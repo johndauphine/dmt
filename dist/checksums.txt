@@ -1,6 +1,0 @@
-dd2f756dca1fe98eaf466dacf70c24737664b71298b5e5bb4959ebb6a0dd5949  mssql-pg-migrate-v1.0.0-darwin-amd64.tar.gz
-e7d0e211bd0ce5d9b6d6b4778e9ec4691a9b4d1eec84e56347516b7ec8f4514d  mssql-pg-migrate-v1.0.0-darwin-arm64.tar.gz
-f40cf5bb7321eee6b419271a920cce0b5844336ba7871ae99c38067241b3a8ab  mssql-pg-migrate-v1.0.0-linux-amd64.tar.gz
-ab79bdc4af089b946dd60825fda536f7b88d3f0e2ef56d9a680f8ff300af87e4  mssql-pg-migrate-v1.0.0-linux-arm64.tar.gz
-7b0282e89c4fdec734ea32b1248e97afa066144477e34fe5caf6837da757cd1c  mssql-pg-migrate-v1.0.0-windows-amd64.tar.gz
-c691ac238dfd14d37f556b1419713993af765e3f789532dcde761d348970cb61  mssql-pg-migrate-v1.0.0-windows-arm64.tar.gz
