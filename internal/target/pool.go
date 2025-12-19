@@ -10,10 +10,21 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
 )
 
+// PoolStats contains connection pool statistics
+type PoolStats struct {
+	MaxConns          int32 // Maximum number of connections
+	TotalConns        int32 // Total number of connections
+	AcquiredConns     int32 // Connections currently in use
+	IdleConns         int32 // Connections currently idle
+	AcquireCount      int64 // Total number of successful acquires
+	EmptyAcquireCount int64 // Acquires that waited for a connection
+}
+
 // Pool manages a pool of PostgreSQL connections
 type Pool struct {
-	pool   *pgxpool.Pool
-	config *config.TargetConfig
+	pool     *pgxpool.Pool
+	config   *config.TargetConfig
+	maxConns int
 }
 
 // NewPool creates a new PostgreSQL connection pool
@@ -40,7 +51,7 @@ func NewPool(cfg *config.TargetConfig, maxConns int) (*Pool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	return &Pool{pool: pool, config: cfg}, nil
+	return &Pool{pool: pool, config: cfg, maxConns: maxConns}, nil
 }
 
 // Close closes all connections in the pool
@@ -51,6 +62,24 @@ func (p *Pool) Close() {
 // Pool returns the underlying pgxpool
 func (p *Pool) Pool() *pgxpool.Pool {
 	return p.pool
+}
+
+// Stats returns current connection pool statistics
+func (p *Pool) Stats() PoolStats {
+	stats := p.pool.Stat()
+	return PoolStats{
+		MaxConns:          stats.MaxConns(),
+		TotalConns:        stats.TotalConns(),
+		AcquiredConns:     stats.AcquiredConns(),
+		IdleConns:         stats.IdleConns(),
+		AcquireCount:      stats.AcquireCount(),
+		EmptyAcquireCount: stats.EmptyAcquireCount(),
+	}
+}
+
+// MaxConns returns the configured maximum connections
+func (p *Pool) MaxConns() int {
+	return p.maxConns
 }
 
 // CreateSchema creates the target schema if it doesn't exist

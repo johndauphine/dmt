@@ -60,13 +60,13 @@ type Orchestrator struct {
 // New creates a new orchestrator
 func New(cfg *config.Config) (*Orchestrator, error) {
 	// Create source pool
-	sourcePool, err := source.NewPool(&cfg.Source, cfg.Migration.MaxConnections)
+	sourcePool, err := source.NewPool(&cfg.Source, cfg.Migration.MaxMssqlConnections)
 	if err != nil {
 		return nil, fmt.Errorf("creating source pool: %w", err)
 	}
 
 	// Create target pool
-	targetPool, err := target.NewPool(&cfg.Target, cfg.Migration.MaxConnections)
+	targetPool, err := target.NewPool(&cfg.Target, cfg.Migration.MaxPgConnections)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)
@@ -105,6 +105,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	runID := uuid.New().String()[:8]
 	startTime := time.Now()
 	fmt.Printf("Starting migration run: %s\n", runID)
+	fmt.Printf("Connection pools: MSSQL=%d, PostgreSQL=%d\n",
+		o.sourcePool.MaxConns(), o.targetPool.MaxConns())
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config); err != nil {
 		return fmt.Errorf("creating run: %w", err)
@@ -331,6 +333,21 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 
 	o.progress.Finish()
+
+	// Log pool stats after transfer
+	srcStats := o.sourcePool.Stats()
+	tgtStats := o.targetPool.Stats()
+	fmt.Printf("Pool stats - MSSQL: %d open (%d in use, %d idle), waits: %d (%.1fms avg)\n",
+		srcStats.OpenConnections, srcStats.InUse, srcStats.Idle, srcStats.WaitCount,
+		func() float64 {
+			if srcStats.WaitCount > 0 {
+				return float64(srcStats.WaitDuration) / float64(srcStats.WaitCount)
+			}
+			return 0
+		}())
+	fmt.Printf("Pool stats - PostgreSQL: %d total (%d acquired, %d idle), acquires: %d (empty: %d)\n",
+		tgtStats.TotalConns, tgtStats.AcquiredConns, tgtStats.IdleConns, tgtStats.AcquireCount, tgtStats.EmptyAcquireCount)
+
 	return nil
 }
 

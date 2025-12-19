@@ -78,10 +78,11 @@ target:
   schema: public
 
 migration:
-  max_connections: 12      # Connection pool size
-  chunk_size: 200000       # Rows per chunk
-  max_partitions: 8        # For large table splitting
-  workers: 8               # Parallel workers
+  max_mssql_connections: 12  # SQL Server connection pool size
+  max_pg_connections: 12     # PostgreSQL connection pool size
+  chunk_size: 200000         # Rows per chunk
+  max_partitions: 8          # For large table splitting
+  workers: 8                 # Parallel workers
   large_table_threshold: 5000000
   exclude_tables:
     - __*                  # Glob patterns
@@ -233,6 +234,33 @@ migration:
 
 When a partition transfer fails and retries, the tool automatically cleans up any partial data in that partition's PK range before re-transferring. This prevents duplicate rows on retry.
 
+### Connection Pools
+
+The tool uses separate connection pools for SQL Server and PostgreSQL:
+
+```yaml
+migration:
+  max_mssql_connections: 12  # SQL Server connection pool size
+  max_pg_connections: 12     # PostgreSQL connection pool size
+```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `max_mssql_connections` | Maximum concurrent SQL Server connections | 12 |
+| `max_pg_connections` | Maximum concurrent PostgreSQL connections | 12 |
+
+Pool statistics are displayed after the transfer phase:
+```
+Pool stats - MSSQL: 12 open (8 in use, 4 idle), waits: 0 (0.0ms avg)
+Pool stats - PostgreSQL: 12 total (8 acquired, 4 idle), acquires: 1234 (empty: 0)
+```
+
+**Recommendations:**
+| Workload | MSSQL Connections | PG Connections |
+|----------|-------------------|----------------|
+| Small (<50M rows) | 8-12 | 8-12 |
+| Large (>50M rows) | 12-16 | 12-16 |
+
 ## Roadmap
 
 - [x] NTILE partitioning for large tables
@@ -245,7 +273,7 @@ When a partition transfer fails and retries, the tool automatically cleans up an
 - [x] Check constraint creation
 - [x] Sample data validation
 - [x] Strict consistency mode
-- [ ] Connection pooling for MSSQL (semaphore-based)
+- [x] Separate connection pools with statistics
 - [ ] Default value extraction
 - [ ] Computed column support
 

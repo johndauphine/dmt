@@ -6,16 +6,28 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	_ "github.com/microsoft/go-mssqldb"
 )
 
+// PoolStats contains connection pool statistics
+type PoolStats struct {
+	MaxOpenConnections int   // Maximum number of open connections
+	OpenConnections    int   // Current number of open connections
+	InUse              int   // Connections currently in use
+	Idle               int   // Connections currently idle
+	WaitCount          int64 // Total number of connections waited for
+	WaitDuration       int64 // Total wait time in milliseconds
+}
+
 // Pool manages a pool of MSSQL connections
 type Pool struct {
-	db     *sql.DB
-	config *config.SourceConfig
-	mu     sync.RWMutex
+	db       *sql.DB
+	config   *config.SourceConfig
+	maxConns int
+	mu       sync.RWMutex
 }
 
 // NewPool creates a new MSSQL connection pool
@@ -28,8 +40,10 @@ func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
 		return nil, fmt.Errorf("opening connection: %w", err)
 	}
 
+	// Configure connection pool
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns / 4)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
 	// Test connection
 	if err := db.Ping(); err != nil {
@@ -37,7 +51,7 @@ func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	return &Pool{db: db, config: cfg}, nil
+	return &Pool{db: db, config: cfg, maxConns: maxConns}, nil
 }
 
 // Close closes all connections in the pool
@@ -48,6 +62,24 @@ func (p *Pool) Close() error {
 // DB returns the underlying database connection
 func (p *Pool) DB() *sql.DB {
 	return p.db
+}
+
+// Stats returns current connection pool statistics
+func (p *Pool) Stats() PoolStats {
+	stats := p.db.Stats()
+	return PoolStats{
+		MaxOpenConnections: stats.MaxOpenConnections,
+		OpenConnections:    stats.OpenConnections,
+		InUse:              stats.InUse,
+		Idle:               stats.Idle,
+		WaitCount:          stats.WaitCount,
+		WaitDuration:       stats.WaitDuration.Milliseconds(),
+	}
+}
+
+// MaxConns returns the configured maximum connections
+func (p *Pool) MaxConns() int {
+	return p.maxConns
 }
 
 // ExtractSchema extracts table metadata from the source database

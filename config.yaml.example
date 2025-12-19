@@ -17,8 +17,9 @@ target:
   schema: public
 
 migration:
-  # Connection pool size (applies to both source and target)
-  max_connections: 12
+  # Connection pool settings
+  max_mssql_connections: 12   # SQL Server connection pool size
+  max_pg_connections: 12      # PostgreSQL connection pool size
 
   # Rows per chunk for transfer
   chunk_size: 200000

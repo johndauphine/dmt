@@ -46,20 +46,22 @@ type TargetConfig struct {
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxConnections         int      `yaml:"max_connections"`
+	MaxConnections         int      `yaml:"max_connections"`          // Deprecated: use max_mssql_connections and max_pg_connections
+	MaxMssqlConnections    int      `yaml:"max_mssql_connections"`    // Max SQL Server connections
+	MaxPgConnections       int      `yaml:"max_pg_connections"`       // Max PostgreSQL connections
 	ChunkSize              int      `yaml:"chunk_size"`
 	MaxPartitions          int      `yaml:"max_partitions"`
 	Workers                int      `yaml:"workers"`
 	LargeTableThreshold    int64    `yaml:"large_table_threshold"`
 	ExcludeTables          []string `yaml:"exclude_tables"`
 	DataDir                string   `yaml:"data_dir"`
-	TargetMode             string   `yaml:"target_mode"`             // "drop_recreate" (default) or "truncate"
-	StrictConsistency      bool     `yaml:"strict_consistency"`      // Use table locks instead of NOLOCK
-	CreateIndexes          bool     `yaml:"create_indexes"`          // Create non-PK indexes
-	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`     // Create foreign key constraints
+	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "truncate"
+	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
+	CreateIndexes          bool     `yaml:"create_indexes"`           // Create non-PK indexes
+	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`      // Create foreign key constraints
 	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
-	SampleValidation       bool     `yaml:"sample_validation"`       // Enable sample data validation
-	SampleSize             int      `yaml:"sample_size"`             // Number of rows to sample for validation
+	SampleValidation       bool     `yaml:"sample_validation"`        // Enable sample data validation
+	SampleSize             int      `yaml:"sample_size"`              // Number of rows to sample for validation
 }
 
 // Load reads configuration from a YAML file
@@ -101,8 +103,15 @@ func (c *Config) applyDefaults() {
 	if c.Target.Schema == "" {
 		c.Target.Schema = "public"
 	}
+	// Handle backwards compatibility: if max_connections is set but new options aren't
 	if c.Migration.MaxConnections == 0 {
 		c.Migration.MaxConnections = 12
+	}
+	if c.Migration.MaxMssqlConnections == 0 {
+		c.Migration.MaxMssqlConnections = c.Migration.MaxConnections
+	}
+	if c.Migration.MaxPgConnections == 0 {
+		c.Migration.MaxPgConnections = c.Migration.MaxConnections
 	}
 	if c.Migration.ChunkSize == 0 {
 		c.Migration.ChunkSize = 200000
