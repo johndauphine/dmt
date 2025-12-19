@@ -352,6 +352,17 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	o.progress.Finish()
 
+	// Print pool stats
+	mssqlStats := o.sourcePool.Stats()
+	pgStats := o.targetPool.Stats()
+	fmt.Printf("\nConnection Pool Usage:\n")
+	fmt.Printf("  MSSQL:      %d/%d active, %d idle, %d waits (%.1fms avg)\n",
+		mssqlStats.InUse, mssqlStats.MaxOpenConnections, mssqlStats.Idle,
+		mssqlStats.WaitCount, float64(mssqlStats.WaitDuration)/float64(max(mssqlStats.WaitCount, 1)))
+	fmt.Printf("  PostgreSQL: %d/%d active, %d idle, %d acquires (%d waited)\n",
+		pgStats.AcquiredConns, pgStats.MaxConns, pgStats.IdleConns,
+		pgStats.AcquireCount, pgStats.EmptyAcquireCount)
+
 	// Print profiling stats
 	fmt.Println("\nTransfer Profile (per table):")
 	fmt.Println("------------------------------")
@@ -627,6 +638,13 @@ func (o *Orchestrator) ShowHistory() error {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int64) int64 {
+	if a > b {
 		return a
 	}
 	return b
