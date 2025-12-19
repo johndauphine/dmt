@@ -73,13 +73,13 @@ func (p *Pool) CreateTable(ctx context.Context, t *source.Table, targetSchema st
 
 // TruncateTable truncates a table
 func (p *Pool) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s", schema, table))
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%q", schema, table))
 	return err
 }
 
 // ConvertToLogged converts an UNLOGGED table to LOGGED
 func (p *Pool) ConvertToLogged(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%s SET LOGGED", schema, table))
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s.%q SET LOGGED", schema, table))
 	return err
 }
 
@@ -127,9 +127,10 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 	}
 
 	// Get sequence name and reset
+	// Note: pg_get_serial_sequence requires quoted identifiers for case-sensitive names
 	sql := fmt.Sprintf(`
 		SELECT setval(
-			pg_get_serial_sequence('%s.%s', '%s'),
+			pg_get_serial_sequence('"%s"."%s"', '%s'),
 			COALESCE((SELECT MAX(%q) FROM %s.%q), 1)
 		)
 	`, schema, t.Name, identityCol, identityCol, schema, t.Name)
