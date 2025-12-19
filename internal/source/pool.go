@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
@@ -161,6 +162,16 @@ func (p *Pool) loadPrimaryKey(ctx context.Context, t *Table) error {
 		t.PrimaryKey = append(t.PrimaryKey, col)
 	}
 
+	// Populate PKColumns with full column metadata
+	for _, pkCol := range t.PrimaryKey {
+		for _, col := range t.Columns {
+			if col.Name == pkCol {
+				t.PKColumns = append(t.PKColumns, col)
+				break
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -210,13 +221,155 @@ func (p *Pool) GetPartitionBoundaries(ctx context.Context, t *Table, numPartitio
 
 	var partitions []Partition
 	for rows.Next() {
-		var p Partition
-		p.TableName = t.FullName()
-		if err := rows.Scan(&p.PartitionID, &p.MinPK, &p.MaxPK, &p.RowCount); err != nil {
+		var part Partition
+		part.TableName = t.FullName()
+		if err := rows.Scan(&part.PartitionID, &part.MinPK, &part.MaxPK, &part.RowCount); err != nil {
 			return nil, err
 		}
-		partitions = append(partitions, p)
+		partitions = append(partitions, part)
 	}
 
 	return partitions, nil
+}
+
+// LoadIndexes loads all non-PK indexes for a table
+func (p *Pool) LoadIndexes(ctx context.Context, t *Table) error {
+	query := `
+		SELECT
+			i.name AS index_name,
+			i.is_unique,
+			i.type_desc,
+			STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS columns,
+			ISNULL(STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, ',')
+				WITHIN GROUP (ORDER BY ic.key_ordinal), '') AS include_columns
+		FROM sys.indexes i
+		JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+		JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+		JOIN sys.tables tb ON i.object_id = tb.object_id
+		JOIN sys.schemas s ON tb.schema_id = s.schema_id
+		WHERE s.name = @schema
+		  AND tb.name = @table
+		  AND i.is_primary_key = 0  -- Exclude PK
+		  AND i.type > 0  -- Exclude heaps
+		GROUP BY i.name, i.is_unique, i.type_desc
+		ORDER BY i.name
+	`
+
+	rows, err := p.db.QueryContext(ctx, query,
+		sql.Named("schema", t.Schema),
+		sql.Named("table", t.Name))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var idx Index
+		var typeDesc, colsStr, includeStr string
+		if err := rows.Scan(&idx.Name, &idx.IsUnique, &typeDesc, &colsStr, &includeStr); err != nil {
+			return err
+		}
+		idx.IsClustered = typeDesc == "CLUSTERED"
+		idx.Columns = splitCSV(colsStr)
+		if includeStr != "" {
+			idx.IncludeCols = splitCSV(includeStr)
+		}
+		t.Indexes = append(t.Indexes, idx)
+	}
+
+	return nil
+}
+
+// LoadForeignKeys loads all foreign keys for a table
+func (p *Pool) LoadForeignKeys(ctx context.Context, t *Table) error {
+	query := `
+		SELECT
+			fk.name AS fk_name,
+			STRING_AGG(pc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS parent_columns,
+			rs.name AS ref_schema,
+			rt.name AS ref_table,
+			STRING_AGG(rc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_columns,
+			fk.delete_referential_action_desc,
+			fk.update_referential_action_desc
+		FROM sys.foreign_keys fk
+		JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+		JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
+		JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
+		JOIN sys.columns pc ON fkc.parent_object_id = pc.object_id AND fkc.parent_column_id = pc.column_id
+		JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+		JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
+		JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id
+		WHERE ps.name = @schema AND pt.name = @table
+		GROUP BY fk.name, rs.name, rt.name, fk.delete_referential_action_desc, fk.update_referential_action_desc
+		ORDER BY fk.name
+	`
+
+	rows, err := p.db.QueryContext(ctx, query,
+		sql.Named("schema", t.Schema),
+		sql.Named("table", t.Name))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var fk ForeignKey
+		var colsStr, refColsStr string
+		if err := rows.Scan(&fk.Name, &colsStr, &fk.RefSchema, &fk.RefTable, &refColsStr, &fk.OnDelete, &fk.OnUpdate); err != nil {
+			return err
+		}
+		fk.Columns = splitCSV(colsStr)
+		fk.RefColumns = splitCSV(refColsStr)
+		t.ForeignKeys = append(t.ForeignKeys, fk)
+	}
+
+	return nil
+}
+
+// LoadCheckConstraints loads all check constraints for a table
+func (p *Pool) LoadCheckConstraints(ctx context.Context, t *Table) error {
+	query := `
+		SELECT
+			cc.name,
+			cc.definition
+		FROM sys.check_constraints cc
+		JOIN sys.tables tb ON cc.parent_object_id = tb.object_id
+		JOIN sys.schemas s ON tb.schema_id = s.schema_id
+		WHERE s.name = @schema AND tb.name = @table
+		  AND cc.is_disabled = 0
+		ORDER BY cc.name
+	`
+
+	rows, err := p.db.QueryContext(ctx, query,
+		sql.Named("schema", t.Schema),
+		sql.Named("table", t.Name))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var chk CheckConstraint
+		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
+			return err
+		}
+		t.CheckConstraints = append(t.CheckConstraints, chk)
+	}
+
+	return nil
+}
+
+// splitCSV splits a comma-separated string into a slice
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

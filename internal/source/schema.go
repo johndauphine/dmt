@@ -1,12 +1,18 @@
 package source
 
+import "strings"
+
 // Table represents a source table's metadata
 type Table struct {
-	Schema     string   `json:"schema"`
-	Name       string   `json:"name"`
-	Columns    []Column `json:"columns"`
-	PrimaryKey []string `json:"primary_key"`
-	RowCount   int64    `json:"row_count"`
+	Schema       string      `json:"schema"`
+	Name         string      `json:"name"`
+	Columns      []Column    `json:"columns"`
+	PrimaryKey   []string    `json:"primary_key"`
+	PKColumns    []Column    `json:"pk_columns"` // Full column metadata for PKs
+	RowCount     int64       `json:"row_count"`
+	Indexes      []Index     `json:"indexes"`
+	ForeignKeys  []ForeignKey `json:"foreign_keys"`
+	CheckConstraints []CheckConstraint `json:"check_constraints"`
 }
 
 // FullName returns schema.table format
@@ -22,6 +28,29 @@ func (t *Table) IsLarge(threshold int64) bool {
 // HasSinglePK returns true if table has a single-column primary key
 func (t *Table) HasSinglePK() bool {
 	return len(t.PrimaryKey) == 1
+}
+
+// HasPK returns true if table has a primary key
+func (t *Table) HasPK() bool {
+	return len(t.PrimaryKey) > 0
+}
+
+// SupportsKeysetPagination returns true if keyset pagination can be used
+// (single-column integer/bigint PK)
+func (t *Table) SupportsKeysetPagination() bool {
+	if len(t.PKColumns) != 1 {
+		return false
+	}
+	pkType := strings.ToLower(t.PKColumns[0].DataType)
+	return pkType == "int" || pkType == "bigint" || pkType == "smallint" || pkType == "tinyint"
+}
+
+// GetPKColumn returns the PK column metadata if single-column PK
+func (t *Table) GetPKColumn() *Column {
+	if len(t.PKColumns) == 1 {
+		return &t.PKColumns[0]
+	}
+	return nil
 }
 
 // Column represents a table column's metadata
@@ -43,4 +72,30 @@ type Partition struct {
 	MinPK       any    `json:"min_pk"`
 	MaxPK       any    `json:"max_pk"`
 	RowCount    int64  `json:"row_count"`
+}
+
+// Index represents a table index
+type Index struct {
+	Name       string   `json:"name"`
+	Columns    []string `json:"columns"`
+	IsUnique   bool     `json:"is_unique"`
+	IsClustered bool    `json:"is_clustered"`
+	IncludeCols []string `json:"include_cols"` // Non-key included columns
+}
+
+// ForeignKey represents a foreign key constraint
+type ForeignKey struct {
+	Name           string   `json:"name"`
+	Columns        []string `json:"columns"`
+	RefTable       string   `json:"ref_table"`
+	RefSchema      string   `json:"ref_schema"`
+	RefColumns     []string `json:"ref_columns"`
+	OnDelete       string   `json:"on_delete"` // CASCADE, SET NULL, NO ACTION, etc.
+	OnUpdate       string   `json:"on_update"`
+}
+
+// CheckConstraint represents a CHECK constraint
+type CheckConstraint struct {
+	Name       string `json:"name"`
+	Definition string `json:"definition"`
 }

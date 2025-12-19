@@ -3,6 +3,7 @@ package target
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
@@ -135,4 +136,144 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 
 	_, err := p.pool.Exec(ctx, sql)
 	return err
+}
+
+// CreateIndex creates an index on the target table
+func (p *Pool) CreateIndex(ctx context.Context, t *source.Table, idx *source.Index, targetSchema string) error {
+	// Build column list
+	cols := make([]string, len(idx.Columns))
+	for i, col := range idx.Columns {
+		cols[i] = fmt.Sprintf("%q", col)
+	}
+
+	unique := ""
+	if idx.IsUnique {
+		unique = "UNIQUE "
+	}
+
+	// Generate index name (PostgreSQL has length limits)
+	idxName := fmt.Sprintf("idx_%s_%s", t.Name, idx.Name)
+	if len(idxName) > 63 {
+		idxName = idxName[:63]
+	}
+
+	sql := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %q ON %s.%q (%s)",
+		unique, idxName, targetSchema, t.Name, strings.Join(cols, ", "))
+
+	// Add included columns if any (PostgreSQL INCLUDE syntax)
+	if len(idx.IncludeCols) > 0 {
+		includeCols := make([]string, len(idx.IncludeCols))
+		for i, col := range idx.IncludeCols {
+			includeCols[i] = fmt.Sprintf("%q", col)
+		}
+		sql += fmt.Sprintf(" INCLUDE (%s)", strings.Join(includeCols, ", "))
+	}
+
+	_, err := p.pool.Exec(ctx, sql)
+	return err
+}
+
+// CreateForeignKey creates a foreign key constraint on the target table
+func (p *Pool) CreateForeignKey(ctx context.Context, t *source.Table, fk *source.ForeignKey, targetSchema string) error {
+	// Build column lists
+	cols := make([]string, len(fk.Columns))
+	for i, col := range fk.Columns {
+		cols[i] = fmt.Sprintf("%q", col)
+	}
+
+	refCols := make([]string, len(fk.RefColumns))
+	for i, col := range fk.RefColumns {
+		refCols[i] = fmt.Sprintf("%q", col)
+	}
+
+	// Map SQL Server referential actions to PostgreSQL
+	onDelete := mapReferentialAction(fk.OnDelete)
+	onUpdate := mapReferentialAction(fk.OnUpdate)
+
+	// Generate FK name
+	fkName := fmt.Sprintf("fk_%s_%s", t.Name, fk.Name)
+	if len(fkName) > 63 {
+		fkName = fkName[:63]
+	}
+
+	sql := fmt.Sprintf(`
+		ALTER TABLE %s.%q
+		ADD CONSTRAINT %q
+		FOREIGN KEY (%s)
+		REFERENCES %s.%q (%s)
+		ON DELETE %s
+		ON UPDATE %s
+	`, targetSchema, t.Name, fkName,
+		strings.Join(cols, ", "),
+		targetSchema, fk.RefTable, strings.Join(refCols, ", "),
+		onDelete, onUpdate)
+
+	_, err := p.pool.Exec(ctx, sql)
+	return err
+}
+
+// CreateCheckConstraint creates a check constraint on the target table
+func (p *Pool) CreateCheckConstraint(ctx context.Context, t *source.Table, chk *source.CheckConstraint, targetSchema string) error {
+	// Convert SQL Server CHECK syntax to PostgreSQL
+	// Most basic checks are compatible
+	definition := convertCheckDefinition(chk.Definition)
+
+	// Generate constraint name
+	chkName := fmt.Sprintf("chk_%s_%s", t.Name, chk.Name)
+	if len(chkName) > 63 {
+		chkName = chkName[:63]
+	}
+
+	sql := fmt.Sprintf(`
+		ALTER TABLE %s.%q
+		ADD CONSTRAINT %q
+		CHECK %s
+	`, targetSchema, t.Name, chkName, definition)
+
+	_, err := p.pool.Exec(ctx, sql)
+	return err
+}
+
+// mapReferentialAction converts SQL Server referential action to PostgreSQL
+func mapReferentialAction(action string) string {
+	switch strings.ToUpper(action) {
+	case "CASCADE":
+		return "CASCADE"
+	case "SET_NULL":
+		return "SET NULL"
+	case "SET_DEFAULT":
+		return "SET DEFAULT"
+	case "NO_ACTION":
+		return "NO ACTION"
+	default:
+		return "NO ACTION"
+	}
+}
+
+// convertCheckDefinition converts SQL Server CHECK definition to PostgreSQL
+func convertCheckDefinition(def string) string {
+	// Replace SQL Server specific functions/syntax
+	// Most basic checks are compatible
+	result := def
+
+	// Replace [column] with "column"
+	// This is a simplified conversion - complex expressions may need manual review
+	for {
+		start := strings.Index(result, "[")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], "]")
+		if end == -1 {
+			break
+		}
+		colName := result[start+1 : start+end]
+		result = result[:start] + `"` + colName + `"` + result[start+end+1:]
+	}
+
+	// Replace getdate() with CURRENT_TIMESTAMP
+	result = strings.ReplaceAll(result, "getdate()", "CURRENT_TIMESTAMP")
+	result = strings.ReplaceAll(result, "GETDATE()", "CURRENT_TIMESTAMP")
+
+	return result
 }

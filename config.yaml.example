@@ -40,6 +40,18 @@ migration:
   # Directory for state database and logs
   data_dir: ~/.mssql-pg-migrate
 
+  # Schema object creation options
+  create_indexes: true          # Create non-PK indexes after data transfer
+  create_foreign_keys: true     # Create foreign key constraints
+  create_check_constraints: true # Create CHECK constraints
+
+  # Consistency options
+  strict_consistency: false     # Set true to disable NOLOCK (slower but consistent reads)
+
+  # Validation options
+  sample_validation: false      # Enable sample data validation after row count check
+  sample_size: 100              # Number of random rows to sample per table
+
 # Slack notifications (optional)
 slack:
   enabled: false

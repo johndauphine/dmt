@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,9 @@ const (
 	TaskTransfer       TaskType = "transfer"
 	TaskResetSequences TaskType = "reset_sequences"
 	TaskCreatePKs      TaskType = "create_pks"
+	TaskCreateIndexes  TaskType = "create_indexes"
+	TaskCreateFKs      TaskType = "create_fks"
+	TaskCreateChecks   TaskType = "create_checks"
 	TaskValidate       TaskType = "validate"
 )
 
@@ -35,7 +40,10 @@ var taskDependencies = map[TaskType][]TaskType{
 	TaskTransfer:       {TaskCreateTables},
 	TaskResetSequences: {TaskTransfer},
 	TaskCreatePKs:      {TaskResetSequences},
-	TaskValidate:       {TaskCreatePKs},
+	TaskCreateIndexes:  {TaskCreatePKs},
+	TaskCreateFKs:      {TaskCreateIndexes},
+	TaskCreateChecks:   {TaskCreateFKs},
+	TaskValidate:       {TaskCreateChecks},
 }
 
 // Orchestrator coordinates the migration process
@@ -109,8 +117,45 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("extracting schema: %w", err)
 	}
+
+	// Load additional metadata if enabled
+	for i := range tables {
+		t := &tables[i]
+
+		if o.config.Migration.CreateIndexes {
+			if err := o.sourcePool.LoadIndexes(ctx, t); err != nil {
+				fmt.Printf("Warning: loading indexes for %s: %v\n", t.Name, err)
+			}
+		}
+
+		if o.config.Migration.CreateForeignKeys {
+			if err := o.sourcePool.LoadForeignKeys(ctx, t); err != nil {
+				fmt.Printf("Warning: loading FKs for %s: %v\n", t.Name, err)
+			}
+		}
+
+		if o.config.Migration.CreateCheckConstraints {
+			if err := o.sourcePool.LoadCheckConstraints(ctx, t); err != nil {
+				fmt.Printf("Warning: loading check constraints for %s: %v\n", t.Name, err)
+			}
+		}
+	}
+
 	o.tables = tables
 	fmt.Printf("Found %d tables\n", len(tables))
+
+	// Print pagination strategy summary
+	keysetCount := 0
+	rowNumberCount := 0
+	for _, t := range tables {
+		if t.SupportsKeysetPagination() {
+			keysetCount++
+		} else if t.HasPK() {
+			rowNumberCount++
+		}
+	}
+	fmt.Printf("Pagination: %d keyset, %d ROW_NUMBER, %d no PK\n",
+		keysetCount, rowNumberCount, len(tables)-keysetCount-rowNumberCount)
 
 	// Send start notification
 	o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
@@ -150,6 +195,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.state.CompleteRun(runID, "failed")
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return err
+	}
+
+	// Sample validation if enabled
+	if o.config.Migration.SampleValidation {
+		fmt.Println("Running sample validation...")
+		if err := o.validateSamples(ctx); err != nil {
+			fmt.Printf("Warning: sample validation failed: %v\n", err)
+		}
 	}
 
 	// Calculate stats for notification
@@ -255,20 +308,59 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
+	// Phase 1: Convert to logged and reset sequences
+	fmt.Println("  Converting tables to logged...")
 	for _, t := range tables {
-		// Convert to logged table
 		if err := o.targetPool.ConvertToLogged(ctx, o.config.Target.Schema, t.Name); err != nil {
 			fmt.Printf("Warning: converting %s to logged: %v\n", t.Name, err)
 		}
 
-		// Reset sequences
 		if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &t); err != nil {
 			fmt.Printf("Warning: resetting sequence for %s: %v\n", t.Name, err)
 		}
+	}
 
-		// Create primary key
+	// Phase 2: Create primary keys
+	fmt.Println("  Creating primary keys...")
+	for _, t := range tables {
 		if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
 			fmt.Printf("Warning: creating PK for %s: %v\n", t.Name, err)
+		}
+	}
+
+	// Phase 3: Create indexes (if enabled)
+	if o.config.Migration.CreateIndexes {
+		fmt.Println("  Creating indexes...")
+		for _, t := range tables {
+			for _, idx := range t.Indexes {
+				if err := o.targetPool.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
+					fmt.Printf("Warning: creating index %s on %s: %v\n", idx.Name, t.Name, err)
+				}
+			}
+		}
+	}
+
+	// Phase 4: Create foreign keys (if enabled)
+	if o.config.Migration.CreateForeignKeys {
+		fmt.Println("  Creating foreign keys...")
+		for _, t := range tables {
+			for _, fk := range t.ForeignKeys {
+				if err := o.targetPool.CreateForeignKey(ctx, &t, &fk, o.config.Target.Schema); err != nil {
+					fmt.Printf("Warning: creating FK %s on %s: %v\n", fk.Name, t.Name, err)
+				}
+			}
+		}
+	}
+
+	// Phase 5: Create check constraints (if enabled)
+	if o.config.Migration.CreateCheckConstraints {
+		fmt.Println("  Creating check constraints...")
+		for _, t := range tables {
+			for _, chk := range t.CheckConstraints {
+				if err := o.targetPool.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
+					fmt.Printf("Warning: creating CHECK %s on %s: %v\n", chk.Name, t.Name, err)
+				}
+			}
 		}
 	}
 
@@ -298,9 +390,9 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 		}
 
 		if targetCount == t.RowCount {
-			fmt.Printf("%-30s ✓ %d rows\n", t.Name, targetCount)
+			fmt.Printf("%-30s OK %d rows\n", t.Name, targetCount)
 		} else {
-			fmt.Printf("%-30s ✗ source=%d target=%d (diff=%d)\n",
+			fmt.Printf("%-30s FAIL source=%d target=%d (diff=%d)\n",
 				t.Name, t.RowCount, targetCount, t.RowCount-targetCount)
 			failed = true
 		}
@@ -308,6 +400,80 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 
 	if failed {
 		return fmt.Errorf("validation failed")
+	}
+	return nil
+}
+
+// validateSamples performs sample data validation by comparing random rows
+func (o *Orchestrator) validateSamples(ctx context.Context) error {
+	sampleSize := o.config.Migration.SampleSize
+	if sampleSize <= 0 {
+		sampleSize = 100
+	}
+
+	fmt.Printf("\nSample Validation (n=%d per table):\n", sampleSize)
+	fmt.Println("------------------------------------")
+
+	var failed bool
+	for _, t := range o.tables {
+		if !t.HasPK() {
+			fmt.Printf("%-30s SKIP (no PK)\n", t.Name)
+			continue
+		}
+
+		// Get sample PKs from source
+		pkCol := t.PrimaryKey[0]
+		sampleQuery := fmt.Sprintf(`
+			SELECT TOP %d [%s] FROM [%s].[%s] WITH (NOLOCK)
+			ORDER BY NEWID()
+		`, sampleSize, pkCol, t.Schema, t.Name)
+
+		rows, err := o.sourcePool.DB().QueryContext(ctx, sampleQuery)
+		if err != nil {
+			fmt.Printf("%-30s ERROR: %v\n", t.Name, err)
+			continue
+		}
+
+		var pks []any
+		for rows.Next() {
+			var pk any
+			if err := rows.Scan(&pk); err != nil {
+				rows.Close()
+				continue
+			}
+			pks = append(pks, pk)
+		}
+		rows.Close()
+
+		if len(pks) == 0 {
+			fmt.Printf("%-30s SKIP (no rows)\n", t.Name)
+			continue
+		}
+
+		// Check if these PKs exist in target
+		missingCount := 0
+		for _, pk := range pks {
+			var exists bool
+			checkQuery := fmt.Sprintf(
+				`SELECT EXISTS(SELECT 1 FROM %s.%q WHERE %q = $1)`,
+				o.config.Target.Schema, t.Name, pkCol,
+			)
+			err := o.targetPool.Pool().QueryRow(ctx, checkQuery, pk).Scan(&exists)
+			if err != nil || !exists {
+				missingCount++
+			}
+		}
+
+		if missingCount == 0 {
+			fmt.Printf("%-30s OK (%d samples)\n", t.Name, len(pks))
+		} else {
+			fmt.Printf("%-30s FAIL (%d/%d missing)\n", t.Name, missingCount, len(pks))
+			failed = true
+		}
+	}
+
+	if failed {
+		return fmt.Errorf("sample validation failed")
 	}
 	return nil
 }
@@ -394,3 +560,7 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// Unused import suppression
+var _ = sql.Named
+var _ = strings.Join

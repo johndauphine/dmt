@@ -46,13 +46,19 @@ type TargetConfig struct {
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxConnections      int      `yaml:"max_connections"`
-	ChunkSize           int      `yaml:"chunk_size"`
-	MaxPartitions       int      `yaml:"max_partitions"`
-	Workers             int      `yaml:"workers"`
-	LargeTableThreshold int64    `yaml:"large_table_threshold"`
-	ExcludeTables       []string `yaml:"exclude_tables"`
-	DataDir             string   `yaml:"data_dir"`
+	MaxConnections        int      `yaml:"max_connections"`
+	ChunkSize             int      `yaml:"chunk_size"`
+	MaxPartitions         int      `yaml:"max_partitions"`
+	Workers               int      `yaml:"workers"`
+	LargeTableThreshold   int64    `yaml:"large_table_threshold"`
+	ExcludeTables         []string `yaml:"exclude_tables"`
+	DataDir               string   `yaml:"data_dir"`
+	StrictConsistency     bool     `yaml:"strict_consistency"`     // Use table locks instead of NOLOCK
+	CreateIndexes         bool     `yaml:"create_indexes"`         // Create non-PK indexes
+	CreateForeignKeys     bool     `yaml:"create_foreign_keys"`    // Create foreign key constraints
+	CreateCheckConstraints bool    `yaml:"create_check_constraints"` // Create CHECK constraints
+	SampleValidation      bool     `yaml:"sample_validation"`      // Enable sample data validation
+	SampleSize            int      `yaml:"sample_size"`            // Number of rows to sample for validation
 }
 
 // Load reads configuration from a YAML file
@@ -112,6 +118,9 @@ func (c *Config) applyDefaults() {
 	if c.Migration.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		c.Migration.DataDir = filepath.Join(home, ".mssql-pg-migrate")
+	}
+	if c.Migration.SampleSize == 0 {
+		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
 }
 
