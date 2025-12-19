@@ -5,7 +5,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/mssql-pg-migrate)](https://go.dev/)
 [![License](https://img.shields.io/github/license/johndauphine/mssql-pg-migrate)](LICENSE)
 
-High-performance CLI tool for migrating data from Microsoft SQL Server to PostgreSQL.
+High-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL.
 
 ## Performance
 
@@ -13,9 +13,19 @@ High-performance CLI tool for migrating data from Microsoft SQL Server to Postgr
 - **2-3x faster** than equivalent Python/Airflow solutions
 - 106M rows migrated in **11 minutes**
 
+## Supported Directions
+
+| Source | Target | Write Method |
+|--------|--------|--------------|
+| SQL Server | PostgreSQL | COPY protocol (fastest) |
+| PostgreSQL | SQL Server | BULK INSERT or batch INSERT |
+
+**Note:** Same-to-same migrations (MSSQL→MSSQL, PG→PG) are not supported. Use native tools for those.
+
 ## Features
 
-- **Fast transfers** using PostgreSQL COPY protocol
+- **Bidirectional migration** - SQL Server ↔ PostgreSQL
+- **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or BULK INSERT (PG→MSSQL)
 - **Keyset pagination** for single-column integer PKs (no OFFSET performance degradation)
 - **ROW_NUMBER pagination** for composite/varchar PKs
 - **Parallel partitioning** - Large tables split via NTILE for concurrent transfer
@@ -79,10 +89,13 @@ go install github.com/johndauphine/mssql-pg-migrate/cmd/migrate@latest
 
 ## Quick Start
 
+### SQL Server to PostgreSQL
+
 1. Create a `config.yaml`:
 
 ```yaml
 source:
+  type: mssql              # optional, default for source
   host: sqlserver.example.com
   port: 1433
   database: MyDatabase
@@ -91,6 +104,7 @@ source:
   schema: dbo
 
 target:
+  type: postgres           # optional, default for target
   host: postgres.example.com
   port: 5432
   database: mydb
@@ -102,6 +116,55 @@ migration:
   workers: 8
   chunk_size: 200000
 ```
+
+### PostgreSQL to SQL Server
+
+```yaml
+source:
+  type: postgres
+  host: postgres.example.com
+  port: 5432
+  database: mydb
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+
+target:
+  type: mssql
+  host: sqlserver.example.com
+  port: 1433
+  database: MyDatabase
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  # BULK INSERT configuration (optional but ~10x faster)
+  bulk_insert_temp_dir: "/path/on/host"           # Where tool writes CSV files
+  bulk_insert_sql_path: "\\\\server\\share\\path" # Path as seen by SQL Server
+
+migration:
+  workers: 8
+  chunk_size: 200000
+```
+
+**Write methods for SQL Server target:**
+
+| Method | Throughput | Configuration |
+|--------|-----------|---------------|
+| BULK INSERT | ~150,000 rows/sec | Set `bulk_insert_temp_dir` |
+| Bulk Copy (TDS) | ~106,000 rows/sec | Default (no temp dir) |
+| Batch INSERT | ~16,000 rows/sec | Fallback only |
+
+**Write method selection (automatic):**
+1. **BULK INSERT**: Used when `bulk_insert_temp_dir` is configured. Fastest but requires file system access.
+2. **Bulk Copy (TDS)**: Default method. Uses native TDS bulk copy protocol (`mssql.CopyIn`). No file system required.
+3. **Batch INSERT**: Fallback if bulk copy fails. Slower but most compatible.
+
+**BULK INSERT notes:**
+- Requires shared file access between the migration tool and SQL Server
+- For Docker: mount a shared volume and set both paths:
+  - `bulk_insert_temp_dir`: host path where files are written
+  - `bulk_insert_sql_path`: path as seen by SQL Server container
+- Falls back to bulk copy if file creation fails
 
 2. Run the migration:
 
@@ -121,20 +184,24 @@ Full configuration options:
 
 ```yaml
 source:
+  type: mssql                 # "mssql" (default) or "postgres"
   host: localhost
-  port: 1433
+  port: 1433                  # Default: 1433 for mssql, 5432 for postgres
   database: MyDatabase
   user: sa
-  password: ${MSSQL_PASSWORD}  # Environment variable
-  schema: dbo
+  password: ${MSSQL_PASSWORD} # Environment variable
+  schema: dbo                 # Default: dbo for mssql, public for postgres
 
 target:
+  type: postgres              # "postgres" (default) or "mssql"
   host: localhost
-  port: 5432
+  port: 5432                  # Default: 5432 for postgres, 1433 for mssql
   database: mydb
   user: postgres
   password: ${PG_PASSWORD}
-  schema: public
+  schema: public              # Default: public for postgres, dbo for mssql
+  bulk_insert_temp_dir: ""    # For MSSQL target: local path for temp CSV files
+  bulk_insert_sql_path: ""    # For MSSQL target: path as seen by SQL Server (if different)
 
 migration:
   # Connection pools
@@ -284,6 +351,8 @@ Tables without primary keys are rejected to ensure data correctness.
 
 ## Type Mapping
 
+### SQL Server → PostgreSQL
+
 | SQL Server | PostgreSQL |
 |------------|------------|
 | int | integer |
@@ -307,6 +376,30 @@ Tables without primary keys are rejected to ensure data correctness.
 | xml | xml |
 
 Identity columns are mapped to `GENERATED BY DEFAULT AS IDENTITY` with proper sequence reset.
+
+### PostgreSQL → SQL Server
+
+| PostgreSQL | SQL Server |
+|------------|------------|
+| integer | int |
+| bigint | bigint |
+| smallint | smallint |
+| boolean | bit |
+| numeric/decimal | decimal |
+| double precision | float |
+| real | real |
+| char | char |
+| varchar/character varying | nvarchar |
+| text | nvarchar(max) |
+| date | date |
+| time | time |
+| timestamp | datetime2 |
+| timestamptz | datetimeoffset |
+| uuid | uniqueidentifier |
+| bytea | varbinary(max) |
+| json/jsonb | nvarchar(max) |
+
+Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 
 ## Benchmarks
 

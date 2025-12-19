@@ -82,6 +82,11 @@ func (p *Pool) MaxConns() int {
 	return p.maxConns
 }
 
+// DBType returns the database type
+func (p *Pool) DBType() string {
+	return "postgres"
+}
+
 // CreateSchema creates the target schema if it doesn't exist
 func (p *Pool) CreateSchema(ctx context.Context, schema string) error {
 	_, err := p.pool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schema))

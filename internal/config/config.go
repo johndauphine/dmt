@@ -24,8 +24,9 @@ type SlackConfig struct {
 	Enabled    bool   `yaml:"enabled"`
 }
 
-// SourceConfig holds MSSQL connection settings
+// SourceConfig holds source database connection settings
 type SourceConfig struct {
+	Type     string `yaml:"type"`     // "mssql" or "postgres" (default: mssql)
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
 	Database string `yaml:"database"`
@@ -34,14 +35,17 @@ type SourceConfig struct {
 	Schema   string `yaml:"schema"`
 }
 
-// TargetConfig holds PostgreSQL connection settings
+// TargetConfig holds target database connection settings
 type TargetConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	Database string `yaml:"database"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Schema   string `yaml:"schema"`
+	Type              string `yaml:"type"`                 // "postgres" or "mssql" (default: postgres)
+	Host              string `yaml:"host"`
+	Port              int    `yaml:"port"`
+	Database          string `yaml:"database"`
+	User              string `yaml:"user"`
+	Password          string `yaml:"password"`
+	Schema            string `yaml:"schema"`
+	BulkInsertTempDir string `yaml:"bulk_insert_temp_dir"` // For MSSQL target: local path where CSV files are written
+	BulkInsertSQLPath string `yaml:"bulk_insert_sql_path"` // For MSSQL target: path as seen by SQL Server (if different from bulk_insert_temp_dir)
 }
 
 // MigrationConfig holds migration behavior settings
@@ -92,17 +96,42 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
+	// Source defaults
+	if c.Source.Type == "" {
+		c.Source.Type = "mssql" // Default source is SQL Server for backward compat
+	}
 	if c.Source.Port == 0 {
-		c.Source.Port = 1433
+		if c.Source.Type == "postgres" {
+			c.Source.Port = 5432
+		} else {
+			c.Source.Port = 1433
+		}
 	}
 	if c.Source.Schema == "" {
-		c.Source.Schema = "dbo"
+		if c.Source.Type == "postgres" {
+			c.Source.Schema = "public"
+		} else {
+			c.Source.Schema = "dbo"
+		}
+	}
+
+	// Target defaults
+	if c.Target.Type == "" {
+		c.Target.Type = "postgres" // Default target is PostgreSQL for backward compat
 	}
 	if c.Target.Port == 0 {
-		c.Target.Port = 5432
+		if c.Target.Type == "mssql" {
+			c.Target.Port = 1433
+		} else {
+			c.Target.Port = 5432
+		}
 	}
 	if c.Target.Schema == "" {
-		c.Target.Schema = "public"
+		if c.Target.Type == "mssql" {
+			c.Target.Schema = "dbo"
+		} else {
+			c.Target.Schema = "public"
+		}
 	}
 	// Handle backwards compatibility: if max_connections is set but new options aren't
 	if c.Migration.MaxConnections == 0 {
@@ -139,32 +168,58 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
+	// Validate source
 	if c.Source.Host == "" {
 		return fmt.Errorf("source.host is required")
 	}
 	if c.Source.Database == "" {
 		return fmt.Errorf("source.database is required")
 	}
+	if c.Source.Type != "mssql" && c.Source.Type != "postgres" {
+		return fmt.Errorf("source.type must be 'mssql' or 'postgres', got '%s'", c.Source.Type)
+	}
+
+	// Validate target
 	if c.Target.Host == "" {
 		return fmt.Errorf("target.host is required")
 	}
 	if c.Target.Database == "" {
 		return fmt.Errorf("target.database is required")
 	}
+	if c.Target.Type != "mssql" && c.Target.Type != "postgres" {
+		return fmt.Errorf("target.type must be 'mssql' or 'postgres', got '%s'", c.Target.Type)
+	}
+
+	// Ensure cross-database migration only (no same-to-same)
+	if c.Source.Type == c.Target.Type {
+		return fmt.Errorf("same-database migration not supported: %s -> %s (use native tools instead)", c.Source.Type, c.Target.Type)
+	}
+
+	// Validate migration settings
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "truncate" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'truncate'")
 	}
 	return nil
 }
 
-// SourceDSN returns the MSSQL connection string
+// SourceDSN returns the source database connection string
 func (c *Config) SourceDSN() string {
+	if c.Source.Type == "postgres" {
+		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database)
+	}
+	// Default: MSSQL
 	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&TrustServerCertificate=true",
 		c.Source.User, c.Source.Password, c.Source.Host, c.Source.Port, c.Source.Database)
 }
 
-// TargetDSN returns the PostgreSQL connection string
+// TargetDSN returns the target database connection string
 func (c *Config) TargetDSN() string {
+	if c.Target.Type == "mssql" {
+		return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&TrustServerCertificate=true",
+			c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database)
+	}
+	// Default: PostgreSQL
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
 		c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database)
 }

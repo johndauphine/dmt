@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
 	"github.com/johndauphine/mssql-pg-migrate/internal/target"
@@ -51,11 +52,146 @@ func (s *TransferStats) String() string {
 		s.Rows)
 }
 
+// dbSyntax provides direction-aware SQL syntax helpers
+type dbSyntax struct {
+	dbType string
+}
+
+func newDBSyntax(dbType string) dbSyntax {
+	return dbSyntax{dbType: dbType}
+}
+
+// quoteIdent quotes an identifier based on database type
+func (s dbSyntax) quoteIdent(name string) string {
+	if s.dbType == "postgres" {
+		return fmt.Sprintf(`"%s"`, name)
+	}
+	return fmt.Sprintf("[%s]", name)
+}
+
+// qualifiedTable returns schema.table with proper quoting
+func (s dbSyntax) qualifiedTable(schema, table string) string {
+	return s.quoteIdent(schema) + "." + s.quoteIdent(table)
+}
+
+// columnList returns a quoted, comma-separated list of columns
+func (s dbSyntax) columnList(cols []string) string {
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = s.quoteIdent(c)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// tableHint returns the table hint (WITH (NOLOCK) for SQL Server, empty for PostgreSQL)
+func (s dbSyntax) tableHint(strictConsistency bool) string {
+	if s.dbType == "postgres" || strictConsistency {
+		return ""
+	}
+	return "WITH (NOLOCK)"
+}
+
+// buildKeysetQuery builds a keyset pagination query for the given database type
+func (s dbSyntax) buildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool) string {
+	if s.dbType == "postgres" {
+		if hasMaxPK {
+			return fmt.Sprintf(`
+				SELECT %s FROM %s
+				WHERE %s > $1 AND %s <= $2
+				ORDER BY %s
+				LIMIT $3
+			`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), s.quoteIdent(pkCol), s.quoteIdent(pkCol))
+		}
+		return fmt.Sprintf(`
+			SELECT %s FROM %s
+			WHERE %s > $1
+			ORDER BY %s
+			LIMIT $2
+		`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), s.quoteIdent(pkCol))
+	}
+
+	// SQL Server syntax
+	if hasMaxPK {
+		return fmt.Sprintf(`
+			SELECT TOP (@limit) %s
+			FROM %s %s
+			WHERE [%s] > @lastPK AND [%s] <= @maxPK
+			ORDER BY [%s]
+		`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, pkCol, pkCol)
+	}
+	return fmt.Sprintf(`
+		SELECT TOP (@limit) %s
+		FROM %s %s
+		WHERE [%s] > @lastPK
+		ORDER BY [%s]
+	`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, pkCol)
+}
+
+// buildRowNumberQuery builds a ROW_NUMBER pagination query for the given database type
+func (s dbSyntax) buildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string {
+	if s.dbType == "postgres" {
+		return fmt.Sprintf(`
+			WITH numbered AS (
+				SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
+				FROM %s
+			)
+			SELECT %s FROM numbered
+			WHERE __rn > $1 AND __rn <= $2
+			ORDER BY __rn
+		`, cols, orderBy, s.qualifiedTable(schema, table), cols)
+	}
+
+	// SQL Server syntax
+	return fmt.Sprintf(`
+		WITH numbered AS (
+			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
+			FROM %s %s
+		)
+		SELECT %s FROM numbered
+		WHERE __rn > @rowNum AND __rn <= @rowNumEnd
+		ORDER BY __rn
+	`, cols, orderBy, s.qualifiedTable(schema, table), tableHint, cols)
+}
+
+// buildArgs builds query arguments for the given database type
+func (s dbSyntax) buildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool) []any {
+	if s.dbType == "postgres" {
+		if hasMaxPK {
+			return []any{lastPK, maxPK, limit}
+		}
+		return []any{lastPK, limit}
+	}
+
+	// SQL Server uses named parameters
+	if hasMaxPK {
+		return []any{
+			sql.Named("limit", limit),
+			sql.Named("lastPK", lastPK),
+			sql.Named("maxPK", maxPK),
+		}
+	}
+	return []any{
+		sql.Named("limit", limit),
+		sql.Named("lastPK", lastPK),
+	}
+}
+
+// buildRowNumberArgs builds query arguments for ROW_NUMBER pagination
+func (s dbSyntax) buildRowNumberArgs(rowNum int64, limit int) []any {
+	if s.dbType == "postgres" {
+		return []any{rowNum, rowNum + int64(limit)}
+	}
+	return []any{
+		sql.Named("rowNum", rowNum),
+		sql.Named("rowNumEnd", rowNum+int64(limit)),
+	}
+}
+
 // Execute runs a transfer job using the optimal pagination strategy
 func Execute(
 	ctx context.Context,
-	srcPool *source.Pool,
-	tgtPool *target.Pool,
+	srcPool pool.SourcePool,
+	tgtPool pool.TargetPool,
 	cfg *config.Config,
 	job Job,
 	prog *progress.Tracker,
@@ -84,7 +220,7 @@ func Execute(
 		} else {
 			// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
 			if job.Table.SupportsKeysetPagination() {
-				if err := cleanupPartitionData(ctx, tgtPool.Pool(), cfg.Target.Schema, &job); err != nil {
+				if err := cleanupPartitionDataGeneric(ctx, tgtPool, cfg.Target.Schema, &job); err != nil {
 					fmt.Printf("Warning: cleanup partition data for %s: %v\n", job.Table.Name, err)
 				}
 			}
@@ -92,14 +228,8 @@ func Execute(
 	} else if job.Table.SupportsKeysetPagination() {
 		// Chunk-level resume: delete any rows beyond the saved lastPK
 		// This handles partial data written after the last saved checkpoint
-		pkCol := job.Table.PrimaryKey[0]
-		deleteQuery := fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
-			cfg.Target.Schema, job.Table.Name, pkCol)
-		result, err := tgtPool.Pool().Exec(ctx, deleteQuery, resumeLastPK)
-		if err != nil {
+		if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK); err != nil {
 			fmt.Printf("Warning: cleaning up partial data for %s: %v\n", job.Table.Name, err)
-		} else if result.RowsAffected() > 0 {
-			fmt.Printf("Cleaned up %d partial rows from %s (pk > %v)\n", result.RowsAffected(), job.Table.Name, resumeLastPK)
 		}
 	}
 
@@ -113,15 +243,15 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool.DB(), tgtPool.Pool(), cfg, job, cols, colTypes, prog, resumeLastPK, resumeRowsDone)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, colTypes, prog, resumeLastPK, resumeRowsDone)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool.DB(), tgtPool.Pool(), cfg, job, cols, colTypes, prog, resumeRowsDone)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, colTypes, prog, resumeRowsDone)
 }
 
-// cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry)
-func cleanupPartitionData(ctx context.Context, pool *pgxpool.Pool, schema string, job *Job) error {
+// cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
+func cleanupPartitionData(ctx context.Context, pgPool *pgxpool.Pool, schema string, job *Job) error {
 	if job.Partition == nil || job.Partition.MinPK == nil {
 		return nil
 	}
@@ -132,15 +262,81 @@ func cleanupPartitionData(ctx context.Context, pool *pgxpool.Pool, schema string
 		schema, job.Table.Name, pkCol, pkCol,
 	)
 
-	_, err := pool.Exec(ctx, query, job.Partition.MinPK, job.Partition.MaxPK)
+	_, err := pgPool.Exec(ctx, query, job.Partition.MinPK, job.Partition.MaxPK)
 	return err
+}
+
+// cleanupPartitionDataGeneric removes partition data using the appropriate pool interface
+func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, schema string, job *Job) error {
+	if job.Partition == nil || job.Partition.MinPK == nil {
+		return nil
+	}
+
+	pkCol := job.Table.PrimaryKey[0]
+
+	// Check target type and use appropriate method
+	switch p := tgtPool.(type) {
+	case *target.Pool:
+		// PostgreSQL target
+		query := fmt.Sprintf(
+			`DELETE FROM %s.%q WHERE %q >= $1 AND %q <= $2`,
+			schema, job.Table.Name, pkCol, pkCol,
+		)
+		_, err := p.Pool().Exec(ctx, query, job.Partition.MinPK, job.Partition.MaxPK)
+		return err
+	case *target.MSSQLPool:
+		// SQL Server target
+		query := fmt.Sprintf(
+			`DELETE FROM [%s].[%s] WHERE [%s] >= @p1 AND [%s] <= @p2`,
+			schema, job.Table.Name, pkCol, pkCol,
+		)
+		_, err := p.DB().ExecContext(ctx, query,
+			sql.Named("p1", job.Partition.MinPK),
+			sql.Named("p2", job.Partition.MaxPK))
+		return err
+	default:
+		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
+	}
+}
+
+// cleanupPartialData removes rows beyond the saved lastPK for chunk-level resume
+func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, tableName, pkCol string, lastPK any) error {
+	switch p := tgtPool.(type) {
+	case *target.Pool:
+		// PostgreSQL target
+		deleteQuery := fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
+			schema, tableName, pkCol)
+		result, err := p.Pool().Exec(ctx, deleteQuery, lastPK)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() > 0 {
+			fmt.Printf("Cleaned up %d partial rows from %s (pk > %v)\n", result.RowsAffected(), tableName, lastPK)
+		}
+		return nil
+	case *target.MSSQLPool:
+		// SQL Server target
+		deleteQuery := fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1`,
+			schema, tableName, pkCol)
+		result, err := p.DB().ExecContext(ctx, deleteQuery, sql.Named("p1", lastPK))
+		if err != nil {
+			return err
+		}
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected > 0 {
+			fmt.Printf("Cleaned up %d partial rows from %s (pk > %v)\n", rowsAffected, tableName, lastPK)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
+	}
 }
 
 // executeKeysetPagination uses WHERE pk > last_pk for efficient pagination
 func executeKeysetPagination(
 	ctx context.Context,
-	db *sql.DB,
-	pool *pgxpool.Pool,
+	srcPool pool.SourcePool,
+	tgtPool pool.TargetPool,
 	cfg *config.Config,
 	job Job,
 	cols, colTypes []string,
@@ -148,9 +344,14 @@ func executeKeysetPagination(
 	resumeLastPK any,
 	resumeRowsDone int64,
 ) (*TransferStats, error) {
+	db := srcPool.DB()
 	stats := &TransferStats{}
 	pkCol := job.Table.PrimaryKey[0]
-	colList := "[" + strings.Join(cols, "], [") + "]"
+
+	// Use direction-aware syntax
+	syntax := newDBSyntax(srcPool.DBType())
+	colList := syntax.columnList(cols)
+	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
 
 	var lastPK any
 	var maxPK any
@@ -182,51 +383,30 @@ func executeKeysetPagination(
 
 		var query string
 		var args []any
-
-		// Use NOLOCK unless strict consistency is enabled
-		tableHint := "WITH (NOLOCK)"
-		if cfg.Migration.StrictConsistency {
-			tableHint = ""
-		}
+		hasMaxPK := job.Partition != nil
 
 		if job.Partition != nil {
 			// Keyset pagination within partition bounds
-			query = fmt.Sprintf(`
-				SELECT TOP (@limit) %s
-				FROM [%s].[%s] %s
-				WHERE [%s] > @lastPK AND [%s] <= @maxPK
-				ORDER BY [%s]
-			`, colList, job.Table.Schema, job.Table.Name, tableHint, pkCol, pkCol, pkCol)
-			args = []any{
-				sql.Named("limit", chunkSize),
-				sql.Named("lastPK", lastPK),
-				sql.Named("maxPK", maxPK),
-			}
+			query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true)
+			args = syntax.buildKeysetArgs(lastPK, maxPK, chunkSize, true)
 		} else {
 			// Keyset pagination for entire table
 			if lastPK == nil {
 				// First chunk - get minimum PK value first
 				var firstPK any
-				err := db.QueryRowContext(ctx,
-					fmt.Sprintf("SELECT MIN([%s]) FROM [%s].[%s] %s", pkCol, job.Table.Schema, job.Table.Name, tableHint)).
-					Scan(&firstPK)
+				minQuery := fmt.Sprintf("SELECT MIN(%s) FROM %s %s",
+					syntax.quoteIdent(pkCol), syntax.qualifiedTable(job.Table.Schema, job.Table.Name), tableHint)
+				err := db.QueryRowContext(ctx, minQuery).Scan(&firstPK)
 				if err != nil || firstPK == nil {
 					return stats, nil // Empty table
 				}
 				lastPK = decrementPK(firstPK)
 			}
 
-			query = fmt.Sprintf(`
-				SELECT TOP (@limit) %s
-				FROM [%s].[%s] %s
-				WHERE [%s] > @lastPK
-				ORDER BY [%s]
-			`, colList, job.Table.Schema, job.Table.Name, tableHint, pkCol, pkCol)
-			args = []any{
-				sql.Named("limit", chunkSize),
-				sql.Named("lastPK", lastPK),
-			}
+			query = syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, false)
+			args = syntax.buildKeysetArgs(lastPK, nil, chunkSize, false)
 		}
+		_ = hasMaxPK // suppress unused variable warning
 
 		// Time the query
 		queryStart := time.Now()
@@ -261,7 +441,7 @@ func executeKeysetPagination(
 
 		// Time the write
 		writeStart := time.Now()
-		if err := writeChunk(ctx, pool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
+		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
 			return stats, fmt.Errorf("writing chunk: %w", err)
 		}
 		stats.WriteTime += time.Since(writeStart)
@@ -298,16 +478,21 @@ func executeKeysetPagination(
 // executeRowNumberPagination uses ROW_NUMBER for composite/varchar PKs
 func executeRowNumberPagination(
 	ctx context.Context,
-	db *sql.DB,
-	pool *pgxpool.Pool,
+	srcPool pool.SourcePool,
+	tgtPool pool.TargetPool,
 	cfg *config.Config,
 	job Job,
 	cols, colTypes []string,
 	prog *progress.Tracker,
 	resumeRowsDone int64,
 ) (*TransferStats, error) {
+	db := srcPool.DB()
 	stats := &TransferStats{}
-	colList := "[" + strings.Join(cols, "], [") + "]"
+
+	// Use direction-aware syntax
+	syntax := newDBSyntax(srcPool.DBType())
+	colList := syntax.columnList(cols)
+	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
 
 	// Build ORDER BY clause from PK columns
 	// Tables without PK cannot be migrated safely - fail fast
@@ -318,15 +503,9 @@ func executeRowNumberPagination(
 
 	pkCols := make([]string, len(job.Table.PrimaryKey))
 	for i, pk := range job.Table.PrimaryKey {
-		pkCols[i] = fmt.Sprintf("[%s]", pk)
+		pkCols[i] = syntax.quoteIdent(pk)
 	}
 	orderBy := strings.Join(pkCols, ", ")
-
-	// Use NOLOCK unless strict consistency is enabled
-	tableHint := "WITH (NOLOCK)"
-	if cfg.Migration.StrictConsistency {
-		tableHint = ""
-	}
 
 	chunkSize := cfg.Migration.ChunkSize
 	rowNum := resumeRowsDone // Resume from where we left off
@@ -340,24 +519,9 @@ func executeRowNumberPagination(
 		default:
 		}
 
-		var query string
-		var args []any
-
-		// ROW_NUMBER pagination
-		query = fmt.Sprintf(`
-			WITH numbered AS (
-				SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
-				FROM [%s].[%s] %s
-			)
-			SELECT %s FROM numbered
-			WHERE __rn > @rowNum AND __rn <= @rowNumEnd
-			ORDER BY __rn
-		`, colList, orderBy, job.Table.Schema, job.Table.Name, tableHint, colList)
-
-		args = []any{
-			sql.Named("rowNum", rowNum),
-			sql.Named("rowNumEnd", rowNum+int64(chunkSize)),
-		}
+		// ROW_NUMBER pagination with direction-aware syntax
+		query := syntax.buildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
+		args := syntax.buildRowNumberArgs(rowNum, chunkSize)
 
 		// Time the query
 		queryStart := time.Now()
@@ -382,7 +546,7 @@ func executeRowNumberPagination(
 
 		// Time the write
 		writeStart := time.Now()
-		if err := writeChunk(ctx, pool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
+		if err := writeChunkGeneric(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, chunk); err != nil {
 			return stats, fmt.Errorf("writing chunk at row %d: %w", rowNum, err)
 		}
 		stats.WriteTime += time.Since(writeStart)
@@ -534,8 +698,8 @@ func decrementPK(pk any) any {
 	}
 }
 
-func writeChunk(ctx context.Context, pool *pgxpool.Pool, schema, table string, cols []string, rows [][]any) error {
-	conn, err := pool.Acquire(ctx)
+func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string, cols []string, rows [][]any) error {
+	conn, err := pgPool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
@@ -556,6 +720,20 @@ func writeChunk(ctx context.Context, pool *pgxpool.Pool, schema, table string, c
 	)
 
 	return err
+}
+
+// writeChunkGeneric writes a chunk of data using the appropriate target pool
+func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any) error {
+	switch p := tgtPool.(type) {
+	case *target.Pool:
+		// PostgreSQL target - use COPY
+		return writeChunk(ctx, p.Pool(), schema, table, cols, rows)
+	case *target.MSSQLPool:
+		// SQL Server target - use BULK INSERT or batch INSERT
+		return p.WriteChunk(ctx, schema, table, cols, rows)
+	default:
+		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
+	}
 }
 
 // ValidateBinaryData ensures binary data is properly formatted

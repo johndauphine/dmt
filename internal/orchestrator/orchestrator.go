@@ -13,6 +13,7 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/notify"
+	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
 	"github.com/johndauphine/mssql-pg-migrate/internal/target"
@@ -37,8 +38,8 @@ const (
 // Orchestrator coordinates the migration process
 type Orchestrator struct {
 	config     *config.Config
-	sourcePool *source.Pool
-	targetPool *target.Pool
+	sourcePool pool.SourcePool
+	targetPool pool.TargetPool
 	state      *checkpoint.State
 	progress   *progress.Tracker
 	notifier   *notify.Notifier
@@ -47,14 +48,24 @@ type Orchestrator struct {
 
 // New creates a new orchestrator
 func New(cfg *config.Config) (*Orchestrator, error) {
-	// Create source pool
-	sourcePool, err := source.NewPool(&cfg.Source, cfg.Migration.MaxMssqlConnections)
+	// Determine max connections based on source/target types
+	maxSourceConns := cfg.Migration.MaxMssqlConnections
+	maxTargetConns := cfg.Migration.MaxPgConnections
+	if cfg.Source.Type == "postgres" {
+		maxSourceConns = cfg.Migration.MaxPgConnections
+	}
+	if cfg.Target.Type == "mssql" {
+		maxTargetConns = cfg.Migration.MaxMssqlConnections
+	}
+
+	// Create source pool using factory
+	sourcePool, err := pool.NewSourcePool(&cfg.Source, maxSourceConns)
 	if err != nil {
 		return nil, fmt.Errorf("creating source pool: %w", err)
 	}
 
-	// Create target pool
-	targetPool, err := target.NewPool(&cfg.Target, cfg.Migration.MaxPgConnections)
+	// Create target pool using factory
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)
@@ -93,7 +104,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	runID := uuid.New().String()[:8]
 	startTime := time.Now()
 	fmt.Printf("Starting migration run: %s\n", runID)
-	fmt.Printf("Connection pools: MSSQL=%d, PostgreSQL=%d\n",
+	fmt.Printf("Migration: %s -> %s\n", o.sourcePool.DBType(), o.targetPool.DBType())
+	fmt.Printf("Connection pools: source=%d, target=%d\n",
 		o.sourcePool.MaxConns(), o.targetPool.MaxConns())
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config); err != nil {
@@ -458,16 +470,26 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 	o.progress.Finish()
 
-	// Print pool stats
-	mssqlStats := o.sourcePool.Stats()
-	pgStats := o.targetPool.Stats()
+	// Print pool stats (based on pool type)
 	fmt.Printf("\nConnection Pool Usage:\n")
-	fmt.Printf("  MSSQL:      %d/%d active, %d idle, %d waits (%.1fms avg)\n",
-		mssqlStats.InUse, mssqlStats.MaxOpenConnections, mssqlStats.Idle,
-		mssqlStats.WaitCount, float64(mssqlStats.WaitDuration)/float64(max(mssqlStats.WaitCount, 1)))
-	fmt.Printf("  PostgreSQL: %d/%d active, %d idle, %d acquires (%d waited)\n",
-		pgStats.AcquiredConns, pgStats.MaxConns, pgStats.IdleConns,
-		pgStats.AcquireCount, pgStats.EmptyAcquireCount)
+	switch p := o.sourcePool.(type) {
+	case *source.Pool:
+		stats := p.Stats()
+		fmt.Printf("  Source (mssql): %d/%d active, %d idle, %d waits (%.1fms avg)\n",
+			stats.InUse, stats.MaxOpenConnections, stats.Idle,
+			stats.WaitCount, float64(stats.WaitDuration)/float64(max(stats.WaitCount, 1)))
+	case *source.PostgresPool:
+		fmt.Printf("  Source (postgres): max connections=%d\n", p.MaxConns())
+	}
+	switch p := o.targetPool.(type) {
+	case *target.Pool:
+		stats := p.Stats()
+		fmt.Printf("  Target (postgres): %d/%d active, %d idle, %d acquires (%d waited)\n",
+			stats.AcquiredConns, stats.MaxConns, stats.IdleConns,
+			stats.AcquireCount, stats.EmptyAcquireCount)
+	case *target.MSSQLPool:
+		fmt.Printf("  Target (mssql): max connections=%d\n", p.MaxConns())
+	}
 
 	// Print profiling stats
 	fmt.Println("\nTransfer Profile (per table):")
@@ -609,23 +631,36 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 			continue
 		}
 
-		// Build PK column list for SELECT (supports composite PKs)
-		pkCols := make([]string, len(t.PrimaryKey))
-		for i, col := range t.PrimaryKey {
-			pkCols[i] = fmt.Sprintf("[%s]", col)
+		// Build sample query based on source database type
+		var sampleQuery string
+		if o.sourcePool.DBType() == "postgres" {
+			// PostgreSQL source syntax
+			pkCols := make([]string, len(t.PrimaryKey))
+			for i, col := range t.PrimaryKey {
+				pkCols[i] = fmt.Sprintf("%q", col)
+			}
+			pkColList := strings.Join(pkCols, ", ")
+			sampleQuery = fmt.Sprintf(`
+				SELECT %s FROM %s.%q
+				ORDER BY random()
+				LIMIT %d
+			`, pkColList, t.Schema, t.Name, sampleSize)
+		} else {
+			// SQL Server source syntax
+			pkCols := make([]string, len(t.PrimaryKey))
+			for i, col := range t.PrimaryKey {
+				pkCols[i] = fmt.Sprintf("[%s]", col)
+			}
+			pkColList := strings.Join(pkCols, ", ")
+			tableHint := "WITH (NOLOCK)"
+			if o.config.Migration.StrictConsistency {
+				tableHint = ""
+			}
+			sampleQuery = fmt.Sprintf(`
+				SELECT TOP %d %s FROM [%s].[%s] %s
+				ORDER BY NEWID()
+			`, sampleSize, pkColList, t.Schema, t.Name, tableHint)
 		}
-		pkColList := strings.Join(pkCols, ", ")
-
-		tableHint := "WITH (NOLOCK)"
-		if o.config.Migration.StrictConsistency {
-			tableHint = ""
-		}
-
-		// Sample random rows with all PK columns
-		sampleQuery := fmt.Sprintf(`
-			SELECT TOP %d %s FROM [%s].[%s] %s
-			ORDER BY NEWID()
-		`, sampleSize, pkColList, t.Schema, t.Name, tableHint)
 
 		rows, err := o.sourcePool.DB().QueryContext(ctx, sampleQuery)
 		if err != nil {
@@ -658,20 +693,7 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 		// Check if these PK tuples exist in target
 		missingCount := 0
 		for _, pkTuple := range pkTuples {
-			// Build WHERE clause: col1 = $1 AND col2 = $2 AND ...
-			whereClauses := make([]string, len(t.PrimaryKey))
-			for i, col := range t.PrimaryKey {
-				whereClauses[i] = fmt.Sprintf("%q = $%d", col, i+1)
-			}
-			whereClause := strings.Join(whereClauses, " AND ")
-
-			checkQuery := fmt.Sprintf(
-				`SELECT EXISTS(SELECT 1 FROM %s.%q WHERE %s)`,
-				o.config.Target.Schema, t.Name, whereClause,
-			)
-
-			var exists bool
-			err := o.targetPool.Pool().QueryRow(ctx, checkQuery, pkTuple...).Scan(&exists)
+			exists, err := o.checkRowExistsInTarget(ctx, t, pkTuple)
 			if err != nil || !exists {
 				missingCount++
 			}
@@ -689,6 +711,46 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 		return fmt.Errorf("sample validation failed")
 	}
 	return nil
+}
+
+// checkRowExistsInTarget checks if a row with the given PK values exists in target
+func (o *Orchestrator) checkRowExistsInTarget(ctx context.Context, t source.Table, pkTuple []any) (bool, error) {
+	switch p := o.targetPool.(type) {
+	case *target.Pool:
+		// PostgreSQL target
+		whereClauses := make([]string, len(t.PrimaryKey))
+		for i, col := range t.PrimaryKey {
+			whereClauses[i] = fmt.Sprintf("%q = $%d", col, i+1)
+		}
+		whereClause := strings.Join(whereClauses, " AND ")
+		checkQuery := fmt.Sprintf(
+			`SELECT EXISTS(SELECT 1 FROM %s.%q WHERE %s)`,
+			o.config.Target.Schema, t.Name, whereClause,
+		)
+		var exists bool
+		err := p.Pool().QueryRow(ctx, checkQuery, pkTuple...).Scan(&exists)
+		return exists, err
+
+	case *target.MSSQLPool:
+		// SQL Server target
+		whereClauses := make([]string, len(t.PrimaryKey))
+		args := make([]any, len(t.PrimaryKey))
+		for i, col := range t.PrimaryKey {
+			whereClauses[i] = fmt.Sprintf("[%s] = @p%d", col, i+1)
+			args[i] = sql.Named(fmt.Sprintf("p%d", i+1), pkTuple[i])
+		}
+		whereClause := strings.Join(whereClauses, " AND ")
+		checkQuery := fmt.Sprintf(
+			`SELECT CASE WHEN EXISTS(SELECT 1 FROM [%s].[%s] WHERE %s) THEN 1 ELSE 0 END`,
+			o.config.Target.Schema, t.Name, whereClause,
+		)
+		var exists int
+		err := p.DB().QueryRowContext(ctx, checkQuery, args...).Scan(&exists)
+		return exists == 1, err
+
+	default:
+		return false, fmt.Errorf("unsupported target pool type: %T", o.targetPool)
+	}
 }
 
 // Resume continues an interrupted migration

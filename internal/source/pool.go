@@ -80,6 +80,11 @@ func (p *Pool) MaxConns() int {
 	return p.maxConns
 }
 
+// DBType returns the database type
+func (p *Pool) DBType() string {
+	return "mssql"
+}
+
 // ExtractSchema extracts table metadata from the source database
 func (p *Pool) ExtractSchema(ctx context.Context, schema string) ([]Table, error) {
 	query := `

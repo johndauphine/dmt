@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+// Direction represents the migration direction
+type Direction int
+
+const (
+	MSSQLToPG Direction = iota
+	PGToMSSQL
+)
+
+// GetDirection returns the migration direction based on source and target types
+func GetDirection(sourceType, targetType string) Direction {
+	if sourceType == "postgres" && targetType == "mssql" {
+		return PGToMSSQL
+	}
+	return MSSQLToPG
+}
+
 // MSSQLToPostgres converts MSSQL data types to PostgreSQL equivalents
 func MSSQLToPostgres(mssqlType string, maxLength, precision, scale int) string {
 	mssqlType = strings.ToLower(mssqlType)
@@ -115,5 +131,132 @@ func MSSQLToPostgres(mssqlType string, maxLength, precision, scale int) string {
 
 	default:
 		return "text"
+	}
+}
+
+// PostgresToMSSQL converts PostgreSQL data types to SQL Server equivalents
+func PostgresToMSSQL(pgType string, maxLength, precision, scale int) string {
+	pgType = strings.ToLower(pgType)
+
+	switch pgType {
+	// Integer types
+	case "boolean", "bool":
+		return "bit"
+	case "smallint", "int2":
+		return "smallint"
+	case "integer", "int", "int4":
+		return "int"
+	case "bigint", "int8":
+		return "bigint"
+	case "serial":
+		return "int" // IDENTITY will be handled separately
+	case "bigserial":
+		return "bigint" // IDENTITY will be handled separately
+	case "smallserial":
+		return "smallint" // IDENTITY will be handled separately
+
+	// Decimal/numeric types
+	case "decimal", "numeric":
+		if precision > 0 {
+			return fmt.Sprintf("decimal(%d,%d)", precision, scale)
+		}
+		return "decimal"
+	case "money":
+		return "money"
+
+	// Floating point types
+	case "real", "float4":
+		return "real"
+	case "double precision", "float8":
+		return "float"
+
+	// String types
+	case "char", "character", "bpchar":
+		if maxLength > 0 && maxLength <= 8000 {
+			return fmt.Sprintf("char(%d)", maxLength)
+		}
+		return "char(1)"
+	case "varchar", "character varying":
+		if maxLength == -1 || maxLength > 8000 { // unlimited or > 8000
+			return "nvarchar(max)"
+		}
+		if maxLength > 0 {
+			return fmt.Sprintf("nvarchar(%d)", maxLength)
+		}
+		return "nvarchar(max)"
+	case "text":
+		return "nvarchar(max)"
+	case "citext":
+		return "nvarchar(max)" // Case-insensitive text
+
+	// Binary types
+	case "bytea":
+		return "varbinary(max)"
+
+	// Date/time types
+	case "date":
+		return "date"
+	case "time", "time without time zone":
+		return "time"
+	case "time with time zone", "timetz":
+		return "time" // SQL Server time doesn't have timezone
+	case "timestamp", "timestamp without time zone":
+		return "datetime2"
+	case "timestamp with time zone", "timestamptz":
+		return "datetimeoffset"
+	case "interval":
+		return "nvarchar(100)" // No direct equivalent
+
+	// UUID
+	case "uuid":
+		return "uniqueidentifier"
+
+	// JSON
+	case "json", "jsonb":
+		return "nvarchar(max)" // Could also use JSON type in SQL Server 2016+
+
+	// XML
+	case "xml":
+		return "xml"
+
+	// Network types
+	case "inet", "cidr", "macaddr", "macaddr8":
+		return "nvarchar(50)"
+
+	// Geometric types (store as text for simplicity)
+	case "point", "line", "lseg", "box", "path", "polygon", "circle":
+		return "nvarchar(max)"
+
+	// Arrays (store as JSON)
+	case "array":
+		return "nvarchar(max)"
+
+	// Range types (store as text)
+	case "int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange":
+		return "nvarchar(100)"
+
+	// Full-text search (store as text)
+	case "tsvector", "tsquery":
+		return "nvarchar(max)"
+
+	// Bit string
+	case "bit":
+		if maxLength > 0 && maxLength <= 64 {
+			return fmt.Sprintf("binary(%d)", (maxLength+7)/8)
+		}
+		return "varbinary(max)"
+	case "bit varying", "varbit":
+		return "varbinary(max)"
+
+	// OID types
+	case "oid", "regproc", "regprocedure", "regoper", "regoperator", "regclass", "regtype", "regconfig", "regdictionary":
+		return "int"
+
+	default:
+		// Check for array types (e.g., "integer[]", "_int4")
+		if strings.HasSuffix(pgType, "[]") || strings.HasPrefix(pgType, "_") {
+			return "nvarchar(max)" // Store arrays as JSON
+		}
+		return "nvarchar(max)"
 	}
 }
