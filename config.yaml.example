@@ -1,0 +1,41 @@
+# MSSQL to PostgreSQL Migration Configuration
+
+source:
+  host: localhost
+  port: 1433
+  database: StackOverflow2010
+  user: sa
+  password: ${MSSQL_PASSWORD}  # Use environment variable
+  schema: dbo
+
+target:
+  host: localhost
+  port: 5432
+  database: stackoverflow
+  user: postgres
+  password: ${PG_PASSWORD}  # Use environment variable
+  schema: public
+
+migration:
+  # Connection pool size (applies to both source and target)
+  max_connections: 12
+
+  # Rows per chunk for transfer
+  chunk_size: 200000
+
+  # Maximum partitions for large tables
+  max_partitions: 8
+
+  # Number of parallel transfer workers
+  workers: 8
+
+  # Tables larger than this will be partitioned (rows)
+  large_table_threshold: 5000000
+
+  # Tables to exclude from migration (glob patterns supported)
+  exclude_tables:
+    - __*           # System tables
+    - temp_*        # Temporary tables
+
+  # Directory for state database and logs
+  data_dir: ~/.mssql-pg-migrate
