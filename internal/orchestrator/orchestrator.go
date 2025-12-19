@@ -189,14 +189,14 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 		}
 	} else {
-		// Default: drop_recreate (using UNLOGGED for speed, convert to LOGGED after transfer)
-		fmt.Println("Creating target tables (drop and recreate, UNLOGGED)...")
+		// Default: drop_recreate
+		fmt.Println("Creating target tables (drop and recreate)...")
 		for _, t := range tables {
 			if err := o.targetPool.DropTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("dropping table %s: %w", t.Name, err)
 			}
-			if err := o.targetPool.CreateTableWithOptions(ctx, &t, o.config.Target.Schema, true); err != nil {
+			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
 				o.notifyFailure(runID, err, time.Since(startTime))
 				return fmt.Errorf("creating table %s: %w", t.FullName(), err)
 			}
@@ -383,16 +383,6 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 }
 
 func (o *Orchestrator) finalize(ctx context.Context, tables []source.Table) error {
-	// Phase 0: Convert UNLOGGED tables to LOGGED (for durability)
-	if o.config.Migration.TargetMode != "truncate" {
-		fmt.Println("  Converting tables to LOGGED...")
-		for _, t := range tables {
-			if err := o.targetPool.SetTableLogged(ctx, o.config.Target.Schema, t.Name); err != nil {
-				fmt.Printf("Warning: converting %s to LOGGED: %v\n", t.Name, err)
-			}
-		}
-	}
-
 	// Phase 1: Reset sequences
 	fmt.Println("  Resetting sequences...")
 	for _, t := range tables {
