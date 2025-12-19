@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
@@ -27,7 +26,6 @@ type Pool struct {
 	db       *sql.DB
 	config   *config.SourceConfig
 	maxConns int
-	mu       sync.RWMutex
 }
 
 // NewPool creates a new MSSQL connection pool

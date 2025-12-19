@@ -219,19 +219,6 @@ func (n *Notifier) getUsername() string {
 	return "mssql-pg-migrate"
 }
 
-func formatNumber(n int64) string {
-	if n >= 1_000_000_000 {
-		return fmt.Sprintf("%.2fB", float64(n)/1_000_000_000)
-	}
-	if n >= 1_000_000 {
-		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
-	}
-	if n >= 1_000 {
-		return fmt.Sprintf("%.1fK", float64(n)/1_000)
-	}
-	return fmt.Sprintf("%d", n)
-}
-
 func formatNumberWithCommas(n int64) string {
 	str := fmt.Sprintf("%d", n)
 	if len(str) <= 3 {

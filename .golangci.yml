@@ -1,0 +1,34 @@
+run:
+  timeout: 5m
+  go: "1.21"
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - gosimple
+    - ineffassign
+  disable:
+    - errcheck      # Too noisy for non-critical error returns (logging, notifications)
+    - unused        # False positives with conditional compilation
+
+linters-settings:
+  staticcheck:
+    checks:
+      - all
+      - -SA9003     # Empty branch - sometimes intentional for clarity
+
+issues:
+  exclude-rules:
+    # Ignore unchecked errors for notification calls (non-critical)
+    - linters:
+        - errcheck
+      text: "notifier\\."
+    # Ignore unchecked errors for progress bar (cosmetic)
+    - linters:
+        - errcheck
+      text: "bar\\."
+    # Ignore unchecked errors for state logging (best effort)
+    - linters:
+        - errcheck
+      text: "CompleteRun|MarkTaskComplete"

@@ -34,19 +34,6 @@ const (
 	TaskValidate       TaskType = "validate"
 )
 
-// Task dependencies - what must complete before each task type can run
-var taskDependencies = map[TaskType][]TaskType{
-	TaskExtractSchema:  {},
-	TaskCreateTables:   {TaskExtractSchema},
-	TaskTransfer:       {TaskCreateTables},
-	TaskResetSequences: {TaskTransfer},
-	TaskCreatePKs:      {TaskResetSequences},
-	TaskCreateIndexes:  {TaskCreatePKs},
-	TaskCreateFKs:      {TaskCreateIndexes},
-	TaskCreateChecks:   {TaskCreateFKs},
-	TaskValidate:       {TaskCreateChecks},
-}
-
 // Orchestrator coordinates the migration process
 type Orchestrator struct {
 	config     *config.Config
