@@ -92,7 +92,7 @@ func (p *Pool) DBType() string {
 // GetRowCount returns the row count for a table
 func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM [%s].[%s]", schema, table)).Scan(&count)
+	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyMSSQLTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -246,18 +246,18 @@ func (p *Pool) GetPartitionBoundaries(ctx context.Context, t *Table, numPartitio
 
 	query := fmt.Sprintf(`
 		WITH numbered AS (
-			SELECT [%s],
-				   NTILE(%d) OVER (ORDER BY [%s]) as partition_id
-			FROM [%s].[%s]
+			SELECT %s,
+				   NTILE(%d) OVER (ORDER BY %s) as partition_id
+			FROM %s
 		)
 		SELECT partition_id,
-			   MIN([%s]) as min_pk,
-			   MAX([%s]) as max_pk,
+			   MIN(%s) as min_pk,
+			   MAX(%s) as max_pk,
 			   COUNT(*) as row_count
 		FROM numbered
 		GROUP BY partition_id
 		ORDER BY partition_id
-	`, pkCol, numPartitions, pkCol, t.Schema, t.Name, pkCol, pkCol)
+	`, quoteMSSQLIdent(pkCol), numPartitions, quoteMSSQLIdent(pkCol), qualifyMSSQLTable(t.Schema, t.Name), quoteMSSQLIdent(pkCol), quoteMSSQLIdent(pkCol))
 
 	rows, err := p.db.QueryContext(ctx, query)
 	if err != nil {
@@ -418,4 +418,12 @@ func splitCSV(s string) []string {
 		}
 	}
 	return result
+}
+
+func quoteMSSQLIdent(ident string) string {
+	return "[" + strings.ReplaceAll(ident, "]", "]]") + "]"
+}
+
+func qualifyMSSQLTable(schema, table string) string {
+	return quoteMSSQLIdent(schema) + "." + quoteMSSQLIdent(table)
 }

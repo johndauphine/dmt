@@ -65,7 +65,7 @@ func (p *PostgresPool) DBType() string {
 // GetRowCount returns the row count for a table
 func (p *PostgresPool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.\"%s\"", schema, table)).Scan(&count)
+	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -200,7 +200,7 @@ func (p *PostgresPool) loadRowCount(ctx context.Context, t *Table) error {
 	err := p.db.QueryRowContext(ctx, query, t.Schema, t.Name).Scan(&t.RowCount)
 	if err != nil || t.RowCount == 0 {
 		// Fall back to COUNT(*) if stats not available or show 0
-		exactQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"."%s"`, t.Schema, t.Name)
+		exactQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(t.Schema, t.Name))
 		return p.db.QueryRowContext(ctx, exactQuery).Scan(&t.RowCount)
 	}
 	return nil
@@ -227,7 +227,7 @@ func (p *PostgresPool) GetPartitionBoundaries(ctx context.Context, t *Table, num
 		FROM numbered
 		GROUP BY partition_id
 		ORDER BY partition_id
-	`, pkCol, numPartitions, pkCol, t.Schema, t.Name, pkCol, pkCol)
+	`, quotePGIdent(pkCol), numPartitions, quotePGIdent(pkCol), quotePGIdent(t.Schema), quotePGIdent(t.Name), quotePGIdent(pkCol), quotePGIdent(pkCol))
 
 	rows, err := p.db.QueryContext(ctx, query)
 	if err != nil {
@@ -393,4 +393,12 @@ func splitCSVPG(s string) []string {
 		}
 	}
 	return result
+}
+
+func quotePGIdent(ident string) string {
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+}
+
+func qualifyPGTable(schema, table string) string {
+	return quotePGIdent(schema) + "." + quotePGIdent(table)
 }

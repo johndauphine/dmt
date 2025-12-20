@@ -3,7 +3,9 @@ package checkpoint
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,22 +46,34 @@ type Run struct {
 
 // TransferProgress tracks chunk-level progress
 type TransferProgress struct {
-	TaskID       int64
-	TableName    string
-	PartitionID  *int
-	LastPK       string
-	RowsDone     int64
-	RowsTotal    int64
-	UpdatedAt    time.Time
+	TaskID      int64
+	TableName   string
+	PartitionID *int
+	LastPK      string
+	RowsDone    int64
+	RowsTotal   int64
+	UpdatedAt   time.Time
 }
 
 // New creates a new state manager
 func New(dataDir string) (*State, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating data dir: %w", err)
+	}
+	// Enforce permissions in case umask relaxed them.
+	if err := os.Chmod(dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("setting data dir permissions: %w", err)
 	}
 
 	dbPath := filepath.Join(dataDir, "migrate.db")
+	// Ensure the DB file exists with restrictive permissions before sql.Open creates it.
+	if _, err := os.Stat(dbPath); errors.Is(err, fs.ErrNotExist) {
+		if f, createErr := os.OpenFile(dbPath, os.O_CREATE|os.O_EXCL, 0600); createErr == nil {
+			f.Close()
+		} else {
+			return nil, fmt.Errorf("creating db file: %w", createErr)
+		}
+	}
 	// WAL mode for better concurrency, busy_timeout to retry on lock contention
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)")
 	if err != nil {

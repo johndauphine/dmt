@@ -157,9 +157,9 @@ func newDBSyntax(dbType string) dbSyntax {
 // quoteIdent quotes an identifier based on database type
 func (s dbSyntax) quoteIdent(name string) string {
 	if s.dbType == "postgres" {
-		return fmt.Sprintf(`"%s"`, name)
+		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 	}
-	return fmt.Sprintf("[%s]", name)
+	return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
 }
 
 // qualifiedTable returns schema.table with proper quoting
@@ -577,8 +577,8 @@ func executeKeysetPagination(
 	writeJobChan := make(chan [][]any, bufferSize)
 
 	// Shared state for parallel writers
-	var totalWriteTime int64  // atomic, nanoseconds
-	var totalWritten int64    // atomic, rows written
+	var totalWriteTime int64 // atomic, nanoseconds
+	var totalWritten int64   // atomic, rows written
 	var writeErr atomic.Pointer[error]
 	var writerWg sync.WaitGroup
 

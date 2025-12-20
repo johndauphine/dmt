@@ -83,7 +83,7 @@ func (p *MSSQLPool) CreateSchema(ctx context.Context, schema string) error {
 		sql.Named("schema", schema)).Scan(&exists)
 	if err == sql.ErrNoRows {
 		// Create schema
-		_, err = p.db.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA [%s]", schema))
+		_, err = p.db.ExecContext(ctx, fmt.Sprintf("CREATE SCHEMA %s", quoteMSSQLIdent(schema)))
 		return err
 	}
 	return err
@@ -113,13 +113,13 @@ func (p *MSSQLPool) SetTableLogged(ctx context.Context, schema, table string) er
 
 // TruncateTable truncates a table
 func (p *MSSQLPool) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := p.db.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE [%s].[%s]", schema, table))
+	_, err := p.db.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifyMSSQLTable(schema, table)))
 	return err
 }
 
 // DropTable drops a table if it exists
 func (p *MSSQLPool) DropTable(ctx context.Context, schema, table string) error {
-	_, err := p.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS [%s].[%s]", schema, table))
+	_, err := p.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyMSSQLTable(schema, table)))
 	return err
 }
 
@@ -147,11 +147,11 @@ func (p *MSSQLPool) CreatePrimaryKey(ctx context.Context, t *source.Table, targe
 		if i > 0 {
 			pkCols += ", "
 		}
-		pkCols += fmt.Sprintf("[%s]", col)
+		pkCols += quoteMSSQLIdent(col)
 	}
 
-	sql := fmt.Sprintf("ALTER TABLE [%s].[%s] ADD PRIMARY KEY (%s)",
-		targetSchema, t.Name, pkCols)
+	sql := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)",
+		qualifyMSSQLTable(targetSchema, t.Name), pkCols)
 
 	_, err := p.db.ExecContext(ctx, sql)
 	return err
@@ -160,7 +160,7 @@ func (p *MSSQLPool) CreatePrimaryKey(ctx context.Context, t *source.Table, targe
 // GetRowCount returns the row count for a table
 func (p *MSSQLPool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM [%s].[%s]", schema, table)).Scan(&count)
+	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyMSSQLTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -182,7 +182,7 @@ func (p *MSSQLPool) ResetSequence(ctx context.Context, schema string, t *source.
 	// Get max value from the table
 	var maxVal int64
 	err := p.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT COALESCE(MAX([%s]), 0) FROM [%s].[%s]", identityCol, schema, t.Name)).Scan(&maxVal)
+		fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s", quoteMSSQLIdent(identityCol), qualifyMSSQLTable(schema, t.Name))).Scan(&maxVal)
 	if err != nil {
 		return fmt.Errorf("getting max value for %s.%s: %w", t.Name, identityCol, err)
 	}
@@ -192,7 +192,7 @@ func (p *MSSQLPool) ResetSequence(ctx context.Context, schema string, t *source.
 	}
 
 	// Reseed identity
-	_, err = p.db.ExecContext(ctx, fmt.Sprintf("DBCC CHECKIDENT ('[%s].[%s]', RESEED, %d)", schema, t.Name, maxVal))
+	_, err = p.db.ExecContext(ctx, fmt.Sprintf("DBCC CHECKIDENT ('%s', RESEED, %d)", qualifyMSSQLTable(schema, t.Name), maxVal))
 	return err
 }
 
@@ -201,7 +201,7 @@ func (p *MSSQLPool) CreateIndex(ctx context.Context, t *source.Table, idx *sourc
 	// Build column list
 	cols := make([]string, len(idx.Columns))
 	for i, col := range idx.Columns {
-		cols[i] = fmt.Sprintf("[%s]", col)
+		cols[i] = quoteMSSQLIdent(col)
 	}
 
 	unique := ""
@@ -215,14 +215,14 @@ func (p *MSSQLPool) CreateIndex(ctx context.Context, t *source.Table, idx *sourc
 		idxName = idxName[:128]
 	}
 
-	sqlStmt := fmt.Sprintf("CREATE %sINDEX [%s] ON [%s].[%s] (%s)",
-		unique, idxName, targetSchema, t.Name, strings.Join(cols, ", "))
+	sqlStmt := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
+		unique, quoteMSSQLIdent(idxName), qualifyMSSQLTable(targetSchema, t.Name), strings.Join(cols, ", "))
 
 	// Add included columns if any
 	if len(idx.IncludeCols) > 0 {
 		includeCols := make([]string, len(idx.IncludeCols))
 		for i, col := range idx.IncludeCols {
-			includeCols[i] = fmt.Sprintf("[%s]", col)
+			includeCols[i] = quoteMSSQLIdent(col)
 		}
 		sqlStmt += fmt.Sprintf(" INCLUDE (%s)", strings.Join(includeCols, ", "))
 	}
@@ -236,12 +236,12 @@ func (p *MSSQLPool) CreateForeignKey(ctx context.Context, t *source.Table, fk *s
 	// Build column lists
 	cols := make([]string, len(fk.Columns))
 	for i, col := range fk.Columns {
-		cols[i] = fmt.Sprintf("[%s]", col)
+		cols[i] = quoteMSSQLIdent(col)
 	}
 
 	refCols := make([]string, len(fk.RefColumns))
 	for i, col := range fk.RefColumns {
-		refCols[i] = fmt.Sprintf("[%s]", col)
+		refCols[i] = quoteMSSQLIdent(col)
 	}
 
 	// Map referential actions
@@ -255,15 +255,15 @@ func (p *MSSQLPool) CreateForeignKey(ctx context.Context, t *source.Table, fk *s
 	}
 
 	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE [%s].[%s]
-		ADD CONSTRAINT [%s]
+		ALTER TABLE %s
+		ADD CONSTRAINT %s
 		FOREIGN KEY (%s)
-		REFERENCES [%s].[%s] (%s)
+		REFERENCES %s (%s)
 		ON DELETE %s
 		ON UPDATE %s
-	`, targetSchema, t.Name, fkName,
+	`, qualifyMSSQLTable(targetSchema, t.Name), quoteMSSQLIdent(fkName),
 		strings.Join(cols, ", "),
-		targetSchema, fk.RefTable, strings.Join(refCols, ", "),
+		qualifyMSSQLTable(targetSchema, fk.RefTable), strings.Join(refCols, ", "),
 		onDelete, onUpdate)
 
 	_, err := p.db.ExecContext(ctx, sqlStmt)
@@ -282,10 +282,10 @@ func (p *MSSQLPool) CreateCheckConstraint(ctx context.Context, t *source.Table, 
 	}
 
 	sqlStmt := fmt.Sprintf(`
-		ALTER TABLE [%s].[%s]
-		ADD CONSTRAINT [%s]
+		ALTER TABLE %s
+		ADD CONSTRAINT %s
 		CHECK %s
-	`, targetSchema, t.Name, chkName, definition)
+	`, qualifyMSSQLTable(targetSchema, t.Name), quoteMSSQLIdent(chkName), definition)
 
 	_, err := p.db.ExecContext(ctx, sqlStmt)
 	return err
@@ -357,7 +357,7 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("CREATE TABLE [%s].[%s] (\n", targetSchema, t.Name))
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", qualifyMSSQLTable(targetSchema, t.Name)))
 
 	for i, col := range t.Columns {
 		if i > 0 {
@@ -367,7 +367,7 @@ func GenerateMSSQLDDL(t *source.Table, targetSchema string) string {
 		// Map data type
 		mssqlType := typemap.PostgresToMSSQL(col.DataType, col.MaxLength, col.Precision, col.Scale)
 
-		sb.WriteString(fmt.Sprintf("    [%s] %s", col.Name, mssqlType))
+		sb.WriteString(fmt.Sprintf("    %s %s", quoteMSSQLIdent(col.Name), mssqlType))
 
 		// Add IDENTITY for serial columns
 		if col.IsIdentity {

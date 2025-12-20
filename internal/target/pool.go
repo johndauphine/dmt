@@ -89,7 +89,7 @@ func (p *Pool) DBType() string {
 
 // CreateSchema creates the target schema if it doesn't exist
 func (p *Pool) CreateSchema(ctx context.Context, schema string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", schema))
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotePGIdent(schema)))
 	return err
 }
 
@@ -119,13 +119,13 @@ func (p *Pool) SetTableLogged(ctx context.Context, schema, table string) error {
 
 // TruncateTable truncates a table
 func (p *Pool) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%q", schema, table))
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifyPGTable(schema, table)))
 	return err
 }
 
 // DropTable drops a table if it exists
 func (p *Pool) DropTable(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s.%q CASCADE", schema, table))
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifyPGTable(schema, table)))
 	return err
 }
 
@@ -152,11 +152,11 @@ func (p *Pool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSche
 		if i > 0 {
 			pkCols += ", "
 		}
-		pkCols += fmt.Sprintf("%q", col)
+		pkCols += quotePGIdent(col)
 	}
 
-	sql := fmt.Sprintf("ALTER TABLE %s.%q ADD PRIMARY KEY (%s)",
-		targetSchema, t.Name, pkCols)
+	sql := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)",
+		qualifyPGTable(targetSchema, t.Name), pkCols)
 
 	_, err := p.pool.Exec(ctx, sql)
 	return err
@@ -165,7 +165,7 @@ func (p *Pool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSche
 // GetRowCount returns the row count for a table
 func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.%q", schema, table)).Scan(&count)
+	err := p.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -187,7 +187,7 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 	// Get max value from the table
 	var maxVal int64
 	err := p.pool.QueryRow(ctx,
-		fmt.Sprintf("SELECT COALESCE(MAX(%q), 0) FROM %s.%q", identityCol, schema, t.Name)).Scan(&maxVal)
+		fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s", quotePGIdent(identityCol), qualifyPGTable(schema, t.Name))).Scan(&maxVal)
 	if err != nil {
 		return fmt.Errorf("getting max value for %s.%s: %w", t.Name, identityCol, err)
 	}
@@ -198,18 +198,18 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 
 	// For GENERATED AS IDENTITY columns, use ALTER TABLE ... RESTART WITH
 	// This works for both SERIAL and IDENTITY columns
-	sql := fmt.Sprintf(`ALTER TABLE %s.%q ALTER COLUMN %q RESTART WITH %d`,
-		schema, t.Name, identityCol, maxVal+1)
+	sql := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s RESTART WITH %d`,
+		qualifyPGTable(schema, t.Name), quotePGIdent(identityCol), maxVal+1)
 
 	_, err = p.pool.Exec(ctx, sql)
 	if err != nil {
 		// Fall back to pg_get_serial_sequence for SERIAL columns
 		fallbackSQL := fmt.Sprintf(`
 			SELECT setval(
-				pg_get_serial_sequence('"%s"."%s"', '%s'),
+				pg_get_serial_sequence('%s', '%s'),
 				%d
 			)
-		`, schema, t.Name, identityCol, maxVal)
+		`, qualifyPGTable(schema, t.Name), identityCol, maxVal)
 		_, err = p.pool.Exec(ctx, fallbackSQL)
 	}
 	return err
@@ -220,7 +220,7 @@ func (p *Pool) CreateIndex(ctx context.Context, t *source.Table, idx *source.Ind
 	// Build column list
 	cols := make([]string, len(idx.Columns))
 	for i, col := range idx.Columns {
-		cols[i] = fmt.Sprintf("%q", col)
+		cols[i] = quotePGIdent(col)
 	}
 
 	unique := ""
@@ -234,14 +234,14 @@ func (p *Pool) CreateIndex(ctx context.Context, t *source.Table, idx *source.Ind
 		idxName = idxName[:63]
 	}
 
-	sql := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %q ON %s.%q (%s)",
-		unique, idxName, targetSchema, t.Name, strings.Join(cols, ", "))
+	sql := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
+		unique, quotePGIdent(idxName), qualifyPGTable(targetSchema, t.Name), strings.Join(cols, ", "))
 
 	// Add included columns if any (PostgreSQL INCLUDE syntax)
 	if len(idx.IncludeCols) > 0 {
 		includeCols := make([]string, len(idx.IncludeCols))
 		for i, col := range idx.IncludeCols {
-			includeCols[i] = fmt.Sprintf("%q", col)
+			includeCols[i] = quotePGIdent(col)
 		}
 		sql += fmt.Sprintf(" INCLUDE (%s)", strings.Join(includeCols, ", "))
 	}
@@ -255,12 +255,12 @@ func (p *Pool) CreateForeignKey(ctx context.Context, t *source.Table, fk *source
 	// Build column lists
 	cols := make([]string, len(fk.Columns))
 	for i, col := range fk.Columns {
-		cols[i] = fmt.Sprintf("%q", col)
+		cols[i] = quotePGIdent(col)
 	}
 
 	refCols := make([]string, len(fk.RefColumns))
 	for i, col := range fk.RefColumns {
-		refCols[i] = fmt.Sprintf("%q", col)
+		refCols[i] = quotePGIdent(col)
 	}
 
 	// Map SQL Server referential actions to PostgreSQL
@@ -274,15 +274,15 @@ func (p *Pool) CreateForeignKey(ctx context.Context, t *source.Table, fk *source
 	}
 
 	sql := fmt.Sprintf(`
-		ALTER TABLE %s.%q
-		ADD CONSTRAINT %q
+		ALTER TABLE %s
+		ADD CONSTRAINT %s
 		FOREIGN KEY (%s)
-		REFERENCES %s.%q (%s)
+		REFERENCES %s (%s)
 		ON DELETE %s
 		ON UPDATE %s
-	`, targetSchema, t.Name, fkName,
+	`, qualifyPGTable(targetSchema, t.Name), quotePGIdent(fkName),
 		strings.Join(cols, ", "),
-		targetSchema, fk.RefTable, strings.Join(refCols, ", "),
+		qualifyPGTable(targetSchema, fk.RefTable), strings.Join(refCols, ", "),
 		onDelete, onUpdate)
 
 	_, err := p.pool.Exec(ctx, sql)
@@ -302,10 +302,10 @@ func (p *Pool) CreateCheckConstraint(ctx context.Context, t *source.Table, chk *
 	}
 
 	sql := fmt.Sprintf(`
-		ALTER TABLE %s.%q
-		ADD CONSTRAINT %q
+		ALTER TABLE %s
+		ADD CONSTRAINT %s
 		CHECK %s
-	`, targetSchema, t.Name, chkName, definition)
+	`, qualifyPGTable(targetSchema, t.Name), quotePGIdent(chkName), definition)
 
 	_, err := p.pool.Exec(ctx, sql)
 	return err
