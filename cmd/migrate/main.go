@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
+	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
 	"github.com/urfave/cli/v2"
 )
 
@@ -27,6 +27,13 @@ func main() {
 				Value:   "config.yaml",
 				Usage:   "Path to configuration file",
 			},
+		},
+		Action: func(c *cli.Context) error {
+			if c.NArg() == 0 {
+				// No command provided, launch TUI
+				return startTUI(c)
+			}
+			return cli.ShowAppHelp(c)
 		},
 		Commands: []*cli.Command{
 			{
@@ -81,12 +88,22 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
+func startTUI(c *cli.Context) error {
+	return tui.Start()
+}
+
 func runMigration(c *cli.Context) error {
-	cfg, err := config.Load(c.String("config"))
+	configPath := c.String("config")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+		return fmt.Errorf("configuration file not found: %s\nPlease provide a config file with -c or create a config.yaml in the current directory.\n\nUsage: mssql-pg-migrate run [options]", configPath)
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -127,7 +144,12 @@ func runMigration(c *cli.Context) error {
 }
 
 func resumeMigration(c *cli.Context) error {
-	cfg, err := config.Load(c.String("config"))
+	configPath := c.String("config")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+		return fmt.Errorf("configuration file not found: %s\nPlease provide a config file with -c or create a config.yaml in the current directory.", configPath)
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -154,7 +176,12 @@ func resumeMigration(c *cli.Context) error {
 }
 
 func showStatus(c *cli.Context) error {
-	cfg, err := config.Load(c.String("config"))
+	configPath := c.String("config")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+		return fmt.Errorf("configuration file not found: %s", configPath)
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -169,7 +196,12 @@ func showStatus(c *cli.Context) error {
 }
 
 func validateMigration(c *cli.Context) error {
-	cfg, err := config.Load(c.String("config"))
+	configPath := c.String("config")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+		return fmt.Errorf("configuration file not found: %s", configPath)
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -184,7 +216,12 @@ func validateMigration(c *cli.Context) error {
 }
 
 func showHistory(c *cli.Context) error {
-	cfg, err := config.Load(c.String("config"))
+	configPath := c.String("config")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+		return fmt.Errorf("configuration file not found: %s", configPath)
+	}
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -202,3 +239,4 @@ func showHistory(c *cli.Context) error {
 
 	return orch.ShowHistory()
 }
+
