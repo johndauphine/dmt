@@ -42,7 +42,19 @@ func (t *Table) SupportsKeysetPagination() bool {
 		return false
 	}
 	pkType := strings.ToLower(t.PKColumns[0].DataType)
-	return pkType == "int" || pkType == "bigint" || pkType == "smallint" || pkType == "tinyint"
+	// SQL Server types
+	if pkType == "int" || pkType == "bigint" || pkType == "smallint" || pkType == "tinyint" {
+		return true
+	}
+	// PostgreSQL types (data_type names)
+	if pkType == "integer" || pkType == "serial" || pkType == "bigserial" || pkType == "smallserial" {
+		return true
+	}
+	// PostgreSQL internal types (udt_name values)
+	if pkType == "int4" || pkType == "int8" || pkType == "int2" {
+		return true
+	}
+	return false
 }
 
 // GetPKColumn returns the PK column metadata if single-column PK

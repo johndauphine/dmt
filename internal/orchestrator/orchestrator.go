@@ -338,8 +338,8 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	tableJobs := make(map[string]int) // tableName -> number of jobs
 
 	for _, t := range tables {
-		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasSinglePK() {
-			// Partition large tables
+		if t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
+			// Partition large tables (only for keyset-compatible PKs)
 			numPartitions := min(
 				int(t.RowCount/int64(o.config.Migration.ChunkSize))+1,
 				o.config.Migration.MaxPartitions,
