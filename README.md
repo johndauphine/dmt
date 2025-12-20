@@ -53,21 +53,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.8.0/mssql-pg-migrate-v1.8.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.8.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.9.0/mssql-pg-migrate-v1.9.0-linux-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.9.0-linux-amd64.tar.gz
 chmod +x mssql-pg-migrate-linux-amd64
 ./mssql-pg-migrate-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.8.0/mssql-pg-migrate-v1.8.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v1.8.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.9.0/mssql-pg-migrate-v1.9.0-darwin-arm64.tar.gz
+tar -xzf mssql-pg-migrate-v1.9.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.8.0/mssql-pg-migrate-v1.8.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.8.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.9.0/mssql-pg-migrate-v1.9.0-darwin-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.9.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.8.0/mssql-pg-migrate-v1.8.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.9.0/mssql-pg-migrate-v1.9.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
 tar -xzf mssql-pg-migrate.tar.gz
 ```
 
