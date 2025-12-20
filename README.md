@@ -391,7 +391,8 @@ Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 ## Benchmarks
 
 Tested on StackOverflow database dumps:
-- **Environment**: 16 cores, 32GB RAM, SQL Server and PostgreSQL in Docker containers (same host)
+- **Environment**: Windows laptop with WSL2 (24GB RAM allocated), 16 cores
+- **Databases**: SQL Server and PostgreSQL running in Docker containers (same host)
 - **Dataset**: StackOverflow 2010 (19.3M rows) and 2013 (106.5M rows)
 
 ### MSSQL → PostgreSQL
