@@ -67,8 +67,14 @@ func main() {
 				Action: validateMigration,
 			},
 			{
-				Name:   "history",
-				Usage:  "List all migration runs",
+				Name:  "history",
+				Usage: "List all migration runs, or view details of a specific run",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "run",
+						Usage: "Show details for a specific run ID",
+					},
+				},
 				Action: showHistory,
 			},
 		},
@@ -188,6 +194,11 @@ func showHistory(c *cli.Context) error {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
 	defer orch.Close()
+
+	// If --run flag is provided, show details for that specific run
+	if runID := c.String("run"); runID != "" {
+		return orch.ShowRunDetails(runID)
+	}
 
 	return orch.ShowHistory()
 }

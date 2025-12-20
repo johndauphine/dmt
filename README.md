@@ -7,6 +7,17 @@
 
 High-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL.
 
+## Security Notice
+
+**Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.mssql-pg-migrate/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
+
+**Recommended actions:**
+1. **Upgrade to v1.10.0 or later** - The tool now automatically sanitizes any stored credentials on startup
+2. **Rotate your database passwords** if you used earlier versions with sensitive credentials
+3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.mssql-pg-migrate/migrate.db`
+
+Starting with v1.10.0, credentials are always redacted before being stored.
+
 ## Performance
 
 - **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)

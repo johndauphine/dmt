@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -121,8 +122,76 @@ func (s *State) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);
 	`
 
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// One-time migration: sanitize any passwords stored in config column
+	return s.sanitizeStoredConfigs()
+}
+
+// sanitizeStoredConfigs removes any passwords accidentally stored in config JSON
+func (s *State) sanitizeStoredConfigs() error {
+	rows, err := s.db.Query(`SELECT id, config FROM runs WHERE config IS NOT NULL AND config != ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		id     string
+		config string
+	}
+	var updates []update
+
+	for rows.Next() {
+		var id, configStr string
+		if err := rows.Scan(&id, &configStr); err != nil {
+			continue
+		}
+
+		// Check if this config contains unredacted passwords
+		if !strings.Contains(configStr, `"Password"`) {
+			continue
+		}
+
+		// Parse and sanitize
+		var configMap map[string]any
+		if err := json.Unmarshal([]byte(configStr), &configMap); err != nil {
+			continue
+		}
+
+		modified := false
+		for _, section := range []string{"Source", "Target"} {
+			if sec, ok := configMap[section].(map[string]any); ok {
+				if pw, ok := sec["Password"].(string); ok && pw != "" && pw != "[REDACTED]" {
+					sec["Password"] = "[REDACTED]"
+					modified = true
+				}
+			}
+		}
+		// Also sanitize Slack webhook
+		if slack, ok := configMap["Slack"].(map[string]any); ok {
+			if wh, ok := slack["WebhookURL"].(string); ok && wh != "" && wh != "[REDACTED]" {
+				slack["WebhookURL"] = "[REDACTED]"
+				modified = true
+			}
+		}
+
+		if modified {
+			newConfig, _ := json.Marshal(configMap)
+			updates = append(updates, update{id: id, config: string(newConfig)})
+		}
+	}
+
+	// Apply updates
+	for _, u := range updates {
+		if _, err := s.db.Exec(`UPDATE runs SET config = ? WHERE id = ?`, u.config, u.id); err != nil {
+			return fmt.Errorf("sanitizing config for run %s: %w", u.id, err)
+		}
+	}
+
+	return nil
 }
 
 // Close closes the database connection
@@ -373,7 +442,7 @@ func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, e
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema
+		SELECT id, started_at, completed_at, status, source_schema, target_schema, config
 		FROM runs ORDER BY started_at DESC LIMIT 20
 	`)
 	if err != nil {
@@ -386,7 +455,8 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var r Run
 		var startedAtStr string
 		var completedAtStr sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema); err != nil {
+		var configStr sql.NullString
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
@@ -394,7 +464,40 @@ func (s *State) GetAllRuns() ([]Run, error) {
 			t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
 			r.CompletedAt = &t
 		}
+		if configStr.Valid {
+			r.Config = configStr.String
+		}
 		runs = append(runs, r)
 	}
 	return runs, nil
+}
+
+// GetRunByID returns a specific run by ID
+func (s *State) GetRunByID(runID string) (*Run, error) {
+	var r Run
+	var startedAtStr string
+	var completedAtStr sql.NullString
+	var configStr sql.NullString
+
+	err := s.db.QueryRow(`
+		SELECT id, started_at, completed_at, status, source_schema, target_schema, config
+		FROM runs WHERE id = ?
+	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+	if completedAtStr.Valid {
+		t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
+		r.CompletedAt = &t
+	}
+	if configStr.Valid {
+		r.Config = configStr.String
+	}
+	return &r, nil
 }

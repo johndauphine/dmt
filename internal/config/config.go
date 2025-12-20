@@ -342,3 +342,21 @@ func (c *Config) TargetDSN() string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
 		c.Target.User, c.Target.Password, c.Target.Host, c.Target.Port, c.Target.Database, c.Target.SSLMode)
 }
+
+// Sanitized returns a copy of the config with sensitive fields redacted
+func (c *Config) Sanitized() *Config {
+	sanitized := *c // shallow copy
+
+	// Redact source credentials
+	sanitized.Source.Password = "[REDACTED]"
+
+	// Redact target credentials
+	sanitized.Target.Password = "[REDACTED]"
+
+	// Redact Slack webhook
+	if sanitized.Slack.WebhookURL != "" {
+		sanitized.Slack.WebhookURL = "[REDACTED]"
+	}
+
+	return &sanitized
+}

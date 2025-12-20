@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -109,7 +110,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Printf("Connection pools: source=%d, target=%d\n",
 		o.sourcePool.MaxConns(), o.targetPool.MaxConns())
 
-	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config); err != nil {
+	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized()); err != nil {
 		return fmt.Errorf("creating run: %w", err)
 	}
 
@@ -1039,6 +1040,53 @@ func (o *Orchestrator) ShowHistory() error {
 		}
 		fmt.Printf("%-10s %-20s %-20s %-10s\n",
 			r.ID, r.StartedAt.Format("2006-01-02 15:04:05"), completed, r.Status)
+	}
+
+	fmt.Println("\nUse 'history --run <ID>' to view run configuration")
+	return nil
+}
+
+// ShowRunDetails displays detailed information for a specific run
+func (o *Orchestrator) ShowRunDetails(runID string) error {
+	run, err := o.state.GetRunByID(runID)
+	if err != nil {
+		return fmt.Errorf("getting run: %w", err)
+	}
+	if run == nil {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+
+	fmt.Printf("Run ID:        %s\n", run.ID)
+	fmt.Printf("Status:        %s\n", run.Status)
+	fmt.Printf("Started:       %s\n", run.StartedAt.Format("2006-01-02 15:04:05"))
+	if run.CompletedAt != nil {
+		fmt.Printf("Completed:     %s\n", run.CompletedAt.Format("2006-01-02 15:04:05"))
+		duration := run.CompletedAt.Sub(run.StartedAt)
+		fmt.Printf("Duration:      %s\n", duration.Round(time.Second))
+	}
+	fmt.Printf("Source Schema: %s\n", run.SourceSchema)
+	fmt.Printf("Target Schema: %s\n", run.TargetSchema)
+
+	// Task stats
+	total, pending, running, success, failed, err := o.state.GetRunStats(run.ID)
+	if err == nil && total > 0 {
+		fmt.Printf("\nTasks: %d total, %d success, %d failed, %d pending, %d running\n",
+			total, success, failed, pending, running)
+	}
+
+	// Config (if stored)
+	if run.Config != "" {
+		fmt.Println("\nConfiguration:")
+		fmt.Println("--------------")
+		// Pretty print the JSON config
+		var cfg config.Config
+		if err := json.Unmarshal([]byte(run.Config), &cfg); err == nil {
+			prettyJSON, _ := json.MarshalIndent(cfg, "", "  ")
+			fmt.Println(string(prettyJSON))
+		} else {
+			// Fall back to raw output if parsing fails
+			fmt.Println(run.Config)
+		}
 	}
 
 	return nil
