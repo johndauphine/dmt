@@ -300,8 +300,14 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 	// Create fully qualified table name
 	fullTableName := fmt.Sprintf("[%s].[%s]", schema, table)
 
-	// Prepare bulk copy statement with TABLOCK for better performance
-	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(fullTableName, mssql.BulkOptions{Tablock: true}, cols...))
+	// Prepare bulk copy statement with performance hints
+	// - Tablock: acquire table lock to reduce lock overhead
+	// - RowsPerBatch: hint to optimizer for memory allocation
+	bulkOpts := mssql.BulkOptions{
+		Tablock:      true,
+		RowsPerBatch: len(rows),
+	}
+	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(fullTableName, bulkOpts, cols...))
 	if err != nil {
 		txn.Rollback()
 		return fmt.Errorf("preparing bulk copy: %w", err)

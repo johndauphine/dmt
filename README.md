@@ -10,7 +10,7 @@ High-performance CLI tool for bidirectional database migration between Microsoft
 ## Performance
 
 - **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)
-- **197,000 rows/sec** PostgreSQL → MSSQL (auto-tuned, 19M rows in 98s)
+- **234,000 rows/sec** PostgreSQL → MSSQL (auto-tuned, 19M rows in 83s)
 - **Auto-tuning** based on CPU cores and available RAM
 - **3-4x faster** than equivalent Python/Airflow solutions
 
@@ -400,9 +400,9 @@ Tested on StackOverflow database dumps (Docker containers, same host, 16-core CP
 ### PostgreSQL → MSSQL
 | Dataset | Rows | Duration | Throughput |
 |---------|------|----------|------------|
-| SO2010 | 19.3M | 98s | **197,000 rows/sec** |
+| SO2010 | 19.3M | 83s | **234,000 rows/sec** |
 
-PostgreSQL → MSSQL is ~3x slower due to TDS bulk copy protocol overhead vs PostgreSQL COPY.
+PostgreSQL → MSSQL is ~2.5x slower due to TDS bulk copy protocol overhead vs PostgreSQL COPY.
 
 Performance varies based on:
 - Network latency between source and target
