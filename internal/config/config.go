@@ -1,12 +1,40 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// getAvailableMemoryMB returns available system memory in MB (Linux only, falls back to 4GB)
+func getAvailableMemoryMB() int64 {
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 4096 // Default 4GB if can't read
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "MemAvailable:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, err := strconv.ParseInt(fields[1], 10, 64)
+				if err == nil {
+					return kb / 1024 // Convert KB to MB
+				}
+			}
+		}
+	}
+	return 4096 // Default 4GB
+}
 
 // Config holds all configuration for the migration tool
 type Config struct {
@@ -143,14 +171,34 @@ func (c *Config) applyDefaults() {
 	if c.Migration.MaxPgConnections == 0 {
 		c.Migration.MaxPgConnections = c.Migration.MaxConnections
 	}
-	if c.Migration.ChunkSize == 0 {
-		c.Migration.ChunkSize = 200000
+	// Auto-detect CPU cores for workers (leave 2 cores for OS/DB overhead)
+	if c.Migration.Workers == 0 {
+		cores := runtime.NumCPU()
+		c.Migration.Workers = cores - 2
+		if c.Migration.Workers < 2 {
+			c.Migration.Workers = 2
+		}
+		if c.Migration.Workers > 32 {
+			c.Migration.Workers = 32 // Cap at 32 workers
+		}
 	}
 	if c.Migration.MaxPartitions == 0 {
-		c.Migration.MaxPartitions = 8
+		c.Migration.MaxPartitions = c.Migration.Workers // Match workers
 	}
-	if c.Migration.Workers == 0 {
-		c.Migration.Workers = 8
+	// Auto-tune chunk size and buffers based on available memory
+	// Target: use ~50% of available RAM for buffering
+	// Each worker buffers: read_ahead_buffers × chunk_size × ~500 bytes/row average
+	availableMB := getAvailableMemoryMB()
+	targetMemoryMB := availableMB / 2 // Use 50% of available RAM
+	if c.Migration.ChunkSize == 0 {
+		// Scale chunk size with available memory: 100K-500K range
+		c.Migration.ChunkSize = int(targetMemoryMB * 50) // ~50 rows per MB
+		if c.Migration.ChunkSize < 100000 {
+			c.Migration.ChunkSize = 100000
+		}
+		if c.Migration.ChunkSize > 500000 {
+			c.Migration.ChunkSize = 500000
+		}
 	}
 	if c.Migration.LargeTableThreshold == 0 {
 		c.Migration.LargeTableThreshold = 5000000
@@ -165,11 +213,35 @@ func (c *Config) applyDefaults() {
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
-	if c.Migration.ReadAheadBuffers == 0 {
-		c.Migration.ReadAheadBuffers = 8 // Default: buffer 8 chunks for parallel writers
-	}
 	if c.Migration.WriteAheadWriters == 0 {
 		c.Migration.WriteAheadWriters = 2 // Default: 2 parallel writers per job
+	}
+	if c.Migration.ReadAheadBuffers == 0 {
+		// Scale buffers: enough to keep writers fed, but within memory limits
+		// Formula: targetMemoryMB / workers / (chunkSize * 500 bytes avg)
+		bytesPerChunk := int64(c.Migration.ChunkSize) * 500 // ~500 bytes per row average
+		buffersPerWorker := (targetMemoryMB * 1024 * 1024) / int64(c.Migration.Workers) / bytesPerChunk
+		c.Migration.ReadAheadBuffers = int(buffersPerWorker)
+		if c.Migration.ReadAheadBuffers < 4 {
+			c.Migration.ReadAheadBuffers = 4
+		}
+		if c.Migration.ReadAheadBuffers > 32 {
+			c.Migration.ReadAheadBuffers = 32 // Cap to avoid excessive memory
+		}
+	}
+
+	// Auto-size connection pools based on workers and writers
+	// Each worker needs: 1 source connection + write_ahead_writers target connections
+	minSourceConns := c.Migration.Workers
+	minTargetConns := c.Migration.Workers * c.Migration.WriteAheadWriters
+	if c.Migration.MaxConnections < minTargetConns {
+		c.Migration.MaxConnections = minTargetConns + 4 // Add headroom
+	}
+	if c.Migration.MaxMssqlConnections < minSourceConns {
+		c.Migration.MaxMssqlConnections = minSourceConns + 4
+	}
+	if c.Migration.MaxPgConnections < minTargetConns {
+		c.Migration.MaxPgConnections = minTargetConns + 4
 	}
 }
 
