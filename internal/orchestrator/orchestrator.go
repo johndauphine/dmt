@@ -258,7 +258,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.state.UpdatePhase(runID, "transferring")
 	if err := o.transferAll(ctx, runID, tables); err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
+		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			o.state.MarkRunAsResumed(runID) // Reset running tasks to pending
 			fmt.Println("Migration interrupted - run 'resume' to continue")
 			return fmt.Errorf("transferring data: %w", err)
 		}
@@ -622,7 +624,13 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("%d transfer errors: %v", len(errs), errs[0])
+		// Check if any error is a context cancellation
+		for _, err := range errs {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return context.Canceled // Return unwrapped so caller can detect it
+			}
+		}
+		return fmt.Errorf("%d transfer errors: %w", len(errs), errs[0])
 	}
 
 	return nil
@@ -1027,6 +1035,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// Transfer only the incomplete tables
 	fmt.Println("Transferring data...")
 	if err := o.transferAll(ctx, run.ID, tablesToTransfer); err != nil {
+		// If context was canceled (Ctrl+C), leave run as "running" so resume works
+		// but reset any "running" tasks to "pending" so status shows correctly
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			o.state.MarkRunAsResumed(run.ID) // Reset running tasks to pending
+			fmt.Println("Migration interrupted - run 'resume' to continue")
+			return fmt.Errorf("transferring data: %w", err)
+		}
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("transferring data: %w", err)
@@ -1105,12 +1120,12 @@ func (o *Orchestrator) ShowStatus() error {
 	}
 
 	// Determine if migration is interrupted:
-	// If in transferring phase with no running tasks and pending tasks remain,
-	// the migration was cancelled or crashed. Workers would be actively processing
-	// if the migration were truly running.
-	if phase == "transferring" && running == 0 && pending > 0 {
+	// If in transferring phase with no running tasks and incomplete tasks remain
+	// (pending or failed), the migration was cancelled or crashed.
+	// Workers would be actively processing if the migration were truly running.
+	if phase == "transferring" && running == 0 && (pending > 0 || failed > 0) {
 		fmt.Printf("Run: %s\n", run.ID)
-		fmt.Printf("Status: interrupted (%d/%d tables completed)\n", success, total)
+		fmt.Printf("Status: interrupted (%d/%d tasks completed)\n", success, total)
 		fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
 		fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
 			total, pending, running, success, failed)
