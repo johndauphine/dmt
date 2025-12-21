@@ -523,11 +523,11 @@ func (s *State) MarkTaskComplete(runID, taskKey string) error {
 
 // ProgressSaver implements transfer.ProgressSaver interface
 type ProgressSaver struct {
-	state *State
+	state StateBackend
 }
 
-// NewProgressSaver creates a progress saver wrapping the state
-func NewProgressSaver(s *State) *ProgressSaver {
+// NewProgressSaver creates a progress saver wrapping any state backend
+func NewProgressSaver(s StateBackend) *ProgressSaver {
 	return &ProgressSaver{state: s}
 }
 
@@ -545,9 +545,9 @@ func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, e
 	if prog == nil {
 		return nil, 0, nil
 	}
-	// Unmarshal lastPK from JSON
+	// Unmarshal lastPK from JSON (stored as string in TransferProgress)
 	if prog.LastPK != "" {
-		if err := json.Unmarshal([]byte(prog.LastPK), &lastPK); err != nil {
+		if jsonErr := json.Unmarshal([]byte(prog.LastPK), &lastPK); jsonErr != nil {
 			return nil, prog.RowsDone, nil // Ignore unmarshal errors, just return rowsDone
 		}
 	}

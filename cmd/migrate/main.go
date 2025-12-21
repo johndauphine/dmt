@@ -31,6 +31,10 @@ func main() {
 				Value:   "config.yaml",
 				Usage:   "Path to configuration file",
 			},
+			&cli.StringFlag{
+				Name:  "state-file",
+				Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() == 0 {
@@ -64,6 +68,10 @@ func main() {
 						Value: 8,
 						Usage: "Number of parallel workers",
 					},
+					&cli.StringFlag{
+						Name:  "state-file",
+						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
+					},
 				},
 			},
 			{
@@ -74,6 +82,10 @@ func main() {
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
+					},
+					&cli.StringFlag{
+						Name:  "state-file",
+						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 					},
 				},
 			},
@@ -86,6 +98,10 @@ func main() {
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
 					},
+					&cli.StringFlag{
+						Name:  "state-file",
+						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
+					},
 				},
 			},
 			{
@@ -96,6 +112,10 @@ func main() {
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
+					},
+					&cli.StringFlag{
+						Name:  "state-file",
+						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 					},
 				},
 			},
@@ -110,6 +130,10 @@ func main() {
 					&cli.StringFlag{
 						Name:  "run",
 						Usage: "Show details for a specific run ID",
+					},
+					&cli.StringFlag{
+						Name:  "state-file",
+						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 					},
 				},
 				Action: showHistory,
@@ -206,8 +230,13 @@ func runMigration(c *cli.Context) error {
 		cfg.Migration.Workers = c.Int("workers")
 	}
 
+	// Build orchestrator options
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+
 	// Create orchestrator
-	orch, err := orchestrator.New(cfg)
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
@@ -237,7 +266,11 @@ func resumeMigration(c *cli.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	orch, err := orchestrator.New(cfg)
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
@@ -264,7 +297,11 @@ func showStatus(c *cli.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	orch, err := orchestrator.New(cfg)
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
@@ -279,7 +316,11 @@ func validateMigration(c *cli.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	orch, err := orchestrator.New(cfg)
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
@@ -294,7 +335,11 @@ func showHistory(c *cli.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	orch, err := orchestrator.New(cfg)
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
@@ -306,6 +351,17 @@ func showHistory(c *cli.Context) error {
 	}
 
 	return orch.ShowHistory()
+}
+
+// getStateFile returns the state file path from the context.
+// Checks both command-level and global flags.
+func getStateFile(c *cli.Context) string {
+	// First check command-level flag
+	if sf := c.String("state-file"); sf != "" {
+		return sf
+	}
+	// Fall back to global flag
+	return c.String("state-file")
 }
 
 func loadConfigWithOrigin(c *cli.Context) (*config.Config, string, string, error) {

@@ -42,7 +42,7 @@ type Orchestrator struct {
 	config     *config.Config
 	sourcePool pool.SourcePool
 	targetPool pool.TargetPool
-	state      *checkpoint.State
+	state      checkpoint.StateBackend
 	progress   *progress.Tracker
 	notifier   *notify.Notifier
 	tables     []source.Table
@@ -50,8 +50,20 @@ type Orchestrator struct {
 	runConfig  string
 }
 
-// New creates a new orchestrator
+// Options configures the orchestrator.
+type Options struct {
+	// StateFile overrides SQLite with a YAML state file (for Airflow).
+	// If empty, uses SQLite in DataDir.
+	StateFile string
+}
+
+// New creates a new orchestrator with default options (SQLite state).
 func New(cfg *config.Config) (*Orchestrator, error) {
+	return NewWithOptions(cfg, Options{})
+}
+
+// NewWithOptions creates a new orchestrator with custom options.
+func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	// Determine max connections based on source/target types
 	maxSourceConns := cfg.Migration.MaxMssqlConnections
 	maxTargetConns := cfg.Migration.MaxPgConnections
@@ -75,12 +87,24 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating target pool: %w", err)
 	}
 
-	// Create state manager
-	state, err := checkpoint.New(cfg.Migration.DataDir)
-	if err != nil {
-		sourcePool.Close()
-		targetPool.Close()
-		return nil, fmt.Errorf("creating state manager: %w", err)
+	// Create state manager based on options
+	var state checkpoint.StateBackend
+	if opts.StateFile != "" {
+		// Use file-based state (for Airflow/headless)
+		state, err = checkpoint.NewFileState(opts.StateFile)
+		if err != nil {
+			sourcePool.Close()
+			targetPool.Close()
+			return nil, fmt.Errorf("creating file state manager: %w", err)
+		}
+	} else {
+		// Use SQLite state (default for desktop)
+		state, err = checkpoint.New(cfg.Migration.DataDir)
+		if err != nil {
+			sourcePool.Close()
+			targetPool.Close()
+			return nil, fmt.Errorf("creating state manager: %w", err)
+		}
 	}
 
 	// Create notifier
