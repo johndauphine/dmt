@@ -637,8 +637,12 @@ Available Commands:
 			m.logBuffer += "\n--- CONFIGURATION WIZARD ---\n"
 		}
 		
+		// Display first prompt
+		prompt := m.renderWizardPrompt()
+		m.logBuffer += prompt
 		m.viewport.SetContent(m.logBuffer)
-		return m.handleWizardStep("")
+		m.viewport.GotoBottom()
+		return nil
 
 	case "/run":
 		return m.runMigrationCmd(getConfigFile(parts))
@@ -774,17 +778,8 @@ func (m Model) runHistoryCmd(configFile, runID string) tea.Cmd {
 	}
 }
 
-func (m *Model) handleWizardStep(input string) tea.Cmd {
-	if input != "" {
-		m.logBuffer += styleUserInput.Render("> " + input) + "\n"
-		m.viewport.SetContent(m.logBuffer)
-		m.textInput.Reset()
-	} else {
-		// User accepted default
-		m.logBuffer += styleUserInput.Render("  (default)") + "\n"
-		m.viewport.SetContent(m.logBuffer)
-	}
 
+func (m *Model) processWizardInput(input string) tea.Cmd {
 	// Capture input for current step before moving to next
 	switch m.step {
 	case stepSourceType:
@@ -855,8 +850,10 @@ func (m *Model) handleWizardStep(input string) tea.Cmd {
 		if input != "" { fmt.Sscanf(input, "%d", &m.wizardData.Migration.Workers) }
 		return m.finishWizard()
 	}
+	return nil
+}
 
-	// Display prompt for current (new) step
+func (m *Model) renderWizardPrompt() string {
 	var prompt string
 	switch m.step {
 	case stepSourceType:
@@ -918,7 +915,26 @@ func (m *Model) handleWizardStep(input string) tea.Cmd {
 		if m.wizardData.Migration.Workers != 0 { def = m.wizardData.Migration.Workers }
 		prompt = fmt.Sprintf("Parallel Workers [%d]: ", def)
 	}
+	return prompt
+}
 
+func (m *Model) handleWizardStep(input string) tea.Cmd {
+	if input != "" {
+		m.logBuffer += styleUserInput.Render("> " + input) + "\n"
+		m.viewport.SetContent(m.logBuffer)
+		m.textInput.Reset()
+	} else {
+		// User accepted default
+		m.logBuffer += styleUserInput.Render("  (default)") + "\n"
+		m.viewport.SetContent(m.logBuffer)
+	}
+
+	if cmd := m.processWizardInput(input); cmd != nil {
+		return cmd
+	}
+
+	// Display prompt for current (new) step
+	prompt := m.renderWizardPrompt()
 	m.logBuffer += prompt
 	m.viewport.SetContent(m.logBuffer)
 	m.viewport.GotoBottom()
