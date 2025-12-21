@@ -70,6 +70,24 @@ type Model struct {
 	wizardInput string
 }
 
+type commandInfo struct {
+	Name        string
+	Description string
+}
+
+var availableCommands = []commandInfo{
+	{"/run", "Start migration (default: config.yaml)"},
+	{"/validate", "Validate migration row counts"},
+	{"/status", "Show migration status"},
+	{"/history", "Show migration history"},
+	{"/wizard", "Launch configuration wizard"},
+	{"/logs", "Save session logs to file"},
+	{"/about", "Show application information"},
+	{"/help", "Show available commands"},
+	{"/clear", "Clear screen"},
+	{"/quit", "Exit application"},
+}
+
 // TickMsg is used to update the UI periodically (e.g. for git status)
 type TickMsg time.Time
 
@@ -143,21 +161,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEnter, tea.KeyTab:
 				// Select suggestion
 				if m.suggestionIdx >= 0 && m.suggestionIdx < len(m.suggestions) {
-					completion := m.suggestions[m.suggestionIdx]
+					selection := m.suggestions[m.suggestionIdx]
+					// Extract actual value (first word) if it contains description
+					completion := strings.Fields(selection)[0]
+					
 					input := m.textInput.Value()
-					if idx := strings.LastIndex(input, "@"); idx != -1 {
+					
+					// File completion logic (@)
+					if idx := strings.LastIndex(input, "@"); idx != -1 && (idx == 0 || input[idx-1] == ' ') {
 						newValue := input[:idx+1] + completion
 						
-						// If value hasn't changed (already fully typed), treat Enter as Submit (fallthrough)
-						// But only for Enter, not Tab
 						if newValue == input && msg.Type == tea.KeyEnter {
 							m.suggestions = nil
-							break // Fallthrough to command handling
+							break // Fallthrough
 						}
-
+						m.textInput.SetValue(newValue)
+						m.textInput.SetCursor(len(newValue))
+					
+					} else if strings.HasPrefix(input, "/") {
+						// Command completion logic
+						newValue := completion
+						
+						if newValue == input && msg.Type == tea.KeyEnter {
+							m.suggestions = nil
+							break // Fallthrough
+						}
 						m.textInput.SetValue(newValue)
 						m.textInput.SetCursor(len(newValue))
 					}
+					
 					m.suggestions = nil
 					m.suggestionIdx = 0
 					return m, nil
@@ -290,10 +322,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	m.textInput, tiCmd = m.textInput.Update(msg)
 	
-	// Handle auto-completion suggestions for @file paths
+	// Handle auto-completion suggestions
 	input := m.textInput.Value()
 	if input != m.lastInput {
 		m.lastInput = input
+		m.suggestions = nil // Reset first
+		
+		// File completion (@)
 		if idx := strings.LastIndex(input, "@"); idx != -1 {
 			// Only trigger if @ is start of input or preceded by space
 			if idx == 0 || input[idx-1] == ' ' {
@@ -306,14 +341,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.suggestions = matches
 					m.suggestionIdx = 0
-				} else {
-					m.suggestions = nil
 				}
-			} else {
-				m.suggestions = nil
 			}
-		} else {
-			m.suggestions = nil
+		} 
+		// Command completion (/)
+		if len(m.suggestions) == 0 && strings.HasPrefix(input, "/") {
+			// Find matching commands
+			for _, cmd := range availableCommands {
+				if strings.HasPrefix(cmd.Name, input) {
+					// Format: "/cmd - Description"
+					m.suggestions = append(m.suggestions, fmt.Sprintf("%-10s %s", cmd.Name, cmd.Description))
+				}
+			}
+			if len(m.suggestions) > 0 {
+				m.suggestionIdx = 0
+			}
 		}
 	}
 
@@ -559,6 +601,23 @@ Available Commands:
 			return func() tea.Msg { return OutputMsg(fmt.Sprintf("Error saving logs: %v\n", err)) }
 		}
 		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
+
+	case "/about":
+		about := `
+  MSSQL-PG-MIGRATE v1.10.0
+  
+  A high-performance data migration tool for moving data 
+  from SQL Server to PostgreSQL (and vice-versa).
+  
+  Features:
+  - Parallel transfer with auto-tuning
+  - Resume capability (chunk-level)
+  - Data validation
+  - Configuration wizard
+  
+  Built with Go and Bubble Tea.
+`
+		return func() tea.Msg { return OutputMsg(about) }
 
 	case "/wizard":
 		m.mode = modeWizard
