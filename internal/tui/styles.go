@@ -52,8 +52,6 @@ var (
 
 	// Viewport Styles
 	styleViewport = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorPurple).
 			Foreground(colorWhite).
 			Padding(0, 1)
 
@@ -94,4 +92,12 @@ var (
 
 	styleScrollbarHandle = lipgloss.NewStyle().
 				Foreground(colorPurple)
+
+	// Command output box style - subtle left border to indicate command output
+	styleOutputBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Padding(0, 1).
+			MarginTop(1).
+			MarginBottom(1)
 )

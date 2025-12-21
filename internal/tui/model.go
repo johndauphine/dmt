@@ -113,6 +113,9 @@ type MigrationDoneMsg struct {
 	Output string
 }
 
+// BoxedOutputMsg is output that should be displayed in a bordered box
+type BoxedOutputMsg string
+
 // activeMigrationCancel holds the cancel function for the currently running migration.
 // This is package-level so Ctrl+C can access it to cancel the migration.
 var activeMigrationCancel context.CancelFunc
@@ -417,6 +420,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logBuffer += styledLine + "\n"
 			}
 		}
+		m.viewport.SetContent(m.logBuffer)
+		m.viewport.GotoBottom()
+
+	case BoxedOutputMsg:
+		// Boxed output - wrap the entire output in a bordered box
+		output := strings.TrimSpace(string(msg))
+		if output == "" {
+			break
+		}
+
+		// Calculate box width based on viewport
+		boxWidth := m.viewport.Width - 4
+		if boxWidth < 40 {
+			boxWidth = 80
+		}
+
+		// Apply the box style to the output
+		boxedOutput := styleOutputBox.Width(boxWidth).Render(output)
+		m.logBuffer += boxedOutput + "\n"
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
@@ -756,28 +778,26 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 		return nil
 
 	case "/help":
-		help := `
-Available Commands:
+		help := `Available Commands:
   /wizard               Launch the configuration wizard
   /run [config_file]    Start migration (default: config.yaml)
   /run --profile NAME   Start migration using a saved profile
   /resume [config_file] Resume an interrupted migration
-  /resume --profile NAME Resume an interrupted migration using a saved profile
+  /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
   /status               Show migration status
   /history              Show migration history
-  /profile save NAME [config_file]   Save an encrypted profile
-  /profile list                      List saved profiles
-  /profile delete NAME               Delete a saved profile
-  /profile export NAME [output_file] Export a profile to a config file
-  /logs                 Save session logs to a file for analysis
+  /profile save NAME    Save an encrypted profile
+  /profile list         List saved profiles
+  /profile delete NAME  Delete a saved profile
+  /profile export NAME  Export a profile to a config file
+  /logs                 Save session logs to a file
   /clear                Clear screen
   /quit                 Exit application
-  !<command>            Run a shell command (e.g., !ls, !cat config.yaml)
+  !<command>            Run a shell command
 
-  Note: You can use @/path/to/file for config files.
-`
-		return func() tea.Msg { return OutputMsg(help) }
+Note: You can use @/path/to/file for config files.`
+		return func() tea.Msg { return BoxedOutputMsg(help) }
 
 	case "/logs":
 		logFile := "session.log"
@@ -788,21 +808,19 @@ Available Commands:
 		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
 
 	case "/about":
-		about := `
-  MSSQL-PG-MIGRATE v1.10.0
-  
-  A high-performance data migration tool for moving data 
-  from SQL Server to PostgreSQL (and vice-versa).
-  
-  Features:
-  - Parallel transfer with auto-tuning
-  - Resume capability (chunk-level)
-  - Data validation
-  - Configuration wizard
-  
-  Built with Go and Bubble Tea.
-`
-		return func() tea.Msg { return OutputMsg(about) }
+		about := `MSSQL-PG-MIGRATE v1.10.0
+
+A high-performance data migration tool for moving data
+from SQL Server to PostgreSQL (and vice-versa).
+
+Features:
+- Parallel transfer with auto-tuning
+- Resume capability (chunk-level)
+- Data validation
+- Configuration wizard
+
+Built with Go and Bubble Tea.`
+		return func() tea.Msg { return BoxedOutputMsg(about) }
 
 	case "/wizard":
 		m.mode = modeWizard
@@ -984,7 +1002,7 @@ func (m Model) runStatusCmd(configFile, profileName string) tea.Cmd {
 		if err != nil {
 			return OutputMsg(fmt.Sprintf("Error showing status: %v\n", err))
 		}
-		return OutputMsg(output)
+		return BoxedOutputMsg(output)
 	}
 }
 
@@ -1012,7 +1030,7 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 				return OutputMsg(fmt.Sprintf("Error showing history: %v\n", err))
 			}
 		}
-		return OutputMsg(output)
+		return BoxedOutputMsg(output)
 	}
 }
 
@@ -1021,9 +1039,9 @@ func (m Model) runShellCmd(shellCmd string) tea.Cmd {
 		cmd := exec.Command("sh", "-c", shellCmd)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return OutputMsg(fmt.Sprintf("%s\nError: %v\n", string(output), err))
+			return BoxedOutputMsg(fmt.Sprintf("%s\nError: %v", string(output), err))
 		}
-		return OutputMsg(string(output))
+		return BoxedOutputMsg(string(output))
 	}
 }
 
@@ -1234,7 +1252,7 @@ func (m Model) profileListCmd() tea.Cmd {
 			return OutputMsg(fmt.Sprintf("Error listing profiles: %v\n", err))
 		}
 		if len(profiles) == 0 {
-			return OutputMsg("No profiles found\n")
+			return BoxedOutputMsg("No profiles found")
 		}
 
 		var b strings.Builder
@@ -1247,7 +1265,7 @@ func (m Model) profileListCmd() tea.Cmd {
 				p.CreatedAt.Format("2006-01-02 15:04:05"),
 				p.UpdatedAt.Format("2006-01-02 15:04:05"))
 		}
-		return OutputMsg(b.String())
+		return BoxedOutputMsg(b.String())
 	}
 }
 
