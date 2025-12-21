@@ -448,6 +448,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logBuffer += styledLine + "\n"
 			}
 		}
+
+		// If wizard is still active, merge wizard buffer into main buffer
+		if m.mode == modeWizard && m.wizardBuffer != "" {
+			m.logBuffer += "\n" + m.wizardBuffer
+			m.wizardBuffer = ""
+		}
+
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
 
@@ -699,16 +706,18 @@ func (m Model) renderSplitView(suggestionsView string) string {
 		migrationContent += styleSystemOutput.Render("  "+m.progressLine) + "\n"
 	}
 
-	// Style for the split panes
+	// Style for the split panes (both with consistent padding)
 	migrationStyle := lipgloss.NewStyle().
 		Width(m.width - 2).
 		Height(migrationHeight).
+		PaddingLeft(1).
 		Border(lipgloss.RoundedBorder(), false, false, true, false). // Bottom border only
 		BorderForeground(colorGray)
 
 	wizardStyle := lipgloss.NewStyle().
 		Width(m.width - 2).
-		Height(wizardHeight)
+		Height(wizardHeight).
+		PaddingLeft(1)
 
 	// Truncate content to fit heights
 	migrationLines := strings.Split(migrationContent, "\n")
@@ -806,18 +815,6 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 		return m.runShellCmd(shellCmd)
 	}
 
-	// Helper to extract config file from args, supporting @/path/to/file syntax
-	getConfigFile := func(args []string) string {
-		if len(args) > 1 {
-			path := args[1]
-			if strings.HasPrefix(path, "@") {
-				return path[1:]
-			}
-			return path
-		}
-		return "config.yaml"
-	}
-
 	switch cmd {
 	case "/quit", "/exit":
 		return tea.Quit
@@ -878,19 +875,37 @@ Built with Go and Bubble Tea.`
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
 
-		// Determine config file to edit/create
-		m.wizardFile = getConfigFile(parts)
+		// Parse wizard arguments - support --profile or config file
+		configFile, profileName := parseConfigArgs(parts)
+		m.wizardFile = configFile
 
 		// Choose which buffer to use based on whether migration is running
 		var headerMsg string
-		if _, err := os.Stat(m.wizardFile); err == nil {
-			if cfg, err := config.LoadWithOptions(m.wizardFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
+		var loaded bool
+
+		// Try to load from profile first if specified
+		if profileName != "" {
+			if cfg, err := loadProfileConfig(profileName); err == nil {
 				m.wizardData = *cfg
-				headerMsg = fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
-			} else {
-				headerMsg = fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
+				m.wizardFile = profileName + ".yaml" // Will save to this file
+				headerMsg = fmt.Sprintf("\n--- EDITING PROFILE: %s ---\n", profileName)
+				loaded = true
 			}
-		} else {
+		}
+
+		// If no profile or profile load failed, try config file
+		if !loaded {
+			if _, err := os.Stat(m.wizardFile); err == nil {
+				if cfg, err := config.LoadWithOptions(m.wizardFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
+					m.wizardData = *cfg
+					headerMsg = fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
+					loaded = true
+				}
+			}
+		}
+
+		// If still not loaded, start fresh wizard
+		if !loaded {
 			headerMsg = fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
 		}
 
