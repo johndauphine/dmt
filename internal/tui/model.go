@@ -68,6 +68,7 @@ type Model struct {
 	step        wizardStep
 	wizardData  config.Config
 	wizardInput string
+	wizardFile  string
 }
 
 type commandInfo struct {
@@ -625,16 +626,19 @@ Available Commands:
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
 		
+		// Determine config file to edit/create
+		m.wizardFile = getConfigFile(parts)
+		
 		// Load existing config if available to use as defaults
-		if _, err := os.Stat("config.yaml"); err == nil {
-			if cfg, err := config.Load("config.yaml"); err == nil {
+		if _, err := os.Stat(m.wizardFile); err == nil {
+			if cfg, err := config.Load(m.wizardFile); err == nil {
 				m.wizardData = *cfg
-				m.logBuffer += "\n--- EDITING EXISTING CONFIGURATION ---\n"
+				m.logBuffer += fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
 			} else {
-				m.logBuffer += "\n--- CONFIGURATION WIZARD ---\n"
+				m.logBuffer += fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
 			}
 		} else {
-			m.logBuffer += "\n--- CONFIGURATION WIZARD ---\n"
+			m.logBuffer += fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
 		}
 		
 		// Display first prompt
@@ -959,12 +963,17 @@ func (m *Model) finishWizard() tea.Cmd {
 			return WizardFinishedMsg{Err: fmt.Errorf("generating config: %w", err)}
 		}
 
-		// Write to file
-		if err := os.WriteFile("config.yaml", data, 0600); err != nil {
-			return WizardFinishedMsg{Err: fmt.Errorf("saving config.yaml: %w", err)}
+		filename := m.wizardFile
+		if filename == "" {
+			filename = "config.yaml"
 		}
 
-		return WizardFinishedMsg{Message: "Configuration saved to config.yaml!\nYou can now run the migration with /run."}
+		// Write to file
+		if err := os.WriteFile(filename, data, 0600); err != nil {
+			return WizardFinishedMsg{Err: fmt.Errorf("saving %s: %w", filename, err)}
+		}
+
+		return WizardFinishedMsg{Message: fmt.Sprintf("Configuration saved to %s!\nYou can now run the migration with /run @%s", filename, filename)}
 	}
 }
 

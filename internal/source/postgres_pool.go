@@ -216,18 +216,18 @@ func (p *PostgresPool) GetPartitionBoundaries(ctx context.Context, t *Table, num
 
 	query := fmt.Sprintf(`
 		WITH numbered AS (
-			SELECT "%s",
-				   NTILE(%d) OVER (ORDER BY "%s") as partition_id
-			FROM "%s"."%s"
+			SELECT %s,
+				   NTILE(%d) OVER (ORDER BY %s) as partition_id
+			FROM %s
 		)
 		SELECT partition_id,
-			   MIN("%s") as min_pk,
-			   MAX("%s") as max_pk,
+			   MIN(%s) as min_pk,
+			   MAX(%s) as max_pk,
 			   COUNT(*) as row_count
 		FROM numbered
 		GROUP BY partition_id
 		ORDER BY partition_id
-	`, quotePGIdent(pkCol), numPartitions, quotePGIdent(pkCol), quotePGIdent(t.Schema), quotePGIdent(t.Name), quotePGIdent(pkCol), quotePGIdent(pkCol))
+	`, quotePGIdent(pkCol), numPartitions, quotePGIdent(pkCol), qualifyPGTable(t.Schema, t.Name), quotePGIdent(pkCol), quotePGIdent(pkCol))
 
 	rows, err := p.db.QueryContext(ctx, query)
 	if err != nil {
