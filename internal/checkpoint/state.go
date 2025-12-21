@@ -83,6 +83,13 @@ func New(dataDir string) (*State, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
+	// Configure connection pool for multi-process access:
+	// - MaxIdleConns(0): Close connections after use to ensure fresh reads across processes
+	// - MaxOpenConns(1): Single connection at a time to avoid lock contention
+	// This ensures each query sees the latest committed data from other processes
+	db.SetMaxIdleConns(0)
+	db.SetMaxOpenConns(1)
+
 	s := &State{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
