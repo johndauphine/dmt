@@ -51,6 +51,7 @@ const (
 // Model is the main TUI model
 type Model struct {
 	viewport      viewport.Model
+	wizardViewport viewport.Model // Secondary viewport for wizard during migration
 	textInput     textinput.Model
 	ready         bool
 	gitInfo       GitInfo
@@ -61,6 +62,7 @@ type Model struct {
 	history       []string
 	historyIdx    int
 	logBuffer     string   // Persistent buffer for logs
+	wizardBuffer  string   // Buffer for wizard output (used during split view)
 	lineBuffer    string   // Buffer for incoming partial lines
 	progressLine  string   // Current progress bar line (updated in-place)
 	suggestions   []string // Auto-completion suggestions
@@ -286,6 +288,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			// If in wizard mode, cancel wizard first
+			if m.mode == modeWizard {
+				m.mode = modeNormal
+				m.wizardBuffer = ""
+				msg := styleSystemOutput.Render("Wizard cancelled") + "\n"
+				m.logBuffer += msg
+				m.viewport.SetContent(m.logBuffer)
+				m.viewport.GotoBottom()
+				return m, nil
+			}
 			// If a migration is running, cancel it instead of quitting
 			if m.migrationRunning && activeMigrationCancel != nil {
 				activeMigrationCancel()
@@ -296,6 +308,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case tea.KeyEsc:
+			// Esc also cancels wizard
+			if m.mode == modeWizard {
+				m.mode = modeNormal
+				m.wizardBuffer = ""
+				msg := styleSystemOutput.Render("Wizard cancelled") + "\n"
+				m.logBuffer += msg
+				m.viewport.SetContent(m.logBuffer)
+				m.viewport.GotoBottom()
+				return m, nil
+			}
 			return m, tea.Quit
 		case tea.KeyEnter:
 			value := m.textInput.Value()
@@ -346,6 +368,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.viewport = viewport.New(msg.Width-2, msg.Height-verticalMarginHeight) // -2 for scrollbar
 			m.viewport.YPosition = headerHeight
+			// Initialize wizard viewport (same size, will be resized in split mode)
+			m.wizardViewport = viewport.New(msg.Width-2, msg.Height-verticalMarginHeight)
 			// Initialize log buffer with welcome message
 			m.logBuffer = m.welcomeMessage()
 			m.viewport.SetContent(m.logBuffer)
@@ -353,6 +377,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.viewport.Width = msg.Width - 2 // -2 for scrollbar
 			m.viewport.Height = msg.Height - verticalMarginHeight
+			m.wizardViewport.Width = msg.Width - 2
+			m.wizardViewport.Height = msg.Height - verticalMarginHeight
 		}
 		m.width = msg.Width
 		m.height = msg.Height
@@ -376,6 +402,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text = styleSuccess.Render("✔ " + text)
 		}
 
+		// Clear wizard buffer and add result to main log
+		m.wizardBuffer = ""
 		m.logBuffer += "\n" + text + "\n"
 		m.viewport.SetContent(m.logBuffer)
 		m.viewport.GotoBottom()
@@ -615,46 +643,6 @@ func (m Model) View() string {
 		return "\n  Initializing..."
 	}
 
-	// Calculate scrollbar
-	// Viewport height is m.viewport.Height
-	// Total content height is len(strings.Split(m.logBuffer, "\n")) - but wait, wordwrap changes line count.
-	// m.viewport.TotalLineCount() is accurate.
-
-	totalLines := m.viewport.TotalLineCount()
-	visibleLines := m.viewport.Height
-	scrollPercent := 0.0
-	if totalLines > visibleLines {
-		scrollPercent = float64(m.viewport.YOffset) / float64(totalLines-visibleLines)
-	}
-
-	// Render Scrollbar
-	bar := make([]string, visibleLines)
-	handleHeight := int(float64(visibleLines) * (float64(visibleLines) / float64(totalLines)))
-	if handleHeight < 1 {
-		handleHeight = 1
-	}
-	handleTop := int(scrollPercent * float64(visibleLines-handleHeight))
-
-	for i := 0; i < visibleLines; i++ {
-		if totalLines <= visibleLines {
-			bar[i] = " " // No scrollbar needed
-		} else if i >= handleTop && i < handleTop+handleHeight {
-			bar[i] = styleScrollbarHandle.Render("┃")
-		} else {
-			bar[i] = styleScrollbar.Render("│")
-		}
-	}
-
-	// Join Viewport and Scrollbar
-	// We need to ensure viewport width accounts for scrollbar
-	// In WindowSizeMsg, we set viewport.Width = msg.Width.
-	// If we add a scrollbar, we should reduce viewport width by 1 or 2.
-	// But changing it here is late.
-	// Let's assume we can overlay it or just append it?
-	// Appending it requires line-by-line join.
-
-	_ = bar // Scrollbar rendering prepared but not yet integrated
-
 	suggestionsView := ""
 	if len(m.suggestions) > 0 {
 		var lines []string
@@ -673,9 +661,71 @@ func (m Model) View() string {
 		suggestionsView = strings.Join(lines, "\n") + "\n"
 	}
 
+	// Check if we need split view (migration running + wizard active)
+	if m.migrationRunning && m.mode == modeWizard {
+		return m.renderSplitView(suggestionsView)
+	}
+
+	// Normal single viewport view
 	viewport := styleViewport.Width(m.viewport.Width + 2).Render(m.viewport.View())
 	return fmt.Sprintf("%s\n%s\n%s%s",
 		viewport,
+		styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
+		suggestionsView,
+		m.statusBarView(),
+	)
+}
+
+// renderSplitView renders a split screen with migration on top, wizard on bottom
+func (m Model) renderSplitView(suggestionsView string) string {
+	// Calculate heights for split view
+	// Total available height = viewport height
+	// Split: 60% for migration, 40% for wizard
+	totalHeight := m.viewport.Height
+	migrationHeight := (totalHeight * 60) / 100
+	wizardHeight := totalHeight - migrationHeight - 1 // -1 for separator
+
+	if migrationHeight < 5 {
+		migrationHeight = 5
+	}
+	if wizardHeight < 5 {
+		wizardHeight = 5
+	}
+
+	// Create a temporary copy of viewport heights for rendering
+	// Render migration viewport (top)
+	migrationContent := m.logBuffer
+	if m.progressLine != "" {
+		migrationContent += styleSystemOutput.Render("  "+m.progressLine) + "\n"
+	}
+
+	// Style for the split panes
+	migrationStyle := lipgloss.NewStyle().
+		Width(m.width - 2).
+		Height(migrationHeight).
+		Border(lipgloss.RoundedBorder(), false, false, true, false). // Bottom border only
+		BorderForeground(colorGray)
+
+	wizardStyle := lipgloss.NewStyle().
+		Width(m.width - 2).
+		Height(wizardHeight)
+
+	// Truncate content to fit heights
+	migrationLines := strings.Split(migrationContent, "\n")
+	if len(migrationLines) > migrationHeight {
+		migrationLines = migrationLines[len(migrationLines)-migrationHeight:]
+	}
+	migrationView := migrationStyle.Render(strings.Join(migrationLines, "\n"))
+
+	wizardLines := strings.Split(m.wizardBuffer, "\n")
+	if len(wizardLines) > wizardHeight {
+		wizardLines = wizardLines[len(wizardLines)-wizardHeight:]
+	}
+	wizardView := wizardStyle.Render(strings.Join(wizardLines, "\n"))
+
+	return fmt.Sprintf("%s\n%s\n%s\n%s%s",
+		migrationView,
+		wizardView,
 		styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
 		suggestionsView,
 		m.statusBarView(),
@@ -823,13 +873,6 @@ Built with Go and Bubble Tea.`
 		return func() tea.Msg { return BoxedOutputMsg(about) }
 
 	case "/wizard":
-		// Don't allow wizard while migration is running
-		if m.migrationRunning {
-			return func() tea.Msg {
-				return OutputMsg("Cannot start wizard while a migration is running. Wait for it to complete or press Ctrl+C to cancel.\n")
-			}
-		}
-
 		m.mode = modeWizard
 		m.step = stepSourceType
 		m.textInput.Reset()
@@ -838,23 +881,33 @@ Built with Go and Bubble Tea.`
 		// Determine config file to edit/create
 		m.wizardFile = getConfigFile(parts)
 
-		// Load existing config if available to use as defaults
+		// Choose which buffer to use based on whether migration is running
+		var headerMsg string
 		if _, err := os.Stat(m.wizardFile); err == nil {
 			if cfg, err := config.LoadWithOptions(m.wizardFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
 				m.wizardData = *cfg
-				m.logBuffer += fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
+				headerMsg = fmt.Sprintf("\n--- EDITING CONFIGURATION: %s ---\n", m.wizardFile)
 			} else {
-				m.logBuffer += fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
+				headerMsg = fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
 			}
 		} else {
-			m.logBuffer += fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
+			headerMsg = fmt.Sprintf("\n--- CONFIGURATION WIZARD: %s ---\n", m.wizardFile)
 		}
 
 		// Display first prompt
 		prompt := m.renderWizardPrompt()
-		m.logBuffer += prompt
-		m.viewport.SetContent(m.logBuffer)
-		m.viewport.GotoBottom()
+
+		if m.migrationRunning {
+			// Use separate wizard buffer for split view
+			m.wizardBuffer = headerMsg + prompt
+			m.wizardViewport.SetContent(m.wizardBuffer)
+			m.wizardViewport.GotoBottom()
+		} else {
+			// Use main buffer when no migration running
+			m.logBuffer += headerMsg + prompt
+			m.viewport.SetContent(m.logBuffer)
+			m.viewport.GotoBottom()
+		}
 		return nil
 
 	case "/run":
@@ -1502,14 +1555,25 @@ func (m *Model) renderWizardPrompt() string {
 }
 
 func (m *Model) handleWizardStep(input string) tea.Cmd {
+	// Helper to append to the correct buffer
+	appendToBuffer := func(text string) {
+		if m.migrationRunning {
+			m.wizardBuffer += text
+			m.wizardViewport.SetContent(m.wizardBuffer)
+			m.wizardViewport.GotoBottom()
+		} else {
+			m.logBuffer += text
+			m.viewport.SetContent(m.logBuffer)
+			m.viewport.GotoBottom()
+		}
+	}
+
 	if input != "" {
-		m.logBuffer += styleUserInput.Render("> "+input) + "\n"
-		m.viewport.SetContent(m.logBuffer)
+		appendToBuffer(styleUserInput.Render("> "+input) + "\n")
 		m.textInput.Reset()
 	} else {
 		// User accepted default
-		m.logBuffer += styleUserInput.Render("  (default)") + "\n"
-		m.viewport.SetContent(m.logBuffer)
+		appendToBuffer(styleUserInput.Render("  (default)") + "\n")
 	}
 
 	if cmd := m.processWizardInput(input); cmd != nil {
@@ -1518,9 +1582,7 @@ func (m *Model) handleWizardStep(input string) tea.Cmd {
 
 	// Display prompt for current (new) step
 	prompt := m.renderWizardPrompt()
-	m.logBuffer += prompt
-	m.viewport.SetContent(m.logBuffer)
-	m.viewport.GotoBottom()
+	appendToBuffer(prompt)
 	return nil
 }
 
