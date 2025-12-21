@@ -52,6 +52,8 @@ var (
 
 	// Viewport Styles
 	styleViewport = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
 			Foreground(colorWhite).
 			Padding(0, 1)
 
