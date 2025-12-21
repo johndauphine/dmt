@@ -70,8 +70,9 @@ type Model struct {
 	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
 
 	// Migration state
-	migrationRunning bool               // True while a migration is in progress
-	migrationCancel  context.CancelFunc // Cancel function for running migration
+	migrations       map[string]*MigrationInstance // Active migrations by ID
+	migrationOrder   []string                      // Order for display (FIFO)
+	focusedMigration string                        // Currently focused migration ID
 
 	// Wizard state
 	mode        sessionMode
@@ -118,9 +119,62 @@ type MigrationDoneMsg struct {
 // BoxedOutputMsg is output that should be displayed in a bordered box
 type BoxedOutputMsg string
 
-// activeMigrationCancel holds the cancel function for the currently running migration.
-// This is package-level so Ctrl+C can access it to cancel the migration.
-var activeMigrationCancel context.CancelFunc
+// MigrationInstance tracks a single running migration
+type MigrationInstance struct {
+	ID           string              // Unique ID for this migration
+	ConfigFile   string              // Config file path
+	ProfileName  string              // Profile name (if used)
+	Cancel       context.CancelFunc  // Cancel function for this migration
+	Buffer       string              // Output buffer for this migration
+	LineBuffer   string              // Buffer for incoming partial lines
+	ProgressLine string              // Current progress bar line
+	Status       string              // "running", "completed", "failed", "cancelled"
+	StartedAt    time.Time
+	Viewport     viewport.Model      // Scrollable viewport for this migration
+	UserScrolled bool                // True if user manually scrolled (disables auto-scroll)
+}
+
+// MigrationOutputMsg routes output to a specific migration
+type MigrationOutputMsg struct {
+	ID     string
+	Output string
+}
+
+// MigrationDoneWithIDMsg signals that a specific migration has completed
+type MigrationDoneWithIDMsg struct {
+	ID     string
+	Output string
+	Status string // "completed", "failed", "cancelled"
+}
+
+// migrationCancels holds cancel functions for each running migration
+var migrationCancels = make(map[string]context.CancelFunc)
+
+// hasRunningMigration returns true if any migration is currently running
+func (m *Model) hasRunningMigration() bool {
+	for _, mi := range m.migrations {
+		if mi.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// runningMigrationCount returns the number of currently running migrations
+func (m *Model) runningMigrationCount() int {
+	count := 0
+	for _, mi := range m.migrations {
+		if mi.Status == "running" {
+			count++
+		}
+	}
+	return count
+}
+
+// generateMigrationID creates a short unique ID for a migration
+func generateMigrationID() string {
+	return fmt.Sprintf("m%d", time.Now().UnixNano()%100000)
+}
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
@@ -210,11 +264,13 @@ func InitialModel() Model {
 	cwd, _ := os.Getwd()
 
 	m := Model{
-		textInput:  ti,
-		gitInfo:    GetGitInfo(),
-		cwd:        cwd,
-		history:    []string{},
-		historyIdx: -1,
+		textInput:      ti,
+		gitInfo:        GetGitInfo(),
+		cwd:            cwd,
+		history:        []string{},
+		historyIdx:     -1,
+		migrations:     make(map[string]*MigrationInstance),
+		migrationOrder: []string{},
 	}
 
 	return m
@@ -298,15 +354,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.GotoBottom()
 				return m, nil
 			}
-			// If a migration is running, cancel it instead of quitting
-			if m.migrationRunning && activeMigrationCancel != nil {
-				activeMigrationCancel()
-				m.logBuffer += styleSystemOutput.Render("Cancelling migration... please wait") + "\n"
-				m.viewport.SetContent(m.logBuffer)
-				m.viewport.GotoBottom()
-				return m, nil
+			// If a migration is focused and running, cancel it
+			if m.focusedMigration != "" {
+				if cancel, ok := migrationCancels[m.focusedMigration]; ok {
+					cancel()
+					if mi, ok := m.migrations[m.focusedMigration]; ok {
+						mi.Buffer += styleSystemOutput.Render("Cancelling migration... please wait") + "\n"
+					}
+					return m, nil
+				}
 			}
-			return m, tea.Quit
+			// No active migrations, quit
+			if !m.hasRunningMigration() {
+				return m, tea.Quit
+			}
+			return m, nil
 		case tea.KeyEsc:
 			// Esc also cancels wizard
 			if m.mode == modeWizard {
@@ -333,20 +395,117 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.history = append(m.history, value)
 				m.historyIdx = len(m.history)
 
-				// Check if this is a migration command and set the running flag
+				// Check if this is a migration command and create migration instance
 				cmd := strings.Fields(value)[0]
 				if cmd == "/run" || cmd == "/resume" {
-					m.migrationRunning = true
+					parts := strings.Fields(value)
+					configFile, profileName := parseConfigArgs(parts)
+
+					// Generate unique ID and create migration instance
+					migrationID := generateMigrationID()
+					label := configFile
+					if profileName != "" {
+						label = profileName
+					}
+
+					// Calculate viewport size (full screen for tab interface)
+					reservedHeight := 10 // tab bar, separator, input, status bar, borders, padding
+					vpHeight := m.height - reservedHeight
+					if vpHeight < 5 {
+						vpHeight = 5
+					}
+					vp := viewport.New(m.width-4, vpHeight)
+
+					m.migrations[migrationID] = &MigrationInstance{
+						ID:          migrationID,
+						ConfigFile:  configFile,
+						ProfileName: profileName,
+						Status:      "running",
+						StartedAt:   time.Now(),
+						Viewport:    vp,
+					}
+					m.migrationOrder = append(m.migrationOrder, migrationID)
+					m.focusedMigration = migrationID
+
+					// Return the appropriate command with migration ID
+					if cmd == "/run" {
+						return m, m.runMigrationCmdWithID(configFile, profileName, migrationID, label)
+					}
+					return m, m.runResumeCmdWithID(configFile, profileName, migrationID, label)
 				}
 
 				return m, m.handleCommand(value)
 			}
+		case tea.KeyTab: // Command completion
+			if m.mode == modeNormal {
+				m.autocompleteCommand()
+			}
+		case tea.KeyPgUp:
+			// Scroll focused migration viewport up
+			if m.focusedMigration != "" {
+				if mi, ok := m.migrations[m.focusedMigration]; ok {
+					mi.Viewport.LineUp(mi.Viewport.Height / 2)
+					mi.UserScrolled = true // Disable auto-scroll
+					return m, nil
+				}
+			}
+		case tea.KeyPgDown:
+			// Scroll focused migration viewport down
+			if m.focusedMigration != "" {
+				if mi, ok := m.migrations[m.focusedMigration]; ok {
+					mi.Viewport.LineDown(mi.Viewport.Height / 2)
+					// Check if at bottom, re-enable auto-scroll
+					if mi.Viewport.AtBottom() {
+						mi.UserScrolled = false
+					}
+					return m, nil
+				}
+			}
+		case tea.KeyHome:
+			// Scroll to top of focused migration viewport
+			if m.focusedMigration != "" {
+				if mi, ok := m.migrations[m.focusedMigration]; ok {
+					mi.Viewport.GotoTop()
+					mi.UserScrolled = true // Disable auto-scroll
+					return m, nil
+				}
+			}
+		case tea.KeyEnd:
+			// Scroll to bottom of focused migration viewport and re-enable auto-scroll
+			if m.focusedMigration != "" {
+				if mi, ok := m.migrations[m.focusedMigration]; ok {
+					mi.Viewport.GotoBottom()
+					mi.UserScrolled = false // Re-enable auto-scroll
+					return m, nil
+				}
+			}
 		case tea.KeyUp:
+			// If migrations are showing and input is empty, scroll viewport
+			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
+				if mi, ok := m.migrations[m.focusedMigration]; ok {
+					mi.Viewport.LineUp(1)
+					mi.UserScrolled = true
+					return m, nil
+				}
+			}
+			// Otherwise fall through to history navigation
 			if m.historyIdx > 0 {
 				m.historyIdx--
 				m.textInput.SetValue(m.history[m.historyIdx])
 			}
+			return m, nil
 		case tea.KeyDown:
+			// If migrations are showing and input is empty, scroll viewport
+			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
+				if mi, ok := m.migrations[m.focusedMigration]; ok {
+					mi.Viewport.LineDown(1)
+					if mi.Viewport.AtBottom() {
+						mi.UserScrolled = false
+					}
+					return m, nil
+				}
+			}
+			// Otherwise fall through to history navigation
 			if m.historyIdx < len(m.history)-1 {
 				m.historyIdx++
 				m.textInput.SetValue(m.history[m.historyIdx])
@@ -354,9 +513,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyIdx = len(m.history)
 				m.textInput.Reset()
 			}
-		case tea.KeyTab: // Command completion
-			if m.mode == modeNormal {
-				m.autocompleteCommand()
+			return m, nil
+		}
+
+		// Alt+number keys to switch migration focus
+		if len(m.migrationOrder) > 0 && msg.Alt {
+			if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+				num := int(msg.Runes[0] - '1') // '1' -> 0, '2' -> 1, etc.
+				if num >= 0 && num < len(m.migrationOrder) {
+					m.focusedMigration = m.migrationOrder[num]
+					return m, nil
+				}
+			}
+		}
+
+		// Ctrl+Left/Right to cycle through migrations
+		if len(m.migrationOrder) > 1 {
+			if msg.Type == tea.KeyLeft && msg.Alt {
+				// Previous tab
+				for i, id := range m.migrationOrder {
+					if id == m.focusedMigration {
+						if i > 0 {
+							m.focusedMigration = m.migrationOrder[i-1]
+						} else {
+							m.focusedMigration = m.migrationOrder[len(m.migrationOrder)-1]
+						}
+						return m, nil
+					}
+				}
+			} else if msg.Type == tea.KeyRight && msg.Alt {
+				// Next tab
+				for i, id := range m.migrationOrder {
+					if id == m.focusedMigration {
+						if i < len(m.migrationOrder)-1 {
+							m.focusedMigration = m.migrationOrder[i+1]
+						} else {
+							m.focusedMigration = m.migrationOrder[0]
+						}
+						return m, nil
+					}
+				}
 			}
 		}
 
@@ -384,6 +580,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.textInput.Width = msg.Width - 4
 
+		// Resize migration viewports when window changes (full screen for tab interface)
+		if len(m.migrationOrder) > 0 {
+			reservedHeight := 10 // tab bar, separator, input, status bar, borders, padding
+			viewportHeight := msg.Height - reservedHeight
+			if viewportHeight < 5 {
+				viewportHeight = 5
+			}
+			for _, id := range m.migrationOrder {
+				if mi, ok := m.migrations[id]; ok {
+					mi.Viewport.Width = msg.Width - 4
+					mi.Viewport.Height = viewportHeight
+				}
+			}
+		}
+
 	case WizardFinishedMsg:
 		m.mode = modeNormal
 
@@ -409,9 +620,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 
 	case MigrationDoneMsg:
-		// Migration completed - clear the running state
-		m.migrationRunning = false
-		activeMigrationCancel = nil
+		// Legacy handler for old-style single migration
+		// (kept for backward compatibility with non-multi-migration code paths)
 		m.progressLine = "" // Clear any progress bar
 		// Process the output the same way as OutputMsg
 		m.lineBuffer += msg.Output
@@ -549,6 +759,115 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(content)
 		m.viewport.GotoBottom()
 
+	case MigrationOutputMsg:
+		// Route output to the specific migration's buffer
+		mi, ok := m.migrations[msg.ID]
+		if !ok {
+			break
+		}
+
+		mi.LineBuffer += msg.Output
+
+		// Calculate wrap width
+		wrapWidth := m.viewport.Width - 6
+		if wrapWidth < 20 {
+			wrapWidth = 80
+		}
+
+		// Process complete lines
+		for {
+			newlineIdx := strings.Index(mi.LineBuffer, "\n")
+			if newlineIdx == -1 {
+				break
+			}
+
+			mi.ProgressLine = ""
+			line := mi.LineBuffer[:newlineIdx]
+			mi.LineBuffer = mi.LineBuffer[newlineIdx+1:]
+
+			if lastCR := strings.LastIndex(line, "\r"); lastCR != -1 {
+				line = line[lastCR+1:]
+			}
+
+			wrappedLines := strings.Split(wrapLine(line, wrapWidth), "\n")
+			for _, wrappedLine := range wrappedLines {
+				lowerText := strings.ToLower(line)
+				prefix := "  "
+
+				isError := strings.Contains(lowerText, "error") ||
+					(strings.Contains(lowerText, "fail") && !strings.Contains(lowerText, "0 failed"))
+
+				if isError {
+					wrappedLine = styleError.Render(wrappedLine)
+					prefix = styleError.Render("✖ ")
+				} else if strings.Contains(lowerText, "success") || strings.Contains(lowerText, "passed") || strings.Contains(lowerText, "complete") {
+					wrappedLine = styleSuccess.Render(wrappedLine)
+					prefix = styleSuccess.Render("✔ ")
+				} else {
+					wrappedLine = styleSystemOutput.Render(wrappedLine)
+				}
+
+				mi.Buffer += prefix + wrappedLine + "\n"
+			}
+		}
+
+		// Handle progress bar updates
+		if strings.Contains(mi.LineBuffer, "\r") {
+			if lastCR := strings.LastIndex(mi.LineBuffer, "\r"); lastCR != -1 {
+				mi.ProgressLine = strings.TrimSpace(mi.LineBuffer[lastCR+1:])
+				mi.LineBuffer = mi.LineBuffer[:lastCR+1]
+			}
+		}
+
+		// Update viewport content
+		content := mi.Buffer
+		if mi.ProgressLine != "" {
+			content += styleSystemOutput.Render("  "+mi.ProgressLine) + "\n"
+		}
+		mi.Viewport.SetContent(content)
+		// Only auto-scroll if user hasn't manually scrolled up
+		if !mi.UserScrolled {
+			mi.Viewport.GotoBottom()
+		}
+
+	case MigrationDoneWithIDMsg:
+		// Update the specific migration's status
+		mi, ok := m.migrations[msg.ID]
+		if ok {
+			mi.Status = msg.Status
+			mi.ProgressLine = ""
+			if msg.Output != "" {
+				// Add final message to buffer
+				prefix := styleSuccess.Render("✔ ")
+				if msg.Status == "failed" || msg.Status == "cancelled" {
+					prefix = styleError.Render("✖ ")
+				}
+				mi.Buffer += prefix + msg.Output
+			}
+			// Update viewport
+			mi.Viewport.SetContent(mi.Buffer)
+			// Only auto-scroll if user hasn't manually scrolled up
+			if !mi.UserScrolled {
+				mi.Viewport.GotoBottom()
+			}
+		}
+
+		// Remove cancel function
+		delete(migrationCancels, msg.ID)
+
+		// Clean up completed migrations from the order list if all are done
+		allDone := true
+		for _, id := range m.migrationOrder {
+			if mi, ok := m.migrations[id]; ok && mi.Status == "running" {
+				allDone = false
+				break
+			}
+		}
+		if allDone && len(m.migrationOrder) > 0 {
+			// Keep the migrations visible but clear the order after a moment
+			// For now, just leave them visible
+		}
+
 	case TickMsg:
 		m.gitInfo = GetGitInfo()
 		return m, tickCmd()
@@ -668,9 +987,13 @@ func (m Model) View() string {
 		suggestionsView = strings.Join(lines, "\n") + "\n"
 	}
 
-	// Check if we need split view (migration running + wizard active)
-	if m.migrationRunning && m.mode == modeWizard {
-		return m.renderSplitView(suggestionsView)
+	// Check if we have migrations to display
+	if len(m.migrationOrder) > 0 {
+		// Check if we also have wizard active
+		if m.mode == modeWizard {
+			return m.renderMigrationsWithWizard(suggestionsView)
+		}
+		return m.renderMultiMigrationView(suggestionsView)
 	}
 
 	// Normal single viewport view
@@ -741,11 +1064,293 @@ func (m Model) renderSplitView(suggestionsView string) string {
 	)
 }
 
+// renderMultiMigrationView renders a full-screen tab interface for migrations
+func (m Model) renderMultiMigrationView(suggestionsView string) string {
+	numMigrations := len(m.migrationOrder)
+	if numMigrations == 0 {
+		return m.View() // Fallback to normal view
+	}
+
+	// Build tab bar
+	var tabs []string
+	for i, migrationID := range m.migrationOrder {
+		mi, ok := m.migrations[migrationID]
+		if !ok {
+			continue
+		}
+
+		// Determine tab style based on focus and status
+		isFocused := migrationID == m.focusedMigration
+		var statusIcon string
+		var tabStyle lipgloss.Style
+
+		switch mi.Status {
+		case "running":
+			statusIcon = "►"
+		case "completed":
+			statusIcon = "✔"
+		case "failed", "cancelled":
+			statusIcon = "✖"
+		}
+
+		// Build tab label
+		label := mi.ConfigFile
+		if mi.ProfileName != "" {
+			label = mi.ProfileName
+		}
+		// Truncate long labels
+		if len(label) > 20 {
+			label = label[:17] + "..."
+		}
+		tabLabel := fmt.Sprintf(" %d:%s %s ", i+1, statusIcon, label)
+
+		if isFocused {
+			// Active tab style
+			tabStyle = lipgloss.NewStyle().
+				Background(colorPurple).
+				Foreground(colorWhite).
+				Bold(true).
+				Padding(0, 1)
+		} else {
+			// Inactive tab style - color based on status
+			var bgColor lipgloss.Color
+			switch mi.Status {
+			case "completed":
+				bgColor = colorGreen
+			case "failed", "cancelled":
+				bgColor = colorRed
+			default:
+				bgColor = colorGray
+			}
+			tabStyle = lipgloss.NewStyle().
+				Background(bgColor).
+				Foreground(colorWhite).
+				Padding(0, 1)
+		}
+
+		tabs = append(tabs, tabStyle.Render(tabLabel))
+	}
+
+	// Build tab bar
+	var tabBar string
+	if len(tabs) == 0 {
+		tabBar = lipgloss.NewStyle().
+			Background(colorGray).
+			Foreground(colorWhite).
+			Padding(0, 1).
+			Render(" No migrations ")
+	} else {
+		tabBar = lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	}
+	// Add a full-width separator line under the tabs
+	separatorStyle := lipgloss.NewStyle().Foreground(colorGray)
+	tabBarWithSeparator := tabBar + "\n" + separatorStyle.Render(strings.Repeat("─", m.width-2))
+
+	// Get the focused migration (fallback to first if not found)
+	mi, ok := m.migrations[m.focusedMigration]
+	if !ok {
+		// Try to use the first migration
+		if len(m.migrationOrder) > 0 {
+			m.focusedMigration = m.migrationOrder[0]
+			mi, ok = m.migrations[m.focusedMigration]
+		}
+		if !ok {
+			// Still not found, render simple view with just the tab bar
+			return fmt.Sprintf("%s\n\n%s\n%s%s",
+				tabBarWithSeparator,
+				styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
+				suggestionsView,
+				m.statusBarView(),
+			)
+		}
+	}
+
+	// Calculate viewport height (full screen minus tab bar, separator, input, status bar, borders)
+	// Tab bar (1) + separator (1) + content border (2) + input box (3) + status bar (1) + padding (2) = 10
+	reservedHeight := 10 + len(m.suggestions)
+	viewportHeight := m.height - reservedHeight
+	if viewportHeight < 5 {
+		viewportHeight = 5
+	}
+
+	// Resize viewport if needed
+	if mi.Viewport.Height != viewportHeight || mi.Viewport.Width != m.width-4 {
+		mi.Viewport.Width = m.width - 4
+		mi.Viewport.Height = viewportHeight
+	}
+
+	// Build scroll indicator
+	scrollInfo := ""
+	if mi.Viewport.TotalLineCount() > mi.Viewport.Height {
+		scrollPct := int(mi.Viewport.ScrollPercent() * 100)
+		scrollInfo = fmt.Sprintf(" [%d%%]", scrollPct)
+	}
+
+	// Build content border with title
+	var borderColor lipgloss.Color
+	switch mi.Status {
+	case "running":
+		borderColor = colorPurple
+	case "completed":
+		borderColor = colorGreen
+	case "failed", "cancelled":
+		borderColor = colorRed
+	default:
+		borderColor = colorGray
+	}
+
+	contentStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Width(m.width - 2).
+		Height(viewportHeight)
+
+	content := contentStyle.Render(mi.Viewport.View())
+
+	// Add scroll info to the right side of the border
+	if scrollInfo != "" {
+		contentLines := strings.Split(content, "\n")
+		if len(contentLines) > 0 {
+			firstLine := contentLines[0]
+			scrollStyled := lipgloss.NewStyle().Foreground(borderColor).Render(scrollInfo)
+			// Insert scroll info near the end of the first line
+			insertPos := len(firstLine) - len(scrollInfo) - 3
+			if insertPos > 10 {
+				contentLines[0] = firstLine[:insertPos] + scrollStyled + firstLine[insertPos+len(scrollInfo):]
+			}
+			content = strings.Join(contentLines, "\n")
+		}
+	}
+
+	return fmt.Sprintf("%s\n%s\n%s\n%s%s",
+		content,
+		tabBarWithSeparator,
+		styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
+		suggestionsView,
+		m.statusBarView(),
+	)
+}
+
+// renderMigrationsWithWizard renders migrations and wizard in split view
+func (m Model) renderMigrationsWithWizard(suggestionsView string) string {
+	// For now, use a simple approach: migrations on top (70%), wizard on bottom (30%)
+	numMigrations := len(m.migrationOrder)
+	if numMigrations == 0 {
+		return m.renderSplitView(suggestionsView)
+	}
+
+	reservedHeight := 4 + len(m.suggestions)
+	availableHeight := m.height - reservedHeight
+
+	// Split 70/30 between migrations and wizard
+	migrationsHeight := (availableHeight * 70) / 100
+	wizardHeight := availableHeight - migrationsHeight - 1
+
+	heightPerMigration := migrationsHeight / numMigrations
+	if heightPerMigration < 4 {
+		heightPerMigration = 4
+	}
+
+	var panes []string
+	for _, migrationID := range m.migrationOrder {
+		mi, ok := m.migrations[migrationID]
+		if !ok {
+			continue
+		}
+
+		content := mi.Buffer
+		if mi.ProgressLine != "" && mi.Status == "running" {
+			content += styleSystemOutput.Render("  "+mi.ProgressLine) + "\n"
+		}
+
+		isFocused := migrationID == m.focusedMigration
+		var borderColor lipgloss.Color
+		var statusIcon string
+
+		switch mi.Status {
+		case "running":
+			statusIcon = "►"
+			if isFocused {
+				borderColor = colorPurple
+			} else {
+				borderColor = colorGray
+			}
+		case "completed":
+			statusIcon = "✔"
+			borderColor = colorGreen
+		default:
+			statusIcon = "✖"
+			borderColor = colorRed
+		}
+
+		label := mi.ConfigFile
+		if mi.ProfileName != "" {
+			label = mi.ProfileName
+		}
+
+		borderStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Width(m.width - 4).
+			Height(heightPerMigration - 2).
+			PaddingLeft(1)
+
+		lines := strings.Split(content, "\n")
+		maxLines := heightPerMigration - 3
+		if len(lines) > maxLines {
+			lines = lines[len(lines)-maxLines:]
+		}
+
+		pane := borderStyle.Render(strings.Join(lines, "\n"))
+		paneLines := strings.Split(pane, "\n")
+		if len(paneLines) > 0 {
+			title := fmt.Sprintf(" %s [%s] %s ", statusIcon, migrationID, label)
+			firstLine := paneLines[0]
+			if len(firstLine) > len(title)+4 {
+				paneLines[0] = firstLine[:2] + title + firstLine[2+len(title):]
+			}
+			pane = strings.Join(paneLines, "\n")
+		}
+
+		panes = append(panes, pane)
+	}
+
+	migrationsView := strings.Join(panes, "\n")
+
+	// Wizard pane
+	wizardStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorBlue).
+		Width(m.width - 4).
+		Height(wizardHeight - 2).
+		PaddingLeft(1)
+
+	wizardLines := strings.Split(m.wizardBuffer, "\n")
+	if len(wizardLines) > wizardHeight-3 {
+		wizardLines = wizardLines[len(wizardLines)-wizardHeight+3:]
+	}
+	wizardPane := wizardStyle.Render(strings.Join(wizardLines, "\n"))
+
+	return fmt.Sprintf("%s\n%s\n%s\n%s%s",
+		migrationsView,
+		wizardPane,
+		styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
+		suggestionsView,
+		m.statusBarView(),
+	)
+}
+
 func (m Model) statusBarView() string {
 	w := lipgloss.Width
 
 	dir := styleStatusDir.Render(m.cwd)
 	branch := styleStatusBranch.Render(" " + m.gitInfo.Branch)
+
+	// Migration count indicator (only show if migrations exist)
+	migCount := ""
+	if len(m.migrationOrder) > 0 {
+		migCount = styleStatusText.Render(fmt.Sprintf(" [%d migs] ", len(m.migrationOrder)))
+	}
 
 	status := ""
 	if m.gitInfo.Status == "Dirty" {
@@ -755,7 +1360,7 @@ func (m Model) statusBarView() string {
 	}
 
 	// Calculate remaining width for spacer
-	usedWidth := w(dir) + w(branch) + w(status)
+	usedWidth := w(dir) + w(branch) + w(migCount) + w(status)
 	if usedWidth > m.width {
 		usedWidth = m.width
 	}
@@ -769,6 +1374,7 @@ func (m Model) statusBarView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top,
 		dir,
 		branch,
+		migCount,
 		spacer,
 		status,
 	)
@@ -912,7 +1518,7 @@ Built with Go and Bubble Tea.`
 		// Display first prompt
 		prompt := m.renderWizardPrompt()
 
-		if m.migrationRunning {
+		if m.hasRunningMigration() {
 			// Use separate wizard buffer for split view
 			m.wizardBuffer = headerMsg + prompt
 			m.wizardViewport.SetContent(m.wizardBuffer)
@@ -925,12 +1531,12 @@ Built with Go and Bubble Tea.`
 		}
 		return nil
 
-	case "/run":
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runMigrationCmd(configFile, profileName)
-	case "/resume":
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runResumeCmd(configFile, profileName)
+	case "/run", "/resume":
+		// These commands are handled earlier in Update() for multi-migration support
+		// This case should never be reached, but we keep it as a safety fallback
+		return func() tea.Msg {
+			return OutputMsg("Error: migration command not properly routed\n")
+		}
 
 	case "/validate":
 		configFile, profileName := parseConfigArgs(parts)
@@ -954,85 +1560,161 @@ Built with Go and Bubble Tea.`
 
 // Wrappers for Orchestrator actions
 
-func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
+// runMigrationCmdWithID runs a migration with output routed to a specific migration instance
+func (m Model) runMigrationCmdWithID(configFile, profileName, migrationID, label string) tea.Cmd {
 	return func() tea.Msg {
-		// Output to the view
-		origin := "config: " + configFile
-		if profileName != "" {
-			origin = "profile: " + profileName
+		p := GetProgramRef()
+		if p == nil {
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: "Internal error: no program reference\n"}
 		}
-		out := fmt.Sprintf("Running migration with %s\n", origin)
+
+		// Helper to send output to this migration
+		send := func(msg string) {
+			p.Send(MigrationOutputMsg{ID: migrationID, Output: msg})
+		}
+
+		send(fmt.Sprintf("Starting migration [%s] with %s\n", migrationID, label))
 
 		// Load config
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error loading config: %v\n", err)}
+			delete(migrationCancels, migrationID)
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)}
 		}
 
 		// Create orchestrator
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
+			delete(migrationCancels, migrationID)
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
 		}
 		defer orch.Close()
+
 		if profileName != "" {
 			orch.SetRunContext(profileName, "")
 		} else {
 			orch.SetRunContext("", configFile)
 		}
 
-		// Create cancellable context for Ctrl+C support
+		// Create cancellable context
 		ctx, cancel := context.WithCancel(context.Background())
-		activeMigrationCancel = cancel
-		defer func() { activeMigrationCancel = nil }()
+		migrationCancels[migrationID] = cancel
+		defer delete(migrationCancels, migrationID)
 
-		// Run
-		if err := orch.Run(ctx); err != nil {
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Migration failed: %v\n", err)}
+		// Redirect stdout/stderr to this migration's output
+		r, w, _ := os.Pipe()
+		origStdout := os.Stdout
+		origStderr := os.Stderr
+		os.Stdout = w
+		os.Stderr = w
+
+		// Reader goroutine
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			buf := make([]byte, 1024)
+			for {
+				n, err := r.Read(buf)
+				if n > 0 {
+					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+
+		// Run migration
+		runErr := orch.Run(ctx)
+
+		// Restore stdout/stderr
+		w.Close()
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		<-done // Wait for reader to finish
+
+		if runErr != nil {
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Migration failed: %v\n", runErr)}
 		}
-
-		return MigrationDoneMsg{Output: out + "Migration completed successfully!\n"}
+		return MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Migration completed successfully!\n"}
 	}
 }
 
-func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
+// runResumeCmdWithID resumes a migration with output routed to a specific migration instance
+func (m Model) runResumeCmdWithID(configFile, profileName, migrationID, label string) tea.Cmd {
 	return func() tea.Msg {
-		origin := "config: " + configFile
-		if profileName != "" {
-			origin = "profile: " + profileName
+		p := GetProgramRef()
+		if p == nil {
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: "Internal error: no program reference\n"}
 		}
-		out := fmt.Sprintf("Resuming migration with %s\n", origin)
+
+		// Helper to send output to this migration
+		send := func(msg string) {
+			p.Send(MigrationOutputMsg{ID: migrationID, Output: msg})
+		}
+
+		send(fmt.Sprintf("Resuming migration [%s] with %s\n", migrationID, label))
 
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error loading config: %v\n", err)}
+			delete(migrationCancels, migrationID)
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)}
 		}
 
 		orch, err := orchestrator.New(cfg)
 		if err != nil {
-			activeMigrationCancel = nil
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
+			delete(migrationCancels, migrationID)
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
 		}
 		defer orch.Close()
+
 		if profileName != "" {
 			orch.SetRunContext(profileName, "")
 		} else {
 			orch.SetRunContext("", configFile)
 		}
 
-		// Create cancellable context for Ctrl+C support
+		// Create cancellable context
 		ctx, cancel := context.WithCancel(context.Background())
-		activeMigrationCancel = cancel
-		defer func() { activeMigrationCancel = nil }()
+		migrationCancels[migrationID] = cancel
+		defer delete(migrationCancels, migrationID)
 
-		if err := orch.Resume(ctx); err != nil {
-			return MigrationDoneMsg{Output: out + fmt.Sprintf("Resume failed: %v\n", err)}
+		// Redirect stdout/stderr to this migration's output
+		r, w, _ := os.Pipe()
+		origStdout := os.Stdout
+		origStderr := os.Stderr
+		os.Stdout = w
+		os.Stderr = w
+
+		// Reader goroutine
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			buf := make([]byte, 1024)
+			for {
+				n, err := r.Read(buf)
+				if n > 0 {
+					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+
+		// Run resume
+		runErr := orch.Resume(ctx)
+
+		// Restore stdout/stderr
+		w.Close()
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		<-done // Wait for reader to finish
+
+		if runErr != nil {
+			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Resume failed: %v\n", runErr)}
 		}
-
-		return MigrationDoneMsg{Output: out + "Resume completed successfully!\n"}
+		return MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Resume completed successfully!\n"}
 	}
 }
 
@@ -1604,7 +2286,7 @@ func (m *Model) renderWizardPrompt() string {
 func (m *Model) handleWizardStep(input string) tea.Cmd {
 	// Helper to append to the correct buffer
 	appendToBuffer := func(text string) {
-		if m.migrationRunning {
+		if m.hasRunningMigration() {
 			m.wizardBuffer += text
 			m.wizardViewport.SetContent(m.wizardBuffer)
 			m.wizardViewport.GotoBottom()
@@ -1670,8 +2352,11 @@ func Start() error {
 	m := InitialModel()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
-	// Start output capture
-	cleanup := CaptureOutput(p)
+	// Store program reference for migration commands
+	SetProgramRef(p)
+
+	// Start output capture for general (non-migration) output
+	cleanup := CaptureOutput(p, "")
 	defer cleanup()
 
 	if _, err := p.Run(); err != nil {

@@ -14,6 +14,7 @@ var (
 	colorGray       = lipgloss.Color("#5D6581")
 	colorLightGray  = lipgloss.Color("#A8B0C9")
 	colorWhite      = lipgloss.Color("#E6E9F5")
+	colorBlue       = lipgloss.Color("#5B9BD5")
 
 	// Base Styles
 	styleNormal = lipgloss.NewStyle().
