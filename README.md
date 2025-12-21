@@ -7,6 +7,23 @@
 
 High-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL.
 
+## Interactive Mode (New!)
+
+Launch the tool without arguments to enter the **Interactive Shell**, a modern TUI designed for ease of use.
+
+```bash
+./mssql-pg-migrate
+```
+
+### Features
+*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/wizard`, `/status`).
+*   **Auto-Completion**:
+    *   **Commands**: Tab-complete commands like `/validate` or `/history`.
+    *   **Files**: Type `@` to browse and select configuration files from your current directory (e.g., `/run @conf<TAB>`).
+*   **Configuration Wizard**: Type `/wizard` to interactively create or edit your `config.yaml`. It guides you through connection details, SSL settings, and performance tuning.
+*   **Live Monitoring**: Watch migration progress with real-time logs and visual status indicators.
+*   **Git Integration**: View your current branch and repository status directly in the status bar.
+
 ## Security Notice
 
 **Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.mssql-pg-migrate/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
