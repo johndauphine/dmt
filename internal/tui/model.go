@@ -73,6 +73,12 @@ type Model struct {
 // TickMsg is used to update the UI periodically (e.g. for git status)
 type TickMsg time.Time
 
+// WizardFinishedMsg indicates the wizard completed (or failed)
+type WizardFinishedMsg struct {
+	Err     error
+	Message string
+}
+
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
@@ -219,6 +225,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.textInput.Width = msg.Width - 4
 
+	case WizardFinishedMsg:
+		m.mode = modeNormal
+		
+		text := msg.Message
+		if msg.Err != nil {
+			text = styleError.Render("✖ " + msg.Err.Error())
+		} else {
+			text = styleSuccess.Render("✔ " + text)
+		}
+		
+		m.logBuffer += "\n" + text + "\n"
+		m.viewport.SetContent(m.logBuffer)
+		m.viewport.GotoBottom()
+
 	case OutputMsg:
 		m.lineBuffer += string(msg)
 
@@ -342,6 +362,10 @@ func (m *Model) autocompleteCommand() {
 			return
 		}
 	}
+	
+	// DEBUG: If no match
+	// m.logBuffer += fmt.Sprintf("No auto-complete match for '%s'\n", input)
+	// m.viewport.SetContent(m.logBuffer)
 }
 
 // View renders the TUI
@@ -483,7 +507,7 @@ func (m Model) welcomeMessage() string {
 
 	return welcome + body + tips
 }
-func (m Model) handleCommand(cmdStr string) tea.Cmd {
+func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 	parts := strings.Fields(cmdStr)
 	if len(parts) == 0 {
 		return nil
@@ -696,6 +720,10 @@ func (m *Model) handleWizardStep(input string) tea.Cmd {
 		m.logBuffer += styleUserInput.Render("> " + input) + "\n"
 		m.viewport.SetContent(m.logBuffer)
 		m.textInput.Reset()
+	} else {
+		// User accepted default
+		m.logBuffer += styleUserInput.Render("  (default)") + "\n"
+		m.viewport.SetContent(m.logBuffer)
 	}
 
 	// Capture input for current step before moving to next
@@ -853,18 +881,15 @@ func (m *Model) finishWizard() tea.Cmd {
 
 		data, err := yaml.Marshal(m.wizardData)
 		if err != nil {
-			m.mode = modeNormal
-			return OutputMsg(fmt.Sprintf("\nError generating config: %v\n", err))
+			return WizardFinishedMsg{Err: fmt.Errorf("generating config: %w", err)}
 		}
 
 		// Write to file
 		if err := os.WriteFile("config.yaml", data, 0600); err != nil {
-			m.mode = modeNormal
-			return OutputMsg(fmt.Sprintf("\nError saving config.yaml: %v\n", err))
+			return WizardFinishedMsg{Err: fmt.Errorf("saving config.yaml: %w", err)}
 		}
 
-		m.mode = modeNormal
-		return OutputMsg("\nConfiguration saved to config.yaml!\nYou can now run the migration with /run.\n")
+		return WizardFinishedMsg{Message: "Configuration saved to config.yaml!\nYou can now run the migration with /run."}
 	}
 }
 
