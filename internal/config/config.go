@@ -1,12 +1,10 @@
 package config
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -26,30 +24,6 @@ func expandTilde(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
-}
-
-// getAvailableMemoryMB returns available system memory in MB (Linux only, falls back to 4GB)
-func getAvailableMemoryMB() int64 {
-	file, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 4096 // Default 4GB if can't read
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "MemAvailable:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				kb, err := strconv.ParseInt(fields[1], 10, 64)
-				if err == nil {
-					return kb / 1024 // Convert KB to MB
-				}
-			}
-		}
-	}
-	return 4096 // Default 4GB
 }
 
 // AutoConfig tracks which values were auto-configured and why
