@@ -196,6 +196,21 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.tables = tables
 	logging.Info("Found %d tables", len(tables))
 
+	// Refine memory settings based on actual row sizes from database stats
+	tableRowSizes := make([]config.TableRowSize, len(tables))
+	for i, t := range tables {
+		tableRowSizes[i] = config.TableRowSize{
+			Name:             t.Name,
+			RowCount:         t.RowCount,
+			EstimatedRowSize: t.EstimatedRowSize,
+		}
+	}
+	if adjusted, changes := o.config.RefineSettingsForRowSizes(tableRowSizes); adjusted {
+		logging.Info("%s", changes)
+	} else if changes != "" {
+		logging.Debug("%s", changes)
+	}
+
 	// Print pagination strategy summary
 	keysetCount := 0
 	rowNumberCount := 0
