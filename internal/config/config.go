@@ -788,6 +788,11 @@ func FormatMemorySize(bytes int64) string {
 	return formatMemorySize(bytes)
 }
 
+// AutoConfig returns the auto-configuration metadata.
+func (c *Config) AutoConfig() AutoConfig {
+	return c.autoConfig
+}
+
 // DebugDump returns a comprehensive configuration dump with auto-tuning explanations
 func (c *Config) DebugDump() string {
 	var b strings.Builder

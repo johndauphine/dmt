@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +150,15 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Log comprehensive configuration dump (always visible at INFO level)
 	logging.Info("%s", o.config.DebugDump())
+
+	// Set runtime memory limit using Go's soft limit mechanism
+	// This tells the GC to work harder to stay under the limit
+	effectiveMemMB := o.config.AutoConfig().EffectiveMaxMemoryMB
+	if effectiveMemMB > 0 {
+		memLimitBytes := effectiveMemMB * 1024 * 1024
+		debug.SetMemoryLimit(memLimitBytes)
+		logging.Info("Runtime memory limit set to %d MB (Go GC soft limit)", effectiveMemMB)
+	}
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
