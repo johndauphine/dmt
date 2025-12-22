@@ -1110,13 +1110,17 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			// Table exists - check if we have saved chunk progress
 			lastPK, rowsDone, _ := progressSaver.GetProgress(taskID)
 
-			if lastPK == nil {
-				// No chunk progress - truncate to ensure clean re-transfer
+			// For partitioned tables, progress is saved at partition level, not table level.
+			// Skip table-level truncation - partition cleanup in transfer.go handles partial data.
+			isPartitioned := t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination()
+
+			if lastPK == nil && !isPartitioned {
+				// No chunk progress and not partitioned - truncate to ensure clean re-transfer
 				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 					o.state.CompleteRun(run.ID, "failed", err.Error())
 					return fmt.Errorf("truncating table %s: %w", t.Name, err)
 				}
-			} else {
+			} else if lastPK != nil {
 				// Have chunk progress - verify target row count matches saved progress
 				// If target has fewer rows than saved progress, data was lost; start fresh
 				targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
