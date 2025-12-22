@@ -442,7 +442,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autocompleteCommand()
 			}
 		case tea.KeyPgUp:
-			// Scroll focused migration viewport up
+			// Scroll focused viewport up (console or migration)
+			if m.focusedMigration == "console" || m.focusedMigration == "" {
+				m.viewport.LineUp(m.viewport.Height / 2)
+				return m, nil
+			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
 					mi.Viewport.LineUp(mi.Viewport.Height / 2)
@@ -451,7 +455,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case tea.KeyPgDown:
-			// Scroll focused migration viewport down
+			// Scroll focused viewport down (console or migration)
+			if m.focusedMigration == "console" || m.focusedMigration == "" {
+				m.viewport.LineDown(m.viewport.Height / 2)
+				return m, nil
+			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
 					mi.Viewport.LineDown(mi.Viewport.Height / 2)
@@ -463,7 +471,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case tea.KeyHome:
-			// Scroll to top of focused migration viewport
+			// Scroll to top of focused viewport (console or migration)
+			if m.focusedMigration == "console" || m.focusedMigration == "" {
+				m.viewport.GotoTop()
+				return m, nil
+			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
 					mi.Viewport.GotoTop()
@@ -472,7 +484,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case tea.KeyEnd:
-			// Scroll to bottom of focused migration viewport and re-enable auto-scroll
+			// Scroll to bottom of focused viewport (console or migration)
+			if m.focusedMigration == "console" || m.focusedMigration == "" {
+				m.viewport.GotoBottom()
+				return m, nil
+			}
 			if m.focusedMigration != "" {
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
 					mi.Viewport.GotoBottom()
@@ -483,6 +499,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyUp:
 			// If migrations are showing and input is empty, scroll viewport
 			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
+				if m.focusedMigration == "console" || m.focusedMigration == "" {
+					m.viewport.LineUp(1)
+					return m, nil
+				}
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
 					mi.Viewport.LineUp(1)
 					mi.UserScrolled = true
@@ -498,6 +518,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyDown:
 			// If migrations are showing and input is empty, scroll viewport
 			if len(m.migrationOrder) > 0 && m.textInput.Value() == "" && len(m.suggestions) == 0 {
+				if m.focusedMigration == "console" || m.focusedMigration == "" {
+					m.viewport.LineDown(1)
+					return m, nil
+				}
 				if mi, ok := m.migrations[m.focusedMigration]; ok {
 					mi.Viewport.LineDown(1)
 					if mi.Viewport.AtBottom() {
@@ -520,6 +544,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Alt+number keys to switch migration focus
 		if len(m.migrationOrder) > 0 && msg.Alt {
 			if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+				// Alt+0 switches to console
+				if msg.Runes[0] == '0' {
+					m.focusedMigration = "console"
+					return m, nil
+				}
+				// Alt+1, Alt+2, etc. switch to migration tabs
 				num := int(msg.Runes[0] - '1') // '1' -> 0, '2' -> 1, etc.
 				if num >= 0 && num < len(m.migrationOrder) {
 					m.focusedMigration = m.migrationOrder[num]
@@ -528,28 +558,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Ctrl+Left/Right to cycle through migrations
-		if len(m.migrationOrder) > 1 {
+		// Alt+Left/Right to cycle through tabs (console + migrations)
+		if len(m.migrationOrder) > 0 {
 			if msg.Type == tea.KeyLeft && msg.Alt {
 				// Previous tab
+				if m.focusedMigration == "console" || m.focusedMigration == "" {
+					// From console, go to last migration
+					m.focusedMigration = m.migrationOrder[len(m.migrationOrder)-1]
+					return m, nil
+				}
+				// Find current migration and go to previous
 				for i, id := range m.migrationOrder {
 					if id == m.focusedMigration {
 						if i > 0 {
 							m.focusedMigration = m.migrationOrder[i-1]
 						} else {
-							m.focusedMigration = m.migrationOrder[len(m.migrationOrder)-1]
+							m.focusedMigration = "console"
 						}
 						return m, nil
 					}
 				}
 			} else if msg.Type == tea.KeyRight && msg.Alt {
 				// Next tab
+				if m.focusedMigration == "console" || m.focusedMigration == "" {
+					// From console, go to first migration
+					m.focusedMigration = m.migrationOrder[0]
+					return m, nil
+				}
+				// Find current migration and go to next
 				for i, id := range m.migrationOrder {
 					if id == m.focusedMigration {
 						if i < len(m.migrationOrder)-1 {
 							m.focusedMigration = m.migrationOrder[i+1]
 						} else {
-							m.focusedMigration = m.migrationOrder[0]
+							m.focusedMigration = "console"
 						}
 						return m, nil
 					}
@@ -1072,8 +1114,27 @@ func (m Model) renderMultiMigrationView(suggestionsView string) string {
 		return m.View() // Fallback to normal view
 	}
 
-	// Build tab bar
+	// Build tab bar - start with Console tab
 	var tabs []string
+
+	// Console tab (tab 0)
+	consoleTabLabel := " 0:📋 Console "
+	var consoleTabStyle lipgloss.Style
+	if m.focusedMigration == "console" || m.focusedMigration == "" {
+		consoleTabStyle = lipgloss.NewStyle().
+			Background(colorPurple).
+			Foreground(colorWhite).
+			Bold(true).
+			Padding(0, 1)
+	} else {
+		consoleTabStyle = lipgloss.NewStyle().
+			Background(colorGray).
+			Foreground(colorWhite).
+			Padding(0, 1)
+	}
+	tabs = append(tabs, consoleTabStyle.Render(consoleTabLabel))
+
+	// Migration tabs (tab 1, 2, 3, ...)
 	for i, migrationID := range m.migrationOrder {
 		mi, ok := m.migrations[migrationID]
 		if !ok {
@@ -1103,7 +1164,7 @@ func (m Model) renderMultiMigrationView(suggestionsView string) string {
 		if len(label) > 20 {
 			label = label[:17] + "..."
 		}
-		tabLabel := fmt.Sprintf(" %d:%s %s ", i+1, statusIcon, label)
+		tabLabel := fmt.Sprintf(" %d:%s %s ", i+1, statusIcon, label) // i+1 because console is tab 0
 
 		if isFocused {
 			// Active tab style
@@ -1147,79 +1208,107 @@ func (m Model) renderMultiMigrationView(suggestionsView string) string {
 	separatorStyle := lipgloss.NewStyle().Foreground(colorGray)
 	tabBarWithSeparator := tabBar + "\n" + separatorStyle.Render(strings.Repeat("─", m.width-2))
 
-	// Get the focused migration (fallback to first if not found)
-	mi, ok := m.migrations[m.focusedMigration]
-	if !ok {
-		// Try to use the first migration
-		if len(m.migrationOrder) > 0 {
-			m.focusedMigration = m.migrationOrder[0]
-			mi, ok = m.migrations[m.focusedMigration]
+	// Check if console tab is focused
+	var content string
+	if m.focusedMigration == "console" || m.focusedMigration == "" {
+		// Show console (main log buffer)
+		reservedHeight := 10
+		viewportHeight := m.height - reservedHeight
+		if viewportHeight < 5 {
+			viewportHeight = 5
 		}
+
+		// Update main viewport size if needed
+		if m.viewport.Height != viewportHeight || m.viewport.Width != m.width-4 {
+			m.viewport.Width = m.width - 4
+			m.viewport.Height = viewportHeight
+		}
+
+		// Update content to include progress line
+		consoleContent := m.logBuffer
+		if m.progressLine != "" {
+			consoleContent += styleSystemOutput.Render("  "+m.progressLine) + "\n"
+		}
+		m.viewport.SetContent(consoleContent)
+
+		contentStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Width(m.width - 2).
+			Height(viewportHeight)
+
+		content = contentStyle.Render(m.viewport.View())
+	} else {
+		// Get the focused migration
+		mi, ok := m.migrations[m.focusedMigration]
 		if !ok {
-			// Still not found, render simple view with just the tab bar
-			return fmt.Sprintf("%s\n\n%s\n%s%s",
-				tabBarWithSeparator,
-				styleInputContainer.Width(m.width-2).Render(m.textInput.View()),
-				suggestionsView,
-				m.statusBarView(),
-			)
-		}
-	}
-
-	// Calculate viewport height (full screen minus tab bar, separator, input, status bar, borders)
-	// Tab bar (1) + separator (1) + content border (2) + input box (3) + status bar (1) + padding (2) = 10
-	reservedHeight := 10 + len(m.suggestions)
-	viewportHeight := m.height - reservedHeight
-	if viewportHeight < 5 {
-		viewportHeight = 5
-	}
-
-	// Resize viewport if needed
-	if mi.Viewport.Height != viewportHeight || mi.Viewport.Width != m.width-4 {
-		mi.Viewport.Width = m.width - 4
-		mi.Viewport.Height = viewportHeight
-	}
-
-	// Build scroll indicator
-	scrollInfo := ""
-	if mi.Viewport.TotalLineCount() > mi.Viewport.Height {
-		scrollPct := int(mi.Viewport.ScrollPercent() * 100)
-		scrollInfo = fmt.Sprintf(" [%d%%]", scrollPct)
-	}
-
-	// Build content border with title
-	var borderColor lipgloss.Color
-	switch mi.Status {
-	case "running":
-		borderColor = colorPurple
-	case "completed":
-		borderColor = colorGreen
-	case "failed", "cancelled":
-		borderColor = colorRed
-	default:
-		borderColor = colorGray
-	}
-
-	contentStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Width(m.width - 2).
-		Height(viewportHeight)
-
-	content := contentStyle.Render(mi.Viewport.View())
-
-	// Add scroll info to the right side of the border
-	if scrollInfo != "" {
-		contentLines := strings.Split(content, "\n")
-		if len(contentLines) > 0 {
-			firstLine := contentLines[0]
-			scrollStyled := lipgloss.NewStyle().Foreground(borderColor).Render(scrollInfo)
-			// Insert scroll info near the end of the first line
-			insertPos := len(firstLine) - len(scrollInfo) - 3
-			if insertPos > 10 {
-				contentLines[0] = firstLine[:insertPos] + scrollStyled + firstLine[insertPos+len(scrollInfo):]
+			// Fallback to first migration if focused one doesn't exist
+			if len(m.migrationOrder) > 0 {
+				m.focusedMigration = m.migrationOrder[0]
+				mi, ok = m.migrations[m.focusedMigration]
 			}
-			content = strings.Join(contentLines, "\n")
+			if !ok {
+				// Still not found, fallback to console
+				m.focusedMigration = "console"
+				return m.renderMultiMigrationView(suggestionsView)
+			}
+		}
+
+		// Calculate viewport height (full screen minus tab bar, separator, input, status bar, borders)
+		// Tab bar (1) + separator (1) + content border (2) + input box (3) + status bar (1) + padding (2) = 10
+		reservedHeight := 10 + len(m.suggestions)
+		viewportHeight := m.height - reservedHeight
+		if viewportHeight < 5 {
+			viewportHeight = 5
+		}
+
+		// Resize viewport if needed
+		if mi.Viewport.Height != viewportHeight || mi.Viewport.Width != m.width-4 {
+			mi.Viewport.Width = m.width - 4
+			mi.Viewport.Height = viewportHeight
+		}
+
+		// Build scroll indicator
+		scrollInfo := ""
+		if mi.Viewport.TotalLineCount() > mi.Viewport.Height {
+			scrollPct := int(mi.Viewport.ScrollPercent() * 100)
+			scrollInfo = fmt.Sprintf(" [%d%%]", scrollPct)
+		}
+
+		// Build content border with title
+		var borderColor lipgloss.Color
+		switch mi.Status {
+		case "running":
+			borderColor = colorPurple
+		case "completed":
+			borderColor = colorGreen
+		case "failed", "cancelled":
+			borderColor = colorRed
+		default:
+			borderColor = colorGray
+		}
+
+		contentStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Width(m.width - 2).
+			Height(viewportHeight)
+
+		content = contentStyle.Render(mi.Viewport.View())
+
+		// Add scroll info to the right side of the border
+		if scrollInfo != "" {
+			contentLines := strings.Split(content, "\n")
+			if len(contentLines) > 0 {
+				firstLine := contentLines[0]
+				scrollStyled := lipgloss.NewStyle().Foreground(borderColor).Render(scrollInfo)
+				// Insert scroll info near the end of the first line
+				insertPos := len(firstLine) - len(scrollInfo) - 3
+				if insertPos > 10 {
+					contentLines[0] = firstLine[:insertPos] + scrollStyled + firstLine[insertPos+len(scrollInfo):]
+				}
+				content = strings.Join(contentLines, "\n")
+			}
 		}
 	}
 
@@ -1576,70 +1665,79 @@ func (m Model) runMigrationCmdWithID(configFile, profileName, migrationID, label
 
 		send(fmt.Sprintf("Starting migration [%s] with %s\n", migrationID, label))
 
-		// Load config
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)}
-		}
-
-		// Create orchestrator
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
-		}
-		defer orch.Close()
-
-		if profileName != "" {
-			orch.SetRunContext(profileName, "")
-		} else {
-			orch.SetRunContext("", configFile)
-		}
-
-		// Create cancellable context
-		ctx, cancel := context.WithCancel(context.Background())
-		migrationCancels[migrationID] = cancel
-		defer delete(migrationCancels, migrationID)
-
-		// Redirect stdout/stderr and logging to this migration's output
-		r, w, _ := os.Pipe()
-		origStdout := os.Stdout
-		origStderr := os.Stderr
-		os.Stdout = w
-		os.Stderr = w
-		logging.SetOutput(w)
-
-		// Reader goroutine
-		done := make(chan struct{})
+		// Run migration asynchronously in a goroutine to avoid blocking the UI
 		go func() {
-			defer close(done)
-			buf := make([]byte, 1024)
-			for {
-				n, err := r.Read(buf)
-				if n > 0 {
-					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
-				}
-				if err != nil {
-					break
-				}
+			// Load config
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)})
+				return
 			}
+
+			// Create orchestrator
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)})
+				return
+			}
+			defer orch.Close()
+
+			if profileName != "" {
+				orch.SetRunContext(profileName, "")
+			} else {
+				orch.SetRunContext("", configFile)
+			}
+
+			// Create cancellable context
+			ctx, cancel := context.WithCancel(context.Background())
+			migrationCancels[migrationID] = cancel
+			defer delete(migrationCancels, migrationID)
+
+			// Redirect stdout/stderr and logging to this migration's output
+			r, w, _ := os.Pipe()
+			origStdout := os.Stdout
+			origStderr := os.Stderr
+			os.Stdout = w
+			os.Stderr = w
+			logging.SetOutput(w)
+
+			// Reader goroutine
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			// Run migration
+			runErr := orch.Run(ctx)
+
+			// Restore stdout/stderr and logging
+			w.Close()
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			logging.SetOutput(origStdout)
+			<-done // Wait for reader to finish
+
+			if runErr != nil {
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Migration failed: %v\n", runErr)})
+				return
+			}
+			p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Migration completed successfully!\n"})
 		}()
 
-		// Run migration
-		runErr := orch.Run(ctx)
-
-		// Restore stdout/stderr and logging
-		w.Close()
-		os.Stdout = origStdout
-		os.Stderr = origStderr
-		logging.SetOutput(origStdout)
-		<-done // Wait for reader to finish
-
-		if runErr != nil {
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Migration failed: %v\n", runErr)}
-		}
-		return MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Migration completed successfully!\n"}
+		// Return immediately to keep UI responsive
+		return nil
 	}
 }
 
@@ -1658,157 +1756,217 @@ func (m Model) runResumeCmdWithID(configFile, profileName, migrationID, label st
 
 		send(fmt.Sprintf("Resuming migration [%s] with %s\n", migrationID, label))
 
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)}
-		}
-
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			delete(migrationCancels, migrationID)
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)}
-		}
-		defer orch.Close()
-
-		if profileName != "" {
-			orch.SetRunContext(profileName, "")
-		} else {
-			orch.SetRunContext("", configFile)
-		}
-
-		// Create cancellable context
-		ctx, cancel := context.WithCancel(context.Background())
-		migrationCancels[migrationID] = cancel
-		defer delete(migrationCancels, migrationID)
-
-		// Redirect stdout/stderr and logging to this migration's output
-		r, w, _ := os.Pipe()
-		origStdout := os.Stdout
-		origStderr := os.Stderr
-		os.Stdout = w
-		os.Stderr = w
-		logging.SetOutput(w)
-
-		// Reader goroutine
-		done := make(chan struct{})
+		// Run resume asynchronously in a goroutine to avoid blocking the UI
 		go func() {
-			defer close(done)
-			buf := make([]byte, 1024)
-			for {
-				n, err := r.Read(buf)
-				if n > 0 {
-					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
-				}
-				if err != nil {
-					break
-				}
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error loading config: %v\n", err)})
+				return
 			}
+
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				delete(migrationCancels, migrationID)
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Error initializing orchestrator: %v\n", err)})
+				return
+			}
+			defer orch.Close()
+
+			if profileName != "" {
+				orch.SetRunContext(profileName, "")
+			} else {
+				orch.SetRunContext("", configFile)
+			}
+
+			// Create cancellable context
+			ctx, cancel := context.WithCancel(context.Background())
+			migrationCancels[migrationID] = cancel
+			defer delete(migrationCancels, migrationID)
+
+			// Redirect stdout/stderr and logging to this migration's output
+			r, w, _ := os.Pipe()
+			origStdout := os.Stdout
+			origStderr := os.Stderr
+			os.Stdout = w
+			os.Stderr = w
+			logging.SetOutput(w)
+
+			// Reader goroutine
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			// Run resume
+			runErr := orch.Resume(ctx)
+
+			// Restore stdout/stderr and logging
+			w.Close()
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			logging.SetOutput(origStdout)
+			<-done // Wait for reader to finish
+
+			if runErr != nil {
+				p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Resume failed: %v\n", runErr)})
+				return
+			}
+			p.Send(MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Resume completed successfully!\n"})
 		}()
 
-		// Run resume
-		runErr := orch.Resume(ctx)
-
-		// Restore stdout/stderr and logging
-		w.Close()
-		os.Stdout = origStdout
-		os.Stderr = origStderr
-		logging.SetOutput(origStdout)
-		<-done // Wait for reader to finish
-
-		if runErr != nil {
-			return MigrationDoneWithIDMsg{ID: migrationID, Status: "failed", Output: fmt.Sprintf("Resume failed: %v\n", runErr)}
-		}
-		return MigrationDoneWithIDMsg{ID: migrationID, Status: "completed", Output: "Resume completed successfully!\n"}
+		// Return immediately to keep UI responsive
+		return nil
 	}
 }
 
 func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		origin := "config: " + configFile
-		if profileName != "" {
-			origin = "profile: " + profileName
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
-		out := fmt.Sprintf("Validating with %s\n", origin)
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error: %v\n", err))
-		}
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			return OutputMsg(out + fmt.Sprintf("Error: %v\n", err))
-		}
-		defer orch.Close()
 
-		if err := orch.Validate(context.Background()); err != nil {
-			return OutputMsg(out + fmt.Sprintf("Validation failed: %v\n", err))
-		}
-		return OutputMsg(out + "Validation passed!\n")
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			origin := "config: " + configFile
+			if profileName != "" {
+				origin = "profile: " + profileName
+			}
+			out := fmt.Sprintf("Validating with %s\n", origin)
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(out + fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				p.Send(OutputMsg(out + fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			defer orch.Close()
+
+			if err := orch.Validate(context.Background()); err != nil {
+				p.Send(OutputMsg(out + fmt.Sprintf("Validation failed: %v\n", err)))
+				return
+			}
+			p.Send(OutputMsg(out + "Validation passed!\n"))
+		}()
+
+		return nil
 	}
 }
 
 func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.Cmd {
 	return func() tea.Msg {
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
-		}
-		defer orch.Close()
 
-		// Capture stdout for ShowStatus or ShowDetailedStatus
-		var output string
-		if detailed {
-			output, err = CaptureToString(orch.ShowDetailedStatus)
-		} else {
-			output, err = CaptureToString(orch.ShowStatus)
-		}
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error showing status: %v\n", err))
-		}
-		return BoxedOutputMsg(output)
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			defer orch.Close()
+
+			// Capture stdout for ShowStatus or ShowDetailedStatus
+			var output string
+			if detailed {
+				output, err = CaptureToString(orch.ShowDetailedStatus)
+			} else {
+				output, err = CaptureToString(orch.ShowStatus)
+			}
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error showing status: %v\n", err)))
+				return
+			}
+			p.Send(BoxedOutputMsg(output))
+		}()
+
+		return nil
 	}
 }
 
 func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 	return func() tea.Msg {
-		cfg, err := loadConfigFromOrigin(configFile, profileName)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
-		orch, err := orchestrator.New(cfg)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error: %v\n", err))
-		}
-		defer orch.Close()
 
-		var output string
-		if runID != "" {
-			output, err = CaptureToString(func() error { return orch.ShowRunDetails(runID) })
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
 			if err != nil {
-				return OutputMsg(fmt.Sprintf("Error showing run details: %v\n", err))
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
 			}
-		} else {
-			output, err = CaptureToString(orch.ShowHistory)
+			orch, err := orchestrator.New(cfg)
 			if err != nil {
-				return OutputMsg(fmt.Sprintf("Error showing history: %v\n", err))
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
 			}
-		}
-		return BoxedOutputMsg(output)
+			defer orch.Close()
+
+			var output string
+			if runID != "" {
+				output, err = CaptureToString(func() error { return orch.ShowRunDetails(runID) })
+				if err != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Error showing run details: %v\n", err)))
+					return
+				}
+			} else {
+				output, err = CaptureToString(orch.ShowHistory)
+				if err != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Error showing history: %v\n", err)))
+					return
+				}
+			}
+			p.Send(BoxedOutputMsg(output))
+		}()
+
+		return nil
 	}
 }
 
 func (m Model) runShellCmd(shellCmd string) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("sh", "-c", shellCmd)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return BoxedOutputMsg(fmt.Sprintf("%s\nError: %v", string(output), err))
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
-		return BoxedOutputMsg(string(output))
+
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			cmd := exec.Command("sh", "-c", shellCmd)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				p.Send(BoxedOutputMsg(fmt.Sprintf("%s\nError: %v", string(output), err)))
+				return
+			}
+			p.Send(BoxedOutputMsg(string(output)))
+		}()
+
+		return nil
 	}
 }
 
@@ -1992,116 +2150,173 @@ func loadProfileConfig(name string) (*config.Config, error) {
 
 func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 	return func() tea.Msg {
-		cfg, err := config.Load(configFile)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error loading config: %v\n", err))
-		}
-		if name == "" {
-			if cfg.Profile.Name != "" {
-				name = cfg.Profile.Name
-			} else {
-				base := filepath.Base(configFile)
-				name = strings.TrimSuffix(base, filepath.Ext(base))
-			}
-		}
-		payload, err := yaml.Marshal(cfg)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error encoding config: %v\n", err))
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
 
-		dataDir, err := config.DefaultDataDir()
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
-		}
-		state, err := checkpoint.New(dataDir)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
-		}
-		defer state.Close()
-
-		if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
-			if strings.Contains(err.Error(), "MSSQL_PG_MIGRATE_MASTER_KEY is not set") {
-				return OutputMsg("Error saving profile: MSSQL_PG_MIGRATE_MASTER_KEY is not set. Start the TUI with the env var set.\n")
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			cfg, err := config.Load(configFile)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error loading config: %v\n", err)))
+				return
 			}
-			return OutputMsg(fmt.Sprintf("Error saving profile: %v\n", err))
-		}
-		return OutputMsg(fmt.Sprintf("Saved profile %q\n", name))
+			if name == "" {
+				if cfg.Profile.Name != "" {
+					name = cfg.Profile.Name
+				} else {
+					base := filepath.Base(configFile)
+					name = strings.TrimSuffix(base, filepath.Ext(base))
+				}
+			}
+			payload, err := yaml.Marshal(cfg)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error encoding config: %v\n", err)))
+				return
+			}
+
+			dataDir, err := config.DefaultDataDir()
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
+				return
+			}
+			state, err := checkpoint.New(dataDir)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err)))
+				return
+			}
+			defer state.Close()
+
+			if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
+				if strings.Contains(err.Error(), "MSSQL_PG_MIGRATE_MASTER_KEY is not set") {
+					p.Send(OutputMsg("Error saving profile: MSSQL_PG_MIGRATE_MASTER_KEY is not set. Start the TUI with the env var set.\n"))
+					return
+				}
+				p.Send(OutputMsg(fmt.Sprintf("Error saving profile: %v\n", err)))
+				return
+			}
+			p.Send(OutputMsg(fmt.Sprintf("Saved profile %q\n", name)))
+		}()
+
+		return nil
 	}
 }
 
 func (m Model) profileListCmd() tea.Cmd {
 	return func() tea.Msg {
-		dataDir, err := config.DefaultDataDir()
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
-		}
-		state, err := checkpoint.New(dataDir)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
-		}
-		defer state.Close()
-
-		profiles, err := state.ListProfiles()
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error listing profiles: %v\n", err))
-		}
-		if len(profiles) == 0 {
-			return BoxedOutputMsg("No profiles found")
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
 
-		var b strings.Builder
-		fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n", "Name", "Description", "Created", "Updated")
-		for _, p := range profiles {
-			desc := strings.ReplaceAll(strings.TrimSpace(p.Description), "\n", " ")
-			fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n",
-				p.Name,
-				desc,
-				p.CreatedAt.Format("2006-01-02 15:04:05"),
-				p.UpdatedAt.Format("2006-01-02 15:04:05"))
-		}
-		return BoxedOutputMsg(b.String())
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			dataDir, err := config.DefaultDataDir()
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
+				return
+			}
+			state, err := checkpoint.New(dataDir)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err)))
+				return
+			}
+			defer state.Close()
+
+			profiles, err := state.ListProfiles()
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error listing profiles: %v\n", err)))
+				return
+			}
+			if len(profiles) == 0 {
+				p.Send(BoxedOutputMsg("No profiles found"))
+				return
+			}
+
+			var b strings.Builder
+			fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n", "Name", "Description", "Created", "Updated")
+			for _, prof := range profiles {
+				desc := strings.ReplaceAll(strings.TrimSpace(prof.Description), "\n", " ")
+				fmt.Fprintf(&b, "%-20s %-40s %-20s %-20s\n",
+					prof.Name,
+					desc,
+					prof.CreatedAt.Format("2006-01-02 15:04:05"),
+					prof.UpdatedAt.Format("2006-01-02 15:04:05"))
+			}
+			p.Send(BoxedOutputMsg(b.String()))
+		}()
+
+		return nil
 	}
 }
 
 func (m Model) profileDeleteCmd(name string) tea.Cmd {
 	return func() tea.Msg {
-		dataDir, err := config.DefaultDataDir()
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
-		state, err := checkpoint.New(dataDir)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
-		}
-		defer state.Close()
 
-		if err := state.DeleteProfile(name); err != nil {
-			return OutputMsg(fmt.Sprintf("Error deleting profile: %v\n", err))
-		}
-		return OutputMsg(fmt.Sprintf("Deleted profile %q\n", name))
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			dataDir, err := config.DefaultDataDir()
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
+				return
+			}
+			state, err := checkpoint.New(dataDir)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err)))
+				return
+			}
+			defer state.Close()
+
+			if err := state.DeleteProfile(name); err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error deleting profile: %v\n", err)))
+				return
+			}
+			p.Send(OutputMsg(fmt.Sprintf("Deleted profile %q\n", name)))
+		}()
+
+		return nil
 	}
 }
 
 func (m Model) profileExportCmd(name, outFile string) tea.Cmd {
 	return func() tea.Msg {
-		dataDir, err := config.DefaultDataDir()
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err))
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
 		}
-		state, err := checkpoint.New(dataDir)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err))
-		}
-		defer state.Close()
 
-		blob, err := state.GetProfile(name)
-		if err != nil {
-			return OutputMsg(fmt.Sprintf("Error loading profile: %v\n", err))
-		}
-		if err := os.WriteFile(outFile, blob, 0600); err != nil {
-			return OutputMsg(fmt.Sprintf("Error exporting profile: %v\n", err))
-		}
-		return OutputMsg(fmt.Sprintf("Exported profile %q to %s\n", name, outFile))
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			dataDir, err := config.DefaultDataDir()
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
+				return
+			}
+			state, err := checkpoint.New(dataDir)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error opening profile store: %v\n", err)))
+				return
+			}
+			defer state.Close()
+
+			blob, err := state.GetProfile(name)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error loading profile: %v\n", err)))
+				return
+			}
+			if err := os.WriteFile(outFile, blob, 0600); err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error exporting profile: %v\n", err)))
+				return
+			}
+			p.Send(OutputMsg(fmt.Sprintf("Exported profile %q to %s\n", name, outFile)))
+		}()
+
+		return nil
 	}
 }
 
