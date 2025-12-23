@@ -1,0 +1,37 @@
+#!/bin/bash
+# Pre-commit hook to run tests before committing
+# Ensures no regressions are introduced
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Check if we're in the right directory
+if [ ! -f "go.mod" ]; then
+    echo "Error: Not in the project root directory"
+    exit 1
+fi
+
+# Run go fmt check
+echo "Checking code formatting..."
+UNFORMATTED=$(gofmt -l . 2>&1 | grep -v vendor || true)
+if [ -n "$UNFORMATTED" ]; then
+    echo "The following files are not formatted:"
+    echo "$UNFORMATTED"
+    echo ""
+    echo "Please run 'go fmt ./...' before committing"
+    exit 1
+fi
+echo "Formatting check passed."
+
+# Run tests
+echo "Running tests..."
+if ! go test ./... -count=1 -short; then
+    echo ""
+    echo "Tests failed. Please fix the failing tests before committing."
+    exit 1
+fi
+
+echo ""
+echo "All pre-commit checks passed."
+exit 0

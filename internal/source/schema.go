@@ -82,8 +82,8 @@ type Column struct {
 type Partition struct {
 	TableName   string `json:"table_name"`
 	PartitionID int    `json:"partition_id"`
-	MinPK       any    `json:"min_pk"`  // For keyset pagination
-	MaxPK       any    `json:"max_pk"`  // For keyset pagination
+	MinPK       any    `json:"min_pk"`    // For keyset pagination
+	MaxPK       any    `json:"max_pk"`    // For keyset pagination
 	StartRow    int64  `json:"start_row"` // For ROW_NUMBER pagination (0-indexed)
 	EndRow      int64  `json:"end_row"`   // For ROW_NUMBER pagination (exclusive)
 	RowCount    int64  `json:"row_count"`
@@ -91,22 +91,22 @@ type Partition struct {
 
 // Index represents a table index
 type Index struct {
-	Name       string   `json:"name"`
-	Columns    []string `json:"columns"`
-	IsUnique   bool     `json:"is_unique"`
-	IsClustered bool    `json:"is_clustered"`
+	Name        string   `json:"name"`
+	Columns     []string `json:"columns"`
+	IsUnique    bool     `json:"is_unique"`
+	IsClustered bool     `json:"is_clustered"`
 	IncludeCols []string `json:"include_cols"` // Non-key included columns
 }
 
 // ForeignKey represents a foreign key constraint
 type ForeignKey struct {
-	Name           string   `json:"name"`
-	Columns        []string `json:"columns"`
-	RefTable       string   `json:"ref_table"`
-	RefSchema      string   `json:"ref_schema"`
-	RefColumns     []string `json:"ref_columns"`
-	OnDelete       string   `json:"on_delete"` // CASCADE, SET NULL, NO ACTION, etc.
-	OnUpdate       string   `json:"on_update"`
+	Name       string   `json:"name"`
+	Columns    []string `json:"columns"`
+	RefTable   string   `json:"ref_table"`
+	RefSchema  string   `json:"ref_schema"`
+	RefColumns []string `json:"ref_columns"`
+	OnDelete   string   `json:"on_delete"` // CASCADE, SET NULL, NO ACTION, etc.
+	OnUpdate   string   `json:"on_update"`
 }
 
 // CheckConstraint represents a CHECK constraint

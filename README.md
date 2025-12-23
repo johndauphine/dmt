@@ -1126,6 +1126,63 @@ Use the Airflow DAG for:
 - Integration with existing Airflow infrastructure
 - Complex workflow orchestration
 
+## Development
+
+### Running Tests
+
+The project includes comprehensive unit tests for CLI parsing, orchestrator logic, and profile encryption.
+
+```bash
+# Run all tests
+make test
+
+# Run tests with short flag (faster, skips slow tests)
+make test-short
+
+# Generate coverage report
+make test-coverage
+# Open coverage.html in browser to view results
+```
+
+### Pre-Commit Hooks
+
+To ensure tests pass before committing:
+
+```bash
+# Set up git hooks (one-time setup)
+make setup-hooks
+
+# This configures git to use .githooks/pre-commit which:
+# - Checks code formatting
+# - Runs all tests
+# - Blocks commit if any check fails
+```
+
+### Building
+
+```bash
+# Build binary
+make build
+
+# Build for all platforms
+make build-all
+
+# Run all checks (format + tests)
+make check
+```
+
+### Test Databases (Docker)
+
+For integration testing:
+
+```bash
+# Start local SQL Server and PostgreSQL
+make test-dbs-up
+
+# Stop and remove test databases
+make test-dbs-down
+```
+
 ## License
 
 MIT

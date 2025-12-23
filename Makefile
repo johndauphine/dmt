@@ -1,4 +1,4 @@
-.PHONY: build clean test run install
+.PHONY: build clean test test-short test-coverage run install check setup-hooks
 
 # Build variables
 BINARY_NAME=mssql-pg-migrate
@@ -37,6 +37,14 @@ clean:
 test:
 	$(GOTEST) -v ./...
 
+test-short:
+	$(GOTEST) ./... -short
+
+test-coverage:
+	$(GOTEST) ./... -coverprofile=coverage.out
+	$(GOCMD) tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report: coverage.html"
+
 deps:
 	$(GOMOD) download
 	$(GOMOD) tidy
@@ -61,3 +69,12 @@ test-dbs-up:
 
 test-dbs-down:
 	docker rm -f mssql-test pg-test 2>/dev/null || true
+
+# Pre-commit hooks
+setup-hooks:
+	git config core.hooksPath .githooks
+	@echo "Git hooks configured to use .githooks directory"
+
+# Run all checks (useful for CI)
+check: fmt test
+	@echo "All checks passed"

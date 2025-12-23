@@ -35,17 +35,17 @@ type AutoConfig struct {
 	CPUCores             int
 
 	// Original values (before auto-tuning)
-	OriginalWorkers            int
-	OriginalChunkSize          int
-	OriginalReadAheadBuffers   int
-	OriginalMaxPartitions      int
-	OriginalMaxMssqlConns      int
-	OriginalMaxPgConns         int
-	OriginalWriteAheadWriters  int
-	OriginalParallelReaders    int
-	OriginalMSSQLRowsPerBatch  int
-	OriginalLargeTableThresh   int64
-	OriginalSampleSize         int
+	OriginalWorkers           int
+	OriginalChunkSize         int
+	OriginalReadAheadBuffers  int
+	OriginalMaxPartitions     int
+	OriginalMaxMssqlConns     int
+	OriginalMaxPgConns        int
+	OriginalWriteAheadWriters int
+	OriginalParallelReaders   int
+	OriginalMSSQLRowsPerBatch int
+	OriginalLargeTableThresh  int64
+	OriginalSampleSize        int
 
 	// Target memory used for calculations
 	TargetMemoryMB int64

@@ -65,9 +65,9 @@ func TestSetFormat_Text(t *testing.T) {
 
 func TestJSONLogLevels(t *testing.T) {
 	tests := []struct {
-		name     string
-		logFunc  func(string, ...interface{})
-		level    string
+		name    string
+		logFunc func(string, ...interface{})
+		level   string
 	}{
 		{"debug", Debug, "debug"},
 		{"info", Info, "info"},

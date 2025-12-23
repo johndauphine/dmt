@@ -51,24 +51,24 @@ const (
 
 // Model is the main TUI model
 type Model struct {
-	viewport      viewport.Model
+	viewport       viewport.Model
 	wizardViewport viewport.Model // Secondary viewport for wizard during migration
-	textInput     textinput.Model
-	ready         bool
-	gitInfo       GitInfo
-	cwd           string
-	err           error
-	width         int
-	height        int
-	history       []string
-	historyIdx    int
-	logBuffer     string   // Persistent buffer for logs
-	wizardBuffer  string   // Buffer for wizard output (used during split view)
-	lineBuffer    string   // Buffer for incoming partial lines
-	progressLine  string   // Current progress bar line (updated in-place)
-	suggestions   []string // Auto-completion suggestions
-	suggestionIdx int      // Currently selected suggestion index
-	lastInput     string   // Last input value to prevent unnecessary suggestion regeneration
+	textInput      textinput.Model
+	ready          bool
+	gitInfo        GitInfo
+	cwd            string
+	err            error
+	width          int
+	height         int
+	history        []string
+	historyIdx     int
+	logBuffer      string   // Persistent buffer for logs
+	wizardBuffer   string   // Buffer for wizard output (used during split view)
+	lineBuffer     string   // Buffer for incoming partial lines
+	progressLine   string   // Current progress bar line (updated in-place)
+	suggestions    []string // Auto-completion suggestions
+	suggestionIdx  int      // Currently selected suggestion index
+	lastInput      string   // Last input value to prevent unnecessary suggestion regeneration
 
 	// Migration state
 	migrations       map[string]*MigrationInstance // Active migrations by ID
@@ -122,17 +122,17 @@ type BoxedOutputMsg string
 
 // MigrationInstance tracks a single running migration
 type MigrationInstance struct {
-	ID           string              // Unique ID for this migration
-	ConfigFile   string              // Config file path
-	ProfileName  string              // Profile name (if used)
-	Cancel       context.CancelFunc  // Cancel function for this migration
-	Buffer       string              // Output buffer for this migration
-	LineBuffer   string              // Buffer for incoming partial lines
-	ProgressLine string              // Current progress bar line
-	Status       string              // "running", "completed", "failed", "cancelled"
+	ID           string             // Unique ID for this migration
+	ConfigFile   string             // Config file path
+	ProfileName  string             // Profile name (if used)
+	Cancel       context.CancelFunc // Cancel function for this migration
+	Buffer       string             // Output buffer for this migration
+	LineBuffer   string             // Buffer for incoming partial lines
+	ProgressLine string             // Current progress bar line
+	Status       string             // "running", "completed", "failed", "cancelled"
 	StartedAt    time.Time
-	Viewport     viewport.Model      // Scrollable viewport for this migration
-	UserScrolled bool                // True if user manually scrolled (disables auto-scroll)
+	Viewport     viewport.Model // Scrollable viewport for this migration
+	UserScrolled bool           // True if user manually scrolled (disables auto-scroll)
 }
 
 // MigrationOutputMsg routes output to a specific migration
@@ -1074,7 +1074,7 @@ func (m Model) renderSplitView(suggestionsView string) string {
 
 	// Style for the split panes (both with consistent padding)
 	migrationStyle := lipgloss.NewStyle().
-		Width(m.width - 2).
+		Width(m.width-2).
 		Height(migrationHeight).
 		PaddingLeft(1).
 		Border(lipgloss.RoundedBorder(), false, false, true, false). // Bottom border only
