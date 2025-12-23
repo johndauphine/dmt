@@ -474,7 +474,7 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 	updateSQL, insertSQL := buildMSSQLUpsertSQL(schema, table, stagingTable, cols, pkCols)
 
 	// For small tables, execute single UPDATE + INSERT
-	if rowCount <= 100000 || maxPK == 0 {
+	if rowCount <= 50000 || maxPK == 0 {
 		if updateSQL != "" {
 			if _, err := p.db.ExecContext(ctx, updateSQL+" OPTION(MAXDOP 1)"); err != nil {
 				return fmt.Errorf("executing update: %w", err)
@@ -485,8 +485,9 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 		}
 	} else {
 		// Chunked UPDATE + INSERT for large tables
-		// Use smaller chunks (10K) to reduce memory pressure on SQL Server
-		chunkSize := int64(10000)
+		// Use 5K chunks - balance between performance and memory pressure
+		chunkSize := int64(5000)
+		chunksProcessed := 0
 
 		for start := minPK; start <= maxPK; start += chunkSize {
 			end := start + chunkSize - 1
@@ -502,6 +503,12 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 			}
 			if _, err := p.db.ExecContext(ctx, chunkedInsert+" OPTION(MAXDOP 1)"); err != nil {
 				return fmt.Errorf("executing chunked insert (pk %d-%d): %w", start, end, err)
+			}
+
+			chunksProcessed++
+			// Issue CHECKPOINT every 10 chunks (50K rows) to release memory buffers
+			if chunksProcessed%10 == 0 {
+				p.db.ExecContext(ctx, "CHECKPOINT")
 			}
 		}
 	}
