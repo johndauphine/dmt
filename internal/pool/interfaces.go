@@ -67,6 +67,10 @@ type TargetPool interface {
 	// ExecuteUpsertMerge runs final MERGE after all chunks staged (MSSQL only, no-op for PG)
 	ExecuteUpsertMerge(ctx context.Context, schema, table string, cols []string, pkCols []string) error
 
+	// CheckUpsertStagingReady checks if staging table exists and has data (for resume)
+	// Returns (exists, rowCount, error) - used to skip bulk insert on resume if staging is ready
+	CheckUpsertStagingReady(ctx context.Context, schema, table string) (bool, int64, error)
+
 	// Pool info
 	MaxConns() int
 	DBType() string // "mssql" or "postgres"

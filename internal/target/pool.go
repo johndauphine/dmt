@@ -193,6 +193,11 @@ func (p *Pool) ExecuteUpsertMerge(ctx context.Context, schema, table string, col
 	return nil
 }
 
+// CheckUpsertStagingReady is a no-op for PostgreSQL (doesn't use staging tables)
+func (p *Pool) CheckUpsertStagingReady(ctx context.Context, schema, table string) (bool, int64, error) {
+	return false, 0, nil
+}
+
 // ResetSequence resets identity sequence to max value
 func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table) error {
 	// Find identity column

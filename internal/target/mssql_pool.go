@@ -399,6 +399,28 @@ func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols 
 	return p.WriteChunk(ctx, schema, stagingTable, cols, rows)
 }
 
+// CheckUpsertStagingReady checks if staging table exists and has data (for resume)
+// Returns (exists, rowCount, error)
+func (p *MSSQLPool) CheckUpsertStagingReady(ctx context.Context, schema, table string) (bool, int64, error) {
+	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
+
+	// Check if staging table exists and get row count
+	sql := fmt.Sprintf(`
+		IF OBJECT_ID('%s', 'U') IS NOT NULL
+			SELECT CAST(1 AS BIT), COUNT_BIG(*) FROM %s
+		ELSE
+			SELECT CAST(0 AS BIT), CAST(0 AS BIGINT)`,
+		stagingTable, stagingTable)
+
+	var exists bool
+	var rowCount int64
+	if err := p.db.QueryRowContext(ctx, sql).Scan(&exists, &rowCount); err != nil {
+		return false, 0, fmt.Errorf("checking staging table: %w", err)
+	}
+
+	return exists, rowCount, nil
+}
+
 // PrepareUpsertStaging creates the staging table before transfer
 func (p *MSSQLPool) PrepareUpsertStaging(ctx context.Context, schema, table string) error {
 	stagingTable := fmt.Sprintf("%s.staging_%s", schema, table)
@@ -453,15 +475,18 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 
 	// For small tables, execute single UPDATE + INSERT
 	if rowCount <= 100000 || maxPK == 0 {
-		if _, err := p.db.ExecContext(ctx, updateSQL); err != nil {
-			return fmt.Errorf("executing update: %w", err)
+		if updateSQL != "" {
+			if _, err := p.db.ExecContext(ctx, updateSQL+" OPTION(MAXDOP 1)"); err != nil {
+				return fmt.Errorf("executing update: %w", err)
+			}
 		}
-		if _, err := p.db.ExecContext(ctx, insertSQL); err != nil {
+		if _, err := p.db.ExecContext(ctx, insertSQL+" OPTION(MAXDOP 1)"); err != nil {
 			return fmt.Errorf("executing insert: %w", err)
 		}
 	} else {
 		// Chunked UPDATE + INSERT for large tables
-		chunkSize := int64(50000)
+		// Use smaller chunks (10K) to reduce memory pressure on SQL Server
+		chunkSize := int64(10000)
 
 		for start := minPK; start <= maxPK; start += chunkSize {
 			end := start + chunkSize - 1
@@ -470,10 +495,12 @@ func (p *MSSQLPool) ExecuteUpsertMerge(ctx context.Context, schema, table string
 			}
 
 			chunkedUpdate, chunkedInsert := buildMSSQLChunkedUpsertSQL(schema, table, stagingTable, cols, pkCols, pkCol, start, end)
-			if _, err := p.db.ExecContext(ctx, chunkedUpdate); err != nil {
-				return fmt.Errorf("executing chunked update (pk %d-%d): %w", start, end, err)
+			if chunkedUpdate != "" {
+				if _, err := p.db.ExecContext(ctx, chunkedUpdate+" OPTION(MAXDOP 1)"); err != nil {
+					return fmt.Errorf("executing chunked update (pk %d-%d): %w", start, end, err)
+				}
 			}
-			if _, err := p.db.ExecContext(ctx, chunkedInsert); err != nil {
+			if _, err := p.db.ExecContext(ctx, chunkedInsert+" OPTION(MAXDOP 1)"); err != nil {
 				return fmt.Errorf("executing chunked insert (pk %d-%d): %w", start, end, err)
 			}
 		}
@@ -518,16 +545,34 @@ func buildMSSQLUpsertSQL(schema, table, stagingTable string, cols []string, pkCo
 		srcCols[i] = fmt.Sprintf("s.%s", quoteMSSQLIdent(col))
 	}
 
-	// UPDATE: Join staging to target on PK, update non-PK columns
+	// UPDATE: Join staging to target on PK, update only changed non-PK columns
+	// Uses EXISTS(SELECT s.cols EXCEPT SELECT t.cols) for NULL-safe change detection
 	var updateSQL string
 	if len(setClauses) > 0 {
+		// Build column list for change detection (non-PK columns only)
+		var nonPKCols []string
+		for _, col := range cols {
+			if !pkSet[col] {
+				nonPKCols = append(nonPKCols, quoteMSSQLIdent(col))
+			}
+		}
+		sNonPKCols := make([]string, len(nonPKCols))
+		tNonPKCols := make([]string, len(nonPKCols))
+		for i, col := range nonPKCols {
+			sNonPKCols[i] = "s." + col
+			tNonPKCols[i] = "t." + col
+		}
+
 		updateSQL = fmt.Sprintf(`UPDATE t SET %s
 FROM %s t
-INNER JOIN %s s ON %s`,
+INNER JOIN %s s ON %s
+WHERE EXISTS (SELECT %s EXCEPT SELECT %s)`,
 			strings.Join(setClauses, ", "),
 			targetTable,
 			stagingTable,
-			pkJoinClause)
+			pkJoinClause,
+			strings.Join(sNonPKCols, ", "),
+			strings.Join(tNonPKCols, ", "))
 	}
 
 	// INSERT: Insert rows from staging that don't exist in target
@@ -582,18 +627,36 @@ func buildMSSQLChunkedUpsertSQL(schema, table, stagingTable string, cols []strin
 	// PK range filter
 	pkRangeFilter := fmt.Sprintf("s.%s BETWEEN %d AND %d", quoteMSSQLIdent(pkCol), startPK, endPK)
 
-	// UPDATE: Join staging to target on PK within range
+	// UPDATE: Join staging to target on PK within range, only update changed rows
+	// Uses EXISTS(SELECT s.cols EXCEPT SELECT t.cols) for NULL-safe change detection
 	var updateSQL string
 	if len(setClauses) > 0 {
+		// Build column list for change detection (non-PK columns only)
+		var nonPKCols []string
+		for _, col := range cols {
+			if !pkSet[col] {
+				nonPKCols = append(nonPKCols, quoteMSSQLIdent(col))
+			}
+		}
+		sNonPKCols := make([]string, len(nonPKCols))
+		tNonPKCols := make([]string, len(nonPKCols))
+		for i, col := range nonPKCols {
+			sNonPKCols[i] = "s." + col
+			tNonPKCols[i] = "t." + col
+		}
+
 		updateSQL = fmt.Sprintf(`UPDATE t SET %s
 FROM %s t
 INNER JOIN %s s ON %s
-WHERE %s`,
+WHERE %s
+AND EXISTS (SELECT %s EXCEPT SELECT %s)`,
 			strings.Join(setClauses, ", "),
 			targetTable,
 			stagingTable,
 			pkJoinClause,
-			pkRangeFilter)
+			pkRangeFilter,
+			strings.Join(sNonPKCols, ", "),
+			strings.Join(tNonPKCols, ", "))
 	}
 
 	// INSERT: Insert rows from staging (within range) that don't exist in target
