@@ -42,8 +42,12 @@ type Run struct {
 	Phase        string // Current phase: initializing, transferring, finalizing, validating, complete
 	SourceSchema string
 	TargetSchema string
-	Config       string
-	ProfileName  string
+	Config string
+	// ConfigHash is the hash of the migration config, used for change detection on resume.
+	// NOTE: Config hash validation on resume is only enforced when using file-based state
+	// (via --state-file). The default SQLite backend does not currently persist this field.
+	ConfigHash  string
+	ProfileName string
 	ConfigPath   string
 	Error        string // Error message if status is "failed"
 }

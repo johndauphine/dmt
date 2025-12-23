@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -37,6 +38,23 @@ func main() {
 				Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 			},
 			&cli.StringFlag{
+				Name:  "run-id",
+				Usage: "Explicit run ID (for Airflow, default: auto-generated UUID)",
+			},
+			&cli.BoolFlag{
+				Name:  "output-json",
+				Usage: "Output JSON result to stdout on completion (logs go to stderr)",
+			},
+			&cli.StringFlag{
+				Name:  "output-file",
+				Usage: "Write JSON result to file on completion",
+			},
+			&cli.StringFlag{
+				Name:  "log-format",
+				Value: "text",
+				Usage: "Log format: text or json",
+			},
+			&cli.StringFlag{
 				Name:  "verbosity",
 				Value: "info",
 				Usage: "Log verbosity level (debug, info, warn, error)",
@@ -49,6 +67,17 @@ func main() {
 				return err
 			}
 			logging.SetLevel(level)
+
+			// Set log format
+			if c.String("log-format") == "json" {
+				logging.SetFormat("json")
+			}
+
+			// Redirect logs to stderr when JSON output is enabled
+			if c.Bool("output-json") || c.String("output-file") != "" {
+				logging.SetOutput(os.Stderr)
+			}
+
 			return nil
 		},
 		Action: func(c *cli.Context) error {
@@ -102,6 +131,10 @@ func main() {
 						Name:  "state-file",
 						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 					},
+					&cli.BoolFlag{
+						Name:  "force-resume",
+						Usage: "Force resume even if config has changed",
+					},
 				},
 			},
 			{
@@ -116,6 +149,10 @@ func main() {
 					&cli.StringFlag{
 						Name:  "state-file",
 						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
+					},
+					&cli.BoolFlag{
+						Name:  "json",
+						Usage: "Output status as JSON",
 					},
 				},
 			},
@@ -247,6 +284,7 @@ func runMigration(c *cli.Context) error {
 	// Build orchestrator options
 	opts := orchestrator.Options{
 		StateFile: getStateFile(c),
+		RunID:     c.String("run-id"),
 	}
 
 	// Create orchestrator
@@ -266,12 +304,29 @@ func runMigration(c *cli.Context) error {
 
 	go func() {
 		<-sigCh
-		fmt.Println("\nInterrupted. Saving checkpoint...")
+		fmt.Fprintln(os.Stderr, "\nInterrupted. Saving checkpoint...")
 		cancel()
 	}()
 
 	// Run migration
-	return orch.Run(ctx)
+	runErr := orch.Run(ctx)
+
+	// Output JSON result if requested
+	if c.Bool("output-json") || c.String("output-file") != "" {
+		result, err := orch.GetLastRunResult()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to get run result: %v\n", err)
+		} else {
+			if runErr != nil {
+				result.Error = runErr.Error()
+			}
+			if err := outputJSON(c, result); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to output JSON: %v\n", err)
+			}
+		}
+	}
+
+	return runErr
 }
 
 func resumeMigration(c *cli.Context) error {
@@ -281,7 +336,8 @@ func resumeMigration(c *cli.Context) error {
 	}
 
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		StateFile:   getStateFile(c),
+		ForceResume: c.Bool("force-resume"),
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
@@ -298,11 +354,28 @@ func resumeMigration(c *cli.Context) error {
 
 	go func() {
 		<-sigCh
-		fmt.Println("\nInterrupted. Saving checkpoint...")
+		fmt.Fprintln(os.Stderr, "\nInterrupted. Saving checkpoint...")
 		cancel()
 	}()
 
-	return orch.Resume(ctx)
+	runErr := orch.Resume(ctx)
+
+	// Output JSON result if requested
+	if c.Bool("output-json") || c.String("output-file") != "" {
+		result, err := orch.GetLastRunResult()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to get run result: %v\n", err)
+		} else {
+			if runErr != nil {
+				result.Error = runErr.Error()
+			}
+			if err := outputJSON(c, result); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to output JSON: %v\n", err)
+			}
+		}
+	}
+
+	return runErr
 }
 
 func showStatus(c *cli.Context) error {
@@ -320,6 +393,26 @@ func showStatus(c *cli.Context) error {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
 	defer orch.Close()
+
+	// JSON output
+	if c.Bool("json") {
+		result, err := orch.GetStatusResult()
+		if err != nil {
+			// Return empty status for no active migration
+			emptyResult := &orchestrator.StatusResult{
+				Status: "no_active_migration",
+			}
+			data, _ := json.MarshalIndent(emptyResult, "", "  ")
+			fmt.Println(string(data))
+			return nil
+		}
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal status: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
 
 	return orch.ShowStatus()
 }
@@ -370,12 +463,16 @@ func showHistory(c *cli.Context) error {
 // getStateFile returns the state file path from the context.
 // Checks both command-level and global flags.
 func getStateFile(c *cli.Context) string {
-	// First check command-level flag
-	if sf := c.String("state-file"); sf != "" {
-		return sf
+	// Check command-level flag first, then walk up the context lineage
+	for _, ctx := range c.Lineage() {
+		if ctx == nil {
+			continue
+		}
+		if sf := ctx.String("state-file"); sf != "" {
+			return sf
+		}
 	}
-	// Fall back to global flag
-	return c.String("state-file")
+	return ""
 }
 
 func loadConfigWithOrigin(c *cli.Context) (*config.Config, string, string, error) {
@@ -523,5 +620,27 @@ func exportProfile(c *cli.Context) error {
 		return err
 	}
 	fmt.Printf("Exported profile %q to %s\n", name, outPath)
+	return nil
+}
+
+// outputJSON writes the migration result as JSON to stdout and/or a file
+func outputJSON(c *cli.Context, result *orchestrator.MigrationResult) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal result: %w", err)
+	}
+
+	// Write to stdout if --output-json flag is set
+	if c.Bool("output-json") {
+		fmt.Println(string(data))
+	}
+
+	// Write to file if --output-file flag is set
+	if outputFile := c.String("output-file"); outputFile != "" {
+		if err := os.WriteFile(outputFile, data, 0600); err != nil {
+			return fmt.Errorf("failed to write output file: %w", err)
+		}
+	}
+
 	return nil
 }

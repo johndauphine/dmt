@@ -2,12 +2,15 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +59,7 @@ type Orchestrator struct {
 	tables     []source.Table
 	runProfile string
 	runConfig  string
+	opts       Options
 }
 
 // Options configures the orchestrator.
@@ -63,6 +67,60 @@ type Options struct {
 	// StateFile overrides SQLite with a YAML state file (for Airflow).
 	// If empty, uses SQLite in DataDir.
 	StateFile string
+
+	// RunID allows specifying a deterministic run ID (for Airflow).
+	// If empty, a UUID is generated.
+	RunID string
+
+	// ForceResume bypasses config hash validation on resume.
+	ForceResume bool
+}
+
+// computeConfigHash returns a short hex hash of the sanitized config.
+func computeConfigHash(cfg *config.Config) string {
+	configJSON, _ := json.Marshal(cfg.Sanitized())
+	hash := sha256.Sum256(configJSON)
+	return hex.EncodeToString(hash[:8])
+}
+
+// MigrationResult contains the outcome of a migration run.
+type MigrationResult struct {
+	RunID           string        `json:"run_id"`
+	Status          string        `json:"status"`
+	StartedAt       time.Time     `json:"started_at"`
+	CompletedAt     time.Time     `json:"completed_at"`
+	DurationSeconds float64       `json:"duration_seconds"`
+	TablesTotal     int           `json:"tables_total"`
+	TablesSuccess   int           `json:"tables_success"`
+	TablesFailed    int           `json:"tables_failed"`
+	RowsTransferred int64         `json:"rows_transferred"`
+	RowsPerSecond   int64         `json:"rows_per_second"`
+	FailedTables    []string      `json:"failed_tables"`
+	TableStats      []TableResult `json:"table_stats"`
+	Error           string        `json:"error,omitempty"`
+}
+
+// TableResult contains the outcome for a single table.
+type TableResult struct {
+	Name   string `json:"name"`
+	Rows   int64  `json:"rows"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// StatusResult contains the current status of a migration.
+type StatusResult struct {
+	RunID           string    `json:"run_id"`
+	Status          string    `json:"status"`
+	Phase           string    `json:"phase"`
+	StartedAt       time.Time `json:"started_at"`
+	TablesTotal     int       `json:"tables_total"`
+	TablesComplete  int       `json:"tables_complete"`
+	TablesRunning   int       `json:"tables_running"`
+	TablesPending   int       `json:"tables_pending"`
+	TablesFailed    int       `json:"tables_failed"`
+	RowsTransferred int64     `json:"rows_transferred"`
+	ProgressPercent float64   `json:"progress_percent"`
 }
 
 // New creates a new orchestrator with default options (SQLite state).
@@ -125,6 +183,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		state:      state,
 		progress:   progress.New(),
 		notifier:   notifier,
+		opts:       opts,
 	}, nil
 }
 
@@ -141,9 +200,13 @@ func (o *Orchestrator) SetRunContext(profileName, configPath string) {
 	o.runConfig = configPath
 }
 
-// Run executes a new migration
+// Run executes a new migration.
 func (o *Orchestrator) Run(ctx context.Context) error {
-	runID := uuid.New().String()[:8]
+	// Use provided run ID or generate a new one
+	runID := o.opts.RunID
+	if runID == "" {
+		runID = uuid.New().String()[:8]
+	}
 	startTime := time.Now()
 	logging.Info("Starting migration run: %s", runID)
 	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
@@ -1004,6 +1067,15 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		return fmt.Errorf("incomplete run %s is obsolete - a later migration with the same schemas completed successfully. Use 'run' to start a new migration", run.ID)
 	}
 
+	// Validate config hash if stored (prevents resuming with different config)
+	if run.ConfigHash != "" && !o.opts.ForceResume {
+		currentHash := computeConfigHash(o.config)
+		if run.ConfigHash != currentHash {
+			return fmt.Errorf("config changed since run started (hash %s != %s), use --force-resume to override",
+				run.ConfigHash, currentHash)
+		}
+	}
+
 	startTime := time.Now()
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
 
@@ -1506,6 +1578,197 @@ func runOrigin(r *checkpoint.Run) string {
 		return "config:" + r.ConfigPath
 	}
 	return ""
+}
+
+// GetLastRunResult builds a MigrationResult from the last run.
+func (o *Orchestrator) GetLastRunResult() (*MigrationResult, error) {
+	run, err := o.state.GetLastIncompleteRun()
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		// Try to get the most recent run from history
+		runs, err := o.state.GetAllRuns()
+		if err != nil {
+			return nil, err
+		}
+		if len(runs) == 0 {
+			return nil, fmt.Errorf("no runs found")
+		}
+		run = &runs[0] // Most recent
+	}
+	return o.buildResultFromRun(run)
+}
+
+// GetRunResult builds a MigrationResult for a specific run ID.
+func (o *Orchestrator) GetRunResult(runID string) (*MigrationResult, error) {
+	run, err := o.state.GetRunByID(runID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, fmt.Errorf("run %s not found", runID)
+	}
+	return o.buildResultFromRun(run)
+}
+
+func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult, error) {
+	tasks, err := o.state.GetTasksWithProgress(run.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &MigrationResult{
+		RunID:      run.ID,
+		Status:     run.Status,
+		StartedAt:  run.StartedAt,
+		TableStats: make([]TableResult, 0),
+	}
+
+	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
+		result.CompletedAt = *run.CompletedAt
+		result.DurationSeconds = run.CompletedAt.Sub(run.StartedAt).Seconds()
+	} else if run.Status == "running" {
+		result.DurationSeconds = time.Since(run.StartedAt).Seconds()
+	}
+
+	if run.Error != "" {
+		result.Error = run.Error
+	}
+
+	var totalRows int64
+	tableMap := make(map[string]*TableResult)
+
+	for _, t := range tasks {
+		if !strings.HasPrefix(t.TaskKey, "transfer:") {
+			continue
+		}
+
+		// Extract table name from task key (transfer:schema.table or transfer:schema.table:pN)
+		tableName := strings.TrimPrefix(t.TaskKey, "transfer:")
+		if idx := strings.LastIndex(tableName, ":p"); idx > 0 {
+			tableName = tableName[:idx] // Remove partition suffix
+		}
+
+		if _, exists := tableMap[tableName]; !exists {
+			tableMap[tableName] = &TableResult{
+				Name:   tableName,
+				Status: "pending",
+			}
+			result.TablesTotal++
+		}
+
+		tr := tableMap[tableName]
+		tr.Rows += t.RowsDone
+		totalRows += t.RowsDone
+
+		// Update status (success only if all partitions succeed)
+		switch t.Status {
+		case "success":
+			if tr.Status != "failed" {
+				tr.Status = "success"
+			}
+		case "failed":
+			tr.Status = "failed"
+			tr.Error = t.ErrorMessage
+		case "running":
+			if tr.Status != "failed" {
+				tr.Status = "running"
+			}
+		}
+	}
+
+	// Build table stats list, count successes/failures, and sort for deterministic output
+	tableNames := make([]string, 0, len(tableMap))
+	for name := range tableMap {
+		tableNames = append(tableNames, name)
+	}
+	sort.Strings(tableNames)
+
+	for _, name := range tableNames {
+		tr := tableMap[name]
+		result.TableStats = append(result.TableStats, *tr)
+		switch tr.Status {
+		case "success":
+			result.TablesSuccess++
+		case "failed":
+			result.TablesFailed++
+			result.FailedTables = append(result.FailedTables, tr.Name)
+		}
+	}
+
+	result.RowsTransferred = totalRows
+	if result.DurationSeconds > 0 {
+		result.RowsPerSecond = int64(float64(totalRows) / result.DurationSeconds)
+	}
+
+	if result.FailedTables == nil {
+		result.FailedTables = []string{}
+	}
+
+	return result, nil
+}
+
+// GetStatusResult builds a StatusResult for the current/last run.
+func (o *Orchestrator) GetStatusResult() (*StatusResult, error) {
+	run, err := o.state.GetLastIncompleteRun()
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, fmt.Errorf("no active migration")
+	}
+
+	// Check if superseded
+	superseded, err := o.state.HasSuccessfulRunAfter(run)
+	if err != nil {
+		return nil, err
+	}
+	if superseded {
+		return nil, fmt.Errorf("no active migration")
+	}
+
+	total, pending, running, success, failed, err := o.state.GetRunStats(run.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	tasks, err := o.state.GetTasksWithProgress(run.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	var totalRows, totalRowsDone int64
+	for _, t := range tasks {
+		if strings.HasPrefix(t.TaskKey, "transfer:") {
+			totalRows += t.RowsTotal
+			totalRowsDone += t.RowsDone
+		}
+	}
+
+	phase := run.Phase
+	if phase == "" {
+		phase = "initializing"
+	}
+
+	var progressPct float64
+	if totalRows > 0 {
+		progressPct = float64(totalRowsDone) / float64(totalRows) * 100
+	}
+
+	return &StatusResult{
+		RunID:           run.ID,
+		Status:          run.Status,
+		Phase:           phase,
+		StartedAt:       run.StartedAt,
+		TablesTotal:     total,
+		TablesComplete:  success,
+		TablesRunning:   running,
+		TablesPending:   pending,
+		TablesFailed:    failed,
+		RowsTransferred: totalRowsDone,
+		ProgressPercent: progressPct,
+	}, nil
 }
 
 // Unused import suppression

@@ -148,6 +148,165 @@ tables:
 | Best for | Desktop, TUI | Airflow, Kubernetes, CI/CD |
 | Persistence | Local database | Any storage (S3, NFS, etc.) |
 
+## Airflow Integration
+
+The CLI provides first-class support for Airflow with machine-readable outputs and deterministic run IDs.
+
+### Airflow CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--run-id <id>` | Explicit run ID (default: auto-generated UUID). Use `{{ dag_run.run_id }}` in Airflow. |
+| `--output-json` | Output JSON result to stdout on completion (logs go to stderr) |
+| `--output-file <path>` | Write JSON result to file on completion |
+| `--log-format=json` | Structured JSONL logging (one JSON object per line) |
+| `status --json` | Output current status as JSON (for Airflow sensors) |
+| `--force-resume` | Bypass config hash validation on resume |
+
+### BashOperator Example
+
+```python
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime
+
+with DAG('mssql_to_pg_migration', start_date=datetime(2025, 1, 1)) as dag:
+
+    migrate = BashOperator(
+        task_id='migrate_data',
+        bash_command='''
+            /opt/mssql-pg-migrate \
+                --run-id "{{ dag_run.run_id }}" \
+                --output-json \
+                --output-file /tmp/{{ dag_run.run_id }}_result.json \
+                --log-format=json \
+                --state-file /tmp/{{ dag_run.run_id }}_state.yaml \
+                -c /opt/configs/migration.yaml \
+                run
+        ''',
+        do_xcom_push=True,  # Captures stdout JSON for downstream tasks
+    )
+```
+
+### KubernetesPodOperator Example
+
+```python
+from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import KubernetesPodOperator
+
+migrate = KubernetesPodOperator(
+    task_id='migrate_data',
+    name='mssql-pg-migrate',
+    image='your-registry/mssql-pg-migrate:latest',
+    cmds=['/mssql-pg-migrate'],
+    arguments=[
+        '--run-id', '{{ dag_run.run_id }}',
+        '--output-json',
+        '--log-format', 'json',
+        '--state-file', '/data/state.yaml',
+        '-c', '/config/migration.yaml',
+        'run'
+    ],
+    volumes=[...],
+    volume_mounts=[...],
+    get_logs=True,
+    do_xcom_push=True,
+)
+```
+
+### JSON Output Format
+
+**Migration Result** (`--output-json` / `--output-file`):
+```json
+{
+  "run_id": "dag_2025_01_15",
+  "status": "success",
+  "started_at": "2025-01-15T10:00:00Z",
+  "completed_at": "2025-01-15T10:01:34Z",
+  "duration_seconds": 94,
+  "tables_total": 9,
+  "tables_success": 9,
+  "tables_failed": 0,
+  "rows_transferred": 19310703,
+  "rows_per_second": 205432,
+  "failed_tables": [],
+  "table_stats": [
+    {"name": "Users", "rows": 299398, "status": "success"},
+    {"name": "Posts", "rows": 3729195, "status": "success"}
+  ]
+}
+```
+
+**Status Result** (`status --json` - for Airflow sensors):
+```json
+{
+  "run_id": "dag_2025_01_15",
+  "status": "running",
+  "phase": "transferring",
+  "started_at": "2025-01-15T10:00:00Z",
+  "tables_total": 9,
+  "tables_complete": 5,
+  "tables_running": 2,
+  "tables_pending": 2,
+  "rows_transferred": 12500000,
+  "progress_percent": 65
+}
+```
+
+**JSON Log Format** (`--log-format=json` - JSONL to stderr):
+```json
+{"ts":"2025-01-15T10:00:01Z","level":"info","msg":"Starting migration run: dag_2025_01_15"}
+{"ts":"2025-01-15T10:00:02Z","level":"info","msg":"Found 9 tables"}
+{"ts":"2025-01-15T10:00:03Z","level":"info","msg":"Transferring data..."}
+```
+
+### Config Hash Validation
+
+When using `--state-file`, the tool stores a hash of the config at run start. On `resume`:
+
+- If the config has changed, resume is blocked with an error showing both hashes
+- Use `--force-resume` to bypass this check (useful for intentional config tweaks)
+- This prevents accidentally resuming with mismatched source/target settings
+
+```bash
+# Config changed error
+Error: config changed since run started (hash 6abfe692 != 1cddb8e0), use --force-resume to override
+
+# Force resume anyway
+./mssql-pg-migrate --state-file state.yaml -c config.yaml resume --force-resume
+```
+
+### Airflow Sensor Pattern
+
+Poll migration status from a separate task:
+
+```python
+from airflow.sensors.python import PythonSensor
+import subprocess
+import json
+
+def check_migration_status(**context):
+    result = subprocess.run([
+        '/opt/mssql-pg-migrate',
+        '--state-file', f"/tmp/{context['dag_run'].run_id}_state.yaml",
+        '-c', '/opt/configs/migration.yaml',
+        'status', '--json'
+    ], capture_output=True, text=True)
+
+    status = json.loads(result.stdout)
+    if status['status'] == 'success':
+        return True
+    elif status['status'] == 'failed':
+        raise Exception(f"Migration failed: {status.get('error')}")
+    return False  # Still running
+
+sensor = PythonSensor(
+    task_id='wait_for_migration',
+    python_callable=check_migration_status,
+    poke_interval=60,
+    timeout=3600,
+)
+```
+
 ## Performance
 
 - **575,000 rows/sec** MSSQL → PostgreSQL (auto-tuned, 19M rows in 34s)

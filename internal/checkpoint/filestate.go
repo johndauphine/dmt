@@ -146,6 +146,7 @@ func (fs *FileState) GetLastIncompleteRun() (*Run, error) {
 		Phase:        phase,
 		SourceSchema: fs.state.SourceSchema,
 		TargetSchema: fs.state.TargetSchema,
+		ConfigHash:   fs.state.ConfigHash,
 		ProfileName:  fs.state.ProfileName,
 		ConfigPath:   fs.state.ConfigPath,
 	}, nil

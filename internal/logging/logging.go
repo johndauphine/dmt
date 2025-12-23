@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -23,11 +24,20 @@ const (
 	LevelDebug
 )
 
+// Format represents the logging output format
+type Format string
+
+const (
+	FormatText Format = "text"
+	FormatJSON Format = "json"
+)
+
 // Logger provides leveled logging
 type Logger struct {
 	mu         sync.Mutex
 	level      Level
 	output     io.Writer
+	format     Format
 	simpleMode bool // When true, skip timestamps and level prefixes (for TUI)
 }
 
@@ -35,6 +45,7 @@ var (
 	defaultLogger = &Logger{
 		level:  LevelInfo,
 		output: os.Stdout,
+		format: FormatText,
 	}
 )
 
@@ -82,6 +93,17 @@ func SetOutput(w io.Writer) {
 	defaultLogger.mu.Lock()
 	defer defaultLogger.mu.Unlock()
 	defaultLogger.output = w
+}
+
+// SetFormat sets the output format for logging (text or json)
+func SetFormat(format string) {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	if format == "json" {
+		defaultLogger.format = FormatJSON
+	} else {
+		defaultLogger.format = FormatText
+	}
 }
 
 // GetLevel returns the current log level
@@ -149,6 +171,27 @@ func (l *Logger) log(level Level, format string, args ...interface{}) {
 	}
 
 	msg := fmt.Sprintf(format, args...)
+
+	// JSON format output
+	if l.format == FormatJSON {
+		logEntry := map[string]interface{}{
+			"ts":    time.Now().Format(time.RFC3339),
+			"level": strings.ToLower(level.String()),
+			"msg":   strings.TrimSpace(msg),
+		}
+		data, err := json.Marshal(logEntry)
+		if err != nil {
+			// Fallback to text output if JSON marshaling fails
+			timestamp := time.Now().Format("2006-01-02 15:04:05")
+			fallback := fmt.Sprintf("%s [%s] %s (json marshal error: %v)", timestamp, level.String(), strings.TrimSpace(msg), err)
+			fmt.Fprintln(l.output, fallback)
+			return
+		}
+		fmt.Fprintln(l.output, string(data))
+		return
+	}
+
+	// Text format output
 	if strings.HasPrefix(msg, "\n") {
 		// Handle leading newlines (preserve blank line formatting)
 		msg = strings.TrimPrefix(msg, "\n")

@@ -176,6 +176,59 @@ func TestFileState_ClearTransferProgress(t *testing.T) {
 	}
 }
 
+func TestFileState_ConfigHash(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.yaml")
+
+	fs, err := NewFileState(stateFile)
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	// Create a run with config (hash will be computed)
+	config := map[string]interface{}{
+		"source": map[string]string{"host": "localhost"},
+		"target": map[string]string{"host": "postgres"},
+	}
+	err = fs.CreateRun("hash123", "dbo", "public", config, "", "/path/to/config.yaml")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// Get the run and verify config hash is set
+	run, err := fs.GetLastIncompleteRun()
+	if err != nil {
+		t.Fatalf("GetLastIncompleteRun: %v", err)
+	}
+	if run == nil {
+		t.Fatal("expected incomplete run")
+	}
+	if run.ConfigHash == "" {
+		t.Error("expected config hash to be set")
+	}
+	t.Logf("Config hash: %s", run.ConfigHash)
+
+	// Verify hash is deterministic (same config = same hash)
+	fs2, _ := NewFileState(filepath.Join(tmpDir, "state2.yaml"))
+	fs2.CreateRun("hash456", "dbo", "public", config, "", "")
+	run2, _ := fs2.GetLastIncompleteRun()
+	if run.ConfigHash != run2.ConfigHash {
+		t.Errorf("config hashes differ for same config: %s != %s", run.ConfigHash, run2.ConfigHash)
+	}
+
+	// Verify different config = different hash
+	config2 := map[string]interface{}{
+		"source": map[string]string{"host": "other-host"},
+		"target": map[string]string{"host": "postgres"},
+	}
+	fs3, _ := NewFileState(filepath.Join(tmpDir, "state3.yaml"))
+	fs3.CreateRun("hash789", "dbo", "public", config2, "", "")
+	run3, _ := fs3.GetLastIncompleteRun()
+	if run.ConfigHash == run3.ConfigHash {
+		t.Errorf("config hashes should differ for different configs: %s == %s", run.ConfigHash, run3.ConfigHash)
+	}
+}
+
 func TestFileState_LoadExisting(t *testing.T) {
 	// Create temp file with existing state
 	tmpDir := t.TempDir()
