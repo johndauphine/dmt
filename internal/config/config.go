@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -641,39 +642,52 @@ func (c *Config) buildMSSQLDSN(host string, port int, database, user, password, 
 		trustCert = "true"
 	}
 
+	// URL-encode values that may contain special characters
+	// Use QueryEscape for user/password to encode @ and : which are reserved in userinfo
+	encodedDB := url.QueryEscape(database)
+	encodedUser := url.QueryEscape(user)
+	encodedPass := url.QueryEscape(password)
+
 	// Kerberos authentication
 	if auth == "kerberos" {
 		dsn := fmt.Sprintf("sqlserver://%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s&authenticator=krb5",
-			host, port, database, encrypt, trustCert)
+			host, port, encodedDB, encrypt, trustCert)
 
 		// Optional Kerberos parameters
 		if krb5Conf != "" {
-			dsn += "&krb5-configfile=" + krb5Conf
+			dsn += "&krb5-configfile=" + url.QueryEscape(krb5Conf)
 		}
 		if keytab != "" {
-			dsn += "&krb5-keytabfile=" + keytab
+			dsn += "&krb5-keytabfile=" + url.QueryEscape(keytab)
 		}
 		if realm != "" {
-			dsn += "&krb5-realm=" + realm
+			dsn += "&krb5-realm=" + url.QueryEscape(realm)
 		}
 		if spn != "" {
-			dsn += "&ServerSPN=" + spn
+			dsn += "&ServerSPN=" + url.QueryEscape(spn)
 		}
 		// If user specified, use it as the principal
 		if user != "" {
-			dsn += "&krb5-username=" + user
+			dsn += "&krb5-username=" + url.QueryEscape(user)
 		}
 		return dsn
 	}
 
 	// Password authentication (default)
 	return fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s&encrypt=%s&TrustServerCertificate=%s",
-		user, password, host, port, database, encrypt, trustCert)
+		encodedUser, encodedPass, host, port, encodedDB, encrypt, trustCert)
 }
 
 // buildPostgresDSN builds a PostgreSQL connection string with optional Kerberos auth
 func (c *Config) buildPostgresDSN(host string, port int, database, user, password, sslMode,
 	auth, gssEncMode string) string {
+
+	// URL-encode values that may contain special characters
+	// Use QueryEscape for user/password to encode @ and : which are reserved in userinfo
+	// Use PathEscape for database since it's in the URL path
+	encodedDB := url.PathEscape(database)
+	encodedUser := url.QueryEscape(user)
+	encodedPass := url.QueryEscape(password)
 
 	// Kerberos/GSSAPI authentication
 	if auth == "kerberos" {
@@ -684,15 +698,15 @@ func (c *Config) buildPostgresDSN(host string, port int, database, user, passwor
 		// For Kerberos, we don't include password in the DSN
 		if user != "" {
 			return fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=%s&gssencmode=%s",
-				user, host, port, database, sslMode, gssEnc)
+				encodedUser, host, port, encodedDB, sslMode, gssEnc)
 		}
 		return fmt.Sprintf("postgres://%s:%d/%s?sslmode=%s&gssencmode=%s",
-			host, port, database, sslMode, gssEnc)
+			host, port, encodedDB, sslMode, gssEnc)
 	}
 
 	// Password authentication (default)
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		user, password, host, port, database, sslMode)
+		encodedUser, encodedPass, host, port, encodedDB, sslMode)
 }
 
 // Sanitized returns a copy of the config with sensitive fields redacted
