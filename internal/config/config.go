@@ -622,9 +622,16 @@ func (c *Config) validate() error {
 		return fmt.Errorf("target.type must be 'mssql' or 'postgres', got '%s'", c.Target.Type)
 	}
 
-	// Ensure cross-database migration only (no same-to-same)
+	// Same-engine migration validation: prevent migration to the exact same database
 	if c.Source.Type == c.Target.Type {
-		return fmt.Errorf("same-database migration not supported: %s -> %s (use native tools instead)", c.Source.Type, c.Target.Type)
+		// Use case-insensitive comparison for hostnames (RFC 1035)
+		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
+		samePort := c.Source.Port == c.Target.Port
+		sameDB := c.Source.Database == c.Target.Database
+		if sameHost && samePort && sameDB {
+			return fmt.Errorf("source and target cannot be the same database (%s:%d/%s)",
+				c.Source.Host, c.Source.Port, c.Source.Database)
+		}
 	}
 
 	// Validate migration settings

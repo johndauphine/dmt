@@ -232,3 +232,167 @@ func TestPostgresKerberosEncoding(t *testing.T) {
 		t.Errorf("Postgres Kerberos DSN missing encoded user in %q", dsn)
 	}
 }
+
+func TestSameEngineValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		sourceType  string
+		targetType  string
+		targetMode  string
+		sourceHost  string
+		targetHost  string
+		sourcePort  int
+		targetPort  int
+		sourceDB    string
+		targetDB    string
+		expectError bool
+		errorMsg    string
+	}{
+		{
+			name:        "cross-engine allowed",
+			sourceType:  "mssql",
+			targetType:  "postgres",
+			targetMode:  "drop_recreate",
+			sourceHost:  "localhost",
+			targetHost:  "localhost",
+			sourcePort:  1433,
+			targetPort:  5432,
+			sourceDB:    "source",
+			targetDB:    "target",
+			expectError: false,
+		},
+		{
+			name:        "same-engine with drop_recreate allowed (different hosts)",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "drop_recreate",
+			sourceHost:  "host1",
+			targetHost:  "host2",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "source",
+			targetDB:    "target",
+			expectError: false,
+		},
+		{
+			name:        "same-engine with upsert allowed",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "host1",
+			targetHost:  "host2",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "source",
+			targetDB:    "target",
+			expectError: false,
+		},
+		{
+			name:        "same-engine with truncate allowed",
+			sourceType:  "mssql",
+			targetType:  "mssql",
+			targetMode:  "truncate",
+			sourceHost:  "host1",
+			targetHost:  "host2",
+			sourcePort:  1433,
+			targetPort:  1433,
+			sourceDB:    "source",
+			targetDB:    "target",
+			expectError: false,
+		},
+		{
+			name:        "same database blocked",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "localhost",
+			targetHost:  "localhost",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "mydb",
+			targetDB:    "mydb",
+			expectError: true,
+			errorMsg:    "source and target cannot be the same database",
+		},
+		{
+			name:        "same host different database allowed",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "localhost",
+			targetHost:  "localhost",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "source",
+			targetDB:    "target",
+			expectError: false,
+		},
+		{
+			name:        "same host different port allowed",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "localhost",
+			targetHost:  "localhost",
+			sourcePort:  5432,
+			targetPort:  5433,
+			sourceDB:    "mydb",
+			targetDB:    "mydb",
+			expectError: false,
+		},
+		{
+			name:        "same database blocked (case-insensitive host)",
+			sourceType:  "postgres",
+			targetType:  "postgres",
+			targetMode:  "upsert",
+			sourceHost:  "LOCALHOST",
+			targetHost:  "localhost",
+			sourcePort:  5432,
+			targetPort:  5432,
+			sourceDB:    "mydb",
+			targetDB:    "mydb",
+			expectError: true,
+			errorMsg:    "source and target cannot be the same database",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Source: SourceConfig{
+					Type:     tt.sourceType,
+					Host:     tt.sourceHost,
+					Port:     tt.sourcePort,
+					Database: tt.sourceDB,
+					User:     "user",
+					Password: "pass",
+				},
+				Target: TargetConfig{
+					Type:     tt.targetType,
+					Host:     tt.targetHost,
+					Port:     tt.targetPort,
+					Database: tt.targetDB,
+					User:     "user",
+					Password: "pass",
+				},
+				Migration: MigrationConfig{
+					TargetMode: tt.targetMode,
+				},
+			}
+
+			err := cfg.validate()
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.errorMsg)
+				} else if !strings.Contains(err.Error(), tt.errorMsg) {
+					t.Errorf("expected error containing %q, got %q", tt.errorMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}

@@ -5,12 +5,17 @@ import (
 	"strings"
 )
 
+// PostgreSQL maximum varchar length before converting to text (1GB - 1 header byte)
+const pgMaxVarcharLength = 10485760
+
 // Direction represents the migration direction
 type Direction int
 
 const (
 	MSSQLToPG Direction = iota
 	PGToMSSQL
+	PGToPG
+	MSSQLToMSSQL
 )
 
 // GetDirection returns the migration direction based on source and target types
@@ -18,7 +23,149 @@ func GetDirection(sourceType, targetType string) Direction {
 	if sourceType == "postgres" && targetType == "mssql" {
 		return PGToMSSQL
 	}
+	if sourceType == "postgres" && targetType == "postgres" {
+		return PGToPG
+	}
+	if sourceType == "mssql" && targetType == "mssql" {
+		return MSSQLToMSSQL
+	}
 	return MSSQLToPG
+}
+
+// IsSameEngine returns true if source and target are the same database type
+func IsSameEngine(sourceType, targetType string) bool {
+	return sourceType == targetType
+}
+
+// MapType converts a source type to the appropriate target type based on direction.
+// For cross-engine migrations, converts types between database engines.
+// For same-engine migrations, normalizes types to canonical representations.
+func MapType(sourceType, targetType, dataType string, maxLength, precision, scale int) string {
+	direction := GetDirection(sourceType, targetType)
+
+	switch direction {
+	case MSSQLToPG:
+		return MSSQLToPostgres(dataType, maxLength, precision, scale)
+	case PGToMSSQL:
+		return PostgresToMSSQL(dataType, maxLength, precision, scale)
+	case PGToPG:
+		return NormalizePostgresType(dataType, maxLength, precision, scale)
+	case MSSQLToMSSQL:
+		return NormalizeMSSQLType(dataType, maxLength, precision, scale)
+	default:
+		return dataType
+	}
+}
+
+// NormalizePostgresType returns the canonical PostgreSQL type representation
+func NormalizePostgresType(pgType string, maxLength, precision, scale int) string {
+	pgType = strings.ToLower(pgType)
+
+	switch pgType {
+	case "int2":
+		return "smallint"
+	case "int4":
+		return "integer"
+	case "int8":
+		return "bigint"
+	case "float4":
+		return "real"
+	case "float8":
+		return "double precision"
+	case "bool":
+		return "boolean"
+	case "bpchar":
+		if maxLength > 0 {
+			return fmt.Sprintf("char(%d)", maxLength)
+		}
+		return "char(1)"
+	case "character":
+		if maxLength > 0 {
+			return fmt.Sprintf("char(%d)", maxLength)
+		}
+		return "char(1)"
+	case "character varying":
+		if maxLength > 0 && maxLength <= pgMaxVarcharLength {
+			return fmt.Sprintf("varchar(%d)", maxLength)
+		}
+		return "text"
+	case "varchar":
+		if maxLength > 0 && maxLength <= pgMaxVarcharLength {
+			return fmt.Sprintf("varchar(%d)", maxLength)
+		}
+		return "text"
+	case "decimal", "numeric":
+		if precision > 0 {
+			return fmt.Sprintf("numeric(%d,%d)", precision, scale)
+		}
+		return "numeric"
+	case "timestamp without time zone":
+		return "timestamp"
+	case "timestamp with time zone":
+		return "timestamptz"
+	case "time without time zone":
+		return "time"
+	case "time with time zone":
+		return "timetz"
+	default:
+		// For most types, return as-is (already canonical)
+		return pgType
+	}
+}
+
+// NormalizeMSSQLType returns the canonical SQL Server type representation
+func NormalizeMSSQLType(mssqlType string, maxLength, precision, scale int) string {
+	mssqlType = strings.ToLower(mssqlType)
+
+	switch mssqlType {
+	case "varchar":
+		if maxLength == -1 {
+			return "varchar(max)"
+		}
+		if maxLength > 0 {
+			return fmt.Sprintf("varchar(%d)", maxLength)
+		}
+		return "varchar(max)"
+	case "nvarchar":
+		if maxLength == -1 {
+			return "nvarchar(max)"
+		}
+		if maxLength > 0 {
+			return fmt.Sprintf("nvarchar(%d)", maxLength)
+		}
+		return "nvarchar(max)"
+	case "char":
+		if maxLength > 0 {
+			return fmt.Sprintf("char(%d)", maxLength)
+		}
+		return "char(1)"
+	case "nchar":
+		if maxLength > 0 {
+			return fmt.Sprintf("nchar(%d)", maxLength)
+		}
+		return "nchar(1)"
+	case "varbinary":
+		if maxLength == -1 {
+			return "varbinary(max)"
+		}
+		if maxLength > 0 {
+			return fmt.Sprintf("varbinary(%d)", maxLength)
+		}
+		return "varbinary(max)"
+	case "binary":
+		if maxLength > 0 {
+			return fmt.Sprintf("binary(%d)", maxLength)
+		}
+		return "binary(1)"
+	case "decimal", "numeric":
+		if precision > 0 {
+			return fmt.Sprintf("decimal(%d,%d)", precision, scale)
+		}
+		return "decimal"
+	default:
+		// For most types, return as-is
+		return mssqlType
+	}
 }
 
 // MSSQLToPostgres converts MSSQL data types to PostgreSQL equivalents
