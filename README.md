@@ -319,9 +319,35 @@ sensor = PythonSensor(
 | Source | Target | Write Method |
 |--------|--------|--------------|
 | SQL Server | PostgreSQL | COPY protocol (fastest) |
-| PostgreSQL | SQL Server | BULK INSERT or batch INSERT |
+| PostgreSQL | SQL Server | TDS bulk copy |
+| PostgreSQL | PostgreSQL | COPY protocol |
+| SQL Server | SQL Server | TDS bulk copy |
 
-**Note:** Same-to-same migrations (MSSQL→MSSQL, PG→PG) are not supported. Use native tools for those.
+### Same-Engine Migrations (New in v1.16.0)
+
+Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
+
+```yaml
+# PostgreSQL to PostgreSQL
+source:
+  type: postgres
+  host: source-pg.example.com
+  # ...
+
+target:
+  type: postgres
+  host: target-pg.example.com
+  # ...
+
+migration:
+  target_mode: upsert  # or drop_recreate, truncate
+```
+
+**Use cases:**
+- Database cloning
+- Environment sync (dev → staging → prod)
+- Disaster recovery
+- Data center migrations
 
 ## Features
 
@@ -356,21 +382,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.12.0/mssql-pg-migrate-v1.12.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.12.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-linux-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.16.0-linux-amd64.tar.gz
 chmod +x mssql-pg-migrate-linux-amd64
 ./mssql-pg-migrate-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.12.0/mssql-pg-migrate-v1.12.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v1.12.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-darwin-arm64.tar.gz
+tar -xzf mssql-pg-migrate-v1.16.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.12.0/mssql-pg-migrate-v1.12.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v1.12.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-darwin-amd64.tar.gz
+tar -xzf mssql-pg-migrate-v1.16.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.12.0/mssql-pg-migrate-v1.12.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v1.16.0/mssql-pg-migrate-v1.16.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
 tar -xzf mssql-pg-migrate.tar.gz
 ```
 
