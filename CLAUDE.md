@@ -185,6 +185,25 @@ See `examples/config-upsert.yaml` for a complete example.
 - `IS DISTINCT FROM` provides efficient NULL-safe change detection
 - SQL Server staging table + UPDATE/INSERT pattern has higher overhead
 
+### Same-Engine Migrations (PG → PG)
+| Mode | Time | Throughput | Notes |
+|------|------|------------|-------|
+| drop_recreate | ~47s | ~410K rows/sec | Fresh table creation |
+| truncate | ~47s | ~410K rows/sec | Truncate and reload |
+| upsert | ~56s | ~345K rows/sec | IS DISTINCT FROM change detection |
+
+### Same-Engine Migrations (MSSQL → MSSQL)
+| Mode | Time | Throughput | Notes |
+|------|------|------------|-------|
+| drop_recreate | ~2m7s | ~152K rows/sec | Fresh table creation |
+| truncate | ~1m50s | ~176K rows/sec | Truncate and reload |
+| upsert | ~4m18s | ~75K rows/sec | IDENTITY_INSERT + staging table |
+
+**Same-engine notes**:
+- Type normalization preserves canonical types (e.g., `int4` → `integer` for PG)
+- MSSQL→MSSQL upsert requires IDENTITY_INSERT for identity columns
+- Useful for database cloning, environment sync, or disaster recovery
+
 ## Building
 
 ```bash
