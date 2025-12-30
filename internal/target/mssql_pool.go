@@ -313,62 +313,79 @@ func (p *MSSQLPool) CreateCheckConstraint(ctx context.Context, t *source.Table, 
 	return err
 }
 
-// WriteChunk writes a chunk of data to the target table using TDS bulk copy protocol
+// WriteChunk writes a chunk of data to the target table using TDS bulk copy protocol.
+// Uses the direct bulk API (CreateBulkContext) for better performance by avoiding
+// database/sql prepared statement overhead. Wrapped in explicit transaction for atomicity.
 func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// Start a transaction for bulk copy
-	txn, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-
 	// Create fully qualified table name
 	fullTableName := fmt.Sprintf("[%s].[%s]", schema, table)
 
-	// Prepare bulk copy statement with performance hints
-	// - Tablock: acquire table lock to reduce lock overhead
-	// - RowsPerBatch: hint to optimizer for memory allocation
-	rowsPerBatch := p.rowsPerBatch
-	if rowsPerBatch <= 0 || rowsPerBatch > len(rows) {
-		rowsPerBatch = len(rows) // Use actual row count if not set or too large
-	}
-	bulkOpts := mssql.BulkOptions{
-		Tablock:      true,
-		RowsPerBatch: rowsPerBatch,
-	}
-	stmt, err := txn.PrepareContext(ctx, mssql.CopyIn(fullTableName, bulkOpts, cols...))
+	// Get a connection from the pool
+	conn, err := p.db.Conn(ctx)
 	if err != nil {
-		txn.Rollback()
-		return fmt.Errorf("preparing bulk copy: %w", err)
+		return fmt.Errorf("getting connection: %w", err)
 	}
+	defer conn.Close()
 
-	// Execute for each row
-	for _, row := range rows {
-		_, err = stmt.ExecContext(ctx, row...)
-		if err != nil {
-			stmt.Close()
-			txn.Rollback()
-			return fmt.Errorf("bulk copy row: %w", err)
+	// Begin transaction for atomicity - ensures all-or-nothing insert
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback() // Safe to call after commit - returns ErrTxDone
+
+	// Use the direct bulk API via Raw() for better performance
+	// This bypasses database/sql prepared statement overhead
+	err = conn.Raw(func(driverConn any) error {
+		mssqlConn, ok := driverConn.(*mssql.Conn)
+		if !ok {
+			return fmt.Errorf("expected *mssql.Conn, got %T", driverConn)
 		}
-	}
 
-	// Final exec with no args to flush all rows
-	_, err = stmt.ExecContext(ctx)
+		// Configure bulk options for optimal performance
+		// - Tablock: acquire table lock to reduce lock overhead
+		// - RowsPerBatch: hint to optimizer for memory allocation
+		rowsPerBatch := p.rowsPerBatch
+		if rowsPerBatch <= 0 || rowsPerBatch > len(rows) {
+			rowsPerBatch = len(rows)
+		}
+
+		// Create bulk insert operation directly
+		bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, cols)
+		bulk.Options.Tablock = true
+		bulk.Options.RowsPerBatch = rowsPerBatch
+
+		// Add all rows - this buffers internally and sends efficiently
+		for _, row := range rows {
+			err := bulk.AddRow(row)
+			if err != nil {
+				return fmt.Errorf("adding row: %w", err)
+			}
+		}
+
+		// Finalize the bulk insert - sends all buffered data
+		rowsAffected, err := bulk.Done()
+		if err != nil {
+			return fmt.Errorf("finalizing bulk insert: %w", err)
+		}
+
+		// Verify all rows were inserted
+		if rowsAffected != int64(len(rows)) {
+			return fmt.Errorf("bulk insert: expected %d rows, got %d", len(rows), rowsAffected)
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		stmt.Close()
-		txn.Rollback()
-		return fmt.Errorf("flushing bulk copy: %w", err)
+		return fmt.Errorf("bulk copy: %w", err)
 	}
 
-	if err = stmt.Close(); err != nil {
-		txn.Rollback()
-		return fmt.Errorf("closing bulk copy: %w", err)
-	}
-
-	if err = txn.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("committing bulk copy: %w", err)
 	}
 
