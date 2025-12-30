@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-// getAvailableMemoryMB returns available system memory in MB on Linux
+// getAvailableMemoryMB returns total system memory in MB on Linux.
+// Uses MemTotal (not MemAvailable) to match Rust implementation.
 func getAvailableMemoryMB() int64 {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
@@ -20,7 +21,7 @@ func getAvailableMemoryMB() int64 {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "MemAvailable:") {
+		if strings.HasPrefix(line, "MemTotal:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				kb, err := strconv.ParseInt(fields[1], 10, 64)

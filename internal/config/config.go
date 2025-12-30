@@ -315,19 +315,20 @@ func (c *Config) applyDefaults() {
 	if c.Migration.MaxPartitions == 0 {
 		c.Migration.MaxPartitions = c.Migration.Workers // Match workers
 	}
-	// Auto-tune chunk size and buffers based on available memory
-	// Target: use ~50% of available RAM for buffering
-	// Each worker buffers: read_ahead_buffers × chunk_size × ~500 bytes/row average
+	// Auto-tune chunk size based on available RAM
+	// Formula: 75K base + 25K per 8GB RAM, clamped to 50K-200K
+	// This matches the Rust implementation for consistent behavior
 	targetMemoryMB := c.autoConfig.TargetMemoryMB
 	if c.Migration.ChunkSize == 0 {
-		// Scale chunk size with available memory: 100K-500K range
-		c.Migration.ChunkSize = int(targetMemoryMB * 50) // ~50 rows per MB
-		if c.Migration.ChunkSize < 100000 {
-			c.Migration.ChunkSize = 100000
+		ramGB := float64(c.autoConfig.AvailableMemoryMB) / 1024.0
+		chunkSize := 75000 + int(ramGB*25000.0/8.0)
+		if chunkSize < 50000 {
+			chunkSize = 50000
 		}
-		if c.Migration.ChunkSize > 500000 {
-			c.Migration.ChunkSize = 500000
+		if chunkSize > 200000 {
+			chunkSize = 200000
 		}
+		c.Migration.ChunkSize = chunkSize
 	}
 	if c.Migration.LargeTableThreshold == 0 {
 		c.Migration.LargeTableThreshold = 5000000
@@ -456,37 +457,25 @@ type TableRowSize struct {
 	EstimatedRowSize int64
 }
 
-// RefineSettingsForRowSizes adjusts memory settings based on actual table row sizes
-// This should be called after schema extraction when we have real data
-// Returns true if settings were adjusted, along with a description of changes
+// RefineSettingsForRowSizes reports actual table row sizes for informational purposes.
+// Previously this function would reduce chunk_size/workers based on memory estimates,
+// but this caused performance regressions. The Go GC soft limit handles memory pressure.
+// Returns false (no adjustments made) and a description of row sizes.
 func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool, changes string) {
 	if len(tables) == 0 {
 		return false, ""
 	}
 
-	// Calculate weighted average row size based on row counts
-	// This gives us a better estimate than just max or simple average
+	// Calculate weighted average row size based on row counts (for informational purposes)
 	var totalRows int64
 	var weightedSum int64
 	var maxRowSize int64
 	var maxRowSizeTable string
 
-	// First pass: calculate total rows and weighted sum
 	for _, t := range tables {
 		if t.EstimatedRowSize > 0 {
 			totalRows += t.RowCount
 			weightedSum += t.RowCount * t.EstimatedRowSize
-		}
-	}
-
-	// Second pass: find max row size, but only from tables with significant row count
-	// (ignore tiny tables that might skew the max)
-	minRowsForMax := totalRows / 1000 // At least 0.1% of total rows
-	if minRowsForMax < 100 {
-		minRowsForMax = 100
-	}
-	for _, t := range tables {
-		if t.EstimatedRowSize > 0 && t.RowCount >= minRowsForMax {
 			if t.EstimatedRowSize > maxRowSize {
 				maxRowSize = t.EstimatedRowSize
 				maxRowSizeTable = t.Name
@@ -494,107 +483,15 @@ func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool
 		}
 	}
 
-	// If no table met the threshold, fall back to overall max
-	if maxRowSize == 0 {
-		for _, t := range tables {
-			if t.EstimatedRowSize > maxRowSize {
-				maxRowSize = t.EstimatedRowSize
-				maxRowSizeTable = t.Name
-			}
-		}
-	}
-
-	// If we couldn't get row sizes, stick with conservative defaults
 	if totalRows == 0 || weightedSum == 0 {
 		return false, ""
 	}
 
 	weightedAvgRowSize := weightedSum / totalRows
 
-	// Use the larger of weighted average or 80% of max (to handle mixed workloads)
-	effectiveRowSize := weightedAvgRowSize
-	if maxRowSize*80/100 > effectiveRowSize {
-		effectiveRowSize = maxRowSize * 80 / 100
-	}
-
-	// Minimum 500 bytes to avoid over-optimizing for tiny rows
-	if effectiveRowSize < 500 {
-		effectiveRowSize = 500
-	}
-
-	// Store original settings for comparison
-	origWorkers := c.Migration.Workers
-	origChunkSize := c.Migration.ChunkSize
-	origBuffers := c.Migration.ReadAheadBuffers
-
-	// Use the effective max memory (already accounts for user limit and 70% cap)
-	maxMemoryBytes := c.autoConfig.EffectiveMaxMemoryMB * 1024 * 1024
-
-	// Iteratively reduce settings if memory estimate exceeds limit
-	iterations := 0
-	for iterations < 50 { // Safety limit
-		estimatedMemory := int64(c.Migration.Workers) *
-			int64(c.Migration.ReadAheadBuffers*2) * // read + write buffers
-			int64(c.Migration.ChunkSize) *
-			effectiveRowSize
-
-		if estimatedMemory <= maxMemoryBytes {
-			break
-		}
-
-		// Reduce settings: buffers first, then chunk size, then workers
-		if c.Migration.ReadAheadBuffers > 2 {
-			c.Migration.ReadAheadBuffers--
-			iterations++
-			continue
-		}
-		if c.Migration.ChunkSize > 25000 {
-			c.Migration.ChunkSize = c.Migration.ChunkSize * 80 / 100
-			iterations++
-			continue
-		}
-		if c.Migration.Workers > 2 {
-			c.Migration.Workers--
-			iterations++
-			continue
-		}
-		break
-	}
-
-	// Check if anything changed
-	if c.Migration.Workers == origWorkers &&
-		c.Migration.ChunkSize == origChunkSize &&
-		c.Migration.ReadAheadBuffers == origBuffers {
-		return false, fmt.Sprintf("Row sizes OK (weighted avg: %s, max: %s in %s)",
-			FormatMemorySize(weightedAvgRowSize), FormatMemorySize(maxRowSize), maxRowSizeTable)
-	}
-
-	// Build change description
-	var changesList []string
-	if c.Migration.Workers != origWorkers {
-		changesList = append(changesList, fmt.Sprintf("workers %d→%d", origWorkers, c.Migration.Workers))
-	}
-	if c.Migration.ChunkSize != origChunkSize {
-		changesList = append(changesList, fmt.Sprintf("chunk_size %d→%d", origChunkSize, c.Migration.ChunkSize))
-	}
-	if c.Migration.ReadAheadBuffers != origBuffers {
-		changesList = append(changesList, fmt.Sprintf("buffers %d→%d", origBuffers, c.Migration.ReadAheadBuffers))
-	}
-
-	changes = fmt.Sprintf("Adjusted for large rows (weighted avg: %s, max: %s in %s): %s",
-		FormatMemorySize(weightedAvgRowSize), FormatMemorySize(maxRowSize), maxRowSizeTable,
-		strings.Join(changesList, ", "))
-
-	// Update connection pools if workers changed
-	if c.Migration.Workers != origWorkers {
-		minSourceConns := c.Migration.Workers * c.Migration.ParallelReaders
-		minTargetConns := c.Migration.Workers * c.Migration.WriteAheadWriters
-		c.Migration.MaxMssqlConnections = minSourceConns + 4
-		c.Migration.MaxPgConnections = minTargetConns + 4
-		c.Migration.MaxConnections = minTargetConns + 4
-	}
-
-	return true, changes
+	// No adjustments made - just report row sizes for visibility
+	return false, fmt.Sprintf("Row sizes: weighted avg %s, max %s in %s",
+		FormatMemorySize(weightedAvgRowSize), FormatMemorySize(maxRowSize), maxRowSizeTable)
 }
 
 func (c *Config) validate() error {
@@ -919,7 +816,8 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  Workers: %s\n", formatAutoValue(c.Migration.Workers, ac.OriginalWorkers, workersExpl)))
 
 	// ChunkSize
-	chunkExpl := fmt.Sprintf("%d MB * 50 rows/MB", ac.TargetMemoryMB)
+	ramGB := float64(ac.AvailableMemoryMB) / 1024.0
+	chunkExpl := fmt.Sprintf("75K + %.1fGB*3.1K", ramGB)
 	b.WriteString(fmt.Sprintf("  ChunkSize: %s\n", formatAutoValue(c.Migration.ChunkSize, ac.OriginalChunkSize, chunkExpl)))
 
 	// ReadAheadBuffers
