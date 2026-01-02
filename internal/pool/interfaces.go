@@ -59,7 +59,16 @@ type TargetPool interface {
 
 	// UpsertChunk performs INSERT ON CONFLICT (PG) or stages data for MERGE (MSSQL)
 	// pkCols identifies the primary key columns for conflict detection
+	// Deprecated: Use UpsertChunkWithWriter for better performance with writer isolation
 	UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error
+
+	// UpsertChunkWithWriter performs high-performance upsert using staging tables with writer isolation.
+	// This method uses per-writer staging tables to avoid contention between parallel writers:
+	// - PostgreSQL: Uses TEMP tables + COPY + INSERT...ON CONFLICT with IS DISTINCT FROM
+	// - MSSQL: Uses #temp tables + bulk insert + MERGE WITH (TABLOCK)
+	// writerID identifies the writer goroutine (0, 1, 2, ...) for staging table isolation
+	// partitionID is optional and used when intra-table partitioning is enabled
+	UpsertChunkWithWriter(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error
 
 	// PrepareUpsertStaging prepares staging table before transfer (MSSQL only, no-op for PG)
 	PrepareUpsertStaging(ctx context.Context, schema, table string) error

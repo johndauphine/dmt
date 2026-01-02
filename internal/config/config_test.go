@@ -399,10 +399,10 @@ func TestSameEngineValidation(t *testing.T) {
 
 func TestAutoTuneWriteAheadWriters(t *testing.T) {
 	tests := []struct {
-		name        string
-		targetType  string
-		cpuCores    int
-		expected    int
+		name       string
+		targetType string
+		cpuCores   int
+		expected   int
 	}{
 		{"MSSQL 16 cores - fixed at 2", "mssql", 16, 2},
 		{"MSSQL 8 cores - fixed at 2", "mssql", 8, 2},
