@@ -912,7 +912,15 @@ func executeRowNumberPagination(
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
 	upsertPKCols := job.Table.PrimaryKey // Use separate variable to avoid shadowing pkCols used for ORDER BY
+
+	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
+	var partitionID *int
+	if job.Partition != nil {
+		partitionID = &job.Partition.PartitionID
+	}
+
 	for i := 0; i < numWriters; i++ {
+		writerID := i // Capture for closure (per-writer staging table isolation)
 		writerWg.Add(1)
 		go func() {
 			defer writerWg.Done()
@@ -926,7 +934,8 @@ func executeRowNumberPagination(
 				writeStart := time.Now()
 				var err error
 				if useUpsert {
-					err = writeChunkUpsert(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, upsertPKCols, rows)
+					// Use UpsertChunkWithWriter for high-performance staging table approach
+					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, upsertPKCols, rows, writerID, partitionID)
 				} else {
 					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows)
 				}
@@ -1190,7 +1199,26 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 }
 
 // writeChunkUpsert writes a chunk of data using upsert (INSERT ON CONFLICT / MERGE)
+// Deprecated: Use writeChunkUpsertWithWriter for better performance
 func writeChunkUpsert(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, pkCols []string, rows [][]any) error {
+	return tgtPool.UpsertChunk(ctx, schema, table, cols, pkCols, rows)
+}
+
+// writeChunkUpsertWithWriter writes a chunk using high-performance staging table approach.
+// This uses per-writer staging tables for isolation and better parallelism:
+// - PostgreSQL: TEMP table + COPY + INSERT...ON CONFLICT
+// - MSSQL: #temp table + bulk insert + MERGE WITH (TABLOCK)
+func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
+	cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+
+	// Try to use the new high-performance method if available
+	if wp, ok := tgtPool.(interface {
+		UpsertChunkWithWriter(context.Context, string, string, []string, []string, [][]any, int, *int) error
+	}); ok {
+		return wp.UpsertChunkWithWriter(ctx, schema, table, cols, pkCols, rows, writerID, partitionID)
+	}
+
+	// Fallback to legacy method (no writer isolation)
 	return tgtPool.UpsertChunk(ctx, schema, table, cols, pkCols, rows)
 }
 

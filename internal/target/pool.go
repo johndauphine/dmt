@@ -2,9 +2,11 @@ package target
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
@@ -524,4 +526,159 @@ func buildPGBatchedUpsertSQL(schema, table string, cols []string, pkCols []strin
 	}
 
 	return sb.String(), args
+}
+
+// UpsertChunkWithWriter performs high-performance upsert using staging tables with writer isolation.
+// This approach uses:
+// 1. Per-writer TEMP staging table (avoids contention between parallel writers)
+// 2. Binary COPY protocol via pgx.CopyFrom (5-10x faster than INSERT VALUES)
+// 3. Single INSERT...SELECT...ON CONFLICT to merge (one statement per chunk)
+// 4. IS DISTINCT FROM to prevent unnecessary row updates (critical for WAL/bloat prevention)
+func (p *Pool) UpsertChunkWithWriter(ctx context.Context, schema, table string,
+	cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+
+	if len(rows) == 0 {
+		return nil
+	}
+
+	if len(pkCols) == 0 {
+		return fmt.Errorf("upsert requires primary key columns")
+	}
+
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Release()
+
+	// Disable statement timeout for bulk operations
+	_, err = conn.Exec(ctx, "SET statement_timeout = 0")
+	if err != nil {
+		return fmt.Errorf("setting statement timeout: %w", err)
+	}
+
+	// 1. Generate safe staging table name (handles long names with hash fallback)
+	stagingTable := safePGStagingName(schema, table, writerID, partitionID)
+
+	// 2. Create TEMP staging table if not exists
+	// TEMP tables are session-scoped and auto-dropped on disconnect (no cleanup needed)
+	// They are also inherently UNLOGGED, reducing WAL I/O
+	createSQL := fmt.Sprintf(
+		`CREATE TEMP TABLE IF NOT EXISTS %s (LIKE %s INCLUDING DEFAULTS)`,
+		quotePGIdent(stagingTable), qualifyPGTable(schema, table))
+	if _, err := conn.Exec(ctx, createSQL); err != nil {
+		return fmt.Errorf("creating staging table: %w", err)
+	}
+
+	// 3. Truncate staging (reuse table across chunks, faster than DROP/CREATE)
+	if _, err := conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", quotePGIdent(stagingTable))); err != nil {
+		return fmt.Errorf("truncating staging table: %w", err)
+	}
+
+	// 4. Binary COPY into staging using pgx.CopyFrom
+	// This is 5-10x faster than INSERT VALUES due to:
+	// - Binary protocol (no parsing overhead)
+	// - Single round-trip for all rows
+	// - No parameter binding overhead
+	_, err = conn.Conn().CopyFrom(
+		ctx,
+		pgx.Identifier{stagingTable},
+		cols,
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("copying to staging: %w", err)
+	}
+
+	// 5. Merge staging into target with IS DISTINCT FROM to prevent empty updates
+	// CRITICAL: Without IS DISTINCT FROM, PostgreSQL writes new row versions even for
+	// identical data, causing table bloat and excessive WAL writes
+	mergeSQL := buildPGStagingMergeSQL(schema, table, stagingTable, cols, pkCols)
+	_, err = conn.Exec(ctx, mergeSQL)
+	if err != nil {
+		return fmt.Errorf("merging staging to target: %w", err)
+	}
+
+	return nil
+}
+
+// safePGStagingName generates a safe staging table name that handles long identifiers.
+// PostgreSQL has a 63-byte limit for identifiers.
+// If the name would be too long, falls back to a hash-based name.
+func safePGStagingName(schema, table string, writerID int, partitionID *int) string {
+	suffix := fmt.Sprintf("_w%d", writerID)
+	if partitionID != nil {
+		suffix = fmt.Sprintf("_p%d%s", *partitionID, suffix)
+	}
+	base := fmt.Sprintf("_stg_%s_%s", schema, table)
+	maxLen := 63 // PostgreSQL identifier limit
+
+	if len(base)+len(suffix) > maxLen {
+		// Use hash for long names
+		hash := sha256.Sum256([]byte(schema + table))
+		base = fmt.Sprintf("_stg_%x", hash[:8]) // 16 hex chars
+	}
+	return base + suffix
+}
+
+// buildPGStagingMergeSQL generates the INSERT...SELECT...ON CONFLICT statement
+// that merges data from staging table to target table.
+// Includes IS DISTINCT FROM to prevent unnecessary row updates.
+func buildPGStagingMergeSQL(schema, table, stagingTable string, cols, pkCols []string) string {
+	// Build column lists
+	quotedCols := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quotePGIdent(col)
+	}
+	colStr := strings.Join(quotedCols, ", ")
+
+	// Build PK list for ON CONFLICT
+	quotedPKs := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		quotedPKs[i] = quotePGIdent(pk)
+	}
+	pkStr := strings.Join(quotedPKs, ", ")
+
+	// Build SET clause and IS DISTINCT FROM clause (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+
+	var setClauses []string
+	var targetCols []string
+	var excludedCols []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			setClauses = append(setClauses, fmt.Sprintf("%s = EXCLUDED.%s", quotePGIdent(col), quotePGIdent(col)))
+			targetCols = append(targetCols, fmt.Sprintf("%s.%s", quotePGIdent(table), quotePGIdent(col)))
+			excludedCols = append(excludedCols, fmt.Sprintf("EXCLUDED.%s", quotePGIdent(col)))
+		}
+	}
+
+	var sb strings.Builder
+
+	// INSERT INTO schema.table (cols) SELECT cols FROM staging
+	sb.WriteString(fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s",
+		qualifyPGTable(schema, table), colStr, colStr, quotePGIdent(stagingTable)))
+
+	// ON CONFLICT (pk_cols)
+	sb.WriteString(fmt.Sprintf(" ON CONFLICT (%s)", pkStr))
+
+	if len(setClauses) > 0 {
+		// DO UPDATE SET col1 = EXCLUDED.col1, ...
+		sb.WriteString(fmt.Sprintf(" DO UPDATE SET %s", strings.Join(setClauses, ", ")))
+
+		// WHERE clause using IS DISTINCT FROM to prevent unnecessary updates
+		// This is CRITICAL to avoid table bloat and excessive WAL writes
+		// PostgreSQL MVCC creates new row versions even for identical data without this
+		sb.WriteString(fmt.Sprintf(" WHERE (%s) IS DISTINCT FROM (%s)",
+			strings.Join(targetCols, ", "),
+			strings.Join(excludedCols, ", ")))
+	} else {
+		// All columns are PK - DO NOTHING
+		sb.WriteString(" DO NOTHING")
+	}
+
+	return sb.String()
 }

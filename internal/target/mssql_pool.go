@@ -2,12 +2,14 @@ package target
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
 	"github.com/johndauphine/mssql-pg-migrate/internal/typemap"
 	mssql "github.com/microsoft/go-mssqldb"
@@ -395,6 +397,7 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 // UpsertChunk for MSSQL uses whole-table staging approach:
 // - Bulk loads data into staging table (fast, using existing WriteChunk logic)
 // - MERGE runs once at the end via ExecuteUpsertMerge
+// Deprecated: Use UpsertChunkWithWriter for better performance with per-chunk merging
 func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols []string, pkCols []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
@@ -403,6 +406,254 @@ func (p *MSSQLPool) UpsertChunk(ctx context.Context, schema, table string, cols 
 	// Write to staging table instead of target (bulk copy is fast)
 	stagingTable := fmt.Sprintf("staging_%s", table)
 	return p.WriteChunk(ctx, schema, stagingTable, cols, rows)
+}
+
+// UpsertChunkWithWriter performs high-performance upsert using per-writer staging tables.
+// This approach uses:
+// 1. Per-writer #temp table (session-scoped, auto-dropped on disconnect)
+// 2. TDS bulk insert into staging (fast, single round-trip)
+// 3. MERGE WITH (TABLOCK) immediately after each chunk
+// 4. Deadlock retry with linear backoff (5 retries)
+//
+// Advantages over whole-table staging (UpsertChunk + ExecuteUpsertMerge):
+// - Bounded memory (staging holds only 1 chunk, not entire table)
+// - Per-writer isolation (no contention between parallel writers)
+// - Incremental progress (merge after each chunk, better resume)
+// - Session-scoped cleanup (no orphaned tables on crash)
+func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table string,
+	cols []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+
+	if len(rows) == 0 {
+		return nil
+	}
+
+	if len(pkCols) == 0 {
+		return fmt.Errorf("upsert requires primary key columns")
+	}
+
+	// Acquire a dedicated connection for this chunk
+	// This is required because #temp tables are session-scoped
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Close()
+
+	// 1. Generate session-scoped temp table name
+	// #tables are auto-dropped when connection closes (handles crashes gracefully)
+	stagingTable := safeMSSQLStagingName(table, writerID, partitionID)
+
+	// 2. Create temp table if not exists, otherwise truncate for reuse
+	targetTable := qualifyMSSQLTable(schema, table)
+	createSQL := fmt.Sprintf(`
+		IF OBJECT_ID('tempdb..%s') IS NULL
+			SELECT TOP 0 * INTO %s FROM %s
+		ELSE
+			TRUNCATE TABLE %s`,
+		stagingTable, stagingTable, targetTable, stagingTable)
+	if _, err := conn.ExecContext(ctx, createSQL); err != nil {
+		return fmt.Errorf("creating staging table: %w", err)
+	}
+
+	// 3. Check for identity columns (need IDENTITY_INSERT for merge)
+	var hasIdentity bool
+	identitySQL := `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.columns c
+			JOIN sys.tables t ON c.object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @p1 AND t.name = @p2 AND c.is_identity = 1
+		) THEN 1 ELSE 0 END`
+	if err := conn.QueryRowContext(ctx, identitySQL, schema, table).Scan(&hasIdentity); err != nil {
+		hasIdentity = false // Non-fatal, assume no identity
+	}
+
+	// 4. Bulk insert into temp staging table using TDS bulk copy
+	if err := p.bulkInsertToTempTable(ctx, conn, stagingTable, cols, rows); err != nil {
+		return fmt.Errorf("bulk insert to staging: %w", err)
+	}
+
+	// 5. Build and execute MERGE with deadlock retry
+	mergeSQL := buildMSSQLMergeWithTablock(targetTable, stagingTable, cols, pkCols)
+	if err := p.executeMergeWithRetry(ctx, conn, targetTable, mergeSQL, hasIdentity, 5); err != nil {
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	return nil
+}
+
+// safeMSSQLStagingName generates a safe #temp table name that handles long identifiers.
+// MSSQL temp table names are limited to 116 characters (128 - 12 for system suffix).
+// If the name would be too long, falls back to a hash-based name.
+func safeMSSQLStagingName(table string, writerID int, partitionID *int) string {
+	suffix := fmt.Sprintf("_w%d", writerID)
+	if partitionID != nil {
+		suffix = fmt.Sprintf("_p%d%s", *partitionID, suffix)
+	}
+	base := fmt.Sprintf("#stg_%s", table)
+	maxLen := 116 // MSSQL temp table limit (128 - 12 for system suffix)
+
+	if len(base)+len(suffix) > maxLen {
+		// Use hash for long names
+		hash := sha256.Sum256([]byte(table))
+		base = fmt.Sprintf("#stg_%x", hash[:8]) // 16 hex chars
+	}
+	return base + suffix
+}
+
+// bulkInsertToTempTable performs TDS bulk insert into a #temp table
+func (p *MSSQLPool) bulkInsertToTempTable(ctx context.Context, conn *sql.Conn, tempTable string, cols []string, rows [][]any) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// Start transaction for bulk insert
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Use mssql.CopyIn for bulk insert
+	stmt, err := tx.PrepareContext(ctx, mssql.CopyIn(tempTable, mssql.BulkOptions{
+		RowsPerBatch: p.rowsPerBatch,
+	}, cols...))
+	if err != nil {
+		return fmt.Errorf("preparing bulk insert: %w", err)
+	}
+	defer stmt.Close()
+
+	// Insert all rows
+	for _, row := range rows {
+		if _, err := stmt.ExecContext(ctx, row...); err != nil {
+			return fmt.Errorf("executing bulk insert row: %w", err)
+		}
+	}
+
+	// Finalize bulk insert
+	if _, err := stmt.ExecContext(ctx); err != nil {
+		return fmt.Errorf("finalizing bulk insert: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing bulk insert: %w", err)
+	}
+
+	return nil
+}
+
+// buildMSSQLMergeWithTablock generates a MERGE statement with TABLOCK hint.
+// TABLOCK prevents S->X lock conversion deadlocks that are common with MERGE.
+func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols []string) string {
+	// Build ON clause (PK join condition)
+	var onClauses []string
+	for _, pk := range pkCols {
+		onClauses = append(onClauses, fmt.Sprintf("target.%s = source.%s",
+			quoteMSSQLIdent(pk), quoteMSSQLIdent(pk)))
+	}
+
+	// Build SET clause and change detection (exclude PK columns)
+	pkSet := make(map[string]bool)
+	for _, pk := range pkCols {
+		pkSet[pk] = true
+	}
+
+	var setClauses []string
+	var changeDetection []string
+	for _, col := range cols {
+		if !pkSet[col] {
+			quotedCol := quoteMSSQLIdent(col)
+			setClauses = append(setClauses, fmt.Sprintf("%s = source.%s", quotedCol, quotedCol))
+			// NULL-safe change detection for MSSQL
+			changeDetection = append(changeDetection, fmt.Sprintf(
+				"(target.%s <> source.%s OR "+
+					"(target.%s IS NULL AND source.%s IS NOT NULL) OR "+
+					"(target.%s IS NOT NULL AND source.%s IS NULL))",
+				quotedCol, quotedCol, quotedCol, quotedCol, quotedCol, quotedCol))
+		}
+	}
+
+	// Build INSERT column lists
+	quotedCols := make([]string, len(cols))
+	sourceCols := make([]string, len(cols))
+	for i, col := range cols {
+		quotedCols[i] = quoteMSSQLIdent(col)
+		sourceCols[i] = fmt.Sprintf("source.%s", quoteMSSQLIdent(col))
+	}
+
+	var sb strings.Builder
+
+	// MERGE INTO target WITH (TABLOCK) - TABLOCK prevents deadlocks
+	sb.WriteString(fmt.Sprintf("MERGE INTO %s WITH (TABLOCK) AS target\n", targetTable))
+	sb.WriteString(fmt.Sprintf("USING %s AS source\n", stagingTable))
+	sb.WriteString(fmt.Sprintf("ON %s\n", strings.Join(onClauses, " AND ")))
+
+	// WHEN MATCHED AND (changes detected) THEN UPDATE
+	if len(setClauses) > 0 {
+		sb.WriteString(fmt.Sprintf("WHEN MATCHED AND (%s) THEN UPDATE SET %s\n",
+			strings.Join(changeDetection, " OR "),
+			strings.Join(setClauses, ", ")))
+	}
+
+	// WHEN NOT MATCHED THEN INSERT
+	sb.WriteString(fmt.Sprintf("WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
+		strings.Join(quotedCols, ", "),
+		strings.Join(sourceCols, ", ")))
+
+	return sb.String()
+}
+
+// executeMergeWithRetry executes a MERGE statement with deadlock retry logic.
+// Handles IDENTITY_INSERT if the target has identity columns.
+func (p *MSSQLPool) executeMergeWithRetry(ctx context.Context, conn *sql.Conn,
+	targetTable, mergeSQL string, hasIdentity bool, maxRetries int) error {
+
+	const baseDelayMs = 200
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		var err error
+
+		if hasIdentity {
+			// Enable IDENTITY_INSERT, execute MERGE, then disable
+			if _, err = conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s ON", targetTable)); err != nil {
+				return fmt.Errorf("enabling identity insert: %w", err)
+			}
+			_, err = conn.ExecContext(ctx, mergeSQL)
+			conn.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s OFF", targetTable))
+		} else {
+			_, err = conn.ExecContext(ctx, mergeSQL)
+		}
+
+		if err == nil {
+			return nil
+		}
+
+		// Check if deadlock (error 1205)
+		if !isDeadlockError(err) || attempt == maxRetries {
+			return err
+		}
+
+		logging.Warn("Deadlock on %s, retry %d/%d", targetTable, attempt, maxRetries)
+		time.Sleep(time.Duration(baseDelayMs*attempt) * time.Millisecond)
+	}
+
+	return fmt.Errorf("merge failed after %d retries", maxRetries)
+}
+
+// isDeadlockError checks if the error is a SQL Server deadlock (error 1205)
+func isDeadlockError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for mssql-specific error type
+	if mssqlErr, ok := err.(interface{ SQLErrorNumber() int32 }); ok {
+		return mssqlErr.SQLErrorNumber() == 1205
+	}
+
+	// Fallback to string matching
+	errStr := err.Error()
+	return strings.Contains(errStr, "deadlock") || strings.Contains(errStr, "1205")
 }
 
 // CheckUpsertStagingReady checks if staging table exists and has data (for resume)
