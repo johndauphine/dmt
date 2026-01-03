@@ -14,6 +14,7 @@ import (
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/exitcodes"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
@@ -309,8 +310,14 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
+		code := exitcodes.FromError(err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		if exitcodes.IsRecoverable(code) {
+			fmt.Fprintf(os.Stderr, "Exit code %d (%s) - safe to retry\n", code, exitcodes.Description(code))
+		} else {
+			fmt.Fprintf(os.Stderr, "Exit code %d (%s)\n", code, exitcodes.Description(code))
+		}
+		os.Exit(code)
 	}
 }
 
@@ -713,7 +720,10 @@ func outputJSON(c *cli.Context, result *orchestrator.MigrationResult) error {
 	return nil
 }
 
-// setupSignalHandler sets up graceful shutdown with timeout
+// setupSignalHandler sets up graceful shutdown with timeout for Airflow/Kubernetes.
+// Exit codes:
+//   - 5 (Cancelled): Normal signal-based shutdown, safe to retry
+//   - Timeout or double-signal also exits with 5 (still user-initiated cancellation)
 func setupSignalHandler(c *cli.Context, cancel context.CancelFunc) {
 	shutdownTimeout := c.Duration("shutdown-timeout")
 
@@ -721,21 +731,28 @@ func setupSignalHandler(c *cli.Context, cancel context.CancelFunc) {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\nInterrupted. Saving checkpoint...")
+		sig := <-sigCh
+		sigName := "SIGINT"
+		if sig == syscall.SIGTERM {
+			sigName = "SIGTERM"
+		}
+		fmt.Fprintf(os.Stderr, "\nReceived %s. Shutting down gracefully (timeout: %s)...\n", sigName, shutdownTimeout)
+		fmt.Fprintln(os.Stderr, "Saving checkpoint and allowing in-progress transfers to complete...")
 		cancel()
 
 		// Start shutdown timer
 		shutdownTimer := time.AfterFunc(shutdownTimeout, func() {
 			fmt.Fprintln(os.Stderr, "Shutdown timeout reached, forcing exit...")
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Exit code %d (%s) - safe to retry\n", exitcodes.Cancelled, exitcodes.Description(exitcodes.Cancelled))
+			os.Exit(exitcodes.Cancelled)
 		})
 
 		// Wait for second signal for immediate exit
 		<-sigCh
 		shutdownTimer.Stop()
-		fmt.Fprintln(os.Stderr, "Forcing immediate exit...")
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "Second signal received, forcing immediate exit...")
+		fmt.Fprintf(os.Stderr, "Exit code %d (%s) - safe to retry\n", exitcodes.Cancelled, exitcodes.Description(exitcodes.Cancelled))
+		os.Exit(exitcodes.Cancelled)
 	}()
 }
 
