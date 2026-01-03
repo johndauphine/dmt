@@ -31,10 +31,10 @@ Comprehensive benchmark results comparing Go and Rust implementations.
 
 ### MSSQL → PostgreSQL
 
-| Mode | Go (Optimized) | Go (Old) | Rust | Notes |
-|------|---------------|----------|------|-------|
-| drop_recreate | **287,000 rows/s** (75s) | 287,000 rows/s | 289,372 rows/s | Comparable |
-| upsert | **301,181 rows/s** (64s) | 72,628 rows/s | 181,450 rows/s | **Go 1.66x faster** |
+| Mode | Go | Rust | Notes |
+|------|-----|------|-------|
+| drop_recreate | 287,000 rows/s (75s) | 289,372 rows/s (74s) | Comparable |
+| upsert | **235,160 rows/s** (82s) | 181,450 rows/s (106s) | **Go 30% faster** |
 
 ### PostgreSQL → MSSQL
 
@@ -56,8 +56,8 @@ Comprehensive benchmark results comparing Go and Rust implementations.
 
 ## Key Findings
 
-### 1. Go Upsert Performance is Superior (New!)
-After optimizing the keyset pagination strategy and memory allocation, Go's MSSQL→PG upsert throughput jumped from 72K to **301K rows/s**, surpassing Rust (181K rows/s). This is achieved by using the same "Staging Table + COPY + MERGE" strategy as the ROW_NUMBER path.
+### 1. Go Upsert Performance is Superior
+After optimizing the keyset pagination strategy and memory allocation, Go's MSSQL→PG upsert throughput jumped from 72K to **235K rows/s**, surpassing Rust (181K rows/s). This is achieved by using the same "Staging Table + COPY + MERGE" strategy as the ROW_NUMBER path.
 
 ### 2. Bulk Load Performance is Comparable
 Both implementations achieve similar throughput for bulk loads (~290K rows/sec MSSQL→PG). The bottleneck is database I/O, not the application.
