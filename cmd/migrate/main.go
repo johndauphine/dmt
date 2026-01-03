@@ -23,7 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var version = "1.22.0"
+var version = "1.23.0"
 
 func main() {
 	app := &cli.App{
