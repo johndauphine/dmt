@@ -240,6 +240,12 @@ func (o *Orchestrator) SetRunContext(profileName, configPath string) {
 	o.runConfig = configPath
 }
 
+// SetProgressReporter configures JSON progress reporting for Airflow/automation.
+// When enabled, disables the terminal progress bar and emits JSON updates to stderr.
+func (o *Orchestrator) SetProgressReporter(reporter progress.Reporter, interval time.Duration) {
+	o.progress.SetReporter(reporter, interval)
+}
+
 // Run executes a new migration.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	// Use provided run ID or generate a new one
@@ -268,6 +274,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Extract schema
+	o.progress.SetPhase("extracting_schema")
 	logging.Info("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
@@ -307,6 +314,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	o.tables = tables
+	o.progress.SetTablesTotal(len(tables))
 	logging.Info("Found %d tables", len(tables))
 
 	// Refine memory settings based on actual row sizes from database stats
@@ -341,6 +349,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
 
 	// Create target schema and tables
+	o.progress.SetPhase("creating_tables")
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
@@ -510,6 +519,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Transfer data
+	o.progress.SetPhase("transfer")
 	logging.Info("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
 	tableFailures, err := o.transferAll(ctx, runID, tables, false)
@@ -547,6 +557,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Finalize (only for successful tables)
+	o.progress.SetPhase("finalizing")
 	logging.Info("Finalizing...")
 	o.state.UpdatePhase(runID, "finalizing")
 	if err := o.finalize(ctx, successTables); err != nil {
@@ -556,6 +567,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Validate (only for successful tables)
+	o.progress.SetPhase("validating")
 	logging.Info("Validating...")
 	o.state.UpdatePhase(runID, "validating")
 	o.tables = successTables // Update for validation
@@ -990,6 +1002,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				}
 				taskKey := fmt.Sprintf("transfer:%s.%s", j.Table.Schema, j.Table.Name)
 				o.markTableComplete(runID, taskKey)
+				o.progress.TableComplete()
 			}
 			ts.mu.Unlock()
 		}(job)
@@ -1009,6 +1022,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		// Only keep first error per table
 		if _, exists := failedTables[te.tableName]; !exists {
 			failedTables[te.tableName] = te.err
+			o.progress.TableFailed()
 		}
 	}
 
@@ -1452,6 +1466,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		o.tables = tables // Use all tables for finalize/validate
 
 		// Finalize
+		o.progress.SetPhase("finalizing")
 		logging.Info("Finalizing...")
 		if err := o.finalize(ctx, tables); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1460,6 +1475,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 
 		// Validate
+		o.progress.SetPhase("validating")
 		logging.Info("Validating...")
 		if err := o.Validate(ctx); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1569,6 +1585,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Finalize (uses successful tables for constraints)
 	o.tables = successTables
+	o.progress.SetPhase("finalizing")
 	logging.Info("Finalizing...")
 	if err := o.finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1577,6 +1594,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Validate successful tables
+	o.progress.SetPhase("validating")
 	logging.Info("Validating...")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())

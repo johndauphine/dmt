@@ -17,6 +17,7 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/exitcodes"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
+	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
 	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
@@ -356,6 +357,13 @@ func runMigration(c *cli.Context) error {
 	defer orch.Close()
 	orch.SetRunContext(profileName, configPath)
 
+	// Set up progress reporter if --progress flag is set
+	if c.Bool("progress") {
+		reporter := progress.NewJSONReporter(os.Stderr, c.Duration("progress-interval"))
+		orch.SetProgressReporter(reporter, c.Duration("progress-interval"))
+		defer reporter.Close()
+	}
+
 	// Handle dry-run mode
 	if c.Bool("dry-run") {
 		ctx := context.Background()
@@ -427,6 +435,13 @@ func resumeMigration(c *cli.Context) error {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
 	defer orch.Close()
+
+	// Set up progress reporter if --progress flag is set
+	if c.Bool("progress") {
+		reporter := progress.NewJSONReporter(os.Stderr, c.Duration("progress-interval"))
+		orch.SetProgressReporter(reporter, c.Duration("progress-interval"))
+		defer reporter.Close()
+	}
 
 	// Handle graceful shutdown with timeout
 	ctx, cancel := context.WithCancel(context.Background())
