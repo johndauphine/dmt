@@ -1,0 +1,28 @@
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: dbo
+  encrypt: "false"
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5433
+  database: stackoverflow
+  user: postgres
+  password: "PostgresPassword123"
+  schema: public
+  ssl_mode: disable
+
+migration:
+  workers: 6
+  chunk_size: 100000
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
