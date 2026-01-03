@@ -78,6 +78,11 @@ func (p *MSSQLPool) Close() {
 	p.db.Close()
 }
 
+// Ping tests the connection to the database
+func (p *MSSQLPool) Ping(ctx context.Context) error {
+	return p.db.PingContext(ctx)
+}
+
 // DB returns the underlying database connection
 func (p *MSSQLPool) DB() *sql.DB {
 	return p.db

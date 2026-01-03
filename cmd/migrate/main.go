@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
@@ -16,6 +18,7 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
 	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +61,20 @@ func main() {
 				Name:  "verbosity",
 				Value: "info",
 				Usage: "Log verbosity level (debug, info, warn, error)",
+			},
+			&cli.DurationFlag{
+				Name:  "shutdown-timeout",
+				Value: 60 * time.Second,
+				Usage: "Graceful shutdown timeout",
+			},
+			&cli.BoolFlag{
+				Name:  "progress",
+				Usage: "Output JSON progress updates to stderr",
+			},
+			&cli.DurationFlag{
+				Name:  "progress-interval",
+				Value: 1 * time.Second,
+				Usage: "Interval between progress updates",
 			},
 		},
 		Before: func(c *cli.Context) error {
@@ -115,6 +132,10 @@ func main() {
 					&cli.StringFlag{
 						Name:  "state-file",
 						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
+					},
+					&cli.BoolFlag{
+						Name:  "dry-run",
+						Usage: "Preview migration plan without executing",
 					},
 				},
 			},
@@ -251,6 +272,39 @@ func main() {
 					},
 				},
 			},
+			{
+				Name:   "health-check",
+				Usage:  "Test database connections",
+				Action: healthCheck,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+				},
+			},
+			{
+				Name:   "init",
+				Usage:  "Create a new configuration file interactively",
+				Action: initConfig,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "output",
+						Aliases: []string{"o"},
+						Value:   "config.yaml",
+						Usage:   "Output file path",
+					},
+					&cli.BoolFlag{
+						Name:  "advanced",
+						Usage: "Show advanced configuration options",
+					},
+					&cli.BoolFlag{
+						Name:    "force",
+						Aliases: []string{"f"},
+						Usage:   "Overwrite existing file",
+					},
+				},
+			},
 		},
 	}
 
@@ -295,18 +349,39 @@ func runMigration(c *cli.Context) error {
 	defer orch.Close()
 	orch.SetRunContext(profileName, configPath)
 
-	// Handle graceful shutdown
+	// Handle dry-run mode
+	if c.Bool("dry-run") {
+		ctx := context.Background()
+		result, err := orch.DryRun(ctx)
+		if err != nil {
+			return err
+		}
+
+		if c.Bool("output-json") || c.String("output-file") != "" {
+			data, err := json.MarshalIndent(result, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal result: %w", err)
+			}
+			if c.Bool("output-json") {
+				fmt.Println(string(data))
+			}
+			if outputFile := c.String("output-file"); outputFile != "" {
+				if err := os.WriteFile(outputFile, data, 0600); err != nil {
+					return fmt.Errorf("failed to write output file: %w", err)
+				}
+			}
+			return nil
+		}
+
+		// Human-readable output
+		printDryRunResult(result)
+		return nil
+	}
+
+	// Handle graceful shutdown with timeout
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\nInterrupted. Saving checkpoint...")
-		cancel()
-	}()
+	setupSignalHandler(c, cancel)
 
 	// Run migration
 	runErr := orch.Run(ctx)
@@ -346,17 +421,10 @@ func resumeMigration(c *cli.Context) error {
 	}
 	defer orch.Close()
 
+	// Handle graceful shutdown with timeout
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigCh
-		fmt.Fprintln(os.Stderr, "\nInterrupted. Saving checkpoint...")
-		cancel()
-	}()
+	setupSignalHandler(c, cancel)
 
 	runErr := orch.Resume(ctx)
 
@@ -643,4 +711,275 @@ func outputJSON(c *cli.Context, result *orchestrator.MigrationResult) error {
 	}
 
 	return nil
+}
+
+// setupSignalHandler sets up graceful shutdown with timeout
+func setupSignalHandler(c *cli.Context, cancel context.CancelFunc) {
+	shutdownTimeout := c.Duration("shutdown-timeout")
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "\nInterrupted. Saving checkpoint...")
+		cancel()
+
+		// Start shutdown timer
+		shutdownTimer := time.AfterFunc(shutdownTimeout, func() {
+			fmt.Fprintln(os.Stderr, "Shutdown timeout reached, forcing exit...")
+			os.Exit(1)
+		})
+
+		// Wait for second signal for immediate exit
+		<-sigCh
+		shutdownTimer.Stop()
+		fmt.Fprintln(os.Stderr, "Forcing immediate exit...")
+		os.Exit(1)
+	}()
+}
+
+// healthCheck tests database connections
+func healthCheck(c *cli.Context) error {
+	cfg, _, _, err := loadConfigWithOrigin(c)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create orchestrator: %w", err)
+	}
+	defer orch.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := orch.HealthCheck(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Output JSON or human-readable based on --output-json flag
+	if c.Bool("output-json") || c.String("output-file") != "" {
+		data, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal result: %w", err)
+		}
+		if c.Bool("output-json") {
+			fmt.Println(string(data))
+		}
+		if outputFile := c.String("output-file"); outputFile != "" {
+			if err := os.WriteFile(outputFile, data, 0600); err != nil {
+				return fmt.Errorf("failed to write output file: %w", err)
+			}
+		}
+		if !result.Healthy {
+			return fmt.Errorf("health check failed")
+		}
+		return nil
+	}
+
+	// Human-readable output
+	fmt.Println("\nHealth Check Results:")
+	fmt.Printf("  Source (%s): %s (%dms)\n",
+		result.SourceDBType,
+		boolToStatus(result.SourceConnected),
+		result.SourceLatencyMs)
+	if result.SourceError != "" {
+		fmt.Printf("    Error: %s\n", result.SourceError)
+	}
+	if result.SourceConnected && result.SourceTableCount > 0 {
+		fmt.Printf("    Tables: %d\n", result.SourceTableCount)
+	}
+
+	fmt.Printf("  Target (%s): %s (%dms)\n",
+		result.TargetDBType,
+		boolToStatus(result.TargetConnected),
+		result.TargetLatencyMs)
+	if result.TargetError != "" {
+		fmt.Printf("    Error: %s\n", result.TargetError)
+	}
+
+	fmt.Printf("\n  Overall: %s\n", boolToHealthy(result.Healthy))
+
+	if !result.Healthy {
+		return fmt.Errorf("health check failed")
+	}
+	return nil
+}
+
+func boolToStatus(connected bool) string {
+	if connected {
+		return "OK"
+	}
+	return "FAILED"
+}
+
+func boolToHealthy(healthy bool) string {
+	if healthy {
+		return "HEALTHY"
+	}
+	return "UNHEALTHY"
+}
+
+// initConfig runs the CLI wizard to create a config file
+func initConfig(c *cli.Context) error {
+	outputPath := c.String("output")
+	advanced := c.Bool("advanced")
+	force := c.Bool("force")
+
+	// Check if file exists (unless --force)
+	if !force {
+		if _, err := os.Stat(outputPath); err == nil {
+			return fmt.Errorf("file %s already exists (use --force to overwrite)", outputPath)
+		}
+	}
+
+	cfg, err := runCLIWizard(advanced)
+	if err != nil {
+		return err
+	}
+
+	// Marshal and write
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("generating config: %w", err)
+	}
+
+	if err := os.WriteFile(outputPath, data, 0600); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+
+	fmt.Printf("Configuration saved to %s\n", outputPath)
+	return nil
+}
+
+// runCLIWizard runs an interactive CLI wizard to create a config
+func runCLIWizard(advanced bool) (*config.Config, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	prompt := func(label, defaultValue string) string {
+		if defaultValue != "" {
+			fmt.Printf("%s [%s]: ", label, defaultValue)
+		} else {
+			fmt.Printf("%s: ", label)
+		}
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			return defaultValue
+		}
+		return input
+	}
+
+	promptInt := func(label string, defaultValue int) int {
+		result := prompt(label, fmt.Sprintf("%d", defaultValue))
+		if val, err := fmt.Sscanf(result, "%d", &defaultValue); err != nil || val != 1 {
+			return defaultValue
+		}
+		return defaultValue
+	}
+
+	promptBool := func(label string, defaultValue bool) bool {
+		defStr := "n"
+		if defaultValue {
+			defStr = "y"
+		}
+		result := strings.ToLower(prompt(label+" (y/n)", defStr))
+		return result == "y" || result == "yes"
+	}
+
+	promptPassword := func(label string) string {
+		fmt.Printf("%s: ", label)
+		password, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println() // newline after hidden input
+		if err != nil {
+			return ""
+		}
+		return string(password)
+	}
+
+	promptChoice := func(label string, choices []string, defaultValue string) string {
+		for {
+			result := prompt(label, defaultValue)
+			for _, choice := range choices {
+				if result == choice {
+					return result
+				}
+			}
+			fmt.Printf("  Invalid choice. Options: %s\n", strings.Join(choices, ", "))
+		}
+	}
+
+	cfg := &config.Config{}
+
+	dbTypes := []string{"mssql", "postgres"}
+	targetModes := []string{"drop_recreate", "truncate", "upsert"}
+
+	fmt.Println("\n=== Source Database ===")
+	cfg.Source.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "mssql")
+	cfg.Source.Host = prompt("Host", "localhost")
+	defaultPort := 1433
+	if cfg.Source.Type == "postgres" {
+		defaultPort = 5432
+	}
+	cfg.Source.Port = promptInt("Port", defaultPort)
+	cfg.Source.Database = prompt("Database name", "")
+	cfg.Source.User = prompt("Username", "sa")
+	cfg.Source.Password = promptPassword("Password")
+	cfg.Source.Schema = prompt("Schema", "dbo")
+
+	fmt.Println("\n=== Target Database ===")
+	cfg.Target.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "postgres")
+	cfg.Target.Host = prompt("Host", "localhost")
+	defaultPort = 5432
+	if cfg.Target.Type == "mssql" {
+		defaultPort = 1433
+	}
+	cfg.Target.Port = promptInt("Port", defaultPort)
+	cfg.Target.Database = prompt("Database name", "")
+	cfg.Target.User = prompt("Username", "postgres")
+	cfg.Target.Password = promptPassword("Password")
+	cfg.Target.Schema = prompt("Schema", "public")
+
+	fmt.Println("\n=== Migration Settings ===")
+	cfg.Migration.TargetMode = promptChoice("Target mode (drop_recreate/truncate/upsert)", targetModes, "drop_recreate")
+	cfg.Migration.CreateIndexes = promptBool("Create indexes", false)
+	cfg.Migration.CreateForeignKeys = promptBool("Create foreign keys", false)
+
+	if advanced {
+		fmt.Println("\n=== Advanced Settings ===")
+		cfg.Migration.Workers = promptInt("Workers", 6)
+		cfg.Migration.ChunkSize = promptInt("Chunk size", 100000)
+	}
+
+	return cfg, nil
+}
+
+// printDryRunResult prints the dry-run result in human-readable format
+func printDryRunResult(r *orchestrator.DryRunResult) {
+	fmt.Println("\n=== Migration Preview (Dry Run) ===")
+	fmt.Printf("Source: %s (%s)\n", r.SourceType, r.SourceSchema)
+	fmt.Printf("Target: %s (%s)\n", r.TargetType, r.TargetSchema)
+	fmt.Printf("Mode: %s\n", r.TargetMode)
+	fmt.Println()
+
+	fmt.Printf("%-30s %12s %12s %15s\n", "Table", "Rows", "Partitions", "Pagination")
+	fmt.Println(strings.Repeat("-", 75))
+	for _, t := range r.Tables {
+		fmt.Printf("%-30s %12d %12d %15s\n",
+			t.Name, t.RowCount, t.Partitions, t.PaginationMethod)
+	}
+	fmt.Println(strings.Repeat("-", 75))
+	fmt.Printf("%-30s %12d\n", "TOTAL", r.TotalRows)
+	fmt.Println()
+
+	fmt.Printf("Workers: %d\n", r.Workers)
+	fmt.Printf("Chunk Size: %d\n", r.ChunkSize)
+	fmt.Printf("Estimated Memory: ~%d MB\n", r.EstimatedMemMB)
 }

@@ -36,6 +36,7 @@ type SourcePool interface {
 type TargetPool interface {
 	// Connection management
 	Close()
+	Ping(ctx context.Context) error
 
 	// Schema operations
 	CreateSchema(ctx context.Context, schema string) error

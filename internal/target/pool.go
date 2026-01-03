@@ -63,6 +63,11 @@ func (p *Pool) Close() {
 	p.pool.Close()
 }
 
+// Ping tests the connection to the database
+func (p *Pool) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
 // Pool returns the underlying pgxpool
 func (p *Pool) Pool() *pgxpool.Pool {
 	return p.pool

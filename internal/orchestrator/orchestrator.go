@@ -123,6 +123,46 @@ type StatusResult struct {
 	ProgressPercent float64   `json:"progress_percent"`
 }
 
+// HealthCheckResult contains connection health information.
+type HealthCheckResult struct {
+	Timestamp        string `json:"timestamp"`
+	SourceConnected  bool   `json:"source_connected"`
+	SourceLatencyMs  int64  `json:"source_latency_ms"`
+	SourceDBType     string `json:"source_db_type"`
+	SourceTableCount int    `json:"source_table_count,omitempty"`
+	SourceError      string `json:"source_error,omitempty"`
+	TargetConnected  bool   `json:"target_connected"`
+	TargetLatencyMs  int64  `json:"target_latency_ms"`
+	TargetDBType     string `json:"target_db_type"`
+	TargetError      string `json:"target_error,omitempty"`
+	Healthy          bool   `json:"healthy"`
+}
+
+// DryRunResult contains the migration plan preview.
+type DryRunResult struct {
+	SourceType     string        `json:"source_type"`
+	TargetType     string        `json:"target_type"`
+	SourceSchema   string        `json:"source_schema"`
+	TargetSchema   string        `json:"target_schema"`
+	Tables         []DryRunTable `json:"tables"`
+	TotalRows      int64         `json:"total_rows"`
+	TotalTables    int           `json:"total_tables"`
+	EstimatedMemMB int64         `json:"estimated_memory_mb"`
+	Workers        int           `json:"workers"`
+	ChunkSize      int           `json:"chunk_size"`
+	TargetMode     string        `json:"target_mode"`
+}
+
+// DryRunTable contains preview information for a single table.
+type DryRunTable struct {
+	Name             string `json:"name"`
+	RowCount         int64  `json:"row_count"`
+	PaginationMethod string `json:"pagination_method"`
+	Partitions       int    `json:"partitions"`
+	HasPK            bool   `json:"has_pk"`
+	Columns          int    `json:"columns"`
+}
+
 // New creates a new orchestrator with default options (SQLite state).
 func New(cfg *config.Config) (*Orchestrator, error) {
 	return NewWithOptions(cfg, Options{})
@@ -2045,6 +2085,126 @@ func (o *Orchestrator) GetStatusResult() (*StatusResult, error) {
 		RowsTransferred: totalRowsDone,
 		ProgressPercent: progressPct,
 	}, nil
+}
+
+// HealthCheck tests connectivity to source and target databases.
+func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, error) {
+	result := &HealthCheckResult{
+		Timestamp:    time.Now().Format(time.RFC3339),
+		SourceDBType: o.sourcePool.DBType(),
+		TargetDBType: o.targetPool.DBType(),
+	}
+
+	// Test source connection
+	sourceStart := time.Now()
+	if db := o.sourcePool.DB(); db != nil {
+		if err := db.PingContext(ctx); err != nil {
+			result.SourceError = err.Error()
+		} else {
+			result.SourceConnected = true
+			// Get table count
+			tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
+			if err == nil {
+				result.SourceTableCount = len(tables)
+			}
+		}
+	}
+	result.SourceLatencyMs = time.Since(sourceStart).Milliseconds()
+
+	// Test target connection
+	targetStart := time.Now()
+	if err := o.targetPool.Ping(ctx); err != nil {
+		result.TargetError = err.Error()
+	} else {
+		result.TargetConnected = true
+	}
+	result.TargetLatencyMs = time.Since(targetStart).Milliseconds()
+
+	result.Healthy = result.SourceConnected && result.TargetConnected
+	return result, nil
+}
+
+// DryRun performs a migration preview without transferring data.
+func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
+	logging.Info("Performing dry run (no data will be transferred)...")
+
+	// Extract schema
+	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
+	if err != nil {
+		return nil, fmt.Errorf("extracting schema: %w", err)
+	}
+
+	// Apply table filters
+	tables = o.filterTables(tables)
+
+	result := &DryRunResult{
+		SourceType:   o.config.Source.Type,
+		TargetType:   o.config.Target.Type,
+		SourceSchema: o.config.Source.Schema,
+		TargetSchema: o.config.Target.Schema,
+		Workers:      o.config.Migration.Workers,
+		ChunkSize:    o.config.Migration.ChunkSize,
+		TargetMode:   o.config.Migration.TargetMode,
+		TotalTables:  len(tables),
+	}
+
+	// Calculate estimated memory
+	bufferMem := int64(o.config.Migration.Workers) *
+		int64(o.config.Migration.ReadAheadBuffers) *
+		int64(o.config.Migration.ChunkSize) *
+		500 // bytes per row estimate
+	result.EstimatedMemMB = bufferMem / (1024 * 1024)
+
+	// Analyze each table
+	for _, t := range tables {
+		rowCount, err := o.sourcePool.GetRowCount(ctx, o.config.Source.Schema, t.Name)
+		if err != nil {
+			logging.Warn("Failed to get row count for %s.%s: %v (assuming 0)", o.config.Source.Schema, t.Name, err)
+			rowCount = 0
+		}
+		result.TotalRows += rowCount
+
+		// Determine pagination method
+		paginationMethod := "full_table"
+		partitions := 1
+		hasPK := len(t.PKColumns) > 0
+
+		if hasPK {
+			if len(t.PKColumns) == 1 && isIntegerType(t.PKColumns[0].DataType) {
+				paginationMethod = "keyset"
+			} else {
+				paginationMethod = "row_number"
+			}
+
+			// Estimate partitions for large tables
+			if rowCount > int64(o.config.Migration.LargeTableThreshold) {
+				partitions = o.config.Migration.MaxPartitions
+			}
+		}
+
+		result.Tables = append(result.Tables, DryRunTable{
+			Name:             t.Name,
+			RowCount:         rowCount,
+			PaginationMethod: paginationMethod,
+			Partitions:       partitions,
+			HasPK:            hasPK,
+			Columns:          len(t.Columns),
+		})
+	}
+
+	return result, nil
+}
+
+// isIntegerType checks if a data type is an integer type.
+func isIntegerType(dataType string) bool {
+	dataType = strings.ToLower(dataType)
+	intTypes := []string{"int", "bigint", "smallint", "tinyint", "integer", "int4", "int8", "int2"}
+	for _, t := range intTypes {
+		if strings.Contains(dataType, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // Unused import suppression
