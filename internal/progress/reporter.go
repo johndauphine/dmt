@@ -13,17 +13,17 @@ import (
 
 // ProgressUpdate represents a JSON progress update for automation/Airflow.
 type ProgressUpdate struct {
-	Timestamp       string  `json:"timestamp"`
-	Phase           string  `json:"phase"`
-	TablesComplete  int     `json:"tables_complete"`
-	TablesTotal     int     `json:"tables_total"`
-	TablesRunning   int     `json:"tables_running"`
-	RowsTransferred int64   `json:"rows_transferred"`
-	RowsTotal       int64   `json:"rows_total,omitempty"`
-	ProgressPct     float64 `json:"progress_pct"`
-	RowsPerSecond   int64   `json:"rows_per_second,omitempty"`
+	Timestamp       string   `json:"timestamp"`
+	Phase           string   `json:"phase"`
+	TablesComplete  int      `json:"tables_complete"`
+	TablesTotal     int      `json:"tables_total"`
+	TablesRunning   int      `json:"tables_running"`
+	RowsTransferred int64    `json:"rows_transferred"`
+	RowsTotal       int64    `json:"rows_total,omitempty"`
+	ProgressPct     float64  `json:"progress_pct"`
+	RowsPerSecond   int64    `json:"rows_per_second,omitempty"`
 	CurrentTables   []string `json:"current_tables,omitempty"`
-	ErrorCount      int     `json:"error_count,omitempty"`
+	ErrorCount      int      `json:"error_count,omitempty"`
 }
 
 // Reporter defines the interface for progress reporting.
@@ -38,11 +38,11 @@ type Reporter interface {
 
 // JSONReporter outputs JSON progress updates to a writer (typically stderr).
 type JSONReporter struct {
-	writer   io.Writer
-	mu       sync.Mutex
-	interval time.Duration
+	writer     io.Writer
+	mu         sync.Mutex
+	interval   time.Duration
 	lastReport time.Time
-	closed   bool
+	closed     bool
 }
 
 // NewJSONReporter creates a new JSON progress reporter.

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -25,6 +26,56 @@ func expandTilde(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// Template patterns for secret expansion:
+// - filePattern: ${file:/path/to/file} - any path characters allowed
+// - envPattern: ${env:VAR_NAME} - valid env var names only [A-Za-z_][A-Za-z0-9_]*
+// - legacyEnvPattern: ${VAR_NAME} - legacy shorthand for ${env:VAR_NAME}
+var filePattern = regexp.MustCompile(`^\$\{file:(.+)\}$`)
+var envPattern = regexp.MustCompile(`^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$`)
+var legacyEnvPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+// expandTemplateValue expands template patterns in a string value.
+// Supported patterns:
+//   - ${file:/path/to/file} - reads value from file (trimmed of whitespace)
+//   - ${env:VAR_NAME} - reads value from environment variable (explicit)
+//   - ${VAR_NAME} - reads value from environment variable (legacy shorthand)
+//   - Any other value is returned as-is (cleartext password)
+//
+// Returns the expanded value and any error encountered.
+func expandTemplateValue(value string) (string, error) {
+	if value == "" {
+		return value, nil
+	}
+
+	// Check for ${file:...} pattern
+	if matches := filePattern.FindStringSubmatch(value); matches != nil {
+		filePath := expandTilde(matches[1])
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("reading secret from file %s: %w", filePath, err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	// Check for ${env:VAR_NAME} pattern (explicit, restricted to valid env var names)
+	if matches := envPattern.FindStringSubmatch(value); matches != nil {
+		// Return empty string if env var not set - allows optional env vars
+		// but may cause silent auth failures if variable name is misspelled.
+		return os.Getenv(matches[1]), nil
+	}
+
+	// Check for legacy ${VAR_NAME} pattern (shorthand for ${env:VAR_NAME})
+	if matches := legacyEnvPattern.FindStringSubmatch(value); matches != nil {
+		// Return empty string if env var not set - matches ${env:VAR} behavior.
+		// This allows optional env vars but may cause silent auth failures
+		// if the variable name is misspelled. Use explicit ${env:VAR} for clarity.
+		return os.Getenv(matches[1]), nil
+	}
+
+	// Not a template pattern - return as-is (cleartext)
+	return value, nil
 }
 
 // AutoConfig tracks which values were auto-configured and why
@@ -172,10 +223,47 @@ func LoadWithOptions(path string, opts LoadOptions) (*Config, error) {
 	return LoadBytes(data)
 }
 
+// expandYAMLTemplates expands ${file:path} and ${env:VAR} templates in YAML string.
+// Also supports legacy ${VAR} syntax for backward compatibility.
+// This runs before YAML parsing to allow templates in any field.
+//
+// Security note: File paths are not restricted - users should only use trusted paths
+// like /run/secrets/ for Docker secrets. Avoid user-controlled paths.
+func expandYAMLTemplates(yamlStr string) (string, error) {
+	// Pattern to match ${file:path}, ${env:VAR}, or ${VAR} in YAML
+	// - file: allows any path characters (user responsibility to use safe paths)
+	// - env: restricted to valid env var names [A-Za-z_][A-Za-z0-9_]*
+	// - legacy ${VAR}: also restricted to valid env var names
+	pattern := regexp.MustCompile(`\$\{file:([^}]+)\}|\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}|\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+	var firstErr error
+	result := pattern.ReplaceAllStringFunc(yamlStr, func(match string) string {
+		// If we've already encountered an error, leave subsequent matches unchanged
+		if firstErr != nil {
+			return match
+		}
+
+		expanded, err := expandTemplateValue(match)
+		if err != nil {
+			firstErr = err
+			return match // Keep original on error
+		}
+		return expanded
+	})
+
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return result, nil
+}
+
 // LoadBytes reads configuration from YAML bytes.
 func LoadBytes(data []byte) (*Config, error) {
-	// Expand environment variables
-	expanded := os.ExpandEnv(string(data))
+	// Expand templates (${file:path}, ${env:VAR}, and legacy ${VAR} syntax)
+	expanded, err := expandYAMLTemplates(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("expanding templates: %w", err)
+	}
 
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {

@@ -27,12 +27,12 @@ type Tracker struct {
 	tablesFailed   atomic.Int32
 
 	// JSON progress reporting
-	reporter    Reporter
-	jsonMode    bool // When true, disable progress bar
-	phase       string
-	reporterMu  sync.Mutex
-	stopReport  chan struct{}
-	reportWg    sync.WaitGroup
+	reporter   Reporter
+	jsonMode   bool // When true, disable progress bar
+	phase      string
+	reporterMu sync.Mutex
+	stopReport chan struct{}
+	reportWg   sync.WaitGroup
 }
 
 // New creates a new progress tracker
