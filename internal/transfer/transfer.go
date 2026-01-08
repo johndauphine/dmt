@@ -342,19 +342,24 @@ func Execute(
 
 	// Build column list
 	cols := make([]string, len(job.Table.Columns))
+	targetCols := make([]string, len(job.Table.Columns))
 	colTypes := make([]string, len(job.Table.Columns))
 	for i, c := range job.Table.Columns {
 		cols[i] = c.Name
+		targetCols[i] = target.SanitizePGIdentifier(c.Name)
 		colTypes[i] = strings.ToLower(c.DataType)
 	}
 
+	// Sanitize table name for target
+	targetTableName := target.SanitizePGIdentifier(job.Table.Name)
+
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, colTypes, prog, resumeLastPK, resumeRowsDone)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, prog, resumeLastPK, resumeRowsDone, targetTableName)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, colTypes, prog, resumeLastPK, resumeRowsDone)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, prog, resumeLastPK, resumeRowsDone, targetTableName)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -363,10 +368,12 @@ func cleanupPartitionData(ctx context.Context, pgPool *pgxpool.Pool, schema stri
 		return nil
 	}
 
-	pkCol := job.Table.PrimaryKey[0]
+	pkCol := target.SanitizePGIdentifier(job.Table.PrimaryKey[0])
+	tableName := target.SanitizePGIdentifier(job.Table.Name)
+
 	query := fmt.Sprintf(
 		`DELETE FROM %s.%q WHERE %q >= $1 AND %q <= $2`,
-		schema, job.Table.Name, pkCol, pkCol,
+		schema, tableName, pkCol, pkCol,
 	)
 
 	_, err := pgPool.Exec(ctx, query, job.Partition.MinPK, job.Partition.MaxPK)
@@ -384,15 +391,17 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 	// Check target type and use appropriate method
 	switch p := tgtPool.(type) {
 	case *target.Pool:
-		// PostgreSQL target
+		// PostgreSQL target - sanitize identifiers
+		sanitizedPK := target.SanitizePGIdentifier(pkCol)
+		sanitizedTable := target.SanitizePGIdentifier(job.Table.Name)
 		query := fmt.Sprintf(
 			`DELETE FROM %s.%q WHERE %q >= $1 AND %q <= $2`,
-			schema, job.Table.Name, pkCol, pkCol,
+			schema, sanitizedTable, sanitizedPK, sanitizedPK,
 		)
 		_, err := p.Pool().Exec(ctx, query, job.Partition.MinPK, job.Partition.MaxPK)
 		return err
 	case *target.MSSQLPool:
-		// SQL Server target
+		// SQL Server target - use original identifiers
 		query := fmt.Sprintf(
 			`DELETE FROM [%s].[%s] WHERE [%s] >= @p1 AND [%s] <= @p2`,
 			schema, job.Table.Name, pkCol, pkCol,
@@ -410,17 +419,20 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, tableName, pkCol string, lastPK any, maxPK any) error {
 	switch p := tgtPool.(type) {
 	case *target.Pool:
-		// PostgreSQL target
+		// PostgreSQL target - sanitize identifiers
+		sanitizedPK := target.SanitizePGIdentifier(pkCol)
+		sanitizedTable := target.SanitizePGIdentifier(tableName)
+		
 		var deleteQuery string
 		var result pgconn.CommandTag
 		var err error
 		if maxPK != nil {
 			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1 AND %q <= $2`,
-				schema, tableName, pkCol, pkCol)
+				schema, sanitizedTable, sanitizedPK, sanitizedPK)
 			result, err = p.Pool().Exec(ctx, deleteQuery, lastPK, maxPK)
 		} else {
 			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
-				schema, tableName, pkCol)
+				schema, sanitizedTable, sanitizedPK)
 			result, err = p.Pool().Exec(ctx, deleteQuery, lastPK)
 		}
 		if err != nil {
@@ -489,10 +501,11 @@ func executeKeysetPagination(
 	tgtPool pool.TargetPool,
 	cfg *config.Config,
 	job Job,
-	cols, colTypes []string,
+	cols, targetCols, colTypes []string,
 	prog *progress.Tracker,
 	resumeLastPK any,
 	resumeRowsDone int64,
+	targetTableName string,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -643,6 +656,12 @@ func executeKeysetPagination(
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
 	pkCols := job.Table.PrimaryKey
+	
+	// Sanitize PK columns for upsert
+	targetPKCols := make([]string, len(pkCols))
+	for i, pk := range pkCols {
+		targetPKCols[i] = target.SanitizePGIdentifier(pk)
+	}
 
 	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
 	var partitionID *int
@@ -666,9 +685,9 @@ func executeKeysetPagination(
 				var err error
 				if useUpsert {
 					// Use high-performance staging table approach
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, pkCols, rows, writerID, partitionID)
+					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, targetPKCols, rows, writerID, partitionID)
 				} else {
-					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows)
+					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
 				}
 				if err != nil {
 					writeErr.CompareAndSwap(nil, &err)
@@ -773,10 +792,11 @@ func executeRowNumberPagination(
 	tgtPool pool.TargetPool,
 	cfg *config.Config,
 	job Job,
-	cols, colTypes []string,
+	cols, targetCols, colTypes []string,
 	prog *progress.Tracker,
 	resumeLastPK any,
 	resumeRowsDone int64,
+	targetTableName string,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -921,7 +941,12 @@ func executeRowNumberPagination(
 
 	// Start write workers
 	useUpsert := cfg.Migration.TargetMode == "upsert"
-	upsertPKCols := job.Table.PrimaryKey // Use separate variable to avoid shadowing pkCols used for ORDER BY
+	
+	// Sanitize PK columns for upsert
+	targetPKCols := make([]string, len(job.Table.PrimaryKey))
+	for i, pk := range job.Table.PrimaryKey {
+		targetPKCols[i] = target.SanitizePGIdentifier(pk)
+	}
 
 	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
 	var partitionID *int
@@ -945,9 +970,9 @@ func executeRowNumberPagination(
 				var err error
 				if useUpsert {
 					// Use UpsertChunkWithWriter for high-performance staging table approach
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, upsertPKCols, rows, writerID, partitionID)
+					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, targetPKCols, rows, writerID, partitionID)
 				} else {
-					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, job.Table.Name, cols, rows)
+					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
 				}
 				if err != nil {
 					writeErr.CompareAndSwap(nil, &err)

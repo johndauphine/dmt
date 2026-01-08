@@ -66,6 +66,20 @@ func (t *Table) GetPKColumn() *Column {
 	return nil
 }
 
+// GetName returns the table name (implements target.TableInfo interface)
+func (t *Table) GetName() string {
+	return t.Name
+}
+
+// GetColumnNames returns a slice of column names (implements target.TableInfo interface)
+func (t *Table) GetColumnNames() []string {
+	names := make([]string, len(t.Columns))
+	for i, col := range t.Columns {
+		names[i] = col.Name
+	}
+	return names
+}
+
 // Column represents a table column's metadata
 type Column struct {
 	Name       string `json:"name"`

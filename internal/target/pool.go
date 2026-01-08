@@ -121,32 +121,40 @@ func (p *Pool) CreateTableWithOptions(ctx context.Context, t *source.Table, targ
 
 // SetTableLogged converts an UNLOGGED table to LOGGED
 func (p *Pool) SetTableLogged(ctx context.Context, schema, table string) error {
-	sql := fmt.Sprintf("ALTER TABLE %s.%q SET LOGGED", schema, table)
+	// Sanitize table name for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(table)
+	sql := fmt.Sprintf("ALTER TABLE %s.%q SET LOGGED", schema, sanitizedTable)
 	_, err := p.pool.Exec(ctx, sql)
 	return err
 }
 
 // TruncateTable truncates a table
 func (p *Pool) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifyPGTable(schema, table)))
+	// Sanitize table name for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(table)
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", qualifyPGTable(schema, sanitizedTable)))
 	return err
 }
 
 // DropTable drops a table if it exists
 func (p *Pool) DropTable(ctx context.Context, schema, table string) error {
-	_, err := p.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifyPGTable(schema, table)))
+	// Sanitize table name for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(table)
+	_, err := p.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", qualifyPGTable(schema, sanitizedTable)))
 	return err
 }
 
 // TableExists checks if a table exists in the schema
 func (p *Pool) TableExists(ctx context.Context, schema, table string) (bool, error) {
+	// Sanitize table name for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(table)
 	var exists bool
 	err := p.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM information_schema.tables
 			WHERE table_schema = $1 AND table_name = $2
 		)
-	`, schema, table).Scan(&exists)
+	`, schema, sanitizedTable).Scan(&exists)
 	return exists, err
 }
 
@@ -161,11 +169,15 @@ func (p *Pool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSche
 		if i > 0 {
 			pkCols += ", "
 		}
-		pkCols += quotePGIdent(col)
+		// Sanitize PK column name for PostgreSQL
+		pkCols += quotePGIdent(SanitizePGIdentifier(col))
 	}
 
+	// Sanitize table name for PostgreSQL
+	sanitizedTableName := SanitizePGIdentifier(t.Name)
+
 	sql := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s)",
-		qualifyPGTable(targetSchema, t.Name), pkCols)
+		qualifyPGTable(targetSchema, sanitizedTableName), pkCols)
 
 	_, err := p.pool.Exec(ctx, sql)
 	return err
@@ -173,13 +185,17 @@ func (p *Pool) CreatePrimaryKey(ctx context.Context, t *source.Table, targetSche
 
 // GetRowCount returns the row count for a table
 func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
+	// Sanitize table name for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(table)
 	var count int64
-	err := p.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(schema, table))).Scan(&count)
+	err := p.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(schema, sanitizedTable))).Scan(&count)
 	return count, err
 }
 
 // HasPrimaryKey checks if a table has a primary key constraint
 func (p *Pool) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
+	// Sanitize table name for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(table)
 	var exists bool
 	err := p.pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -188,7 +204,7 @@ func (p *Pool) HasPrimaryKey(ctx context.Context, schema, table string) (bool, e
 			AND table_schema = $1
 			AND table_name = $2
 		)
-	`, schema, table).Scan(&exists)
+	`, schema, sanitizedTable).Scan(&exists)
 	return exists, err
 }
 
@@ -222,12 +238,16 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 		return nil
 	}
 
+	// Sanitize identifiers for PostgreSQL
+	sanitizedTable := SanitizePGIdentifier(t.Name)
+	sanitizedCol := SanitizePGIdentifier(identityCol)
+
 	// Get max value from the table
 	var maxVal int64
 	err := p.pool.QueryRow(ctx,
-		fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s", quotePGIdent(identityCol), qualifyPGTable(schema, t.Name))).Scan(&maxVal)
+		fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s", quotePGIdent(sanitizedCol), qualifyPGTable(schema, sanitizedTable))).Scan(&maxVal)
 	if err != nil {
-		return fmt.Errorf("getting max value for %s.%s: %w", t.Name, identityCol, err)
+		return fmt.Errorf("getting max value for %s.%s: %w", sanitizedTable, sanitizedCol, err)
 	}
 
 	if maxVal == 0 {
@@ -237,7 +257,7 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 	// For GENERATED AS IDENTITY columns, use ALTER TABLE ... RESTART WITH
 	// This works for both SERIAL and IDENTITY columns
 	sql := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s RESTART WITH %d`,
-		qualifyPGTable(schema, t.Name), quotePGIdent(identityCol), maxVal+1)
+		qualifyPGTable(schema, sanitizedTable), quotePGIdent(sanitizedCol), maxVal+1)
 
 	_, err = p.pool.Exec(ctx, sql)
 	if err != nil {
@@ -247,7 +267,7 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 				pg_get_serial_sequence('%s', '%s'),
 				%d
 			)
-		`, qualifyPGTable(schema, t.Name), identityCol, maxVal)
+		`, qualifyPGTable(schema, sanitizedTable), sanitizedCol, maxVal)
 		_, err = p.pool.Exec(ctx, fallbackSQL)
 	}
 	return err
@@ -255,10 +275,13 @@ func (p *Pool) ResetSequence(ctx context.Context, schema string, t *source.Table
 
 // CreateIndex creates an index on the target table
 func (p *Pool) CreateIndex(ctx context.Context, t *source.Table, idx *source.Index, targetSchema string) error {
-	// Build column list
+	// Sanitize table name
+	sanitizedTable := SanitizePGIdentifier(t.Name)
+
+	// Build column list with sanitized names
 	cols := make([]string, len(idx.Columns))
 	for i, col := range idx.Columns {
-		cols[i] = quotePGIdent(col)
+		cols[i] = quotePGIdent(SanitizePGIdentifier(col))
 	}
 
 	unique := ""
@@ -267,19 +290,19 @@ func (p *Pool) CreateIndex(ctx context.Context, t *source.Table, idx *source.Ind
 	}
 
 	// Generate index name (PostgreSQL has length limits)
-	idxName := fmt.Sprintf("idx_%s_%s", t.Name, idx.Name)
+	idxName := fmt.Sprintf("idx_%s_%s", sanitizedTable, SanitizePGIdentifier(idx.Name))
 	if len(idxName) > 63 {
 		idxName = idxName[:63]
 	}
 
 	sql := fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
-		unique, quotePGIdent(idxName), qualifyPGTable(targetSchema, t.Name), strings.Join(cols, ", "))
+		unique, quotePGIdent(idxName), qualifyPGTable(targetSchema, sanitizedTable), strings.Join(cols, ", "))
 
 	// Add included columns if any (PostgreSQL INCLUDE syntax)
 	if len(idx.IncludeCols) > 0 {
 		includeCols := make([]string, len(idx.IncludeCols))
 		for i, col := range idx.IncludeCols {
-			includeCols[i] = quotePGIdent(col)
+			includeCols[i] = quotePGIdent(SanitizePGIdentifier(col))
 		}
 		sql += fmt.Sprintf(" INCLUDE (%s)", strings.Join(includeCols, ", "))
 	}
@@ -290,23 +313,27 @@ func (p *Pool) CreateIndex(ctx context.Context, t *source.Table, idx *source.Ind
 
 // CreateForeignKey creates a foreign key constraint on the target table
 func (p *Pool) CreateForeignKey(ctx context.Context, t *source.Table, fk *source.ForeignKey, targetSchema string) error {
-	// Build column lists
+	// Sanitize table names
+	sanitizedTable := SanitizePGIdentifier(t.Name)
+	sanitizedRefTable := SanitizePGIdentifier(fk.RefTable)
+
+	// Build column lists with sanitized names
 	cols := make([]string, len(fk.Columns))
 	for i, col := range fk.Columns {
-		cols[i] = quotePGIdent(col)
+		cols[i] = quotePGIdent(SanitizePGIdentifier(col))
 	}
 
 	refCols := make([]string, len(fk.RefColumns))
 	for i, col := range fk.RefColumns {
-		refCols[i] = quotePGIdent(col)
+		refCols[i] = quotePGIdent(SanitizePGIdentifier(col))
 	}
 
 	// Map SQL Server referential actions to PostgreSQL
 	onDelete := mapReferentialAction(fk.OnDelete)
 	onUpdate := mapReferentialAction(fk.OnUpdate)
 
-	// Generate FK name
-	fkName := fmt.Sprintf("fk_%s_%s", t.Name, fk.Name)
+	// Generate FK name with sanitized names
+	fkName := fmt.Sprintf("fk_%s_%s", sanitizedTable, SanitizePGIdentifier(fk.Name))
 	if len(fkName) > 63 {
 		fkName = fkName[:63]
 	}
@@ -318,9 +345,9 @@ func (p *Pool) CreateForeignKey(ctx context.Context, t *source.Table, fk *source
 		REFERENCES %s (%s)
 		ON DELETE %s
 		ON UPDATE %s
-	`, qualifyPGTable(targetSchema, t.Name), quotePGIdent(fkName),
+	`, qualifyPGTable(targetSchema, sanitizedTable), quotePGIdent(fkName),
 		strings.Join(cols, ", "),
-		qualifyPGTable(targetSchema, fk.RefTable), strings.Join(refCols, ", "),
+		qualifyPGTable(targetSchema, sanitizedRefTable), strings.Join(refCols, ", "),
 		onDelete, onUpdate)
 
 	_, err := p.pool.Exec(ctx, sql)
@@ -329,12 +356,15 @@ func (p *Pool) CreateForeignKey(ctx context.Context, t *source.Table, fk *source
 
 // CreateCheckConstraint creates a check constraint on the target table
 func (p *Pool) CreateCheckConstraint(ctx context.Context, t *source.Table, chk *source.CheckConstraint, targetSchema string) error {
+	// Sanitize table name
+	sanitizedTable := SanitizePGIdentifier(t.Name)
+
 	// Convert SQL Server CHECK syntax to PostgreSQL
 	// Most basic checks are compatible
 	definition := convertCheckDefinition(chk.Definition)
 
-	// Generate constraint name
-	chkName := fmt.Sprintf("chk_%s_%s", t.Name, chk.Name)
+	// Generate constraint name with sanitized names
+	chkName := fmt.Sprintf("chk_%s_%s", sanitizedTable, SanitizePGIdentifier(chk.Name))
 	if len(chkName) > 63 {
 		chkName = chkName[:63]
 	}
@@ -343,7 +373,7 @@ func (p *Pool) CreateCheckConstraint(ctx context.Context, t *source.Table, chk *
 		ALTER TABLE %s
 		ADD CONSTRAINT %s
 		CHECK %s
-	`, qualifyPGTable(targetSchema, t.Name), quotePGIdent(chkName), definition)
+	`, qualifyPGTable(targetSchema, sanitizedTable), quotePGIdent(chkName), definition)
 
 	_, err := p.pool.Exec(ctx, sql)
 	return err

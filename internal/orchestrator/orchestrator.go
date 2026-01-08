@@ -613,7 +613,46 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			len(tables), totalRows, duration.Round(time.Second), throughput)
 	}
 
+	// Log identifier changes for PostgreSQL targets
+	if o.config.Target.Type == "postgres" {
+		o.logPGIdentifierChanges(tables)
+	}
+
 	return nil
+}
+
+// logPGIdentifierChanges logs any identifier name changes applied during PostgreSQL migration
+func (o *Orchestrator) logPGIdentifierChanges(tables []source.Table) {
+	// Convert to TableInfo interface slice
+	tableInfos := make([]target.TableInfo, len(tables))
+	for i := range tables {
+		tableInfos[i] = &tables[i]
+	}
+
+	report := target.CollectPGIdentifierChanges(tableInfos)
+	if !report.HasChanges() {
+		return
+	}
+
+	logging.Info("")
+	logging.Info("PostgreSQL identifier changes applied:")
+
+	for _, tc := range report.Tables {
+		if tc.HasTableChange {
+			logging.Info("  Table: '%s' → '%s'", tc.TableName.Original, tc.TableName.Sanitized)
+		}
+		for _, cc := range tc.ColumnChanges {
+			tableName := tc.TableName.Sanitized
+			if !tc.HasTableChange {
+				tableName = tc.TableName.Original
+			}
+			logging.Info("    %s: column '%s' → '%s'", tableName, cc.Original, cc.Sanitized)
+		}
+	}
+
+	logging.Info("")
+	logging.Info("Summary: %d table(s) renamed, %d column(s) renamed across %d table(s)",
+		report.TotalTableChanges, report.TotalColumnChanges, report.TablesWithChanges)
 }
 
 // notifyFailure sends a failure notification
@@ -1645,6 +1684,11 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
+	}
+
+	// Log identifier changes for PostgreSQL targets
+	if o.config.Target.Type == "postgres" {
+		o.logPGIdentifierChanges(tablesToTransfer)
 	}
 
 	return nil

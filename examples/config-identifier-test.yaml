@@ -1,0 +1,50 @@
+# Configuration for testing identifier sanitization
+#
+# This config migrates tables with problematic identifiers that require
+# PostgreSQL sanitization (spaces, special chars, mixed case, etc.)
+#
+# Setup:
+#   1. Run test_identifiers.sql against your MSSQL source database
+#   2. Set environment variables:
+#      export MSSQL_PASSWORD="YourStrong@Passw0rd"
+#      export PG_PASSWORD="postgres"
+#   3. Run migration:
+#      ./mssql-pg-migrate -c examples/config-identifier-test.yaml run
+#
+# Expected tables created in PostgreSQL:
+#   - useraccounts (from UserAccounts)
+#   - customer_orders (from "Customer Orders")
+#   - product_catalog (from "Product$Catalog")
+#   - order_items (from "Order-Items")
+#   - col_1stquartersales (from "1stQuarterSales")
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: TestDB
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  encrypt: "false"
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5433
+  database: testdb
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+migration:
+  target_mode: drop_recreate
+  chunk_size: 10000
+  workers: 4
+  include_tables:
+    - UserAccounts
+    - "Customer Orders"
+    - "Product$Catalog"
+    - "Order-Items"
+    - "1stQuarterSales"
