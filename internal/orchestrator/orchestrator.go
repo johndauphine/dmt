@@ -399,15 +399,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	if o.config.Migration.TargetMode == "upsert" {
-		logging.Info("Preparing target tables (upsert mode)...")
+		// Upsert mode requires tables to already exist with primary keys.
+		// Use drop_recreate for initial load, then upsert for incremental syncs.
+		logging.Info("Validating target tables (upsert mode)...")
+		var sourceMissingPK []string
+		var missingTables []string
+		var targetMissingPK []string
 		for i, t := range tables {
 			logging.Debug("  [%d/%d] %s", i+1, len(tables), t.Name)
 			// Validate source table has PK for upsert (required for ON CONFLICT / MERGE)
 			if !t.HasPK() {
-				o.state.CompleteRun(runID, "failed", fmt.Sprintf("table %s has no primary key", t.Name))
-				err := fmt.Errorf("table %s has no primary key - upsert mode requires primary keys", t.Name)
-				o.notifyFailure(runID, err, time.Since(startTime))
-				return err
+				sourceMissingPK = append(sourceMissingPK, t.Name)
+				continue // Skip target checks if source has no PK
 			}
 			exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 			if err != nil {
@@ -416,18 +419,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 				return fmt.Errorf("checking if table %s exists: %w", t.Name, err)
 			}
 			if !exists {
-				// Create table if it doesn't exist
-				if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-					o.state.CompleteRun(runID, "failed", err.Error())
-					o.notifyFailure(runID, err, time.Since(startTime))
-					return fmt.Errorf("creating table %s: %w", t.FullName(), err)
-				}
-				// Create PK immediately for upsert mode (needed for ON CONFLICT)
-				if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
-					o.state.CompleteRun(runID, "failed", err.Error())
-					o.notifyFailure(runID, err, time.Since(startTime))
-					return fmt.Errorf("creating primary key for %s: %w", t.Name, err)
-				}
+				missingTables = append(missingTables, t.Name)
 			} else {
 				// Table exists - verify it has a primary key (required for ON CONFLICT / MERGE)
 				hasPK, err := o.targetPool.HasPrimaryKey(ctx, o.config.Target.Schema, t.Name)
@@ -437,17 +429,31 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 					return fmt.Errorf("checking primary key for %s: %w", t.Name, err)
 				}
 				if !hasPK {
-					// Try to create the PK on existing table
-					logging.Info("  Creating missing PK on existing table %s...", t.Name)
-					if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
-						o.state.CompleteRun(runID, "failed", err.Error())
-						errMsg := fmt.Errorf("target table %s exists but has no primary key - cannot create PK: %w", t.Name, err)
-						o.notifyFailure(runID, errMsg, time.Since(startTime))
-						return errMsg
-					}
+					targetMissingPK = append(targetMissingPK, t.Name)
 				}
 			}
-			// Do NOT truncate - upsert mode preserves existing data
+		}
+		// Report all validation errors at once for better UX
+		var validationErrors []string
+		if len(sourceMissingPK) > 0 {
+			validationErrors = append(validationErrors,
+				fmt.Sprintf("source tables missing primary keys: %v", sourceMissingPK))
+		}
+		if len(missingTables) > 0 {
+			validationErrors = append(validationErrors,
+				fmt.Sprintf("target tables do not exist: %v", missingTables))
+		}
+		if len(targetMissingPK) > 0 {
+			validationErrors = append(validationErrors,
+				fmt.Sprintf("target tables missing primary keys: %v", targetMissingPK))
+		}
+		if len(validationErrors) > 0 {
+			err := fmt.Errorf("upsert mode validation failed - %s. "+
+				"Run with target_mode: drop_recreate first to create tables, then use upsert for incremental syncs",
+				strings.Join(validationErrors, "; "))
+			o.state.CompleteRun(runID, "failed", err.Error())
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
 		}
 	} else {
 		// Default: drop_recreate

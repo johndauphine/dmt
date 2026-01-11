@@ -5,27 +5,34 @@
 # - UPDATE changed rows (all columns compared)
 # - LEAVE rows that exist only in target (no deletes)
 #
+# IMPORTANT: Upsert mode requires target tables to already exist!
+# Recommended workflow:
+#   1. Initial load: Run with target_mode: drop_recreate (fast bulk copy)
+#   2. Incremental syncs: Run with target_mode: upsert (only changed rows)
+#
 # Requirements:
-# - All tables must have primary keys
-# - Target tables must have matching PK constraints (auto-created if missing)
+# - All tables must have primary keys (source and target)
+# - Target tables must already exist with PK constraints
+#
+# Date-Based Incremental Loading:
+# - Configure date_updated_columns to filter rows by last-modified date
+# - Highwater marks are stored automatically in the state database
+# - Subsequent runs only fetch rows modified since the last sync
 #
 # Performance Notes:
-# - Upsert is slower than bulk copy (COPY/TDS bulk) due to:
-#   - Index maintenance during writes
-#   - Row-by-row conflict detection
-#   - Transaction logging of updates
-# - Expect 2-5x slower throughput compared to drop_recreate mode
+# - Full upsert is 2-5x slower than drop_recreate (index maintenance overhead)
+# - Incremental upsert with date filtering is extremely fast (seconds vs minutes)
 # - PostgreSQL uses batched multi-row INSERT...ON CONFLICT
-# - SQL Server uses staging table + UPDATE/INSERT (with EXCEPT-based change
-#   detection for efficiency)
+# - SQL Server uses staging table + UPDATE/INSERT
 #
 # Usage:
+#   # Step 1: Initial load (creates tables, fast bulk copy)
+#   ./mssql-pg-migrate -c config-drop-recreate.yaml run
+#
+#   # Step 2: Incremental syncs (uses highwater marks)
 #   export MSSQL_PASSWORD="your-mssql-password"
 #   export PG_PASSWORD="your-postgres-password"
 #   ./mssql-pg-migrate -c examples/config-upsert.yaml run
-#
-# For initial sync (empty target), upsert mode behaves like bulk insert.
-# For subsequent syncs, only changed/new rows are processed.
 
 source:
   type: mssql
@@ -52,6 +59,15 @@ migration:
   workers: 4
   chunk_size: 10000       # Smaller chunks recommended for upsert
   target_mode: upsert     # Enable incremental sync
+
+  # Date columns for incremental loading (tries each column name in order)
+  # Highwater marks are stored automatically - subsequent runs only fetch
+  # rows where date_column > last_sync_timestamp
+  date_updated_columns:
+    - UpdatedAt           # Common convention
+    - ModifiedDate        # SQL Server convention
+    - LastModified
+    - CreationDate        # Fallback for append-only tables
 
   # Optional: Filter tables for incremental sync
   # include_tables:
