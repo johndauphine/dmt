@@ -1,0 +1,40 @@
+# WideWorldImporters Warehouse schema migration
+# Source: mssql-wwi (port 1435)
+# Target: pg-wwi (port 5435)
+#
+# Largest table: ColdRoomTemperatures_Archive (3.6M rows)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Warehouse
+  encrypt: "false"
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: "PostgresPassword123"
+  schema: warehouse
+  ssl_mode: disable
+
+migration:
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Exclude archive tables without PKs
+  exclude_tables:
+    - ColdRoomTemperatures_Archive
+    - Colors_Archive
+    - PackageTypes_Archive
+    - StockGroups_Archive
+    - StockItems_Archive

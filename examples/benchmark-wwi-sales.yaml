@@ -1,0 +1,41 @@
+# WideWorldImporters Sales schema migration
+# Source: mssql-wwi (port 1435)
+# Target: pg-wwi (port 5435)
+#
+# Excluded tables:
+# - Customers, Customers_Archive: Contains geography column (DeliveryLocation)
+# - *_Archive tables: Temporal history tables without primary keys
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: "YourStrong@Passw0rd"
+  schema: Sales
+  encrypt: "false"
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: "PostgresPassword123"
+  schema: sales
+  ssl_mode: disable
+
+migration:
+  workers: 6
+  chunk_size: 50000
+  create_indexes: false
+  create_foreign_keys: false
+
+  # Exclude tables with geography columns and archive tables without PKs
+  exclude_tables:
+    - Customers
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
