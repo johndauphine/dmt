@@ -1,0 +1,29 @@
+# PG to PG migration using separate containers
+# Source: pg-so2010 (port 5433)
+# Target: pg-so2010-target (port 5434)
+
+source:
+  type: postgres
+  host: localhost
+  port: 5433
+  database: so2010
+  user: postgres
+  password: "PostgresPassword123"
+  schema: public
+  ssl_mode: disable
+
+target:
+  type: postgres
+  host: localhost
+  port: 5434
+  database: so2010
+  user: postgres
+  password: "PostgresPassword123"
+  schema: public
+  ssl_mode: disable
+
+migration:
+  workers: 6
+  chunk_size: 100000
+  create_indexes: false
+  create_foreign_keys: false
