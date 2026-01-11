@@ -156,6 +156,68 @@ func (p *PostgresPool) loadColumns(ctx context.Context, t *Table) error {
 		t.Columns = append(t.Columns, c)
 	}
 
+	// Load SRID for any spatial columns
+	if err := p.loadSpatialSRIDs(ctx, t); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// loadSpatialSRIDs queries PostGIS metadata to get SRID for geography/geometry columns.
+// If PostGIS is not installed or columns are not registered, SRID remains 0 (unset).
+func (p *PostgresPool) loadSpatialSRIDs(ctx context.Context, t *Table) error {
+	// Find spatial columns
+	var spatialCols []string
+	for _, c := range t.Columns {
+		lowerType := strings.ToLower(c.DataType)
+		if lowerType == "geography" || lowerType == "geometry" {
+			spatialCols = append(spatialCols, c.Name)
+		}
+	}
+
+	if len(spatialCols) == 0 {
+		return nil
+	}
+
+	// Query PostGIS geometry_columns view (covers both geometry and geography)
+	// This view exists when PostGIS is installed and tables have spatial columns
+	query := `
+		SELECT f_geometry_column, srid
+		FROM geometry_columns
+		WHERE f_table_schema = $1 AND f_table_name = $2
+		UNION ALL
+		SELECT f_geography_column, srid
+		FROM geography_columns
+		WHERE f_table_schema = $1 AND f_table_name = $2
+	`
+
+	rows, err := p.db.QueryContext(ctx, query, t.Schema, t.Name)
+	if err != nil {
+		// PostGIS may not be installed, or views may not exist
+		// This is not an error - SRID will remain 0 (default)
+		return nil
+	}
+	defer rows.Close()
+
+	// Build SRID map
+	sridMap := make(map[string]int)
+	for rows.Next() {
+		var colName string
+		var srid int
+		if err := rows.Scan(&colName, &srid); err != nil {
+			continue
+		}
+		sridMap[strings.ToLower(colName)] = srid
+	}
+
+	// Update columns with SRID
+	for i := range t.Columns {
+		if srid, ok := sridMap[strings.ToLower(t.Columns[i].Name)]; ok {
+			t.Columns[i].SRID = srid
+		}
+	}
+
 	return nil
 }
 
