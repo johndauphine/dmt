@@ -9,8 +9,13 @@ import (
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
+	"github.com/johndauphine/mssql-pg-migrate/internal/util"
 	_ "github.com/microsoft/go-mssqldb"
 )
+
+// mssqlDialect is the shared dialect instance for MSSQL operations
+var mssqlDialect = dialect.GetDialect("mssql")
 
 // PoolStats contains connection pool statistics
 type PoolStats struct {
@@ -109,7 +114,7 @@ func (p *Pool) DBType() string {
 // GetRowCount returns the row count for a table
 func (p *Pool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyMSSQLTable(schema, table))).Scan(&count)
+	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", mssqlDialect.QualifyTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -277,7 +282,7 @@ func (p *Pool) GetPartitionBoundaries(ctx context.Context, t *Table, numPartitio
 		FROM numbered
 		GROUP BY partition_id
 		ORDER BY partition_id
-	`, quoteMSSQLIdent(pkCol), numPartitions, quoteMSSQLIdent(pkCol), qualifyMSSQLTable(t.Schema, t.Name), quoteMSSQLIdent(pkCol), quoteMSSQLIdent(pkCol))
+	`, mssqlDialect.QuoteIdentifier(pkCol), numPartitions, mssqlDialect.QuoteIdentifier(pkCol), mssqlDialect.QualifyTable(t.Schema, t.Name), mssqlDialect.QuoteIdentifier(pkCol), mssqlDialect.QuoteIdentifier(pkCol))
 
 	rows, err := p.db.QueryContext(ctx, query)
 	if err != nil {
@@ -336,9 +341,9 @@ func (p *Pool) LoadIndexes(ctx context.Context, t *Table) error {
 			return err
 		}
 		idx.IsClustered = typeDesc == "CLUSTERED"
-		idx.Columns = splitCSV(colsStr)
+		idx.Columns = util.SplitCSV(colsStr)
 		if includeStr != "" {
-			idx.IncludeCols = splitCSV(includeStr)
+			idx.IncludeCols = util.SplitCSV(includeStr)
 		}
 		t.Indexes = append(t.Indexes, idx)
 	}
@@ -384,8 +389,8 @@ func (p *Pool) LoadForeignKeys(ctx context.Context, t *Table) error {
 		if err := rows.Scan(&fk.Name, &colsStr, &fk.RefSchema, &fk.RefTable, &refColsStr, &fk.OnDelete, &fk.OnUpdate); err != nil {
 			return err
 		}
-		fk.Columns = splitCSV(colsStr)
-		fk.RefColumns = splitCSV(refColsStr)
+		fk.Columns = util.SplitCSV(colsStr)
+		fk.RefColumns = util.SplitCSV(refColsStr)
 		t.ForeignKeys = append(t.ForeignKeys, fk)
 	}
 
@@ -464,25 +469,3 @@ func (p *Pool) GetDateColumnInfo(ctx context.Context, schema, table string, cand
 	return "", "", false
 }
 
-// splitCSV splits a comma-separated string into a slice
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var result []string
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
-}
-
-func quoteMSSQLIdent(ident string) string {
-	return "[" + strings.ReplaceAll(ident, "]", "]]") + "]"
-}
-
-func qualifyMSSQLTable(schema, table string) string {
-	return quoteMSSQLIdent(schema) + "." + quoteMSSQLIdent(table)
-}

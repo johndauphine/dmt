@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
@@ -62,8 +64,8 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			syntax := newDBSyntax(tt.dbType)
-			query := syntax.buildKeysetQuery(
+			d := dialect.GetDialect(tt.dbType)
+			query := d.BuildKeysetQuery(
 				"col1, col2, pk",
 				"pk",
 				"dbo",
@@ -159,8 +161,8 @@ func TestBuildKeysetArgsWithDateFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			syntax := newDBSyntax(tt.dbType)
-			args := syntax.buildKeysetArgs(
+			d := dialect.GetDialect(tt.dbType)
+			args := d.BuildKeysetArgs(
 				int64(0),  // lastPK
 				int64(99), // maxPK
 				100,       // limit

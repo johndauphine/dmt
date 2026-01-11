@@ -9,8 +9,13 @@ import (
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
+	"github.com/johndauphine/mssql-pg-migrate/internal/util"
 	_ "github.com/lib/pq" // PostgreSQL driver
 )
+
+// pgDialect is the shared dialect instance for PostgreSQL operations
+var pgDialect = dialect.GetDialect("postgres")
 
 // PostgresPool manages a pool of PostgreSQL source connections
 type PostgresPool struct {
@@ -72,7 +77,7 @@ func (p *PostgresPool) DBType() string {
 // GetRowCount returns the row count for a table
 func (p *PostgresPool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(schema, table))).Scan(&count)
+	err := p.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", pgDialect.QualifyTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -272,7 +277,7 @@ func (p *PostgresPool) loadRowCount(ctx context.Context, t *Table) error {
 	err := p.db.QueryRowContext(ctx, query, t.Schema, t.Name).Scan(&t.RowCount)
 	if err != nil || t.RowCount == 0 {
 		// Fall back to COUNT(*) if stats not available or show 0
-		exactQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(t.Schema, t.Name))
+		exactQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", pgDialect.QualifyTable(t.Schema, t.Name))
 		return p.db.QueryRowContext(ctx, exactQuery).Scan(&t.RowCount)
 	}
 	return nil
@@ -299,7 +304,7 @@ func (p *PostgresPool) GetPartitionBoundaries(ctx context.Context, t *Table, num
 		FROM numbered
 		GROUP BY partition_id
 		ORDER BY partition_id
-	`, quotePGIdent(pkCol), numPartitions, quotePGIdent(pkCol), qualifyPGTable(t.Schema, t.Name), quotePGIdent(pkCol), quotePGIdent(pkCol))
+	`, pgDialect.QuoteIdentifier(pkCol), numPartitions, pgDialect.QuoteIdentifier(pkCol), pgDialect.QualifyTable(t.Schema, t.Name), pgDialect.QuoteIdentifier(pkCol), pgDialect.QuoteIdentifier(pkCol))
 
 	rows, err := p.db.QueryContext(ctx, query)
 	if err != nil {
@@ -354,7 +359,7 @@ func (p *PostgresPool) LoadIndexes(ctx context.Context, t *Table) error {
 		if err := rows.Scan(&idx.Name, &idx.IsUnique, &idx.IsClustered, &colsStr); err != nil {
 			return err
 		}
-		idx.Columns = splitCSV(colsStr)
+		idx.Columns = util.SplitCSV(colsStr)
 		t.Indexes = append(t.Indexes, idx)
 	}
 
@@ -412,8 +417,8 @@ func (p *PostgresPool) LoadForeignKeys(ctx context.Context, t *Table) error {
 		if err := rows.Scan(&fk.Name, &colsStr, &fk.RefSchema, &fk.RefTable, &refColsStr, &fk.OnDelete, &fk.OnUpdate); err != nil {
 			return err
 		}
-		fk.Columns = splitCSV(colsStr)
-		fk.RefColumns = splitCSV(refColsStr)
+		fk.Columns = util.SplitCSV(colsStr)
+		fk.RefColumns = util.SplitCSV(refColsStr)
 		t.ForeignKeys = append(t.ForeignKeys, fk)
 	}
 
@@ -489,25 +494,3 @@ func (p *PostgresPool) GetDateColumnInfo(ctx context.Context, schema, table stri
 	return "", "", false
 }
 
-// splitCSV splits a comma-separated string into a slice (duplicated from pool.go for independence)
-func splitCSVPG(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var result []string
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
-}
-
-func quotePGIdent(ident string) string {
-	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
-}
-
-func qualifyPGTable(schema, table string) string {
-	return quotePGIdent(schema) + "." + quotePGIdent(table)
-}

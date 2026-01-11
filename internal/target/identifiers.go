@@ -3,16 +3,34 @@ package target
 import (
 	"strings"
 	"unicode"
+
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
 )
 
-// quotePGIdent safely quotes a PostgreSQL identifier, escaping embedded quotes.
+// Package-level dialect instances for identifier quoting
+var (
+	pgDialect    = dialect.GetDialect("postgres")
+	mssqlDialect = dialect.GetDialect("mssql")
+)
+
+// quotePGIdent safely quotes a PostgreSQL identifier using the dialect package.
 func quotePGIdent(ident string) string {
-	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+	return pgDialect.QuoteIdentifier(ident)
 }
 
-// quoteMSSQLIdent safely quotes a SQL Server identifier, escaping embedded ].
+// quoteMSSQLIdent safely quotes a SQL Server identifier using the dialect package.
 func quoteMSSQLIdent(ident string) string {
-	return "[" + strings.ReplaceAll(ident, "]", "]]") + "]"
+	return mssqlDialect.QuoteIdentifier(ident)
+}
+
+// qualifyPGTable returns a fully qualified PostgreSQL table name.
+func qualifyPGTable(schema, table string) string {
+	return pgDialect.QualifyTable(schema, table)
+}
+
+// qualifyMSSQLTable returns a fully qualified SQL Server table name.
+func qualifyMSSQLTable(schema, table string) string {
+	return mssqlDialect.QualifyTable(schema, table)
 }
 
 // SanitizePGIdentifier converts a SQL Server identifier to a PostgreSQL-friendly format.
@@ -52,14 +70,6 @@ func SanitizePGIdentifier(ident string) string {
 	}
 
 	return s
-}
-
-func qualifyPGTable(schema, table string) string {
-	return quotePGIdent(schema) + "." + quotePGIdent(table)
-}
-
-func qualifyMSSQLTable(schema, table string) string {
-	return quoteMSSQLIdent(schema) + "." + quoteMSSQLIdent(table)
 }
 
 // IdentifierChange represents a single identifier name change
