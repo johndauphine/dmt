@@ -1265,6 +1265,28 @@ make test-dbs-up
 make test-dbs-down
 ```
 
+## Known Limitations
+
+### Geography/Geometry Columns in Upsert Mode
+
+SQL Server does not support comparison operators (`=`, `<>`) on `geography` and `geometry` data types. In **upsert mode**, the MERGE statement uses change detection with `<>` comparisons, which fails for tables containing spatial columns:
+
+```
+Invalid operator for data type. Operator equals not equal to, type equals geography.
+```
+
+**Workarounds:**
+1. Use `drop_recreate` mode for tables with geography/geometry columns
+2. Exclude affected tables from upsert migrations using `exclude_tables`
+
+**Note:** This limitation only affects upsert mode. The `drop_recreate` mode handles geography/geometry columns correctly for all migration directions.
+
+### Tables Without Primary Keys
+
+All tables must have primary keys for migration. Tables without primary keys are automatically skipped with a warning. This is required for:
+- Chunked pagination during data transfer
+- Change detection in upsert mode
+
 ## License
 
 MIT
