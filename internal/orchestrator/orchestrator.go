@@ -1026,6 +1026,13 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 				errCh <- tableError{tableName: j.Table.Name, err: err}
 				// Log the failure immediately
 				logging.Error("Table %s failed: %v", j.Table.Name, err)
+				// Check for geography/geometry comparison error in upsert mode
+				errStr := err.Error()
+				if strings.Contains(errStr, "Invalid operator for data type") &&
+					(strings.Contains(errStr, "geography") || strings.Contains(errStr, "geometry")) {
+					logging.Warn("HINT: Table %s contains geography/geometry columns which cannot be compared in MERGE statements.", j.Table.Name)
+					logging.Warn("      Use 'target_mode: drop_recreate' or exclude this table with 'exclude_tables'.")
+				}
 				// Notify via Slack
 				o.notifier.TableTransferFailed(runID, j.Table.Name, err)
 				return
