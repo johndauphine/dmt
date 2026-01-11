@@ -85,11 +85,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+391cc0e chore: bump version to 1.41.0
+07f2e78 fix: handle geography columns in PG→MSSQL upsert staging tables (#45)
 5b0820f chore: bump version to 1.40.0
 4c48154 feat: add packet_size config and change encrypt to bool (#44)
-87156ca docs: add complete WWI upsert test results to CLAUDE.md
-b06b3b7 chore: bump version to 1.32.0
-8cc66a9 fix: convert WKT text to geography for PG→MSSQL upsert
+a860d31 docs: update README with packet_size parameter and v1.40.0 benchmarks
 ```
 
 ### Major Features
@@ -255,6 +255,28 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 10: PG→MSSQL Geography Staging Table Fix (Claude - January 11, 2026)
+1. Fixed PG→MSSQL upsert failing for tables with geography columns (PR #45):
+   - Previous fix (PR #43) only worked when `colTypes` contained target types
+   - For PG→MSSQL, source type is `text` (WKT), not `geography`
+   - Staging table created from target had `geography` type, but `colTypes` had `text`
+   - Bulk insert failed: `invalid type for Binary column: string POINT...`
+2. Solution: Query staging table directly to find spatial columns:
+   - Query `tempdb.sys.columns` to find geography/geometry columns in staging table
+   - Alter those columns to `nvarchar(max)` to accept WKT text
+   - Return list of spatial column names to MERGE builder
+   - MERGE uses `geography::STGeomFromText(source.col, 4326)` to convert back
+3. Refactored `alterSpatialColumnsToText()`:
+   - No longer takes `colTypes` parameter (was unreliable for cross-engine)
+   - Queries staging table directly for spatial column detection
+   - Returns list of altered columns for use in MERGE
+4. Refactored `buildMSSQLMergeWithTablock()`:
+   - Takes `spatialCols []string` instead of `colTypes` and `isCrossEngine`
+   - Uses spatial column list for WKT→geography conversion
+5. Test results (WWI Sales with geography):
+   - PG→MSSQL upsert: **9/9 tables ✓** (was 8/9), 403-428K rows/sec
+6. Released v1.41.0
 
 ### Session 9: MSSQL Performance Optimization (Claude - January 11, 2026)
 1. Added `packet_size` config parameter for MSSQL connections (PR #44):
