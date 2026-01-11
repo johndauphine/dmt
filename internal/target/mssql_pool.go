@@ -704,18 +704,41 @@ func (p *MSSQLPool) executeMergeWithRetry(ctx context.Context, conn *sql.Conn,
 // convertRowForBulkCopy converts row values for MSSQL bulk copy.
 // SQL Server source returns decimal/money values as []byte (ASCII string),
 // which the go-mssqldb bulk copy can't handle. This function converts []byte
-// values to strings which bulk copy accepts for numeric columns.
+// values to strings ONLY if they look like ASCII numeric data.
+// Binary data (geography, varbinary, etc.) is left unchanged.
 func convertRowForBulkCopy(row []any) []any {
 	result := make([]any, len(row))
 	for i, v := range row {
 		if b, ok := v.([]byte); ok {
-			// Convert byte slice to string - works for decimal and other text-representable types
-			result[i] = string(b)
+			// Only convert to string if it looks like ASCII numeric data (decimal/money)
+			// Binary data (geography, varbinary) should pass through unchanged
+			if isASCIINumeric(b) {
+				result[i] = string(b)
+			} else {
+				result[i] = v
+			}
 		} else {
 			result[i] = v
 		}
 	}
 	return result
+}
+
+// isASCIINumeric checks if a byte slice contains only ASCII numeric characters
+// (digits, decimal point, minus sign, plus sign). This is used to distinguish
+// decimal/money values (which come as ASCII strings like "3000.00") from
+// binary data (geography, varbinary) which contains non-printable bytes.
+func isASCIINumeric(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, c := range b {
+		// Allow: 0-9, decimal point, minus, plus, 'E'/'e' for scientific notation
+		if !((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'E' || c == 'e') {
+			return false
+		}
+	}
+	return true
 }
 
 // isDeadlockError checks if the error is a SQL Server deadlock (error 1205)
