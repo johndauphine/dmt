@@ -70,7 +70,8 @@ type TargetPool interface {
 	// writerID identifies the writer goroutine (0, 1, 2, ...) for staging table isolation
 	// partitionID is optional and used when intra-table partitioning is enabled
 	// colTypes contains the data types for each column (used to skip geography/geometry from change detection)
-	UpsertChunkWithWriter(ctx context.Context, schema, table string, cols []string, colTypes []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error
+	// colSRIDs contains the SRID for each column (used for geography/geometry conversion in cross-engine migrations)
+	UpsertChunkWithWriter(ctx context.Context, schema, table string, cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error
 
 	// Pool info
 	MaxConns() int

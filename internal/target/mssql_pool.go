@@ -424,8 +424,9 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 // 3. MERGE WITH (TABLOCK) immediately after each chunk
 // 4. Deadlock retry with linear backoff (5 retries)
 // colTypes is used to skip geography/geometry columns from change detection in MERGE
+// colSRIDs contains the SRID for each column (used for geography/geometry conversion)
 func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table string,
-	cols []string, colTypes []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
 
 	if len(rows) == 0 {
 		return nil
@@ -464,6 +465,20 @@ func (p *MSSQLPool) UpsertChunkWithWriter(ctx context.Context, schema, table str
 	spatialCols, err := p.getSpatialColumns(ctx, conn, stagingTable)
 	if err != nil {
 		return fmt.Errorf("detecting spatial columns: %w", err)
+	}
+
+	// Populate SRID for spatial columns from source column metadata
+	// Build a case-insensitive map from column name to SRID
+	if len(spatialCols) > 0 && len(colSRIDs) == len(cols) {
+		sridMap := make(map[string]int, len(cols))
+		for i, col := range cols {
+			sridMap[strings.ToLower(col)] = colSRIDs[i]
+		}
+		for i := range spatialCols {
+			if srid, ok := sridMap[strings.ToLower(spatialCols[i].Name)]; ok && srid > 0 {
+				spatialCols[i].SRID = srid
+			}
+		}
 	}
 
 	// 2b. For cross-engine migrations (PG→MSSQL), alter geography/geometry columns to nvarchar(max)
@@ -594,10 +609,11 @@ func (p *MSSQLPool) getStagingTableColumns(ctx context.Context, conn *sql.Conn, 
 	return cols, nil
 }
 
-// SpatialColumn represents a geography or geometry column with its type.
+// SpatialColumn represents a geography or geometry column with its type and SRID.
 type SpatialColumn struct {
 	Name     string
 	TypeName string // "geography" or "geometry"
+	SRID     int    // Spatial Reference ID (0 = use default 4326)
 }
 
 // getSpatialColumns returns geography/geometry columns in a staging table with their types.
@@ -696,14 +712,13 @@ func (p *MSSQLPool) bulkInsertToTempTable(ctx context.Context, conn *sql.Conn, t
 // (SQL Server doesn't support comparison operators on spatial types).
 // isCrossEngine indicates if this is a cross-engine migration (PG→MSSQL) which requires
 // STGeomFromText conversion for spatial columns (WKT text → geography/geometry).
-//
-// NOTE: SRID 4326 (WGS84) is hardcoded for geography conversion. This works for most GPS/mapping
-// use cases. Future enhancement: query source SRID from PostGIS ST_SRID() or SQL Server metadata.
+// The SRID for each spatial column comes from the source schema (e.g., PostGIS metadata).
+// If SRID is 0 or unset, defaults to 4326 (WGS84, standard GPS coordinates).
 func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols []string, spatialCols []SpatialColumn, isCrossEngine bool) string {
-	// Build spatial column lookup (case-insensitive) -> type name
-	spatialMap := make(map[string]string, len(spatialCols))
+	// Build spatial column lookup (case-insensitive) -> SpatialColumn info
+	spatialMap := make(map[string]SpatialColumn, len(spatialCols))
 	for _, col := range spatialCols {
-		spatialMap[strings.ToLower(col.Name)] = col.TypeName
+		spatialMap[strings.ToLower(col.Name)] = col
 	}
 
 	// Build ON clause (PK join condition)
@@ -727,11 +742,15 @@ func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols [
 			sourceExpr := fmt.Sprintf("source.%s", quotedCol)
 
 			// Check if this is a spatial column (case-insensitive)
-			spatialType, isSpatial := spatialMap[strings.ToLower(col)]
+			spatialCol, isSpatial := spatialMap[strings.ToLower(col)]
 			if isSpatial && isCrossEngine {
 				// Use STGeomFromText to convert WKT text to geography/geometry (PG→MSSQL only)
-				// SRID 4326 is WGS84 (standard GPS coordinates)
-				sourceExpr = fmt.Sprintf("%s::STGeomFromText(source.%s, 4326)", spatialType, quotedCol)
+				// Use SRID from source schema, default to 4326 (WGS84) if not set
+				srid := spatialCol.SRID
+				if srid == 0 {
+					srid = 4326 // Default to WGS84 (standard GPS coordinates)
+				}
+				sourceExpr = fmt.Sprintf("%s::STGeomFromText(source.%s, %d)", spatialCol.TypeName, quotedCol, srid)
 			}
 
 			setClauses = append(setClauses, fmt.Sprintf("%s = %s", quotedCol, sourceExpr))
@@ -758,9 +777,14 @@ func buildMSSQLMergeWithTablock(targetTable, stagingTable string, cols, pkCols [
 		quotedCols[i] = quotedCol
 
 		// Check if this is a spatial column - only use STGeomFromText for cross-engine (PG→MSSQL)
-		spatialType, isSpatial := spatialMap[strings.ToLower(col)]
+		spatialCol, isSpatial := spatialMap[strings.ToLower(col)]
 		if isSpatial && isCrossEngine {
-			sourceCols[i] = fmt.Sprintf("%s::STGeomFromText(source.%s, 4326)", spatialType, quotedCol)
+			// Use SRID from source schema, default to 4326 (WGS84) if not set
+			srid := spatialCol.SRID
+			if srid == 0 {
+				srid = 4326
+			}
+			sourceCols[i] = fmt.Sprintf("%s::STGeomFromText(source.%s, %d)", spatialCol.TypeName, quotedCol, srid)
 		} else {
 			sourceCols[i] = fmt.Sprintf("source.%s", quotedCol)
 		}

@@ -93,6 +93,7 @@ type Column struct {
 	IsNullable bool   `json:"is_nullable"`
 	IsIdentity bool   `json:"is_identity"`
 	OrdinalPos int    `json:"ordinal_position"`
+	SRID       int    `json:"srid,omitempty"` // Spatial Reference ID for geography/geometry columns (0 = default/unset)
 }
 
 // Partition represents a portion of a large table for parallel transfer

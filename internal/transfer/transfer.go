@@ -446,6 +446,7 @@ func Execute(
 	cols := make([]string, len(job.Table.Columns))
 	targetCols := make([]string, len(job.Table.Columns))
 	colTypes := make([]string, len(job.Table.Columns))
+	colSRIDs := make([]int, len(job.Table.Columns))
 
 	// Only sanitize identifiers when target is PostgreSQL
 	_, isPGTarget := tgtPool.(*target.Pool)
@@ -458,6 +459,7 @@ func Execute(
 			targetCols[i] = c.Name // Preserve original case for MSSQL
 		}
 		colTypes[i] = strings.ToLower(c.DataType)
+		colSRIDs[i] = c.SRID // SRID from source schema (0 = unset)
 	}
 
 	// Sanitize table name for target (only for PostgreSQL)
@@ -470,11 +472,11 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, prog, resumeLastPK, resumeRowsDone, targetTableName)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, prog, resumeLastPK, resumeRowsDone, targetTableName)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -639,6 +641,7 @@ func executeKeysetPagination(
 	cfg *config.Config,
 	job Job,
 	cols, targetCols, colTypes []string,
+	colSRIDs []int,
 	prog *progress.Tracker,
 	resumeLastPK any,
 	resumeRowsDone int64,
@@ -844,7 +847,8 @@ func executeKeysetPagination(
 				if useUpsert {
 					// Use high-performance staging table approach
 					// Pass colTypes to skip geography/geometry from change detection in MSSQL MERGE
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, targetPKCols, rows, writerID, partitionID)
+					// Pass colSRIDs for geography/geometry SRID in STGeomFromText (PG→MSSQL)
+					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, colSRIDs, targetPKCols, rows, writerID, partitionID)
 				} else {
 					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
 				}
@@ -980,6 +984,7 @@ func executeRowNumberPagination(
 	cfg *config.Config,
 	job Job,
 	cols, targetCols, colTypes []string,
+	colSRIDs []int,
 	prog *progress.Tracker,
 	resumeLastPK any,
 	resumeRowsDone int64,
@@ -1215,7 +1220,8 @@ func executeRowNumberPagination(
 				if useUpsert {
 					// Use UpsertChunkWithWriter for high-performance staging table approach
 					// Pass colTypes to skip geography/geometry from change detection in MSSQL MERGE
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, targetPKCols, rows, writerID, partitionID)
+					// Pass colSRIDs for geography/geometry SRID in STGeomFromText (PG→MSSQL)
+					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, colSRIDs, targetPKCols, rows, writerID, partitionID)
 				} else {
 					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
 				}
@@ -1508,9 +1514,10 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 // - PostgreSQL: TEMP table + COPY + INSERT...ON CONFLICT
 // - MSSQL: #temp table + bulk insert + MERGE WITH (TABLOCK)
 // colTypes is passed to skip geography/geometry from change detection in MSSQL MERGE
+// colSRIDs is passed for geography/geometry SRID in STGeomFromText conversion (PG→MSSQL)
 func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
-	cols []string, colTypes []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
-	return tgtPool.UpsertChunkWithWriter(ctx, schema, table, cols, colTypes, pkCols, rows, writerID, partitionID)
+	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+	return tgtPool.UpsertChunkWithWriter(ctx, schema, table, cols, colTypes, colSRIDs, pkCols, rows, writerID, partitionID)
 }
 
 // ValidateBinaryData ensures binary data is properly formatted

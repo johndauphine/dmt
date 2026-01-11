@@ -209,6 +209,49 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 				"target.[shape] <> source.[shape]", // geometry NOT in change detection
 			},
 		},
+		{
+			name:          "cross-engine geography with custom SRID",
+			targetTable:   "[sales].[locations]",
+			stagingTable:  "#stg_locations_w0",
+			cols:          []string{"id", "name", "point"},
+			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "point", TypeName: "geography", SRID: 2163}}, // NAD83 / US National Atlas Equal Area
+			isCrossEngine: true,
+			wantContains: []string{
+				"geography::STGeomFromText(source.[point], 2163)", // Custom SRID used
+				"target.[name] <> source.[name]",
+			},
+			wantNotContains: []string{
+				"STGeomFromText(source.[point], 4326)", // Should NOT use default SRID
+			},
+		},
+		{
+			name:          "cross-engine geometry with custom SRID",
+			targetTable:   "[dbo].[map_features]",
+			stagingTable:  "#stg_map_features_w0",
+			cols:          []string{"id", "feature", "description"},
+			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "feature", TypeName: "geometry", SRID: 3857}}, // Web Mercator
+			isCrossEngine: true,
+			wantContains: []string{
+				"geometry::STGeomFromText(source.[feature], 3857)", // Custom SRID used
+			},
+			wantNotContains: []string{
+				"STGeomFromText(source.[feature], 4326)", // Should NOT use default SRID
+			},
+		},
+		{
+			name:          "cross-engine geography with SRID 0 uses default",
+			targetTable:   "[dbo].[places]",
+			stagingTable:  "#stg_places_w0",
+			cols:          []string{"id", "name", "coords"},
+			pkCols:        []string{"id"},
+			spatialCols:   []SpatialColumn{{Name: "coords", TypeName: "geography", SRID: 0}}, // SRID not set
+			isCrossEngine: true,
+			wantContains: []string{
+				"geography::STGeomFromText(source.[coords], 4326)", // Default SRID used when 0
+			},
+		},
 	}
 
 	for _, tt := range tests {

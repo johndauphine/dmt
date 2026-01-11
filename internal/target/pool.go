@@ -414,10 +414,10 @@ func convertCheckDefinition(def string) string {
 // 2. Binary COPY protocol via pgx.CopyFrom (5-10x faster than INSERT VALUES)
 // 3. Single INSERT...SELECT...ON CONFLICT to merge (one statement per chunk)
 // 4. IS DISTINCT FROM to prevent unnecessary row updates (critical for WAL/bloat prevention)
-// colTypes is accepted for interface compatibility but not used by PostgreSQL
+// colTypes and colSRIDs are accepted for interface compatibility but not used by PostgreSQL
 // (PostgreSQL's IS DISTINCT FROM works with all types including geography/geometry)
 func (p *Pool) UpsertChunkWithWriter(ctx context.Context, schema, table string,
-	cols []string, colTypes []string, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
 
 	if len(rows) == 0 {
 		return nil
