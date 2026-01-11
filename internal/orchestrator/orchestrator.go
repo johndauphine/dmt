@@ -725,6 +725,10 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Track jobs per table for completion tracking
 	tableJobs := make(map[string]int) // tableName -> number of jobs
 
+	// Track sync types for summary logging
+	var tablesIncremental, tablesFirstSync, tablesNoDateColumn int
+	var noDateColumnTables []string
+
 	// Count tables that need partitioning
 	var largeKeysetTables, largeRowNumTables int
 	for _, t := range tables {
@@ -772,16 +776,21 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 						Timestamp: *lastSync,
 					}
 					tableDateFilters[t.Name] = dateFilter
-					logging.Info("Table %s: incremental sync from %v using %s (%s)",
-						t.Name, lastSync.Format(time.RFC3339), colName, colType)
+					tablesIncremental++
+					logging.Info("Table %s: incremental - syncing rows where %s > %v",
+						t.Name, colName, lastSync.Format(time.RFC3339))
 				} else {
 					// First sync - no date filter, but we'll record the sync timestamp
 					tableDateFilters[t.Name] = nil // nil means first sync
-					logging.Info("Table %s: first sync (full load), date column %s found", t.Name, colName)
+					tablesFirstSync++
+					logging.Info("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
+						t.Name, t.RowCount, colName)
 				}
 			} else {
-				logging.Debug("Table %s: no date column found in %v, using full sync",
-					t.Name, o.config.Migration.DateUpdatedColumns)
+				tablesNoDateColumn++
+				noDateColumnTables = append(noDateColumnTables, t.Name)
+				logging.Info("Table %s: full sync - no date column, syncing all %d rows (repeated each run)",
+					t.Name, t.RowCount)
 			}
 		}
 
@@ -874,6 +883,17 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	if largeKeysetTables > 0 {
 		totalPartitionTime = time.Since(partitionStartTime)
 		logging.Info("Partition queries completed in %s", totalPartitionTime.Round(time.Millisecond))
+	}
+
+	// Log incremental sync summary
+	if dateIncrementalEnabled {
+		if tablesIncremental > 0 || tablesFirstSync > 0 || tablesNoDateColumn > 0 {
+			logging.Info("Incremental sync summary: %d tables incremental, %d tables first sync, %d tables full sync (no date column)",
+				tablesIncremental, tablesFirstSync, tablesNoDateColumn)
+		}
+		if tablesNoDateColumn > 0 {
+			logging.Info("Tables without date columns will sync all rows every run: %v", noDateColumnTables)
+		}
 	}
 
 	// Initialize progress
