@@ -85,11 +85,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+5b0820f chore: bump version to 1.40.0
+4c48154 feat: add packet_size config and change encrypt to bool (#44)
+87156ca docs: add complete WWI upsert test results to CLAUDE.md
+b06b3b7 chore: bump version to 1.32.0
 8cc66a9 fix: convert WKT text to geography for PG→MSSQL upsert
-0b7ece2 docs: remove geography limitation from README
-30f43a7 fix: exclude geography/geometry from MERGE change detection
-6f8e905 feat: add helpful warning for geography/geometry upsert failures
-8f79202 fix: preserve binary data in MSSQL bulk copy conversion
 ```
 
 ### Major Features
@@ -174,10 +174,12 @@ All permutations of source, target, and mode (19.3M rows each):
 
 | Direction | drop_recreate | upsert |
 |-----------|---------------|--------|
-| **MSSQL → PG** | 323K rows/sec | 296K rows/sec |
+| **MSSQL → PG** | 400-425K rows/sec | 267-430K rows/sec |
 | **PG → MSSQL** | 196K rows/sec | 148K rows/sec |
-| **MSSQL → MSSQL** | 183K rows/sec | 79K rows/sec |
+| **MSSQL → MSSQL** | 464-499K rows/sec | 350-381K rows/sec |
 | **PG → PG** | 472K rows/sec | 337K rows/sec |
+
+*Note: MSSQL source performance improved significantly in v1.40.0 with 32KB TDS packet size (default).*
 
 ### Key Observations
 
@@ -253,6 +255,21 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 9: MSSQL Performance Optimization (Claude - January 11, 2026)
+1. Added `packet_size` config parameter for MSSQL connections (PR #44):
+   - TDS protocol packet size in bytes (default: 32767, max: 32767)
+   - go-mssqldb driver defaults to 4KB which limits throughput
+   - 32KB packets significantly improve MSSQL read/write performance
+2. Changed `encrypt` config from string to `*bool`:
+   - More intuitive: `encrypt: false` instead of `encrypt: "false"`
+   - Default: `true` (secure by default)
+   - Nil-safe: Added nil checks in SourceDSN(), TargetDSN(), DebugDump()
+3. Performance improvements with 32KB packet size:
+   - **MSSQL→PG**: 323K → 400-425K rows/sec (+27%)
+   - **MSSQL→MSSQL**: 183K → 464-499K rows/sec (+162%)
+   - **MSSQL→MSSQL upsert**: 79K → 350-381K rows/sec (+380%)
+4. Released v1.40.0 with MSSQL performance optimizations
 
 ### Session 8: PG→MSSQL Geography Upsert Fix (Claude - January 11, 2026)
 1. Fixed PG→MSSQL upsert for tables with geography/geometry columns (PR #43):
