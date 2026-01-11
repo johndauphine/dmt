@@ -234,14 +234,7 @@ func (p *Pool) loadPrimaryKey(ctx context.Context, t *Table) error {
 	}
 
 	// Populate PKColumns with full column metadata
-	for _, pkCol := range t.PrimaryKey {
-		for _, col := range t.Columns {
-			if col.Name == pkCol {
-				t.PKColumns = append(t.PKColumns, col)
-				break
-			}
-		}
-	}
+	t.PopulatePKColumns()
 
 	return nil
 }

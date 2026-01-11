@@ -39,6 +39,20 @@ func (t *Table) HasPK() bool {
 	return len(t.PrimaryKey) > 0
 }
 
+// PopulatePKColumns fills PKColumns with full column metadata from Columns.
+// Call this after both PrimaryKey and Columns are populated.
+func (t *Table) PopulatePKColumns() {
+	t.PKColumns = nil // Reset
+	for _, pkCol := range t.PrimaryKey {
+		for _, col := range t.Columns {
+			if col.Name == pkCol {
+				t.PKColumns = append(t.PKColumns, col)
+				break
+			}
+		}
+	}
+}
+
 // SupportsKeysetPagination returns true if keyset pagination can be used
 // (single-column integer/bigint PK)
 func (t *Table) SupportsKeysetPagination() bool {
