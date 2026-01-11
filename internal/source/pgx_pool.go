@@ -11,9 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver for database/sql
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/util"
 )
+
+// pgDialect is the shared dialect instance for PostgreSQL operations
+var pgDialect = dialect.GetDialect("postgres")
 
 // PgxSourcePool manages a pool of PostgreSQL source connections using pgx.
 type PgxSourcePool struct {
