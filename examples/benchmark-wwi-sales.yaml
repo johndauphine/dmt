@@ -2,9 +2,8 @@
 # Source: mssql-wwi (port 1435)
 # Target: pg-wwi (port 5435)
 #
-# Excluded tables:
-# - Customers, Customers_Archive: Contains geography column (DeliveryLocation)
-# - *_Archive tables: Temporal history tables without primary keys
+# Note: Geography columns are automatically converted to WKT text format
+# Excluded tables: *_Archive (temporal history tables without primary keys)
 
 source:
   type: mssql
@@ -33,9 +32,8 @@ migration:
   create_indexes: false
   create_foreign_keys: false
 
-  # Exclude tables with geography columns and archive tables without PKs
+  # Exclude archive tables without PKs (geography columns now supported!)
   exclude_tables:
-    - Customers
     - Customers_Archive
     - BuyingGroups_Archive
     - CustomerCategories_Archive

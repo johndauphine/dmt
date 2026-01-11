@@ -213,6 +213,46 @@ func (s dbSyntax) columnList(cols []string) string {
 	return strings.Join(quoted, ", ")
 }
 
+// columnListForSelect returns a column list for SELECT queries, with conversions for special types.
+// For cross-engine migrations with geography/geometry columns, converts to WKT text format.
+// For same-engine migrations, preserves native spatial types.
+func (s dbSyntax) columnListForSelect(cols, colTypes []string) string {
+	return s.columnListForSelectWithTarget(cols, colTypes, s.dbType)
+}
+
+// columnListForSelectWithTarget returns a column list for SELECT queries, converting spatial types
+// when migrating between different database engines.
+func (s dbSyntax) columnListForSelectWithTarget(cols, colTypes []string, targetDBType string) string {
+	quoted := make([]string, len(cols))
+	isCrossEngine := s.dbType != targetDBType
+
+	for i, c := range cols {
+		colType := ""
+		if i < len(colTypes) {
+			colType = colTypes[i]
+		}
+
+		// Only convert spatial types for cross-engine migrations
+		if isCrossEngine {
+			// SQL Server geography/geometry → WKT text for PostgreSQL
+			if s.dbType == "mssql" && (colType == "geography" || colType == "geometry") {
+				// Use STAsText() to convert spatial data to Well-Known Text (WKT) format
+				quoted[i] = fmt.Sprintf("%s.STAsText() AS %s", s.quoteIdent(c), s.quoteIdent(c))
+				continue
+			}
+			// PostGIS geography/geometry → WKT text for SQL Server
+			if s.dbType == "postgres" && (colType == "geography" || colType == "geometry") {
+				// Use ST_AsText() to convert PostGIS spatial data to WKT format
+				quoted[i] = fmt.Sprintf("ST_AsText(%s) AS %s", s.quoteIdent(c), s.quoteIdent(c))
+				continue
+			}
+		}
+
+		quoted[i] = s.quoteIdent(c)
+	}
+	return strings.Join(quoted, ", ")
+}
+
 // tableHint returns the table hint (WITH (NOLOCK) for SQL Server, empty for PostgreSQL)
 func (s dbSyntax) tableHint(strictConsistency bool) string {
 	if s.dbType == "postgres" || strictConsistency {
@@ -608,9 +648,9 @@ func executeKeysetPagination(
 	stats := &TransferStats{}
 	pkCol := job.Table.PrimaryKey[0]
 
-	// Use direction-aware syntax
+	// Use direction-aware syntax with target type for spatial column conversion
 	syntax := newDBSyntax(srcPool.DBType())
-	colList := syntax.columnList(cols)
+	colList := syntax.columnListForSelectWithTarget(cols, colTypes, tgtPool.DBType())
 	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
 	chunkSize := cfg.Migration.ChunkSize
 
@@ -947,9 +987,9 @@ func executeRowNumberPagination(
 	db := srcPool.DB()
 	stats := &TransferStats{}
 
-	// Use direction-aware syntax
+	// Use direction-aware syntax with target type for spatial column conversion
 	syntax := newDBSyntax(srcPool.DBType())
-	colList := syntax.columnList(cols)
+	colList := syntax.columnListForSelectWithTarget(cols, colTypes, tgtPool.DBType())
 	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
 
 	// Build ORDER BY clause from PK columns
