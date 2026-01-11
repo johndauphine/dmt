@@ -367,8 +367,9 @@ func (p *MSSQLPool) WriteChunk(ctx context.Context, schema, table string, cols [
 		bulk.Options.RowsPerBatch = rowsPerBatch
 
 		// Add all rows - this buffers internally and sends efficiently
+		// Convert rows to handle []byte values (e.g., decimal from MSSQL source)
 		for _, row := range rows {
-			err := bulk.AddRow(row)
+			err := bulk.AddRow(convertRowForBulkCopy(row))
 			if err != nil {
 				return fmt.Errorf("adding row: %w", err)
 			}
@@ -580,8 +581,9 @@ func (p *MSSQLPool) bulkInsertToTempTable(ctx context.Context, conn *sql.Conn, t
 	defer stmt.Close()
 
 	// Insert all rows
+	// Convert rows to handle []byte values (e.g., decimal from MSSQL source)
 	for _, row := range rows {
-		if _, err := stmt.ExecContext(ctx, row...); err != nil {
+		if _, err := stmt.ExecContext(ctx, convertRowForBulkCopy(row)...); err != nil {
 			return fmt.Errorf("executing bulk insert row: %w", err)
 		}
 	}
@@ -697,6 +699,23 @@ func (p *MSSQLPool) executeMergeWithRetry(ctx context.Context, conn *sql.Conn,
 	}
 
 	return fmt.Errorf("merge failed after %d retries", maxRetries)
+}
+
+// convertRowForBulkCopy converts row values for MSSQL bulk copy.
+// SQL Server source returns decimal/money values as []byte (ASCII string),
+// which the go-mssqldb bulk copy can't handle. This function converts []byte
+// values to strings which bulk copy accepts for numeric columns.
+func convertRowForBulkCopy(row []any) []any {
+	result := make([]any, len(row))
+	for i, v := range row {
+		if b, ok := v.([]byte); ok {
+			// Convert byte slice to string - works for decimal and other text-representable types
+			result[i] = string(b)
+		} else {
+			result[i] = v
+		}
+	}
+	return result
 }
 
 // isDeadlockError checks if the error is a SQL Server deadlock (error 1205)
