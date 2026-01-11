@@ -11,8 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver for database/sql
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/mssql-pg-migrate/internal/util"
 )
+
+// pgDialect is the shared dialect instance for PostgreSQL operations
+var pgDialect = dialect.GetDialect("postgres")
 
 // PgxSourcePool manages a pool of PostgreSQL source connections using pgx.
 type PgxSourcePool struct {
@@ -107,7 +112,7 @@ func (p *PgxSourcePool) DBType() string {
 // GetRowCount returns the row count for a table
 func (p *PgxSourcePool) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := p.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(schema, table))).Scan(&count)
+	err := p.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", pgDialect.QualifyTable(schema, table))).Scan(&count)
 	return count, err
 }
 
@@ -222,14 +227,7 @@ func (p *PgxSourcePool) loadPrimaryKey(ctx context.Context, t *Table) error {
 	}
 
 	// Populate PKColumns with full column metadata
-	for _, pkCol := range t.PrimaryKey {
-		for _, col := range t.Columns {
-			if col.Name == pkCol {
-				t.PKColumns = append(t.PKColumns, col)
-				break
-			}
-		}
-	}
+	t.PopulatePKColumns()
 
 	return nil
 }
@@ -245,7 +243,7 @@ func (p *PgxSourcePool) loadRowCount(ctx context.Context, t *Table) error {
 	err := p.pool.QueryRow(ctx, query, t.Schema, t.Name).Scan(&t.RowCount)
 	if err != nil || t.RowCount == 0 {
 		// Fall back to COUNT(*) if stats not available or show 0
-		exactQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyPGTable(t.Schema, t.Name))
+		exactQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", pgDialect.QualifyTable(t.Schema, t.Name))
 		return p.pool.QueryRow(ctx, exactQuery).Scan(&t.RowCount)
 	}
 	return nil
@@ -272,7 +270,7 @@ func (p *PgxSourcePool) GetPartitionBoundaries(ctx context.Context, t *Table, nu
 		FROM numbered
 		GROUP BY partition_id
 		ORDER BY partition_id
-	`, quotePGIdent(pkCol), numPartitions, quotePGIdent(pkCol), qualifyPGTable(t.Schema, t.Name), quotePGIdent(pkCol), quotePGIdent(pkCol))
+	`, pgDialect.QuoteIdentifier(pkCol), numPartitions, pgDialect.QuoteIdentifier(pkCol), pgDialect.QualifyTable(t.Schema, t.Name), pgDialect.QuoteIdentifier(pkCol), pgDialect.QuoteIdentifier(pkCol))
 
 	rows, err := p.pool.Query(ctx, query)
 	if err != nil {
@@ -327,7 +325,7 @@ func (p *PgxSourcePool) LoadIndexes(ctx context.Context, t *Table) error {
 		if err := rows.Scan(&idx.Name, &idx.IsUnique, &idx.IsClustered, &colsStr); err != nil {
 			return err
 		}
-		idx.Columns = splitCSV(colsStr)
+		idx.Columns = util.SplitCSV(colsStr)
 		t.Indexes = append(t.Indexes, idx)
 	}
 
@@ -385,8 +383,8 @@ func (p *PgxSourcePool) LoadForeignKeys(ctx context.Context, t *Table) error {
 		if err := rows.Scan(&fk.Name, &colsStr, &fk.RefSchema, &fk.RefTable, &refColsStr, &fk.OnDelete, &fk.OnUpdate); err != nil {
 			return err
 		}
-		fk.Columns = splitCSV(colsStr)
-		fk.RefColumns = splitCSV(refColsStr)
+		fk.Columns = util.SplitCSV(colsStr)
+		fk.RefColumns = util.SplitCSV(refColsStr)
 		t.ForeignKeys = append(t.ForeignKeys, fk)
 	}
 

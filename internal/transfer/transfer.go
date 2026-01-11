@@ -9,13 +9,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
@@ -29,11 +29,8 @@ type ProgressSaver interface {
 	GetProgress(taskID int64) (lastPK any, rowsDone int64, err error)
 }
 
-// DateFilter specifies a date-based filter for incremental sync
-type DateFilter struct {
-	Column    string    // Date column name
-	Timestamp time.Time // Only sync rows where column > timestamp (or is NULL)
-}
+// DateFilter is an alias for dialect.DateFilter for backward compatibility
+type DateFilter = dialect.DateFilter
 
 // Job represents a data transfer job
 type Job struct {
@@ -180,209 +177,6 @@ func (s *TransferStats) String() string {
 		s.ScanTime.Seconds(), float64(s.ScanTime)/float64(total)*100,
 		s.WriteTime.Seconds(), float64(s.WriteTime)/float64(total)*100,
 		s.Rows)
-}
-
-// dbSyntax provides direction-aware SQL syntax helpers
-type dbSyntax struct {
-	dbType string
-}
-
-func newDBSyntax(dbType string) dbSyntax {
-	return dbSyntax{dbType: dbType}
-}
-
-// quoteIdent quotes an identifier based on database type
-func (s dbSyntax) quoteIdent(name string) string {
-	if s.dbType == "postgres" {
-		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-	}
-	return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
-}
-
-// qualifiedTable returns schema.table with proper quoting
-func (s dbSyntax) qualifiedTable(schema, table string) string {
-	return s.quoteIdent(schema) + "." + s.quoteIdent(table)
-}
-
-// columnList returns a quoted, comma-separated list of columns
-func (s dbSyntax) columnList(cols []string) string {
-	quoted := make([]string, len(cols))
-	for i, c := range cols {
-		quoted[i] = s.quoteIdent(c)
-	}
-	return strings.Join(quoted, ", ")
-}
-
-// columnListForSelect returns a column list for SELECT queries, with conversions for special types.
-// For cross-engine migrations with geography/geometry columns, converts to WKT text format.
-// For same-engine migrations, preserves native spatial types.
-func (s dbSyntax) columnListForSelect(cols, colTypes []string) string {
-	return s.columnListForSelectWithTarget(cols, colTypes, s.dbType)
-}
-
-// columnListForSelectWithTarget returns a column list for SELECT queries, converting spatial types
-// when migrating between different database engines.
-func (s dbSyntax) columnListForSelectWithTarget(cols, colTypes []string, targetDBType string) string {
-	quoted := make([]string, len(cols))
-	isCrossEngine := s.dbType != targetDBType
-
-	for i, c := range cols {
-		colType := ""
-		if i < len(colTypes) {
-			colType = colTypes[i]
-		}
-
-		// Only convert spatial types for cross-engine migrations
-		if isCrossEngine {
-			// SQL Server geography/geometry → WKT text for PostgreSQL
-			if s.dbType == "mssql" && (colType == "geography" || colType == "geometry") {
-				// Use STAsText() to convert spatial data to Well-Known Text (WKT) format
-				quoted[i] = fmt.Sprintf("%s.STAsText() AS %s", s.quoteIdent(c), s.quoteIdent(c))
-				continue
-			}
-			// PostGIS geography/geometry → WKT text for SQL Server
-			if s.dbType == "postgres" && (colType == "geography" || colType == "geometry") {
-				// Use ST_AsText() to convert PostGIS spatial data to WKT format
-				quoted[i] = fmt.Sprintf("ST_AsText(%s) AS %s", s.quoteIdent(c), s.quoteIdent(c))
-				continue
-			}
-		}
-
-		quoted[i] = s.quoteIdent(c)
-	}
-	return strings.Join(quoted, ", ")
-}
-
-// tableHint returns the table hint (WITH (NOLOCK) for SQL Server, empty for PostgreSQL)
-func (s dbSyntax) tableHint(strictConsistency bool) string {
-	if s.dbType == "postgres" || strictConsistency {
-		return ""
-	}
-	return "WITH (NOLOCK)"
-}
-
-// buildKeysetQuery builds a keyset pagination query for the given database type
-// If dateFilter is provided, adds a date filter clause for incremental sync
-func (s dbSyntax) buildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *DateFilter) string {
-	if s.dbType == "postgres" {
-		dateClause := ""
-		if dateFilter != nil {
-			// Include rows where date > lastSync OR date IS NULL (catch rows without timestamps)
-			dateClause = fmt.Sprintf(" AND (%s > $4 OR %s IS NULL)", s.quoteIdent(dateFilter.Column), s.quoteIdent(dateFilter.Column))
-			if !hasMaxPK {
-				dateClause = fmt.Sprintf(" AND (%s > $3 OR %s IS NULL)", s.quoteIdent(dateFilter.Column), s.quoteIdent(dateFilter.Column))
-			}
-		}
-		if hasMaxPK {
-			return fmt.Sprintf(`
-				SELECT %s FROM %s
-				WHERE %s > $1 AND %s <= $2%s
-				ORDER BY %s
-				LIMIT $3
-			`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), s.quoteIdent(pkCol), dateClause, s.quoteIdent(pkCol))
-		}
-		return fmt.Sprintf(`
-			SELECT %s FROM %s
-			WHERE %s > $1%s
-			ORDER BY %s
-			LIMIT $2
-		`, cols, s.qualifiedTable(schema, table), s.quoteIdent(pkCol), dateClause, s.quoteIdent(pkCol))
-	}
-
-	// SQL Server syntax
-	dateClause := ""
-	if dateFilter != nil {
-		// Include rows where date > lastSync OR date IS NULL (catch rows without timestamps)
-		dateClause = fmt.Sprintf(" AND ([%s] > @lastSyncDate OR [%s] IS NULL)", dateFilter.Column, dateFilter.Column)
-	}
-	if hasMaxPK {
-		return fmt.Sprintf(`
-			SELECT TOP (@limit) %s
-			FROM %s %s
-			WHERE [%s] > @lastPK AND [%s] <= @maxPK%s
-			ORDER BY [%s]
-		`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, pkCol, dateClause, pkCol)
-	}
-	return fmt.Sprintf(`
-		SELECT TOP (@limit) %s
-		FROM %s %s
-		WHERE [%s] > @lastPK%s
-		ORDER BY [%s]
-	`, cols, s.qualifiedTable(schema, table), tableHint, pkCol, dateClause, pkCol)
-}
-
-// buildRowNumberQuery builds a ROW_NUMBER pagination query for the given database type
-func (s dbSyntax) buildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string {
-	if s.dbType == "postgres" {
-		return fmt.Sprintf(`
-			WITH numbered AS (
-				SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
-				FROM %s
-			)
-			SELECT %s FROM numbered
-			WHERE __rn > $1 AND __rn <= $2
-			ORDER BY __rn
-		`, cols, orderBy, s.qualifiedTable(schema, table), cols)
-	}
-
-	// SQL Server syntax
-	return fmt.Sprintf(`
-		WITH numbered AS (
-			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
-			FROM %s %s
-		)
-		SELECT %s FROM numbered
-		WHERE __rn > @rowNum AND __rn <= @rowNumEnd
-		ORDER BY __rn
-	`, cols, orderBy, s.qualifiedTable(schema, table), tableHint, cols)
-}
-
-// buildArgs builds query arguments for the given database type
-func (s dbSyntax) buildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *DateFilter) []any {
-	if s.dbType == "postgres" {
-		if hasMaxPK {
-			if dateFilter != nil {
-				return []any{lastPK, maxPK, limit, dateFilter.Timestamp}
-			}
-			return []any{lastPK, maxPK, limit}
-		}
-		if dateFilter != nil {
-			return []any{lastPK, limit, dateFilter.Timestamp}
-		}
-		return []any{lastPK, limit}
-	}
-
-	// SQL Server uses named parameters
-	if hasMaxPK {
-		args := []any{
-			sql.Named("limit", limit),
-			sql.Named("lastPK", lastPK),
-			sql.Named("maxPK", maxPK),
-		}
-		if dateFilter != nil {
-			args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
-		}
-		return args
-	}
-	args := []any{
-		sql.Named("limit", limit),
-		sql.Named("lastPK", lastPK),
-	}
-	if dateFilter != nil {
-		args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
-	}
-	return args
-}
-
-// buildRowNumberArgs builds query arguments for ROW_NUMBER pagination
-func (s dbSyntax) buildRowNumberArgs(rowNum int64, limit int) []any {
-	if s.dbType == "postgres" {
-		return []any{rowNum, rowNum + int64(limit)}
-	}
-	return []any{
-		sql.Named("rowNum", rowNum),
-		sql.Named("rowNumEnd", rowNum+int64(limit)),
-	}
 }
 
 // Execute runs a transfer job using the optimal pagination strategy
@@ -651,10 +445,10 @@ func executeKeysetPagination(
 	stats := &TransferStats{}
 	pkCol := job.Table.PrimaryKey[0]
 
-	// Use direction-aware syntax with target type for spatial column conversion
-	syntax := newDBSyntax(srcPool.DBType())
-	colList := syntax.columnListForSelectWithTarget(cols, colTypes, tgtPool.DBType())
-	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
+	// Use dialect for database-specific SQL syntax
+	srcDialect := dialect.GetDialect(srcPool.DBType())
+	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
+	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 	chunkSize := cfg.Migration.ChunkSize
 
 	// Get PK range for parallel readers
@@ -665,8 +459,8 @@ func executeKeysetPagination(
 	} else {
 		// For non-partitioned tables, get min and max PK
 		minMaxQuery := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s %s",
-			syntax.quoteIdent(pkCol), syntax.quoteIdent(pkCol),
-			syntax.qualifiedTable(job.Table.Schema, job.Table.Name), tableHint)
+			srcDialect.QuoteIdentifier(pkCol), srcDialect.QuoteIdentifier(pkCol),
+			srcDialect.QualifyTable(job.Table.Schema, job.Table.Name), tableHint)
 		err := db.QueryRowContext(ctx, minMaxQuery).Scan(&minPKVal, &maxPKVal)
 		if err != nil || minPKVal == nil {
 			return stats, nil // Empty table
@@ -721,8 +515,8 @@ func executeKeysetPagination(
 				}
 
 				// Always use bounded query for parallel readers
-				query := syntax.buildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true, job.DateFilter)
-				args := syntax.buildKeysetArgs(lastPK, rangeMaxPK, chunkSize, true, job.DateFilter)
+				query := srcDialect.BuildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true, job.DateFilter)
+				args := srcDialect.BuildKeysetArgs(lastPK, rangeMaxPK, chunkSize, true, job.DateFilter)
 
 				// Time the query
 				queryStart := time.Now()
@@ -774,107 +568,41 @@ func executeKeysetPagination(
 		close(chunkChan)
 	}()
 
-	// Parallel writers setup
-	numWriters := cfg.Migration.WriteAheadWriters
-	if numWriters < 1 {
-		numWriters = 1
-	}
-
-	// Channel for dispatching write jobs to worker pool
-	writeJobChan := make(chan writeJob, bufferSize)
-
-	// Shared state for parallel writers
-	var totalWriteTime int64 // atomic, nanoseconds
-	var totalWritten int64   // atomic, rows written
-	var writeErr atomic.Pointer[error]
-	var writerWg sync.WaitGroup
-
-	// Writer cancellation context
-	writerCtx, cancelWriters := context.WithCancel(ctx)
-	defer cancelWriters()
-
-	// Start write workers
-	useUpsert := cfg.Migration.TargetMode == "upsert"
-	pkCols := job.Table.PrimaryKey
-
-	// Sanitize PK columns for upsert (only for PostgreSQL targets)
-	_, isPGTarget := tgtPool.(*target.Pool)
-	targetPKCols := make([]string, len(pkCols))
-	for i, pk := range pkCols {
-		if isPGTarget {
-			targetPKCols[i] = target.SanitizePGIdentifier(pk)
-		} else {
-			targetPKCols[i] = pk // Preserve original case for MSSQL
-		}
-	}
-
-	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
+	// Get partition ID for staging table naming
 	var partitionID *int
 	if job.Partition != nil {
 		partitionID = &job.Partition.PartitionID
 	}
 
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &totalWritten, cfg.Migration.CheckpointFrequency)
+	// Create writer pool
+	numWriters := cfg.Migration.WriteAheadWriters
+	if numWriters < 1 {
+		numWriters = 1
+	}
 
-	var ackChan chan writeAck
-	var ackWg sync.WaitGroup
+	wp := newWriterPool(ctx, writerPoolConfig{
+		NumWriters:   numWriters,
+		BufferSize:   bufferSize,
+		UseUpsert:    cfg.Migration.TargetMode == "upsert",
+		TargetSchema: cfg.Target.Schema,
+		TargetTable:  targetTableName,
+		TargetCols:   targetCols,
+		ColTypes:     colTypes,
+		ColSRIDs:     colSRIDs,
+		TargetPKCols: buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:  partitionID,
+		TgtPool:      tgtPool,
+		Prog:         prog,
+		EnableAck:    job.Saver != nil && job.TaskID > 0,
+	})
+
+	// Setup checkpoint coordinator
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, cfg.Migration.CheckpointFrequency)
 	if checkpointCoord != nil {
-		ackChan = make(chan writeAck, bufferSize)
-		ackWg.Add(1)
-		go func() {
-			defer ackWg.Done()
-			for ack := range ackChan {
-				checkpointCoord.onAck(ack)
-			}
-		}()
+		wp.startAckProcessor(checkpointCoord.onAck)
 	}
 
-	for i := 0; i < numWriters; i++ {
-		writerID := i // Capture for closure
-		writerWg.Add(1)
-		go func() {
-			defer writerWg.Done()
-			for job := range writeJobChan {
-				select {
-				case <-writerCtx.Done():
-					return
-				default:
-				}
-
-				rows := job.rows
-				writeStart := time.Now()
-				var err error
-				if useUpsert {
-					// Use high-performance staging table approach
-					// Pass colTypes to skip geography/geometry from change detection in MSSQL MERGE
-					// Pass colSRIDs for geography/geometry SRID in STGeomFromText (PG→MSSQL)
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, colSRIDs, targetPKCols, rows, writerID, partitionID)
-				} else {
-					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
-				}
-				if err != nil {
-					writeErr.CompareAndSwap(nil, &err)
-					cancelWriters()
-					return
-				}
-				writeDuration := time.Since(writeStart)
-				atomic.AddInt64(&totalWriteTime, int64(writeDuration))
-
-				// Update progress atomically
-				rowCount := int64(len(rows))
-				atomic.AddInt64(&totalWritten, rowCount)
-				prog.Add(rowCount)
-
-				if ackChan != nil {
-					ackChan <- writeAck{
-						readerID: job.readerID,
-						seq:      job.seq,
-						lastPK:   job.lastPK,
-					}
-				}
-			}
-		}()
-	}
+	wp.start()
 
 	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	totalTransferred := resumeRowsDone
@@ -889,7 +617,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			cancelWriters()
+			wp.cancel()
 			break
 		}
 		if result.done {
@@ -909,18 +637,16 @@ chunkLoop:
 		lastWriteEnd = time.Now()
 
 		// Dispatch to write pool
-		select {
-		case writeJobChan <- writeJob{
+		if !wp.submit(writeJob{
 			rows:     result.rows,
 			lastPK:   result.lastPK,
 			readerID: result.readerID,
 			seq:      result.seq,
-		}:
-		case <-writerCtx.Done():
-			if err := writeErr.Load(); err != nil {
-				loopErr = fmt.Errorf("writing chunk: %w", *err)
+		}) {
+			if err := wp.error(); err != nil {
+				loopErr = fmt.Errorf("writing chunk: %w", err)
 			} else {
-				loopErr = writerCtx.Err()
+				loopErr = ctx.Err()
 			}
 			break chunkLoop
 		}
@@ -935,26 +661,21 @@ chunkLoop:
 		chunkCount++
 	}
 
-	// Close write job channel and wait for writers to finish
-	close(writeJobChan)
-	writerWg.Wait()
-	if ackChan != nil {
-		close(ackChan)
-		ackWg.Wait()
-	}
+	// Wait for writers to finish
+	wp.wait()
 
 	if loopErr != nil {
 		return stats, loopErr
 	}
 
 	// Check for write errors
-	if err := writeErr.Load(); err != nil {
-		return stats, fmt.Errorf("writing chunk: %w", *err)
+	if err := wp.error(); err != nil {
+		return stats, fmt.Errorf("writing chunk: %w", err)
 	}
 
 	// Aggregate stats
-	stats.WriteTime = time.Duration(atomic.LoadInt64(&totalWriteTime))
-	totalTransferred += atomic.LoadInt64(&totalWritten)
+	stats.WriteTime = wp.writeTime()
+	totalTransferred += wp.written()
 	stats.Rows = totalTransferred
 
 	// Save final progress
@@ -963,11 +684,7 @@ chunkLoop:
 		if checkpointCoord != nil {
 			finalLastPK = checkpointCoord.finalCheckpoint(lastPK)
 		}
-		var partID *int
-		if job.Partition != nil {
-			partID = &job.Partition.PartitionID
-		}
-		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partID, finalLastPK, totalTransferred, job.Table.RowCount); err != nil {
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount); err != nil {
 			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}
@@ -993,10 +710,10 @@ func executeRowNumberPagination(
 	db := srcPool.DB()
 	stats := &TransferStats{}
 
-	// Use direction-aware syntax with target type for spatial column conversion
-	syntax := newDBSyntax(srcPool.DBType())
-	colList := syntax.columnListForSelectWithTarget(cols, colTypes, tgtPool.DBType())
-	tableHint := syntax.tableHint(cfg.Migration.StrictConsistency)
+	// Use dialect for database-specific SQL syntax
+	srcDialect := dialect.GetDialect(srcPool.DBType())
+	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
+	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 
 	// Build ORDER BY clause from PK columns
 	// Tables without PK cannot be migrated safely - fail fast
@@ -1007,7 +724,7 @@ func executeRowNumberPagination(
 
 	pkCols := make([]string, len(job.Table.PrimaryKey))
 	for i, pk := range job.Table.PrimaryKey {
-		pkCols[i] = syntax.quoteIdent(pk)
+		pkCols[i] = srcDialect.QuoteIdentifier(pk)
 	}
 	orderBy := strings.Join(pkCols, ", ")
 
@@ -1065,8 +782,8 @@ func executeRowNumberPagination(
 			}
 
 			// ROW_NUMBER pagination with direction-aware syntax
-			query := syntax.buildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
-			args := syntax.buildRowNumberArgs(rowNum, effectiveChunkSize)
+			query := srcDialect.BuildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
+			args := srcDialect.BuildRowNumberArgs(rowNum, effectiveChunkSize)
 
 			// Time the query
 			queryStart := time.Now()
@@ -1116,40 +833,7 @@ func executeRowNumberPagination(
 		chunkChan <- chunkResult{done: true}
 	}()
 
-	// Parallel writers setup
-	numWriters := cfg.Migration.WriteAheadWriters
-	if numWriters < 1 {
-		numWriters = 1
-	}
-
-	// Channel for dispatching write jobs to worker pool
-	writeJobChan := make(chan writeJob, bufferSize)
-
-	// Shared state for parallel writers
-	var totalWriteTime int64 // atomic, nanoseconds
-	var totalWritten int64   // atomic, rows written
-	var writeErr atomic.Pointer[error]
-	var writerWg sync.WaitGroup
-
-	// Writer cancellation context
-	writerCtx, cancelWriters := context.WithCancel(ctx)
-	defer cancelWriters()
-
-	// Start write workers
-	useUpsert := cfg.Migration.TargetMode == "upsert"
-
-	// Sanitize PK columns for upsert (only for PostgreSQL targets)
-	_, isPGTarget := tgtPool.(*target.Pool)
-	targetPKCols := make([]string, len(job.Table.PrimaryKey))
-	for i, pk := range job.Table.PrimaryKey {
-		if isPGTarget {
-			targetPKCols[i] = target.SanitizePGIdentifier(pk)
-		} else {
-			targetPKCols[i] = pk // Preserve original case for MSSQL
-		}
-	}
-
-	// Get partition ID for staging table naming (used by UpsertChunkWithWriter)
+	// Get partition ID and row count for staging table naming and checkpointing
 	var partitionID *int
 	var partitionRows int64
 	if job.Partition != nil {
@@ -1159,95 +843,67 @@ func executeRowNumberPagination(
 		partitionRows = job.Table.RowCount
 	}
 
+	// Create writer pool
+	numWriters := cfg.Migration.WriteAheadWriters
+	if numWriters < 1 {
+		numWriters = 1
+	}
+
+	enableAck := job.Saver != nil && job.TaskID > 0
+	wp := newWriterPool(ctx, writerPoolConfig{
+		NumWriters:   numWriters,
+		BufferSize:   bufferSize,
+		UseUpsert:    cfg.Migration.TargetMode == "upsert",
+		TargetSchema: cfg.Target.Schema,
+		TargetTable:  targetTableName,
+		TargetCols:   targetCols,
+		ColTypes:     colTypes,
+		ColSRIDs:     colSRIDs,
+		TargetPKCols: buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:  partitionID,
+		TgtPool:      tgtPool,
+		Prog:         prog,
+		EnableAck:    enableAck,
+	})
+
+	// Setup ROW_NUMBER checkpoint handler
 	checkpointFreq := cfg.Migration.CheckpointFrequency
 	if checkpointFreq <= 0 {
-		checkpointFreq = 10 // Default fallback
+		checkpointFreq = 10
 	}
-
-	var ackChan chan writeAck
-	var ackWg sync.WaitGroup
 	lastCheckpointRowNum := initialRowNum
 
-	if job.Saver != nil && job.TaskID > 0 {
-		ackChan = make(chan writeAck, bufferSize)
-		ackWg.Add(1)
-		go func() {
-			defer ackWg.Done()
-			expectedSeq := int64(0)
-			pending := make(map[int64]writeAck)
-			completedChunks := 0
-			for ack := range ackChan {
-				if ack.seq != expectedSeq {
-					pending[ack.seq] = ack
-					continue
-				}
-				for {
-					lastCheckpointRowNum = ack.rowNum
-					completedChunks++
-					if completedChunks%checkpointFreq == 0 {
-						rowsDone := resumeRowsDone + atomic.LoadInt64(&totalWritten)
-						if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
-							logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
-						}
-					}
-					expectedSeq++
-					next, ok := pending[expectedSeq]
-					if !ok {
-						break
-					}
-					delete(pending, expectedSeq)
-					ack = next
-				}
+	if enableAck {
+		expectedSeq := int64(0)
+		pending := make(map[int64]writeAck)
+		completedChunks := 0
+
+		wp.startAckProcessor(func(ack writeAck) {
+			if ack.seq != expectedSeq {
+				pending[ack.seq] = ack
+				return
 			}
-		}()
+			for {
+				lastCheckpointRowNum = ack.rowNum
+				completedChunks++
+				if completedChunks%checkpointFreq == 0 {
+					rowsDone := resumeRowsDone + wp.written()
+					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
+						logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
+					}
+				}
+				expectedSeq++
+				next, ok := pending[expectedSeq]
+				if !ok {
+					break
+				}
+				delete(pending, expectedSeq)
+				ack = next
+			}
+		})
 	}
 
-	for i := 0; i < numWriters; i++ {
-		writerID := i // Capture for closure (per-writer staging table isolation)
-		writerWg.Add(1)
-		go func() {
-			defer writerWg.Done()
-			for job := range writeJobChan {
-				select {
-				case <-writerCtx.Done():
-					return
-				default:
-				}
-
-				rows := job.rows
-				writeStart := time.Now()
-				var err error
-				if useUpsert {
-					// Use UpsertChunkWithWriter for high-performance staging table approach
-					// Pass colTypes to skip geography/geometry from change detection in MSSQL MERGE
-					// Pass colSRIDs for geography/geometry SRID in STGeomFromText (PG→MSSQL)
-					err = writeChunkUpsertWithWriter(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, colTypes, colSRIDs, targetPKCols, rows, writerID, partitionID)
-				} else {
-					err = writeChunkGeneric(writerCtx, tgtPool, cfg.Target.Schema, targetTableName, targetCols, rows)
-				}
-				if err != nil {
-					writeErr.CompareAndSwap(nil, &err)
-					cancelWriters()
-					return
-				}
-				writeDuration := time.Since(writeStart)
-				atomic.AddInt64(&totalWriteTime, int64(writeDuration))
-
-				// Update progress atomically
-				rowCount := int64(len(rows))
-				atomic.AddInt64(&totalWritten, rowCount)
-				prog.Add(rowCount)
-
-				if ackChan != nil {
-					ackChan <- writeAck{
-						readerID: job.readerID,
-						seq:      job.seq,
-						rowNum:   job.rowNum,
-					}
-				}
-			}
-		}()
-	}
+	wp.start()
 
 	// Main consumer loop - reads from chunkChan, dispatches to write pool
 	chunkCount := 0
@@ -1262,7 +918,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			cancelWriters()
+			wp.cancel()
 			break
 		}
 		if result.done {
@@ -1282,18 +938,16 @@ chunkLoop:
 		lastWriteEnd = time.Now()
 
 		// Dispatch to write pool
-		select {
-		case writeJobChan <- writeJob{
+		if !wp.submit(writeJob{
 			rows:     result.rows,
 			rowNum:   result.rowNum,
 			readerID: result.readerID,
 			seq:      result.seq,
-		}:
-		case <-writerCtx.Done():
-			if err := writeErr.Load(); err != nil {
-				loopErr = fmt.Errorf("writing chunk: %w", *err)
+		}) {
+			if err := wp.error(); err != nil {
+				loopErr = fmt.Errorf("writing chunk: %w", err)
 			} else {
-				loopErr = writerCtx.Err()
+				loopErr = ctx.Err()
 			}
 			break chunkLoop
 		}
@@ -1308,32 +962,27 @@ chunkLoop:
 		chunkCount++
 	}
 
-	// Close write job channel and wait for writers to finish
-	close(writeJobChan)
-	writerWg.Wait()
-	if ackChan != nil {
-		close(ackChan)
-		ackWg.Wait()
-	}
+	// Wait for writers to finish
+	wp.wait()
 
 	if loopErr != nil {
 		return stats, loopErr
 	}
 
 	// Check for write errors
-	if err := writeErr.Load(); err != nil {
-		return stats, fmt.Errorf("writing chunk: %w", *err)
+	if err := wp.error(); err != nil {
+		return stats, fmt.Errorf("writing chunk: %w", err)
 	}
 
 	// Aggregate stats
-	stats.WriteTime = time.Duration(atomic.LoadInt64(&totalWriteTime))
-	totalTransferred += atomic.LoadInt64(&totalWritten)
+	stats.WriteTime = wp.writeTime()
+	totalTransferred += wp.written()
 	stats.Rows = totalTransferred
 
 	// Save final progress
 	if job.Saver != nil && job.TaskID > 0 {
 		finalRowNum := currentRowNum
-		if ackChan != nil {
+		if enableAck {
 			finalRowNum = lastCheckpointRowNum
 		}
 		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows); err != nil {

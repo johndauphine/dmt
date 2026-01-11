@@ -1099,7 +1099,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 			logging.Debug("  Source (mssql): %d/%d active, %d idle, %d waits (%.1fms avg)",
 				stats.InUse, stats.MaxOpenConnections, stats.Idle,
 				stats.WaitCount, float64(stats.WaitDuration)/float64(max(stats.WaitCount, 1)))
-		case *source.PostgresPool:
+		case *source.PgxSourcePool:
 			logging.Debug("  Source (postgres): max connections=%d", p.MaxConns())
 		}
 		switch p := o.targetPool.(type) {
