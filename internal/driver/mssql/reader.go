@@ -372,7 +372,7 @@ func (r *Reader) readKeysetPagination(ctx context.Context, batches chan<- driver
 			return
 		}
 
-		batch, newLastPK, err := r.scanRows(rows, len(opts.Columns))
+		batch, newLastPK, err := driver.ScanRows(rows, len(opts.Columns))
 		rows.Close()
 
 		if err != nil {
@@ -393,7 +393,7 @@ func (r *Reader) readKeysetPagination(ctx context.Context, batches chan<- driver
 
 		// Check if we've reached the end
 		if maxPK != nil {
-			if cmp := compareKeys(lastPK, maxPK); cmp >= 0 {
+			if cmp := driver.CompareKeys(lastPK, maxPK); cmp >= 0 {
 				batch.Done = true
 			}
 		}
@@ -441,7 +441,7 @@ func (r *Reader) readRowNumberPagination(ctx context.Context, batches chan<- dri
 			return
 		}
 
-		batch, _, err := r.scanRows(rows, len(opts.Columns))
+		batch, _, err := driver.ScanRows(rows, len(opts.Columns))
 		rows.Close()
 
 		if err != nil {
@@ -517,62 +517,4 @@ func (r *Reader) readFullTable(ctx context.Context, batches chan<- driver.Batch,
 
 		queryTime = 0 // Only first batch has query time
 	}
-}
-
-func (r *Reader) scanRows(rows *sql.Rows, numCols int) (driver.Batch, any, error) {
-	batch := driver.Batch{}
-	scanStart := time.Now()
-
-	var lastPK any
-	for rows.Next() {
-		row := make([]any, numCols)
-		ptrs := make([]any, numCols)
-		for j := range row {
-			ptrs[j] = &row[j]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return batch, nil, fmt.Errorf("scanning row: %w", err)
-		}
-		batch.Rows = append(batch.Rows, row)
-		lastPK = row[0] // Assume first column is PK for keyset
-	}
-
-	batch.Stats.ScanTime = time.Since(scanStart)
-	batch.Stats.ReadEnd = time.Now()
-
-	return batch, lastPK, rows.Err()
-}
-
-// compareKeys compares two primary key values.
-func compareKeys(a, b any) int {
-	switch va := a.(type) {
-	case int64:
-		if vb, ok := b.(int64); ok {
-			if va < vb {
-				return -1
-			} else if va > vb {
-				return 1
-			}
-			return 0
-		}
-	case int32:
-		if vb, ok := b.(int32); ok {
-			if va < vb {
-				return -1
-			} else if va > vb {
-				return 1
-			}
-			return 0
-		}
-	case int:
-		if vb, ok := b.(int); ok {
-			if va < vb {
-				return -1
-			} else if va > vb {
-				return 1
-			}
-			return 0
-		}
-	}
-	return 0
 }
