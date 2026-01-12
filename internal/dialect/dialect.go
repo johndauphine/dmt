@@ -181,6 +181,8 @@ func (d *PostgresDialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK
 }
 
 func (d *PostgresDialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string) string {
+	// Extract just column aliases for outer SELECT (handles expressions like "ST_AsText(col) AS col")
+	outerCols := extractColumnAliasesPG(cols)
 	return fmt.Sprintf(`
 		WITH numbered AS (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
@@ -189,7 +191,28 @@ func (d *PostgresDialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ st
 		SELECT %s FROM numbered
 		WHERE __rn > $1 AND __rn <= $2
 		ORDER BY __rn
-	`, cols, orderBy, d.QualifyTable(schema, table), cols)
+	`, cols, orderBy, d.QualifyTable(schema, table), outerCols)
+}
+
+// extractColumnAliasesPG extracts just the column aliases from a column expression list.
+// For expressions like "ST_AsText(col) AS col", it extracts "col".
+// For plain columns like "col", it returns them unchanged.
+func extractColumnAliasesPG(cols string) string {
+	parts := strings.Split(cols, ",")
+	aliases := make([]string, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		// Check for " AS " (case-insensitive)
+		upperPart := strings.ToUpper(part)
+		if idx := strings.LastIndex(upperPart, " AS "); idx != -1 {
+			// Extract the alias after " AS "
+			aliases[i] = strings.TrimSpace(part[idx+4:])
+		} else {
+			// Plain column - keep as-is
+			aliases[i] = part
+		}
+	}
+	return strings.Join(aliases, ", ")
 }
 
 func (d *PostgresDialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
@@ -357,6 +380,8 @@ func (d *MSSQLDialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bo
 }
 
 func (d *MSSQLDialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string {
+	// Extract just column aliases for outer SELECT (handles expressions like "col.STAsText() AS col")
+	outerCols := extractColumnAliasesMSSQL(cols)
 	return fmt.Sprintf(`
 		WITH numbered AS (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
@@ -365,7 +390,28 @@ func (d *MSSQLDialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHi
 		SELECT %s FROM numbered
 		WHERE __rn > @rowNum AND __rn <= @rowNumEnd
 		ORDER BY __rn
-	`, cols, orderBy, d.QualifyTable(schema, table), tableHint, cols)
+	`, cols, orderBy, d.QualifyTable(schema, table), tableHint, outerCols)
+}
+
+// extractColumnAliasesMSSQL extracts just the column aliases from a column expression list.
+// For expressions like "[Col].STAsText() AS [Col]", it extracts "[Col]".
+// For plain columns like "[Col]", it returns them unchanged.
+func extractColumnAliasesMSSQL(cols string) string {
+	parts := strings.Split(cols, ",")
+	aliases := make([]string, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		// Check for " AS " (case-insensitive)
+		upperPart := strings.ToUpper(part)
+		if idx := strings.LastIndex(upperPart, " AS "); idx != -1 {
+			// Extract the alias after " AS "
+			aliases[i] = strings.TrimSpace(part[idx+4:])
+		} else {
+			// Plain column - keep as-is
+			aliases[i] = part
+		}
+	}
+	return strings.Join(aliases, ", ")
 }
 
 func (d *MSSQLDialect) BuildRowNumberArgs(rowNum int64, limit int) []any {

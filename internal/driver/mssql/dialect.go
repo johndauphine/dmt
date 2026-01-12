@@ -132,6 +132,8 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, dateFilter *driver.DateFilt
 }
 
 func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string {
+	// Extract just column aliases for outer SELECT (handles expressions like "col.STAsText() AS col")
+	outerCols := extractColumnAliases(cols)
 	return fmt.Sprintf(`
 		WITH numbered AS (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
@@ -140,7 +142,28 @@ func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint st
 		SELECT %s FROM numbered
 		WHERE __rn > @rowNum AND __rn <= @rowNumEnd
 		ORDER BY __rn
-	`, cols, orderBy, d.QualifyTable(schema, table), tableHint, cols)
+	`, cols, orderBy, d.QualifyTable(schema, table), tableHint, outerCols)
+}
+
+// extractColumnAliases extracts just the column aliases from a column expression list.
+// For expressions like "[Col].STAsText() AS [Col]", it extracts "[Col]".
+// For plain columns like "[Col]", it returns them unchanged.
+func extractColumnAliases(cols string) string {
+	parts := strings.Split(cols, ",")
+	aliases := make([]string, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		// Check for " AS " (case-insensitive)
+		upperPart := strings.ToUpper(part)
+		if idx := strings.LastIndex(upperPart, " AS "); idx != -1 {
+			// Extract the alias after " AS "
+			aliases[i] = strings.TrimSpace(part[idx+4:])
+		} else {
+			// Plain column - keep as-is
+			aliases[i] = part
+		}
+	}
+	return strings.Join(aliases, ", ")
 }
 
 func (d *Dialect) BuildRowNumberArgs(startRow, endRow int64) []any {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,6 +14,31 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
 )
+
+// sanitizePGIdentifier converts an identifier to PostgreSQL-friendly format.
+// Converts to lowercase, replaces special chars with underscores.
+func sanitizePGIdentifier(ident string) string {
+	if ident == "" {
+		return "col_"
+	}
+	s := strings.ToLower(ident)
+	var sb strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune('_')
+		}
+	}
+	s = sb.String()
+	if len(s) > 0 && unicode.IsDigit(rune(s[0])) {
+		s = "col_" + s
+	}
+	if s == "" {
+		return "col_"
+	}
+	return s
+}
 
 // Writer implements driver.Writer for PostgreSQL.
 type Writer struct {
@@ -120,7 +146,9 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string, unlogged bool
 	} else {
 		sb.WriteString("CREATE TABLE ")
 	}
-	sb.WriteString(w.dialect.QualifyTable(targetSchema, t.Name))
+	// Sanitize table name for PostgreSQL (lowercase, safe chars)
+	sanitizedTable := sanitizePGIdentifier(t.Name)
+	sb.WriteString(w.dialect.QualifyTable(targetSchema, sanitizedTable))
 	sb.WriteString(" (\n")
 
 	mapper := &TypeMapper{}
@@ -129,7 +157,9 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string, unlogged bool
 			sb.WriteString(",\n")
 		}
 		sb.WriteString("  ")
-		sb.WriteString(w.dialect.QuoteIdentifier(col.Name))
+		// Sanitize column name
+		sanitizedCol := sanitizePGIdentifier(col.Name)
+		sb.WriteString(w.dialect.QuoteIdentifier(sanitizedCol))
 		sb.WriteString(" ")
 
 		// Map type
@@ -160,31 +190,35 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string, unlogged bool
 
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	_, err := w.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", w.dialect.QualifyTable(schema, table)))
+	sanitizedTable := sanitizePGIdentifier(table)
+	_, err := w.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", w.dialect.QualifyTable(schema, sanitizedTable)))
 	return err
 }
 
 // TruncateTable truncates a table.
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := w.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", w.dialect.QualifyTable(schema, table)))
+	sanitizedTable := sanitizePGIdentifier(table)
+	_, err := w.pool.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE %s", w.dialect.QualifyTable(schema, sanitizedTable)))
 	return err
 }
 
 // TableExists checks if a table exists.
 func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {
+	sanitizedTable := sanitizePGIdentifier(table)
 	var exists bool
 	err := w.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM information_schema.tables
 			WHERE table_schema = $1 AND table_name = $2
 		)
-	`, schema, table).Scan(&exists)
+	`, schema, sanitizedTable).Scan(&exists)
 	return exists, err
 }
 
 // SetTableLogged converts an UNLOGGED table to LOGGED.
 func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error {
-	_, err := w.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s SET LOGGED", w.dialect.QualifyTable(schema, table)))
+	sanitizedTable := sanitizePGIdentifier(table)
+	_, err := w.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s SET LOGGED", w.dialect.QualifyTable(schema, sanitizedTable)))
 	return err
 }
 
@@ -194,14 +228,15 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 		return nil
 	}
 
+	sanitizedTable := sanitizePGIdentifier(t.Name)
 	cols := make([]string, len(t.PrimaryKey))
 	for i, c := range t.PrimaryKey {
-		cols[i] = w.dialect.QuoteIdentifier(c)
+		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 	}
 
-	pkName := fmt.Sprintf("pk_%s", t.Name)
+	pkName := fmt.Sprintf("pk_%s", sanitizedTable)
 	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s PRIMARY KEY (%s)",
-		w.dialect.QualifyTable(targetSchema, t.Name),
+		w.dialect.QualifyTable(targetSchema, sanitizedTable),
 		w.dialect.QuoteIdentifier(pkName),
 		strings.Join(cols, ", "))
 
@@ -211,20 +246,23 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 
 // CreateIndex creates an index.
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
+	sanitizedTable := sanitizePGIdentifier(t.Name)
+	sanitizedIdxName := sanitizePGIdentifier(idx.Name)
+
 	var sb strings.Builder
 	sb.WriteString("CREATE ")
 	if idx.IsUnique {
 		sb.WriteString("UNIQUE ")
 	}
 	sb.WriteString("INDEX ")
-	sb.WriteString(w.dialect.QuoteIdentifier(idx.Name))
+	sb.WriteString(w.dialect.QuoteIdentifier(sanitizedIdxName))
 	sb.WriteString(" ON ")
-	sb.WriteString(w.dialect.QualifyTable(targetSchema, t.Name))
+	sb.WriteString(w.dialect.QualifyTable(targetSchema, sanitizedTable))
 	sb.WriteString(" (")
 
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(c)
+		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 	}
 	sb.WriteString(strings.Join(cols, ", "))
 	sb.WriteString(")")
@@ -233,7 +271,7 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 		sb.WriteString(" INCLUDE (")
 		inc := make([]string, len(idx.IncludeCols))
 		for i, c := range idx.IncludeCols {
-			inc[i] = w.dialect.QuoteIdentifier(c)
+			inc[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 		}
 		sb.WriteString(strings.Join(inc, ", "))
 		sb.WriteString(")")
@@ -245,20 +283,24 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 
 // CreateForeignKey creates a foreign key constraint.
 func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
+	sanitizedTable := sanitizePGIdentifier(t.Name)
+	sanitizedFKName := sanitizePGIdentifier(fk.Name)
+	sanitizedRefTable := sanitizePGIdentifier(fk.RefTable)
+
 	cols := make([]string, len(fk.Columns))
 	refCols := make([]string, len(fk.RefColumns))
 	for i, c := range fk.Columns {
-		cols[i] = w.dialect.QuoteIdentifier(c)
+		cols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 	}
 	for i, c := range fk.RefColumns {
-		refCols[i] = w.dialect.QuoteIdentifier(c)
+		refCols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
 	}
 
 	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
-		w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(fk.Name),
+		w.dialect.QualifyTable(targetSchema, sanitizedTable),
+		w.dialect.QuoteIdentifier(sanitizedFKName),
 		strings.Join(cols, ", "),
-		w.dialect.QualifyTable(fk.RefSchema, fk.RefTable),
+		w.dialect.QualifyTable(fk.RefSchema, sanitizedRefTable),
 		strings.Join(refCols, ", "))
 
 	if fk.OnDelete != "" && fk.OnDelete != "NO_ACTION" {
@@ -274,9 +316,12 @@ func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driv
 
 // CreateCheckConstraint creates a check constraint.
 func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
+	sanitizedTable := sanitizePGIdentifier(t.Name)
+	sanitizedChkName := sanitizePGIdentifier(chk.Name)
+
 	sql := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK %s",
-		w.dialect.QualifyTable(targetSchema, t.Name),
-		w.dialect.QuoteIdentifier(chk.Name),
+		w.dialect.QualifyTable(targetSchema, sanitizedTable),
+		w.dialect.QuoteIdentifier(sanitizedChkName),
 		chk.Definition)
 
 	_, err := w.pool.Exec(ctx, sql)
@@ -285,6 +330,7 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 
 // HasPrimaryKey checks if a table has a primary key.
 func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
+	sanitizedTable := sanitizePGIdentifier(table)
 	var exists bool
 	err := w.pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -293,25 +339,28 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 			JOIN pg_namespace n ON n.oid = c.relnamespace
 			WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2
 		)
-	`, schema, table).Scan(&exists)
+	`, schema, sanitizedTable).Scan(&exists)
 	return exists, err
 }
 
 // GetRowCount returns the row count for a table.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
+	sanitizedTable := sanitizePGIdentifier(table)
 	var count int64
-	err := w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, table))).Scan(&count)
+	err := w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)
 	return count, err
 }
 
 // ResetSequence resets the sequence for an identity column.
 func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
+	sanitizedTable := sanitizePGIdentifier(t.Name)
 	for _, col := range t.Columns {
 		if col.IsIdentity {
-			// Find the sequence name
-			seqName := fmt.Sprintf("%s_%s_seq", t.Name, col.Name)
+			// Find the sequence name (uses sanitized names)
+			sanitizedCol := sanitizePGIdentifier(col.Name)
+			seqName := fmt.Sprintf("%s_%s_seq", sanitizedTable, sanitizedCol)
 			query := fmt.Sprintf("SELECT setval('%s.%s', COALESCE((SELECT MAX(%s) FROM %s), 1))",
-				schema, seqName, w.dialect.QuoteIdentifier(col.Name), w.dialect.QualifyTable(schema, t.Name))
+				schema, seqName, w.dialect.QuoteIdentifier(sanitizedCol), w.dialect.QualifyTable(schema, sanitizedTable))
 			if _, err := w.pool.Exec(ctx, query); err != nil {
 				logging.Debug("Failed to reset sequence %s: %v", seqName, err)
 			}
