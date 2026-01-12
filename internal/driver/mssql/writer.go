@@ -611,11 +611,21 @@ func (w *Writer) getSpatialColumns(ctx context.Context, conn *sql.Conn, stagingT
 }
 
 func (w *Writer) alterSpatialColumnsToText(ctx context.Context, conn *sql.Conn, stagingTable string, spatialCols []spatialColumn) error {
+	// SQL Server doesn't allow ALTER COLUMN from geography/geometry to nvarchar(max)
+	// (implicit conversion not allowed). Instead, we DROP and ADD the column.
 	for _, col := range spatialCols {
-		alterSQL := fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s nvarchar(max)`,
-			stagingTable, w.dialect.QuoteIdentifier(col.Name))
-		if _, err := conn.ExecContext(ctx, alterSQL); err != nil {
-			return fmt.Errorf("altering column %s: %w", col.Name, err)
+		quotedCol := w.dialect.QuoteIdentifier(col.Name)
+
+		// Drop the geography/geometry column
+		dropSQL := fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, stagingTable, quotedCol)
+		if _, err := conn.ExecContext(ctx, dropSQL); err != nil {
+			return fmt.Errorf("dropping column %s: %w", col.Name, err)
+		}
+
+		// Add it back as nvarchar(max) for WKT text data
+		addSQL := fmt.Sprintf(`ALTER TABLE %s ADD %s nvarchar(max)`, stagingTable, quotedCol)
+		if _, err := conn.ExecContext(ctx, addSQL); err != nil {
+			return fmt.Errorf("adding column %s as nvarchar: %w", col.Name, err)
 		}
 	}
 	return nil
