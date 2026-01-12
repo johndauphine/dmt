@@ -989,3 +989,104 @@ func TestInvalidEnvVarNames(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalDriverName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"mssql", "mssql"},
+		{"sqlserver", "mssql"},
+		{"sql-server", "mssql"},
+		{"MSSQL", "mssql"},
+		{"SQLSERVER", "mssql"},
+		{"postgres", "postgres"},
+		{"postgresql", "postgres"},
+		{"pg", "postgres"},
+		{"POSTGRES", "postgres"},
+		{"PG", "postgres"},
+		{"unknown", "unknown"}, // Unknown types return unchanged
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := canonicalDriverName(tt.input)
+			if result != tt.expected {
+				t.Errorf("canonicalDriverName(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsValidDriverType(t *testing.T) {
+	validTypes := []string{
+		"mssql", "sqlserver", "sql-server",
+		"postgres", "postgresql", "pg",
+		"MSSQL", "PG", // Case insensitive
+	}
+	invalidTypes := []string{
+		"mysql", "oracle", "sqlite", "unknown", "",
+	}
+
+	for _, dbType := range validTypes {
+		t.Run("valid_"+dbType, func(t *testing.T) {
+			if !isValidDriverType(dbType) {
+				t.Errorf("isValidDriverType(%q) = false, want true", dbType)
+			}
+		})
+	}
+
+	for _, dbType := range invalidTypes {
+		t.Run("invalid_"+dbType, func(t *testing.T) {
+			if isValidDriverType(dbType) {
+				t.Errorf("isValidDriverType(%q) = true, want false", dbType)
+			}
+		})
+	}
+}
+
+func TestConfigValidationWithAliases(t *testing.T) {
+	// Test that config validation accepts driver aliases
+	tests := []struct {
+		name       string
+		sourceType string
+		targetType string
+		wantErr    bool
+	}{
+		{"mssql to postgres", "mssql", "postgres", false},
+		{"sqlserver to pg", "sqlserver", "pg", false},
+		{"sql-server to postgresql", "sql-server", "postgresql", false},
+		{"pg to mssql", "pg", "mssql", false},
+		{"postgres to sqlserver", "postgres", "sqlserver", false},
+		{"invalid source", "mysql", "postgres", true},
+		{"invalid target", "mssql", "oracle", true},
+		{"both invalid", "mysql", "oracle", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Source: SourceConfig{
+					Type:     tt.sourceType,
+					Host:     "localhost",
+					Database: "test",
+				},
+				Target: TargetConfig{
+					Type:     tt.targetType,
+					Host:     "localhost",
+					Database: "test",
+				},
+				Migration: MigrationConfig{
+					TargetMode: "drop_recreate",
+				},
+			}
+			err := cfg.validate()
+			if tt.wantErr && err == nil {
+				t.Errorf("validate() expected error for source=%q, target=%q", tt.sourceType, tt.targetType)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("validate() unexpected error: %v", err)
+			}
+		})
+	}
+}

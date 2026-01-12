@@ -12,6 +12,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// supportedDrivers defines the valid database types and their aliases.
+// The key is the alias, the value is the canonical driver name.
+// This list must be kept in sync with registered drivers.
+var supportedDrivers = map[string]string{
+	"mssql":      "mssql",
+	"sqlserver":  "mssql",
+	"sql-server": "mssql",
+	"postgres":   "postgres",
+	"postgresql": "postgres",
+	"pg":         "postgres",
+}
+
+// canonicalDriverName returns the canonical driver name for a given type.
+// For example, "pg" -> "postgres", "sqlserver" -> "mssql".
+// Returns the input unchanged if not a known type.
+func canonicalDriverName(dbType string) string {
+	if canonical, ok := supportedDrivers[strings.ToLower(dbType)]; ok {
+		return canonical
+	}
+	return dbType
+}
+
+// isValidDriverType returns true if the type is a valid driver type or alias.
+func isValidDriverType(dbType string) bool {
+	_, ok := supportedDrivers[strings.ToLower(dbType)]
+	return ok
+}
+
+// availableDriverTypes returns a list of supported driver types.
+func availableDriverTypes() []string {
+	return []string{"mssql", "postgres"}
+}
+
 // expandTilde expands ~ or ~/ at the start of a path to the user's home directory
 func expandTilde(path string) string {
 	if path == "" {
@@ -377,15 +410,16 @@ func (c *Config) applyDefaults() {
 	if c.Source.Type == "" {
 		c.Source.Type = "mssql" // Default source is SQL Server for backward compat
 	}
+	sourceType := canonicalDriverName(c.Source.Type)
 	if c.Source.Port == 0 {
-		if c.Source.Type == "postgres" {
+		if sourceType == "postgres" {
 			c.Source.Port = 5432
 		} else {
 			c.Source.Port = 1433
 		}
 	}
 	if c.Source.Schema == "" {
-		if c.Source.Type == "postgres" {
+		if sourceType == "postgres" {
 			c.Source.Schema = "public"
 		} else {
 			c.Source.Schema = "dbo"
@@ -407,15 +441,16 @@ func (c *Config) applyDefaults() {
 	if c.Target.Type == "" {
 		c.Target.Type = "postgres" // Default target is PostgreSQL for backward compat
 	}
+	targetType := canonicalDriverName(c.Target.Type)
 	if c.Target.Port == 0 {
-		if c.Target.Type == "mssql" {
+		if targetType == "mssql" {
 			c.Target.Port = 1433
 		} else {
 			c.Target.Port = 5432
 		}
 	}
 	if c.Target.Schema == "" {
-		if c.Target.Type == "mssql" {
+		if targetType == "mssql" {
 			c.Target.Schema = "dbo"
 		} else {
 			c.Target.Schema = "public"
@@ -493,7 +528,7 @@ func (c *Config) applyDefaults() {
 	// MSSQL targets: very conservative (2) due to TABLOCK bulk insert serialization
 	// PostgreSQL targets: moderate (2-4) as COPY handles parallelism well
 	if c.Migration.WriteAheadWriters == 0 {
-		if c.Target.Type == "mssql" {
+		if targetType == "mssql" {
 			// MSSQL: TABLOCK serializes writes, more writers = more contention
 			c.Migration.WriteAheadWriters = 2
 		} else {
@@ -657,8 +692,8 @@ func (c *Config) validate() error {
 	if c.Source.Database == "" {
 		return fmt.Errorf("source.database is required")
 	}
-	if c.Source.Type != "mssql" && c.Source.Type != "postgres" {
-		return fmt.Errorf("source.type must be 'mssql' or 'postgres', got '%s'", c.Source.Type)
+	if !isValidDriverType(c.Source.Type) {
+		return fmt.Errorf("source.type '%s' is not a valid driver type (supported: %v)", c.Source.Type, availableDriverTypes())
 	}
 
 	// Validate target
@@ -668,12 +703,13 @@ func (c *Config) validate() error {
 	if c.Target.Database == "" {
 		return fmt.Errorf("target.database is required")
 	}
-	if c.Target.Type != "mssql" && c.Target.Type != "postgres" {
-		return fmt.Errorf("target.type must be 'mssql' or 'postgres', got '%s'", c.Target.Type)
+	if !isValidDriverType(c.Target.Type) {
+		return fmt.Errorf("target.type '%s' is not a valid driver type (supported: %v)", c.Target.Type, availableDriverTypes())
 	}
 
 	// Same-engine migration validation: prevent migration to the exact same database
-	if c.Source.Type == c.Target.Type {
+	// Compare canonical driver names to handle aliases (e.g., "mssql" == "sqlserver")
+	if canonicalDriverName(c.Source.Type) == canonicalDriverName(c.Target.Type) {
 		// Use case-insensitive comparison for hostnames (RFC 1035)
 		sameHost := strings.EqualFold(c.Source.Host, c.Target.Host)
 		samePort := c.Source.Port == c.Target.Port
@@ -693,7 +729,8 @@ func (c *Config) validate() error {
 
 // SourceDSN returns the source database connection string
 func (c *Config) SourceDSN() string {
-	if c.Source.Type == "postgres" {
+	// Resolve aliases (e.g., "pg" -> "postgres")
+	if canonicalDriverName(c.Source.Type) == "postgres" {
 		return c.buildPostgresDSN(c.Source.Host, c.Source.Port, c.Source.Database,
 			c.Source.User, c.Source.Password, c.Source.SSLMode,
 			c.Source.Auth, c.Source.GSSEncMode)
@@ -707,7 +744,8 @@ func (c *Config) SourceDSN() string {
 
 // TargetDSN returns the target database connection string
 func (c *Config) TargetDSN() string {
-	if c.Target.Type == "mssql" {
+	// Resolve aliases (e.g., "sqlserver" -> "mssql")
+	if canonicalDriverName(c.Target.Type) == "mssql" {
 		encrypt := c.Target.Encrypt != nil && *c.Target.Encrypt
 		return c.buildMSSQLDSN(c.Target.Host, c.Target.Port, c.Target.Database,
 			c.Target.User, c.Target.Password, encrypt, c.Target.TrustServerCert,
@@ -933,7 +971,7 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  Schema: %s\n", c.Source.Schema))
 	b.WriteString(fmt.Sprintf("  User: %s\n", c.Source.User))
 	b.WriteString("  Password: [REDACTED]\n")
-	if c.Source.Type == "mssql" {
+	if canonicalDriverName(c.Source.Type) == "mssql" {
 		encrypt := c.Source.Encrypt != nil && *c.Source.Encrypt
 		b.WriteString(fmt.Sprintf("  Encrypt: %v\n", encrypt))
 		b.WriteString(fmt.Sprintf("  TrustServerCert: %v\n", c.Source.TrustServerCert))
@@ -963,7 +1001,7 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  Schema: %s\n", c.Target.Schema))
 	b.WriteString(fmt.Sprintf("  User: %s\n", c.Target.User))
 	b.WriteString("  Password: [REDACTED]\n")
-	if c.Target.Type == "mssql" {
+	if canonicalDriverName(c.Target.Type) == "mssql" {
 		encrypt := c.Target.Encrypt != nil && *c.Target.Encrypt
 		b.WriteString(fmt.Sprintf("  Encrypt: %v\n", encrypt))
 		b.WriteString(fmt.Sprintf("  TrustServerCert: %v\n", c.Target.TrustServerCert))
@@ -1014,7 +1052,7 @@ func (c *Config) DebugDump() string {
 
 	// WriteAheadWriters
 	var writersExpl string
-	if c.Target.Type == "mssql" {
+	if canonicalDriverName(c.Target.Type) == "mssql" {
 		writersExpl = "fixed 2 (MSSQL TABLOCK)"
 	} else {
 		writersExpl = fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
