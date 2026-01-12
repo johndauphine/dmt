@@ -24,13 +24,15 @@ const (
 	ProviderClaude AIProvider = "claude"
 	// ProviderOpenAI uses OpenAI's API.
 	ProviderOpenAI AIProvider = "openai"
+	// ProviderGemini uses Google's Gemini API.
+	ProviderGemini AIProvider = "gemini"
 )
 
 // AITypeMappingConfig contains configuration for AI-assisted type mapping.
 // This is a copy of config.AITypeMappingConfig to avoid import cycles.
 type AITypeMappingConfig struct {
 	Enabled        bool   // Enable AI type mapping
-	Provider       string // "claude" or "openai"
+	Provider       string // "claude", "openai", or "gemini"
 	APIKey         string // API key - supports same patterns as password:
 	//                       ${file:/path/to/key} - read from file
 	//                       ${env:VAR_NAME} - read from env var
@@ -91,6 +93,8 @@ func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AI
 			config.Model = "claude-sonnet-4-20250514"
 		case ProviderOpenAI:
 			config.Model = "gpt-4o"
+		case ProviderGemini:
+			config.Model = "gemini-2.0-flash"
 		}
 	}
 
@@ -235,6 +239,8 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 		result, err = m.queryClaudeAPI(ctx, prompt)
 	case ProviderOpenAI:
 		result, err = m.queryOpenAIAPI(ctx, prompt)
+	case ProviderGemini:
+		result, err = m.queryGeminiAPI(ctx, prompt)
 	default:
 		return "", fmt.Errorf("unsupported AI provider: %s", m.config.Provider)
 	}
@@ -563,6 +569,102 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string) (strin
 	}
 
 	return openAIResp.Choices[0].Message.Content, nil
+}
+
+// Gemini API types
+type geminiRequest struct {
+	Contents         []geminiContent  `json:"contents"`
+	GenerationConfig geminiGenConfig  `json:"generationConfig"`
+}
+
+type geminiContent struct {
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiPart struct {
+	Text string `json:"text"`
+}
+
+type geminiGenConfig struct {
+	MaxOutputTokens int     `json:"maxOutputTokens"`
+	Temperature     float64 `json:"temperature"`
+}
+
+type geminiResponse struct {
+	Candidates []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (string, error) {
+	reqBody := geminiRequest{
+		Contents: []geminiContent{
+			{
+				Parts: []geminiPart{
+					{Text: prompt},
+				},
+			},
+		},
+		GenerationConfig: geminiGenConfig{
+			MaxOutputTokens: 100,
+			Temperature:     0, // Deterministic
+		},
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshaling request: %w", err)
+	}
+
+	// Gemini uses API key in URL query parameter
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+		m.config.Model, m.config.APIKey)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, sanitizeErrorResponse(body, 200))
+	}
+
+	var geminiResp geminiResponse
+	if err := json.Unmarshal(body, &geminiResp); err != nil {
+		return "", fmt.Errorf("parsing response: %w", err)
+	}
+
+	if geminiResp.Error != nil {
+		return "", fmt.Errorf("API error: %s", geminiResp.Error.Message)
+	}
+
+	if len(geminiResp.Candidates) == 0 ||
+		len(geminiResp.Candidates[0].Content.Parts) == 0 ||
+		geminiResp.Candidates[0].Content.Parts[0].Text == "" {
+		return "", fmt.Errorf("empty response from API")
+	}
+
+	return geminiResp.Candidates[0].Content.Parts[0].Text, nil
 }
 
 // TypeMappingCache stores AI-generated type mappings.

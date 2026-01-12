@@ -56,6 +56,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 	}{
 		{"claude", "claude-sonnet-4-20250514"},
 		{"openai", "gpt-4o"},
+		{"gemini", "gemini-2.0-flash"},
 	}
 
 	for _, tt := range tests {
