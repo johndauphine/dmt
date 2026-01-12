@@ -390,31 +390,3 @@ func applySizedMappingToPostgres(m SizedTypeMapping, maxLength, precision, scale
 	return m.PostgresMax
 }
 
-// applySizedMappingToMSSQL applies a sized type mapping to get an MSSQL type.
-func applySizedMappingToMSSQL(m SizedTypeMapping, maxLength, precision, scale int) string {
-	// Handle precision for decimal types
-	if m.PreservePrecision && precision > 0 {
-		return fmt.Sprintf("%s(%d,%d)", m.MSSQL, precision, scale)
-	}
-
-	// Handle length for string types
-	if m.PreserveLength && maxLength > 0 {
-		if maxLength > mssqlMaxVarcharLength {
-			return m.MSSQLMax
-		}
-		// Use nvarchar instead of varchar for Unicode support
-		if m.MSSQL == "varchar" {
-			return fmt.Sprintf("nvarchar(%d)", maxLength)
-		}
-		if m.MSSQL == "char" {
-			return fmt.Sprintf("nchar(%d)", maxLength)
-		}
-		return fmt.Sprintf("%s(%d)", m.MSSQL, maxLength)
-	}
-
-	// Default to max type
-	if m.MSSQLMax != "" {
-		return m.MSSQLMax
-	}
-	return m.MSSQL
-}
