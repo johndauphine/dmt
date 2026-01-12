@@ -4,7 +4,7 @@
 package driver
 
 import (
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 )
 
 // Driver represents a pluggable database driver that provides all
@@ -26,10 +26,10 @@ type Driver interface {
 	Dialect() Dialect
 
 	// NewReader creates a new Reader for this database type.
-	NewReader(cfg *config.SourceConfig, maxConns int) (Reader, error)
+	NewReader(cfg *dbconfig.SourceConfig, maxConns int) (Reader, error)
 
 	// NewWriter creates a new Writer for this database type.
-	NewWriter(cfg *config.TargetConfig, maxConns int, opts WriterOptions) (Writer, error)
+	NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts WriterOptions) (Writer, error)
 
 	// TypeMapper returns the type mapper for converting to/from this database's types.
 	TypeMapper() TypeMapper

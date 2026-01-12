@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
@@ -18,7 +18,7 @@ import (
 // Writer implements driver.Writer for SQL Server.
 type Writer struct {
 	db           *sql.DB
-	config       *config.TargetConfig
+	config       *dbconfig.TargetConfig
 	maxConns     int
 	rowsPerBatch int
 	compatLevel  int
@@ -27,7 +27,7 @@ type Writer struct {
 }
 
 // NewWriter creates a new SQL Server writer.
-func NewWriter(cfg *config.TargetConfig, maxConns int, opts driver.WriterOptions) (*Writer, error) {
+func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptions) (*Writer, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 

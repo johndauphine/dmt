@@ -9,40 +9,40 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
+	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"gopkg.in/yaml.v3"
+
+	// Import driver packages to trigger init() registration before validation
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
+	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/postgres"
 )
 
-// supportedDrivers defines the valid database types and their aliases.
-// The key is the alias, the value is the canonical driver name.
-// This list must be kept in sync with registered drivers.
-var supportedDrivers = map[string]string{
-	"mssql":      "mssql",
-	"sqlserver":  "mssql",
-	"sql-server": "mssql",
-	"postgres":   "postgres",
-	"postgresql": "postgres",
-	"pg":         "postgres",
-}
+// Type aliases for database configuration types.
+// These are defined in dbconfig package to break circular imports with driver package.
+type SourceConfig = dbconfig.SourceConfig
+type TargetConfig = dbconfig.TargetConfig
 
 // canonicalDriverName returns the canonical driver name for a given type.
 // For example, "pg" -> "postgres", "sqlserver" -> "mssql".
-// Returns the input unchanged if not a known type.
+// Uses the driver registry for lookup.
 func canonicalDriverName(dbType string) string {
-	if canonical, ok := supportedDrivers[strings.ToLower(dbType)]; ok {
-		return canonical
+	if d, err := driver.Get(dbType); err == nil {
+		return d.Name()
 	}
 	return dbType
 }
 
 // isValidDriverType returns true if the type is a valid driver type or alias.
+// Uses the driver registry for validation.
 func isValidDriverType(dbType string) bool {
-	_, ok := supportedDrivers[strings.ToLower(dbType)]
-	return ok
+	return driver.IsRegistered(dbType)
 }
 
 // availableDriverTypes returns a list of supported driver types.
+// Uses the driver registry to get available drivers.
 func availableDriverTypes() []string {
-	return []string{"mssql", "postgres"}
+	return driver.Available()
 }
 
 // expandTilde expands ~ or ~/ at the start of a path to the user's home directory
@@ -160,88 +160,6 @@ type SlackConfig struct {
 	Channel    string `yaml:"channel"`
 	Username   string `yaml:"username"`
 	Enabled    bool   `yaml:"enabled"`
-}
-
-// SourceConfig holds source database connection settings
-type SourceConfig struct {
-	Type            string `yaml:"type"` // "mssql" or "postgres" (default: mssql)
-	Host            string `yaml:"host"`
-	Port            int    `yaml:"port"`
-	Database        string `yaml:"database"`
-	User            string `yaml:"user"`
-	Password        string `yaml:"password"`
-	Schema          string `yaml:"schema"`
-	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
-	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
-	Encrypt         *bool  `yaml:"encrypt"`           // MSSQL: enable TLS encryption (default: true)
-	PacketSize      int    `yaml:"packet_size"`       // MSSQL: TDS packet size in bytes (default: 32767, max: 32767)
-	// Kerberos authentication (alternative to user/password)
-	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
-	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
-	Keytab     string `yaml:"keytab"`     // Path to keytab file (optional, uses credential cache)
-	Realm      string `yaml:"realm"`      // Kerberos realm (optional, auto-detected)
-	SPN        string `yaml:"spn"`        // Service Principal Name for MSSQL (optional)
-	GSSEncMode string `yaml:"gssencmode"` // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
-}
-
-// TargetConfig holds target database connection settings
-type TargetConfig struct {
-	Type            string `yaml:"type"` // "postgres" or "mssql" (default: postgres)
-	Host            string `yaml:"host"`
-	Port            int    `yaml:"port"`
-	Database        string `yaml:"database"`
-	User            string `yaml:"user"`
-	Password        string `yaml:"password"`
-	Schema          string `yaml:"schema"`
-	SSLMode         string `yaml:"ssl_mode"`          // PostgreSQL: disable, require, verify-ca, verify-full (default: require)
-	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
-	Encrypt         *bool  `yaml:"encrypt"`           // MSSQL: enable TLS encryption (default: true)
-	PacketSize      int    `yaml:"packet_size"`       // MSSQL: TDS packet size in bytes (default: 32767, max: 32767)
-	// Kerberos authentication (alternative to user/password)
-	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
-	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
-	Keytab     string `yaml:"keytab"`     // Path to keytab file (optional, uses credential cache)
-	Realm      string `yaml:"realm"`      // Kerberos realm (optional, auto-detected)
-	SPN        string `yaml:"spn"`        // Service Principal Name for MSSQL (optional)
-	GSSEncMode string `yaml:"gssencmode"` // PostgreSQL GSSAPI encryption: disable, prefer, require (default: prefer)
-}
-
-// DSNOptions returns a map of options for building a DSN via dialect.BuildDSN.
-// This consolidates the DSN option handling between source and target configs.
-func (c *SourceConfig) DSNOptions() map[string]any {
-	opts := make(map[string]any)
-	if c.SSLMode != "" {
-		opts["sslmode"] = c.SSLMode
-	}
-	if c.Encrypt != nil {
-		opts["encrypt"] = *c.Encrypt
-	}
-	if c.TrustServerCert {
-		opts["trustServerCertificate"] = true
-	}
-	if c.PacketSize > 0 {
-		opts["packetSize"] = c.PacketSize
-	}
-	return opts
-}
-
-// DSNOptions returns a map of options for building a DSN via dialect.BuildDSN.
-// This consolidates the DSN option handling between source and target configs.
-func (c *TargetConfig) DSNOptions() map[string]any {
-	opts := make(map[string]any)
-	if c.SSLMode != "" {
-		opts["sslmode"] = c.SSLMode
-	}
-	if c.Encrypt != nil {
-		opts["encrypt"] = *c.Encrypt
-	}
-	if c.TrustServerCert {
-		opts["trustServerCertificate"] = true
-	}
-	if c.PacketSize > 0 {
-		opts["packetSize"] = c.PacketSize
-	}
-	return opts
 }
 
 // MigrationConfig holds migration behavior settings

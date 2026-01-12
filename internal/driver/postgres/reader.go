@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver for database/sql
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
@@ -19,13 +19,13 @@ import (
 type Reader struct {
 	pool     *pgxpool.Pool
 	sqlDB    *sql.DB
-	config   *config.SourceConfig
+	config   *dbconfig.SourceConfig
 	maxConns int
 	dialect  *Dialect
 }
 
 // NewReader creates a new PostgreSQL reader.
-func NewReader(cfg *config.SourceConfig, maxConns int) (*Reader, error) {
+func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 

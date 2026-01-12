@@ -1,7 +1,7 @@
 package mssql
 
 import (
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 )
 
@@ -28,12 +28,12 @@ func (d *Driver) Dialect() driver.Dialect {
 }
 
 // NewReader creates a new MSSQL reader.
-func (d *Driver) NewReader(cfg *config.SourceConfig, maxConns int) (driver.Reader, error) {
+func (d *Driver) NewReader(cfg *dbconfig.SourceConfig, maxConns int) (driver.Reader, error) {
 	return NewReader(cfg, maxConns)
 }
 
 // NewWriter creates a new MSSQL writer.
-func (d *Driver) NewWriter(cfg *config.TargetConfig, maxConns int, opts driver.WriterOptions) (driver.Writer, error) {
+func (d *Driver) NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptions) (driver.Writer, error) {
 	return NewWriter(cfg, maxConns, opts)
 }
 

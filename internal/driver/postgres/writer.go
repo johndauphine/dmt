@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
@@ -17,14 +17,14 @@ import (
 // Writer implements driver.Writer for PostgreSQL.
 type Writer struct {
 	pool       *pgxpool.Pool
-	config     *config.TargetConfig
+	config     *dbconfig.TargetConfig
 	maxConns   int
 	sourceType string
 	dialect    *Dialect
 }
 
 // NewWriter creates a new PostgreSQL writer.
-func NewWriter(cfg *config.TargetConfig, maxConns int, opts driver.WriterOptions) (*Writer, error) {
+func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptions) (*Writer, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 

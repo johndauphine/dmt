@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
@@ -17,13 +17,13 @@ import (
 // Reader implements driver.Reader for SQL Server.
 type Reader struct {
 	db       *sql.DB
-	config   *config.SourceConfig
+	config   *dbconfig.SourceConfig
 	maxConns int
 	dialect  *Dialect
 }
 
 // NewReader creates a new SQL Server reader.
-func NewReader(cfg *config.SourceConfig, maxConns int) (*Reader, error) {
+func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
