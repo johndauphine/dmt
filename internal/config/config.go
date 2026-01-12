@@ -11,6 +11,7 @@ import (
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"gopkg.in/yaml.v3"
 
 	// Import driver packages to trigger init() registration before validation
@@ -446,7 +447,8 @@ func (c *Config) applyDefaults() {
 				c.Migration.WriteAheadWriters = defaults.WriteAheadWriters
 			}
 		} else {
-			// Fallback for unknown drivers
+			// Fallback for unknown drivers - log warning as this may indicate a config issue
+			logging.Warn("Unknown target driver type '%s', using fallback WriteAheadWriters=2", c.Target.Type)
 			c.Migration.WriteAheadWriters = 2
 		}
 	}
