@@ -194,6 +194,32 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
+	// AI-assisted type mapping for unknown types
+	AITypeMapping *AITypeMappingConfig `yaml:"ai_type_mapping"` // Optional AI-assisted type mapping
+}
+
+// AITypeMappingConfig contains configuration for AI-assisted type mapping.
+type AITypeMappingConfig struct {
+	// Enabled turns AI type mapping on/off.
+	Enabled bool `yaml:"enabled"`
+
+	// Provider specifies which AI provider to use ("claude" or "openai").
+	Provider string `yaml:"provider"`
+
+	// APIKey is the API key for the AI provider (can use ${ENV_VAR} syntax).
+	APIKey string `yaml:"api_key"`
+
+	// CacheFile is the path to the JSON cache file for type mappings.
+	// Defaults to ~/.mssql-pg-migrate/type-cache.json
+	CacheFile string `yaml:"cache_file"`
+
+	// Model specifies which model to use (optional, uses provider default).
+	// Claude: "claude-3-haiku-20240307" (default), "claude-3-sonnet-20240229"
+	// OpenAI: "gpt-4o-mini" (default), "gpt-4o"
+	Model string `yaml:"model"`
+
+	// TimeoutSeconds is the API request timeout (default: 30).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
 }
 
 // LoadOptions controls configuration loading behavior.
