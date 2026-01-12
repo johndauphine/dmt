@@ -15,18 +15,18 @@ import (
 // It consolidates the common logic from executeKeysetPagination and executeRowNumberPagination.
 type writerPool struct {
 	// Configuration
-	numWriters    int
-	bufferSize    int
-	useUpsert     bool
-	targetSchema  string
-	targetTable   string
-	targetCols    []string
-	colTypes      []string
-	colSRIDs      []int
-	targetPKCols  []string
-	partitionID   *int
-	tgtPool       pool.TargetPool
-	prog          *progress.Tracker
+	numWriters   int
+	bufferSize   int
+	useUpsert    bool
+	targetSchema string
+	targetTable  string
+	targetCols   []string
+	colTypes     []string
+	colSRIDs     []int
+	targetPKCols []string
+	partitionID  *int
+	tgtPool      pool.TargetPool
+	prog         *progress.Tracker
 
 	// Channels
 	jobChan chan writeJob
@@ -202,7 +202,7 @@ func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
 
 // buildTargetPKCols sanitizes PK columns for the target database.
 func buildTargetPKCols(pkCols []string, tgtPool pool.TargetPool) []string {
-	_, isPGTarget := tgtPool.(*target.Pool)
+	isPGTarget := tgtPool.DBType() == "postgres"
 	targetPKCols := make([]string, len(pkCols))
 	for i, pk := range pkCols {
 		if isPGTarget {

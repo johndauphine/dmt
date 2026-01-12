@@ -245,7 +245,7 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 		idx.IsClustered = typeDesc == "CLUSTERED"
 		idx.Columns = util.SplitCSV(colsStr)
 		if includeStr != "" {
-			idx.Include = util.SplitCSV(includeStr)
+			idx.IncludeCols = util.SplitCSV(includeStr)
 		}
 		t.Indexes = append(t.Indexes, idx)
 	}

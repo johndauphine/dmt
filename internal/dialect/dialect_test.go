@@ -218,9 +218,9 @@ func TestBuildDSN(t *testing.T) {
 
 	mssqlDialect := &MSSQLDialect{}
 	mssqlDSN := mssqlDialect.BuildDSN("localhost", 1433, "testdb", "user", "pass", map[string]any{
-		"encrypt":                  false,
-		"trustServerCertificate":   true,
-		"packetSize":               32767,
+		"encrypt":                false,
+		"trustServerCertificate": true,
+		"packetSize":             32767,
 	})
 	if !strings.Contains(mssqlDSN, "sqlserver://") || !strings.Contains(mssqlDSN, "encrypt=false") {
 		t.Errorf("MSSQL DSN unexpected format: %s", mssqlDSN)

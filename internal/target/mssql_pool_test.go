@@ -157,7 +157,7 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			},
 			wantNotContains: []string{
 				"target.[location] <> source.[location]", // geography NOT in change detection
-				"STGeomFromText", // no conversion for same-engine
+				"STGeomFromText",                         // no conversion for same-engine
 			},
 		},
 		{
@@ -169,12 +169,12 @@ func TestBuildMSSQLMergeWithTablock(t *testing.T) {
 			spatialCols:   []SpatialColumn{{Name: "shape", TypeName: "geometry"}},
 			isCrossEngine: false,
 			wantContains: []string{
-				"[shape] = source.[shape]", // geometry is updated directly
+				"[shape] = source.[shape]",         // geometry is updated directly
 				"target.[label] <> source.[label]", // label has change detection
 			},
 			wantNotContains: []string{
 				"target.[shape] <> source.[shape]", // geometry NOT in change detection
-				"STGeomFromText", // no conversion for same-engine
+				"STGeomFromText",                   // no conversion for same-engine
 			},
 		},
 		{

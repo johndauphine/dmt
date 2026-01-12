@@ -4,9 +4,8 @@ import (
 	"fmt"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
-	"github.com/johndauphine/mssql-pg-migrate/internal/source"
-	"github.com/johndauphine/mssql-pg-migrate/internal/target"
 
 	// Import driver packages to trigger init() registration
 	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
@@ -14,8 +13,8 @@ import (
 )
 
 // NewSourcePool creates a source pool based on the configuration type.
-// Uses the driver registry to validate the database type, then creates
-// the appropriate source pool implementation.
+// Uses the driver registry to create the appropriate Reader implementation.
+// Adding a new database driver requires no changes to this function.
 func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
@@ -23,30 +22,26 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 		dbType = "mssql" // Default to MSSQL for backward compatibility
 	}
 
-	// Validate driver exists in registry and get canonical name
+	// Get the driver from the registry
 	d, err := driver.Get(dbType)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported source type: %s (available: %v)", dbType, driver.Available())
 	}
 
-	// Use canonical driver name for dispatching
-	// This allows aliases like "pg", "sqlserver" to work correctly
-	switch d.Name() {
-	case "mssql":
-		return source.NewPool(cfg, maxConns)
-	case "postgres":
-		return source.NewPgxSourcePool(cfg, maxConns)
-	default:
-		// This should not happen if drivers are properly registered
-		return nil, fmt.Errorf("no implementation for source type: %s", d.Name())
-	}
+	// Create the reader using the driver's factory method
+	// This is truly pluggable - no switch statement needed
+	return d.NewReader((*dbconfig.SourceConfig)(cfg), maxConns)
 }
 
 // NewTargetPool creates a target pool based on the configuration type.
-// Uses the driver registry to validate the database type, then creates
-// the appropriate target pool implementation.
-// mssqlRowsPerBatch is only used for MSSQL targets (ignored for PostgreSQL)
-// sourceType indicates the source database type ("mssql" or "postgres") for DDL generation
+// Uses the driver registry to create the appropriate Writer implementation.
+// Adding a new database driver requires no changes to this function.
+//
+// Parameters:
+//   - cfg: Target database configuration
+//   - maxConns: Maximum number of connections in the pool
+//   - mssqlRowsPerBatch: Rows per batch for bulk operations (passed via WriterOptions)
+//   - sourceType: Source database type for cross-engine type handling
 func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, sourceType string) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
@@ -54,21 +49,17 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int
 		dbType = "postgres" // Default to PostgreSQL for backward compatibility
 	}
 
-	// Validate driver exists in registry and get canonical name
+	// Get the driver from the registry
 	d, err := driver.Get(dbType)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported target type: %s (available: %v)", dbType, driver.Available())
 	}
 
-	// Use canonical driver name for dispatching
-	// This allows aliases like "pg", "sqlserver" to work correctly
-	switch d.Name() {
-	case "postgres":
-		return target.NewPool(cfg, maxConns, sourceType)
-	case "mssql":
-		return target.NewMSSQLPool(cfg, maxConns, mssqlRowsPerBatch, sourceType)
-	default:
-		// This should not happen if drivers are properly registered
-		return nil, fmt.Errorf("no implementation for target type: %s", d.Name())
+	// Create the writer using the driver's factory method
+	// This is truly pluggable - no switch statement needed
+	opts := driver.WriterOptions{
+		RowsPerBatch: mssqlRowsPerBatch,
+		SourceType:   sourceType,
 	}
+	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
 }

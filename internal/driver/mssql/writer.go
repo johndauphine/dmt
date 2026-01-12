@@ -292,12 +292,12 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 	sqlStmt := fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
 		unique, w.dialect.QuoteIdentifier(idxName), w.dialect.QualifyTable(targetSchema, t.Name), strings.Join(cols, ", "))
 
-	if len(idx.Include) > 0 {
-		includeCols := make([]string, len(idx.Include))
-		for i, col := range idx.Include {
-			includeCols[i] = w.dialect.QuoteIdentifier(col)
+	if len(idx.IncludeCols) > 0 {
+		incCols := make([]string, len(idx.IncludeCols))
+		for i, col := range idx.IncludeCols {
+			incCols[i] = w.dialect.QuoteIdentifier(col)
 		}
-		sqlStmt += fmt.Sprintf(" INCLUDE (%s)", strings.Join(includeCols, ", "))
+		sqlStmt += fmt.Sprintf(" INCLUDE (%s)", strings.Join(incCols, ", "))
 	}
 
 	_, err := w.db.ExecContext(ctx, sqlStmt)
@@ -887,4 +887,20 @@ func convertCheckDefinition(def string) string {
 	result = strings.ReplaceAll(result, "(false)", "(0)")
 
 	return result
+}
+
+// ExecRaw executes a raw SQL query and returns the number of rows affected.
+// The query should use sql.Named parameters for SQL Server.
+func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64, error) {
+	result, err := w.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// QueryRowRaw executes a raw SQL query that returns a single row.
+// The query should use sql.Named parameters for SQL Server.
+func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
+	return w.db.QueryRowContext(ctx, query, args...).Scan(dest)
 }

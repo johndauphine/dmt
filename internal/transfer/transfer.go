@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
 	"github.com/johndauphine/mssql-pg-migrate/internal/dialect"
@@ -243,7 +242,7 @@ func Execute(
 	colSRIDs := make([]int, len(job.Table.Columns))
 
 	// Only sanitize identifiers when target is PostgreSQL
-	_, isPGTarget := tgtPool.(*target.Pool)
+	isPGTarget := tgtPool.DBType() == "postgres"
 
 	for i, c := range job.Table.Columns {
 		cols[i] = c.Name
@@ -299,87 +298,72 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 
 	pkCol := job.Table.PrimaryKey[0]
 
-	// Check target type and use appropriate method
-	switch p := tgtPool.(type) {
-	case *target.Pool:
-		// PostgreSQL target - sanitize identifiers
+	// Build query and args based on target type
+	var query string
+	var args []any
+
+	if tgtPool.DBType() == "postgres" {
+		// PostgreSQL target - sanitize identifiers and use $N parameters
 		sanitizedPK := target.SanitizePGIdentifier(pkCol)
 		sanitizedTable := target.SanitizePGIdentifier(job.Table.Name)
-		query := fmt.Sprintf(
+		query = fmt.Sprintf(
 			`DELETE FROM %s.%q WHERE %q >= $1 AND %q <= $2`,
 			schema, sanitizedTable, sanitizedPK, sanitizedPK,
 		)
-		_, err := p.Pool().Exec(ctx, query, job.Partition.MinPK, job.Partition.MaxPK)
-		return err
-	case *target.MSSQLPool:
-		// SQL Server target - use original identifiers
-		query := fmt.Sprintf(
+		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
+	} else {
+		// SQL Server target - use original identifiers and @p parameters
+		query = fmt.Sprintf(
 			`DELETE FROM [%s].[%s] WHERE [%s] >= @p1 AND [%s] <= @p2`,
 			schema, job.Table.Name, pkCol, pkCol,
 		)
-		_, err := p.DB().ExecContext(ctx, query,
-			sql.Named("p1", job.Partition.MinPK),
-			sql.Named("p2", job.Partition.MaxPK))
-		return err
-	default:
-		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
+		args = []any{sql.Named("p1", job.Partition.MinPK), sql.Named("p2", job.Partition.MaxPK)}
 	}
+
+	_, err := tgtPool.ExecRaw(ctx, query, args...)
+	return err
 }
 
 // cleanupPartialData removes rows beyond the saved lastPK for chunk-level resume
 func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, tableName, pkCol string, lastPK any, maxPK any) error {
-	switch p := tgtPool.(type) {
-	case *target.Pool:
+	var deleteQuery string
+	var args []any
+
+	if tgtPool.DBType() == "postgres" {
 		// PostgreSQL target - sanitize identifiers
 		sanitizedPK := target.SanitizePGIdentifier(pkCol)
 		sanitizedTable := target.SanitizePGIdentifier(tableName)
 
-		var deleteQuery string
-		var result pgconn.CommandTag
-		var err error
 		if maxPK != nil {
 			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1 AND %q <= $2`,
 				schema, sanitizedTable, sanitizedPK, sanitizedPK)
-			result, err = p.Pool().Exec(ctx, deleteQuery, lastPK, maxPK)
+			args = []any{lastPK, maxPK}
 		} else {
 			deleteQuery = fmt.Sprintf(`DELETE FROM %s.%q WHERE %q > $1`,
 				schema, sanitizedTable, sanitizedPK)
-			result, err = p.Pool().Exec(ctx, deleteQuery, lastPK)
+			args = []any{lastPK}
 		}
-		if err != nil {
-			return err
-		}
-		if result.RowsAffected() > 0 {
-			logging.Debug("Removed %d stale rows from %s beyond pk=%v", result.RowsAffected(), tableName, lastPK)
-		}
-		return nil
-	case *target.MSSQLPool:
+	} else {
 		// SQL Server target
-		var deleteQuery string
-		var result sql.Result
-		var err error
 		if maxPK != nil {
 			deleteQuery = fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1 AND [%s] <= @p2`,
 				schema, tableName, pkCol, pkCol)
-			result, err = p.DB().ExecContext(ctx, deleteQuery,
-				sql.Named("p1", lastPK),
-				sql.Named("p2", maxPK))
+			args = []any{sql.Named("p1", lastPK), sql.Named("p2", maxPK)}
 		} else {
 			deleteQuery = fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1`,
 				schema, tableName, pkCol)
-			result, err = p.DB().ExecContext(ctx, deleteQuery, sql.Named("p1", lastPK))
+			args = []any{sql.Named("p1", lastPK)}
 		}
-		if err != nil {
-			return err
-		}
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected > 0 {
-			logging.Debug("Removed %d stale rows from %s beyond pk=%v", rowsAffected, tableName, lastPK)
-		}
-		return nil
-	default:
-		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
 	}
+
+	rowsAffected, err := tgtPool.ExecRaw(ctx, deleteQuery, args...)
+	if err != nil {
+		return err
+	}
+	if rowsAffected > 0 {
+		logging.Debug("Removed %d stale rows from %s beyond pk=%v", rowsAffected, tableName, lastPK)
+	}
+	return nil
 }
 
 func parseResumeRowNum(lastPK any) (int64, bool) {
@@ -1146,16 +1130,12 @@ func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string,
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool
 func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any) error {
-	switch p := tgtPool.(type) {
-	case *target.Pool:
-		// PostgreSQL target - use COPY
-		return writeChunk(ctx, p.Pool(), schema, table, cols, rows)
-	case *target.MSSQLPool:
-		// SQL Server target - use BULK INSERT or batch INSERT
-		return p.WriteChunk(ctx, schema, table, cols, rows)
-	default:
-		return fmt.Errorf("unsupported target pool type: %T", tgtPool)
-	}
+	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
+		Schema:  schema,
+		Table:   table,
+		Columns: cols,
+		Rows:    rows,
+	})
 }
 
 // writeChunkUpsertWithWriter writes a chunk using high-performance staging table approach.
@@ -1166,7 +1146,17 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 // colSRIDs is passed for geography/geometry SRID in STGeomFromText conversion (PG→MSSQL)
 func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
 	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
-	return tgtPool.UpsertChunkWithWriter(ctx, schema, table, cols, colTypes, colSRIDs, pkCols, rows, writerID, partitionID)
+	return tgtPool.UpsertBatch(ctx, pool.UpsertBatchOptions{
+		Schema:      schema,
+		Table:       table,
+		Columns:     cols,
+		ColumnTypes: colTypes,
+		ColumnSRIDs: colSRIDs,
+		PKColumns:   pkCols,
+		Rows:        rows,
+		WriterID:    writerID,
+		PartitionID: partitionID,
+	})
 }
 
 // ValidateBinaryData ensures binary data is properly formatted

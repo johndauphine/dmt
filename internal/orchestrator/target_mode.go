@@ -41,22 +41,22 @@ func NewTargetModeStrategy(targetMode string, targetPool pool.TargetPool, target
 		}
 	}
 	return &dropRecreateStrategy{
-		targetPool:     targetPool,
-		targetSchema:   targetSchema,
-		createIndexes:  createIndexes,
-		createFKs:      createFKs,
-		createChecks:   createChecks,
+		targetPool:    targetPool,
+		targetSchema:  targetSchema,
+		createIndexes: createIndexes,
+		createFKs:     createFKs,
+		createChecks:  createChecks,
 	}
 }
 
 // dropRecreateStrategy implements TargetModeStrategy for drop_recreate mode.
 // This mode drops existing tables and recreates them from scratch.
 type dropRecreateStrategy struct {
-	targetPool     pool.TargetPool
-	targetSchema   string
-	createIndexes  bool
-	createFKs      bool
-	createChecks   bool
+	targetPool    pool.TargetPool
+	targetSchema  string
+	createIndexes bool
+	createFKs     bool
+	createChecks  bool
 }
 
 func (s *dropRecreateStrategy) ModeName() string {

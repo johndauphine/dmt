@@ -39,6 +39,14 @@ type Writer interface {
 	// Upsert - for upsert mode with per-writer isolation
 	UpsertBatch(ctx context.Context, opts UpsertBatchOptions) error
 
+	// Raw SQL execution for cleanup and special operations
+	// Returns the number of rows affected and any error.
+	ExecRaw(ctx context.Context, query string, args ...any) (int64, error)
+
+	// Raw SQL query for single row results (e.g., EXISTS checks)
+	// dest should be a pointer to the value to scan into
+	QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error
+
 	// Pool info
 	MaxConns() int
 	DBType() string

@@ -8,7 +8,6 @@ import (
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
 	"github.com/johndauphine/mssql-pg-migrate/internal/source"
-	"github.com/johndauphine/mssql-pg-migrate/internal/target"
 )
 
 // Validate checks row counts between source and target
@@ -157,40 +156,39 @@ func (o *Orchestrator) validateSamples(ctx context.Context) error {
 
 // checkRowExistsInTarget checks if a row with the given PK values exists in target
 func (o *Orchestrator) checkRowExistsInTarget(ctx context.Context, t source.Table, pkTuple []any) (bool, error) {
-	switch p := o.targetPool.(type) {
-	case *target.Pool:
+	var checkQuery string
+	var args []any
+
+	if o.targetPool.DBType() == "postgres" {
 		// PostgreSQL target
 		whereClauses := make([]string, len(t.PrimaryKey))
 		for i, col := range t.PrimaryKey {
 			whereClauses[i] = fmt.Sprintf("%q = $%d", col, i+1)
 		}
 		whereClause := strings.Join(whereClauses, " AND ")
-		checkQuery := fmt.Sprintf(
+		checkQuery = fmt.Sprintf(
 			`SELECT EXISTS(SELECT 1 FROM %s.%q WHERE %s)`,
 			o.config.Target.Schema, t.Name, whereClause,
 		)
+		args = pkTuple
 		var exists bool
-		err := p.Pool().QueryRow(ctx, checkQuery, pkTuple...).Scan(&exists)
+		err := o.targetPool.QueryRowRaw(ctx, checkQuery, &exists, args...)
 		return exists, err
-
-	case *target.MSSQLPool:
+	} else {
 		// SQL Server target
 		whereClauses := make([]string, len(t.PrimaryKey))
-		args := make([]any, len(t.PrimaryKey))
+		args = make([]any, len(t.PrimaryKey))
 		for i, col := range t.PrimaryKey {
 			whereClauses[i] = fmt.Sprintf("[%s] = @p%d", col, i+1)
 			args[i] = sql.Named(fmt.Sprintf("p%d", i+1), pkTuple[i])
 		}
 		whereClause := strings.Join(whereClauses, " AND ")
-		checkQuery := fmt.Sprintf(
+		checkQuery = fmt.Sprintf(
 			`SELECT CASE WHEN EXISTS(SELECT 1 FROM [%s].[%s] WHERE %s) THEN 1 ELSE 0 END`,
 			o.config.Target.Schema, t.Name, whereClause,
 		)
 		var exists int
-		err := p.DB().QueryRowContext(ctx, checkQuery, args...).Scan(&exists)
+		err := o.targetPool.QueryRowRaw(ctx, checkQuery, &exists, args...)
 		return exists == 1, err
-
-	default:
-		return false, fmt.Errorf("unsupported target pool type: %T", o.targetPool)
 	}
 }

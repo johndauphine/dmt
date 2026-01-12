@@ -186,11 +186,11 @@ func (s *PostgresStrategy) GetDateColumnQuery() string {
 // IsValidDateType checks if a data type is a temporal type in PostgreSQL
 func (s *PostgresStrategy) IsValidDateType(dataType string) bool {
 	validTypes := map[string]bool{
-		"timestamp":                    true,
-		"timestamptz":                  true,
-		"date":                         true,
-		"timestamp without time zone":  true,
-		"timestamp with time zone":     true,
+		"timestamp":                   true,
+		"timestamptz":                 true,
+		"date":                        true,
+		"timestamp without time zone": true,
+		"timestamp with time zone":    true,
 	}
 	return validTypes[strings.ToLower(dataType)]
 }

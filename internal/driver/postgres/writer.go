@@ -229,10 +229,10 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 	sb.WriteString(strings.Join(cols, ", "))
 	sb.WriteString(")")
 
-	if len(idx.Include) > 0 {
+	if len(idx.IncludeCols) > 0 {
 		sb.WriteString(" INCLUDE (")
-		inc := make([]string, len(idx.Include))
-		for i, c := range idx.Include {
+		inc := make([]string, len(idx.IncludeCols))
+		for i, c := range idx.IncludeCols {
 			inc[i] = w.dialect.QuoteIdentifier(c)
 		}
 		sb.WriteString(strings.Join(inc, ", "))
@@ -454,4 +454,20 @@ func (w *Writer) buildUpsertSQL(opts driver.UpsertBatchOptions, stagingTable str
 	}
 
 	return sb.String()
+}
+
+// ExecRaw executes a raw SQL query and returns the number of rows affected.
+// The query should use $1, $2, etc. for parameter placeholders.
+func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64, error) {
+	result, err := w.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+// QueryRowRaw executes a raw SQL query that returns a single row.
+// The query should use $1, $2, etc. for parameter placeholders.
+func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
+	return w.pool.QueryRow(ctx, query, args...).Scan(dest)
 }

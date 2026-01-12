@@ -86,107 +86,107 @@ var SizedTypeMappings = []SizedTypeMapping{
 
 // PostgresAliases maps PostgreSQL type aliases to their canonical forms.
 var PostgresAliases = map[string]string{
-	"bool":                       "boolean",
-	"int2":                       "smallint",
-	"int4":                       "integer",
-	"int":                        "integer",
-	"int8":                       "bigint",
-	"float4":                     "real",
-	"float8":                     "double precision",
-	"bpchar":                     "char",
-	"character":                  "char",
-	"character varying":          "varchar",
+	"bool":                        "boolean",
+	"int2":                        "smallint",
+	"int4":                        "integer",
+	"int":                         "integer",
+	"int8":                        "bigint",
+	"float4":                      "real",
+	"float8":                      "double precision",
+	"bpchar":                      "char",
+	"character":                   "char",
+	"character varying":           "varchar",
 	"timestamp without time zone": "timestamp",
-	"timestamp with time zone":   "timestamptz",
-	"time without time zone":     "time",
-	"time with time zone":        "timetz",
+	"timestamp with time zone":    "timestamptz",
+	"time without time zone":      "time",
+	"time with time zone":         "timetz",
 }
 
 // PostgresToMSSQLMappings defines PostgreSQL-specific types that map to MSSQL.
 // These are types that don't have a direct MSSQL equivalent in SimpleTypeMappings.
 var PostgresToMSSQLMappings = map[string]string{
 	// Integer types with aliases
-	"boolean":          "bit",
-	"smallint":         "smallint",
-	"integer":          "int",
-	"bigint":           "bigint",
-	"serial":           "int",
-	"bigserial":        "bigint",
-	"smallserial":      "smallint",
+	"boolean":     "bit",
+	"smallint":    "smallint",
+	"integer":     "int",
+	"bigint":      "bigint",
+	"serial":      "int",
+	"bigserial":   "bigint",
+	"smallserial": "smallint",
 
 	// Floating point
 	"real":             "real",
 	"double precision": "float",
 
 	// Money
-	"money":            "money",
+	"money": "money",
 
 	// Date/time
-	"date":             "date",
-	"time":             "time",
-	"timetz":           "time",
-	"timestamp":        "datetime2",
-	"timestamptz":      "datetimeoffset",
-	"interval":         "nvarchar(100)",
+	"date":        "date",
+	"time":        "time",
+	"timetz":      "time",
+	"timestamp":   "datetime2",
+	"timestamptz": "datetimeoffset",
+	"interval":    "nvarchar(100)",
 
 	// Text
-	"text":             "nvarchar(max)",
-	"citext":           "nvarchar(max)",
+	"text":   "nvarchar(max)",
+	"citext": "nvarchar(max)",
 
 	// Binary
-	"bytea":            "varbinary(max)",
+	"bytea": "varbinary(max)",
 
 	// UUID
-	"uuid":             "uniqueidentifier",
+	"uuid": "uniqueidentifier",
 
 	// JSON
-	"json":             "nvarchar(max)",
-	"jsonb":            "nvarchar(max)",
+	"json":  "nvarchar(max)",
+	"jsonb": "nvarchar(max)",
 
 	// XML
-	"xml":              "xml",
+	"xml": "xml",
 
 	// Network types
-	"inet":             "nvarchar(50)",
-	"cidr":             "nvarchar(50)",
-	"macaddr":          "nvarchar(50)",
-	"macaddr8":         "nvarchar(50)",
+	"inet":     "nvarchar(50)",
+	"cidr":     "nvarchar(50)",
+	"macaddr":  "nvarchar(50)",
+	"macaddr8": "nvarchar(50)",
 
 	// Geometric types (PostgreSQL native, not PostGIS)
-	"point":            "nvarchar(max)",
-	"line":             "nvarchar(max)",
-	"lseg":             "nvarchar(max)",
-	"box":              "nvarchar(max)",
-	"path":             "nvarchar(max)",
-	"polygon":          "nvarchar(max)",
-	"circle":           "nvarchar(max)",
+	"point":   "nvarchar(max)",
+	"line":    "nvarchar(max)",
+	"lseg":    "nvarchar(max)",
+	"box":     "nvarchar(max)",
+	"path":    "nvarchar(max)",
+	"polygon": "nvarchar(max)",
+	"circle":  "nvarchar(max)",
 
 	// Range types
-	"int4range":        "nvarchar(100)",
-	"int8range":        "nvarchar(100)",
-	"numrange":         "nvarchar(100)",
-	"tsrange":          "nvarchar(100)",
-	"tstzrange":        "nvarchar(100)",
-	"daterange":        "nvarchar(100)",
+	"int4range": "nvarchar(100)",
+	"int8range": "nvarchar(100)",
+	"numrange":  "nvarchar(100)",
+	"tsrange":   "nvarchar(100)",
+	"tstzrange": "nvarchar(100)",
+	"daterange": "nvarchar(100)",
 
 	// Full-text search
-	"tsvector":         "nvarchar(max)",
-	"tsquery":          "nvarchar(max)",
+	"tsvector": "nvarchar(max)",
+	"tsquery":  "nvarchar(max)",
 
 	// Bit string
-	"bit varying":      "varbinary(max)",
-	"varbit":           "varbinary(max)",
+	"bit varying": "varbinary(max)",
+	"varbit":      "varbinary(max)",
 
 	// OID types
-	"oid":              "int",
-	"regproc":          "int",
-	"regprocedure":     "int",
-	"regoper":          "int",
-	"regoperator":      "int",
-	"regclass":         "int",
-	"regtype":          "int",
-	"regconfig":        "int",
-	"regdictionary":    "int",
+	"oid":           "int",
+	"regproc":       "int",
+	"regprocedure":  "int",
+	"regoper":       "int",
+	"regoperator":   "int",
+	"regclass":      "int",
+	"regtype":       "int",
+	"regconfig":     "int",
+	"regdictionary": "int",
 }
 
 // PostgreSQL maximum varchar length before converting to text
@@ -389,4 +389,3 @@ func applySizedMappingToPostgres(m SizedTypeMapping, maxLength, precision, scale
 	// Default to max type
 	return m.PostgresMax
 }
-

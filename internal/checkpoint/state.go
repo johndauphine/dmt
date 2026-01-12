@@ -282,10 +282,10 @@ func (s *State) ensureProfileColumns() error {
 // validTableNames is a whitelist of allowed table names for schema queries.
 // This prevents SQL injection via the table parameter in tableColumns().
 var validTableNames = map[string]bool{
-	"runs":                   true,
-	"tasks":                  true,
-	"profiles":               true,
-	"table_sync_timestamps":  true,
+	"runs":                  true,
+	"tasks":                 true,
+	"profiles":              true,
+	"table_sync_timestamps": true,
 }
 
 func (s *State) tableColumns(table string) ([]string, error) {

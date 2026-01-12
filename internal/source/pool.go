@@ -263,4 +263,3 @@ func (p *Pool) LoadCheckConstraints(ctx context.Context, t *Table) error {
 func (p *Pool) GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool) {
 	return p.schemaLoader.GetDateColumnInfo(ctx, schema, table, candidates)
 }
-
