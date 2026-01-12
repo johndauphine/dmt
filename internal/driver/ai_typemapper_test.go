@@ -14,7 +14,7 @@ func TestNewAITypeMapper_Disabled(t *testing.T) {
 	config := AITypeMappingConfig{
 		Enabled: false,
 	}
-	_, err := NewAITypeMapper(config)
+	_, err := NewAITypeMapper(config, nil)
 	if err == nil {
 		t.Error("expected error when AI type mapping is disabled")
 	}
@@ -26,7 +26,7 @@ func TestNewAITypeMapper_MissingAPIKey(t *testing.T) {
 		Provider: "claude",
 		APIKey:   "",
 	}
-	_, err := NewAITypeMapper(config)
+	_, err := NewAITypeMapper(config, nil)
 	if err == nil {
 		t.Error("expected error when API key is missing")
 	}
@@ -40,7 +40,7 @@ func TestNewAITypeMapper_APIKeyProvided(t *testing.T) {
 		Provider: "claude",
 		APIKey:   "test-key-123", // Already expanded by config loading
 	}
-	mapper, err := NewAITypeMapper(config)
+	mapper, err := NewAITypeMapper(config, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 				Provider: tt.provider,
 				APIKey:   "test-key",
 			}
-			mapper, err := NewAITypeMapper(config)
+			mapper, err := NewAITypeMapper(config, nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -118,7 +118,7 @@ func TestAITypeMapper_CacheKey(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	info := TypeInfo{
 		SourceDBType: "mysql",
@@ -141,7 +141,7 @@ func TestAITypeMapper_Fallback(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	tests := []struct {
 		targetDB string
@@ -162,12 +162,55 @@ func TestAITypeMapper_Fallback(t *testing.T) {
 	}
 }
 
+// mockStaticMapper is a simple static mapper for testing fallback behavior
+type mockStaticMapper struct{}
+
+func (m *mockStaticMapper) MapType(info TypeInfo) string {
+	// Simple static mappings for testing
+	switch info.DataType {
+	case "int":
+		return "integer"
+	case "varchar":
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+func (m *mockStaticMapper) CanMap(source, target string) bool {
+	return true
+}
+
+func (m *mockStaticMapper) SupportedTargets() []string {
+	return []string{"*"}
+}
+
+func TestAITypeMapper_FallbackWithStaticMapper(t *testing.T) {
+	staticMapper := &mockStaticMapper{}
+	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
+		Enabled:  true,
+		Provider: "claude",
+		APIKey:   "test-key",
+	}, staticMapper)
+
+	// Test fallback uses static mapper
+	result := mapper.fallback(TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "int",
+	})
+
+	if result != "integer" {
+		t.Errorf("expected static mapper result 'integer', got '%s'", result)
+	}
+}
+
 func TestAITypeMapper_CanMap(t *testing.T) {
 	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	// AI mapper should always return true for CanMap
 	if !mapper.CanMap("mysql", "postgres") {
@@ -183,7 +226,7 @@ func TestAITypeMapper_SupportedTargets(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	targets := mapper.SupportedTargets()
 	if len(targets) != 1 || targets[0] != "*" {
@@ -196,7 +239,7 @@ func TestAITypeMapper_BuildPrompt(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	info := TypeInfo{
 		SourceDBType: "mysql",
@@ -232,7 +275,7 @@ func TestAITypeMapper_BuildPromptWithSamples(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	info := TypeInfo{
 		SourceDBType: "mssql",
@@ -265,7 +308,7 @@ func TestAITypeMapper_BuildPromptTruncatesLongSamples(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	// Create a long sample value (over 100 chars)
 	longValue := strings.Repeat("x", 150)
@@ -295,7 +338,7 @@ func TestAITypeMapper_BuildPromptLimitsToFiveSamples(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	info := TypeInfo{
 		SourceDBType: "mssql",
@@ -326,7 +369,7 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 		Provider:  "claude",
 		APIKey:    "test-key",
 		CacheFile: cacheFile,
-	})
+	}, nil)
 
 	// Add some cache entries
 	mapper.cache.Set("test:key:1", "varchar(100)")
@@ -344,7 +387,7 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 		Provider:  "claude",
 		APIKey:    "test-key",
 		CacheFile: cacheFile,
-	})
+	}, nil)
 
 	if mapper2.CacheSize() != 2 {
 		t.Errorf("expected cache size 2, got %d", mapper2.CacheSize())
@@ -361,7 +404,7 @@ func TestAITypeMapper_ExportCache(t *testing.T) {
 		Enabled:  true,
 		Provider: "claude",
 		APIKey:   "test-key",
-	})
+	}, nil)
 
 	mapper.cache.Set("mysql:postgres:mediumblob:0:0:0", "bytea")
 	mapper.cache.Set("mysql:postgres:tinyint:0:0:0", "smallint")

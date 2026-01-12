@@ -45,15 +45,17 @@ type AITypeMappingConfig struct {
 // It implements the TypeMapper interface and can be used as a fallback
 // in a ChainedTypeMapper for types not covered by static mappings.
 type AITypeMapper struct {
-	config     AITypeMappingConfig
-	client     *http.Client
-	cache      *TypeMappingCache
-	cacheMu    sync.RWMutex
-	requestsMu sync.Mutex // Serialize API requests to avoid rate limiting
+	config         AITypeMappingConfig
+	client         *http.Client
+	cache          *TypeMappingCache
+	cacheMu        sync.RWMutex
+	requestsMu     sync.Mutex // Serialize API requests to avoid rate limiting
+	fallbackMapper TypeMapper // Static mapper to use when AI is unavailable
 }
 
 // NewAITypeMapper creates a new AI-powered type mapper.
-func NewAITypeMapper(config AITypeMappingConfig) (*AITypeMapper, error) {
+// The fallbackMapper is used when AI API calls fail.
+func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AITypeMapper, error) {
 	if !config.Enabled {
 		return nil, fmt.Errorf("AI type mapping is not enabled")
 	}
@@ -89,7 +91,8 @@ func NewAITypeMapper(config AITypeMappingConfig) (*AITypeMapper, error) {
 		client: &http.Client{
 			Timeout: time.Duration(config.TimeoutSeconds) * time.Second,
 		},
-		cache: NewTypeMappingCache(),
+		cache:          NewTypeMappingCache(),
+		fallbackMapper: fallbackMapper,
 	}
 
 	// Load existing cache
@@ -155,6 +158,14 @@ func (m *AITypeMapper) cacheKey(info TypeInfo) string {
 }
 
 func (m *AITypeMapper) fallback(info TypeInfo) string {
+	// Use static mapper fallback if available
+	if m.fallbackMapper != nil {
+		result := m.fallbackMapper.MapType(info)
+		logging.Info("AI fallback: using static mapping for %s -> %s", info.DataType, result)
+		return result
+	}
+
+	// Ultimate fallback if no static mapper
 	if info.TargetDBType == "postgres" {
 		return "text"
 	}
