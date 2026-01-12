@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/config"
@@ -29,10 +28,11 @@ type PoolStats struct {
 
 // Pool manages a pool of MSSQL connections
 type Pool struct {
-	db       *sql.DB
-	config   *config.SourceConfig
-	maxConns int
-	strategy *MSSQLStrategy
+	db           *sql.DB
+	config       *config.SourceConfig
+	maxConns     int
+	strategy     *MSSQLStrategy
+	schemaLoader *SchemaLoader
 }
 
 // NewPool creates a new MSSQL connection pool
@@ -76,7 +76,14 @@ func NewPool(cfg *config.SourceConfig, maxConns int) (*Pool, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	return &Pool{db: db, config: cfg, maxConns: maxConns, strategy: NewMSSQLStrategy()}, nil
+	strategy := NewMSSQLStrategy()
+	return &Pool{
+		db:           db,
+		config:       cfg,
+		maxConns:     maxConns,
+		strategy:     strategy,
+		schemaLoader: NewSchemaLoader(db, strategy),
+	}, nil
 }
 
 // Close closes all connections in the pool
@@ -159,43 +166,11 @@ func (p *Pool) ExtractSchema(ctx context.Context, schema string) ([]Table, error
 }
 
 func (p *Pool) loadColumns(ctx context.Context, t *Table) error {
-	rows, err := p.db.QueryContext(ctx, p.strategy.GetColumnsQuery(), p.strategy.BindColumnParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var c Column
-		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision,
-			&c.Scale, &c.IsNullable, &c.IsIdentity, &c.OrdinalPos); err != nil {
-			return err
-		}
-		t.Columns = append(t.Columns, c)
-	}
-
-	return nil
+	return p.schemaLoader.LoadColumns(ctx, t)
 }
 
 func (p *Pool) loadPrimaryKey(ctx context.Context, t *Table) error {
-	rows, err := p.db.QueryContext(ctx, p.strategy.GetPrimaryKeyQuery(), p.strategy.BindPKParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			return err
-		}
-		t.PrimaryKey = append(t.PrimaryKey, col)
-	}
-
-	// Populate PKColumns with full column metadata
-	t.PopulatePKColumns()
-
-	return nil
+	return p.schemaLoader.LoadPrimaryKey(ctx, t)
 }
 
 func (p *Pool) loadRowCount(ctx context.Context, t *Table) error {
@@ -282,63 +257,17 @@ func (p *Pool) LoadIndexes(ctx context.Context, t *Table) error {
 
 // LoadForeignKeys loads all foreign keys for a table
 func (p *Pool) LoadForeignKeys(ctx context.Context, t *Table) error {
-	rows, err := p.db.QueryContext(ctx, p.strategy.GetForeignKeysQuery(), p.strategy.BindFKParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var fk ForeignKey
-		var colsStr, refColsStr string
-		if err := rows.Scan(&fk.Name, &colsStr, &fk.RefSchema, &fk.RefTable, &refColsStr, &fk.OnDelete, &fk.OnUpdate); err != nil {
-			return err
-		}
-		fk.Columns = util.SplitCSV(colsStr)
-		fk.RefColumns = util.SplitCSV(refColsStr)
-		t.ForeignKeys = append(t.ForeignKeys, fk)
-	}
-
-	return nil
+	return p.schemaLoader.LoadForeignKeys(ctx, t)
 }
 
 // LoadCheckConstraints loads all check constraints for a table
 func (p *Pool) LoadCheckConstraints(ctx context.Context, t *Table) error {
-	rows, err := p.db.QueryContext(ctx, p.strategy.GetCheckConstraintsQuery(), p.strategy.BindCheckParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var chk CheckConstraint
-		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
-			return err
-		}
-		t.CheckConstraints = append(t.CheckConstraints, chk)
-	}
-
-	return nil
+	return p.schemaLoader.LoadCheckConstraints(ctx, t)
 }
 
 // GetDateColumnInfo checks if any of the candidate columns exist as a temporal type
 // Returns the first matching column name, its data type, and whether a match was found
 func (p *Pool) GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool) {
-	if len(candidates) == 0 {
-		return "", "", false
-	}
-
-	// Check each candidate in order
-	for _, candidate := range candidates {
-		var dt string
-		err := p.db.QueryRowContext(ctx, p.strategy.GetDateColumnQuery(),
-			p.strategy.BindDateColumnParams(schema, table, candidate)...).Scan(&dt)
-
-		if err == nil && p.strategy.IsValidDateType(strings.ToLower(dt)) {
-			return candidate, dt, true
-		}
-	}
-
-	return "", "", false
+	return p.schemaLoader.GetDateColumnInfo(ctx, schema, table, candidates)
 }
 

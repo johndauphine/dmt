@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,11 +20,12 @@ var pgDialect = dialect.GetDialect("postgres")
 
 // PgxSourcePool manages a pool of PostgreSQL source connections using pgx.
 type PgxSourcePool struct {
-	pool     *pgxpool.Pool
-	sqlDB    *sql.DB // Wrapper for compatibility with SourcePool interface
-	config   *config.SourceConfig
-	maxConns int
-	strategy *PostgresStrategy
+	pool         *pgxpool.Pool
+	sqlDB        *sql.DB // Wrapper for compatibility with SourcePool interface
+	config       *config.SourceConfig
+	maxConns     int
+	strategy     *PostgresStrategy
+	schemaLoader *SchemaLoader
 }
 
 // NewPgxSourcePool creates a new PostgreSQL source connection pool using pgx.
@@ -76,12 +76,14 @@ func NewPgxSourcePool(cfg *config.SourceConfig, maxConns int) (*PgxSourcePool, e
 
 	logging.Info("Connected to PostgreSQL source (pgx): %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
 
+	strategy := NewPostgresStrategy()
 	return &PgxSourcePool{
-		pool:     pool,
-		sqlDB:    db,
-		config:   cfg,
-		maxConns: maxConns,
-		strategy: NewPostgresStrategy(),
+		pool:         pool,
+		sqlDB:        db,
+		config:       cfg,
+		maxConns:     maxConns,
+		strategy:     strategy,
+		schemaLoader: NewSchemaLoader(db, strategy),
 	}, nil
 }
 
@@ -158,43 +160,11 @@ func (p *PgxSourcePool) ExtractSchema(ctx context.Context, schema string) ([]Tab
 }
 
 func (p *PgxSourcePool) loadColumns(ctx context.Context, t *Table) error {
-	rows, err := p.pool.Query(ctx, p.strategy.GetColumnsQuery(), p.strategy.BindColumnParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var c Column
-		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision,
-			&c.Scale, &c.IsNullable, &c.IsIdentity, &c.OrdinalPos); err != nil {
-			return err
-		}
-		t.Columns = append(t.Columns, c)
-	}
-
-	return nil
+	return p.schemaLoader.LoadColumns(ctx, t)
 }
 
 func (p *PgxSourcePool) loadPrimaryKey(ctx context.Context, t *Table) error {
-	rows, err := p.pool.Query(ctx, p.strategy.GetPrimaryKeyQuery(), p.strategy.BindPKParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			return err
-		}
-		t.PrimaryKey = append(t.PrimaryKey, col)
-	}
-
-	// Populate PKColumns with full column metadata
-	t.PopulatePKColumns()
-
-	return nil
+	return p.schemaLoader.LoadPrimaryKey(ctx, t)
 }
 
 func (p *PgxSourcePool) loadRowCount(ctx context.Context, t *Table) error {
@@ -279,62 +249,16 @@ func (p *PgxSourcePool) LoadIndexes(ctx context.Context, t *Table) error {
 
 // LoadForeignKeys loads all foreign keys for a table
 func (p *PgxSourcePool) LoadForeignKeys(ctx context.Context, t *Table) error {
-	rows, err := p.pool.Query(ctx, p.strategy.GetForeignKeysQuery(), p.strategy.BindFKParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var fk ForeignKey
-		var colsStr, refColsStr string
-		if err := rows.Scan(&fk.Name, &colsStr, &fk.RefSchema, &fk.RefTable, &refColsStr, &fk.OnDelete, &fk.OnUpdate); err != nil {
-			return err
-		}
-		fk.Columns = util.SplitCSV(colsStr)
-		fk.RefColumns = util.SplitCSV(refColsStr)
-		t.ForeignKeys = append(t.ForeignKeys, fk)
-	}
-
-	return nil
+	return p.schemaLoader.LoadForeignKeys(ctx, t)
 }
 
 // LoadCheckConstraints loads all check constraints for a table
 func (p *PgxSourcePool) LoadCheckConstraints(ctx context.Context, t *Table) error {
-	rows, err := p.pool.Query(ctx, p.strategy.GetCheckConstraintsQuery(), p.strategy.BindCheckParams(t.Schema, t.Name)...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var chk CheckConstraint
-		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
-			return err
-		}
-		t.CheckConstraints = append(t.CheckConstraints, chk)
-	}
-
-	return nil
+	return p.schemaLoader.LoadCheckConstraints(ctx, t)
 }
 
 // GetDateColumnInfo checks if any of the candidate columns exist as a temporal type
 // Returns the first matching column name, its data type, and whether a match was found
 func (p *PgxSourcePool) GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool) {
-	if len(candidates) == 0 {
-		return "", "", false
-	}
-
-	// Check each candidate in order
-	for _, candidate := range candidates {
-		var dt string
-		err := p.pool.QueryRow(ctx, p.strategy.GetDateColumnQuery(),
-			p.strategy.BindDateColumnParams(schema, table, candidate)...).Scan(&dt)
-
-		if err == nil && p.strategy.IsValidDateType(strings.ToLower(dt)) {
-			return candidate, dt, true
-		}
-	}
-
-	return "", "", false
+	return p.schemaLoader.GetDateColumnInfo(ctx, schema, table, candidates)
 }
