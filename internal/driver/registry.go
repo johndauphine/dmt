@@ -3,6 +3,7 @@ package driver
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -43,13 +44,14 @@ func Register(d Driver) {
 	}
 }
 
-// Get retrieves a driver by name or alias.
+// Get retrieves a driver by name or alias (case-insensitive).
 // Returns an error if no driver is registered with that name.
 func Get(nameOrAlias string) (Driver, error) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
-	d, exists := drivers[nameOrAlias]
+	// Lookup is case-insensitive since drivers are registered lowercase
+	d, exists := drivers[strings.ToLower(nameOrAlias)]
 	if !exists {
 		return nil, fmt.Errorf("unknown database driver: %q (available: %v)", nameOrAlias, Available())
 	}
@@ -76,10 +78,10 @@ func Available() []string {
 	return names
 }
 
-// IsRegistered returns true if a driver with the given name or alias exists.
+// IsRegistered returns true if a driver with the given name or alias exists (case-insensitive).
 func IsRegistered(nameOrAlias string) bool {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	_, exists := drivers[nameOrAlias]
+	_, exists := drivers[strings.ToLower(nameOrAlias)]
 	return exists
 }
