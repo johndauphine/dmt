@@ -13,7 +13,7 @@ source:
   user: sa
   password: ${MSSQL_PASSWORD}
   schema: dbo
-  encrypt: "true"
+  encrypt: true
   trust_server_cert: false
 
 target:

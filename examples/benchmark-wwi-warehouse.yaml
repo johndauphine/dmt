@@ -12,7 +12,7 @@ source:
   user: sa
   password: "YourStrong@Passw0rd"
   schema: Warehouse
-  encrypt: "false"
+  encrypt: false
   trust_server_cert: true
 
 target:

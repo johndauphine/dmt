@@ -10,7 +10,7 @@ source:
   user: sa
   password: "YourStrong@Passw0rd"
   schema: Sales
-  encrypt: "false"
+  encrypt: false
   trust_server_cert: true
 
 target:
@@ -21,7 +21,7 @@ target:
   user: sa
   password: "YourStrong@Passw0rd"
   schema: Sales
-  encrypt: "false"
+  encrypt: false
   trust_server_cert: true
 
 migration:

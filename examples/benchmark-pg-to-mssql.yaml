@@ -16,7 +16,7 @@ target:
   user: sa
   password: "YourStrong@Passw0rd"
   schema: dbo
-  encrypt: "false"
+  encrypt: false
   trust_server_cert: true
 
 migration:

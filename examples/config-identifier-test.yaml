@@ -25,7 +25,7 @@ source:
   database: TestDB
   user: sa
   password: ${MSSQL_PASSWORD}
-  encrypt: "false"
+  encrypt: false
   trust_server_cert: true
 
 target:

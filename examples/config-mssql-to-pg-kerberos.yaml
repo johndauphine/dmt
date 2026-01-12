@@ -20,7 +20,7 @@ source:
   user: svc_migrate@CORP.EXAMPLE.COM
   keytab: /etc/mssql-migrate.keytab
   realm: CORP.EXAMPLE.COM
-  encrypt: "true"
+  encrypt: true
 
 target:
   type: postgres
