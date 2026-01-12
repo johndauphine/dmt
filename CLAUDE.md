@@ -19,6 +19,30 @@ internal/
 │   ├── config.go           # Config structs, YAML parsing, DSN building, LoadBytes, DefaultDataDir
 │   ├── permissions_unix.go # File permission check (Linux/macOS)
 │   └── permissions_windows.go # File permission check (Windows)
+├── driver/                  # Pluggable database driver abstractions (NEW)
+│   ├── driver.go           # Driver interface, registry pattern
+│   ├── reader.go           # Reader interface (source abstraction)
+│   ├── writer.go           # Writer interface (target abstraction)
+│   ├── types.go            # Table, Column, Partition, Index types
+│   ├── typemapper.go       # TypeMapper interface for type conversion
+│   ├── postgres/           # PostgreSQL driver implementation
+│   │   ├── driver.go       # Driver registration via init()
+│   │   ├── reader.go       # PostgresReader (pgx-based)
+│   │   ├── writer.go       # PostgresWriter (COPY protocol)
+│   │   ├── dialect.go      # PostgreSQL SQL syntax
+│   │   └── types.go        # PG type mappings
+│   └── mssql/              # SQL Server driver implementation
+│       ├── driver.go       # Driver registration via init()
+│       ├── reader.go       # MSSQLReader (go-mssqldb)
+│       ├── writer.go       # MSSQLWriter (TDS bulk copy)
+│       ├── dialect.go      # MSSQL SQL syntax
+│       └── types.go        # MSSQL type mappings
+├── pipeline/               # Transfer orchestration (NEW)
+│   ├── pipeline.go         # Pipeline struct (Reader → Queue → Writer)
+│   ├── job.go              # Job, DateFilter types
+│   ├── stats.go            # Transfer statistics
+│   ├── writer_pool.go      # Parallel writer pool
+│   └── checkpoint.go       # Checkpoint coordinator for parallel readers
 ├── tui/                     # Interactive Terminal User Interface (Bubble Tea)
 │   ├── model.go            # Main TUI loop, command handling, wizard logic, profile commands
 │   ├── styles.go           # Lip Gloss styles (Gemini-style: purple accents, gold input border)
@@ -29,17 +53,17 @@ internal/
 ├── checkpoint/             # State persistence (SQLite)
 │   ├── state.go           # Run/task tracking, progress saving, resume support, run origin
 │   └── profiles.go        # Encrypted profile storage (AES-GCM)
-├── source/                 # Source database abstraction
+├── source/                 # Source database abstraction (legacy, being replaced by driver/)
 │   ├── pool.go            # MSSQL source pool
 │   ├── postgres_pool.go   # PostgreSQL source pool
 │   └── types.go           # Table, Column, Index, FK structs
-├── target/                 # Target database abstraction
+├── target/                 # Target database abstraction (legacy, being replaced by driver/)
 │   ├── pool.go            # PostgreSQL target pool (COPY protocol)
 │   └── mssql_pool.go      # MSSQL target pool (TDS bulk copy)
 ├── transfer/              # Data transfer engine
 │   └── transfer.go        # Chunked transfer with read-ahead/write-ahead pipelining
 ├── pool/                  # Connection pool factory
-│   └── factory.go         # Creates source/target pools based on config
+│   └── factory.go         # Creates source/target pools using driver registry
 ├── progress/              # Progress bar display
 │   └── tracker.go
 └── notify/                # Slack notifications
@@ -85,11 +109,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+b065b73 feat: update factory to use driver registry for validation (Phase 5)
+70b6a09 feat: add pipeline package for Reader → Writer orchestration (Phase 4)
+2d82ebf feat: add MSSQL driver package (Phase 3 of pluggable architecture)
+e9370b9 feat: add PostgreSQL driver package (Phase 2 of pluggable architecture)
 391cc0e chore: bump version to 1.41.0
-07f2e78 fix: handle geography columns in PG→MSSQL upsert staging tables (#45)
-5b0820f chore: bump version to 1.40.0
-4c48154 feat: add packet_size config and change encrypt to bool (#44)
-a860d31 docs: update README with packet_size parameter and v1.40.0 benchmarks
 ```
 
 ### Major Features
@@ -255,6 +279,35 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 13: Pluggable Database Architecture (Claude - January 11, 2026)
+1. Implemented pluggable database architecture (PR #56) - Phases 1-5 of refactoring plan:
+   - Enables adding new databases (MySQL, Oracle, etc.) with zero changes to core code
+2. **Phase 1-2: Driver Package & PostgreSQL Driver**:
+   - Created `internal/driver/` with core interfaces (Driver, Reader, Writer, Dialect, TypeMapper)
+   - Driver registry pattern with `init()` registration and alias support
+   - PostgreSQL driver: `internal/driver/postgres/` (~1,500 lines)
+   - Reader uses pgx for streaming, Writer uses COPY protocol
+3. **Phase 3: MSSQL Driver**:
+   - SQL Server driver: `internal/driver/mssql/` (~2,000 lines)
+   - Reader uses go-mssqldb, Writer uses TDS bulk copy
+   - Full dialect support (bracket quoting, @p parameters, NOLOCK hints)
+   - Type mapper for PG→MSSQL and MSSQL→MSSQL conversions
+4. **Phase 4: Pipeline Package**:
+   - Created `internal/pipeline/` (~1,500 lines) for Reader → Writer orchestration
+   - `Pipeline` struct with `Execute()` method
+   - Writer pool for parallel writes
+   - Checkpoint coordinator for multi-reader keyset pagination
+   - Stats tracking (query time, scan time, write time)
+5. **Phase 5: Factory Integration**:
+   - Updated `internal/pool/factory.go` to use driver registry
+   - Validates database types via `driver.Get()`
+   - Supports aliases (postgresql, pg, sqlserver, sql-server)
+   - Backward compatible with existing pool interfaces
+6. All tests pass, binary builds successfully
+7. Remaining phases for follow-up PRs:
+   - Phase 6: AI type mapper with configurable providers (optional)
+   - Phase 7: Cleanup deprecated packages
 
 ### Session 12: SRID Hardcoding Fix (Claude - January 11, 2026)
 1. Addressed remaining SRID hardcoding issue from Gemini CLI review (PR #47):

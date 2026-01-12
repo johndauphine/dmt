@@ -2,13 +2,16 @@ package driver
 
 // Table represents a database table with its metadata.
 type Table struct {
-	Schema         string
-	Name           string
-	Columns        []Column
-	PrimaryKey     []string
-	RowCount       int64
-	DateColumn     string
-	DateColumnType string
+	Schema           string
+	Name             string
+	Columns          []Column
+	PrimaryKey       []string
+	RowCount         int64
+	DateColumn       string
+	DateColumnType   string
+	Indexes          []Index
+	ForeignKeys      []ForeignKey
+	CheckConstraints []CheckConstraint
 }
 
 // FullName returns the fully qualified table name (schema.table).
