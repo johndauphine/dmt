@@ -111,11 +111,11 @@ examples/                   # Example configuration files
 
 ### Latest Commits
 ```
+e263d89 Merge pull request #61 - fix PG→MSSQL upsert with geography columns
+df28b7a fix: PG→MSSQL upsert with geography columns
+a5bf6c7 docs: update README with v2.1.0 benchmark results
+e1b3ccd chore: bump version to 2.1.0
 bdcf722 Merge pull request #60 - make factory truly pluggable with driver registry
-8b3d481 fix: BuildRowNumberQuery CTE and PostgreSQL identifier sanitization
-1ead244 Merge pull request #59 - break config-driver circular import
-0a55d09 Merge pull request #58 - use driver registry for config validation
-fe7fcde docs: update CLAUDE.md with Session 14
 ```
 
 ### Major Features
@@ -281,6 +281,29 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 - Log warnings but continue for non-fatal issues
 
 ## Session History
+
+### Session 16: PG→MSSQL Geography Upsert Fix (Claude - January 12, 2026)
+1. **PR #61 - Fix PG→MSSQL upsert with geography columns**:
+   - Error: "Implicit conversion from data type geography to nvarchar(max) is not allowed"
+   - Root cause: SQL Server doesn't allow ALTER COLUMN from geography to nvarchar(max)
+   - Previous approach tried `ALTER TABLE ... ALTER COLUMN` which failed
+   - Solution: Use `DROP COLUMN` + `ADD COLUMN` instead of `ALTER COLUMN`
+   - Staging table geography columns are dropped and re-added as `nvarchar(max)` for WKT text
+   - MERGE still uses `geography::STGeomFromText()` to convert back to geography type
+2. **WWI Benchmark Results (all 4 directions, both modes)**:
+   - Test environment: WSL2 on Windows, 32GB RAM, PostgreSQL 15 and SQL Server 2022 in Docker
+   - Dataset: WideWorldImporters Sales schema (9 tables, 701K rows)
+
+   | Direction | drop_recreate | upsert |
+   |-----------|---------------|--------|
+   | PG → PG | 563K rows/sec | 694K rows/sec |
+   | PG → MSSQL | 645K rows/sec | 492K rows/sec |
+   | MSSQL → PG | 248K rows/sec | 295K rows/sec |
+   | MSSQL → MSSQL | 222K rows/sec | 507K rows/sec |
+
+   - Upsert mode is faster for 3/4 directions (pre-existing tables, no DDL overhead)
+   - PG→MSSQL upsert 24% slower due to staging table + MERGE overhead
+3. Released v2.2.0
 
 ### Session 15: Pluggable Factory & BuildRowNumberQuery Fix (Claude - January 12, 2026)
 1. **PR #60 - Make Factory Truly Pluggable**:
