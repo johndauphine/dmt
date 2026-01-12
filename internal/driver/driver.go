@@ -7,6 +7,25 @@ import (
 	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
 )
 
+// DriverDefaults contains default values for a database driver.
+// Used by config.applyDefaults() to set sensible defaults for each database type.
+type DriverDefaults struct {
+	// Port is the default port (e.g., 5432 for PostgreSQL, 1433 for MSSQL).
+	Port int
+
+	// Schema is the default schema (e.g., "public" for PostgreSQL, "dbo" for MSSQL).
+	Schema string
+
+	// SSLMode is the default SSL mode for PostgreSQL-style connections.
+	SSLMode string
+
+	// Encrypt is the default encryption setting for MSSQL-style connections.
+	Encrypt bool
+
+	// PacketSize is the default TDS packet size (MSSQL only, 0 means driver default).
+	PacketSize int
+}
+
 // Driver represents a pluggable database driver that provides all
 // database-specific functionality in one cohesive unit.
 //
@@ -21,6 +40,10 @@ type Driver interface {
 	// Aliases returns alternative names for this driver.
 	// For example, postgres might have aliases ["postgresql", "pg"].
 	Aliases() []string
+
+	// Defaults returns the default configuration values for this driver.
+	// Used by config.applyDefaults() to avoid hardcoding database-specific defaults.
+	Defaults() DriverDefaults
 
 	// Dialect returns the SQL dialect for this database.
 	Dialect() Dialect

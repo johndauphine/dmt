@@ -324,66 +324,50 @@ func (c *Config) applyDefaults() {
 	}
 	c.autoConfig.TargetMemoryMB = baseMemoryMB / 2
 
-	// Source defaults
+	// Source defaults - use driver registry for pluggable defaults
 	if c.Source.Type == "" {
 		c.Source.Type = "mssql" // Default source is SQL Server for backward compat
 	}
-	sourceType := canonicalDriverName(c.Source.Type)
-	if c.Source.Port == 0 {
-		if sourceType == "postgres" {
-			c.Source.Port = 5432
-		} else {
-			c.Source.Port = 1433
+	if sourceDriver, err := driver.Get(c.Source.Type); err == nil {
+		defaults := sourceDriver.Defaults()
+		if c.Source.Port == 0 && defaults.Port > 0 {
+			c.Source.Port = defaults.Port
 		}
-	}
-	if c.Source.Schema == "" {
-		if sourceType == "postgres" {
-			c.Source.Schema = "public"
-		} else {
-			c.Source.Schema = "dbo"
+		if c.Source.Schema == "" && defaults.Schema != "" {
+			c.Source.Schema = defaults.Schema
 		}
-	}
-	// SSL defaults for source
-	if c.Source.SSLMode == "" {
-		c.Source.SSLMode = "require" // Secure default for PostgreSQL
-	}
-	if c.Source.Encrypt == nil {
-		defaultEncrypt := true // Secure default for MSSQL
-		c.Source.Encrypt = &defaultEncrypt
-	}
-	if c.Source.PacketSize == 0 {
-		c.Source.PacketSize = 32767 // 32KB max - significantly improves MSSQL read throughput
+		if c.Source.SSLMode == "" && defaults.SSLMode != "" {
+			c.Source.SSLMode = defaults.SSLMode
+		}
+		if c.Source.Encrypt == nil {
+			c.Source.Encrypt = &defaults.Encrypt
+		}
+		if c.Source.PacketSize == 0 && defaults.PacketSize > 0 {
+			c.Source.PacketSize = defaults.PacketSize
+		}
 	}
 
-	// Target defaults
+	// Target defaults - use driver registry for pluggable defaults
 	if c.Target.Type == "" {
 		c.Target.Type = "postgres" // Default target is PostgreSQL for backward compat
 	}
-	targetType := canonicalDriverName(c.Target.Type)
-	if c.Target.Port == 0 {
-		if targetType == "mssql" {
-			c.Target.Port = 1433
-		} else {
-			c.Target.Port = 5432
+	if targetDriver, err := driver.Get(c.Target.Type); err == nil {
+		defaults := targetDriver.Defaults()
+		if c.Target.Port == 0 && defaults.Port > 0 {
+			c.Target.Port = defaults.Port
 		}
-	}
-	if c.Target.Schema == "" {
-		if targetType == "mssql" {
-			c.Target.Schema = "dbo"
-		} else {
-			c.Target.Schema = "public"
+		if c.Target.Schema == "" && defaults.Schema != "" {
+			c.Target.Schema = defaults.Schema
 		}
-	}
-	// SSL defaults for target
-	if c.Target.SSLMode == "" {
-		c.Target.SSLMode = "require" // Secure default for PostgreSQL
-	}
-	if c.Target.Encrypt == nil {
-		defaultEncrypt := true // Secure default for MSSQL
-		c.Target.Encrypt = &defaultEncrypt
-	}
-	if c.Target.PacketSize == 0 {
-		c.Target.PacketSize = 32767 // 32KB max - significantly improves MSSQL write throughput
+		if c.Target.SSLMode == "" && defaults.SSLMode != "" {
+			c.Target.SSLMode = defaults.SSLMode
+		}
+		if c.Target.Encrypt == nil {
+			c.Target.Encrypt = &defaults.Encrypt
+		}
+		if c.Target.PacketSize == 0 && defaults.PacketSize > 0 {
+			c.Target.PacketSize = defaults.PacketSize
+		}
 	}
 
 	// Handle backwards compatibility: if max_connections is set but new options aren't
@@ -446,7 +430,7 @@ func (c *Config) applyDefaults() {
 	// MSSQL targets: very conservative (2) due to TABLOCK bulk insert serialization
 	// PostgreSQL targets: moderate (2-4) as COPY handles parallelism well
 	if c.Migration.WriteAheadWriters == 0 {
-		if targetType == "mssql" {
+		if canonicalDriverName(c.Target.Type) == "mssql" {
 			// MSSQL: TABLOCK serializes writes, more writers = more contention
 			c.Migration.WriteAheadWriters = 2
 		} else {
@@ -645,34 +629,48 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// SourceDSN returns the source database connection string
+// SourceDSN returns the source database connection string.
+// Uses driver registry to determine the correct DSN builder.
 func (c *Config) SourceDSN() string {
-	// Resolve aliases (e.g., "pg" -> "postgres")
-	if canonicalDriverName(c.Source.Type) == "postgres" {
+	// Use driver registry to get canonical name (e.g., "pg" -> "postgres")
+	driverName := canonicalDriverName(c.Source.Type)
+	switch driverName {
+	case "postgres":
 		return c.buildPostgresDSN(c.Source.Host, c.Source.Port, c.Source.Database,
 			c.Source.User, c.Source.Password, c.Source.SSLMode,
 			c.Source.Auth, c.Source.GSSEncMode)
+	case "mssql":
+		encrypt := c.Source.Encrypt != nil && *c.Source.Encrypt
+		return c.buildMSSQLDSN(c.Source.Host, c.Source.Port, c.Source.Database,
+			c.Source.User, c.Source.Password, encrypt, c.Source.TrustServerCert,
+			c.Source.PacketSize, c.Source.Auth, c.Source.Krb5Conf, c.Source.Keytab, c.Source.Realm, c.Source.SPN)
+	default:
+		// Unknown driver type - should have been caught in validation
+		// Return empty string to trigger connection error
+		return ""
 	}
-	// Default: MSSQL
-	encrypt := c.Source.Encrypt != nil && *c.Source.Encrypt
-	return c.buildMSSQLDSN(c.Source.Host, c.Source.Port, c.Source.Database,
-		c.Source.User, c.Source.Password, encrypt, c.Source.TrustServerCert,
-		c.Source.PacketSize, c.Source.Auth, c.Source.Krb5Conf, c.Source.Keytab, c.Source.Realm, c.Source.SPN)
 }
 
-// TargetDSN returns the target database connection string
+// TargetDSN returns the target database connection string.
+// Uses driver registry to determine the correct DSN builder.
 func (c *Config) TargetDSN() string {
-	// Resolve aliases (e.g., "sqlserver" -> "mssql")
-	if canonicalDriverName(c.Target.Type) == "mssql" {
+	// Use driver registry to get canonical name (e.g., "sqlserver" -> "mssql")
+	driverName := canonicalDriverName(c.Target.Type)
+	switch driverName {
+	case "mssql":
 		encrypt := c.Target.Encrypt != nil && *c.Target.Encrypt
 		return c.buildMSSQLDSN(c.Target.Host, c.Target.Port, c.Target.Database,
 			c.Target.User, c.Target.Password, encrypt, c.Target.TrustServerCert,
 			c.Target.PacketSize, c.Target.Auth, c.Target.Krb5Conf, c.Target.Keytab, c.Target.Realm, c.Target.SPN)
+	case "postgres":
+		return c.buildPostgresDSN(c.Target.Host, c.Target.Port, c.Target.Database,
+			c.Target.User, c.Target.Password, c.Target.SSLMode,
+			c.Target.Auth, c.Target.GSSEncMode)
+	default:
+		// Unknown driver type - should have been caught in validation
+		// Return empty string to trigger connection error
+		return ""
 	}
-	// Default: PostgreSQL
-	return c.buildPostgresDSN(c.Target.Host, c.Target.Port, c.Target.Database,
-		c.Target.User, c.Target.Password, c.Target.SSLMode,
-		c.Target.Auth, c.Target.GSSEncMode)
 }
 
 // buildMSSQLDSN builds an MSSQL connection string with optional Kerberos auth

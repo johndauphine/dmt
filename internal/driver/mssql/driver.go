@@ -22,6 +22,16 @@ func (d *Driver) Aliases() []string {
 	return []string{"sqlserver", "sql-server"}
 }
 
+// Defaults returns the default configuration values for MSSQL.
+func (d *Driver) Defaults() driver.DriverDefaults {
+	return driver.DriverDefaults{
+		Port:       1433,
+		Schema:     "dbo",
+		Encrypt:    true,  // Secure default
+		PacketSize: 32767, // 32KB max - significantly improves read/write throughput
+	}
+}
+
 // Dialect returns the MSSQL dialect.
 func (d *Driver) Dialect() driver.Dialect {
 	return &Dialect{}

@@ -24,6 +24,15 @@ func (d *Driver) Aliases() []string {
 	return []string{"postgresql", "pg"}
 }
 
+// Defaults returns the default configuration values for PostgreSQL.
+func (d *Driver) Defaults() driver.DriverDefaults {
+	return driver.DriverDefaults{
+		Port:    5432,
+		Schema:  "public",
+		SSLMode: "require", // Secure default
+	}
+}
+
 // Dialect returns the PostgreSQL dialect.
 func (d *Driver) Dialect() driver.Dialect {
 	return &Dialect{}
