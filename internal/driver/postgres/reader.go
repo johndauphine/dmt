@@ -552,6 +552,18 @@ func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column s
 		limit = 5
 	}
 
+	// Validate identifiers to prevent SQL injection
+	// These come from information_schema but we validate anyway for defense in depth
+	if err := driver.ValidateIdentifier(schema); err != nil {
+		return nil, fmt.Errorf("invalid schema name: %w", err)
+	}
+	if err := driver.ValidateIdentifier(table); err != nil {
+		return nil, fmt.Errorf("invalid table name: %w", err)
+	}
+	if err := driver.ValidateIdentifier(column); err != nil {
+		return nil, fmt.Errorf("invalid column name: %w", err)
+	}
+
 	// Query distinct non-null values with LIMIT
 	query := fmt.Sprintf(`
 		SELECT DISTINCT %s::text AS sample_val

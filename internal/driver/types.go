@@ -1,6 +1,9 @@
 package driver
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Table represents a database table with its metadata.
 type Table struct {
@@ -165,4 +168,63 @@ type ForeignKey struct {
 type CheckConstraint struct {
 	Name       string `json:"name"`
 	Definition string `json:"definition"`
+}
+
+// ValidateIdentifier checks if a database identifier (schema, table, column name)
+// is safe to use in SQL queries. Returns an error if the identifier contains
+// potentially dangerous characters that could enable SQL injection.
+//
+// Valid identifiers:
+// - Start with letter or underscore
+// - Contain only letters, digits, underscores, and spaces (spaces allowed for SQL Server)
+// - Maximum length of 128 characters (SQL Server limit)
+// - Not empty
+func ValidateIdentifier(name string) error {
+	if name == "" {
+		return fmt.Errorf("identifier cannot be empty")
+	}
+
+	if len(name) > 128 {
+		return fmt.Errorf("identifier too long: %d characters (max 128)", len(name))
+	}
+
+	// Check first character: must be letter or underscore
+	first := rune(name[0])
+	if !isValidIdentifierStart(first) {
+		return fmt.Errorf("identifier must start with letter or underscore: %q", name)
+	}
+
+	// Check remaining characters
+	for i, r := range name {
+		if i == 0 {
+			continue // Already checked
+		}
+		if !isValidIdentifierChar(r) {
+			return fmt.Errorf("identifier contains invalid character %q at position %d: %q", r, i, name)
+		}
+	}
+
+	return nil
+}
+
+// isValidIdentifierStart returns true if r is a valid first character for an identifier.
+func isValidIdentifierStart(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+}
+
+// isValidIdentifierChar returns true if r is valid anywhere in an identifier.
+func isValidIdentifierChar(r rune) bool {
+	return isValidIdentifierStart(r) ||
+		(r >= '0' && r <= '9') ||
+		r == ' ' || // SQL Server allows spaces in identifiers
+		r == '$' || // PostgreSQL allows $ in identifiers
+		r == '#' // SQL Server allows # for temp tables
+}
+
+// MustValidateIdentifier validates an identifier and panics if invalid.
+// Use only when identifier comes from trusted source (e.g., INFORMATION_SCHEMA).
+func MustValidateIdentifier(name string) {
+	if err := ValidateIdentifier(name); err != nil {
+		panic(fmt.Sprintf("invalid identifier: %v", err))
+	}
 }

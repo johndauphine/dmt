@@ -49,8 +49,16 @@ type AITypeMapper struct {
 	client         *http.Client
 	cache          *TypeMappingCache
 	cacheMu        sync.RWMutex
-	requestsMu     sync.Mutex // Serialize API requests to avoid rate limiting
-	fallbackMapper TypeMapper // Static mapper to use when AI is unavailable
+	requestsMu     sync.Mutex  // Serialize API requests to avoid rate limiting
+	inflight       sync.Map    // Track in-flight requests to avoid duplicate API calls
+	fallbackMapper TypeMapper  // Static mapper to use when AI is unavailable
+}
+
+// inflightRequest tracks an in-progress API request for a specific type.
+type inflightRequest struct {
+	done   chan struct{}
+	result string
+	err    error
 }
 
 // NewAITypeMapper creates a new AI-powered type mapper.
@@ -104,12 +112,45 @@ func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AI
 }
 
 // MapType uses AI to determine the target type for an unknown source type.
+// This method is safe to call concurrently - it uses in-flight request tracking
+// to avoid duplicate API calls for the same type.
 func (m *AITypeMapper) MapType(info TypeInfo) string {
-	// Check cache first
 	cacheKey := m.cacheKey(info)
+
+	// Check cache first (fast path)
 	m.cacheMu.RLock()
 	if cached, ok := m.cache.Get(cacheKey); ok {
 		m.cacheMu.RUnlock()
+		return cached
+	}
+	m.cacheMu.RUnlock()
+
+	// Check if there's already an in-flight request for this key
+	// Use LoadOrStore to atomically check and register if not present
+	req := &inflightRequest{done: make(chan struct{})}
+	if existing, loaded := m.inflight.LoadOrStore(cacheKey, req); loaded {
+		// Another goroutine is already fetching this type, wait for it
+		existingReq := existing.(*inflightRequest)
+		<-existingReq.done
+		if existingReq.err != nil {
+			// The other request failed, use fallback
+			return m.fallback(info)
+		}
+		return existingReq.result
+	}
+
+	// We're the first to request this type, do the API call
+	defer func() {
+		close(req.done) // Signal waiting goroutines
+		m.inflight.Delete(cacheKey)
+	}()
+
+	// Double-check cache after acquiring the slot (another goroutine may have
+	// completed just before our LoadOrStore)
+	m.cacheMu.RLock()
+	if cached, ok := m.cache.Get(cacheKey); ok {
+		m.cacheMu.RUnlock()
+		req.result = cached
 		return cached
 	}
 	m.cacheMu.RUnlock()
@@ -118,7 +159,10 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 	result, err := m.queryAI(info)
 	if err != nil {
 		logging.Warn("AI type mapping failed for %s: %v, using fallback", info.DataType, err)
-		return m.fallback(info)
+		req.err = err
+		result = m.fallback(info)
+		req.result = result
+		return result
 	}
 
 	// Cache the result
@@ -138,6 +182,7 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 	logging.Info("AI mapped %s.%s -> %s.%s%s (cached for future use)",
 		info.SourceDBType, info.DataType, info.TargetDBType, result, sampleInfo)
 
+	req.result = result
 	return result
 }
 
@@ -206,6 +251,71 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 	return result, nil
 }
 
+// maxSampleValueLen is the maximum length of a single sample value in prompts.
+const maxSampleValueLen = 100
+
+// maxSamplesInPrompt is the maximum number of sample values to include in prompts.
+const maxSamplesInPrompt = 5
+
+// maxTotalSampleBytes is the maximum total bytes of sample data to include.
+const maxTotalSampleBytes = 500
+
+// sanitizeSampleValue cleans and truncates a sample value for inclusion in AI prompts.
+// It redacts potential PII patterns and limits length.
+func sanitizeSampleValue(value string) string {
+	if value == "" {
+		return value
+	}
+
+	// Truncate to max length
+	if len(value) > maxSampleValueLen {
+		value = value[:maxSampleValueLen] + "..."
+	}
+
+	// Redact potential email addresses
+	if strings.Contains(value, "@") && strings.Contains(value, ".") {
+		// Simple email pattern detection - redact the local part
+		parts := strings.SplitN(value, "@", 2)
+		if len(parts) == 2 && len(parts[0]) > 0 {
+			value = "[EMAIL]@" + parts[1]
+		}
+	}
+
+	// Redact potential SSN patterns (XXX-XX-XXXX)
+	if len(value) == 11 && value[3] == '-' && value[6] == '-' {
+		allDigits := true
+		for i, c := range value {
+			if i == 3 || i == 6 {
+				continue
+			}
+			if c < '0' || c > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			value = "[SSN]"
+		}
+	}
+
+	// Redact potential phone numbers (10+ consecutive digits)
+	digitCount := 0
+	for _, c := range value {
+		if c >= '0' && c <= '9' {
+			digitCount++
+		}
+	}
+	if digitCount >= 10 && digitCount <= 15 {
+		// Check if it looks like a phone number (mostly digits with optional formatting)
+		nonDigits := len(value) - digitCount
+		if nonDigits <= 4 { // Allow for dashes, spaces, parens
+			value = "[PHONE]"
+		}
+	}
+
+	return value
+}
+
 func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 	var sb strings.Builder
 	sb.WriteString("You are a database type mapping expert.\n\n")
@@ -223,19 +333,27 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString(fmt.Sprintf("- Scale: %d\n", info.Scale))
 	}
 
-	// Include sample values if available for better context
+	// Include sanitized sample values if available for better context
 	if len(info.SampleValues) > 0 {
 		sb.WriteString("\nSample values from source data:\n")
-		for i, v := range info.SampleValues {
-			if i >= 5 { // Limit to 5 samples in prompt
+		totalBytes := 0
+		samplesIncluded := 0
+		for _, v := range info.SampleValues {
+			if samplesIncluded >= maxSamplesInPrompt {
 				break
 			}
-			// Truncate long values
-			display := v
-			if len(display) > 100 {
-				display = display[:100] + "..."
+			// Sanitize the value (truncate, redact PII)
+			display := sanitizeSampleValue(v)
+			if display == "" {
+				continue
+			}
+			// Check total size limit
+			if totalBytes+len(display) > maxTotalSampleBytes {
+				break
 			}
 			sb.WriteString(fmt.Sprintf("  - %q\n", display))
+			totalBytes += len(display)
+			samplesIncluded++
 		}
 	}
 
@@ -269,6 +387,41 @@ type claudeResponse struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// sanitizeErrorResponse truncates and sanitizes API error response bodies
+// to prevent potential API key or sensitive data leakage in error messages.
+func sanitizeErrorResponse(body []byte, maxLen int) string {
+	if maxLen <= 0 {
+		maxLen = 200
+	}
+
+	s := string(body)
+
+	// Truncate to max length
+	if len(s) > maxLen {
+		s = s[:maxLen] + "..."
+	}
+
+	// Remove potential API keys (patterns like sk-..., api-..., key-...)
+	// This is a defense-in-depth measure
+	keyPatterns := []string{"sk-", "api-", "key-", "secret-", "token-"}
+	for _, pattern := range keyPatterns {
+		for {
+			idx := strings.Index(strings.ToLower(s), pattern)
+			if idx == -1 {
+				break
+			}
+			// Redact 40 chars after the pattern (typical key length)
+			endIdx := idx + len(pattern) + 40
+			if endIdx > len(s) {
+				endIdx = len(s)
+			}
+			s = s[:idx] + "[REDACTED]" + s[endIdx:]
+		}
+	}
+
+	return s
 }
 
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
@@ -306,7 +459,7 @@ func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (strin
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, sanitizeErrorResponse(body, 200))
 	}
 
 	var claudeResp claudeResponse
@@ -385,7 +538,7 @@ func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string) (strin
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, sanitizeErrorResponse(body, 200))
 	}
 
 	var openAIResp openAIResponse

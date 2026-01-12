@@ -476,3 +476,151 @@ func TestAITypeMapper_OpenAIAPI(t *testing.T) {
 	// This test validates the response parsing logic
 	// In a real test, we'd inject the mock server URL
 }
+
+func TestSanitizeSampleValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"empty", "", ""},
+		{"simple", "hello", "hello"},
+		{"email redaction", "john.doe@example.com", "[EMAIL]@example.com"},
+		{"email with subdomain", "user@mail.company.org", "[EMAIL]@mail.company.org"},
+		{"SSN redaction", "123-45-6789", "[SSN]"},
+		{"not SSN - wrong format", "12-345-6789", "12-345-6789"},
+		{"not SSN - has letters", "123-AB-6789", "123-AB-6789"},
+		{"phone redaction 10 digits", "5551234567", "[PHONE]"},
+		{"phone with dashes", "555-123-4567", "[PHONE]"},
+		{"phone with parens", "(555)123-4567", "[PHONE]"},
+		{"not phone - too few digits", "555-1234", "555-1234"},
+		{"not phone - too many non-digits", "phone: 555-123-4567", "phone: 555-123-4567"},
+		{"long value truncated", strings.Repeat("a", 150), strings.Repeat("a", 100) + "..."},
+		{"GPS coordinates preserved", "POINT (-108.5523 39.0430)", "POINT (-108.5523 39.0430)"},
+		{"UUID preserved", "550e8400-e29b-41d4-a716-446655440000", "550e8400-e29b-41d4-a716-446655440000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeSampleValue(tt.input)
+			if result != tt.expected {
+				t.Errorf("sanitizeSampleValue(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSanitizeErrorResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		contains string // Check contains instead of exact match due to redaction position
+	}{
+		{"empty", "", 200, ""},
+		{"simple error", "Invalid request", 200, "Invalid request"},
+		{"truncated", strings.Repeat("a", 300), 200, "..."},
+		{"redacts API key sk-", "Error with sk-ant-api03-abc123def456ghi789", 200, "[REDACTED]"},
+		{"redacts multiple patterns", "Keys: api-key123 token-abc secret-xyz", 200, "[REDACTED]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeErrorResponse([]byte(tt.input), tt.maxLen)
+			if !strings.Contains(result, tt.contains) {
+				t.Errorf("sanitizeErrorResponse(%q) = %q, want to contain %q", tt.input, result, tt.contains)
+			}
+			// Ensure no API key patterns remain
+			if strings.Contains(result, "sk-ant") || strings.Contains(result, "api03") {
+				t.Errorf("sanitizeErrorResponse(%q) = %q, should not contain API key", tt.input, result)
+			}
+		})
+	}
+}
+
+func TestAITypeMapper_BuildPromptRespectsSizeLimits(t *testing.T) {
+	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
+		Enabled:  true,
+		Provider: "claude",
+		APIKey:   "test-key",
+	}, nil)
+
+	// Create info with many large sample values
+	info := TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "varchar",
+		SampleValues: []string{
+			strings.Repeat("a", 200), // Will be truncated
+			strings.Repeat("b", 200),
+			strings.Repeat("c", 200),
+			strings.Repeat("d", 200),
+			strings.Repeat("e", 200),
+			strings.Repeat("f", 200), // Beyond max samples
+			strings.Repeat("g", 200),
+		},
+	}
+
+	prompt := mapper.buildPrompt(info)
+
+	// Check that sample values section exists
+	if !strings.Contains(prompt, "Sample values") {
+		t.Error("prompt should contain sample values section")
+	}
+
+	// Check that values are truncated (contain "...")
+	if !strings.Contains(prompt, "...") {
+		t.Error("long sample values should be truncated")
+	}
+
+	// Check that not all samples are included (total size limit)
+	sampleCount := strings.Count(prompt, "  - \"")
+	if sampleCount > maxSamplesInPrompt {
+		t.Errorf("prompt has %d samples, should have at most %d", sampleCount, maxSamplesInPrompt)
+	}
+}
+
+func TestAITypeMapper_BuildPromptRedactsPII(t *testing.T) {
+	mapper, _ := NewAITypeMapper(AITypeMappingConfig{
+		Enabled:  true,
+		Provider: "claude",
+		APIKey:   "test-key",
+	}, nil)
+
+	info := TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "varchar",
+		SampleValues: []string{
+			"john.doe@example.com",
+			"123-45-6789",
+			"(555) 123-4567",
+		},
+	}
+
+	prompt := mapper.buildPrompt(info)
+
+	// Verify email is redacted
+	if strings.Contains(prompt, "john.doe") {
+		t.Error("prompt should not contain email local part")
+	}
+	if !strings.Contains(prompt, "[EMAIL]") {
+		t.Error("prompt should contain [EMAIL] redaction marker")
+	}
+
+	// Verify SSN is redacted
+	if strings.Contains(prompt, "123-45-6789") {
+		t.Error("prompt should not contain SSN")
+	}
+	if !strings.Contains(prompt, "[SSN]") {
+		t.Error("prompt should contain [SSN] redaction marker")
+	}
+
+	// Verify phone is redacted
+	if strings.Contains(prompt, "555") {
+		t.Error("prompt should not contain phone number")
+	}
+	if !strings.Contains(prompt, "[PHONE]") {
+		t.Error("prompt should contain [PHONE] redaction marker")
+	}
+}
