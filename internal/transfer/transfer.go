@@ -431,6 +431,9 @@ func executeKeysetPagination(
 
 	// Use dialect for database-specific SQL syntax
 	srcDialect := driver.GetDialect(srcPool.DBType())
+	if srcDialect == nil {
+		return nil, fmt.Errorf("no dialect registered for source DB type %s", srcPool.DBType())
+	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 	chunkSize := cfg.Migration.ChunkSize
@@ -696,6 +699,9 @@ func executeRowNumberPagination(
 
 	// Use dialect for database-specific SQL syntax
 	srcDialect := driver.GetDialect(srcPool.DBType())
+	if srcDialect == nil {
+		return nil, fmt.Errorf("no dialect registered for source DB type %q", srcPool.DBType())
+	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 

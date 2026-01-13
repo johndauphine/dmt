@@ -35,6 +35,20 @@ func TestGetDialect(t *testing.T) {
 	}
 }
 
+func TestGetDialect_UnknownType(t *testing.T) {
+	// Unknown or empty database types should return nil
+	tests := []string{"", "unknown", "mysql", "oracle"}
+
+	for _, dbType := range tests {
+		t.Run(dbType, func(t *testing.T) {
+			d := GetDialect(dbType)
+			if d != nil {
+				t.Errorf("GetDialect(%q) = %v, want nil for unregistered type", dbType, d)
+			}
+		})
+	}
+}
+
 func TestQuoteIdentifier(t *testing.T) {
 	pgDialect := driver.GetDialect("postgres")
 	mssqlDialect := driver.GetDialect("mssql")
