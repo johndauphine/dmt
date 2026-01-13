@@ -253,9 +253,8 @@ The migration tool uses these parameters:
 
 Guidelines (in priority order):
 1. CHUNK SIZE IS THE MOST IMPORTANT PARAMETER - larger chunks = higher throughput
-   - For MSSQL sources: use 120K-150K rows per chunk (sweet spot for TDS protocol)
-   - For PostgreSQL sources: use 200K-500K rows per chunk (COPY protocol is efficient)
-   - Formula: chunk_size = min(150000, 50MB / avg_row_bytes) for MSSQL
+   - Target 120K-200K rows per chunk for optimal batch processing
+   - Formula: chunk_size = min(200000, 50MB / avg_row_bytes)
    - NEVER use chunks smaller than 100K for datasets over 1M rows
 
 2. workers should be cores-2 but capped at 12 (diminishing returns beyond)
