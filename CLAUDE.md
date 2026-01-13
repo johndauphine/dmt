@@ -1,14 +1,14 @@
-# AI Context File - mssql-pg-migrate
+# AI Context File - data-transfer-tool
 
 This file provides context for AI assistants working on this project. Read this before making changes.
 
 ## Project Overview
 
-**mssql-pg-migrate** is a high-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL. Written in Go, it supports all 4 migration directions (MSSQL↔PG, PG↔PG, MSSQL↔MSSQL) with throughput ranging from 79K-472K rows/sec depending on direction and mode.
+**data-transfer-tool** is a high-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL. Written in Go, it supports all 4 migration directions (MSSQL↔PG, PG↔PG, MSSQL↔MSSQL) with throughput ranging from 79K-472K rows/sec depending on direction and mode.
 
 It features a modern **Terminal User Interface (TUI)** powered by Bubble Tea, offering an interactive wizard, real-time monitoring, encrypted profile storage, and easy configuration management.
 
-**Repository**: https://github.com/johndauphine/mssql-pg-migrate
+**Repository**: https://github.com/johndauphine/data-transfer-tool
 
 ## Architecture
 
@@ -76,7 +76,7 @@ examples/                   # Example configuration files
 ## Key Concepts
 
 ### Interactive Mode (TUI)
-- Launched when no arguments are provided: `./mssql-pg-migrate`
+- Launched when no arguments are provided: `./data-transfer-tool`
 - **Framework**: Bubble Tea + Lip Gloss + Bubbles
 - **Commands**: Slash commands (e.g., `/run`, `/wizard`, `/status`, `/resume`) with tab completion
 - **Output Capture**: Redirects `stdout`/`stderr` to a persistent, scrollable viewport
@@ -232,11 +232,11 @@ All permutations of source, target, and mode (19.3M rows each):
 
 ```bash
 # Build with TUI support
-CGO_ENABLED=0 go build -o mssql-pg-migrate ./cmd/migrate
+CGO_ENABLED=0 go build -o data-transfer-tool ./cmd/migrate
 
 # Cross-compile
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o mssql-pg-migrate.exe ./cmd/migrate
-GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd/migrate
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o data-transfer-tool.exe ./cmd/migrate
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o data-transfer-tool-darwin ./cmd/migrate
 ```
 
 ## Dependencies
@@ -256,7 +256,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
 
 ### Building
 - **Always build the binary to the repo root after making changes**
-- Command: `go build -o mssql-pg-migrate ./cmd/...`
+- Command: `go build -o data-transfer-tool ./cmd/...`
 - This ensures the user has an up-to-date binary for testing
 
 ### Testing
@@ -546,7 +546,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
    - Shared settings (api_key, provider, model) now at `ai` level
    - Type mapping settings under `ai.type_mapping`
 2. Added smart config detection feature (no config needed, runs on demand):
-   - New `analyze` CLI command: `mssql-pg-migrate -c config.yaml analyze`
+   - New `analyze` CLI command: `data-transfer-tool -c config.yaml analyze`
    - Detects date columns for incremental sync (UpdatedAt, ModifiedDate, etc.)
    - Identifies tables to exclude (temp_, log_, archive_, etc.)
    - Recommends chunk size based on table row sizes
@@ -595,7 +595,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o mssql-pg-migrate-darwin ./cmd
    - Supports Claude, OpenAI, and Gemini providers
    - Uses smart models by default (Sonnet, GPT-4o, Gemini Flash)
    - Samples complete rows (not just columns) for better context
-   - Caches mappings in `~/.mssql-pg-migrate/type-cache.json`
+   - Caches mappings in `~/.data-transfer-tool/type-cache.json`
 2. Key files added:
    - `internal/driver/ai_typemapper.go` - AI type mapper implementation
    - `internal/driver/ai_typemapper_test.go` - Comprehensive tests

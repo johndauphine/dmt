@@ -1,5 +1,5 @@
 // Package exitcodes defines standard exit codes for CLI operations.
-// These codes match the Rust mssql-pg-migrate implementation for consistency
+// These codes match the Rust data-transfer-tool implementation for consistency
 // in Airflow, Kubernetes, and other orchestration environments.
 package exitcodes
 

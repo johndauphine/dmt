@@ -1,10 +1,10 @@
 # Restartability Guide
 
-This document describes the checkpoint and resume functionality in mssql-pg-migrate, including implementation details, limitations, and testing procedures.
+This document describes the checkpoint and resume functionality in data-transfer-tool, including implementation details, limitations, and testing procedures.
 
 ## Overview
 
-mssql-pg-migrate supports resumable migrations through a checkpoint system that tracks progress at multiple levels:
+data-transfer-tool supports resumable migrations through a checkpoint system that tracks progress at multiple levels:
 
 1. **Run level**: Tracks overall migration status (running, success, failed)
 2. **Table level**: Tracks which tables have been successfully transferred
@@ -18,7 +18,7 @@ Two state backends are available:
 
 | Backend | Storage | Use Case | Config Hash | Chunk Progress |
 |---------|---------|----------|-------------|----------------|
-| SQLite (default) | `~/.mssql-pg-migrate/migrate.db` | Desktop/interactive | ✅ Yes | ✅ Yes |
+| SQLite (default) | `~/.data-transfer-tool/migrate.db` | Desktop/interactive | ✅ Yes | ✅ Yes |
 | File-based | User-specified YAML file | Airflow/headless | ✅ Yes | ✅ Yes |
 
 ### Key Files
@@ -313,20 +313,20 @@ go test ./internal/checkpoint/... -v
 
 3. **Start migration**:
    ```bash
-   ./mssql-pg-migrate -c config.yaml run
+   ./data-transfer-tool -c config.yaml run
    ```
 
 4. **Kill process mid-transfer**: Press Ctrl+C or `kill -9 <pid>` during transfer phase
 
 5. **Check SQLite state**:
    ```bash
-   sqlite3 ~/.mssql-pg-migrate/migrate.db "SELECT * FROM transfer_progress"
-   sqlite3 ~/.mssql-pg-migrate/migrate.db "SELECT * FROM runs WHERE status='running'"
+   sqlite3 ~/.data-transfer-tool/migrate.db "SELECT * FROM transfer_progress"
+   sqlite3 ~/.data-transfer-tool/migrate.db "SELECT * FROM runs WHERE status='running'"
    ```
 
 6. **Resume**:
    ```bash
-   ./mssql-pg-migrate -c config.yaml resume
+   ./data-transfer-tool -c config.yaml resume
    ```
 
 7. **Verify**:
@@ -342,14 +342,14 @@ go test ./internal/checkpoint/... -v
 
 3. **Attempt resume**:
    ```bash
-   ./mssql-pg-migrate -c config.yaml resume
+   ./data-transfer-tool -c config.yaml resume
    ```
 
 4. **Expected**: Error message about config hash mismatch
 
 5. **Force resume** (if needed):
    ```bash
-   ./mssql-pg-migrate -c config.yaml resume --force-resume
+   ./data-transfer-tool -c config.yaml resume --force-resume
    ```
 
 ### Manual Testing: Retry Logic
@@ -374,7 +374,7 @@ go test ./internal/checkpoint/... -v
 
 1. **Create old test runs**:
    ```bash
-   sqlite3 ~/.mssql-pg-migrate/migrate.db "INSERT INTO runs (id, started_at, completed_at, status, source_schema, target_schema) VALUES ('old-run-1', datetime('now', '-60 days'), datetime('now', '-60 days'), 'success', 'dbo', 'public')"
+   sqlite3 ~/.data-transfer-tool/migrate.db "INSERT INTO runs (id, started_at, completed_at, status, source_schema, target_schema) VALUES ('old-run-1', datetime('now', '-60 days'), datetime('now', '-60 days'), 'success', 'dbo', 'public')"
    ```
 
 2. **Configure retention**:
@@ -387,7 +387,7 @@ go test ./internal/checkpoint/... -v
 
 4. **Verify cleanup**:
    ```bash
-   sqlite3 ~/.mssql-pg-migrate/migrate.db "SELECT id FROM runs WHERE id='old-run-1'"
+   sqlite3 ~/.data-transfer-tool/migrate.db "SELECT id FROM runs WHERE id='old-run-1'"
    # Should return no rows
    ```
 
@@ -400,7 +400,7 @@ go test ./internal/checkpoint/... -v
 set -e
 
 CONFIG="examples/config.yaml"
-DB="$HOME/.mssql-pg-migrate/migrate.db"
+DB="$HOME/.data-transfer-tool/migrate.db"
 
 echo "=== Testing Restartability ==="
 
@@ -408,7 +408,7 @@ echo "=== Testing Restartability ==="
 rm -f "$DB"
 
 # 2. Start migration in background
-./mssql-pg-migrate -c "$CONFIG" run &
+./data-transfer-tool -c "$CONFIG" run &
 PID=$!
 sleep 10  # Let it run for a bit
 
@@ -424,7 +424,7 @@ sqlite3 "$DB" "SELECT table_name, rows_done, rows_total FROM transfer_progress L
 
 # 5. Resume
 echo "Resuming..."
-./mssql-pg-migrate -c "$CONFIG" resume
+./data-transfer-tool -c "$CONFIG" resume
 
 # 6. Verify
 echo "Verifying..."
@@ -439,20 +439,20 @@ echo "=== Test Complete ==="
 
 ```bash
 # All runs
-sqlite3 ~/.mssql-pg-migrate/migrate.db "SELECT id, status, phase, started_at FROM runs ORDER BY started_at DESC"
+sqlite3 ~/.data-transfer-tool/migrate.db "SELECT id, status, phase, started_at FROM runs ORDER BY started_at DESC"
 
 # Tasks for a run
-sqlite3 ~/.mssql-pg-migrate/migrate.db "SELECT task_key, status, retry_count FROM tasks WHERE run_id='<run-id>'"
+sqlite3 ~/.data-transfer-tool/migrate.db "SELECT task_key, status, retry_count FROM tasks WHERE run_id='<run-id>'"
 
 # Progress for incomplete transfers
-sqlite3 ~/.mssql-pg-migrate/migrate.db "SELECT tp.table_name, tp.rows_done, tp.rows_total, tp.last_pk FROM transfer_progress tp JOIN tasks t ON tp.task_id = t.id WHERE t.status != 'success'"
+sqlite3 ~/.data-transfer-tool/migrate.db "SELECT tp.table_name, tp.rows_done, tp.rows_total, tp.last_pk FROM transfer_progress tp JOIN tasks t ON tp.task_id = t.id WHERE t.status != 'success'"
 ```
 
 ### Enable Debug Logging
 
 ```bash
 export LOG_LEVEL=debug
-./mssql-pg-migrate -c config.yaml run
+./data-transfer-tool -c config.yaml run
 ```
 
 Debug logs show:

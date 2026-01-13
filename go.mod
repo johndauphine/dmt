@@ -1,4 +1,4 @@
-module github.com/johndauphine/mssql-pg-migrate
+module github.com/johndauphine/data-transfer-tool
 
 go 1.24.0
 

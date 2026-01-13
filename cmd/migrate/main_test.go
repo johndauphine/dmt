@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
+	"github.com/johndauphine/data-transfer-tool/internal/orchestrator"
 	"github.com/urfave/cli/v2"
 )
 

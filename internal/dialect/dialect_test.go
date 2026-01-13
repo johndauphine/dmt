@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
 	// Import driver packages to register dialects
-	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
-	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/postgres"
+	_ "github.com/johndauphine/data-transfer-tool/internal/driver/mssql"
+	_ "github.com/johndauphine/data-transfer-tool/internal/driver/postgres"
 )
 
 func TestGetDialect(t *testing.T) {

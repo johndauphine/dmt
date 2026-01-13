@@ -1,7 +1,7 @@
 package postgres
 
 import (
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
 )
 
 // TypeMapper implements driver.TypeMapper for PostgreSQL.

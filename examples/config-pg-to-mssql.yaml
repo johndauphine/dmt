@@ -3,7 +3,7 @@
 # Usage:
 #   export PG_PASSWORD="your-postgres-password"
 #   export MSSQL_PASSWORD="your-mssql-password"
-#   ./mssql-pg-migrate -c examples/config-pg-to-mssql.yaml run
+#   ./data-transfer-tool -c examples/config-pg-to-mssql.yaml run
 
 source:
   type: postgres

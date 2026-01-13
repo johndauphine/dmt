@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/data-transfer-tool/internal/config"
 )
 
 // Notifier sends notifications to Slack
@@ -81,7 +81,7 @@ func (n *Notifier) MigrationStarted(runID string, sourceDB, targetDB string, tab
 					{Title: "Source", Value: sourceDB, Short: true},
 					{Title: "Target", Value: targetDB, Short: true},
 				},
-				Footer:    "mssql-pg-migrate",
+				Footer:    "data-transfer-tool",
 				Timestamp: time.Now().Unix(),
 			},
 		},
@@ -115,7 +115,7 @@ func (n *Notifier) MigrationCompleted(runID string, startTime time.Time, duratio
 					{Title: "Total Rows", Value: formatNumberWithCommas(rowCount), Short: true},
 					{Title: "Throughput", Value: fmt.Sprintf("%s rows/sec", formatNumberWithCommas(int64(throughput))), Short: true},
 				},
-				Footer:    "mssql-pg-migrate",
+				Footer:    "data-transfer-tool",
 				Timestamp: time.Now().Unix(),
 			},
 		},
@@ -151,7 +151,7 @@ func (n *Notifier) MigrationFailed(runID string, err error, duration time.Durati
 					{Title: "Duration", Value: duration.Round(time.Second).String(), Short: true},
 					{Title: "Error", Value: errMsg, Short: false},
 				},
-				Footer:    "mssql-pg-migrate",
+				Footer:    "data-transfer-tool",
 				Timestamp: time.Now().Unix(),
 			},
 		},
@@ -201,7 +201,7 @@ func (n *Notifier) MigrationCompletedWithErrors(runID string, startTime time.Tim
 					{Title: "Total Rows", Value: formatNumberWithCommas(rowCount), Short: true},
 					{Title: "Failed Tables", Value: failureSummary, Short: false},
 				},
-				Footer:    "mssql-pg-migrate",
+				Footer:    "data-transfer-tool",
 				Timestamp: time.Now().Unix(),
 			},
 		},
@@ -234,7 +234,7 @@ func (n *Notifier) TableTransferFailed(runID, tableName string, err error) error
 					{Title: "Table", Value: tableName, Short: true},
 					{Title: "Error", Value: errMsg, Short: false},
 				},
-				Footer:    "mssql-pg-migrate",
+				Footer:    "data-transfer-tool",
 				Timestamp: time.Now().Unix(),
 			},
 		},
@@ -266,7 +266,7 @@ func (n *Notifier) getUsername() string {
 	if n.config.Username != "" {
 		return n.config.Username
 	}
-	return "mssql-pg-migrate"
+	return "data-transfer-tool"
 }
 
 func formatNumberWithCommas(n int64) string {

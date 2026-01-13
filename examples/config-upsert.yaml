@@ -35,12 +35,12 @@
 # Usage:
 #   # Step 1: Initial load with timestamp recording
 #   # (Add date_updated_columns to your drop_recreate config)
-#   ./mssql-pg-migrate -c config-drop-recreate.yaml run
+#   ./data-transfer-tool -c config-drop-recreate.yaml run
 #
 #   # Step 2: Incremental syncs (uses timestamps from step 1)
 #   export MSSQL_PASSWORD="your-mssql-password"
 #   export PG_PASSWORD="your-postgres-password"
-#   ./mssql-pg-migrate -c examples/config-upsert.yaml run
+#   ./data-transfer-tool -c examples/config-upsert.yaml run
 
 source:
   type: mssql

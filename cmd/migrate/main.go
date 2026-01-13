@@ -12,13 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
-	"github.com/johndauphine/mssql-pg-migrate/internal/exitcodes"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
-	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
-	"github.com/johndauphine/mssql-pg-migrate/internal/tui"
+	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
+	"github.com/johndauphine/data-transfer-tool/internal/config"
+	"github.com/johndauphine/data-transfer-tool/internal/exitcodes"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/orchestrator"
+	"github.com/johndauphine/data-transfer-tool/internal/progress"
+	"github.com/johndauphine/data-transfer-tool/internal/tui"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -28,7 +28,7 @@ var version = "2.27.0"
 
 func main() {
 	app := &cli.App{
-		Name:    "mssql-pg-migrate",
+		Name:    "data-transfer-tool",
 		Usage:   "High-performance MSSQL to PostgreSQL migration",
 		Version: version,
 		Flags: []cli.Flag{

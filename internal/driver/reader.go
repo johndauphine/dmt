@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
+	"github.com/johndauphine/data-transfer-tool/internal/stats"
 )
 
 // Reader represents a database reader that can stream data from source tables.

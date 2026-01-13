@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
 )
 
 // keysetCheckpointCoordinator coordinates checkpointing for keyset pagination

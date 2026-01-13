@@ -5,7 +5,7 @@
 # Usage:
 #   export MSSQL_PASSWORD="YourStrong@Passw0rd"
 #   export PG_PASSWORD="postgres"
-#   ./mssql-pg-migrate -c examples/config-local.yaml run
+#   ./data-transfer-tool -c examples/config-local.yaml run
 
 source:
   host: localhost

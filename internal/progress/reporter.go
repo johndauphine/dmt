@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
 )
 
 // ProgressUpdate represents a JSON progress update for automation/Airflow.

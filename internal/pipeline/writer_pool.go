@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
-	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/progress"
 )
 
 // writerPool manages a pool of parallel write workers.

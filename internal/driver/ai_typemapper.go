@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
 )
 
 // AIProvider represents supported AI providers for type mapping.
@@ -106,7 +106,7 @@ func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AI
 	}
 	if config.CacheFile == "" {
 		homeDir, _ := os.UserHomeDir()
-		config.CacheFile = filepath.Join(homeDir, ".mssql-pg-migrate", "type-cache.json")
+		config.CacheFile = filepath.Join(homeDir, ".data-transfer-tool", "type-cache.json")
 	}
 	config.CacheFile = os.ExpandEnv(config.CacheFile)
 

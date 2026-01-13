@@ -9,14 +9,14 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
 	"gopkg.in/yaml.v3"
 
 	// Import driver packages to trigger init() registration before validation
-	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/mssql"
-	_ "github.com/johndauphine/mssql-pg-migrate/internal/driver/postgres"
+	_ "github.com/johndauphine/data-transfer-tool/internal/driver/mssql"
+	_ "github.com/johndauphine/data-transfer-tool/internal/driver/postgres"
 )
 
 // Type aliases for database configuration types.
@@ -234,7 +234,7 @@ type AITypeMappingConfig struct {
 	Enabled *bool `yaml:"enabled"`
 
 	// CacheFile is the path to the JSON cache file for type mappings.
-	// Defaults to ~/.mssql-pg-migrate/type-cache.json
+	// Defaults to ~/.data-transfer-tool/type-cache.json
 	CacheFile string `yaml:"cache_file"`
 }
 
@@ -327,7 +327,7 @@ func DefaultDataDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".mssql-pg-migrate")
+	dir := filepath.Join(home, ".data-transfer-tool")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
@@ -459,7 +459,7 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Migration.DataDir == "" {
 		home, _ := os.UserHomeDir()
-		c.Migration.DataDir = filepath.Join(home, ".mssql-pg-migrate")
+		c.Migration.DataDir = filepath.Join(home, ".data-transfer-tool")
 	} else {
 		c.Migration.DataDir = expandTilde(c.Migration.DataDir)
 	}

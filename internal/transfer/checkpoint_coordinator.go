@@ -3,7 +3,7 @@ package transfer
 import (
 	"sync/atomic"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
 )
 
 type keysetCheckpointCoordinator struct {

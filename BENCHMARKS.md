@@ -80,13 +80,13 @@ Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent
 
 ```bash
 # Build
-go build -o mssql-pg-migrate .
+go build -o data-transfer-tool .
 
 # MSSQL → PostgreSQL (drop_recreate)
-./mssql-pg-migrate -config benchmark-config.yaml run
+./data-transfer-tool -config benchmark-config.yaml run
 
 # MSSQL → PostgreSQL (upsert)
-./mssql-pg-migrate -config benchmark-upsert.yaml run
+./data-transfer-tool -config benchmark-upsert.yaml run
 ```
 
 ## Configuration

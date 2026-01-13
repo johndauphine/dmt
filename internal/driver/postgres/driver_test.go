@@ -3,7 +3,7 @@ package postgres
 import (
 	"testing"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
 )
 
 func TestDriverRegistration(t *testing.T) {

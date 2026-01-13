@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
+	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
+	"github.com/johndauphine/data-transfer-tool/internal/config"
 )
 
 // ShowStatus displays status of current/last run

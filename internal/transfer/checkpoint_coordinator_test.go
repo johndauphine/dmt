@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/source"
+	"github.com/johndauphine/data-transfer-tool/internal/source"
 )
 
 type fakeSaver struct {

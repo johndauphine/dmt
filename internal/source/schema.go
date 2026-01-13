@@ -2,7 +2,7 @@
 // All types are now defined in the driver package.
 package source
 
-import "github.com/johndauphine/mssql-pg-migrate/internal/driver"
+import "github.com/johndauphine/data-transfer-tool/internal/driver"
 
 // Type aliases for backward compatibility.
 // These allow existing code using source.Table, source.Column, etc.

@@ -9,7 +9,7 @@
 #      export MSSQL_PASSWORD="YourStrong@Passw0rd"
 #      export PG_PASSWORD="postgres"
 #   3. Run migration:
-#      ./mssql-pg-migrate -c examples/config-identifier-test.yaml run
+#      ./data-transfer-tool -c examples/config-identifier-test.yaml run
 #
 # Expected tables created in PostgreSQL:
 #   - useraccounts (from UserAccounts)

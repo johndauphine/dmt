@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
+	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/stats"
 	mssql "github.com/microsoft/go-mssqldb"
 )
 

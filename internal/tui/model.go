@@ -14,10 +14,10 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/orchestrator"
+	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
+	"github.com/johndauphine/data-transfer-tool/internal/config"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/orchestrator"
 	"gopkg.in/yaml.v3"
 )
 

@@ -9,10 +9,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/stats"
+	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/stats"
 )
 
 // sanitizePGIdentifier converts an identifier to PostgreSQL-friendly format.

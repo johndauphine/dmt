@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
-	"github.com/johndauphine/mssql-pg-migrate/internal/source"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/pool"
+	"github.com/johndauphine/data-transfer-tool/internal/source"
 )
 
 // TargetModeStrategy handles mode-specific table preparation and finalization.

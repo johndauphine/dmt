@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
 )
 
 // Dialect implements driver.Dialect for SQL Server.

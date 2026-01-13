@@ -1,9 +1,9 @@
-# mssql-pg-migrate
+# data-transfer-tool
 
-[![CI](https://github.com/johndauphine/mssql-pg-migrate/actions/workflows/ci.yml/badge.svg)](https://github.com/johndauphine/mssql-pg-migrate/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/johndauphine/mssql-pg-migrate)](https://github.com/johndauphine/mssql-pg-migrate/releases/latest)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/mssql-pg-migrate)](https://go.dev/)
-[![License](https://img.shields.io/github/license/johndauphine/mssql-pg-migrate)](LICENSE)
+[![CI](https://github.com/johndauphine/data-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/johndauphine/data-transfer-tool/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/johndauphine/data-transfer-tool)](https://github.com/johndauphine/data-transfer-tool/releases/latest)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/data-transfer-tool)](https://go.dev/)
+[![License](https://img.shields.io/github/license/johndauphine/data-transfer-tool)](LICENSE)
 
 High-performance CLI tool for bidirectional database migration between Microsoft SQL Server and PostgreSQL.
 
@@ -12,7 +12,7 @@ High-performance CLI tool for bidirectional database migration between Microsoft
 Launch the tool without arguments to enter the **Interactive Shell**, a modern TUI designed for ease of use.
 
 ```bash
-./mssql-pg-migrate
+./data-transfer-tool
 ```
 
 ### Features
@@ -38,12 +38,12 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 
 ### Credential Storage (v1.10.0+)
 
-**Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.mssql-pg-migrate/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
+**Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.data-transfer-tool/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
 
 **Recommended actions:**
 1. **Upgrade to v1.43.0 or later** - Includes all security fixes and credential sanitization
 2. **Rotate your database passwords** if you used earlier versions with sensitive credentials
-3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.mssql-pg-migrate/migrate.db`
+3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.data-transfer-tool/migrate.db`
 
 Starting with v1.10.0, credentials are always redacted before being stored.
 
@@ -55,10 +55,10 @@ For large databases with frequent updates, use **date-based incremental loading*
 
 ```bash
 # Step 1: Initial load (fast bulk copy, creates tables)
-./mssql-pg-migrate -c config.yaml run   # target_mode: drop_recreate
+./data-transfer-tool -c config.yaml run   # target_mode: drop_recreate
 
 # Step 2: Incremental syncs (uses highwater marks)
-./mssql-pg-migrate -c config.yaml run   # target_mode: upsert
+./data-transfer-tool -c config.yaml run   # target_mode: upsert
 ```
 
 ### Performance Impact
@@ -87,7 +87,7 @@ migration:
 
 1. **First run**: Full load of all rows, records sync timestamp per table
 2. **Subsequent runs**: Only fetches rows where `date_column > last_sync_timestamp`
-3. **Highwater marks**: Stored automatically in the state database (`~/.mssql-pg-migrate/migrate.db`)
+3. **Highwater marks**: Stored automatically in the state database (`~/.data-transfer-tool/migrate.db`)
 4. **Upsert logic**: INSERTs new rows, UPDATEs changed rows, preserves target-only rows
 
 ### Important Notes
@@ -111,16 +111,16 @@ You can store full configuration profiles (including secrets) encrypted at rest 
 **CLI workflow**
 ```bash
 # Save a profile from YAML (encrypts and stores in SQLite)
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile save --name prod --config config.yaml
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool profile save --name prod --config config.yaml
 
 # List profiles
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile list
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool profile list
 
 # Run using a profile
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate run --profile prod
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool run --profile prod
 
 # Export a profile back to YAML
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./mssql-pg-migrate profile export --name prod --out config.yaml
+MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool profile export --name prod --out config.yaml
 ```
 
 **YAML profile name (optional)**
@@ -145,10 +145,10 @@ Descriptions are shown in `profile list`.
 ```
 
 **Airflow note**
-- Profiles are stored as encrypted blobs in the same SQLite DB (`~/.mssql-pg-migrate/migrate.db` by default).
+- Profiles are stored as encrypted blobs in the same SQLite DB (`~/.data-transfer-tool/migrate.db` by default).
 - In Airflow, you can set `MSSQL_PG_MIGRATE_MASTER_KEY` via your secrets backend and run `profile save` at deploy time, or stick with YAML + env vars for CI/CD.
 - You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
-- On first run, the default data directory (`~/.mssql-pg-migrate`) is created automatically if it does not exist.
+- On first run, the default data directory (`~/.data-transfer-tool`) is created automatically if it does not exist.
 
 ## AI Features
 
@@ -183,7 +183,7 @@ ai:
 
   type_mapping:
     enabled: true                # Auto-enabled when api_key is set
-    cache_file: ~/.mssql-pg-migrate/type-cache.json
+    cache_file: ~/.data-transfer-tool/type-cache.json
 ```
 
 ### AI Type Mapping
@@ -206,7 +206,7 @@ Automatically infers the best target type for unknown or complex source types.
 Analyze your source database and get optimal configuration suggestions:
 
 ```bash
-./mssql-pg-migrate -c config.yaml analyze
+./data-transfer-tool -c config.yaml analyze
 ```
 
 **Output example:**
@@ -244,16 +244,16 @@ For headless environments like Airflow or Kubernetes where SQLite may be impract
 
 ```bash
 # Use a YAML state file instead of SQLite
-./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml run
+./data-transfer-tool -c config.yaml --state-file /tmp/migration-state.yaml run
 
 # Resume using the same state file
-./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml resume
+./data-transfer-tool -c config.yaml --state-file /tmp/migration-state.yaml resume
 
 # Check status
-./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml status
+./data-transfer-tool -c config.yaml --state-file /tmp/migration-state.yaml status
 
 # View history
-./mssql-pg-migrate -c config.yaml --state-file /tmp/migration-state.yaml history
+./data-transfer-tool -c config.yaml --state-file /tmp/migration-state.yaml history
 ```
 
 **State file features:**
@@ -323,7 +323,7 @@ with DAG('mssql_to_pg_migration', start_date=datetime(2025, 1, 1)) as dag:
     migrate = BashOperator(
         task_id='migrate_data',
         bash_command='''
-            /opt/mssql-pg-migrate \
+            /opt/data-transfer-tool \
                 --run-id "{{ dag_run.run_id }}" \
                 --output-json \
                 --output-file /tmp/{{ dag_run.run_id }}_result.json \
@@ -343,9 +343,9 @@ from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import Kubernete
 
 migrate = KubernetesPodOperator(
     task_id='migrate_data',
-    name='mssql-pg-migrate',
-    image='your-registry/mssql-pg-migrate:latest',
-    cmds=['/mssql-pg-migrate'],
+    name='data-transfer-tool',
+    image='your-registry/data-transfer-tool:latest',
+    cmds=['/data-transfer-tool'],
     arguments=[
         '--run-id', '{{ dag_run.run_id }}',
         '--output-json',
@@ -420,7 +420,7 @@ When using `--state-file`, the tool stores a hash of the config at run start. On
 Error: config changed since run started (hash 6abfe692 != 1cddb8e0), use --force-resume to override
 
 # Force resume anyway
-./mssql-pg-migrate --state-file state.yaml -c config.yaml resume --force-resume
+./data-transfer-tool --state-file state.yaml -c config.yaml resume --force-resume
 ```
 
 ### Airflow Sensor Pattern
@@ -434,7 +434,7 @@ import json
 
 def check_migration_status(**context):
     result = subprocess.run([
-        '/opt/mssql-pg-migrate',
+        '/opt/data-transfer-tool',
         '--state-file', f"/tmp/{context['dag_run'].run_id}_state.yaml",
         '-c', '/opt/configs/migration.yaml',
         'status', '--json'
@@ -541,26 +541,26 @@ Previously, all spatial data was converted with hardcoded SRID 4326. Now the act
 
 ### Download pre-built binaries
 
-Download from [GitHub Releases](https://github.com/johndauphine/mssql-pg-migrate/releases/latest):
+Download from [GitHub Releases](https://github.com/johndauphine/data-transfer-tool/releases/latest):
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v2.24.0/mssql-pg-migrate-v2.24.0-linux-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v2.24.0-linux-amd64.tar.gz
-chmod +x mssql-pg-migrate-linux-amd64
-./mssql-pg-migrate-linux-amd64 --version
+curl -LO https://github.com/johndauphine/data-transfer-tool/releases/download/v2.24.0/data-transfer-tool-v2.24.0-linux-amd64.tar.gz
+tar -xzf data-transfer-tool-v2.24.0-linux-amd64.tar.gz
+chmod +x data-transfer-tool-linux-amd64
+./data-transfer-tool-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v2.24.0/mssql-pg-migrate-v2.24.0-darwin-arm64.tar.gz
-tar -xzf mssql-pg-migrate-v2.24.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/data-transfer-tool/releases/download/v2.24.0/data-transfer-tool-v2.24.0-darwin-arm64.tar.gz
+tar -xzf data-transfer-tool-v2.24.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/mssql-pg-migrate/releases/download/v2.24.0/mssql-pg-migrate-v2.24.0-darwin-amd64.tar.gz
-tar -xzf mssql-pg-migrate-v2.24.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/data-transfer-tool/releases/download/v2.24.0/data-transfer-tool-v2.24.0-darwin-amd64.tar.gz
+tar -xzf data-transfer-tool-v2.24.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/mssql-pg-migrate/releases/download/v2.24.0/mssql-pg-migrate-v2.24.0-windows-amd64.tar.gz -OutFile mssql-pg-migrate.tar.gz
-tar -xzf mssql-pg-migrate.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/data-transfer-tool/releases/download/v2.24.0/data-transfer-tool-v2.24.0-windows-amd64.tar.gz -OutFile data-transfer-tool.tar.gz
+tar -xzf data-transfer-tool.tar.gz
 ```
 
 ### Build from source
@@ -568,15 +568,15 @@ tar -xzf mssql-pg-migrate.tar.gz
 Requires Go 1.21+
 
 ```bash
-git clone https://github.com/johndauphine/mssql-pg-migrate.git
-cd mssql-pg-migrate
-CGO_ENABLED=0 go build -o mssql-pg-migrate ./cmd/migrate
+git clone https://github.com/johndauphine/data-transfer-tool.git
+cd data-transfer-tool
+CGO_ENABLED=0 go build -o data-transfer-tool ./cmd/migrate
 ```
 
 ### Go install
 
 ```bash
-go install github.com/johndauphine/mssql-pg-migrate/cmd/migrate@latest
+go install github.com/johndauphine/data-transfer-tool/cmd/migrate@latest
 ```
 
 ## Quick Start
@@ -640,13 +640,13 @@ migration:
 2. Run the migration:
 
 ```bash
-./mssql-pg-migrate -c config.yaml run
+./data-transfer-tool -c config.yaml run
 ```
 
 3. If interrupted, resume:
 
 ```bash
-./mssql-pg-migrate -c config.yaml resume
+./data-transfer-tool -c config.yaml resume
 ```
 
 ## Configuration Reference
@@ -736,7 +736,7 @@ The `migration` section controls how data is transferred.
 |-----------|----------|---------|-------------|
 | `target_mode` | No | `drop_recreate` | How to handle existing tables: `drop_recreate` (drop and recreate) or `upsert` (incremental sync). **Note:** `upsert` requires target tables to already exist - run `drop_recreate` first for initial load. |
 | `date_updated_columns` | No | None | List of column names to check for last-modified date (e.g., `UpdatedAt`, `ModifiedDate`). Enables incremental sync - only rows modified since last sync are transferred. |
-| `data_dir` | No | `~/.mssql-pg-migrate` | Directory for state database and temporary files |
+| `data_dir` | No | `~/.data-transfer-tool` | Directory for state database and temporary files |
 
 **Schema Object Creation:**
 
@@ -779,7 +779,7 @@ The `ai` section configures AI-powered features.
 | `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.0-flash`) |
 | `ai.timeout_seconds` | No | `30` | API request timeout |
 | `ai.type_mapping.enabled` | No | Auto | Enable AI type mapping (auto-enabled when api_key is set) |
-| `ai.type_mapping.cache_file` | No | `~/.mssql-pg-migrate/type-cache.json` | Path to cache AI type mappings |
+| `ai.type_mapping.cache_file` | No | `~/.data-transfer-tool/type-cache.json` | Path to cache AI type mappings |
 | `ai.smart_config.enabled` | No | `false` | Enable smart config detection |
 | `ai.smart_config.detect_date_columns` | No | `true` | Detect date_updated_columns candidates |
 | `ai.smart_config.detect_exclude_tables` | No | `true` | Detect tables to exclude |
@@ -792,7 +792,7 @@ The `ai` section configures AI-powered features.
 | `enabled` | No | `false` | Enable Slack notifications |
 | `webhook_url` | Yes (if enabled) | - | Slack incoming webhook URL |
 | `channel` | No | Webhook default | Channel to post to (e.g., `#data-engineering`) |
-| `username` | No | `mssql-pg-migrate` | Bot username for messages |
+| `username` | No | `data-transfer-tool` | Bot username for messages |
 
 ## Kerberos Authentication
 
@@ -856,7 +856,7 @@ kinit svc_migrate@EXAMPLE.COM
 klist
 
 # Run migration (no password needed)
-./mssql-pg-migrate -c config.yaml run
+./data-transfer-tool -c config.yaml run
 ```
 
 ## Example Configurations
@@ -1095,13 +1095,13 @@ migration:
   sample_size: 500                   # Check 500 rows per table
 
   # State persistence
-  data_dir: /var/lib/mssql-pg-migrate
+  data_dir: /var/lib/data-transfer-tool
 
 slack:
   enabled: true
   webhook_url: ${SLACK_WEBHOOK_URL}
   channel: "#data-migrations"
-  username: mssql-pg-migrate
+  username: data-transfer-tool
 
 ```
 
@@ -1111,25 +1111,25 @@ slack:
 
 ```bash
 # Run a new migration
-./mssql-pg-migrate -c config.yaml run
+./data-transfer-tool -c config.yaml run
 
 # Resume an interrupted migration (continues from last checkpoint)
-./mssql-pg-migrate -c config.yaml resume
+./data-transfer-tool -c config.yaml resume
 
 # Check status of current/last run
-./mssql-pg-migrate -c config.yaml status
+./data-transfer-tool -c config.yaml status
 
 # Validate row counts between source and target
-./mssql-pg-migrate -c config.yaml validate
+./data-transfer-tool -c config.yaml validate
 
 # View migration history
-./mssql-pg-migrate -c config.yaml history
+./data-transfer-tool -c config.yaml history
 
 # View details for a specific run (shows error if failed)
-./mssql-pg-migrate -c config.yaml history --run <run-id>
+./data-transfer-tool -c config.yaml history --run <run-id>
 
 # Analyze source database and get configuration suggestions
-./mssql-pg-migrate -c config.yaml analyze
+./data-transfer-tool -c config.yaml analyze
 ```
 
 ### Headless Mode (Airflow/Kubernetes)
@@ -1138,14 +1138,14 @@ For headless environments, use `--state-file` to store state in a YAML file inst
 
 ```bash
 # Run with state file
-./mssql-pg-migrate -c config.yaml --state-file state.yaml run
+./data-transfer-tool -c config.yaml --state-file state.yaml run
 
 # Resume with state file
-./mssql-pg-migrate -c config.yaml --state-file state.yaml resume
+./data-transfer-tool -c config.yaml --state-file state.yaml resume
 
 # All commands support --state-file
-./mssql-pg-migrate -c config.yaml --state-file state.yaml status
-./mssql-pg-migrate -c config.yaml --state-file state.yaml history
+./data-transfer-tool -c config.yaml --state-file state.yaml status
+./data-transfer-tool -c config.yaml --state-file state.yaml history
 ```
 
 ### Example Output
@@ -1193,7 +1193,7 @@ Votes                          OK 52928720 rows
 
 ## Resume Capability
 
-The tool saves progress to enable efficient resume after failures. By default, state is stored in SQLite (`~/.mssql-pg-migrate/migrate.db`). For headless environments, use `--state-file` for a portable YAML state file.
+The tool saves progress to enable efficient resume after failures. By default, state is stored in SQLite (`~/.data-transfer-tool/migrate.db`). For headless environments, use `--state-file` for a portable YAML state file.
 
 ### Table-level resume
 - Completed tables are skipped entirely on resume
@@ -1211,10 +1211,10 @@ The tool saves progress to enable efficient resume after failures. By default, s
 
 ```bash
 # Resume shows what's being skipped/continued
-./mssql-pg-migrate -c config.yaml resume
+./data-transfer-tool -c config.yaml resume
 
 # Or with state file for Airflow/Kubernetes
-./mssql-pg-migrate -c config.yaml --state-file state.yaml resume
+./data-transfer-tool -c config.yaml --state-file state.yaml resume
 
 # Output:
 # Resuming run: a1b2c3d4 (started 2025-01-15T10:30:00Z)
@@ -1327,7 +1327,7 @@ Performance varies based on:
 
 ## Comparison with Airflow DAG
 
-| Feature | mssql-pg-migrate (Go) | Airflow DAG (Python) |
+| Feature | data-transfer-tool (Go) | Airflow DAG (Python) |
 |---------|----------------------|---------------------|
 | Throughput | 222-645K rows/sec | ~50-80k rows/sec |
 | Memory usage | ~50MB | ~200-400MB |

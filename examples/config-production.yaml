@@ -10,7 +10,7 @@
 #   export MSSQL_PASSWORD="secure-password"
 #   export PG_PASSWORD="secure-password"
 #   export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
-#   ./mssql-pg-migrate -c examples/config-production.yaml run
+#   ./data-transfer-tool -c examples/config-production.yaml run
 
 source:
   type: mssql
@@ -67,11 +67,11 @@ migration:
   sample_size: 500
 
   # State persistence
-  data_dir: /var/lib/mssql-pg-migrate
+  data_dir: /var/lib/data-transfer-tool
 
 # Slack notifications
 slack:
   enabled: true
   webhook_url: ${SLACK_WEBHOOK_URL}
   channel: "#data-migrations"
-  username: mssql-pg-migrate
+  username: data-transfer-tool

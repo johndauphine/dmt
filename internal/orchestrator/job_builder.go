@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
-	"github.com/johndauphine/mssql-pg-migrate/internal/source"
-	"github.com/johndauphine/mssql-pg-migrate/internal/transfer"
+	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
+	"github.com/johndauphine/data-transfer-tool/internal/config"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/pool"
+	"github.com/johndauphine/data-transfer-tool/internal/source"
+	"github.com/johndauphine/data-transfer-tool/internal/transfer"
 )
 
 // JobBuilder creates transfer jobs from tables.

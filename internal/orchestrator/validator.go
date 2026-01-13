@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/source"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/source"
 )
 
 // Validate checks row counts between source and target

@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
 	"github.com/shirou/gopsutil/v3/mem"
 )
 

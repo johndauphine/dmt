@@ -1,4 +1,4 @@
-# Review: mssql-pg-migrate
+# Review: data-transfer-tool
 
 Findings (ordered by severity)
 - MSSQL metadata queries use `STRING_AGG ... WITHIN GROUP`, which fails on SQL Server compatibility levels < 130 (error “Incorrect syntax near '('” seen during runs). Impact: index/foreign key/check metadata is not loaded, so recreate phases may skip those objects. Source: `internal/source/pool.go` (LoadIndexes/LoadForeignKeys/LoadCheckConstraints). Proposal: detect server/compat level and fall back to a STUFF/FOR XML aggregation for 2014/2012, or gate `CreateIndexes/CreateForeignKeys/CreateCheckConstraints` when metadata query fails and surface a clearer warning.

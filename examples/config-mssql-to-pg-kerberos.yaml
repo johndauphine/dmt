@@ -8,7 +8,7 @@
 #   3. Or run: kinit svc_migrate@CORP.EXAMPLE.COM
 #
 # Usage:
-#   ./mssql-pg-migrate -c examples/config-mssql-to-pg-kerberos.yaml run
+#   ./data-transfer-tool -c examples/config-mssql-to-pg-kerberos.yaml run
 
 source:
   type: mssql

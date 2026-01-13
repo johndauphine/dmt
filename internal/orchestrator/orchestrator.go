@@ -14,15 +14,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/johndauphine/mssql-pg-migrate/internal/checkpoint"
-	"github.com/johndauphine/mssql-pg-migrate/internal/config"
-	"github.com/johndauphine/mssql-pg-migrate/internal/driver"
-	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
-	"github.com/johndauphine/mssql-pg-migrate/internal/notify"
-	"github.com/johndauphine/mssql-pg-migrate/internal/pool"
-	"github.com/johndauphine/mssql-pg-migrate/internal/progress"
-	"github.com/johndauphine/mssql-pg-migrate/internal/source"
-	"github.com/johndauphine/mssql-pg-migrate/internal/target"
+	"github.com/johndauphine/data-transfer-tool/internal/checkpoint"
+	"github.com/johndauphine/data-transfer-tool/internal/config"
+	"github.com/johndauphine/data-transfer-tool/internal/driver"
+	"github.com/johndauphine/data-transfer-tool/internal/logging"
+	"github.com/johndauphine/data-transfer-tool/internal/notify"
+	"github.com/johndauphine/data-transfer-tool/internal/pool"
+	"github.com/johndauphine/data-transfer-tool/internal/progress"
+	"github.com/johndauphine/data-transfer-tool/internal/source"
+	"github.com/johndauphine/data-transfer-tool/internal/target"
 )
 
 // TaskType defines the type of migration task

@@ -4,7 +4,7 @@
 package driver
 
 import (
-	"github.com/johndauphine/mssql-pg-migrate/internal/dbconfig"
+	"github.com/johndauphine/data-transfer-tool/internal/dbconfig"
 )
 
 // DriverDefaults contains default values for a database driver.
