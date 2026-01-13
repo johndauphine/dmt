@@ -1112,10 +1112,12 @@ func TestSanitizedRedactsAIAPIKey(t *testing.T) {
 		},
 		Migration: MigrationConfig{
 			TargetMode: "drop_recreate",
-			AITypeMapping: &AITypeMappingConfig{
-				Enabled:  boolPtr(true),
-				Provider: "claude",
-				APIKey:   "sk-ant-api-key-12345",
+		},
+		AI: &AIConfig{
+			Provider: "claude",
+			APIKey:   "sk-ant-api-key-12345",
+			TypeMapping: &AITypeMappingConfig{
+				Enabled: boolPtr(true),
 			},
 		},
 		Slack: SlackConfig{
@@ -1136,15 +1138,15 @@ func TestSanitizedRedactsAIAPIKey(t *testing.T) {
 	if sanitized.Slack.WebhookURL != "[REDACTED]" {
 		t.Errorf("Slack webhook not redacted: %s", sanitized.Slack.WebhookURL)
 	}
-	if sanitized.Migration.AITypeMapping.APIKey != "[REDACTED]" {
-		t.Errorf("AI API key not redacted: %s", sanitized.Migration.AITypeMapping.APIKey)
+	if sanitized.AI.APIKey != "[REDACTED]" {
+		t.Errorf("AI API key not redacted: %s", sanitized.AI.APIKey)
 	}
 
 	// Verify original is unchanged
 	if cfg.Source.Password == "[REDACTED]" {
 		t.Error("Original source password was modified")
 	}
-	if cfg.Migration.AITypeMapping.APIKey == "[REDACTED]" {
+	if cfg.AI.APIKey == "[REDACTED]" {
 		t.Error("Original AI API key was modified")
 	}
 }
@@ -1164,14 +1166,14 @@ func TestSanitizedWithNilAIConfig(t *testing.T) {
 			Password: "secret",
 		},
 		Migration: MigrationConfig{
-			TargetMode:    "drop_recreate",
-			AITypeMapping: nil, // No AI config
+			TargetMode: "drop_recreate",
 		},
+		AI: nil, // No AI config
 	}
 
 	// Should not panic
 	sanitized := cfg.Sanitized()
-	if sanitized.Migration.AITypeMapping != nil {
-		t.Error("Expected AITypeMapping to remain nil")
+	if sanitized.AI != nil {
+		t.Error("Expected AI to remain nil")
 	}
 }

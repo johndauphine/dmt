@@ -144,6 +144,7 @@ type Config struct {
 	Migration MigrationConfig `yaml:"migration"`
 	Slack     SlackConfig     `yaml:"slack"`
 	Profile   ProfileConfig   `yaml:"profile,omitempty"`
+	AI        *AIConfig       `yaml:"ai,omitempty"` // AI-assisted features
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
@@ -194,22 +195,11 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
-	// AI-assisted type mapping for unknown types
-	AITypeMapping *AITypeMappingConfig `yaml:"ai_type_mapping"` // Optional AI-assisted type mapping
 }
 
-// AITypeMappingConfig contains configuration for AI-assisted type mapping.
-// AI type mapping is auto-enabled when api_key is configured.
-type AITypeMappingConfig struct {
-	// Enabled turns AI type mapping on/off.
-	// Auto-enabled when api_key is configured (unless explicitly set to false).
-	Enabled *bool `yaml:"enabled"`
-
-	// Provider specifies which AI provider to use.
-	// Valid values: "claude", "openai", "gemini"
-	// Defaults to "claude" if not specified.
-	Provider string `yaml:"provider"`
-
+// AIConfig contains configuration for all AI-assisted features.
+// AI features are auto-enabled when api_key is configured.
+type AIConfig struct {
 	// APIKey is the API key for the AI provider.
 	// Supports the same secret patterns as passwords:
 	//   ${file:/path/to/key} - read from file (recommended for production)
@@ -218,12 +208,13 @@ type AITypeMappingConfig struct {
 	//   literal value - not recommended, use file or env instead
 	APIKey string `yaml:"api_key"`
 
-	// CacheFile is the path to the JSON cache file for type mappings.
-	// Defaults to ~/.mssql-pg-migrate/type-cache.json
-	CacheFile string `yaml:"cache_file"`
+	// Provider specifies which AI provider to use.
+	// Valid values: "claude", "openai", "gemini"
+	// Defaults to "claude" if not specified.
+	Provider string `yaml:"provider"`
 
 	// Model specifies which model to use (optional).
-	// Defaults to smart models for accurate type inference:
+	// Defaults to smart models for accurate inference:
 	//   Claude: claude-sonnet-4-20250514
 	//   OpenAI: gpt-4o
 	//   Gemini: gemini-2.0-flash
@@ -231,6 +222,39 @@ type AITypeMappingConfig struct {
 
 	// TimeoutSeconds is the API request timeout (default: 30).
 	TimeoutSeconds int `yaml:"timeout_seconds"`
+
+	// TypeMapping configures AI-assisted type mapping for unknown types.
+	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
+
+	// SmartConfig configures AI-assisted configuration detection.
+	SmartConfig *AISmartConfigConfig `yaml:"smart_config"`
+}
+
+// AITypeMappingConfig contains settings specific to AI type mapping.
+type AITypeMappingConfig struct {
+	// Enabled turns AI type mapping on/off.
+	// Auto-enabled when api_key is configured (unless explicitly set to false).
+	Enabled *bool `yaml:"enabled"`
+
+	// CacheFile is the path to the JSON cache file for type mappings.
+	// Defaults to ~/.mssql-pg-migrate/type-cache.json
+	CacheFile string `yaml:"cache_file"`
+}
+
+// AISmartConfigConfig contains settings for AI-assisted configuration detection.
+type AISmartConfigConfig struct {
+	// Enabled turns smart config detection on/off.
+	// Must be explicitly enabled.
+	Enabled *bool `yaml:"enabled"`
+
+	// DetectDateColumns enables detection of date_updated_columns candidates.
+	DetectDateColumns *bool `yaml:"detect_date_columns"`
+
+	// DetectExcludeTables enables detection of tables to exclude (temp, log, archive).
+	DetectExcludeTables *bool `yaml:"detect_exclude_tables"`
+
+	// SuggestChunkSize enables AI-based chunk size recommendations.
+	SuggestChunkSize *bool `yaml:"suggest_chunk_size"`
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -584,21 +608,29 @@ func (c *Config) applyDefaults() {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
 
-	// AI type mapping: auto-enable if api_key is configured and enabled not explicitly set
-	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.APIKey != "" {
-		// Only auto-enable if Enabled is nil (not explicitly set)
-		// This respects explicit enabled: false in config
-		if c.Migration.AITypeMapping.Enabled == nil {
-			enabled := true
-			c.Migration.AITypeMapping.Enabled = &enabled
-		}
+	// AI features: apply defaults when api_key is configured
+	if c.AI != nil && c.AI.APIKey != "" {
 		// Default provider to claude if not specified
-		if c.Migration.AITypeMapping.Provider == "" {
-			c.Migration.AITypeMapping.Provider = "claude"
+		if c.AI.Provider == "" {
+			c.AI.Provider = "claude"
 		}
 		// Normalize provider to lowercase for case-insensitive matching
-		if c.Migration.AITypeMapping.Provider != "" {
-			c.Migration.AITypeMapping.Provider = driver.NormalizeAIProvider(c.Migration.AITypeMapping.Provider)
+		if c.AI.Provider != "" {
+			c.AI.Provider = driver.NormalizeAIProvider(c.AI.Provider)
+		}
+
+		// Type mapping: auto-enable if not explicitly disabled
+		if c.AI.TypeMapping == nil {
+			c.AI.TypeMapping = &AITypeMappingConfig{}
+		}
+		if c.AI.TypeMapping.Enabled == nil {
+			enabled := true
+			c.AI.TypeMapping.Enabled = &enabled
+		}
+
+		// Smart config: defaults (not auto-enabled, must be explicit)
+		if c.AI.SmartConfig == nil {
+			c.AI.SmartConfig = &AISmartConfigConfig{}
 		}
 	}
 }
@@ -688,14 +720,20 @@ func (c *Config) validate() error {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
 
-	// Validate AI type mapping if enabled
-	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled != nil && *c.Migration.AITypeMapping.Enabled {
-		if c.Migration.AITypeMapping.APIKey == "" {
-			return fmt.Errorf("ai_type_mapping.api_key is required when AI type mapping is enabled")
-		}
-		if !driver.IsValidAIProvider(c.Migration.AITypeMapping.Provider) {
-			return fmt.Errorf("ai_type_mapping.provider '%s' is not valid (supported: %v)",
-				c.Migration.AITypeMapping.Provider, driver.ValidAIProviders())
+	// Validate AI configuration
+	if c.AI != nil {
+		// Check if any AI feature is enabled
+		typeMappingEnabled := c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled
+		smartConfigEnabled := c.AI.SmartConfig != nil && c.AI.SmartConfig.Enabled != nil && *c.AI.SmartConfig.Enabled
+
+		if typeMappingEnabled || smartConfigEnabled {
+			if c.AI.APIKey == "" {
+				return fmt.Errorf("ai.api_key is required when AI features are enabled")
+			}
+			if !driver.IsValidAIProvider(c.AI.Provider) {
+				return fmt.Errorf("ai.provider '%s' is not valid (supported: %v)",
+					c.AI.Provider, driver.ValidAIProviders())
+			}
 		}
 	}
 
@@ -854,11 +892,11 @@ func (c *Config) Sanitized() *Config {
 	}
 
 	// Redact AI API key
-	if sanitized.Migration.AITypeMapping != nil && sanitized.Migration.AITypeMapping.APIKey != "" {
+	if sanitized.AI != nil && sanitized.AI.APIKey != "" {
 		// Make a copy to avoid modifying the original
-		aiConfig := *sanitized.Migration.AITypeMapping
+		aiConfig := *sanitized.AI
 		aiConfig.APIKey = "[REDACTED]"
-		sanitized.Migration.AITypeMapping = &aiConfig
+		sanitized.AI = &aiConfig
 	}
 
 	return &sanitized
@@ -1149,25 +1187,38 @@ func (c *Config) DebugDump() string {
 		b.WriteString("  Slack: disabled\n")
 	}
 
-	// AI Type Mapping
-	b.WriteString("\nAI Type Mapping:\n")
-	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled != nil && *c.Migration.AITypeMapping.Enabled {
-		b.WriteString("  Enabled: true\n")
-		b.WriteString(fmt.Sprintf("  Provider: %s\n", c.Migration.AITypeMapping.Provider))
+	// AI Features
+	b.WriteString("\nAI Features:\n")
+	if c.AI != nil && c.AI.APIKey != "" {
+		b.WriteString(fmt.Sprintf("  Provider: %s\n", c.AI.Provider))
 		b.WriteString("  APIKey: [REDACTED]\n")
-		if c.Migration.AITypeMapping.Model != "" {
-			b.WriteString(fmt.Sprintf("  Model: %s\n", c.Migration.AITypeMapping.Model))
+		if c.AI.Model != "" {
+			b.WriteString(fmt.Sprintf("  Model: %s\n", c.AI.Model))
 		} else {
 			b.WriteString("  Model: (provider default)\n")
 		}
-		if c.Migration.AITypeMapping.CacheFile != "" {
-			b.WriteString(fmt.Sprintf("  CacheFile: %s\n", c.Migration.AITypeMapping.CacheFile))
+		if c.AI.TimeoutSeconds > 0 {
+			b.WriteString(fmt.Sprintf("  Timeout: %ds\n", c.AI.TimeoutSeconds))
 		}
-		if c.Migration.AITypeMapping.TimeoutSeconds > 0 {
-			b.WriteString(fmt.Sprintf("  Timeout: %ds\n", c.Migration.AITypeMapping.TimeoutSeconds))
+
+		// Type Mapping
+		if c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled {
+			b.WriteString("  TypeMapping: enabled\n")
+			if c.AI.TypeMapping.CacheFile != "" {
+				b.WriteString(fmt.Sprintf("    CacheFile: %s\n", c.AI.TypeMapping.CacheFile))
+			}
+		} else {
+			b.WriteString("  TypeMapping: disabled\n")
+		}
+
+		// Smart Config
+		if c.AI.SmartConfig != nil && c.AI.SmartConfig.Enabled != nil && *c.AI.SmartConfig.Enabled {
+			b.WriteString("  SmartConfig: enabled\n")
+		} else {
+			b.WriteString("  SmartConfig: disabled\n")
 		}
 	} else {
-		b.WriteString("  Enabled: false\n")
+		b.WriteString("  Disabled (no API key)\n")
 	}
 
 	return b.String()

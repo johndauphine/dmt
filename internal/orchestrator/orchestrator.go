@@ -216,14 +216,14 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 
 	// Convert AI type mapping config if enabled
 	var aiConfig *driver.AITypeMappingConfig
-	if cfg.Migration.AITypeMapping != nil && cfg.Migration.AITypeMapping.Enabled != nil && *cfg.Migration.AITypeMapping.Enabled {
+	if cfg.AI != nil && cfg.AI.TypeMapping != nil && cfg.AI.TypeMapping.Enabled != nil && *cfg.AI.TypeMapping.Enabled {
 		aiConfig = &driver.AITypeMappingConfig{
 			Enabled:        true,
-			Provider:       cfg.Migration.AITypeMapping.Provider,
-			APIKey:         cfg.Migration.AITypeMapping.APIKey,
-			CacheFile:      cfg.Migration.AITypeMapping.CacheFile,
-			Model:          cfg.Migration.AITypeMapping.Model,
-			TimeoutSeconds: cfg.Migration.AITypeMapping.TimeoutSeconds,
+			Provider:       cfg.AI.Provider,
+			APIKey:         cfg.AI.APIKey,
+			CacheFile:      cfg.AI.TypeMapping.CacheFile,
+			Model:          cfg.AI.Model,
+			TimeoutSeconds: cfg.AI.TimeoutSeconds,
 		}
 	}
 
@@ -349,7 +349,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Load additional metadata if enabled
-	aiMappingEnabled := o.config.Migration.AITypeMapping != nil && o.config.Migration.AITypeMapping.Enabled != nil && *o.config.Migration.AITypeMapping.Enabled
+	aiMappingEnabled := o.config.AI != nil && o.config.AI.TypeMapping != nil && o.config.AI.TypeMapping.Enabled != nil && *o.config.AI.TypeMapping.Enabled
 	for i := range tables {
 		t := &tables[i]
 
