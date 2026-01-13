@@ -286,6 +286,22 @@ func main() {
 				},
 			},
 			{
+				Name:   "analyze",
+				Usage:  "Analyze source database and suggest optimal configuration",
+				Action: analyzeConfig,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+					&cli.StringFlag{
+						Name:  "source-schema",
+						Value: "dbo",
+						Usage: "Source schema to analyze",
+					},
+				},
+			},
+			{
 				Name:   "init",
 				Usage:  "Create a new configuration file interactively",
 				Action: initConfig,
@@ -842,6 +858,50 @@ func healthCheck(c *cli.Context) error {
 	if !result.Healthy {
 		return fmt.Errorf("health check failed")
 	}
+	return nil
+}
+
+func analyzeConfig(c *cli.Context) error {
+	cfg, _, _, err := loadConfigWithOrigin(c)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Create source pool to query database
+	opts := orchestrator.Options{
+		StateFile: getStateFile(c),
+	}
+	orch, err := orchestrator.NewWithOptions(cfg, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create orchestrator: %w", err)
+	}
+	defer orch.Close()
+
+	// Get schema to analyze
+	schema := c.String("source-schema")
+	if schema == "" {
+		schema = cfg.Source.Schema
+		if schema == "" {
+			if cfg.Source.Type == "postgres" {
+				schema = "public"
+			} else {
+				schema = "dbo"
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Run smart config analysis
+	suggestions, err := orch.AnalyzeConfig(ctx, schema)
+	if err != nil {
+		return fmt.Errorf("failed to analyze config: %w", err)
+	}
+
+	// Output suggestions
+	fmt.Println(suggestions.FormatYAML())
+
 	return nil
 }
 
