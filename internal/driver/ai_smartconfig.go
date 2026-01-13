@@ -262,10 +262,11 @@ Guidelines (in priority order):
 
 3. read_ahead_buffers: use 8-12 buffers (more than 12 has diminishing returns)
    - Buffers matter less than chunk size - prioritize larger chunks first
-   - Formula: read_ahead_buffers = min(12, available_memory / (workers * 2 * chunk_size * avg_row_bytes))
+   - To derive optimal buffers from memory budget: read_ahead_buffers = available_memory / (workers * chunk_size * avg_row_bytes)
 
 4. PRIORITIZE THROUGHPUT over memory conservation - use up to 50%% of available memory
-   - Estimate memory as: workers * read_ahead_buffers * 2 * chunk_size * avg_row_bytes
+   - Buffer memory formula: workers * read_ahead_buffers * chunk_size * avg_row_bytes
+   - Use this formula to calculate estimated_memory_mb in your response
 
 5. For large datasets (>1M rows), maximize chunk_size first, then adjust buffers to fit memory
 

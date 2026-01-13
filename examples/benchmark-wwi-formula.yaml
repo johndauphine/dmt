@@ -9,7 +9,7 @@ source:
   port: 1435
   database: WideWorldImporters
   user: sa
-  password: "YourStrong@Passw0rd"
+  password: ${MSSQL_PASSWORD}  # Set via environment variable
   schema: Sales
   encrypt: false
   trust_server_cert: true
@@ -20,7 +20,7 @@ target:
   port: 5435
   database: wideworldimporters
   user: postgres
-  password: "PostgresPassword123"
+  password: ${POSTGRES_PASSWORD}  # Set via environment variable
   schema: sales
   ssl_mode: disable
 
