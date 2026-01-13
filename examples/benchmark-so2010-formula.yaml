@@ -1,0 +1,31 @@
+# StackOverflow2010 benchmark - Formula-based auto-tuning
+# Source: mssql-so2010 (port 1433)
+# Target: postgres-target (port 5433)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010
+  user: sa
+  password: ${MSSQL_PASSWORD}  # Set via environment variable
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5433
+  database: stackoverflow
+  user: postgres
+  password: ${POSTGRES_PASSWORD}  # Set via environment variable
+  schema: public
+  ssl_mode: disable
+
+migration:
+  # Let auto-tuning set values based on system specs
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate

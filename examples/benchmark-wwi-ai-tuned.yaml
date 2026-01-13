@@ -1,0 +1,48 @@
+# WideWorldImporters benchmark - AI-suggested tuning
+# Uses AI-recommended values for optimal performance
+# Source: mssql-wwi (port 1435)
+# Target: pg-wwi (port 5435)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: ${MSSQL_PASSWORD}  # Set via environment variable
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: ${POSTGRES_PASSWORD}  # Set via environment variable
+  schema: sales
+  ssl_mode: disable
+
+migration:
+  # AI-suggested values (100K min chunks)
+  workers: 12
+  chunk_size: 100000
+  read_ahead_buffers: 8
+  max_partitions: 12
+  large_table_threshold: 5000000
+
+  create_indexes: false
+  create_foreign_keys: false
+
+  exclude_tables:
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
+
+# AI type mapping disabled for benchmark comparison
+# ai:
+#   api_key: ${file:~/.secrets/anthropic-api-key}
+#   provider: claude
+#   type_mapping:
+#     enabled: true

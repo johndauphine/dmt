@@ -251,13 +251,24 @@ The migration tool uses these parameters:
 - max_partitions: Max parallel partitions for large tables (typically matches workers)
 - large_table_threshold: Row count above which tables get partitioned (typically 1M-10M)
 
-Guidelines:
-- workers should be cores-2 but capped at 12 (diminishing returns beyond)
-- chunk_size should target ~50MB per chunk based on avg_row_bytes
-- read_ahead_buffers should balance memory usage vs throughput
-- Estimate memory as: workers * read_ahead_buffers * 2 * chunk_size * avg_row_bytes
-- For MSSQL sources, slightly smaller chunks work better due to TDS protocol
-- For PostgreSQL sources, larger chunks work well with COPY protocol
+Guidelines (in priority order):
+1. CHUNK SIZE IS THE MOST IMPORTANT PARAMETER - larger chunks = higher throughput
+   - ALWAYS use 100K-200K rows per chunk regardless of dataset size
+   - Minimum chunk_size should be 100000 rows
+   - Only reduce below 100K if avg_row_bytes > 1000 AND memory_gb < 8
+   - Even small datasets benefit from large chunks (reduces per-batch overhead)
+
+2. workers should be cores-2 but capped at 12 (diminishing returns beyond)
+
+3. read_ahead_buffers: use 8-12 buffers (more than 12 has diminishing returns)
+   - Buffers matter less than chunk size - prioritize larger chunks first
+   - To derive optimal buffers from memory budget: read_ahead_buffers = available_memory / (workers * chunk_size * avg_row_bytes)
+
+4. PRIORITIZE THROUGHPUT over memory conservation - use up to 50%% of available memory
+   - Buffer memory formula: workers * read_ahead_buffers * chunk_size * avg_row_bytes
+   - Use this formula to calculate estimated_memory_mb in your response
+
+5. For large datasets (>1M rows), maximize chunk_size first, then adjust buffers to fit memory
 
 Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
 {

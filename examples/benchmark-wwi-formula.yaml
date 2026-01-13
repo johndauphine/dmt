@@ -1,0 +1,38 @@
+# WideWorldImporters benchmark - Formula-based auto-tuning
+# Uses built-in formulas for workers, chunk_size, etc.
+# Source: mssql-wwi (port 1435)
+# Target: pg-wwi (port 5435)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1435
+  database: WideWorldImporters
+  user: sa
+  password: ${MSSQL_PASSWORD}  # Set via environment variable
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5435
+  database: wideworldimporters
+  user: postgres
+  password: ${POSTGRES_PASSWORD}  # Set via environment variable
+  schema: sales
+  ssl_mode: disable
+
+migration:
+  # Let auto-tuning set these based on system specs
+  # workers: auto
+  # chunk_size: auto
+  # read_ahead_buffers: auto
+  create_indexes: false
+  create_foreign_keys: false
+
+  exclude_tables:
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
