@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
@@ -20,6 +21,18 @@ type SmartConfigSuggestions struct {
 
 	// ChunkSizeRecommendation is the suggested chunk size based on table analysis
 	ChunkSizeRecommendation int
+
+	// Auto-tuned performance parameters
+	Workers             int   // Recommended worker count (based on CPU cores)
+	ReadAheadBuffers    int   // Recommended read-ahead buffers
+	MaxPartitions       int   // Recommended max partitions for large tables
+	LargeTableThreshold int64 // Row count threshold for partitioning
+
+	// Database statistics
+	TotalTables    int   // Number of tables analyzed
+	TotalRows      int64 // Total rows across all tables
+	AvgRowSizeBytes int64 // Average row size in bytes
+	EstimatedMemMB int64 // Estimated memory usage with these settings
 
 	// Warnings contains any issues detected during analysis
 	Warnings []string
@@ -59,7 +72,15 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 		return nil, fmt.Errorf("getting tables: %w", err)
 	}
 
-	// Analyze each table
+	// Calculate database statistics
+	s.suggestions.TotalTables = len(tables)
+	var totalRows int64
+	for _, t := range tables {
+		totalRows += t.RowCount
+	}
+	s.suggestions.TotalRows = totalRows
+
+	// Analyze each table for date columns and exclude candidates
 	for _, table := range tables {
 		// Detect date columns
 		dateColumns, err := s.detectDateColumns(ctx, schema, table.Name)
@@ -77,16 +98,105 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 		}
 	}
 
-	// Calculate chunk size recommendation based on largest tables
-	s.suggestions.ChunkSizeRecommendation = s.calculateChunkSize(tables)
+	// Calculate auto-tuned parameters
+	s.calculateAutoTuneParams(tables)
 
 	// Log summary
 	logging.Info("Smart config analysis complete:")
+	logging.Info("  - Tables: %d (%s rows)", s.suggestions.TotalTables, formatRowCount(s.suggestions.TotalRows))
 	logging.Info("  - Tables with date columns: %d", len(s.suggestions.DateColumns))
 	logging.Info("  - Suggested exclude tables: %d", len(s.suggestions.ExcludeTables))
-	logging.Info("  - Recommended chunk size: %d", s.suggestions.ChunkSizeRecommendation)
+	logging.Info("  - Recommended: workers=%d, chunk_size=%d, read_ahead=%d",
+		s.suggestions.Workers, s.suggestions.ChunkSizeRecommendation, s.suggestions.ReadAheadBuffers)
+	logging.Info("  - Estimated memory: %dMB", s.suggestions.EstimatedMemMB)
 
 	return s.suggestions, nil
+}
+
+// calculateAutoTuneParams calculates all auto-tuned performance parameters.
+func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
+	// Workers: based on CPU cores (cores - 2, clamped to 4-12)
+	cores := runtime.NumCPU()
+	s.suggestions.Workers = cores - 2
+	if s.suggestions.Workers < 4 {
+		s.suggestions.Workers = 4
+	}
+	if s.suggestions.Workers > 12 {
+		s.suggestions.Workers = 12
+	}
+
+	// Calculate avg row size from top 5 largest tables (more representative)
+	var totalSize int64
+	var count int
+	for i, t := range tables {
+		if i >= 5 || t.RowCount == 0 {
+			break
+		}
+		if t.AvgRowSizeBytes > 0 {
+			totalSize += t.AvgRowSizeBytes
+			count++
+		}
+	}
+	avgRowSize := int64(500) // Default estimate
+	if count > 0 {
+		avgRowSize = totalSize / int64(count)
+	}
+	// Cap at reasonable max (very wide tables skew estimates)
+	if avgRowSize > 2000 {
+		avgRowSize = 2000
+	}
+	s.suggestions.AvgRowSizeBytes = avgRowSize
+
+	// Chunk size: based on average row size (target ~50MB per chunk)
+	s.suggestions.ChunkSizeRecommendation = s.calculateChunkSize(tables)
+
+	// ReadAheadBuffers: based on memory budget and workers
+	// Target ~200MB total memory, divided by workers and chunk size
+	targetMemoryMB := int64(200)
+	bytesPerChunk := int64(s.suggestions.ChunkSizeRecommendation) * avgRowSize
+	buffersPerWorker := (targetMemoryMB * 1024 * 1024) / int64(s.suggestions.Workers) / bytesPerChunk
+	s.suggestions.ReadAheadBuffers = int(buffersPerWorker)
+	if s.suggestions.ReadAheadBuffers < 2 {
+		s.suggestions.ReadAheadBuffers = 2
+	}
+	if s.suggestions.ReadAheadBuffers > 16 {
+		s.suggestions.ReadAheadBuffers = 16
+	}
+
+	// MaxPartitions: match workers for parallel processing
+	s.suggestions.MaxPartitions = s.suggestions.Workers
+
+	// LargeTableThreshold: tables above this get partitioned
+	// Default 5M, or 10x the largest non-huge table
+	s.suggestions.LargeTableThreshold = 5000000
+	for _, t := range tables {
+		if t.RowCount > 1000000 && t.RowCount < 5000000 {
+			threshold := t.RowCount * 10
+			if threshold > s.suggestions.LargeTableThreshold {
+				s.suggestions.LargeTableThreshold = threshold
+			}
+		}
+	}
+
+	// EstimatedMemoryMB: calculate expected memory usage
+	// Formula: workers * (read_ahead + write_ahead) * chunk_size * avg_row_size
+	totalBuffers := int64(s.suggestions.ReadAheadBuffers) * 2 // read + write queues
+	s.suggestions.EstimatedMemMB = (int64(s.suggestions.Workers) * totalBuffers *
+		int64(s.suggestions.ChunkSizeRecommendation) * avgRowSize) / (1024 * 1024)
+}
+
+// formatRowCount formats large row counts with K/M/B suffixes.
+func formatRowCount(count int64) string {
+	if count >= 1000000000 {
+		return fmt.Sprintf("%.1fB", float64(count)/1000000000)
+	}
+	if count >= 1000000 {
+		return fmt.Sprintf("%.1fM", float64(count)/1000000)
+	}
+	if count >= 1000 {
+		return fmt.Sprintf("%.1fK", float64(count)/1000)
+	}
+	return fmt.Sprintf("%d", count)
 }
 
 // tableInfo holds basic table metadata.
@@ -335,13 +445,24 @@ func (s *SmartConfigAnalyzer) calculateChunkSize(tables []tableInfo) int {
 func (s *SmartConfigSuggestions) FormatYAML() string {
 	var sb strings.Builder
 
-	sb.WriteString("# AI-detected configuration suggestions\n\n")
+	sb.WriteString("# Smart Configuration Suggestions\n")
+	sb.WriteString(fmt.Sprintf("# Database: %d tables, %s rows, ~%d bytes/row avg\n\n",
+		s.TotalTables, formatRowCount(s.TotalRows), s.AvgRowSizeBytes))
+
+	sb.WriteString("migration:\n")
+
+	// Auto-tuned performance parameters
+	sb.WriteString("  # Auto-tuned performance parameters\n")
+	sb.WriteString(fmt.Sprintf("  workers: %d                    # based on CPU cores\n", s.Workers))
+	sb.WriteString(fmt.Sprintf("  chunk_size: %d              # based on avg row size (~50MB/chunk)\n", s.ChunkSizeRecommendation))
+	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d           # based on memory budget\n", s.ReadAheadBuffers))
+	sb.WriteString(fmt.Sprintf("  max_partitions: %d              # matches worker count\n", s.MaxPartitions))
+	sb.WriteString(fmt.Sprintf("  large_table_threshold: %d  # rows before partitioning\n", s.LargeTableThreshold))
+	sb.WriteString(fmt.Sprintf("  # Estimated memory usage: ~%dMB\n\n", s.EstimatedMemMB))
 
 	// Date columns
 	if len(s.DateColumns) > 0 {
-		sb.WriteString("# Recommended date_updated_columns for incremental sync:\n")
-		sb.WriteString("# (Listed in priority order - first match per table is used)\n")
-		sb.WriteString("migration:\n")
+		sb.WriteString("  # Date columns for incremental sync (priority order)\n")
 		sb.WriteString("  date_updated_columns:\n")
 
 		// Collect unique column names in priority order
@@ -364,18 +485,11 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 
 	// Exclude tables
 	if len(s.ExcludeTables) > 0 {
-		sb.WriteString("# Suggested tables to exclude:\n")
+		sb.WriteString("  # Tables to exclude (temp/log/archive patterns)\n")
 		sb.WriteString("  exclude_tables:\n")
 		for _, table := range s.ExcludeTables {
 			sb.WriteString(fmt.Sprintf("    - %s\n", table))
 		}
-		sb.WriteString("\n")
-	}
-
-	// Chunk size
-	if s.ChunkSizeRecommendation > 0 {
-		sb.WriteString(fmt.Sprintf("  # Recommended chunk size based on table analysis\n"))
-		sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", s.ChunkSizeRecommendation))
 		sb.WriteString("\n")
 	}
 
