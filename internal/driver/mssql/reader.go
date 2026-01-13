@@ -386,13 +386,16 @@ func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns [
 		return nil, fmt.Errorf("invalid table name: %w", err)
 	}
 
-	// Build column list with MSSQL NVARCHAR cast
+	// Build column list with MSSQL text conversion
+	// Use TRY_CONVERT which returns NULL instead of failing for unconvertible types
+	// This handles geography/geometry columns gracefully (returns NULL, query doesn't fail)
 	var quotedCols []string
 	for _, col := range columns {
 		if err := driver.ValidateIdentifier(col); err != nil {
 			return nil, fmt.Errorf("invalid column name %s: %w", col, err)
 		}
-		quotedCols = append(quotedCols, fmt.Sprintf("CAST(%s AS NVARCHAR(MAX))", r.dialect.QuoteIdentifier(col)))
+		quotedCol := r.dialect.QuoteIdentifier(col)
+		quotedCols = append(quotedCols, fmt.Sprintf("TRY_CONVERT(NVARCHAR(MAX), %s)", quotedCol))
 	}
 
 	// Query TOP N rows with all columns

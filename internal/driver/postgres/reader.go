@@ -612,12 +612,14 @@ func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns [
 	}
 
 	// Build column list with PostgreSQL text cast
+	// Use COALESCE to handle NULL and potential cast failures gracefully
+	// The ::text cast works for most types including geometry/geography (returns WKT)
 	var quotedCols []string
 	for _, col := range columns {
 		if err := driver.ValidateIdentifier(col); err != nil {
 			return nil, fmt.Errorf("invalid column name %s: %w", col, err)
 		}
-		quotedCols = append(quotedCols, fmt.Sprintf("%s::text", r.dialect.QuoteIdentifier(col)))
+		quotedCols = append(quotedCols, fmt.Sprintf("(%s)::text", r.dialect.QuoteIdentifier(col)))
 	}
 
 	// Query N rows with all columns

@@ -58,6 +58,20 @@ func Get(nameOrAlias string) (Driver, error) {
 	return d, nil
 }
 
+// Canonicalize returns the canonical (primary) driver name for a given name or alias.
+// For example, "sqlserver" returns "mssql", "postgresql" returns "postgres".
+// Returns the input unchanged if no driver matches (case-insensitive lookup).
+func Canonicalize(nameOrAlias string) string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	d, exists := drivers[strings.ToLower(nameOrAlias)]
+	if !exists {
+		return nameOrAlias
+	}
+	return d.Name()
+}
+
 // Available returns a sorted list of registered driver names.
 // This includes only primary names, not aliases.
 func Available() []string {

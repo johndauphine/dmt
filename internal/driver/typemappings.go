@@ -276,6 +276,77 @@ func LookupPostgresToMSSQL(pgType string, maxLength, precision, scale int) strin
 	return "nvarchar(max)"
 }
 
+// IsKnownMSSQLType returns true if the MSSQL type has a known static mapping to PostgreSQL.
+func IsKnownMSSQLType(mssqlType string) bool {
+	mssqlType = strings.ToLower(mssqlType)
+
+	// Check simple mappings
+	for _, m := range SimpleTypeMappings {
+		if strings.EqualFold(m.MSSQL, mssqlType) {
+			return true
+		}
+	}
+
+	// Check sized mappings
+	for _, m := range SizedTypeMappings {
+		if strings.EqualFold(m.MSSQL, mssqlType) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// IsKnownPostgresType returns true if the PostgreSQL type has a known static mapping to MSSQL.
+func IsKnownPostgresType(pgType string) bool {
+	pgType = strings.ToLower(pgType)
+
+	// Resolve aliases first
+	if canonical, ok := PostgresAliases[pgType]; ok {
+		pgType = canonical
+	}
+
+	// Check direct mappings
+	if _, ok := PostgresToMSSQLMappings[pgType]; ok {
+		return true
+	}
+
+	// Check known types with special handling
+	knownTypes := []string{"varchar", "char", "numeric", "decimal", "bit"}
+	for _, known := range knownTypes {
+		if pgType == known {
+			return true
+		}
+	}
+
+	// Check array types (known pattern)
+	if strings.HasSuffix(pgType, "[]") || strings.HasPrefix(pgType, "_") {
+		return true
+	}
+
+	return false
+}
+
+// IsTypeKnown returns true if there's a static mapping for this type conversion.
+// Handles DB type aliases (e.g., "sqlserver" -> "mssql", "postgresql" -> "postgres").
+func IsTypeKnown(sourceType, sourceDB, targetDB string) bool {
+	// Canonicalize DB type names to handle aliases
+	sourceDB = Canonicalize(sourceDB)
+	targetDB = Canonicalize(targetDB)
+
+	switch {
+	case sourceDB == "mssql" && targetDB == "postgres":
+		return IsKnownMSSQLType(sourceType)
+	case sourceDB == "postgres" && targetDB == "mssql":
+		return IsKnownPostgresType(sourceType)
+	case sourceDB == targetDB:
+		// Same DB type - normalization, always "known"
+		return true
+	default:
+		return false
+	}
+}
+
 // NormalizePostgresType returns the canonical PostgreSQL type representation.
 func NormalizePostgresType(pgType string, maxLength, precision, scale int) string {
 	pgType = strings.ToLower(pgType)
