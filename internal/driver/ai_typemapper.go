@@ -471,7 +471,7 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
 	reqBody := claudeRequest{
 		Model:     m.config.Model,
-		MaxTokens: 100,
+		MaxTokens: 1024, // Enough for auto-tune JSON with reasoning
 		Messages: []claudeMessage{
 			{Role: "user", Content: prompt},
 		},

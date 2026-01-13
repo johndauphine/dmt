@@ -291,6 +291,12 @@ func main() {
 				Action: analyzeConfig,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
+					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
 					},
