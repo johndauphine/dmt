@@ -139,19 +139,12 @@ func NewAITypeMapper(config AITypeMappingConfig, fallbackMapper TypeMapper) (*AI
 	return mapper, nil
 }
 
-// MapType maps a source type to the target type.
-// It first checks if there's a known static mapping - if so, uses that (no API call).
-// Only calls AI for types NOT covered by static mappings.
+// MapType maps a source type to the target type using AI-first with aggressive caching.
+// This approach maximizes database agnosticism - AI determines mappings, cache prevents
+// repeated API calls. Static mappings are only used as fallback when AI fails.
 // This method is safe to call concurrently - it uses in-flight request tracking
 // to avoid duplicate API calls for the same type.
 func (m *AITypeMapper) MapType(info TypeInfo) string {
-	// FIRST: Check if static mapper knows this type (avoid unnecessary AI calls)
-	if IsTypeKnown(info.DataType, info.SourceDBType, info.TargetDBType) {
-		// Use static mapper - no AI needed for known types
-		return m.fallback(info)
-	}
-
-	// Type is unknown to static mapper - use AI
 	cacheKey := m.cacheKey(info)
 
 	// Check cache first (fast path)
@@ -192,8 +185,8 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 	}
 	m.cacheMu.RUnlock()
 
-	// Log that we're calling AI for an unknown type
-	logging.Info("Unknown type %s.%s -> %s, consulting AI...", info.SourceDBType, info.DataType, info.TargetDBType)
+	// Log that we're calling AI (not in cache)
+	logging.Debug("AI type mapping: %s.%s -> %s (not cached, calling API)", info.SourceDBType, info.DataType, info.TargetDBType)
 
 	// Call AI API
 	result, err := m.queryAI(info)
