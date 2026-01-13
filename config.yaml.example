@@ -45,7 +45,7 @@ migration:
     - temp_*        # Temporary tables
 
   # Directory for state database and logs
-  data_dir: ~/.mssql-pg-migrate
+  data_dir: ~/.data-transfer-tool
 
   # Target table handling: "drop_recreate" (default) or "upsert"
   # - drop_recreate: Drop and recreate tables (ensures schema changes are applied)
@@ -69,4 +69,4 @@ slack:
   enabled: false
   webhook_url: ${SLACK_WEBHOOK_URL}
   channel: "#data-engineering"
-  username: mssql-pg-migrate
+  username: data-transfer-tool

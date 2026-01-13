@@ -85,7 +85,7 @@ examples/                   # Example configuration files
 
 ### Encrypted Profiles
 - Profiles stored in SQLite with AES-GCM encryption
-- Master key via `MSSQL_PG_MIGRATE_MASTER_KEY` environment variable (base64 32-byte key)
+- Master key via `DATA_TRANSFER_TOOL_MASTER_KEY` environment variable (base64 32-byte key)
 - Profile CRUD: `/profile save`, `/profile list`, `/profile load`, `/profile delete`
 - Run history tracks whether run came from profile or config file
 
@@ -272,7 +272,7 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o data-transfer-tool-darwin ./c
 - `config.DefaultDataDir()` - Get default data directory
 
 ### Profile Encryption
-- Master key from `MSSQL_PG_MIGRATE_MASTER_KEY` (base64 encoded 32-byte key)
+- Master key from `DATA_TRANSFER_TOOL_MASTER_KEY` (base64 encoded 32-byte key)
 - Generate key: `openssl rand -base64 32`
 - Profiles encrypted at rest, decrypted only when loaded
 

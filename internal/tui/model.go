@@ -2255,8 +2255,8 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 			defer state.Close()
 
 			if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
-				if strings.Contains(err.Error(), "MSSQL_PG_MIGRATE_MASTER_KEY is not set") {
-					p.Send(OutputMsg("Error saving profile: MSSQL_PG_MIGRATE_MASTER_KEY is not set. Start the TUI with the env var set.\n"))
+				if strings.Contains(err.Error(), "DATA_TRANSFER_TOOL_MASTER_KEY is not set") {
+					p.Send(OutputMsg("Error saving profile: DATA_TRANSFER_TOOL_MASTER_KEY is not set. Start the TUI with the env var set.\n"))
 					return
 				}
 				p.Send(OutputMsg(fmt.Sprintf("Error saving profile: %v\n", err)))

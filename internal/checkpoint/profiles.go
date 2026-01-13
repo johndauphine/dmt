@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	masterKeyEnv     = "MSSQL_PG_MIGRATE_MASTER_KEY"
+	masterKeyEnv     = "DATA_TRANSFER_TOOL_MASTER_KEY"
 	profileCipherV1  = byte(1)
 	minCipherPayload = 1 + 12 // version + nonce
 )

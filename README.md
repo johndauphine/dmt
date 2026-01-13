@@ -101,7 +101,7 @@ migration:
 You can store full configuration profiles (including secrets) encrypted at rest inside the same SQLite database used for run history.
 
 **Master key**
-- Set `MSSQL_PG_MIGRATE_MASTER_KEY` to a **base64-encoded 32-byte key**.
+- Set `DATA_TRANSFER_TOOL_MASTER_KEY` to a **base64-encoded 32-byte key**.
 - Example key generation (POSIX):
   ```bash
   openssl rand -base64 32
@@ -111,16 +111,16 @@ You can store full configuration profiles (including secrets) encrypted at rest 
 **CLI workflow**
 ```bash
 # Save a profile from YAML (encrypts and stores in SQLite)
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool profile save --name prod --config config.yaml
+DATA_TRANSFER_TOOL_MASTER_KEY=... ./data-transfer-tool profile save --name prod --config config.yaml
 
 # List profiles
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool profile list
+DATA_TRANSFER_TOOL_MASTER_KEY=... ./data-transfer-tool profile list
 
 # Run using a profile
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool run --profile prod
+DATA_TRANSFER_TOOL_MASTER_KEY=... ./data-transfer-tool run --profile prod
 
 # Export a profile back to YAML
-MSSQL_PG_MIGRATE_MASTER_KEY=... ./data-transfer-tool profile export --name prod --out config.yaml
+DATA_TRANSFER_TOOL_MASTER_KEY=... ./data-transfer-tool profile export --name prod --out config.yaml
 ```
 
 **YAML profile name (optional)**
@@ -146,7 +146,7 @@ Descriptions are shown in `profile list`.
 
 **Airflow note**
 - Profiles are stored as encrypted blobs in the same SQLite DB (`~/.data-transfer-tool/migrate.db` by default).
-- In Airflow, you can set `MSSQL_PG_MIGRATE_MASTER_KEY` via your secrets backend and run `profile save` at deploy time, or stick with YAML + env vars for CI/CD.
+- In Airflow, you can set `DATA_TRANSFER_TOOL_MASTER_KEY` via your secrets backend and run `profile save` at deploy time, or stick with YAML + env vars for CI/CD.
 - You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
 - On first run, the default data directory (`~/.data-transfer-tool`) is created automatically if it does not exist.
 
