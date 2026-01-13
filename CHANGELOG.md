@@ -2,12 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.28.0] - 2026-01-13
+## [3.0.0] - 2026-01-13
+
+### Breaking Changes
+- **Renamed environment variable** - `DATA_TRANSFER_TOOL_MASTER_KEY` → `DMT_MASTER_KEY` for profile encryption
+- **Default Slack username** - Changed from `data-transfer-tool` to `dmt`
 
 ### Changed
-- **Renamed environment variable** - `DATA_TRANSFER_TOOL_MASTER_KEY` → `DMT_MASTER_KEY` for profile encryption
 - **Updated TUI branding** - New ASCII art logo and version display
 - **Centralized version** - Version now managed in `internal/version` package
+- **Updated all references** - Makefile, README, docs, and config examples now use `dmt`
 
 ### Added
 - **Tests for notify package** - 37 test cases covering Slack notifications, error handling, and formatting
