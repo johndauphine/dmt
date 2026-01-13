@@ -18,6 +18,7 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/tui"
 	"github.com/johndauphine/dmt/internal/version"
 	"github.com/urfave/cli/v2"
@@ -356,6 +357,18 @@ func main() {
 						Name:    "force",
 						Aliases: []string{"f"},
 						Usage:   "Overwrite existing file",
+					},
+				},
+			},
+			{
+				Name:   "init-secrets",
+				Usage:  "Create a secrets file for API keys and encryption",
+				Action: initSecrets,
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:    "force",
+						Aliases: []string{"f"},
+						Usage:   "Overwrite existing secrets file",
 					},
 				},
 			},
@@ -981,6 +994,44 @@ func initConfig(c *cli.Context) error {
 	}
 
 	fmt.Printf("Configuration saved to %s\n", outputPath)
+	return nil
+}
+
+// initSecrets creates a secrets file for API keys and encryption
+func initSecrets(c *cli.Context) error {
+	force := c.Bool("force")
+
+	// Ensure secrets directory exists
+	secretsDir, err := secrets.EnsureSecretsDir()
+	if err != nil {
+		return fmt.Errorf("creating secrets directory: %w", err)
+	}
+
+	secretsPath := secrets.GetSecretsPath()
+
+	// Check if file exists (unless --force)
+	if !force {
+		if _, err := os.Stat(secretsPath); err == nil {
+			return fmt.Errorf("secrets file %s already exists (use --force to overwrite)", secretsPath)
+		}
+	}
+
+	// Generate template
+	template := secrets.GenerateTemplate()
+
+	// Write with secure permissions
+	if err := os.WriteFile(secretsPath, []byte(template), 0600); err != nil {
+		return fmt.Errorf("writing secrets file: %w", err)
+	}
+
+	fmt.Printf("Secrets file created: %s\n", secretsPath)
+	fmt.Printf("Directory: %s (permissions: 0700)\n", secretsDir)
+	fmt.Println("\nNext steps:")
+	fmt.Println("1. Edit the file to add your AI provider API key")
+	fmt.Println("2. Set encryption.master_key for profile encryption:")
+	fmt.Println("   Generate with: openssl rand -base64 32")
+	fmt.Println("\nIMPORTANT: Keep this file secure and never commit it to version control!")
+
 	return nil
 }
 

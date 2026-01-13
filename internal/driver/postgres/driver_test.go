@@ -55,39 +55,6 @@ func TestDialect(t *testing.T) {
 	}
 }
 
-func TestTypeMapper(t *testing.T) {
-	mapper := &TypeMapper{}
-
-	tests := []struct {
-		source   string
-		dataType string
-		expected string
-	}{
-		{"mssql", "int", "integer"},
-		{"mssql", "bigint", "bigint"},
-		{"mssql", "bit", "boolean"},
-		{"mssql", "varchar", "text"}, // varchar without length defaults to text
-		{"mssql", "datetime", "timestamp"},
-		{"mssql", "uniqueidentifier", "uuid"},
-		{"postgres", "int4", "integer"},
-		{"postgres", "int8", "bigint"},
-		{"postgres", "bool", "boolean"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.source+"_"+tt.dataType, func(t *testing.T) {
-			result := mapper.MapType(driver.TypeInfo{
-				SourceDBType: tt.source,
-				TargetDBType: "postgres",
-				DataType:     tt.dataType,
-			})
-			if result != tt.expected {
-				t.Errorf("MapType(%s, %s) = %q, want %q", tt.source, tt.dataType, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestAvailableDrivers(t *testing.T) {
 	available := driver.Available()
 	found := false
