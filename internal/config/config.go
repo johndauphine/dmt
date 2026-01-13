@@ -222,9 +222,11 @@ type AITypeMappingConfig struct {
 	// Defaults to ~/.mssql-pg-migrate/type-cache.json
 	CacheFile string `yaml:"cache_file"`
 
-	// Model specifies which model to use (optional, uses provider default).
-	// Claude: "claude-3-haiku-20240307" (default), "claude-3-sonnet-20240229"
-	// OpenAI: "gpt-4o-mini" (default), "gpt-4o"
+	// Model specifies which model to use (optional).
+	// Defaults to smart models for accurate type inference:
+	//   Claude: claude-sonnet-4-20250514
+	//   OpenAI: gpt-4o
+	//   Gemini: gemini-2.0-flash
 	Model string `yaml:"model"`
 
 	// TimeoutSeconds is the API request timeout (default: 30).
