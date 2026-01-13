@@ -33,13 +33,23 @@ func ValidAIProviders() []string {
 	return []string{string(ProviderClaude), string(ProviderOpenAI), string(ProviderGemini)}
 }
 
-// IsValidAIProvider returns true if the provider name is valid.
+// IsValidAIProvider returns true if the provider name is valid (case-insensitive).
 func IsValidAIProvider(provider string) bool {
-	switch AIProvider(provider) {
+	switch AIProvider(strings.ToLower(provider)) {
 	case ProviderClaude, ProviderOpenAI, ProviderGemini:
 		return true
 	}
 	return false
+}
+
+// NormalizeAIProvider returns the canonical lowercase provider name.
+// Returns empty string if the provider is invalid.
+func NormalizeAIProvider(provider string) string {
+	normalized := strings.ToLower(provider)
+	if IsValidAIProvider(normalized) {
+		return normalized
+	}
+	return ""
 }
 
 // AITypeMappingConfig contains configuration for AI-assisted type mapping.

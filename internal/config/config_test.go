@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+// boolPtr returns a pointer to a bool value for use in tests.
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func TestMSSQLDSNURLEncoding(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1108,7 +1113,7 @@ func TestSanitizedRedactsAIAPIKey(t *testing.T) {
 		Migration: MigrationConfig{
 			TargetMode: "drop_recreate",
 			AITypeMapping: &AITypeMappingConfig{
-				Enabled:  true,
+				Enabled:  boolPtr(true),
 				Provider: "claude",
 				APIKey:   "sk-ant-api-key-12345",
 			},

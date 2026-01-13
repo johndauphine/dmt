@@ -216,9 +216,9 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 
 	// Convert AI type mapping config if enabled
 	var aiConfig *driver.AITypeMappingConfig
-	if cfg.Migration.AITypeMapping != nil && cfg.Migration.AITypeMapping.Enabled {
+	if cfg.Migration.AITypeMapping != nil && cfg.Migration.AITypeMapping.Enabled != nil && *cfg.Migration.AITypeMapping.Enabled {
 		aiConfig = &driver.AITypeMappingConfig{
-			Enabled:        cfg.Migration.AITypeMapping.Enabled,
+			Enabled:        true,
 			Provider:       cfg.Migration.AITypeMapping.Provider,
 			APIKey:         cfg.Migration.AITypeMapping.APIKey,
 			CacheFile:      cfg.Migration.AITypeMapping.CacheFile,
@@ -349,7 +349,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Load additional metadata if enabled
-	aiMappingEnabled := o.config.Migration.AITypeMapping != nil && o.config.Migration.AITypeMapping.Enabled
+	aiMappingEnabled := o.config.Migration.AITypeMapping != nil && o.config.Migration.AITypeMapping.Enabled != nil && *o.config.Migration.AITypeMapping.Enabled
 	for i := range tables {
 		t := &tables[i]
 

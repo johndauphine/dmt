@@ -625,3 +625,61 @@ func TestAITypeMapper_BuildPromptRedactsPII(t *testing.T) {
 		t.Error("prompt should contain [PHONE] redaction marker")
 	}
 }
+
+func TestIsValidAIProvider_CaseInsensitive(t *testing.T) {
+	tests := []struct {
+		provider string
+		valid    bool
+	}{
+		{"claude", true},
+		{"Claude", true},
+		{"CLAUDE", true},
+		{"openai", true},
+		{"OpenAI", true},
+		{"OPENAI", true},
+		{"gemini", true},
+		{"Gemini", true},
+		{"GEMINI", true},
+		{"invalid", false},
+		{"gpt", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			result := IsValidAIProvider(tt.provider)
+			if result != tt.valid {
+				t.Errorf("IsValidAIProvider(%q) = %v, want %v", tt.provider, result, tt.valid)
+			}
+		})
+	}
+}
+
+func TestNormalizeAIProvider(t *testing.T) {
+	tests := []struct {
+		provider string
+		expected string
+	}{
+		{"claude", "claude"},
+		{"Claude", "claude"},
+		{"CLAUDE", "claude"},
+		{"openai", "openai"},
+		{"OpenAI", "openai"},
+		{"OPENAI", "openai"},
+		{"gemini", "gemini"},
+		{"Gemini", "gemini"},
+		{"GEMINI", "gemini"},
+		{"invalid", ""},
+		{"gpt", ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			result := NormalizeAIProvider(tt.provider)
+			if result != tt.expected {
+				t.Errorf("NormalizeAIProvider(%q) = %q, want %q", tt.provider, result, tt.expected)
+			}
+		})
+	}
+}

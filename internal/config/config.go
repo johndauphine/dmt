@@ -202,8 +202,8 @@ type MigrationConfig struct {
 // AI type mapping is auto-enabled when api_key is configured.
 type AITypeMappingConfig struct {
 	// Enabled turns AI type mapping on/off.
-	// Auto-enabled when api_key is configured.
-	Enabled bool `yaml:"enabled"`
+	// Auto-enabled when api_key is configured (unless explicitly set to false).
+	Enabled *bool `yaml:"enabled"`
 
 	// Provider specifies which AI provider to use.
 	// Valid values: "claude", "openai", "gemini"
@@ -584,12 +584,21 @@ func (c *Config) applyDefaults() {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
 
-	// AI type mapping: auto-enable if api_key is configured
+	// AI type mapping: auto-enable if api_key is configured and enabled not explicitly set
 	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.APIKey != "" {
-		c.Migration.AITypeMapping.Enabled = true
+		// Only auto-enable if Enabled is nil (not explicitly set)
+		// This respects explicit enabled: false in config
+		if c.Migration.AITypeMapping.Enabled == nil {
+			enabled := true
+			c.Migration.AITypeMapping.Enabled = &enabled
+		}
 		// Default provider to claude if not specified
 		if c.Migration.AITypeMapping.Provider == "" {
 			c.Migration.AITypeMapping.Provider = "claude"
+		}
+		// Normalize provider to lowercase for case-insensitive matching
+		if c.Migration.AITypeMapping.Provider != "" {
+			c.Migration.AITypeMapping.Provider = driver.NormalizeAIProvider(c.Migration.AITypeMapping.Provider)
 		}
 	}
 }
@@ -680,7 +689,7 @@ func (c *Config) validate() error {
 	}
 
 	// Validate AI type mapping if enabled
-	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled {
+	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled != nil && *c.Migration.AITypeMapping.Enabled {
 		if c.Migration.AITypeMapping.APIKey == "" {
 			return fmt.Errorf("ai_type_mapping.api_key is required when AI type mapping is enabled")
 		}
@@ -1142,7 +1151,7 @@ func (c *Config) DebugDump() string {
 
 	// AI Type Mapping
 	b.WriteString("\nAI Type Mapping:\n")
-	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled {
+	if c.Migration.AITypeMapping != nil && c.Migration.AITypeMapping.Enabled != nil && *c.Migration.AITypeMapping.Enabled {
 		b.WriteString("  Enabled: true\n")
 		b.WriteString(fmt.Sprintf("  Provider: %s\n", c.Migration.AITypeMapping.Provider))
 		b.WriteString("  APIKey: [REDACTED]\n")
