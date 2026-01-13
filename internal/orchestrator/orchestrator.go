@@ -73,6 +73,10 @@ type Options struct {
 
 	// ForceResume bypasses config hash validation on resume.
 	ForceResume bool
+
+	// SourceOnly creates orchestrator with only source pool (for analyze command).
+	// When true, target pool is not created and analyze operations only work.
+	SourceOnly bool
 }
 
 // computeConfigHash returns a short hex hash of the sanitized config.
@@ -214,6 +218,15 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating source pool: %w", err)
 	}
 
+	// For source-only mode (analyze command), skip target/state/notifier
+	if opts.SourceOnly {
+		return &Orchestrator{
+			config:     cfg,
+			sourcePool: sourcePool,
+			opts:       opts,
+		}, nil
+	}
+
 	// Convert AI type mapping config if enabled
 	var aiConfig *driver.AITypeMappingConfig
 	if cfg.AI != nil && cfg.AI.TypeMapping != nil && cfg.AI.TypeMapping.Enabled != nil && *cfg.AI.TypeMapping.Enabled {
@@ -294,9 +307,15 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 
 // Close releases all resources
 func (o *Orchestrator) Close() {
-	o.sourcePool.Close()
-	o.targetPool.Close()
-	o.state.Close()
+	if o.sourcePool != nil {
+		o.sourcePool.Close()
+	}
+	if o.targetPool != nil {
+		o.targetPool.Close()
+	}
+	if o.state != nil {
+		o.state.Close()
+	}
 }
 
 // SetRunContext sets metadata for the current run (profile name or config path).

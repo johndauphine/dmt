@@ -294,11 +294,6 @@ func main() {
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
 					},
-					&cli.StringFlag{
-						Name:  "source-schema",
-						Value: "dbo",
-						Usage: "Source schema to analyze",
-					},
 				},
 			},
 			{
@@ -867,9 +862,9 @@ func analyzeConfig(c *cli.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Create source pool to query database
+	// Create source-only orchestrator (no target connection needed)
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		SourceOnly: true,
 	}
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
@@ -877,16 +872,13 @@ func analyzeConfig(c *cli.Context) error {
 	}
 	defer orch.Close()
 
-	// Get schema to analyze
-	schema := c.String("source-schema")
+	// Get schema from config (default to dbo/public based on source type)
+	schema := cfg.Source.Schema
 	if schema == "" {
-		schema = cfg.Source.Schema
-		if schema == "" {
-			if cfg.Source.Type == "postgres" {
-				schema = "public"
-			} else {
-				schema = "dbo"
-			}
+		if cfg.Source.Type == "postgres" {
+			schema = "public"
+		} else {
+			schema = "dbo"
 		}
 	}
 

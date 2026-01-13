@@ -92,6 +92,7 @@ var availableCommands = []commandInfo{
 	{"/run", "Start migration (default: config.yaml)"},
 	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
+	{"/analyze", "Analyze source database and suggest config"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/wizard", "Launch configuration wizard"},
@@ -990,7 +991,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -1528,6 +1529,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume [config_file] Resume an interrupted migration
   /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
+  /analyze [config_file] Analyze source database and suggest configuration
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
@@ -1642,6 +1644,10 @@ Built with Go and Bubble Tea.`
 
 	case "/profile":
 		return m.handleProfileCommand(parts)
+
+	case "/analyze":
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runAnalyzeCmd(configFile, profileName)
 
 	default:
 		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
@@ -1861,6 +1867,66 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 				return
 			}
 			p.Send(OutputMsg(out + "Validation passed!\n"))
+		}()
+
+		return nil
+	}
+}
+
+func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
+	return func() tea.Msg {
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
+		}
+
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			origin := "config: " + configFile
+			if profileName != "" {
+				origin = "profile: " + profileName
+			}
+			out := fmt.Sprintf("Analyzing with %s\n", origin)
+			p.Send(OutputMsg(out))
+
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+
+			// Create source-only orchestrator (no target connection needed)
+			opts := orchestrator.Options{
+				SourceOnly: true,
+			}
+			orch, err := orchestrator.NewWithOptions(cfg, opts)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			defer orch.Close()
+
+			// Get schema from config
+			schema := cfg.Source.Schema
+			if schema == "" {
+				if cfg.Source.Type == "postgres" {
+					schema = "public"
+				} else {
+					schema = "dbo"
+				}
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			suggestions, err := orch.AnalyzeConfig(ctx, schema)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+
+			// Output suggestions in a box
+			p.Send(BoxedOutputMsg(suggestions.FormatYAML()))
 		}()
 
 		return nil
