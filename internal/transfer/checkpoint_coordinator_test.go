@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/johndauphine/data-migration-tool/internal/source"
+	"github.com/johndauphine/dmt/internal/source"
 )
 
 type fakeSaver struct {

@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // keysetCheckpointCoordinator coordinates checkpointing for keyset pagination

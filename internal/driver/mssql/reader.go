@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
-	"github.com/johndauphine/data-migration-tool/internal/driver"
-	"github.com/johndauphine/data-migration-tool/internal/logging"
-	"github.com/johndauphine/data-migration-tool/internal/stats"
-	"github.com/johndauphine/data-migration-tool/internal/util"
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/stats"
+	"github.com/johndauphine/dmt/internal/util"
 	_ "github.com/microsoft/go-mssqldb"
 )
 

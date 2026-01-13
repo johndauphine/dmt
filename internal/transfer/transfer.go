@@ -13,13 +13,13 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/johndauphine/data-migration-tool/internal/config"
-	"github.com/johndauphine/data-migration-tool/internal/driver"
-	"github.com/johndauphine/data-migration-tool/internal/logging"
-	"github.com/johndauphine/data-migration-tool/internal/pool"
-	"github.com/johndauphine/data-migration-tool/internal/progress"
-	"github.com/johndauphine/data-migration-tool/internal/source"
-	"github.com/johndauphine/data-migration-tool/internal/target"
+	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/internal/target"
 )
 
 // ProgressSaver is an interface for saving transfer progress

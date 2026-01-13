@@ -7,7 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // OutputMsg is sent when new stdout/stderr output is captured

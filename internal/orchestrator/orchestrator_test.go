@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/config"
+	"github.com/johndauphine/dmt/internal/config"
 )
 
 func TestComputeConfigHash(t *testing.T) {

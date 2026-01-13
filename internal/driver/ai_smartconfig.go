@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/shirou/gopsutil/v3/mem"
 )
 

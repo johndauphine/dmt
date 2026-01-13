@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/data-migration-tool/internal/logging"
-	"github.com/johndauphine/data-migration-tool/internal/source"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/source"
 )
 
 // Validate checks row counts between source and target

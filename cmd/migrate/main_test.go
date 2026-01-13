@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/orchestrator"
+	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/urfave/cli/v2"
 )
 

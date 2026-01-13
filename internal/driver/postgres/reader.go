@@ -9,10 +9,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx driver for database/sql
-	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
-	"github.com/johndauphine/data-migration-tool/internal/driver"
-	"github.com/johndauphine/data-migration-tool/internal/logging"
-	"github.com/johndauphine/data-migration-tool/internal/stats"
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/stats"
 )
 
 // Reader implements driver.Reader for PostgreSQL using pgx.

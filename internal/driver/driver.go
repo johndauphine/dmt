@@ -4,7 +4,7 @@
 package driver
 
 import (
-	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/dbconfig"
 )
 
 // DriverDefaults contains default values for a database driver.

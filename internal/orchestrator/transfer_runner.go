@@ -8,14 +8,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/checkpoint"
-	"github.com/johndauphine/data-migration-tool/internal/config"
-	"github.com/johndauphine/data-migration-tool/internal/logging"
-	"github.com/johndauphine/data-migration-tool/internal/notify"
-	"github.com/johndauphine/data-migration-tool/internal/pool"
-	"github.com/johndauphine/data-migration-tool/internal/progress"
-	"github.com/johndauphine/data-migration-tool/internal/source"
-	"github.com/johndauphine/data-migration-tool/internal/transfer"
+	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/notify"
+	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/internal/transfer"
 )
 
 // TransferRunner executes transfer jobs with a worker pool.

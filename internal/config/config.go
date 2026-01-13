@@ -9,14 +9,14 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
-	"github.com/johndauphine/data-migration-tool/internal/driver"
-	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
 	"gopkg.in/yaml.v3"
 
 	// Import driver packages to trigger init() registration before validation
-	_ "github.com/johndauphine/data-migration-tool/internal/driver/mssql"
-	_ "github.com/johndauphine/data-migration-tool/internal/driver/postgres"
+	_ "github.com/johndauphine/dmt/internal/driver/mssql"
+	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 // Type aliases for database configuration types.

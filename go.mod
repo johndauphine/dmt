@@ -1,4 +1,4 @@
-module github.com/johndauphine/data-migration-tool
+module github.com/johndauphine/dmt
 
 go 1.24.0
 

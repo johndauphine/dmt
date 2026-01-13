@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/config"
+	"github.com/johndauphine/dmt/internal/config"
 )
 
 // Notifier sends notifications to Slack

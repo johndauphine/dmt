@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/logging"
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // AIProvider represents supported AI providers for type mapping.

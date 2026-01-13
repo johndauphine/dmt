@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/pool"
-	"github.com/johndauphine/data-migration-tool/internal/progress"
-	"github.com/johndauphine/data-migration-tool/internal/target"
+	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/target"
 )
 
 // writerPool manages a pool of parallel write workers.

@@ -3,7 +3,7 @@ package driver
 import (
 	"context"
 
-	"github.com/johndauphine/data-migration-tool/internal/stats"
+	"github.com/johndauphine/dmt/internal/stats"
 )
 
 // Writer represents a database writer that can write data to target tables.

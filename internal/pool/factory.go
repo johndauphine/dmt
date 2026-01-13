@@ -3,13 +3,13 @@ package pool
 import (
 	"fmt"
 
-	"github.com/johndauphine/data-migration-tool/internal/config"
-	"github.com/johndauphine/data-migration-tool/internal/dbconfig"
-	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/driver"
 
 	// Import driver packages to trigger init() registration
-	_ "github.com/johndauphine/data-migration-tool/internal/driver/mssql"
-	_ "github.com/johndauphine/data-migration-tool/internal/driver/postgres"
+	_ "github.com/johndauphine/dmt/internal/driver/mssql"
+	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 // NewSourcePool creates a source pool based on the configuration type.

@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/stats"
+	"github.com/johndauphine/dmt/internal/stats"
 )
 
 // Reader represents a database reader that can stream data from source tables.

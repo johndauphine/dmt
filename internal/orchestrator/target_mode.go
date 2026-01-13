@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/johndauphine/data-migration-tool/internal/logging"
-	"github.com/johndauphine/data-migration-tool/internal/pool"
-	"github.com/johndauphine/data-migration-tool/internal/source"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/internal/source"
 )
 
 // TargetModeStrategy handles mode-specific table preparation and finalization.

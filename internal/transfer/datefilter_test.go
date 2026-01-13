@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver"
 	// Import driver packages to register dialects
-	_ "github.com/johndauphine/data-migration-tool/internal/driver/mssql"
-	_ "github.com/johndauphine/data-migration-tool/internal/driver/postgres"
+	_ "github.com/johndauphine/dmt/internal/driver/mssql"
+	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {

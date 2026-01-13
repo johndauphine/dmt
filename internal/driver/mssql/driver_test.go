@@ -3,7 +3,7 @@ package mssql
 import (
 	"testing"
 
-	"github.com/johndauphine/data-migration-tool/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver"
 )
 
 func TestDriverRegistration(t *testing.T) {
