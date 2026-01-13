@@ -18,6 +18,7 @@ import (
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1472,23 +1473,21 @@ func (m Model) statusBarView() string {
 }
 
 func (m Model) welcomeMessage() string {
-	logo := `
-  __  __  _____  _____  _____ _       
- |  \/  |/ ____|/ ____|/ ____| |      
- | \  / | (___ | (___ | |  __| |      
- | |\/| |\___ \ \___ \ | | |_ | |      
- | |  | |____) |____) | |__| | |____  
- |_|  |_|_____/|_____/ \_____|______| 
-  PG-MIGRATE INTERACTIVE SHELL
-`
+	logo := fmt.Sprintf(`
+      _            _
+   __| |_ __ ___  | |_
+  / _' | '_ ' _ \ | __|
+ | (_| | | | | | || |_
+  \__,_|_| |_| |_| \__|
+  Data Migration Tool v%s
+`, version.Version)
 
 	welcome := styleTitle.Render(logo)
 
 	body := `
- Welcome to the migration engine. This tool allows you to
- safely and efficiently move data between SQL Server and 
- PostgreSQL.
- 
+ Welcome to dmt. This tool allows you to safely and
+ efficiently move data between SQL Server and PostgreSQL.
+
  Type /help to see available commands.
 `
 
@@ -1553,18 +1552,19 @@ Note: You can use @/path/to/file for config files.`
 		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
 
 	case "/about":
-		about := `MSSQL-PG-MIGRATE v1.10.0
+		about := fmt.Sprintf(`dmt v%s
 
-A high-performance data migration tool for moving data
-from SQL Server to PostgreSQL (and vice-versa).
+%s
 
 Features:
+- Bidirectional: SQL Server <-> PostgreSQL
 - Parallel transfer with auto-tuning
 - Resume capability (chunk-level)
 - Data validation
+- Encrypted profile storage
 - Configuration wizard
 
-Built with Go and Bubble Tea.`
+Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return func() tea.Msg { return BoxedOutputMsg(about) }
 
 	case "/wizard":

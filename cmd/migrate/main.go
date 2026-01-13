@@ -19,18 +19,17 @@ import (
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/tui"
+	"github.com/johndauphine/dmt/internal/version"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
-var version = "2.28.0"
-
 func main() {
 	app := &cli.App{
-		Name:    "dmt",
-		Usage:   "High-performance database migration tool",
-		Version: version,
+		Name:    version.Name,
+		Usage:   version.Description,
+		Version: version.Version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "config",
