@@ -681,8 +681,8 @@ func saveProfile(c *cli.Context) error {
 	defer state.Close()
 
 	if err := state.SaveProfile(name, cfg.Profile.Description, payload); err != nil {
-		if strings.Contains(err.Error(), "DATA_TRANSFER_TOOL_MASTER_KEY is not set") {
-			return fmt.Errorf("DATA_TRANSFER_TOOL_MASTER_KEY is not set; set it before saving profiles")
+		if strings.Contains(err.Error(), "DMT_MASTER_KEY is not set") {
+			return fmt.Errorf("DMT_MASTER_KEY is not set; set it before saving profiles")
 		}
 		return err
 	}

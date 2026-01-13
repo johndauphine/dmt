@@ -1,4 +1,4 @@
-# data-transfer-tool
+# dmt
 
 [![CI](https://github.com/johndauphine/dmt/actions/workflows/ci.yml/badge.svg)](https://github.com/johndauphine/dmt/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/johndauphine/dmt)](https://github.com/johndauphine/dmt/releases/latest)
@@ -101,7 +101,7 @@ migration:
 You can store full configuration profiles (including secrets) encrypted at rest inside the same SQLite database used for run history.
 
 **Master key**
-- Set `DATA_TRANSFER_TOOL_MASTER_KEY` to a **base64-encoded 32-byte key**.
+- Set `DMT_MASTER_KEY` to a **base64-encoded 32-byte key**.
 - Example key generation (POSIX):
   ```bash
   openssl rand -base64 32
@@ -111,16 +111,16 @@ You can store full configuration profiles (including secrets) encrypted at rest 
 **CLI workflow**
 ```bash
 # Save a profile from YAML (encrypts and stores in SQLite)
-DATA_TRANSFER_TOOL_MASTER_KEY=... ./dmt profile save --name prod --config config.yaml
+DMT_MASTER_KEY=... ./dmt profile save --name prod --config config.yaml
 
 # List profiles
-DATA_TRANSFER_TOOL_MASTER_KEY=... ./dmt profile list
+DMT_MASTER_KEY=... ./dmt profile list
 
 # Run using a profile
-DATA_TRANSFER_TOOL_MASTER_KEY=... ./dmt run --profile prod
+DMT_MASTER_KEY=... ./dmt run --profile prod
 
 # Export a profile back to YAML
-DATA_TRANSFER_TOOL_MASTER_KEY=... ./dmt profile export --name prod --out config.yaml
+DMT_MASTER_KEY=... ./dmt profile export --name prod --out config.yaml
 ```
 
 **YAML profile name (optional)**
@@ -146,7 +146,7 @@ Descriptions are shown in `profile list`.
 
 **Airflow note**
 - Profiles are stored as encrypted blobs in the same SQLite DB (`~/.dmt/migrate.db` by default).
-- In Airflow, you can set `DATA_TRANSFER_TOOL_MASTER_KEY` via your secrets backend and run `profile save` at deploy time, or stick with YAML + env vars for CI/CD.
+- In Airflow, you can set `DMT_MASTER_KEY` via your secrets backend and run `profile save` at deploy time, or stick with YAML + env vars for CI/CD.
 - You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
 - On first run, the default data directory (`~/.dmt`) is created automatically if it does not exist.
 
@@ -343,7 +343,7 @@ from airflow.providers.cncf.kubernetes.operators.kubernetes_pod import Kubernete
 
 migrate = KubernetesPodOperator(
     task_id='migrate_data',
-    name='data-transfer-tool',
+    name='dmt',
     image='your-registry/dmt:latest',
     cmds=['/dmt'],
     arguments=[
@@ -569,8 +569,8 @@ Requires Go 1.21+
 
 ```bash
 git clone https://github.com/johndauphine/dmt.git
-cd data-transfer-tool
-CGO_ENABLED=0 go build -o data-transfer-tool ./cmd/migrate
+cd dmt
+CGO_ENABLED=0 go build -o dmt ./cmd/migrate
 ```
 
 ### Go install
@@ -792,7 +792,7 @@ The `ai` section configures AI-powered features.
 | `enabled` | No | `false` | Enable Slack notifications |
 | `webhook_url` | Yes (if enabled) | - | Slack incoming webhook URL |
 | `channel` | No | Webhook default | Channel to post to (e.g., `#data-engineering`) |
-| `username` | No | `data-transfer-tool` | Bot username for messages |
+| `username` | No | `dmt` | Bot username for messages |
 
 ## Kerberos Authentication
 
@@ -1101,7 +1101,7 @@ slack:
   enabled: true
   webhook_url: ${SLACK_WEBHOOK_URL}
   channel: "#data-migrations"
-  username: data-transfer-tool
+  username: dmt
 
 ```
 
@@ -1327,7 +1327,7 @@ Performance varies based on:
 
 ## Comparison with Airflow DAG
 
-| Feature | data-transfer-tool (Go) | Airflow DAG (Python) |
+| Feature | dmt (Go) | Airflow DAG (Python) |
 |---------|----------------------|---------------------|
 | Throughput | 222-645K rows/sec | ~50-80k rows/sec |
 | Memory usage | ~50MB | ~200-400MB |

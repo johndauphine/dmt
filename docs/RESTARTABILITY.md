@@ -1,10 +1,10 @@
 # Restartability Guide
 
-This document describes the checkpoint and resume functionality in data-transfer-tool, including implementation details, limitations, and testing procedures.
+This document describes the checkpoint and resume functionality in dmt, including implementation details, limitations, and testing procedures.
 
 ## Overview
 
-data-transfer-tool supports resumable migrations through a checkpoint system that tracks progress at multiple levels:
+dmt supports resumable migrations through a checkpoint system that tracks progress at multiple levels:
 
 1. **Run level**: Tracks overall migration status (running, success, failed)
 2. **Table level**: Tracks which tables have been successfully transferred
@@ -400,7 +400,7 @@ go test ./internal/checkpoint/... -v
 set -e
 
 CONFIG="examples/config.yaml"
-DB="$HOME/.data-transfer-tool/migrate.db"
+DB="$HOME/.dmt/migrate.db"
 
 echo "=== Testing Restartability ==="
 

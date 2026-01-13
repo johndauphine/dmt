@@ -1,4 +1,4 @@
-# MSSQL to PostgreSQL Migration Configuration
+# dmt - Data Migration Tool Configuration
 
 source:
   host: localhost
@@ -69,4 +69,4 @@ slack:
   enabled: false
   webhook_url: ${SLACK_WEBHOOK_URL}
   channel: "#data-engineering"
-  username: data-transfer-tool
+  username: dmt

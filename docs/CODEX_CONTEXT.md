@@ -1,6 +1,6 @@
 # Context Update
 
-- Feature scope: Added encrypted profile storage in SQLite, TUI/CLI profile management, and run-history origin tracking. Profiles are encrypted at rest with AES-GCM using DATA_TRANSFER_TOOL_MASTER_KEY (base64 32-byte key). YAML remains primary for CI/CD.
+- Feature scope: Added encrypted profile storage in SQLite, TUI/CLI profile management, and run-history origin tracking. Profiles are encrypted at rest with AES-GCM using DMT_MASTER_KEY (base64 32-byte key). YAML remains primary for CI/CD.
 
 - Profile storage:
   - New table profiles with name, description, config_enc, timestamps.
@@ -23,7 +23,7 @@
   - /status no longer reports running when there are 0 running tasks; shows “No active migration (last incomplete run …)” and suggests /resume.
 
 - Docs:
-  - README documents encrypted profiles, DATA_TRANSFER_TOOL_MASTER_KEY, profile.name/description, /resume, and migration.data_dir.
+  - README documents encrypted profiles, DMT_MASTER_KEY, profile.name/description, /resume, and migration.data_dir.
 
 - Key files:
   - internal/checkpoint/profiles.go (encryption + profile CRUD)

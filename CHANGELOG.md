@@ -2,10 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.28.0] - 2026-01-12
+## [2.28.0] - 2026-01-13
 
 ### Changed
-- **Renamed environment variable** - `MSSQL_PG_MIGRATE_MASTER_KEY` → `DATA_TRANSFER_TOOL_MASTER_KEY` for profile encryption
+- **Renamed environment variable** - `DATA_TRANSFER_TOOL_MASTER_KEY` → `DMT_MASTER_KEY` for profile encryption
+- **Updated TUI branding** - New ASCII art logo and version display
+- **Centralized version** - Version now managed in `internal/version` package
 
 ### Added
 - **Tests for notify package** - 37 test cases covering Slack notifications, error handling, and formatting

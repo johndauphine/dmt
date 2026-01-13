@@ -1,6 +1,4 @@
 # Binaries
-mssql-pg-migrate
-mssql-pg-migrate-*
 dmt
 dmt-*
 *.exe
