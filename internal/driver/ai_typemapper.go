@@ -812,3 +812,38 @@ func (m *AITypeMapper) ExportCache(w io.Writer) error {
 	_, err = w.Write(data)
 	return err
 }
+
+// CallAI sends a prompt to the configured AI provider and returns the response.
+// This is a generic method for arbitrary prompts (not just type mapping).
+func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error) {
+	// Serialize API requests to avoid rate limiting
+	m.requestsMu.Lock()
+	defer m.requestsMu.Unlock()
+
+	// Use provided context or create one with timeout
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(m.config.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+
+	var result string
+	var err error
+
+	switch AIProvider(m.config.Provider) {
+	case ProviderClaude:
+		result, err = m.queryClaudeAPI(ctx, prompt)
+	case ProviderOpenAI:
+		result, err = m.queryOpenAIAPI(ctx, prompt)
+	case ProviderGemini:
+		result, err = m.queryGeminiAPI(ctx, prompt)
+	default:
+		return "", fmt.Errorf("unsupported AI provider: %s", m.config.Provider)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	return result, nil
+}

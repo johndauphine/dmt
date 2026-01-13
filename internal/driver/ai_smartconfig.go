@@ -3,12 +3,14 @@ package driver
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/johndauphine/mssql-pg-migrate/internal/logging"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 // SmartConfigSuggestions contains AI-detected configuration suggestions.
@@ -36,6 +38,43 @@ type SmartConfigSuggestions struct {
 
 	// Warnings contains any issues detected during analysis
 	Warnings []string
+
+	// AISuggestions contains AI-recommended values (if AI was used)
+	AISuggestions *AutoTuneOutput
+}
+
+// AutoTuneInput contains system and database info for AI auto-tuning.
+type AutoTuneInput struct {
+	// System info
+	CPUCores     int   `json:"cpu_cores"`
+	MemoryGB     int   `json:"memory_gb"`
+
+	// Database info
+	DatabaseType string `json:"database_type"` // "mssql" or "postgres"
+	TotalTables  int    `json:"total_tables"`
+	TotalRows    int64  `json:"total_rows"`
+	AvgRowBytes  int64  `json:"avg_row_bytes"`
+
+	// Largest tables (top 5)
+	LargestTables []TableStats `json:"largest_tables"`
+}
+
+// TableStats contains stats for a single table.
+type TableStats struct {
+	Name        string `json:"name"`
+	RowCount    int64  `json:"row_count"`
+	AvgRowBytes int64  `json:"avg_row_bytes"`
+}
+
+// AutoTuneOutput contains AI-recommended configuration values.
+type AutoTuneOutput struct {
+	Workers             int   `json:"workers"`
+	ChunkSize           int   `json:"chunk_size"`
+	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
+	MaxPartitions       int   `json:"max_partitions"`
+	LargeTableThreshold int64 `json:"large_table_threshold"`
+	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
+	Reasoning           string `json:"reasoning,omitempty"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -99,7 +138,7 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	}
 
 	// Calculate auto-tuned parameters
-	s.calculateAutoTuneParams(tables)
+	s.calculateAutoTuneParams(ctx, tables)
 
 	// Log summary
 	logging.Info("Smart config analysis complete:")
@@ -114,18 +153,30 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 }
 
 // calculateAutoTuneParams calculates all auto-tuned performance parameters.
-func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
-	// Workers: based on CPU cores (cores - 2, clamped to 4-12)
-	cores := runtime.NumCPU()
-	s.suggestions.Workers = cores - 2
-	if s.suggestions.Workers < 4 {
-		s.suggestions.Workers = 4
-	}
-	if s.suggestions.Workers > 12 {
-		s.suggestions.Workers = 12
-	}
+// Always uses formula-based calculation, optionally gets AI suggestions too.
+func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, tables []tableInfo) {
+	// First calculate avg row size
+	avgRowSize := s.calculateAvgRowSize(tables)
+	s.suggestions.AvgRowSizeBytes = avgRowSize
 
-	// Calculate avg row size from top 5 largest tables (more representative)
+	// Always calculate formula-based params
+	s.calculateFormulaBasedParams(tables, avgRowSize)
+
+	// Also get AI suggestions if available (for comparison)
+	if s.useAI && s.aiMapper != nil {
+		input := s.buildAutoTuneInput(tables, avgRowSize)
+		output, err := s.getAIAutoTune(ctx, input)
+		if err == nil && output != nil {
+			s.suggestions.AISuggestions = output
+			logging.Info("AI suggestions available (see output for comparison)")
+		} else {
+			logging.Warn("AI auto-tune unavailable: %v", err)
+		}
+	}
+}
+
+// calculateAvgRowSize calculates average row size from top 5 largest tables.
+func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
 	var totalSize int64
 	var count int
 	for i, t := range tables {
@@ -145,7 +196,123 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 	if avgRowSize > 2000 {
 		avgRowSize = 2000
 	}
-	s.suggestions.AvgRowSizeBytes = avgRowSize
+	return avgRowSize
+}
+
+// buildAutoTuneInput constructs input for AI auto-tuning.
+func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize int64) AutoTuneInput {
+	// Get system info
+	cores := runtime.NumCPU()
+	memoryGB := 8 // Default
+	if v, err := mem.VirtualMemory(); err == nil {
+		memoryGB = int(v.Total / (1024 * 1024 * 1024))
+	}
+
+	// Build largest tables list
+	var largestTables []TableStats
+	for i, t := range tables {
+		if i >= 5 {
+			break
+		}
+		largestTables = append(largestTables, TableStats{
+			Name:        t.Name,
+			RowCount:    t.RowCount,
+			AvgRowBytes: t.AvgRowSizeBytes,
+		})
+	}
+
+	return AutoTuneInput{
+		CPUCores:      cores,
+		MemoryGB:      memoryGB,
+		DatabaseType:  s.dbType,
+		TotalTables:   s.suggestions.TotalTables,
+		TotalRows:     s.suggestions.TotalRows,
+		AvgRowBytes:   avgRowSize,
+		LargestTables: largestTables,
+	}
+}
+
+// getAIAutoTune calls the AI to get auto-tuned parameters.
+func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutput, error) {
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling input: %w", err)
+	}
+
+	prompt := fmt.Sprintf(`You are a database migration performance expert. Given the following system and database statistics, recommend optimal configuration parameters for a high-performance database migration tool.
+
+System and Database Info:
+%s
+
+The migration tool uses these parameters:
+- workers: Number of parallel worker goroutines (typically 4-12)
+- chunk_size: Rows per batch (typically 50,000-500,000)
+- read_ahead_buffers: Buffers per worker for pipelining (typically 2-16)
+- max_partitions: Max parallel partitions for large tables (typically matches workers)
+- large_table_threshold: Row count above which tables get partitioned (typically 1M-10M)
+
+Guidelines:
+- workers should be cores-2 but capped at 12 (diminishing returns beyond)
+- chunk_size should target ~50MB per chunk based on avg_row_bytes
+- read_ahead_buffers should balance memory usage vs throughput
+- Estimate memory as: workers * read_ahead_buffers * 2 * chunk_size * avg_row_bytes
+- For MSSQL sources, slightly smaller chunks work better due to TDS protocol
+- For PostgreSQL sources, larger chunks work well with COPY protocol
+
+Respond with ONLY a JSON object (no markdown, no explanation outside JSON):
+{
+  "workers": <int>,
+  "chunk_size": <int>,
+  "read_ahead_buffers": <int>,
+  "max_partitions": <int>,
+  "large_table_threshold": <int>,
+  "estimated_memory_mb": <int>,
+  "reasoning": "<brief 1-2 sentence explanation>"
+}`, string(inputJSON))
+
+	response, err := s.aiMapper.CallAI(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("calling AI: %w", err)
+	}
+
+	// Parse JSON response
+	response = strings.TrimSpace(response)
+	// Remove markdown code blocks if present
+	response = strings.TrimPrefix(response, "```json")
+	response = strings.TrimPrefix(response, "```")
+	response = strings.TrimSuffix(response, "```")
+	response = strings.TrimSpace(response)
+
+	var output AutoTuneOutput
+	if err := json.Unmarshal([]byte(response), &output); err != nil {
+		return nil, fmt.Errorf("parsing AI response: %w (response: %s)", err, response)
+	}
+
+	// Validate output ranges
+	if output.Workers < 1 || output.Workers > 24 {
+		return nil, fmt.Errorf("invalid workers value: %d", output.Workers)
+	}
+	if output.ChunkSize < 1000 || output.ChunkSize > 1000000 {
+		return nil, fmt.Errorf("invalid chunk_size value: %d", output.ChunkSize)
+	}
+	if output.ReadAheadBuffers < 1 || output.ReadAheadBuffers > 64 {
+		return nil, fmt.Errorf("invalid read_ahead_buffers value: %d", output.ReadAheadBuffers)
+	}
+
+	return &output, nil
+}
+
+// calculateFormulaBasedParams calculates parameters using formulas (fallback).
+func (s *SmartConfigAnalyzer) calculateFormulaBasedParams(tables []tableInfo, avgRowSize int64) {
+	// Workers: based on CPU cores (cores - 2, clamped to 4-12)
+	cores := runtime.NumCPU()
+	s.suggestions.Workers = cores - 2
+	if s.suggestions.Workers < 4 {
+		s.suggestions.Workers = 4
+	}
+	if s.suggestions.Workers > 12 {
+		s.suggestions.Workers = 12
+	}
 
 	// Chunk size: based on average row size (target ~50MB per chunk)
 	s.suggestions.ChunkSizeRecommendation = s.calculateChunkSize(tables)
@@ -451,14 +618,30 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 
 	sb.WriteString("migration:\n")
 
-	// Auto-tuned performance parameters
-	sb.WriteString("  # Auto-tuned performance parameters\n")
-	sb.WriteString(fmt.Sprintf("  workers: %d                    # based on CPU cores\n", s.Workers))
-	sb.WriteString(fmt.Sprintf("  chunk_size: %d              # based on avg row size (~50MB/chunk)\n", s.ChunkSizeRecommendation))
-	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d           # based on memory budget\n", s.ReadAheadBuffers))
+	// Auto-tuned performance parameters (formula-based)
+	sb.WriteString("  # Auto-tuned performance parameters (formula-based)\n")
+	sb.WriteString(fmt.Sprintf("  workers: %d                    # CPU cores - 2, capped 4-12\n", s.Workers))
+	sb.WriteString(fmt.Sprintf("  chunk_size: %d              # ~50MB per chunk\n", s.ChunkSizeRecommendation))
+	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d           # memory budget / chunk size\n", s.ReadAheadBuffers))
 	sb.WriteString(fmt.Sprintf("  max_partitions: %d              # matches worker count\n", s.MaxPartitions))
 	sb.WriteString(fmt.Sprintf("  large_table_threshold: %d  # rows before partitioning\n", s.LargeTableThreshold))
-	sb.WriteString(fmt.Sprintf("  # Estimated memory usage: ~%dMB\n\n", s.EstimatedMemMB))
+	sb.WriteString(fmt.Sprintf("  # Estimated memory: ~%dMB\n", s.EstimatedMemMB))
+
+	// Show AI suggestions if available
+	if s.AISuggestions != nil {
+		ai := s.AISuggestions
+		sb.WriteString("\n  # AI-suggested alternatives (configure ai.api_key to enable):\n")
+		sb.WriteString(fmt.Sprintf("  # workers: %d\n", ai.Workers))
+		sb.WriteString(fmt.Sprintf("  # chunk_size: %d\n", ai.ChunkSize))
+		sb.WriteString(fmt.Sprintf("  # read_ahead_buffers: %d\n", ai.ReadAheadBuffers))
+		sb.WriteString(fmt.Sprintf("  # max_partitions: %d\n", ai.MaxPartitions))
+		sb.WriteString(fmt.Sprintf("  # large_table_threshold: %d\n", ai.LargeTableThreshold))
+		sb.WriteString(fmt.Sprintf("  # Estimated memory: ~%dMB\n", ai.EstimatedMemoryMB))
+		if ai.Reasoning != "" {
+			sb.WriteString(fmt.Sprintf("  # Reasoning: %s\n", ai.Reasoning))
+		}
+	}
+	sb.WriteString("\n")
 
 	// Date columns
 	if len(s.DateColumns) > 0 {
