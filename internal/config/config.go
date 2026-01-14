@@ -196,6 +196,9 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
+	// AI-driven real-time parameter adjustment
+	AIAdjust bool   `yaml:"ai_adjust"`           // Enable AI-driven parameter adjustment during migration (default: false, auto-enabled if AI configured)
+	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 }
 
 // AIConfig contains configuration for all AI-assisted features.

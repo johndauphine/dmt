@@ -39,11 +39,34 @@ type Config struct {
 	CheckpointFrequency int
 }
 
+// ApplyTiming determines when a config update should be applied.
+type ApplyTiming int
+
+const (
+	// ApplyNextChunk applies the update at the next chunk boundary (within a table)
+	ApplyNextChunk ApplyTiming = iota
+	// ApplyNextTable applies the update at the next table boundary
+	ApplyNextTable
+)
+
+// ConfigUpdate represents a requested configuration update with timing information.
+type ConfigUpdate struct {
+	ChunkSize         *int       // Pointer allows nil = "no change"
+	ReadAheadBuffers  *int
+	ParallelReaders   *int
+	WriteAheadWriters *int
+	ApplyAt           ApplyTiming
+}
+
 // Pipeline orchestrates data transfer from a Reader to a Writer.
 type Pipeline struct {
 	reader driver.Reader
 	writer driver.Writer
-	config Config
+
+	// Configuration with synchronization for runtime updates
+	configMu      sync.RWMutex
+	config        Config
+	configUpdates chan ConfigUpdate // Channel for safe runtime configuration updates
 }
 
 // New creates a new Pipeline with the given reader, writer, and configuration.
@@ -66,10 +89,83 @@ func New(reader driver.Reader, writer driver.Writer, cfg Config) *Pipeline {
 	}
 
 	return &Pipeline{
-		reader: reader,
-		writer: writer,
-		config: cfg,
+		reader:        reader,
+		writer:        writer,
+		config:        cfg,
+		configUpdates: make(chan ConfigUpdate, 1), // Buffer size 1 allows non-blocking update attempt
 	}
+}
+
+// UpdateConfig requests a configuration update to be applied at the specified timing.
+// The request is queued non-blocking; if the channel is full, an error is returned.
+func (p *Pipeline) UpdateConfig(update ConfigUpdate) error {
+	select {
+	case p.configUpdates <- update:
+		return nil
+	default:
+		// Channel is full (timeout or still processing previous update)
+		return fmt.Errorf("config update queue full - another update may be pending")
+	}
+}
+
+// ApplyPendingUpdates checks for any pending configuration updates and applies them.
+// This should be called at chunk boundaries for ApplyNextChunk updates,
+// and at table boundaries for ApplyNextTable updates.
+func (p *Pipeline) ApplyPendingUpdates(atTableBoundary bool) {
+	select {
+	case update := <-p.configUpdates:
+		// Only apply if timing matches
+		if atTableBoundary || update.ApplyAt == ApplyNextChunk {
+			p.applyConfigUpdate(update)
+		} else {
+			// Re-queue the update to apply later (at table boundary)
+			select {
+			case p.configUpdates <- update:
+			default:
+				// This shouldn't happen with buffer size 1
+				logging.Warn("Failed to re-queue config update")
+			}
+		}
+	default:
+		// No pending updates
+	}
+}
+
+// applyConfigUpdate safely applies a configuration update to the current config.
+func (p *Pipeline) applyConfigUpdate(update ConfigUpdate) {
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
+
+	changed := false
+
+	if update.ChunkSize != nil && *update.ChunkSize > 0 {
+		p.config.ChunkSize = *update.ChunkSize
+		changed = true
+	}
+	if update.ReadAheadBuffers != nil && *update.ReadAheadBuffers >= 0 {
+		p.config.ReadAheadBuffers = *update.ReadAheadBuffers
+		changed = true
+	}
+	if update.ParallelReaders != nil && *update.ParallelReaders >= 1 {
+		p.config.ParallelReaders = *update.ParallelReaders
+		changed = true
+	}
+	if update.WriteAheadWriters != nil && *update.WriteAheadWriters >= 1 {
+		p.config.WriteAheadWriters = *update.WriteAheadWriters
+		changed = true
+	}
+
+	if changed {
+		logging.Info("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d",
+			p.config.ChunkSize, p.config.ParallelReaders, p.config.WriteAheadWriters, p.config.ReadAheadBuffers)
+	}
+}
+
+// GetConfig returns a copy of the current configuration.
+func (p *Pipeline) GetConfig() Config {
+	p.configMu.RLock()
+	defer p.configMu.RUnlock()
+	return p.config
 }
 
 // Execute runs a transfer job, returning statistics on completion.
@@ -377,6 +473,24 @@ chunkLoop:
 			break chunkLoop
 		}
 
+		// Check for and apply pending configuration updates at chunk boundaries
+		select {
+		case update := <-p.configUpdates:
+			// Only apply WriteAheadWriters updates mid-chunk since other params
+			// (ChunkSize, ReadAheadBuffers, ParallelReaders) are tied to reader setup
+			if update.WriteAheadWriters != nil && *update.WriteAheadWriters > 0 {
+				newWriters := *update.WriteAheadWriters
+				if err := wp.ScaleWorkers(newWriters); err != nil {
+					logging.Warn("Failed to scale workers: %v", err)
+				} else {
+					logging.Info("Scaled writers from %d to %d", numWriters, newWriters)
+					numWriters = newWriters
+				}
+			}
+		default:
+			// No pending updates
+		}
+
 		if chunkCount > 0 && chunkCount%50 == 0 {
 			waitTime := time.Since(receiveTime)
 			logging.Debug("Pipeline %s: %d chunks, overlap=%v, wait=%v, buffers=%d, writers=%d",
@@ -642,6 +756,24 @@ chunkLoop:
 				loopErr = ctx.Err()
 			}
 			break chunkLoop
+		}
+
+		// Check for and apply pending configuration updates at chunk boundaries
+		select {
+		case update := <-p.configUpdates:
+			// Only apply WriteAheadWriters updates mid-chunk since other params
+			// (ChunkSize, ReadAheadBuffers, ParallelReaders) are tied to reader setup
+			if update.WriteAheadWriters != nil && *update.WriteAheadWriters > 0 {
+				newWriters := *update.WriteAheadWriters
+				if err := wp.ScaleWorkers(newWriters); err != nil {
+					logging.Warn("Failed to scale workers: %v", err)
+				} else {
+					logging.Info("Scaled writers from %d to %d", numWriters, newWriters)
+					numWriters = newWriters
+				}
+			}
+		default:
+			// No pending updates
 		}
 
 		if chunkCount > 0 && chunkCount%50 == 0 {

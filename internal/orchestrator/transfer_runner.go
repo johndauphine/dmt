@@ -10,8 +10,11 @@ import (
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/monitor"
 	"github.com/johndauphine/dmt/internal/notify"
+	"github.com/johndauphine/dmt/internal/pipeline"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
@@ -98,8 +101,39 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		return nil, err
 	}
 
+	// Setup AI-driven monitoring if enabled
+	var aiMonitor *monitor.AIMonitor
+	if r.config.Migration.AIAdjust {
+		typeMapper, err := driver.GetAITypeMapper()
+		if err == nil && typeMapper != nil {
+			// Type-assert to AITypeMapper
+			if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
+				// Create a placeholder pipeline for the monitor (it will be updated per-job)
+				p := pipeline.New(nil, nil, pipeline.Config{})
+				interval := 30 * time.Second // Default
+				if r.config.Migration.AIAdjustInterval != "" {
+					if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
+						interval = d
+					}
+				}
+				aiMonitor = monitor.NewAIMonitor(p, aiMapper, interval)
+
+				// Start monitoring in background
+				monitorCtx, cancelMonitor := context.WithCancel(ctx)
+				defer cancelMonitor()
+				go aiMonitor.Start(monitorCtx)
+
+				logging.Info("AI-driven parameter adjustment enabled (interval: %v)", interval)
+			} else {
+				logging.Debug("AI adjustment requested but type assertion failed")
+			}
+		} else {
+			logging.Debug("AI adjustment requested but AI not configured: %v", err)
+		}
+	}
+
 	// Execute jobs with worker pool
-	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap)
+	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, aiMonitor)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +201,7 @@ func (r *TransferRunner) preTruncateIfNeeded(ctx context.Context, jobs []transfe
 }
 
 // executeJobs runs jobs with a worker pool.
-func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats) ([]TableFailure, error) {
+func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor) ([]TableFailure, error) {
 	logging.Debug("Starting worker pool with %d workers, %d jobs", r.config.Migration.Workers, len(jobs))
 
 	sem := make(chan struct{}, r.config.Migration.Workers)
@@ -187,7 +221,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh)
+			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, aiMonitor)
 		}(job)
 	}
 
@@ -199,7 +233,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 }
 
 // executeJob runs a single job with retry logic.
-func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError) {
+func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor) {
 	// Mark task as running
 	r.state.UpdateTaskStatus(j.TaskID, "running", "")
 
@@ -257,6 +291,10 @@ retryLoop:
 		ts.stats.ScanTime += stats.ScanTime
 		ts.stats.WriteTime += stats.WriteTime
 		ts.stats.Rows += stats.Rows
+		// Update row counter for AI monitoring
+		if aiMonitor != nil {
+			aiMonitor.UpdateRowsProcessed(r.progress.Current())
+		}
 	}
 	ts.jobsComplete++
 
