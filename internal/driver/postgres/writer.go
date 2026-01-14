@@ -408,10 +408,17 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	}
 	defer conn.Release()
 
+	// Sanitize table and column names to match how they were created (lowercase)
+	sanitizedTable := sanitizePGIdentifier(opts.Table)
+	sanitizedCols := make([]string, len(opts.Columns))
+	for i, col := range opts.Columns {
+		sanitizedCols[i] = sanitizePGIdentifier(col)
+	}
+
 	_, err = conn.Conn().CopyFrom(
 		ctx,
-		pgx.Identifier{opts.Schema, opts.Table},
-		opts.Columns,
+		pgx.Identifier{opts.Schema, sanitizedTable},
+		sanitizedCols,
 		pgx.CopyFromRows(opts.Rows),
 	)
 	return err
