@@ -29,4 +29,4 @@ vendor/
 /dist/
 
 # Logs
-session.log
+session.logconfig.yaml

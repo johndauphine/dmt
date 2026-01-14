@@ -249,13 +249,13 @@ The "drivers" section contains database driver defaults. Use these for database-
 6. IMPORTANT: Use driver defaults to set write_ahead_writers and parallel_readers appropriately
 7. ALWAYS explain WHY you chose specific values in the reasoning field - cite the data that led to each decision
 
-## Extended Parameters (optional - include when helpful)
-- max_partitions: number of partitions for large tables (default: workers)
-- large_table_threshold: row count to trigger partitioning (default: 5,000,000)
-- mssql_rows_per_batch: bulk copy batch hint for MSSQL source/target (default: chunk_size)
-- upsert_merge_chunk_size: batch size for upsert UPDATE+INSERT (default: 5000-20000)
-- max_source_connections: source database connection pool size
-- max_target_connections: target database connection pool size
+## Extended Parameters (ALWAYS include these with sensible values)
+- max_partitions: number of partitions for large tables (recommend: workers count)
+- large_table_threshold: row count to trigger partitioning (recommend: 1-10 million based on chunk_size)
+- mssql_rows_per_batch: bulk copy batch hint for MSSQL (recommend: chunk_size)
+- upsert_merge_chunk_size: batch size for upsert UPDATE+INSERT (recommend: 5000-20000)
+- max_source_connections: source connection pool size (recommend: workers * 2 + 4)
+- max_target_connections: target connection pool size (recommend: workers * 2 + 4)
 
 Return ONLY valid JSON (no markdown, no explanation outside JSON):
 {
@@ -266,12 +266,12 @@ Return ONLY valid JSON (no markdown, no explanation outside JSON):
     "parallel_readers": <int>,
     "write_ahead_writers": <int>,
     "packet_size": <int or omit if not MSSQL>,
-    "max_partitions": <int, optional>,
-    "large_table_threshold": <int, optional>,
-    "mssql_rows_per_batch": <int, optional for MSSQL>,
-    "upsert_merge_chunk_size": <int, optional>,
-    "max_source_connections": <int, optional>,
-    "max_target_connections": <int, optional>
+    "max_partitions": <int>,
+    "large_table_threshold": <int>,
+    "mssql_rows_per_batch": <int>,
+    "upsert_merge_chunk_size": <int>,
+    "max_source_connections": <int>,
+    "max_target_connections": <int>
   },
   "estimated_rows_per_sec": <int>,
   "confidence": "<high|medium|low>",
