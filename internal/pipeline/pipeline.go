@@ -92,7 +92,7 @@ func New(reader driver.Reader, writer driver.Writer, cfg Config) *Pipeline {
 		reader:        reader,
 		writer:        writer,
 		config:        cfg,
-		configUpdates: make(chan ConfigUpdate, 1), // Buffer size 1 allows non-blocking update attempt
+		configUpdates: make(chan ConfigUpdate, 10), // Buffer size 10 allows AI monitor to queue multiple decisions
 	}
 }
 

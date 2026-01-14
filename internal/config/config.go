@@ -593,6 +593,26 @@ func (c *Config) applyDefaults() {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
 
+	// AI features: load api_key from secrets if not configured in config file
+	if c.AI != nil && c.AI.Provider != "" {
+		// If no API key in config, try to load from secrets
+		if c.AI.APIKey == "" {
+			secretsCfg, err := secrets.Load()
+			if err != nil {
+				// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
+				if _, ok := err.(*secrets.SecretsNotFoundError); !ok {
+					logging.Warn("failed to load secrets configuration for AI provider: %v", err)
+				}
+			} else {
+				// Get the provider's API key from secrets
+				provider, err := secretsCfg.GetProvider(c.AI.Provider)
+				if err == nil && provider.APIKey != "" {
+					c.AI.APIKey = provider.APIKey
+				}
+			}
+		}
+	}
+
 	// AI features: apply defaults when api_key is configured
 	if c.AI != nil && c.AI.APIKey != "" {
 		// Default provider to claude if not specified
