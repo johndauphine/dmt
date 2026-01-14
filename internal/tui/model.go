@@ -94,6 +94,7 @@ var availableCommands = []commandInfo{
 	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
 	{"/analyze", "Analyze source database and suggest config"},
+	{"/calibrate", "Run AI calibration to find optimal config"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/wizard", "Launch configuration wizard"},
@@ -992,7 +993,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/calibrate", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -1529,6 +1530,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
   /analyze [config_file] Analyze source database and suggest configuration
+  /calibrate [config]   Run AI calibration to find optimal config
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
@@ -1647,6 +1649,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 	case "/analyze":
 		configFile, profileName := parseConfigArgs(parts)
 		return m.runAnalyzeCmd(configFile, profileName)
+
+	case "/calibrate":
+		configFile, profileName := parseConfigArgs(parts)
+		return m.runCalibrateCmd(configFile, profileName)
 
 	default:
 		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
@@ -1926,6 +1932,92 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 
 			// Output suggestions in a box
 			p.Send(BoxedOutputMsg(suggestions.FormatYAML()))
+		}()
+
+		return nil
+	}
+}
+
+func (m Model) runCalibrateCmd(configFile, profileName string) tea.Cmd {
+	return func() tea.Msg {
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
+		}
+
+		// Run asynchronously to avoid blocking the UI
+		go func() {
+			origin := "config: " + configFile
+			if profileName != "" {
+				origin = "profile: " + profileName
+			}
+			out := fmt.Sprintf("Starting calibration with %s\n", origin)
+			p.Send(OutputMsg(out))
+
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+
+			// Create orchestrator
+			orch, err := orchestrator.New(cfg)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			defer orch.Close()
+
+			// Redirect stdout/stderr for calibration output
+			r, w, _ := os.Pipe()
+			origStdout := os.Stdout
+			origStderr := os.Stderr
+			os.Stdout = w
+			os.Stderr = w
+			logging.SetOutput(w)
+
+			// Reader goroutine
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				buf := make([]byte, 1024)
+				for {
+					n, err := r.Read(buf)
+					if n > 0 {
+						p.Send(OutputMsg(string(buf[:n])))
+					}
+					if err != nil {
+						break
+					}
+				}
+			}()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+
+			result, runErr := orch.Calibrate(ctx, 10000) // 10K sample size
+
+			// Restore stdout/stderr and logging
+			w.Close()
+			os.Stdout = origStdout
+			os.Stderr = origStderr
+			logging.SetOutput(origStdout)
+			<-done // Wait for reader to finish
+
+			if runErr != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Calibration failed: %v\n", runErr)))
+				return
+			}
+
+			// Output the results table and YAML recommendation
+			p.Send(BoxedOutputMsg(result.FormatResultsTable()))
+			if result.Recommendation != nil {
+				p.Send(OutputMsg("\nRecommended Configuration:\n"))
+				p.Send(BoxedOutputMsg(result.FormatYAML()))
+				if result.AIReasoning != "" {
+					p.Send(OutputMsg(fmt.Sprintf("\nAI Reasoning: %s\n", result.AIReasoning)))
+				}
+			}
 		}()
 
 		return nil

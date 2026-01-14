@@ -120,6 +120,9 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 			return nil, fmt.Errorf("loading PK for %s: %w", t.FullName(), err)
 		}
 
+		// Populate PKColumns with full column metadata
+		t.PopulatePKColumns()
+
 		// Get row count
 		if err := r.loadRowCount(ctx, &t); err != nil {
 			return nil, fmt.Errorf("loading row count for %s: %w", t.FullName(), err)

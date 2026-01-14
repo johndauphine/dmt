@@ -12,11 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/calibration"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/tui"
@@ -335,6 +338,45 @@ func main() {
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
+					},
+				},
+			},
+			{
+				Name:   "calibrate",
+				Usage:  "Run calibration tests to find optimal configuration using AI",
+				Action: runCalibration,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+						Usage:   "Configuration file path",
+					},
+					&cli.StringFlag{
+						Name:  "profile",
+						Usage: "Profile name stored in SQLite",
+					},
+					&cli.IntFlag{
+						Name:  "sample-size",
+						Value: 10000,
+						Usage: "Number of rows per table for calibration",
+					},
+					&cli.StringSliceFlag{
+						Name:  "tables",
+						Usage: "Specific tables to use (default: auto-select)",
+					},
+					&cli.StringFlag{
+						Name:  "output",
+						Usage: "Write recommended config to YAML file",
+					},
+					&cli.BoolFlag{
+						Name:    "yes",
+						Aliases: []string{"y"},
+						Usage:   "Skip confirmation prompt",
+					},
+					&cli.BoolFlag{
+						Name:  "apply",
+						Usage: "Update the source config file with recommended values",
 					},
 				},
 			},
@@ -947,6 +989,239 @@ func analyzeConfig(c *cli.Context) error {
 
 	// Output suggestions
 	fmt.Println(suggestions.FormatYAML())
+
+	return nil
+}
+
+func runCalibration(c *cli.Context) error {
+	cfg, profileName, configPath, err := loadConfigWithOrigin(c)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Check if --apply is valid (requires file-based config, not profile)
+	if c.Bool("apply") && configPath == "" {
+		return fmt.Errorf("--apply requires a file-based config (not a profile): use -c config.yaml")
+	}
+	_ = profileName // unused for now
+
+	// Confirmation prompt unless --yes is specified
+	if !c.Bool("yes") {
+		fmt.Println("\nCalibration will:")
+		fmt.Println("  - Run 5 test migrations against your databases")
+		fmt.Println("  - Generate significant read load on source")
+		fmt.Println("  - Generate write load on target (temp schema)")
+		fmt.Println("  - Take approximately 2-5 minutes")
+		fmt.Print("\nContinue? [y/N]: ")
+
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input != "y" && input != "yes" {
+			fmt.Println("Calibration cancelled.")
+			return nil
+		}
+	}
+
+	// Get drivers
+	sourceDriver, err := driver.Get(cfg.Source.Type)
+	if err != nil {
+		return fmt.Errorf("unknown source database type: %s", cfg.Source.Type)
+	}
+	targetDriver, err := driver.Get(cfg.Target.Type)
+	if err != nil {
+		return fmt.Errorf("unknown target database type: %s", cfg.Target.Type)
+	}
+
+	// Create pools
+	maxConns := cfg.Migration.Workers * 2
+	if maxConns < 10 {
+		maxConns = 10
+	}
+
+	sourcePool, err := pool.NewSourcePool(&cfg.Source, maxConns)
+	if err != nil {
+		return fmt.Errorf("failed to connect to source: %w", err)
+	}
+	defer sourcePool.Close()
+
+	// Get AI type mapper (required for target pool, optional for calibration analysis)
+	var aiMapper *driver.AITypeMapper
+	aiMapper, err = driver.NewAITypeMapperFromSecrets()
+	if err != nil {
+		logging.Warn("AI not configured: %v (calibration will use best-observed configuration)", err)
+	}
+
+	// Use AI mapper as type mapper, or create a minimal one if no AI
+	var typeMapper driver.TypeMapper = aiMapper
+	if typeMapper == nil {
+		// Fall back to getting default type mapper
+		typeMapper, err = driver.GetAITypeMapper()
+		if err != nil {
+			return fmt.Errorf("no type mapper available - configure AI provider or run 'dmt init-secrets': %w", err)
+		}
+	}
+
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxConns, cfg.Migration.ChunkSize, cfg.Source.Type, typeMapper)
+	if err != nil {
+		return fmt.Errorf("failed to connect to target: %w", err)
+	}
+	defer targetPool.Close()
+
+	// Create calibrator
+	cal := calibration.NewCalibrator(
+		cfg,
+		sourcePool,
+		targetPool,
+		sourceDriver,
+		targetDriver,
+		calibration.CalibratorOptions{
+			SampleSize: c.Int("sample-size"),
+			Tables:     c.StringSlice("tables"),
+			Depth:      calibration.DepthQuick,
+			AIMapper:   aiMapper,
+		},
+	)
+
+	// Run calibration
+	ctx := context.Background()
+	result, err := cal.Run(ctx)
+	if err != nil {
+		return fmt.Errorf("calibration failed: %w", err)
+	}
+
+	// Display results
+	fmt.Println("\n" + result.FormatResultsTable())
+	fmt.Println(result.FormatRecommendation())
+
+	// Handle output options
+	if c.Bool("apply") {
+		// Update the source config file with recommended values
+		if err := applyCalibrationToConfig(configPath, result.Recommendation); err != nil {
+			return fmt.Errorf("failed to apply calibration: %w", err)
+		}
+		fmt.Printf("\nConfig updated: %s\n", configPath)
+	} else if outputPath := c.String("output"); outputPath != "" {
+		yamlContent := result.FormatYAML()
+		if err := os.WriteFile(outputPath, []byte(yamlContent), 0600); err != nil {
+			return fmt.Errorf("failed to write output file: %w", err)
+		}
+		fmt.Printf("\nRecommended config written to: %s\n", outputPath)
+	} else {
+		fmt.Println("\nRecommended YAML config:")
+		fmt.Println(result.FormatYAML())
+	}
+
+	return nil
+}
+
+// applyCalibrationToConfig updates an existing config file with AI-recommended values.
+// It preserves the existing structure, comments, and non-migration settings.
+func applyCalibrationToConfig(configPath string, rec *calibration.RecommendedConfig) error {
+	if rec == nil {
+		return fmt.Errorf("no recommendation available")
+	}
+
+	// Read existing file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Parse as yaml.Node to preserve structure and comments
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Find or create the migration section
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return fmt.Errorf("invalid YAML structure")
+	}
+
+	docContent := root.Content[0]
+	if docContent.Kind != yaml.MappingNode {
+		return fmt.Errorf("expected mapping at root")
+	}
+
+	// Find migration key
+	var migrationNode *yaml.Node
+	for i := 0; i < len(docContent.Content)-1; i += 2 {
+		if docContent.Content[i].Value == "migration" {
+			migrationNode = docContent.Content[i+1]
+			break
+		}
+	}
+
+	// Create migration section if it doesn't exist
+	if migrationNode == nil {
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: "migration"}
+		migrationNode = &yaml.Node{Kind: yaml.MappingNode}
+		docContent.Content = append(docContent.Content, keyNode, migrationNode)
+	}
+
+	// Helper to set a value in the migration mapping
+	setMigrationValue := func(key string, value interface{}) {
+		// Look for existing key
+		for i := 0; i < len(migrationNode.Content)-1; i += 2 {
+			if migrationNode.Content[i].Value == key {
+				// Update existing value
+				migrationNode.Content[i+1].Value = fmt.Sprintf("%v", value)
+				return
+			}
+		}
+		// Add new key-value pair
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: key}
+		valueNode := &yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%v", value)}
+		migrationNode.Content = append(migrationNode.Content, keyNode, valueNode)
+	}
+
+	// Apply recommended values
+	setMigrationValue("chunk_size", rec.ChunkSize)
+	setMigrationValue("workers", rec.Workers)
+	setMigrationValue("read_ahead_buffers", rec.ReadAheadBuffers)
+
+	if rec.ParallelReaders > 0 {
+		setMigrationValue("parallel_readers", rec.ParallelReaders)
+	}
+	if rec.WriteAheadWriters > 0 {
+		setMigrationValue("write_ahead_writers", rec.WriteAheadWriters)
+	}
+	if rec.PacketSize > 0 {
+		setMigrationValue("mssql_packet_size", rec.PacketSize)
+	}
+	if rec.MaxPartitions > 0 {
+		setMigrationValue("max_partitions", rec.MaxPartitions)
+	}
+	if rec.MaxSourceConnections > 0 {
+		setMigrationValue("max_source_connections", rec.MaxSourceConnections)
+	}
+	if rec.MaxTargetConnections > 0 {
+		setMigrationValue("max_target_connections", rec.MaxTargetConnections)
+	}
+	if rec.LargeTableThreshold > 0 {
+		setMigrationValue("large_table_threshold", rec.LargeTableThreshold)
+	}
+	if rec.MSSQLRowsPerBatch > 0 {
+		setMigrationValue("mssql_rows_per_batch", rec.MSSQLRowsPerBatch)
+	}
+	if rec.UpsertMergeChunkSize > 0 {
+		setMigrationValue("upsert_merge_chunk_size", rec.UpsertMergeChunkSize)
+	}
+
+	// Marshal back to YAML
+	var buf strings.Builder
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&root); err != nil {
+		return fmt.Errorf("failed to encode config: %w", err)
+	}
+	encoder.Close()
+
+	// Write back to file
+	if err := os.WriteFile(configPath, []byte(buf.String()), 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
 
 	return nil
 }

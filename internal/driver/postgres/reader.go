@@ -142,6 +142,9 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 			return nil, err
 		}
 
+		// Populate PKColumns with full column metadata
+		t.PopulatePKColumns()
+
 		// Get row count
 		count, err := r.GetRowCount(ctx, t.Schema, t.Name)
 		if err != nil {
