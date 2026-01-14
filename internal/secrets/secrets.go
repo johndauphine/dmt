@@ -25,8 +25,9 @@ const (
 
 // Config represents the complete secrets configuration
 type Config struct {
-	AI         AIConfig         `yaml:"ai"`
-	Encryption EncryptionConfig `yaml:"encryption"`
+	AI            AIConfig              `yaml:"ai"`
+	Encryption    EncryptionConfig      `yaml:"encryption"`
+	Notifications NotificationsConfig   `yaml:"notifications"`
 }
 
 // AIConfig holds AI provider configuration
@@ -45,6 +46,16 @@ type Provider struct {
 // EncryptionConfig holds encryption-related secrets
 type EncryptionConfig struct {
 	MasterKey string `yaml:"master_key"`
+}
+
+// NotificationsConfig holds notification service credentials
+type NotificationsConfig struct {
+	Slack SlackConfig `yaml:"slack"`
+}
+
+// SlackConfig holds Slack webhook configuration
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
 }
 
 // ProviderType categorizes providers by their API style
@@ -325,5 +336,9 @@ ai:
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32
+
+notifications:
+  slack:
+    webhook_url: ""  # Slack webhook URL for migration notifications
 `
 }
