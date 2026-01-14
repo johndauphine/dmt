@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
@@ -79,7 +80,12 @@ func (am *AIMonitor) evaluateAndAdjust(ctx context.Context) {
 	// Apply if action is not "continue"
 	if decision.Action != "continue" {
 		if err := am.adjuster.ApplyDecision(decision); err != nil {
-			logging.Warn("Failed to apply AI decision: %v", err)
+			// Queue full is expected when reapplying cached decisions - log as debug only
+			if strings.Contains(err.Error(), "queue full") {
+				logging.Debug("AI decision not applied (queue full): %v", err)
+			} else {
+				logging.Warn("Failed to apply AI decision: %v", err)
+			}
 		}
 	}
 
