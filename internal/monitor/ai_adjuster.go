@@ -226,6 +226,10 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 			update.ChunkSize = &value
 		case "workers":
 			update.WriteAheadWriters = &value
+		case "parallel_readers":
+			update.ParallelReaders = &value
+		case "read_ahead_buffers":
+			update.ReadAheadBuffers = &value
 		}
 	}
 
@@ -327,6 +331,14 @@ func (aa *AIAdjuster) validateParameter(param string, value int) error {
 	case "workers":
 		if value < 1 || value > 16 {
 			return fmt.Errorf("workers %d out of range (1-16)", value)
+		}
+	case "parallel_readers":
+		if value < 1 || value > 4 {
+			return fmt.Errorf("parallel_readers %d out of range (1-4)", value)
+		}
+	case "read_ahead_buffers":
+		if value < 4 || value > 32 {
+			return fmt.Errorf("read_ahead_buffers %d out of range (4-32)", value)
 		}
 	default:
 		return fmt.Errorf("unknown parameter: %s", param)
