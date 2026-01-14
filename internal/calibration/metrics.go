@@ -2,8 +2,11 @@ package calibration
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // RunStatus represents the outcome of a calibration run.
@@ -273,4 +276,115 @@ func (r *CalibrationResult) FormatYAML() string {
 	sb.WriteString(fmt.Sprintf("  # Estimated throughput: ~%d rows/sec\n", r.Recommendation.EstimatedRowsPerSec))
 
 	return sb.String()
+}
+
+// ApplyToConfigFile updates an existing config file with the recommended values.
+// It preserves the existing structure, comments, and non-migration settings.
+func (rec *RecommendedConfig) ApplyToConfigFile(configPath string) error {
+	if rec == nil {
+		return fmt.Errorf("no recommendation available")
+	}
+
+	// Read existing file
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Parse as yaml.Node to preserve structure and comments
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Find or create the migration section
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return fmt.Errorf("invalid YAML structure")
+	}
+
+	docContent := root.Content[0]
+	if docContent.Kind != yaml.MappingNode {
+		return fmt.Errorf("expected mapping at root")
+	}
+
+	// Find migration key
+	var migrationNode *yaml.Node
+	for i := 0; i < len(docContent.Content)-1; i += 2 {
+		if docContent.Content[i].Value == "migration" {
+			migrationNode = docContent.Content[i+1]
+			break
+		}
+	}
+
+	// Create migration section if it doesn't exist
+	if migrationNode == nil {
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: "migration"}
+		migrationNode = &yaml.Node{Kind: yaml.MappingNode}
+		docContent.Content = append(docContent.Content, keyNode, migrationNode)
+	}
+
+	// Helper to set a value in the migration mapping
+	setMigrationValue := func(key string, value interface{}) {
+		// Look for existing key
+		for i := 0; i < len(migrationNode.Content)-1; i += 2 {
+			if migrationNode.Content[i].Value == key {
+				// Update existing value
+				migrationNode.Content[i+1].Value = fmt.Sprintf("%v", value)
+				return
+			}
+		}
+		// Add new key-value pair
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: key}
+		valueNode := &yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%v", value)}
+		migrationNode.Content = append(migrationNode.Content, keyNode, valueNode)
+	}
+
+	// Apply recommended values
+	setMigrationValue("chunk_size", rec.ChunkSize)
+	setMigrationValue("workers", rec.Workers)
+	setMigrationValue("read_ahead_buffers", rec.ReadAheadBuffers)
+
+	if rec.ParallelReaders > 0 {
+		setMigrationValue("parallel_readers", rec.ParallelReaders)
+	}
+	if rec.WriteAheadWriters > 0 {
+		setMigrationValue("write_ahead_writers", rec.WriteAheadWriters)
+	}
+	if rec.PacketSize > 0 {
+		setMigrationValue("mssql_packet_size", rec.PacketSize)
+	}
+	if rec.MaxPartitions > 0 {
+		setMigrationValue("max_partitions", rec.MaxPartitions)
+	}
+	if rec.MaxSourceConnections > 0 {
+		setMigrationValue("max_source_connections", rec.MaxSourceConnections)
+	}
+	if rec.MaxTargetConnections > 0 {
+		setMigrationValue("max_target_connections", rec.MaxTargetConnections)
+	}
+	if rec.LargeTableThreshold > 0 {
+		setMigrationValue("large_table_threshold", rec.LargeTableThreshold)
+	}
+	if rec.MSSQLRowsPerBatch > 0 {
+		setMigrationValue("mssql_rows_per_batch", rec.MSSQLRowsPerBatch)
+	}
+	if rec.UpsertMergeChunkSize > 0 {
+		setMigrationValue("upsert_merge_chunk_size", rec.UpsertMergeChunkSize)
+	}
+
+	// Marshal back to YAML
+	var buf strings.Builder
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&root); err != nil {
+		return fmt.Errorf("failed to encode config: %w", err)
+	}
+	encoder.Close()
+
+	// Write back to file
+	if err := os.WriteFile(configPath, []byte(buf.String()), 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
 }

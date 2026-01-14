@@ -1531,6 +1531,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /validate             Validate migration
   /analyze [config_file] Analyze source database and suggest configuration
   /calibrate [config]   Run AI calibration to find optimal config
+                        Options: --apply (update config), --sample-size N
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
@@ -1651,8 +1652,8 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return m.runAnalyzeCmd(configFile, profileName)
 
 	case "/calibrate":
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runCalibrateCmd(configFile, profileName)
+		configFile, profileName, applyToConfig, sampleSize := parseCalibrateArgs(parts)
+		return m.runCalibrateCmd(configFile, profileName, applyToConfig, sampleSize)
 
 	default:
 		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
@@ -1938,11 +1939,16 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 	}
 }
 
-func (m Model) runCalibrateCmd(configFile, profileName string) tea.Cmd {
+func (m Model) runCalibrateCmd(configFile, profileName string, applyToConfig bool, sampleSize int) tea.Cmd {
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
 			return OutputMsg("Internal error: no program reference\n")
+		}
+
+		// Check if --apply is valid (requires file-based config, not profile)
+		if applyToConfig && profileName != "" {
+			return OutputMsg("Error: --apply requires a file-based config (not a profile)\n")
 		}
 
 		// Run asynchronously to avoid blocking the UI
@@ -1951,7 +1957,11 @@ func (m Model) runCalibrateCmd(configFile, profileName string) tea.Cmd {
 			if profileName != "" {
 				origin = "profile: " + profileName
 			}
-			out := fmt.Sprintf("Starting calibration with %s\n", origin)
+			opts := fmt.Sprintf("sample-size=%d", sampleSize)
+			if applyToConfig {
+				opts += ", apply=true"
+			}
+			out := fmt.Sprintf("Starting calibration with %s (%s)\n", origin, opts)
 			p.Send(OutputMsg(out))
 
 			cfg, err := loadConfigFromOrigin(configFile, profileName)
@@ -1995,7 +2005,7 @@ func (m Model) runCalibrateCmd(configFile, profileName string) tea.Cmd {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 
-			result, runErr := orch.Calibrate(ctx, 10000) // 10K sample size
+			result, runErr := orch.Calibrate(ctx, sampleSize)
 
 			// Restore stdout/stderr and logging
 			w.Close()
@@ -2016,6 +2026,15 @@ func (m Model) runCalibrateCmd(configFile, profileName string) tea.Cmd {
 				p.Send(BoxedOutputMsg(result.FormatYAML()))
 				if result.AIReasoning != "" {
 					p.Send(OutputMsg(fmt.Sprintf("\nAI Reasoning: %s\n", result.AIReasoning)))
+				}
+
+				// Apply to config file if requested
+				if applyToConfig {
+					if err := result.Recommendation.ApplyToConfigFile(configFile); err != nil {
+						p.Send(OutputMsg(fmt.Sprintf("\nFailed to apply config: %v\n", err)))
+					} else {
+						p.Send(OutputMsg(fmt.Sprintf("\nConfig updated: %s\n", configFile)))
+					}
 				}
 			}
 		}()
@@ -2234,6 +2253,40 @@ func parseStatusArgs(parts []string) (string, string, bool) {
 	}
 
 	return configFile, profileName, detailed
+}
+
+func parseCalibrateArgs(parts []string) (string, string, bool, int) {
+	configFile := "config.yaml"
+	profileName := ""
+	applyToConfig := false
+	sampleSize := 10000
+
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+		switch arg {
+		case "--apply", "-a":
+			applyToConfig = true
+		case "--sample-size", "-s":
+			if i+1 < len(parts) {
+				if n, err := fmt.Sscanf(parts[i+1], "%d", &sampleSize); err == nil && n == 1 {
+					i++
+				}
+			}
+		case "--profile":
+			if i+1 < len(parts) {
+				profileName = parts[i+1]
+				i++
+			}
+		default:
+			if strings.HasPrefix(arg, "@") {
+				configFile = arg[1:]
+			} else if !strings.HasPrefix(arg, "-") {
+				configFile = arg
+			}
+		}
+	}
+
+	return configFile, profileName, applyToConfig, sampleSize
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {
