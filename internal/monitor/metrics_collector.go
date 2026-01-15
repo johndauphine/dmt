@@ -52,9 +52,10 @@ type ConfigSnapshot struct {
 // TrendAnalysis captures detected performance trends.
 type TrendAnalysis struct {
 	Insufficient         bool
-	ThroughputDecreasing bool  // >10% decline
-	MemoryIncreasing     bool  // >5% increase per sample
-	LatencyIncreasing    bool  // >20% increase
+	ThroughputDecreasing bool    // >20% decline (significant threshold)
+	ThroughputDecline    float64 // actual decline percentage
+	MemoryIncreasing     bool    // >5% increase per sample
+	LatencyIncreasing    bool    // >20% increase
 	CPUSaturated         bool
 	MemorySaturated      bool
 }
@@ -201,10 +202,11 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	// Analyze last 3 samples
 	recent := mc.metrics[len(mc.metrics)-3:]
 
-	// Throughput trend (>10% decline)
+	// Throughput trend (>20% decline - significant threshold to avoid over-adjusting)
 	if recent[0].Throughput > 0 && recent[2].Throughput > 0 {
 		decline := (recent[0].Throughput - recent[2].Throughput) / recent[0].Throughput
-		if decline > 0.10 {
+		result.ThroughputDecline = decline * 100 // Store as percentage
+		if decline > 0.20 {
 			result.ThroughputDecreasing = true
 		}
 	}

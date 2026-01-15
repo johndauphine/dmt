@@ -27,8 +27,16 @@ type AIAdjuster struct {
 	aiMapper       *driver.AITypeMapper
 	collector      *MetricsCollector
 	pipeline       *pipeline.Pipeline
+	startTime      time.Time
 	lastAdjustment time.Time
 	adjustmentsMu  sync.Mutex
+
+	// Smarter adjustment control
+	lastActionType      string    // Track last action to prevent repeated same-action
+	lastActionTime      time.Time // When last non-continue action was applied
+	sameActionCooldown  time.Duration
+	warmupPeriod        time.Duration
+	adjustmentCount     int // Total non-continue adjustments made
 
 	// Cost control
 	callInterval   time.Duration
@@ -46,14 +54,17 @@ type AIAdjuster struct {
 // NewAIAdjuster creates a new AI adjuster.
 func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, p *pipeline.Pipeline) *AIAdjuster {
 	return &AIAdjuster{
-		aiMapper:         aiMapper,
-		collector:        collector,
-		pipeline:         p,
-		callInterval:     30 * time.Second, // Throttle to 30s intervals
-		cacheDuration:    60 * time.Second, // Cache decisions for 60s
-		failureThreshold: 3,
-		resetTimeout:     5 * time.Minute,
-		circuitOpen:      false,
+		aiMapper:           aiMapper,
+		collector:          collector,
+		pipeline:           p,
+		startTime:          time.Now(),
+		warmupPeriod:       2 * time.Minute,  // Wait 2 min before any adjustments (let auto-tune stabilize)
+		sameActionCooldown: 3 * time.Minute,  // Wait 3 min between same-type adjustments
+		callInterval:       30 * time.Second, // Throttle to 30s intervals
+		cacheDuration:      60 * time.Second, // Cache decisions for 60s
+		failureThreshold:   3,
+		resetTimeout:       5 * time.Minute,
+		circuitOpen:        false,
 	}
 }
 
@@ -61,6 +72,18 @@ func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, p
 func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error) {
 	aa.adjustmentsMu.Lock()
 	defer aa.adjustmentsMu.Unlock()
+
+	// Check warmup period - let auto-tuned defaults stabilize before adjusting
+	if time.Since(aa.startTime) < aa.warmupPeriod {
+		remaining := aa.warmupPeriod - time.Since(aa.startTime)
+		logging.Debug("AI adjustment warmup: %.0fs remaining before first adjustment", remaining.Seconds())
+		return &AdjustmentDecision{
+			Action:      "continue",
+			Reasoning:   fmt.Sprintf("Warmup period - waiting %.0fs for auto-tuned defaults to stabilize", remaining.Seconds()),
+			Confidence:  "high",
+			Adjustments: make(map[string]int),
+		}, nil
+	}
 
 	// Check circuit breaker
 	if aa.circuitOpen {
@@ -208,6 +231,31 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		return nil // No adjustments to apply
 	}
 
+	// Check same-action cooldown to prevent repeated adjustments
+	if decision.Action == aa.lastActionType && time.Since(aa.lastActionTime) < aa.sameActionCooldown {
+		remaining := aa.sameActionCooldown - time.Since(aa.lastActionTime)
+		logging.Debug("AI adjustment cooldown: skipping %s (same action applied %.0fs ago, wait %.0fs)",
+			decision.Action, time.Since(aa.lastActionTime).Seconds(), remaining.Seconds())
+		return nil
+	}
+
+	// Check if we're already at limits for this action type
+	config := aa.pipeline.GetConfig()
+	if decision.Action == "scale_up" {
+		// Don't scale up if already at max workers
+		if config.WriteAheadWriters >= 16 {
+			logging.Debug("AI adjustment skipped: already at max workers (%d)", config.WriteAheadWriters)
+			return nil
+		}
+	}
+	if decision.Action == "scale_down" {
+		// Don't scale down if already at min workers
+		if config.WriteAheadWriters <= 1 {
+			logging.Debug("AI adjustment skipped: already at min workers (%d)", config.WriteAheadWriters)
+			return nil
+		}
+	}
+
 	// Validate adjustments
 	for param, value := range decision.Adjustments {
 		if err := aa.validateParameter(param, value); err != nil {
@@ -240,8 +288,13 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		return fmt.Errorf("failed to apply config update: %w", err)
 	}
 
-	logging.Info("AI adjustment applied: %s - %s (confidence: %s)",
-		decision.Action, decision.Reasoning, decision.Confidence)
+	// Track this adjustment
+	aa.lastActionType = decision.Action
+	aa.lastActionTime = time.Now()
+	aa.adjustmentCount++
+
+	logging.Info("AI adjustment #%d applied: %s - %s (confidence: %s)",
+		aa.adjustmentCount, decision.Action, decision.Reasoning, decision.Confidence)
 
 	aa.lastAdjustment = time.Now()
 	return nil
@@ -272,11 +325,20 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	latest := metrics[0]
 	config := aa.pipeline.GetConfig()
 
-	// Rule 1: Memory saturation
+	// Rule 1: Memory saturation (high priority)
 	if trends.MemorySaturated {
 		newChunkSize := config.ChunkSize / 2
 		if newChunkSize < 5000 {
 			newChunkSize = 5000
+		}
+		if newChunkSize == config.ChunkSize {
+			// Already at minimum, nothing to do
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   "Memory saturated but already at minimum chunk size",
+				Confidence:  "medium",
+				Adjustments: make(map[string]int),
+			}
 		}
 		return &AdjustmentDecision{
 			Action:      "reduce_chunk",
@@ -288,10 +350,16 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 
 	// Rule 2: CPU saturation with latency increase
 	if trends.CPUSaturated && latest.CPUPercent > 85 {
-		newWorkers := config.WriteAheadWriters - 1
-		if newWorkers < 1 {
-			newWorkers = 1
+		if config.WriteAheadWriters <= 1 {
+			// Already at minimum, nothing to do
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   "CPU saturated but already at minimum workers",
+				Confidence:  "medium",
+				Adjustments: make(map[string]int),
+			}
 		}
+		newWorkers := config.WriteAheadWriters - 1
 		return &AdjustmentDecision{
 			Action:      "scale_down",
 			Reasoning:   "CPU saturated - reducing workers to decrease contention",
@@ -300,25 +368,32 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 		}
 	}
 
-	// Rule 3: Throughput declining with available resources
+	// Rule 3: Throughput declining significantly (>20%) with available resources
+	// Only suggest scale_up if not already at max and decline is significant
 	if trends.ThroughputDecreasing && !trends.CPUSaturated && !trends.MemorySaturated {
-		newWorkers := config.WriteAheadWriters + 1
-		if newWorkers > 16 {
-			newWorkers = 16
+		if config.WriteAheadWriters >= 16 {
+			// Already at maximum, nothing to do
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   fmt.Sprintf("Throughput declining %.0f%% but already at max workers", trends.ThroughputDecline),
+				Confidence:  "medium",
+				Adjustments: make(map[string]int),
+			}
 		}
+		newWorkers := config.WriteAheadWriters + 1
 		return &AdjustmentDecision{
 			Action:      "scale_up",
-			Reasoning:   "Throughput declining and resources available - increasing workers",
+			Reasoning:   fmt.Sprintf("Throughput declining %.0f%% with resources available - increasing workers", trends.ThroughputDecline),
 			Confidence:  "medium",
 			Adjustments: map[string]int{"workers": newWorkers},
 		}
 	}
 
-	// Default: continue
+	// Default: continue - performance is stable
 	return &AdjustmentDecision{
 		Action:      "continue",
-		Reasoning:   "Performance stable (fallback rules)",
-		Confidence:  "low",
+		Reasoning:   fmt.Sprintf("Performance stable (throughput trend: %.1f%%)", trends.ThroughputDecline),
+		Confidence:  "high",
 		Adjustments: make(map[string]int),
 	}
 }
