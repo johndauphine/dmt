@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 // AdjustmentDecision represents AI's recommendation for parameter adjustments.
@@ -22,13 +24,51 @@ type AdjustmentDecision struct {
 	Confidence  string         `json:"confidence"`
 }
 
+// AdjustmentRecord tracks a past adjustment and its effect.
+type AdjustmentRecord struct {
+	Timestamp        time.Time
+	Action           string
+	Adjustments      map[string]int
+	ThroughputBefore float64
+	ThroughputAfter  float64 // Measured 30s after adjustment
+	EffectPercent    float64 // Positive = improvement
+}
+
+// SystemResources captures the execution environment for AI context.
+type SystemResources struct {
+	CPUCores             int
+	MemoryTotalMB        int64
+	MemoryAvailableMB    int64
+	MaxSourceConnections int
+	MaxTargetConnections int
+}
+
 // AIAdjuster uses AI to analyze metrics and recommend parameter adjustments.
 type AIAdjuster struct {
 	aiMapper       *driver.AITypeMapper
 	collector      *MetricsCollector
 	pipeline       *pipeline.Pipeline
+	startTime      time.Time
 	lastAdjustment time.Time
 	adjustmentsMu  sync.Mutex
+
+	// System resources for AI context
+	systemResources SystemResources
+
+	// Baseline metrics (captured after warmup)
+	baselineMetrics   *PerformanceSnapshot
+	baselineCaptured  bool
+
+	// Adjustment history for AI learning
+	adjustmentHistory []AdjustmentRecord
+	maxHistorySize    int
+
+	// Smarter adjustment control
+	lastActionType     string    // Track last action to prevent repeated same-action
+	lastActionTime     time.Time // When last non-continue action was applied
+	sameActionCooldown time.Duration
+	warmupPeriod       time.Duration
+	adjustmentCount    int // Total non-continue adjustments made
 
 	// Cost control
 	callInterval   time.Duration
@@ -45,22 +85,99 @@ type AIAdjuster struct {
 
 // NewAIAdjuster creates a new AI adjuster.
 func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, p *pipeline.Pipeline) *AIAdjuster {
-	return &AIAdjuster{
-		aiMapper:         aiMapper,
-		collector:        collector,
-		pipeline:         p,
-		callInterval:     30 * time.Second, // Throttle to 30s intervals
-		cacheDuration:    60 * time.Second, // Cache decisions for 60s
-		failureThreshold: 3,
-		resetTimeout:     5 * time.Minute,
-		circuitOpen:      false,
+	aa := &AIAdjuster{
+		aiMapper:           aiMapper,
+		collector:          collector,
+		pipeline:           p,
+		startTime:          time.Now(),
+		warmupPeriod:       2 * time.Minute,  // Wait 2 min before any adjustments (let auto-tune stabilize)
+		sameActionCooldown: 3 * time.Minute,  // Wait 3 min between same-type adjustments
+		callInterval:       30 * time.Second, // Throttle to 30s intervals
+		cacheDuration:      60 * time.Second, // Cache decisions for 60s
+		failureThreshold:   3,
+		resetTimeout:       5 * time.Minute,
+		circuitOpen:        false,
+		maxHistorySize:     10, // Keep last 10 adjustments
+		adjustmentHistory:  make([]AdjustmentRecord, 0, 10),
 	}
+
+	// Gather system resources
+	aa.gatherSystemResources()
+
+	return aa
+}
+
+// SetConnectionLimits sets the max connection limits for source and target.
+func (aa *AIAdjuster) SetConnectionLimits(maxSource, maxTarget int) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.systemResources.MaxSourceConnections = maxSource
+	aa.systemResources.MaxTargetConnections = maxTarget
+}
+
+// gatherSystemResources collects system information for AI context.
+func (aa *AIAdjuster) gatherSystemResources() {
+	aa.systemResources.CPUCores = runtime.NumCPU()
+
+	if memInfo, err := mem.VirtualMemory(); err == nil {
+		aa.systemResources.MemoryTotalMB = int64(memInfo.Total / 1024 / 1024)
+		aa.systemResources.MemoryAvailableMB = int64(memInfo.Available / 1024 / 1024)
+	}
+}
+
+// captureBaseline captures baseline metrics after warmup period.
+func (aa *AIAdjuster) captureBaseline() {
+	if aa.baselineCaptured {
+		return
+	}
+
+	metrics := aa.collector.GetRecentMetrics(3)
+	if len(metrics) < 3 {
+		return
+	}
+
+	// Average the metrics for a stable baseline
+	var avgThroughput float64
+	var avgCPU float64
+	var avgMemory float64
+	for _, m := range metrics {
+		avgThroughput += m.Throughput
+		avgCPU += m.CPUPercent
+		avgMemory += m.MemoryPercent
+	}
+	count := float64(len(metrics))
+
+	aa.baselineMetrics = &PerformanceSnapshot{
+		Throughput:    avgThroughput / count,
+		CPUPercent:    avgCPU / count,
+		MemoryPercent: avgMemory / count,
+		Timestamp:     time.Now(),
+	}
+	aa.baselineCaptured = true
+
+	logging.Info("AI adjuster baseline captured: %.0f rows/sec, CPU %.1f%%, Memory %.1f%%",
+		aa.baselineMetrics.Throughput, aa.baselineMetrics.CPUPercent, aa.baselineMetrics.MemoryPercent)
 }
 
 // Evaluate analyzes current metrics and returns an adjustment recommendation.
 func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error) {
 	aa.adjustmentsMu.Lock()
 	defer aa.adjustmentsMu.Unlock()
+
+	// Check warmup period - let auto-tuned defaults stabilize before adjusting
+	if time.Since(aa.startTime) < aa.warmupPeriod {
+		remaining := aa.warmupPeriod - time.Since(aa.startTime)
+		logging.Debug("AI adjustment warmup: %.0fs remaining before first adjustment", remaining.Seconds())
+		return &AdjustmentDecision{
+			Action:      "continue",
+			Reasoning:   fmt.Sprintf("Warmup period - waiting %.0fs for auto-tuned defaults to stabilize", remaining.Seconds()),
+			Confidence:  "high",
+			Adjustments: make(map[string]int),
+		}, nil
+	}
+
+	// Capture baseline after warmup
+	aa.captureBaseline()
 
 	// Check circuit breaker
 	if aa.circuitOpen {
@@ -78,7 +195,7 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 		return nil, fmt.Errorf("throttled - next AI call available in %.0fs", (aa.callInterval - time.Since(aa.lastAICall)).Seconds())
 	}
 
-	// Build prompt
+	// Build prompt with full context
 	prompt := aa.buildAdjustmentPrompt()
 
 	// Call AI
@@ -107,65 +224,137 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 	return decision, nil
 }
 
-// buildAdjustmentPrompt constructs the prompt for AI analysis.
+// buildAdjustmentPrompt constructs the prompt for AI analysis with full context.
 func (aa *AIAdjuster) buildAdjustmentPrompt() string {
-	metrics := aa.collector.GetRecentMetrics(3) // Last 3 samples (90 seconds)
+	metrics := aa.collector.GetRecentMetrics(5) // Last 5 samples for trend
 	trends := aa.collector.AnalyzeTrends()
 	config := aa.pipeline.GetConfig()
 
-	// Build metrics summary
-	var metricsStr string
-	if len(metrics) > 0 {
-		latest := metrics[len(metrics)-1]
-		metricsStr = fmt.Sprintf(`
-Current Performance (latest):
-- Rows: %d (%.0f rows/sec)
-- Throughput trend: %.1f%%
-- Memory: %dMB (%.1f%%)
-- CPU: %.1f%%
-- Elapsed: %.0f seconds
-`, latest.RowsProcessed, latest.Throughput, latest.ThroughputTrend, latest.MemoryUsedMB, latest.MemoryPercent, latest.CPUPercent, latest.ElapsedSeconds)
+	var sb strings.Builder
+
+	sb.WriteString("Real-time database migration parameter adjustment.\n\n")
+
+	// System Resources
+	sb.WriteString("## System Resources\n")
+	sb.WriteString(fmt.Sprintf("- CPU cores: %d\n", aa.systemResources.CPUCores))
+	sb.WriteString(fmt.Sprintf("- Memory: %d MB available / %d MB total\n",
+		aa.systemResources.MemoryAvailableMB, aa.systemResources.MemoryTotalMB))
+	if aa.systemResources.MaxSourceConnections > 0 {
+		sb.WriteString(fmt.Sprintf("- Max source connections: %d\n", aa.systemResources.MaxSourceConnections))
+	}
+	if aa.systemResources.MaxTargetConnections > 0 {
+		sb.WriteString(fmt.Sprintf("- Max target connections: %d\n", aa.systemResources.MaxTargetConnections))
+	}
+	sb.WriteString("\n")
+
+	// Baseline metrics
+	if aa.baselineMetrics != nil {
+		sb.WriteString("## Baseline Performance (after warmup)\n")
+		sb.WriteString(fmt.Sprintf("- Baseline throughput: %.0f rows/sec\n", aa.baselineMetrics.Throughput))
+		sb.WriteString(fmt.Sprintf("- Baseline CPU: %.1f%%\n", aa.baselineMetrics.CPUPercent))
+		sb.WriteString(fmt.Sprintf("- Baseline memory: %.1f%%\n", aa.baselineMetrics.MemoryPercent))
+		sb.WriteString("\n")
 	}
 
-	prompt := fmt.Sprintf(`Real-time database migration parameter adjustment.
+	// Current performance
+	sb.WriteString("## Current Performance\n")
+	if len(metrics) > 0 {
+		latest := metrics[len(metrics)-1]
+		sb.WriteString(fmt.Sprintf("- Current throughput: %.0f rows/sec", latest.Throughput))
+		if aa.baselineMetrics != nil && aa.baselineMetrics.Throughput > 0 {
+			pctChange := (latest.Throughput - aa.baselineMetrics.Throughput) / aa.baselineMetrics.Throughput * 100
+			sb.WriteString(fmt.Sprintf(" (%.1f%% vs baseline)", pctChange))
+		}
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- CPU: %.1f%%\n", latest.CPUPercent))
+		sb.WriteString(fmt.Sprintf("- Memory: %d MB (%.1f%%)\n", latest.MemoryUsedMB, latest.MemoryPercent))
+		sb.WriteString(fmt.Sprintf("- Elapsed: %.0f seconds\n", latest.ElapsedSeconds))
+		sb.WriteString(fmt.Sprintf("- Rows processed: %d\n", latest.RowsProcessed))
+	}
+	sb.WriteString("\n")
 
-## Current Status
-%s
+	// Recent metrics trend
+	sb.WriteString("## Recent Metrics (last 5 samples)\n")
+	if len(metrics) >= 3 {
+		sb.WriteString("- Throughput: ")
+		for i, m := range metrics {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("%.0f", m.Throughput))
+		}
+		sb.WriteString(" rows/sec\n")
 
-## Current Configuration
-- chunk_size: %d (10K-200K)
-- workers: %d (1-16)
-- parallel_readers: %d (1-4)
-- read_ahead_buffers: %d (4-32)
+		sb.WriteString("- CPU: ")
+		for i, m := range metrics {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("%.0f%%", m.CPUPercent))
+		}
+		sb.WriteString("\n")
 
-## Performance Trends
-- Throughput decreasing: %v
-- Memory increasing: %v
-- CPU saturated (>90%%): %v
-- Memory saturated (>85%%): %v
+		sb.WriteString("- Memory: ")
+		for i, m := range metrics {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("%.0f%%", m.MemoryPercent))
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(fmt.Sprintf("- Throughput trend: %.1f%% (>20%% decline = significant)\n", trends.ThroughputDecline))
+	sb.WriteString("\n")
 
-## Guidelines for Adjustment
-1. **If performance stable** → action: "continue" (no changes)
-2. **If throughput declining + resources available** → "scale_up" (more workers or larger chunks)
-3. **If memory >85%%** → "reduce_chunk" (smaller chunks)
-4. **If CPU >90%% + latency high** → "scale_down" (fewer workers)
+	// Current config
+	sb.WriteString("## Current Configuration\n")
+	sb.WriteString(fmt.Sprintf("- workers: %d\n", config.WriteAheadWriters))
+	sb.WriteString(fmt.Sprintf("- chunk_size: %d\n", config.ChunkSize))
+	sb.WriteString(fmt.Sprintf("- parallel_readers: %d\n", config.ParallelReaders))
+	sb.WriteString(fmt.Sprintf("- read_ahead_buffers: %d\n", config.ReadAheadBuffers))
+	sb.WriteString("\n")
 
-Important: Only recommend changes that make sense. If performance is good, continue.
+	// Adjustment history
+	if len(aa.adjustmentHistory) > 0 {
+		sb.WriteString("## Adjustment History\n")
+		for _, adj := range aa.adjustmentHistory {
+			sb.WriteString(fmt.Sprintf("- %s ago: %s → throughput %+.1f%%\n",
+				time.Since(adj.Timestamp).Round(time.Second),
+				adj.Action,
+				adj.EffectPercent))
+		}
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("## Adjustment History\n- No adjustments made yet\n\n")
+	}
+
+	// Guidelines
+	sb.WriteString(`## Guidelines
+Based on system resources above, determine safe parameter ranges:
+- workers: Should not exceed CPU cores or max DB connections
+- chunk_size: Larger = better throughput, but watch memory usage
+
+Decision rules:
+1. **If within ±10% of baseline** → "continue" (stable, no changes needed)
+2. **If >20% below baseline + CPU/memory available** → consider "scale_up"
+3. **If memory >85%** → "reduce_chunk"
+4. **If CPU >90% sustained** → consider "scale_down"
+5. **If past adjustment didn't help** → don't repeat same action
+
+Important: Only adjust if there's a significant problem. Stability is preferred.
 
 Return ONLY valid JSON:
 {
-  "action": "continue|scale_up|scale_down|reduce_chunk|optimize",
+  "action": "continue|scale_up|scale_down|reduce_chunk",
   "adjustments": {
-    "chunk_size": <new value or omit>,
-    "workers": <new value or omit>
+    "workers": <new value or omit>,
+    "chunk_size": <new value or omit>
   },
-  "reasoning": "<2-3 sentences explaining why>",
-  "warnings": ["<warning if any>"],
+  "reasoning": "<2-3 sentences explaining decision based on data>",
   "confidence": "high|medium|low"
-}`, metricsStr, config.ChunkSize, config.WriteAheadWriters, config.ParallelReaders, config.ReadAheadBuffers,
-		trends.ThroughputDecreasing, trends.MemoryIncreasing, trends.CPUSaturated, trends.MemorySaturated)
+}`)
 
-	return prompt
+	return sb.String()
 }
 
 // parseDecision parses the AI response into an AdjustmentDecision.
@@ -208,10 +397,26 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		return nil // No adjustments to apply
 	}
 
-	// Validate adjustments
+	// Check same-action cooldown to prevent repeated adjustments
+	if decision.Action == aa.lastActionType && time.Since(aa.lastActionTime) < aa.sameActionCooldown {
+		remaining := aa.sameActionCooldown - time.Since(aa.lastActionTime)
+		logging.Debug("AI adjustment cooldown: skipping %s (same action applied %.0fs ago, wait %.0fs)",
+			decision.Action, time.Since(aa.lastActionTime).Seconds(), remaining.Seconds())
+		return nil
+	}
+
+	// Record throughput before adjustment for history
+	var throughputBefore float64
+	metrics := aa.collector.GetRecentMetrics(1)
+	if len(metrics) > 0 {
+		throughputBefore = metrics[0].Throughput
+	}
+
+	// Validate adjustments against system resources (AI-informed limits)
 	for param, value := range decision.Adjustments {
-		if err := aa.validateParameter(param, value); err != nil {
-			return fmt.Errorf("invalid adjustment for %s: %w", param, err)
+		if err := aa.validateParameterWithResources(param, value); err != nil {
+			logging.Warn("AI adjustment rejected: %v", err)
+			return nil
 		}
 	}
 
@@ -231,7 +436,7 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		case "read_ahead_buffers":
 			update.ReadAheadBuffers = &value
 		default:
-			logging.Info("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
+			logging.Debug("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
 		}
 	}
 
@@ -240,10 +445,93 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		return fmt.Errorf("failed to apply config update: %w", err)
 	}
 
-	logging.Info("AI adjustment applied: %s - %s (confidence: %s)",
-		decision.Action, decision.Reasoning, decision.Confidence)
+	// Track this adjustment
+	aa.lastActionType = decision.Action
+	aa.lastActionTime = time.Now()
+	aa.adjustmentCount++
+
+	// Record in history (we'll update the effect later)
+	record := AdjustmentRecord{
+		Timestamp:        time.Now(),
+		Action:           decision.Action,
+		Adjustments:      decision.Adjustments,
+		ThroughputBefore: throughputBefore,
+	}
+	aa.adjustmentHistory = append(aa.adjustmentHistory, record)
+	if len(aa.adjustmentHistory) > aa.maxHistorySize {
+		aa.adjustmentHistory = aa.adjustmentHistory[1:]
+	}
+
+	// Schedule effect measurement (30s later)
+	go aa.measureAdjustmentEffect(len(aa.adjustmentHistory) - 1)
+
+	logging.Info("AI adjustment #%d applied: %s - %s (confidence: %s)",
+		aa.adjustmentCount, decision.Action, decision.Reasoning, decision.Confidence)
 
 	aa.lastAdjustment = time.Now()
+	return nil
+}
+
+// measureAdjustmentEffect measures the effect of an adjustment after 30 seconds.
+func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
+	time.Sleep(30 * time.Second)
+
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+
+	if historyIndex >= len(aa.adjustmentHistory) {
+		return
+	}
+
+	metrics := aa.collector.GetRecentMetrics(1)
+	if len(metrics) == 0 {
+		return
+	}
+
+	record := &aa.adjustmentHistory[historyIndex]
+	record.ThroughputAfter = metrics[0].Throughput
+
+	if record.ThroughputBefore > 0 {
+		record.EffectPercent = (record.ThroughputAfter - record.ThroughputBefore) / record.ThroughputBefore * 100
+		logging.Debug("AI adjustment effect: %s → throughput %+.1f%% (%.0f → %.0f rows/sec)",
+			record.Action, record.EffectPercent, record.ThroughputBefore, record.ThroughputAfter)
+	}
+}
+
+// validateParameterWithResources validates against system resources.
+func (aa *AIAdjuster) validateParameterWithResources(param string, value int) error {
+	switch param {
+	case "chunk_size":
+		if value < 1000 || value > 500000 {
+			return fmt.Errorf("chunk_size %d out of safe range (1K-500K)", value)
+		}
+	case "workers":
+		// Max workers shouldn't exceed CPU cores or connection limits
+		maxWorkers := aa.systemResources.CPUCores
+		if aa.systemResources.MaxTargetConnections > 0 && aa.systemResources.MaxTargetConnections < maxWorkers {
+			maxWorkers = aa.systemResources.MaxTargetConnections
+		}
+		if maxWorkers < 1 {
+			maxWorkers = 16 // Fallback
+		}
+		if value < 1 || value > maxWorkers {
+			return fmt.Errorf("workers %d out of safe range (1-%d based on system resources)", value, maxWorkers)
+		}
+	case "parallel_readers":
+		maxReaders := 4
+		if aa.systemResources.MaxSourceConnections > 0 && aa.systemResources.MaxSourceConnections < maxReaders {
+			maxReaders = aa.systemResources.MaxSourceConnections
+		}
+		if value < 1 || value > maxReaders {
+			return fmt.Errorf("parallel_readers %d out of safe range (1-%d)", value, maxReaders)
+		}
+	case "read_ahead_buffers":
+		if value < 2 || value > 32 {
+			return fmt.Errorf("read_ahead_buffers %d out of safe range (2-32)", value)
+		}
+	default:
+		return fmt.Errorf("unknown parameter: %s", param)
+	}
 	return nil
 }
 
@@ -272,11 +560,32 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	latest := metrics[0]
 	config := aa.pipeline.GetConfig()
 
-	// Rule 1: Memory saturation
+	// Check if we're close to baseline (stable)
+	if aa.baselineMetrics != nil && aa.baselineMetrics.Throughput > 0 {
+		pctFromBaseline := (latest.Throughput - aa.baselineMetrics.Throughput) / aa.baselineMetrics.Throughput * 100
+		if pctFromBaseline >= -10 && pctFromBaseline <= 10 {
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   fmt.Sprintf("Throughput within ±10%% of baseline (%.1f%%)", pctFromBaseline),
+				Confidence:  "high",
+				Adjustments: make(map[string]int),
+			}
+		}
+	}
+
+	// Rule 1: Memory saturation (high priority)
 	if trends.MemorySaturated {
 		newChunkSize := config.ChunkSize / 2
 		if newChunkSize < 5000 {
 			newChunkSize = 5000
+		}
+		if newChunkSize == config.ChunkSize {
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   "Memory saturated but already at minimum chunk size",
+				Confidence:  "medium",
+				Adjustments: make(map[string]int),
+			}
 		}
 		return &AdjustmentDecision{
 			Action:      "reduce_chunk",
@@ -286,12 +595,17 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 		}
 	}
 
-	// Rule 2: CPU saturation with latency increase
+	// Rule 2: CPU saturation
 	if trends.CPUSaturated && latest.CPUPercent > 85 {
-		newWorkers := config.WriteAheadWriters - 1
-		if newWorkers < 1 {
-			newWorkers = 1
+		if config.WriteAheadWriters <= 1 {
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   "CPU saturated but already at minimum workers",
+				Confidence:  "medium",
+				Adjustments: make(map[string]int),
+			}
 		}
+		newWorkers := config.WriteAheadWriters - 1
 		return &AdjustmentDecision{
 			Action:      "scale_down",
 			Reasoning:   "CPU saturated - reducing workers to decrease contention",
@@ -300,52 +614,35 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 		}
 	}
 
-	// Rule 3: Throughput declining with available resources
+	// Rule 3: Significant throughput decline (>20%)
 	if trends.ThroughputDecreasing && !trends.CPUSaturated && !trends.MemorySaturated {
-		newWorkers := config.WriteAheadWriters + 1
-		if newWorkers > 16 {
-			newWorkers = 16
+		maxWorkers := aa.systemResources.CPUCores
+		if maxWorkers < 1 {
+			maxWorkers = 16
 		}
+		if config.WriteAheadWriters >= maxWorkers {
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   fmt.Sprintf("Throughput declining %.0f%% but at max workers for system", trends.ThroughputDecline),
+				Confidence:  "medium",
+				Adjustments: make(map[string]int),
+			}
+		}
+		newWorkers := config.WriteAheadWriters + 1
 		return &AdjustmentDecision{
 			Action:      "scale_up",
-			Reasoning:   "Throughput declining and resources available - increasing workers",
+			Reasoning:   fmt.Sprintf("Throughput declining %.0f%% with resources available", trends.ThroughputDecline),
 			Confidence:  "medium",
 			Adjustments: map[string]int{"workers": newWorkers},
 		}
 	}
 
-	// Default: continue
 	return &AdjustmentDecision{
 		Action:      "continue",
-		Reasoning:   "Performance stable (fallback rules)",
-		Confidence:  "low",
+		Reasoning:   fmt.Sprintf("Performance stable (throughput trend: %.1f%%)", trends.ThroughputDecline),
+		Confidence:  "high",
 		Adjustments: make(map[string]int),
 	}
-}
-
-// validateParameter checks if a parameter value is within valid ranges.
-func (aa *AIAdjuster) validateParameter(param string, value int) error {
-	switch param {
-	case "chunk_size":
-		if value < 1000 || value > 500000 {
-			return fmt.Errorf("chunk_size %d out of range (1K-500K)", value)
-		}
-	case "workers":
-		if value < 1 || value > 16 {
-			return fmt.Errorf("workers %d out of range (1-16)", value)
-		}
-	case "parallel_readers":
-		if value < 1 || value > 4 {
-			return fmt.Errorf("parallel_readers %d out of range (1-4)", value)
-		}
-	case "read_ahead_buffers":
-		if value < 4 || value > 32 {
-			return fmt.Errorf("read_ahead_buffers %d out of range (4-32)", value)
-		}
-	default:
-		return fmt.Errorf("unknown parameter: %s", param)
-	}
-	return nil
 }
 
 // recordFailure tracks AI call failures for circuit breaker logic.

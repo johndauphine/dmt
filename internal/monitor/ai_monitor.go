@@ -36,6 +36,11 @@ func NewAIMonitor(
 	}
 }
 
+// SetConnectionLimits sets the max connection limits for source and target.
+func (am *AIMonitor) SetConnectionLimits(maxSource, maxTarget int) {
+	am.adjuster.SetConnectionLimits(maxSource, maxTarget)
+}
+
 // UpdateRowsProcessed updates the count of rows transferred.
 func (am *AIMonitor) UpdateRowsProcessed(count int64) {
 	am.rowsProcessed = count
