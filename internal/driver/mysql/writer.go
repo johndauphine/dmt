@@ -519,7 +519,8 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	for _, col := range opts.Columns {
 		if !pkSet[strings.ToLower(col)] {
 			qCol := w.dialect.QuoteIdentifier(col)
-			updateClauses = append(updateClauses, fmt.Sprintf("%s = VALUES(%s)", qCol, qCol))
+			// Use new.col syntax (MySQL 8.0.19+) instead of deprecated VALUES(col)
+			updateClauses = append(updateClauses, fmt.Sprintf("%s = new.%s", qCol, qCol))
 		}
 	}
 
@@ -567,7 +568,8 @@ func (w *Writer) upsertBatch(ctx context.Context, tableName, colList string, col
 		rowPlaceholders[i] = rowPlaceholder
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s%s",
+	// Use AS new alias (MySQL 8.0.19+) for the new row reference in ON DUPLICATE KEY UPDATE
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new%s",
 		tableName, colList, strings.Join(rowPlaceholders, ", "), updateClause)
 
 	// Flatten all values
