@@ -171,10 +171,14 @@ func (m *AITypeMapper) MapType(info TypeInfo) string {
 		// The caller should use MapTypeWithError if they want to handle errors
 		logging.Error("AI type mapping failed for %s.%s: %v", info.SourceDBType, info.DataType, err)
 		// Return a generic fallback - this should rarely happen with proper caching
-		if info.TargetDBType == "postgres" {
+		switch info.TargetDBType {
+		case "postgres":
 			return "text"
+		case "mysql":
+			return "text"
+		default:
+			return "nvarchar(max)"
 		}
-		return "nvarchar(max)"
 	}
 	return result
 }
@@ -415,6 +419,9 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 			strings.ToLower(info.DataType) == "text") {
 			sb.WriteString("Note: PostgreSQL string types store characters. SQL Server varchar stores bytes, nvarchar stores characters.\n")
 		}
+	case "mysql":
+		sb.WriteString("\nTarget: MySQL 8.0+ or MariaDB 10.5+ with InnoDB engine.\n")
+		sb.WriteString("Note: MySQL varchar has 65535 byte max (use TEXT for longer). Use utf8mb4 charset.\n")
 	}
 
 	sb.WriteString("\nReturn ONLY the ")
