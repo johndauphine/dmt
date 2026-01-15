@@ -229,12 +229,8 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 		logging.Warn("Failed to save AI type mapping cache: %v", err)
 	}
 
-	sampleInfo := ""
-	if len(info.SampleValues) > 0 {
-		sampleInfo = fmt.Sprintf(" (with %d sample values)", len(info.SampleValues))
-	}
-	logging.Info("AI mapped %s.%s -> %s.%s%s (cached for future use)",
-		info.SourceDBType, info.DataType, info.TargetDBType, result, sampleInfo)
+	logging.Info("AI mapped %s.%s -> %s.%s (cached for future use)",
+		info.SourceDBType, info.DataType, info.TargetDBType, result)
 
 	req.result = result
 	return result, nil
@@ -384,28 +380,8 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString(fmt.Sprintf("- Scale: %d\n", info.Scale))
 	}
 
-	// Include sanitized sample values if available
-	if len(info.SampleValues) > 0 {
-		sb.WriteString("\nSample values from source data:\n")
-		totalBytes := 0
-		samplesIncluded := 0
-		for _, v := range info.SampleValues {
-			if samplesIncluded >= maxSamplesInPrompt {
-				break
-			}
-			display := sanitizeSampleValue(v)
-			if display == "" {
-				continue
-			}
-			if totalBytes+len(display) > maxTotalSampleBytes {
-				break
-			}
-			sb.WriteString(fmt.Sprintf("  - %q\n", display))
-			totalBytes += len(display)
-			samplesIncluded++
-		}
-		sb.WriteString("The target column must be able to store these exact values.\n")
-	}
+	// Sample values are no longer collected (privacy improvement)
+	// Type mapping now works purely from DDL metadata
 
 	// Add target database context
 	switch info.TargetDBType {
