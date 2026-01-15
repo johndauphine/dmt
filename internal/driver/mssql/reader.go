@@ -272,19 +272,51 @@ func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) erro
 }
 
 // GetRowCount returns the row count for a table.
+// It first tries a fast statistics-based count, then falls back to COUNT(*) if needed.
 func (r *Reader) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
+	// Try fast stats-based count first
+	count, err := r.GetRowCountFast(ctx, schema, table)
+	if err == nil && count > 0 {
+		return count, nil
+	}
+
+	// Fall back to COUNT(*)
+	err = r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))).Scan(&count)
+	return count, err
+}
+
+// GetRowCountFast returns an approximate row count using system statistics.
+// This is much faster than COUNT(*) for large tables.
+func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))).Scan(&count)
+	query := `
+		SELECT SUM(p.rows)
+		FROM sys.partitions p
+		JOIN sys.tables t ON p.object_id = t.object_id
+		JOIN sys.schemas s ON t.schema_id = s.schema_id
+		WHERE s.name = @schema AND t.name = @table AND p.index_id IN (0, 1)
+	`
+	err := r.db.QueryRowContext(ctx, query,
+		sql.Named("schema", schema),
+		sql.Named("table", table)).Scan(&count)
+	return count, err
+}
+
+// GetRowCountExact returns the exact row count using COUNT(*).
+// This may be slow on large tables.
+func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WITH (NOLOCK)", r.dialect.QualifyTable(schema, table))).Scan(&count)
 	return count, err
 }
 
 // PartitionQueryTimeout is the maximum time to wait for partition boundary calculation.
-// If exceeded, the table will be processed without partitioning.
+// If exceeded, falls back to MIN/MAX based partitioning.
 const PartitionQueryTimeout = 30 * time.Second
 
 // GetPartitionBoundaries calculates NTILE boundaries for a large table.
 // If the query times out (e.g., due to memory pressure on very large tables),
-// it logs a warning and returns nil, allowing the table to be processed without partitioning.
+// it falls back to a faster MIN/MAX based approach.
 func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
 	if len(t.PrimaryKey) != 1 {
 		return nil, fmt.Errorf("partitioning requires single-column PK")
@@ -301,9 +333,9 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 	rows, err := r.db.QueryContext(timeoutCtx, query)
 	if err != nil {
 		if timeoutCtx.Err() == context.DeadlineExceeded {
-			logging.Warn("Partition query timed out for %s after %v - table will be processed without partitioning",
+			logging.Warn("Partition query timed out for %s after %v - falling back to MIN/MAX partitioning",
 				t.FullName(), PartitionQueryTimeout)
-			return nil, nil // Return nil to signal fallback to single-job processing
+			return r.getPartitionBoundariesFast(ctx, t, numPartitions)
 		}
 		return nil, err
 	}
@@ -319,6 +351,57 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 		partitions = append(partitions, part)
 	}
 
+	return partitions, nil
+}
+
+// getPartitionBoundariesFast calculates partition boundaries using MIN/MAX.
+// This is much faster than NTILE because MIN/MAX can use indexes.
+// The boundaries are evenly distributed based on the PK range.
+func (r *Reader) getPartitionBoundariesFast(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
+	if len(t.PrimaryKey) != 1 {
+		return nil, fmt.Errorf("partitioning requires single-column PK")
+	}
+
+	pkCol := r.dialect.QuoteIdentifier(t.PrimaryKey[0])
+	qualifiedTable := r.dialect.QualifyTable(t.Schema, t.Name)
+
+	// Get MIN and MAX of the primary key (uses index, very fast)
+	var minPK, maxPK int64
+	query := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s WITH (NOLOCK)", pkCol, pkCol, qualifiedTable)
+	err := r.db.QueryRowContext(ctx, query).Scan(&minPK, &maxPK)
+	if err != nil {
+		return nil, fmt.Errorf("getting MIN/MAX: %w", err)
+	}
+
+	// Get approximate row count from stats
+	rowCount, _ := r.GetRowCountFast(ctx, t.Schema, t.Name)
+	if rowCount == 0 {
+		rowCount = maxPK - minPK + 1 // Fallback estimate
+	}
+
+	// Calculate even partition boundaries
+	rangeSize := maxPK - minPK + 1
+	partitionSize := rangeSize / int64(numPartitions)
+	rowsPerPartition := rowCount / int64(numPartitions)
+
+	var partitions []driver.Partition
+	for i := 0; i < numPartitions; i++ {
+		start := minPK + int64(i)*partitionSize
+		end := minPK + int64(i+1)*partitionSize - 1
+		if i == numPartitions-1 {
+			end = maxPK // Last partition takes the remainder
+		}
+
+		partitions = append(partitions, driver.Partition{
+			TableName:   t.FullName(),
+			PartitionID: i + 1,
+			MinPK:       start,
+			MaxPK:       end,
+			RowCount:    rowsPerPartition,
+		})
+	}
+
+	logging.Info("  %s: %d partitions via MIN/MAX (range %d-%d)", t.Name, numPartitions, minPK, maxPK)
 	return partitions, nil
 }
 

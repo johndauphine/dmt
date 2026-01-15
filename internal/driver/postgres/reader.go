@@ -465,18 +465,36 @@ func (r *Reader) readFullTable(ctx context.Context, batches chan<- driver.Batch,
 }
 
 // GetRowCount returns the row count for a table.
+// It first tries a fast statistics-based count, then falls back to COUNT(*) if needed.
 func (r *Reader) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
-	// Try stats first for fast estimate
+	// Try fast stats-based count first
+	count, err := r.GetRowCountFast(ctx, schema, table)
+	if err == nil && count > 0 {
+		return count, nil
+	}
+
+	// Fall back to COUNT(*)
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
+	err = r.sqlDB.QueryRowContext(ctx, query).Scan(&count)
+	return count, err
+}
+
+// GetRowCountFast returns an approximate row count using system statistics.
+// This is much faster than COUNT(*) for large tables.
+func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int64, error) {
 	var count int64
 	err := r.sqlDB.QueryRowContext(ctx,
 		`SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
 		schema, table).Scan(&count)
+	return count, err
+}
 
-	if err != nil || count == 0 {
-		// Fall back to COUNT(*)
-		query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
-		err = r.sqlDB.QueryRowContext(ctx, query).Scan(&count)
-	}
+// GetRowCountExact returns the exact row count using COUNT(*).
+// This may be slow on large tables.
+func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
+	var count int64
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
+	err := r.sqlDB.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
 }
 

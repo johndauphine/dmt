@@ -18,11 +18,12 @@ const ValidationTimeout = 30 * time.Second
 
 // tableValidationResult holds the result of validating a single table.
 type tableValidationResult struct {
-	tableName   string
-	sourceCount int64
-	targetCount int64
-	err         error
-	timedOut    bool
+	tableName    string
+	sourceCount  int64
+	targetCount  int64
+	err          error
+	timedOut     bool
+	usedEstimate bool // true if we used fast/estimated counts
 }
 
 // Validate checks row counts between source and target in parallel.
@@ -81,11 +82,20 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 			continue
 		}
 		if r.targetCount == r.sourceCount {
-			logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
+			if r.usedEstimate {
+				logging.Warn("%-30s OK ~%d rows (estimated)", r.tableName, r.targetCount)
+			} else {
+				logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
+			}
 		} else {
-			logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
-				r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
-			failed = true
+			if r.usedEstimate {
+				logging.Warn("%-30s DIFF source=~%d target=~%d (estimated, diff=%d)",
+					r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
+			} else {
+				logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
+					r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
+				failed = true
+			}
 		}
 	}
 
@@ -95,38 +105,55 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 	return nil
 }
 
-// validateTable validates a single table's row count with timeout.
+// validateTable validates a single table's row count.
+// It first tries exact COUNT(*) with a timeout, then falls back to estimated counts.
 func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableValidationResult {
 	result := tableValidationResult{tableName: t.Name}
 
-	// Create timeout context for this table's validation
+	// First, try exact COUNT(*) with timeout
 	timeoutCtx, cancel := context.WithTimeout(ctx, ValidationTimeout)
 	defer cancel()
 
-	// Query source count
-	sourceCount, err := o.sourcePool.GetRowCount(timeoutCtx, o.config.Source.Schema, t.Name)
-	if err != nil {
-		if timeoutCtx.Err() == context.DeadlineExceeded {
-			result.timedOut = true
-			return result
-		}
-		result.err = fmt.Errorf("source count: %w", err)
+	// Query source count (exact)
+	sourceCount, srcErr := o.sourcePool.GetRowCountExact(timeoutCtx, o.config.Source.Schema, t.Name)
+	srcTimedOut := timeoutCtx.Err() == context.DeadlineExceeded
+
+	// Query target count (exact) - use fresh timeout
+	timeoutCtx2, cancel2 := context.WithTimeout(ctx, ValidationTimeout)
+	defer cancel2()
+	targetCount, tgtErr := o.targetPool.GetRowCountExact(timeoutCtx2, o.config.Target.Schema, t.Name)
+	tgtTimedOut := timeoutCtx2.Err() == context.DeadlineExceeded
+
+	// If both exact counts succeeded, use them
+	if srcErr == nil && tgtErr == nil {
+		result.sourceCount = sourceCount
+		result.targetCount = targetCount
 		return result
 	}
-	result.sourceCount = sourceCount
 
-	// Query target count
-	targetCount, err := o.targetPool.GetRowCount(timeoutCtx, o.config.Target.Schema, t.Name)
-	if err != nil {
-		if timeoutCtx.Err() == context.DeadlineExceeded {
-			result.timedOut = true
+	// If either timed out, fall back to estimated counts
+	if srcTimedOut || tgtTimedOut {
+		srcEst, srcEstErr := o.sourcePool.GetRowCountFast(ctx, o.config.Source.Schema, t.Name)
+		tgtEst, tgtEstErr := o.targetPool.GetRowCountFast(ctx, o.config.Target.Schema, t.Name)
+
+		if srcEstErr == nil && tgtEstErr == nil && srcEst > 0 && tgtEst > 0 {
+			result.sourceCount = srcEst
+			result.targetCount = tgtEst
+			result.usedEstimate = true
 			return result
 		}
-		result.err = fmt.Errorf("target count: %w", err)
+
+		// Both exact and estimate failed
+		result.timedOut = true
 		return result
 	}
-	result.targetCount = targetCount
 
+	// Non-timeout error
+	if srcErr != nil {
+		result.err = fmt.Errorf("source count: %w", srcErr)
+	} else {
+		result.err = fmt.Errorf("target count: %w", tgtErr)
+	}
 	return result
 }
 

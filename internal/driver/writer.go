@@ -30,7 +30,9 @@ type Writer interface {
 	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
 	// Data operations
-	GetRowCount(ctx context.Context, schema, table string) (int64, error)
+	GetRowCount(ctx context.Context, schema, table string) (int64, error)      // Tries fast first, falls back to exact
+	GetRowCountFast(ctx context.Context, schema, table string) (int64, error)  // Fast approximate count from system statistics
+	GetRowCountExact(ctx context.Context, schema, table string) (int64, error) // Exact COUNT(*) - may be slow on large tables
 	ResetSequence(ctx context.Context, schema string, t *Table) error
 
 	// Bulk write - for drop_recreate mode

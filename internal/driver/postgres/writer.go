@@ -375,7 +375,33 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 }
 
 // GetRowCount returns the row count for a table.
+// It first tries a fast statistics-based count, then falls back to COUNT(*) if needed.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
+	// Try fast stats-based count first
+	count, err := w.GetRowCountFast(ctx, schema, table)
+	if err == nil && count > 0 {
+		return count, nil
+	}
+
+	// Fall back to COUNT(*)
+	sanitizedTable := sanitizePGIdentifier(table)
+	err = w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)
+	return count, err
+}
+
+// GetRowCountFast returns an approximate row count using system statistics.
+// This is much faster than COUNT(*) for large tables.
+func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int64, error) {
+	var count int64
+	err := w.pool.QueryRow(ctx,
+		`SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2`,
+		schema, table).Scan(&count)
+	return count, err
+}
+
+// GetRowCountExact returns the exact row count using COUNT(*).
+// This may be slow on large tables.
+func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
 	sanitizedTable := sanitizePGIdentifier(table)
 	var count int64
 	err := w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)

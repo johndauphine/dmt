@@ -25,7 +25,9 @@ type Reader interface {
 	ReadTable(ctx context.Context, opts ReadOptions) (<-chan Batch, error)
 
 	// Metadata
-	GetRowCount(ctx context.Context, schema, table string) (int64, error)
+	GetRowCount(ctx context.Context, schema, table string) (int64, error)      // Tries fast first, falls back to exact
+	GetRowCountFast(ctx context.Context, schema, table string) (int64, error)  // Fast approximate count from system statistics
+	GetRowCountExact(ctx context.Context, schema, table string) (int64, error) // Exact COUNT(*) - may be slow on large tables
 	GetPartitionBoundaries(ctx context.Context, t *Table, numPartitions int) ([]Partition, error)
 	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
 
