@@ -129,6 +129,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				}
 				aiMonitor.SetConnectionLimits(maxSource, maxTarget)
 
+				// Set state backend for persistent history
+				aiMonitor.SetStateBackend(r.state, runID)
+
 				// Start monitoring in background
 				monitorCtx, cancelMonitor := context.WithCancel(ctx)
 				defer cancelMonitor()

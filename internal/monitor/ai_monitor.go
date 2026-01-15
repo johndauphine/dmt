@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pipeline"
@@ -39,6 +40,11 @@ func NewAIMonitor(
 // SetConnectionLimits sets the max connection limits for source and target.
 func (am *AIMonitor) SetConnectionLimits(maxSource, maxTarget int) {
 	am.adjuster.SetConnectionLimits(maxSource, maxTarget)
+}
+
+// SetStateBackend sets the state backend for persistent history.
+func (am *AIMonitor) SetStateBackend(state checkpoint.StateBackend, runID string) {
+	am.adjuster.SetStateBackend(state, runID)
 }
 
 // UpdateRowsProcessed updates the count of rows transferred.
