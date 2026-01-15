@@ -406,7 +406,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 					}
 				}
 				if sampleCount > 0 {
-					logging.Info("AI Type Mapping: sampled %d rows from %s for type inference context", 5, t.Name)
+					logging.Debug("AI Type Mapping: sampled %d rows from %s for type inference context", 5, t.Name)
 				}
 			}
 		}

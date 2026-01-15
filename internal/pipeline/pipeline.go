@@ -156,7 +156,7 @@ func (p *Pipeline) applyConfigUpdate(update ConfigUpdate) {
 	}
 
 	if changed {
-		logging.Info("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d",
+		logging.Debug("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d",
 			p.config.ChunkSize, p.config.ParallelReaders, p.config.WriteAheadWriters, p.config.ReadAheadBuffers)
 	}
 }
@@ -184,7 +184,7 @@ func (p *Pipeline) Execute(ctx context.Context, job Job, prog *progress.Tracker)
 			logging.Warn("Failed to load checkpoint for %s: %v", job.Table.Name, err)
 		}
 		if resumeLastPK != nil {
-			logging.Info("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
+			logging.Debug("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
 		}
 	}
 
@@ -483,7 +483,7 @@ chunkLoop:
 				if err := wp.ScaleWorkers(newWriters); err != nil {
 					logging.Warn("Failed to scale workers: %v", err)
 				} else {
-					logging.Info("Scaled writers from %d to %d", numWriters, newWriters)
+					logging.Debug("Scaled writers from %d to %d", numWriters, newWriters)
 					numWriters = newWriters
 				}
 			}
@@ -768,7 +768,7 @@ chunkLoop:
 				if err := wp.ScaleWorkers(newWriters); err != nil {
 					logging.Warn("Failed to scale workers: %v", err)
 				} else {
-					logging.Info("Scaled writers from %d to %d", numWriters, newWriters)
+					logging.Debug("Scaled writers from %d to %d", numWriters, newWriters)
 					numWriters = newWriters
 				}
 			}
