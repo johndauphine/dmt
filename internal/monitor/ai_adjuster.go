@@ -9,10 +9,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pipeline"
 	"github.com/shirou/gopsutil/v3/mem"
+)
+
+const (
+	// effectivenessThreshold defines the minimum percentage improvement
+	// for an adjustment to be considered effective
+	effectivenessThreshold = 5.0
 )
 
 // AdjustmentDecision represents AI's recommendation for parameter adjustments.
@@ -26,6 +33,7 @@ type AdjustmentDecision struct {
 
 // AdjustmentRecord tracks a past adjustment and its effect.
 type AdjustmentRecord struct {
+	AdjustmentNumber int
 	Timestamp        time.Time
 	Action           string
 	Adjustments      map[string]int
@@ -81,6 +89,10 @@ type AIAdjuster struct {
 	failureThreshold int
 	resetTimeout     time.Duration
 	circuitOpen      bool
+
+	// Persistent history
+	state checkpoint.StateBackend
+	runID string
 }
 
 // NewAIAdjuster creates a new AI adjuster.
@@ -113,6 +125,21 @@ func (aa *AIAdjuster) SetConnectionLimits(maxSource, maxTarget int) {
 	defer aa.adjustmentsMu.Unlock()
 	aa.systemResources.MaxSourceConnections = maxSource
 	aa.systemResources.MaxTargetConnections = maxTarget
+}
+
+// SetStateBackend sets the state backend for persistent history.
+func (aa *AIAdjuster) SetStateBackend(state checkpoint.StateBackend, runID string) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.state = state
+	aa.runID = runID
+
+	// Load historical patterns from past migrations
+	if state != nil {
+		if history, err := state.GetAIAdjustments(50); err == nil && len(history) > 0 {
+			logging.Info("AI adjuster loaded %d historical adjustments from past migrations", len(history))
+		}
+	}
 }
 
 // gatherSystemResources collects system information for AI context.
@@ -314,9 +341,9 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	sb.WriteString(fmt.Sprintf("- read_ahead_buffers: %d\n", config.ReadAheadBuffers))
 	sb.WriteString("\n")
 
-	// Adjustment history
+	// Current session adjustment history
 	if len(aa.adjustmentHistory) > 0 {
-		sb.WriteString("## Adjustment History\n")
+		sb.WriteString("## Current Session Adjustments\n")
 		for _, adj := range aa.adjustmentHistory {
 			sb.WriteString(fmt.Sprintf("- %s ago: %s → throughput %+.1f%%\n",
 				time.Since(adj.Timestamp).Round(time.Second),
@@ -325,7 +352,40 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		}
 		sb.WriteString("\n")
 	} else {
-		sb.WriteString("## Adjustment History\n- No adjustments made yet\n\n")
+		sb.WriteString("## Current Session Adjustments\n- No adjustments made yet\n\n")
+	}
+
+	// Historical patterns from past migrations
+	if aa.state != nil {
+		if history, err := aa.state.GetAIAdjustments(50); err == nil && len(history) > 0 {
+			// Calculate effectiveness by action type
+			actionStats := make(map[string]struct {
+				count      int
+				effective  int
+				avgEffect  float64
+				totalEffect float64
+			})
+
+			for _, h := range history {
+				stats := actionStats[h.Action]
+				stats.count++
+				stats.totalEffect += h.EffectPercent
+				if h.EffectPercent > effectivenessThreshold {
+					stats.effective++
+				}
+				actionStats[h.Action] = stats
+			}
+
+			sb.WriteString("## Historical Patterns (from past migrations)\n")
+			for action, stats := range actionStats {
+				if stats.count > 0 && action != "continue" {
+					avgEffect := stats.totalEffect / float64(stats.count)
+					sb.WriteString(fmt.Sprintf("- %s: effective %d/%d times (avg %+.1f%% throughput)\n",
+						action, stats.effective, stats.count, avgEffect))
+				}
+			}
+			sb.WriteString("\n")
+		}
 	}
 
 	// Guidelines
@@ -450,8 +510,16 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 	aa.lastActionTime = time.Now()
 	aa.adjustmentCount++
 
+	// Capture current CPU and memory for history
+	var cpuBefore, memoryBefore float64
+	if len(metrics) > 0 {
+		cpuBefore = metrics[0].CPUPercent
+		memoryBefore = metrics[0].MemoryPercent
+	}
+
 	// Record in history (we'll update the effect later)
 	record := AdjustmentRecord{
+		AdjustmentNumber: aa.adjustmentCount,
 		Timestamp:        time.Now(),
 		Action:           decision.Action,
 		Adjustments:      decision.Adjustments,
@@ -460,6 +528,24 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 	aa.adjustmentHistory = append(aa.adjustmentHistory, record)
 	if len(aa.adjustmentHistory) > aa.maxHistorySize {
 		aa.adjustmentHistory = aa.adjustmentHistory[1:]
+	}
+
+	// Persist to database for cross-migration learning
+	if aa.state != nil && aa.runID != "" {
+		dbRecord := checkpoint.AIAdjustmentRecord{
+			AdjustmentNumber: aa.adjustmentCount,
+			Timestamp:        time.Now(),
+			Action:           decision.Action,
+			Adjustments:      decision.Adjustments,
+			ThroughputBefore: throughputBefore,
+			CPUBefore:        cpuBefore,
+			MemoryBefore:     memoryBefore,
+			Reasoning:        decision.Reasoning,
+			Confidence:       decision.Confidence,
+		}
+		if err := aa.state.SaveAIAdjustment(aa.runID, dbRecord); err != nil {
+			logging.Debug("Failed to persist AI adjustment: %v", err)
+		}
 	}
 
 	// Schedule effect measurement (30s later)
@@ -495,6 +581,25 @@ func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
 		record.EffectPercent = (record.ThroughputAfter - record.ThroughputBefore) / record.ThroughputBefore * 100
 		logging.Debug("AI adjustment effect: %s → throughput %+.1f%% (%.0f → %.0f rows/sec)",
 			record.Action, record.EffectPercent, record.ThroughputBefore, record.ThroughputAfter)
+	}
+
+	// Update database with effect measurement
+	if aa.state != nil && aa.runID != "" {
+		// Use the original adjustment number captured at initial save time
+		dbRecord := checkpoint.AIAdjustmentRecord{
+			AdjustmentNumber: record.AdjustmentNumber,
+			Timestamp:        record.Timestamp,
+			Action:           record.Action,
+			Adjustments:      record.Adjustments,
+			ThroughputBefore: record.ThroughputBefore,
+			ThroughputAfter:  record.ThroughputAfter,
+			EffectPercent:    record.EffectPercent,
+			CPUAfter:         metrics[0].CPUPercent,
+			MemoryAfter:      metrics[0].MemoryPercent,
+		}
+		if err := aa.state.SaveAIAdjustment(aa.runID, dbRecord); err != nil {
+			logging.Debug("Failed to update AI adjustment effect: %v", err)
+		}
 	}
 }
 

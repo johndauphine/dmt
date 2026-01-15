@@ -185,6 +185,28 @@ func (s *State) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks(run_id, status);
 	CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);
+
+	CREATE TABLE IF NOT EXISTS ai_adjustments (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		adjustment_number INTEGER NOT NULL,
+		timestamp TEXT NOT NULL,
+		action TEXT NOT NULL,
+		adjustments TEXT NOT NULL,
+		throughput_before REAL,
+		throughput_after REAL,
+		effect_percent REAL,
+		cpu_before REAL,
+		cpu_after REAL,
+		memory_before REAL,
+		memory_after REAL,
+		reasoning TEXT,
+		confidence TEXT,
+		UNIQUE(run_id, adjustment_number)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_ai_adjustments_run ON ai_adjustments(run_id);
+	CREATE INDEX IF NOT EXISTS idx_ai_adjustments_action ON ai_adjustments(action);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -286,6 +308,7 @@ var validTableNames = map[string]bool{
 	"tasks":                 true,
 	"profiles":              true,
 	"table_sync_timestamps": true,
+	"ai_adjustments":        true,
 }
 
 func (s *State) tableColumns(table string) ([]string, error) {
@@ -886,6 +909,17 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 		return 0, fmt.Errorf("deleting old task outputs: %w", err)
 	}
 
+	// Delete old AI adjustments
+	_, err = s.db.Exec(`
+		DELETE FROM ai_adjustments WHERE run_id IN (
+			SELECT id FROM runs
+			WHERE completed_at < ? AND status IN ('success', 'failed')
+		)
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old ai adjustments: %w", err)
+	}
+
 	// Delete old tasks
 	_, err = s.db.Exec(`
 		DELETE FROM tasks WHERE run_id IN (
@@ -945,4 +979,120 @@ func (s *State) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string
 			updated_at = excluded.updated_at
 	`, sourceSchema, tableName, targetSchema, ts.Format(time.RFC3339))
 	return err
+}
+
+// SaveAIAdjustment saves an AI adjustment record for historical analysis.
+func (s *State) SaveAIAdjustment(runID string, record AIAdjustmentRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO ai_adjustments (
+			run_id, adjustment_number, timestamp, action, adjustments,
+			throughput_before, throughput_after, effect_percent,
+			cpu_before, cpu_after, memory_before, memory_after,
+			reasoning, confidence
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, adjustment_number) DO UPDATE SET
+			throughput_after = excluded.throughput_after,
+			effect_percent = excluded.effect_percent,
+			cpu_after = excluded.cpu_after,
+			memory_after = excluded.memory_after
+	`, runID, record.AdjustmentNumber, record.Timestamp.Format("2006-01-02 15:04:05"),
+		record.Action, record.AdjustmentsJSON(),
+		record.ThroughputBefore, record.ThroughputAfter, record.EffectPercent,
+		record.CPUBefore, record.CPUAfter, record.MemoryBefore, record.MemoryAfter,
+		record.Reasoning, record.Confidence)
+	return err
+}
+
+// GetAIAdjustments returns the most recent AI adjustment records across all runs.
+func (s *State) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
+		       throughput_before, throughput_after, effect_percent,
+		       cpu_before, cpu_after, memory_before, memory_after,
+		       reasoning, confidence
+		FROM ai_adjustments
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanAIAdjustments(rows)
+}
+
+// GetAIAdjustmentsByAction returns AI adjustment records filtered by action type.
+func (s *State) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
+		       throughput_before, throughput_after, effect_percent,
+		       cpu_before, cpu_after, memory_before, memory_after,
+		       reasoning, confidence
+		FROM ai_adjustments
+		WHERE action = ?
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, action, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanAIAdjustments(rows)
+}
+
+// scanAIAdjustments scans rows into AIAdjustmentRecord slice.
+func (s *State) scanAIAdjustments(rows *sql.Rows) ([]AIAdjustmentRecord, error) {
+	var records []AIAdjustmentRecord
+	for rows.Next() {
+		var r AIAdjustmentRecord
+		var timestampStr, adjustmentsStr string
+		var reasoning, confidence sql.NullString
+		var throughputBefore, throughputAfter, effectPercent sql.NullFloat64
+		var cpuBefore, cpuAfter, memoryBefore, memoryAfter sql.NullFloat64
+
+		if err := rows.Scan(
+			&r.ID, &r.RunID, &r.AdjustmentNumber, &timestampStr, &r.Action, &adjustmentsStr,
+			&throughputBefore, &throughputAfter, &effectPercent,
+			&cpuBefore, &cpuAfter, &memoryBefore, &memoryAfter,
+			&reasoning, &confidence,
+		); err != nil {
+			return nil, err
+		}
+
+		r.Timestamp, _ = time.Parse("2006-01-02 15:04:05", timestampStr)
+		r.Adjustments = ParseAdjustments(adjustmentsStr)
+
+		if throughputBefore.Valid {
+			r.ThroughputBefore = throughputBefore.Float64
+		}
+		if throughputAfter.Valid {
+			r.ThroughputAfter = throughputAfter.Float64
+		}
+		if effectPercent.Valid {
+			r.EffectPercent = effectPercent.Float64
+		}
+		if cpuBefore.Valid {
+			r.CPUBefore = cpuBefore.Float64
+		}
+		if cpuAfter.Valid {
+			r.CPUAfter = cpuAfter.Float64
+		}
+		if memoryBefore.Valid {
+			r.MemoryBefore = memoryBefore.Float64
+		}
+		if memoryAfter.Valid {
+			r.MemoryAfter = memoryAfter.Float64
+		}
+		if reasoning.Valid {
+			r.Reasoning = reasoning.String
+		}
+		if confidence.Valid {
+			r.Confidence = confidence.String
+		}
+
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }

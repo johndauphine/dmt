@@ -426,6 +426,21 @@ func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema s
 	return nil
 }
 
+// SaveAIAdjustment is a no-op for file state (doesn't persist AI history).
+func (fs *FileState) SaveAIAdjustment(runID string, record AIAdjustmentRecord) error {
+	return nil
+}
+
+// GetAIAdjustments returns empty slice for file state (doesn't persist AI history).
+func (fs *FileState) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
+	return nil, nil
+}
+
+// GetAIAdjustmentsByAction returns empty slice for file state.
+func (fs *FileState) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error) {
+	return nil, nil
+}
+
 // Close is a no-op for file state.
 func (fs *FileState) Close() error {
 	return nil
