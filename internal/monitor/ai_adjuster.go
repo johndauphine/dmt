@@ -63,7 +63,7 @@ type AIAdjuster struct {
 	// System resources for AI context
 	systemResources SystemResources
 
-	// Baseline metrics (captured after warmup)
+	// Baseline metrics
 	baselineMetrics   *PerformanceSnapshot
 	baselineCaptured  bool
 
@@ -71,12 +71,10 @@ type AIAdjuster struct {
 	adjustmentHistory []AdjustmentRecord
 	maxHistorySize    int
 
-	// Smarter adjustment control
-	lastActionType     string    // Track last action to prevent repeated same-action
-	lastActionTime     time.Time // When last non-continue action was applied
-	sameActionCooldown time.Duration
-	warmupPeriod       time.Duration
-	adjustmentCount    int // Total non-continue adjustments made
+	// Adjustment tracking
+	lastActionType  string    // Track last action for history
+	lastActionTime  time.Time // When last non-continue action was applied
+	adjustmentCount int       // Total non-continue adjustments made
 
 	// Cost control
 	callInterval   time.Duration
@@ -98,19 +96,17 @@ type AIAdjuster struct {
 // NewAIAdjuster creates a new AI adjuster.
 func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, p *pipeline.Pipeline) *AIAdjuster {
 	aa := &AIAdjuster{
-		aiMapper:           aiMapper,
-		collector:          collector,
-		pipeline:           p,
-		startTime:          time.Now(),
-		warmupPeriod:       2 * time.Minute,  // Wait 2 min before any adjustments (let auto-tune stabilize)
-		sameActionCooldown: 3 * time.Minute,  // Wait 3 min between same-type adjustments
-		callInterval:       30 * time.Second, // Throttle to 30s intervals
-		cacheDuration:      60 * time.Second, // Cache decisions for 60s
-		failureThreshold:   3,
-		resetTimeout:       5 * time.Minute,
-		circuitOpen:        false,
-		maxHistorySize:     10, // Keep last 10 adjustments
-		adjustmentHistory:  make([]AdjustmentRecord, 0, 10),
+		aiMapper:          aiMapper,
+		collector:         collector,
+		pipeline:          p,
+		startTime:         time.Now(),
+		callInterval:      30 * time.Second, // Throttle to 30s intervals
+		cacheDuration:     60 * time.Second, // Cache decisions for 60s
+		failureThreshold:  3,
+		resetTimeout:      5 * time.Minute,
+		circuitOpen:       false,
+		maxHistorySize:    10, // Keep last 10 adjustments
+		adjustmentHistory: make([]AdjustmentRecord, 0, 10),
 	}
 
 	// Gather system resources
@@ -152,7 +148,7 @@ func (aa *AIAdjuster) gatherSystemResources() {
 	}
 }
 
-// captureBaseline captures baseline metrics after warmup period.
+// captureBaseline captures baseline metrics when sufficient data is available.
 func (aa *AIAdjuster) captureBaseline() {
 	if aa.baselineCaptured {
 		return
@@ -191,19 +187,7 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 	aa.adjustmentsMu.Lock()
 	defer aa.adjustmentsMu.Unlock()
 
-	// Check warmup period - let auto-tuned defaults stabilize before adjusting
-	if time.Since(aa.startTime) < aa.warmupPeriod {
-		remaining := aa.warmupPeriod - time.Since(aa.startTime)
-		logging.Debug("AI adjustment warmup: %.0fs remaining before first adjustment", remaining.Seconds())
-		return &AdjustmentDecision{
-			Action:      "continue",
-			Reasoning:   fmt.Sprintf("Warmup period - waiting %.0fs for auto-tuned defaults to stabilize", remaining.Seconds()),
-			Confidence:  "high",
-			Adjustments: make(map[string]int),
-		}, nil
-	}
-
-	// Capture baseline after warmup
+	// Capture baseline when we have enough data
 	aa.captureBaseline()
 
 	// Check circuit breaker
@@ -276,7 +260,7 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 
 	// Baseline metrics
 	if aa.baselineMetrics != nil {
-		sb.WriteString("## Baseline Performance (after warmup)\n")
+		sb.WriteString("## Baseline Performance\n")
 		sb.WriteString(fmt.Sprintf("- Baseline throughput: %.0f rows/sec\n", aa.baselineMetrics.Throughput))
 		sb.WriteString(fmt.Sprintf("- Baseline CPU: %.1f%%\n", aa.baselineMetrics.CPUPercent))
 		sb.WriteString(fmt.Sprintf("- Baseline memory: %.1f%%\n", aa.baselineMetrics.MemoryPercent))
@@ -455,14 +439,6 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 
 	if len(decision.Adjustments) == 0 {
 		return nil // No adjustments to apply
-	}
-
-	// Check same-action cooldown to prevent repeated adjustments
-	if decision.Action == aa.lastActionType && time.Since(aa.lastActionTime) < aa.sameActionCooldown {
-		remaining := aa.sameActionCooldown - time.Since(aa.lastActionTime)
-		logging.Debug("AI adjustment cooldown: skipping %s (same action applied %.0fs ago, wait %.0fs)",
-			decision.Action, time.Since(aa.lastActionTime).Seconds(), remaining.Seconds())
-		return nil
 	}
 
 	// Record throughput before adjustment for history
