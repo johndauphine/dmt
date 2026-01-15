@@ -351,6 +351,10 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 		partitions = append(partitions, part)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return partitions, nil
 }
 
