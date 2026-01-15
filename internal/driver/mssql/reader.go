@@ -310,58 +310,10 @@ func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string) (in
 	return count, err
 }
 
-// PartitionQueryTimeout is the maximum time to wait for partition boundary calculation.
-// If exceeded, falls back to MIN/MAX based partitioning.
-const PartitionQueryTimeout = 30 * time.Second
-
-// GetPartitionBoundaries calculates NTILE boundaries for a large table.
-// If the query times out (e.g., due to memory pressure on very large tables),
-// it falls back to a faster MIN/MAX based approach.
+// GetPartitionBoundaries calculates partition boundaries using MIN/MAX.
+// This uses index lookups for MIN/MAX (very fast) and divides the PK range evenly.
+// This approach is preferred over NTILE which requires sorting all rows in memory.
 func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
-	if len(t.PrimaryKey) != 1 {
-		return nil, fmt.Errorf("partitioning requires single-column PK")
-	}
-
-	pkCol := t.PrimaryKey[0]
-	query := r.dialect.PartitionBoundariesQuery(pkCol, t.Schema, t.Name, numPartitions)
-
-	// Use a timeout context to prevent hanging on very large tables
-	// where SQL Server may not have enough memory for the NTILE sort operation
-	timeoutCtx, cancel := context.WithTimeout(ctx, PartitionQueryTimeout)
-	defer cancel()
-
-	rows, err := r.db.QueryContext(timeoutCtx, query)
-	if err != nil {
-		if timeoutCtx.Err() == context.DeadlineExceeded {
-			logging.Warn("Partition query timed out for %s after %v - falling back to MIN/MAX partitioning",
-				t.FullName(), PartitionQueryTimeout)
-			return r.getPartitionBoundariesFast(ctx, t, numPartitions)
-		}
-		return nil, err
-	}
-	defer rows.Close()
-
-	var partitions []driver.Partition
-	for rows.Next() {
-		var part driver.Partition
-		part.TableName = t.FullName()
-		if err := rows.Scan(&part.PartitionID, &part.MinPK, &part.MaxPK, &part.RowCount); err != nil {
-			return nil, err
-		}
-		partitions = append(partitions, part)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return partitions, nil
-}
-
-// getPartitionBoundariesFast calculates partition boundaries using MIN/MAX.
-// This is much faster than NTILE because MIN/MAX can use indexes.
-// The boundaries are evenly distributed based on the PK range.
-func (r *Reader) getPartitionBoundariesFast(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
 	if len(t.PrimaryKey) != 1 {
 		return nil, fmt.Errorf("partitioning requires single-column PK")
 	}
