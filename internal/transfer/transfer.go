@@ -302,7 +302,8 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 	var query string
 	var args []any
 
-	if tgtPool.DBType() == "postgres" {
+	switch tgtPool.DBType() {
+	case "postgres":
 		// PostgreSQL target - sanitize identifiers and use $N parameters
 		sanitizedPK := target.SanitizePGIdentifier(pkCol)
 		sanitizedTable := target.SanitizePGIdentifier(job.Table.Name)
@@ -311,8 +312,15 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 			schema, sanitizedTable, sanitizedPK, sanitizedPK,
 		)
 		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
-	} else {
-		// SQL Server target - use original identifiers and @p parameters
+	case "mysql":
+		// MySQL target - use backtick identifiers and ? positional parameters
+		query = fmt.Sprintf(
+			"DELETE FROM `%s`.`%s` WHERE `%s` >= ? AND `%s` <= ?",
+			schema, job.Table.Name, pkCol, pkCol,
+		)
+		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
+	default:
+		// SQL Server target - use bracket identifiers and @p parameters
 		query = fmt.Sprintf(
 			`DELETE FROM [%s].[%s] WHERE [%s] >= @p1 AND [%s] <= @p2`,
 			schema, job.Table.Name, pkCol, pkCol,
@@ -329,7 +337,8 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 	var deleteQuery string
 	var args []any
 
-	if tgtPool.DBType() == "postgres" {
+	switch tgtPool.DBType() {
+	case "postgres":
 		// PostgreSQL target - sanitize identifiers
 		sanitizedPK := target.SanitizePGIdentifier(pkCol)
 		sanitizedTable := target.SanitizePGIdentifier(tableName)
@@ -343,7 +352,18 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 				schema, sanitizedTable, sanitizedPK)
 			args = []any{lastPK}
 		}
-	} else {
+	case "mysql":
+		// MySQL target - use backtick identifiers and ? positional parameters
+		if maxPK != nil {
+			deleteQuery = fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE `%s` > ? AND `%s` <= ?",
+				schema, tableName, pkCol, pkCol)
+			args = []any{lastPK, maxPK}
+		} else {
+			deleteQuery = fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE `%s` > ?",
+				schema, tableName, pkCol)
+			args = []any{lastPK}
+		}
+	default:
 		// SQL Server target
 		if maxPK != nil {
 			deleteQuery = fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1 AND [%s] <= @p2`,

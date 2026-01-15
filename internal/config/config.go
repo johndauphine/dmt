@@ -17,6 +17,7 @@ import (
 
 	// Import driver packages to trigger init() registration before validation
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
+	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
@@ -405,6 +406,10 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Target.Schema == "" && defaults.Schema != "" {
 			c.Target.Schema = defaults.Schema
+		}
+		// MySQL uses database name as schema (no separate schema concept)
+		if c.Target.Type == "mysql" && c.Target.Schema == "" && c.Target.Database != "" {
+			c.Target.Schema = c.Target.Database
 		}
 		if c.Target.SSLMode == "" && defaults.SSLMode != "" {
 			c.Target.SSLMode = defaults.SSLMode

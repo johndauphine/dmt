@@ -8,6 +8,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	// Import driver packages to register dialects
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
+	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
@@ -20,6 +21,8 @@ func TestGetDialect(t *testing.T) {
 		{"postgresql", "postgres"},
 		{"mssql", "mssql"},
 		{"sqlserver", "mssql"},
+		{"mysql", "mysql"},
+		{"mariadb", "mysql"},
 	}
 
 	for _, tt := range tests {
@@ -37,7 +40,7 @@ func TestGetDialect(t *testing.T) {
 
 func TestGetDialect_UnknownType(t *testing.T) {
 	// Unknown or empty database types should return nil
-	tests := []string{"", "unknown", "mysql", "oracle"}
+	tests := []string{"", "unknown", "oracle", "sqlite"}
 
 	for _, dbType := range tests {
 		t.Run(dbType, func(t *testing.T) {

@@ -1029,10 +1029,11 @@ func TestIsValidDriverType(t *testing.T) {
 	validTypes := []string{
 		"mssql", "sqlserver", "sql-server",
 		"postgres", "postgresql", "pg",
-		"MSSQL", "PG", // Case insensitive
+		"mysql", "mariadb", "maria",
+		"MSSQL", "PG", "MYSQL", // Case insensitive
 	}
 	invalidTypes := []string{
-		"mysql", "oracle", "sqlite", "unknown", "",
+		"oracle", "sqlite", "unknown", "",
 	}
 
 	for _, dbType := range validTypes {
@@ -1065,9 +1066,11 @@ func TestConfigValidationWithAliases(t *testing.T) {
 		{"sql-server to postgresql", "sql-server", "postgresql", false},
 		{"pg to mssql", "pg", "mssql", false},
 		{"postgres to sqlserver", "postgres", "sqlserver", false},
-		{"invalid source", "mysql", "postgres", true},
+		{"mysql to postgres", "mysql", "postgres", false},
+		{"mariadb to mssql", "mariadb", "mssql", false},
+		{"invalid source", "oracle", "postgres", true},
 		{"invalid target", "mssql", "oracle", true},
-		{"both invalid", "mysql", "oracle", true},
+		{"both invalid", "oracle", "sqlite", true},
 	}
 
 	for _, tt := range tests {

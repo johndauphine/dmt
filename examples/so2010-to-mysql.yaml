@@ -1,0 +1,34 @@
+# StackOverflow2010 to MySQL migration test
+# Source: mssql-so2010 (port 1433)
+# Target: mysql-test (port 3306)
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: mysql
+  host: localhost
+  port: 3306
+  database: so2010
+  user: root
+  password: testpass
+
+migration:
+  workers: 8
+  chunk_size: 50000
+  read_ahead_buffers: 8
+  max_partitions: 8
+  large_table_threshold: 1000000
+
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
