@@ -32,6 +32,12 @@ const (
 	defaultMaxDelay = 10 * time.Second
 )
 
+func init() {
+	// Seed the random number generator for jitter in backoff calculations.
+	// Go 1.20+ seeds automatically, but this ensures compatibility with older versions.
+	rand.Seed(time.Now().UnixNano())
+}
+
 // AIProvider represents supported AI providers for type mapping.
 type AIProvider string
 
@@ -472,7 +478,8 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 }
 
 // isRetryableError determines if an error is transient and should be retried.
-// Returns true for network timeouts, connection errors, and server errors (5xx).
+// Returns true for network timeouts, temporary network errors, connection errors,
+// server errors (5xx), and rate limiting responses (429).
 func isRetryableError(err error, statusCode int) bool {
 	// Check for retryable HTTP status codes (server errors, rate limiting)
 	if statusCode >= 500 || statusCode == 429 {
@@ -488,30 +495,41 @@ func isRetryableError(err error, statusCode int) bool {
 		return true
 	}
 
-	// Check for network errors
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		// Retry on timeout or temporary network errors
-		return netErr.Timeout()
-	}
-
-	// Check for connection errors
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	// Check for EOF errors
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 
-	// Check for common retryable error messages
+	// Check for network errors (timeout or temporary)
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		// Retry on timeout or temporary network errors
+		//nolint:staticcheck // Temporary() is deprecated but still useful for some net errors
+		return netErr.Timeout() || netErr.Temporary()
+	}
+
+	// Check for connection errors - only retry on temporary or dial errors
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		// Only retry dial errors (connection refused, etc.) or temporary errors
+		//nolint:staticcheck // Temporary() is deprecated but still useful for some net errors
+		if opErr.Op == "dial" || opErr.Temporary() {
+			return true
+		}
+		return false
+	}
+
+	// Check for common retryable error messages (fallback for wrapped errors)
 	errMsg := strings.ToLower(err.Error())
 	retryablePatterns := []string{
 		"tls handshake timeout",
 		"connection reset",
 		"connection refused",
-		"eof",
 		"broken pipe",
 		"no such host",
 		"temporary failure",
 		"i/o timeout",
+		"unexpected eof", // Fallback for wrapped EOF errors
 	}
 	for _, pattern := range retryablePatterns {
 		if strings.Contains(errMsg, pattern) {
@@ -571,6 +589,12 @@ func (m *AITypeMapper) retryableHTTPDo(ctx context.Context, reqFunc func() (*htt
 
 		if readErr != nil {
 			lastErr = readErr
+
+			// Only retry if the read error is retryable
+			if !isRetryableError(readErr, 0) {
+				return nil, nil, fmt.Errorf("reading response body: %w", readErr)
+			}
+
 			if attempt < defaultMaxRetries {
 				delay := calculateBackoff(attempt)
 				logging.Debug("AI API response read failed (attempt %d/%d): %v, retrying in %v",

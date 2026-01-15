@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -637,7 +639,10 @@ func TestIsRetryableError(t *testing.T) {
 		{"TLS handshake timeout", errWithMessage("TLS handshake timeout"), 0, true},
 		{"connection reset", errWithMessage("connection reset by peer"), 0, true},
 		{"connection refused", errWithMessage("connection refused"), 0, true},
-		{"EOF error", errWithMessage("unexpected EOF"), 0, true},
+		{"io.EOF", io.EOF, 0, true},
+		{"io.ErrUnexpectedEOF", io.ErrUnexpectedEOF, 0, true},
+		{"wrapped EOF", fmt.Errorf("read failed: %w", io.EOF), 0, true},
+		{"unexpected EOF string", errWithMessage("unexpected eof in response"), 0, true},
 		{"i/o timeout", errWithMessage("i/o timeout"), 0, true},
 		{"broken pipe", errWithMessage("broken pipe"), 0, true},
 		{"no such host", errWithMessage("no such host"), 0, true},
@@ -820,5 +825,77 @@ func TestRetryableHTTPDo_NoRetryOn400(t *testing.T) {
 	// Should not retry on 400
 	if callCount != 1 {
 		t.Errorf("expected 1 call (no retries for 400), got %d", callCount)
+	}
+}
+
+func TestRetryableHTTPDo_ContextCancellation(t *testing.T) {
+	// Create a test server that always returns 500 to trigger retries
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "always fails"}`))
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper.client = server.Client()
+
+	// Create a context that will be cancelled during the retry delay
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel the context after a short delay (less than backoff time)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, _, err := mapper.retryableHTTPDo(ctx, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "POST", server.URL, bytes.NewReader([]byte(`{}`)))
+	})
+	elapsed := time.Since(start)
+
+	// Should return context.Canceled error
+	if err == nil {
+		t.Error("expected error when context is cancelled")
+	}
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled error, got %v", err)
+	}
+
+	// Should have been cancelled quickly, not waited for all retries
+	// The backoff would be ~1s+ for the first retry, so if we cancelled in 100ms
+	// we should complete much faster than a full retry cycle
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("expected quick cancellation, but took %v", elapsed)
+	}
+
+	// Should have made at least 1 call before being cancelled during backoff
+	if callCount < 1 {
+		t.Errorf("expected at least 1 call before cancellation, got %d", callCount)
+	}
+}
+
+func TestIsRetryableError_EOF(t *testing.T) {
+	// Test that io.EOF and io.ErrUnexpectedEOF are properly detected as retryable
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"io.EOF direct", io.EOF, true},
+		{"io.ErrUnexpectedEOF direct", io.ErrUnexpectedEOF, true},
+		{"wrapped io.EOF", fmt.Errorf("connection: %w", io.EOF), true},
+		{"wrapped io.ErrUnexpectedEOF", fmt.Errorf("read: %w", io.ErrUnexpectedEOF), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isRetryableError(tt.err, 0)
+			if result != tt.expected {
+				t.Errorf("isRetryableError(%v, 0) = %v, want %v", tt.err, result, tt.expected)
+			}
+		})
 	}
 }
