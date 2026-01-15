@@ -63,7 +63,7 @@ type AIAdjuster struct {
 	// System resources for AI context
 	systemResources SystemResources
 
-	// Baseline metrics (captured after warmup)
+	// Baseline metrics
 	baselineMetrics   *PerformanceSnapshot
 	baselineCaptured  bool
 
@@ -148,7 +148,7 @@ func (aa *AIAdjuster) gatherSystemResources() {
 	}
 }
 
-// captureBaseline captures baseline metrics after warmup period.
+// captureBaseline captures baseline metrics when sufficient data is available.
 func (aa *AIAdjuster) captureBaseline() {
 	if aa.baselineCaptured {
 		return
@@ -260,7 +260,7 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 
 	// Baseline metrics
 	if aa.baselineMetrics != nil {
-		sb.WriteString("## Baseline Performance (after warmup)\n")
+		sb.WriteString("## Baseline Performance\n")
 		sb.WriteString(fmt.Sprintf("- Baseline throughput: %.0f rows/sec\n", aa.baselineMetrics.Throughput))
 		sb.WriteString(fmt.Sprintf("- Baseline CPU: %.1f%%\n", aa.baselineMetrics.CPUPercent))
 		sb.WriteString(fmt.Sprintf("- Baseline memory: %.1f%%\n", aa.baselineMetrics.MemoryPercent))
