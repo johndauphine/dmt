@@ -72,7 +72,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
-			logging.Info("Loaded %d cached AI type mappings", aiMapper.CacheSize())
+			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
 		}
 	}
 
@@ -159,7 +159,7 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
 	// Check if using AI mapper for logging
 	_, isAIMapper := w.typeMapper.(*driver.AITypeMapper)
 	if isAIMapper {
-		logging.Info("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
+		logging.Debug("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
 	}
 
 	for i, col := range t.Columns {
@@ -181,7 +181,7 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
 
 		// Log AI type mappings
 		if isAIMapper {
-			logging.Info("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
+			logging.Debug("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
 				t.Name, col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, mssqlType)
 		}
 

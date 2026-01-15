@@ -133,7 +133,7 @@ func (aa *AIAdjuster) SetStateBackend(state checkpoint.StateBackend, runID strin
 	// Load historical patterns from past migrations
 	if state != nil {
 		if history, err := state.GetAIAdjustments(50); err == nil && len(history) > 0 {
-			logging.Info("AI adjuster loaded %d historical adjustments from past migrations", len(history))
+			logging.Debug("AI adjuster loaded %d historical adjustments from past migrations", len(history))
 		}
 	}
 }

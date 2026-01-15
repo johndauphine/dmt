@@ -201,7 +201,7 @@ func Execute(
 			logging.Warn("Failed to load checkpoint for %s: %v", job.Table.Name, err)
 		}
 		if resumeLastPK != nil {
-			logging.Info("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
+			logging.Debug("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
 		}
 	}
 

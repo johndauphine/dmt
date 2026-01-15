@@ -357,7 +357,7 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 		})
 	}
 
-	logging.Info("  %s: %d partitions via MIN/MAX (range %d-%d)", t.Name, numPartitions, minPK, maxPK)
+	logging.Debug("  %s: %d partitions via MIN/MAX (range %d-%d)", t.Name, numPartitions, minPK, maxPK)
 	return partitions, nil
 }
 

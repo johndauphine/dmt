@@ -72,7 +72,7 @@ func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Ta
 
 	var partitionStartTime time.Time
 	if largeKeysetTables > 0 {
-		logging.Info("Calculating partition boundaries for %d large tables...", largeKeysetTables)
+		logging.Debug("Calculating partition boundaries for %d large tables...", largeKeysetTables)
 		partitionStartTime = time.Now()
 	}
 
@@ -92,7 +92,7 @@ func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Ta
 
 	// Log partition query time
 	if largeKeysetTables > 0 {
-		logging.Info("Partition queries completed in %s", time.Since(partitionStartTime).Round(time.Millisecond))
+		logging.Debug("Partition queries completed in %s", time.Since(partitionStartTime).Round(time.Millisecond))
 	}
 
 	// Log date tracking summary
@@ -114,10 +114,10 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 		result.Summary.TablesNoDateColumn++
 		result.Summary.NoDateColumnTables = append(result.Summary.NoDateColumnTables, t.Name)
 		if applyDateFilter {
-			logging.Info("Table %s: full sync - no date column, syncing all %d rows (repeated each run)",
+			logging.Debug("Table %s: full sync - no date column, syncing all %d rows (repeated each run)",
 				t.Name, t.RowCount)
 		} else {
-			logging.Info("Table %s: full load - no date column configured", t.Name)
+			logging.Debug("Table %s: full load - no date column configured", t.Name)
 		}
 		return nil
 	}
@@ -132,7 +132,7 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 
 	if !applyDateFilter {
 		result.Summary.TablesFirstSync++
-		logging.Info("Table %s: full load - recording %s timestamp for future incremental syncs",
+		logging.Debug("Table %s: full load - recording %s timestamp for future incremental syncs",
 			t.Name, colName)
 		return nil
 	}
@@ -150,14 +150,14 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 		}
 		result.TableDateFilters[t.Name] = dateFilter
 		result.Summary.TablesIncremental++
-		logging.Info("Table %s: incremental - syncing rows where %s > %v",
+		logging.Debug("Table %s: incremental - syncing rows where %s > %v",
 			t.Name, colName, lastSync.Format(time.RFC3339))
 		return dateFilter
 	}
 
 	// First sync
 	result.Summary.TablesFirstSync++
-	logging.Info("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
+	logging.Debug("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
 		t.Name, t.RowCount, colName)
 	return nil
 }
@@ -192,11 +192,11 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 
 	// If partitions is nil (e.g., query timed out), fall back to single job
 	if partitions == nil || len(partitions) == 0 {
-		logging.Info("  %s: no partitions (timeout or error) - using single job (%s)", t.Name, tableElapsed.Round(time.Millisecond))
+		logging.Debug("  %s: no partitions (timeout or error) - using single job (%s)", t.Name, tableElapsed.Round(time.Millisecond))
 		return b.createSingleJob(runID, t, dateFilter, result)
 	}
 
-	logging.Info("  %s: %d partitions (%s)", t.Name, len(partitions), tableElapsed.Round(time.Millisecond))
+	logging.Debug("  %s: %d partitions (%s)", t.Name, len(partitions), tableElapsed.Round(time.Millisecond))
 
 	result.TableJobCounts[t.Name] = len(partitions)
 	for _, p := range partitions {
@@ -284,15 +284,15 @@ func (b *JobBuilder) logDateTrackingSummary(dateTrackingEnabled, applyDateFilter
 
 	if summary.TablesIncremental > 0 || summary.TablesFirstSync > 0 || summary.TablesNoDateColumn > 0 {
 		if applyDateFilter {
-			logging.Info("Incremental sync summary: %d tables incremental, %d tables first sync, %d tables full sync (no date column)",
+			logging.Debug("Incremental sync summary: %d tables incremental, %d tables first sync, %d tables full sync (no date column)",
 				summary.TablesIncremental, summary.TablesFirstSync, summary.TablesNoDateColumn)
 		} else {
-			logging.Info("Timestamp recording: %d tables with date columns, %d tables without",
+			logging.Debug("Timestamp recording: %d tables with date columns, %d tables without",
 				summary.TablesFirstSync, summary.TablesNoDateColumn)
 		}
 	}
 
 	if summary.TablesNoDateColumn > 0 && applyDateFilter {
-		logging.Info("Tables without date columns will sync all rows every run: %v", summary.NoDateColumnTables)
+		logging.Debug("Tables without date columns will sync all rows every run: %v", summary.NoDateColumnTables)
 	}
 }

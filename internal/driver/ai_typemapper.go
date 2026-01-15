@@ -250,7 +250,7 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 		logging.Warn("Failed to save AI type mapping cache: %v", err)
 	}
 
-	logging.Info("AI mapped %s.%s -> %s.%s (cached for future use)",
+	logging.Debug("AI mapped %s.%s -> %s.%s (cached for future use)",
 		info.SourceDBType, info.DataType, info.TargetDBType, result)
 
 	req.result = result
@@ -990,7 +990,7 @@ func (m *AITypeMapper) loadCache() error {
 	}
 
 	m.cache.Load(mappings)
-	logging.Info("Loaded %d AI type mappings from cache", len(mappings))
+	logging.Debug("Loaded %d AI type mappings from cache", len(mappings))
 	return nil
 }
 
