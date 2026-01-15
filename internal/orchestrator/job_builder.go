@@ -185,11 +185,18 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 	tableStart := time.Now()
 	partitions, err := b.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
 	tableElapsed := time.Since(tableStart)
-	logging.Info("  %s: %d partitions (%s)", t.Name, len(partitions), tableElapsed.Round(time.Millisecond))
 
 	if err != nil {
 		return fmt.Errorf("partitioning %s: %w", t.FullName(), err)
 	}
+
+	// If partitions is nil (e.g., query timed out), fall back to single job
+	if partitions == nil || len(partitions) == 0 {
+		logging.Info("  %s: no partitions (timeout or error) - using single job (%s)", t.Name, tableElapsed.Round(time.Millisecond))
+		return b.createSingleJob(runID, t, dateFilter, result)
+	}
+
+	logging.Info("  %s: %d partitions (%s)", t.Name, len(partitions), tableElapsed.Round(time.Millisecond))
 
 	result.TableJobCounts[t.Name] = len(partitions)
 	for _, p := range partitions {

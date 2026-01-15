@@ -278,7 +278,13 @@ func (r *Reader) GetRowCount(ctx context.Context, schema, table string) (int64, 
 	return count, err
 }
 
+// PartitionQueryTimeout is the maximum time to wait for partition boundary calculation.
+// If exceeded, the table will be processed without partitioning.
+const PartitionQueryTimeout = 30 * time.Second
+
 // GetPartitionBoundaries calculates NTILE boundaries for a large table.
+// If the query times out (e.g., due to memory pressure on very large tables),
+// it logs a warning and returns nil, allowing the table to be processed without partitioning.
 func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
 	if len(t.PrimaryKey) != 1 {
 		return nil, fmt.Errorf("partitioning requires single-column PK")
@@ -287,8 +293,18 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 	pkCol := t.PrimaryKey[0]
 	query := r.dialect.PartitionBoundariesQuery(pkCol, t.Schema, t.Name, numPartitions)
 
-	rows, err := r.db.QueryContext(ctx, query)
+	// Use a timeout context to prevent hanging on very large tables
+	// where SQL Server may not have enough memory for the NTILE sort operation
+	timeoutCtx, cancel := context.WithTimeout(ctx, PartitionQueryTimeout)
+	defer cancel()
+
+	rows, err := r.db.QueryContext(timeoutCtx, query)
 	if err != nil {
+		if timeoutCtx.Err() == context.DeadlineExceeded {
+			logging.Warn("Partition query timed out for %s after %v - table will be processed without partitioning",
+				t.FullName(), PartitionQueryTimeout)
+			return nil, nil // Return nil to signal fallback to single-job processing
+		}
 		return nil, err
 	}
 	defer rows.Close()
