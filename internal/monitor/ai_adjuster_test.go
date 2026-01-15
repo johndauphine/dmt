@@ -8,7 +8,6 @@ import (
 )
 
 // createTestAdjuster creates an AIAdjuster configured for testing.
-// It has a short warmup period and uses a real pipeline with mock config.
 func createTestAdjuster() *AIAdjuster {
 	// Create a real pipeline with test config
 	p := pipeline.New(nil, nil, pipeline.Config{
@@ -29,17 +28,15 @@ func createTestAdjuster() *AIAdjuster {
 	}
 
 	aa := &AIAdjuster{
-		collector:          mc,
-		pipeline:           p,
-		startTime:          time.Now().Add(-3 * time.Minute), // Already past warmup
-		warmupPeriod:       2 * time.Minute,
-		sameActionCooldown: 3 * time.Minute,
-		callInterval:       30 * time.Second,
-		cacheDuration:      60 * time.Second,
-		failureThreshold:   3,
-		resetTimeout:       5 * time.Minute,
-		maxHistorySize:     10,
-		adjustmentHistory:  make([]AdjustmentRecord, 0, 10),
+		collector:         mc,
+		pipeline:          p,
+		startTime:         time.Now().Add(-3 * time.Minute),
+		callInterval:      30 * time.Second,
+		cacheDuration:     60 * time.Second,
+		failureThreshold:  3,
+		resetTimeout:      5 * time.Minute,
+		maxHistorySize:    10,
+		adjustmentHistory: make([]AdjustmentRecord, 0, 10),
 		systemResources: SystemResources{
 			CPUCores:             8,
 			MemoryTotalMB:        16000,
@@ -52,35 +49,15 @@ func createTestAdjuster() *AIAdjuster {
 	return aa
 }
 
-func TestWarmupPeriod(t *testing.T) {
-	t.Run("during warmup returns continue", func(t *testing.T) {
+func TestFallbackEvaluation(t *testing.T) {
+	t.Run("fallback rules produce valid decision", func(t *testing.T) {
 		aa := createTestAdjuster()
-		// Set start time to now (in warmup period)
-		aa.startTime = time.Now()
-
-		decision, err := aa.Evaluate(nil)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if decision.Action != "continue" {
-			t.Errorf("expected action 'continue' during warmup, got %q", decision.Action)
-		}
-
-		if decision.Confidence != "high" {
-			t.Errorf("expected high confidence during warmup, got %q", decision.Confidence)
-		}
-	})
-
-	t.Run("after warmup allows fallback evaluation", func(t *testing.T) {
-		aa := createTestAdjuster()
-		// Already past warmup (set in createTestAdjuster)
 
 		// Without AI mapper, fallback rules will be used
 		decision := aa.fallbackRules()
 
 		if decision == nil {
-			t.Fatal("expected a decision after warmup")
+			t.Fatal("expected a decision from fallback rules")
 		}
 
 		// With stable metrics, should get continue
@@ -90,8 +67,8 @@ func TestWarmupPeriod(t *testing.T) {
 	})
 }
 
-func TestSameActionCooldown(t *testing.T) {
-	t.Run("same action within cooldown is skipped", func(t *testing.T) {
+func TestConsecutiveAdjustments(t *testing.T) {
+	t.Run("consecutive adjustments are applied", func(t *testing.T) {
 		aa := createTestAdjuster()
 
 		// First apply a scale_up decision
@@ -115,7 +92,7 @@ func TestSameActionCooldown(t *testing.T) {
 			t.Errorf("expected workers=5 after first apply, got %d", config.WriteAheadWriters)
 		}
 
-		// Try to apply same action immediately
+		// Apply another adjustment immediately
 		decision2 := &AdjustmentDecision{
 			Action:      "scale_up",
 			Adjustments: map[string]int{"workers": 6},
@@ -131,14 +108,14 @@ func TestSameActionCooldown(t *testing.T) {
 		// Simulate pipeline consuming any pending updates
 		aa.pipeline.ApplyPendingUpdates(true)
 
-		// Workers should NOT have changed (cooldown in effect)
+		// Workers should have changed (no cooldown)
 		config = aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != 5 {
-			t.Errorf("expected workers=5 (unchanged due to cooldown), got %d", config.WriteAheadWriters)
+		if config.WriteAheadWriters != 6 {
+			t.Errorf("expected workers=6, got %d", config.WriteAheadWriters)
 		}
 	})
 
-	t.Run("different action type not affected by cooldown", func(t *testing.T) {
+	t.Run("different action types applied consecutively", func(t *testing.T) {
 		aa := createTestAdjuster()
 
 		// Apply scale_up
@@ -151,7 +128,7 @@ func TestSameActionCooldown(t *testing.T) {
 		aa.ApplyDecision(decision1)
 		aa.pipeline.ApplyPendingUpdates(true)
 
-		// Apply scale_down immediately (different action type)
+		// Apply scale_down immediately
 		decision2 := &AdjustmentDecision{
 			Action:      "scale_down",
 			Adjustments: map[string]int{"workers": 3},
@@ -167,50 +144,10 @@ func TestSameActionCooldown(t *testing.T) {
 		// Simulate pipeline consuming the config update
 		aa.pipeline.ApplyPendingUpdates(true)
 
-		// Workers SHOULD have changed (different action type)
+		// Workers should have changed
 		config := aa.pipeline.GetConfig()
 		if config.WriteAheadWriters != 3 {
-			t.Errorf("expected workers=3 (different action allowed), got %d", config.WriteAheadWriters)
-		}
-	})
-
-	t.Run("same action after cooldown expires is allowed", func(t *testing.T) {
-		aa := createTestAdjuster()
-		aa.sameActionCooldown = 1 * time.Millisecond // Very short for testing
-
-		// Apply first decision
-		decision1 := &AdjustmentDecision{
-			Action:      "scale_up",
-			Adjustments: map[string]int{"workers": 5},
-			Reasoning:   "test",
-			Confidence:  "high",
-		}
-		aa.ApplyDecision(decision1)
-		aa.pipeline.ApplyPendingUpdates(true)
-
-		// Wait for cooldown
-		time.Sleep(5 * time.Millisecond)
-
-		// Apply same action type
-		decision2 := &AdjustmentDecision{
-			Action:      "scale_up",
-			Adjustments: map[string]int{"workers": 6},
-			Reasoning:   "test2",
-			Confidence:  "high",
-		}
-
-		err := aa.ApplyDecision(decision2)
-		if err != nil {
-			t.Fatalf("apply failed: %v", err)
-		}
-
-		// Simulate pipeline consuming the config update
-		aa.pipeline.ApplyPendingUpdates(true)
-
-		// Workers SHOULD have changed (cooldown expired)
-		config := aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != 6 {
-			t.Errorf("expected workers=6 (cooldown expired), got %d", config.WriteAheadWriters)
+			t.Errorf("expected workers=3, got %d", config.WriteAheadWriters)
 		}
 	})
 }
@@ -429,7 +366,6 @@ func TestAdjustmentHistory(t *testing.T) {
 	t.Run("history limited to max size", func(t *testing.T) {
 		aa := createTestAdjuster()
 		aa.maxHistorySize = 3
-		aa.sameActionCooldown = 0 // Disable cooldown for this test
 
 		// Apply more adjustments than max size
 		for i := 0; i < 5; i++ {
@@ -441,9 +377,6 @@ func TestAdjustmentHistory(t *testing.T) {
 			}
 			aa.ApplyDecision(decision)
 			aa.pipeline.ApplyPendingUpdates(true)
-
-			// Reset action type to avoid cooldown
-			aa.lastActionType = ""
 		}
 
 		if len(aa.adjustmentHistory) != 3 {

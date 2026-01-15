@@ -222,7 +222,9 @@ func TestAITypeMapper_BuildPrompt(t *testing.T) {
 	}
 }
 
-func TestAITypeMapper_BuildPromptWithSamples(t *testing.T) {
+func TestAITypeMapper_BuildPromptWithoutSamples(t *testing.T) {
+	// Sample values are no longer included in prompts (privacy improvement).
+	// Type mapping now works purely from DDL metadata.
 	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
 
 	info := TypeInfo{
@@ -239,63 +241,41 @@ func TestAITypeMapper_BuildPromptWithSamples(t *testing.T) {
 
 	prompt := mapper.buildPrompt(info)
 
-	// Check that prompt contains sample values section
-	if !bytes.Contains([]byte(prompt), []byte("Sample values from source data")) {
-		t.Error("prompt should contain sample values header")
+	// Verify sample values are NOT included (privacy improvement)
+	if bytes.Contains([]byte(prompt), []byte("Sample values")) {
+		t.Error("prompt should NOT contain sample values (privacy improvement)")
 	}
-	if !bytes.Contains([]byte(prompt), []byte("POINT (-108.5523153 39.0430375)")) {
-		t.Error("prompt should contain sample GPS coordinate data")
+	if bytes.Contains([]byte(prompt), []byte("POINT (-108.5523153 39.0430375)")) {
+		t.Error("prompt should NOT contain sample data (privacy improvement)")
 	}
+	// Data type should still be present
 	if !bytes.Contains([]byte(prompt), []byte("geography")) {
 		t.Error("prompt should contain data type")
 	}
 }
 
-func TestAITypeMapper_BuildPromptTruncatesLongSamples(t *testing.T) {
+func TestAITypeMapper_BuildPromptMetadataOnly(t *testing.T) {
+	// Since sample values are no longer used, prompts should work from DDL metadata only
 	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
-
-	// Create a long sample value (over 100 chars)
-	longValue := strings.Repeat("x", 150)
 
 	info := TypeInfo{
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
 		DataType:     "nvarchar",
 		MaxLength:    -1,
-		SampleValues: []string{longValue},
 	}
 
 	prompt := mapper.buildPrompt(info)
 
-	// Check that long value is truncated with "..."
-	if !bytes.Contains([]byte(prompt), []byte("...")) {
-		t.Error("prompt should truncate long sample values")
+	// Verify prompt contains metadata but no sample section
+	if !bytes.Contains([]byte(prompt), []byte("nvarchar")) {
+		t.Error("prompt should contain data type")
 	}
-	// Original 150-char value should NOT appear in full
-	if bytes.Contains([]byte(prompt), []byte(longValue)) {
-		t.Error("prompt should not contain full long value")
+	if !bytes.Contains([]byte(prompt), []byte("Max length: MAX")) {
+		t.Error("prompt should contain max length")
 	}
-}
-
-func TestAITypeMapper_BuildPromptLimitsToFiveSamples(t *testing.T) {
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
-
-	info := TypeInfo{
-		SourceDBType: "mssql",
-		TargetDBType: "postgres",
-		DataType:     "int",
-		SampleValues: []string{"1", "2", "3", "4", "5", "6", "7", "8"},
-	}
-
-	prompt := mapper.buildPrompt(info)
-
-	// Count occurrences of sample values in the prompt
-	// Should have at most 5 (values 1-5) but not 6, 7, 8
-	if bytes.Contains([]byte(prompt), []byte("\"6\"")) {
-		t.Error("prompt should not contain 6th sample")
-	}
-	if bytes.Contains([]byte(prompt), []byte("\"7\"")) {
-		t.Error("prompt should not contain 7th sample")
+	if bytes.Contains([]byte(prompt), []byte("Sample")) {
+		t.Error("prompt should not contain sample values section")
 	}
 }
 
@@ -434,82 +414,73 @@ func TestSanitizeErrorResponse(t *testing.T) {
 	}
 }
 
-func TestAITypeMapper_BuildPromptRespectsSizeLimits(t *testing.T) {
+func TestAITypeMapper_BuildPromptExcludesSampleValues(t *testing.T) {
+	// Sample values are no longer included in prompts (privacy improvement).
+	// This test verifies that even when SampleValues are provided,
+	// they are not included in the generated prompt.
 	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
 
-	// Create info with many large sample values
+	// Create info with sample values that would previously be included
 	info := TypeInfo{
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
 		DataType:     "varchar",
 		SampleValues: []string{
-			strings.Repeat("a", 200), // Will be truncated
+			strings.Repeat("a", 200),
 			strings.Repeat("b", 200),
-			strings.Repeat("c", 200),
-			strings.Repeat("d", 200),
-			strings.Repeat("e", 200),
-			strings.Repeat("f", 200), // Beyond max samples
-			strings.Repeat("g", 200),
+			"sensitive data",
 		},
 	}
 
 	prompt := mapper.buildPrompt(info)
 
-	// Check that sample values section exists
-	if !strings.Contains(prompt, "Sample values") {
-		t.Error("prompt should contain sample values section")
+	// Verify sample values are NOT included
+	if strings.Contains(prompt, "Sample values") {
+		t.Error("prompt should NOT contain sample values section (privacy improvement)")
+	}
+	if strings.Contains(prompt, "sensitive data") {
+		t.Error("prompt should NOT contain any sample data")
 	}
 
-	// Check that values are truncated (contain "...")
-	if !strings.Contains(prompt, "...") {
-		t.Error("long sample values should be truncated")
-	}
-
-	// Check that not all samples are included (total size limit)
-	sampleCount := strings.Count(prompt, "  - \"")
-	if sampleCount > maxSamplesInPrompt {
-		t.Errorf("prompt has %d samples, should have at most %d", sampleCount, maxSamplesInPrompt)
+	// Verify prompt still contains necessary metadata
+	if !strings.Contains(prompt, "varchar") {
+		t.Error("prompt should contain data type")
 	}
 }
 
-func TestAITypeMapper_BuildPromptRedactsPII(t *testing.T) {
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+func TestSanitizeSampleValue_RedactsPII(t *testing.T) {
+	// The sanitizeSampleValue function still exists for backwards compatibility
+	// but is no longer used in buildPrompt. Test the function directly.
 
-	info := TypeInfo{
-		SourceDBType: "mssql",
-		TargetDBType: "postgres",
-		DataType:     "varchar",
-		SampleValues: []string{
-			"john.doe@example.com",
-			"123-45-6789",
-			"(555) 123-4567",
-		},
+	// Test email redaction
+	email := sanitizeSampleValue("john.doe@example.com")
+	if strings.Contains(email, "john.doe") {
+		t.Error("email local part should be redacted")
 	}
-
-	prompt := mapper.buildPrompt(info)
-
-	// Verify email is redacted
-	if strings.Contains(prompt, "john.doe") {
-		t.Error("prompt should not contain email local part")
-	}
-	if !strings.Contains(prompt, "[EMAIL]") {
-		t.Error("prompt should contain [EMAIL] redaction marker")
+	if !strings.Contains(email, "[EMAIL]") {
+		t.Error("email should contain [EMAIL] marker")
 	}
 
-	// Verify SSN is redacted
-	if strings.Contains(prompt, "123-45-6789") {
-		t.Error("prompt should not contain SSN")
-	}
-	if !strings.Contains(prompt, "[SSN]") {
-		t.Error("prompt should contain [SSN] redaction marker")
+	// Test SSN redaction
+	ssn := sanitizeSampleValue("123-45-6789")
+	if ssn != "[SSN]" {
+		t.Errorf("SSN should be redacted to [SSN], got %q", ssn)
 	}
 
-	// Verify phone is redacted
-	if strings.Contains(prompt, "555") {
-		t.Error("prompt should not contain phone number")
+	// Test phone redaction
+	phone := sanitizeSampleValue("(555) 123-4567")
+	if phone != "[PHONE]" {
+		t.Errorf("phone should be redacted to [PHONE], got %q", phone)
 	}
-	if !strings.Contains(prompt, "[PHONE]") {
-		t.Error("prompt should contain [PHONE] redaction marker")
+
+	// Test truncation of long values
+	longValue := strings.Repeat("x", 150)
+	truncated := sanitizeSampleValue(longValue)
+	if len(truncated) > 104 { // 100 chars + "..."
+		t.Errorf("long value should be truncated, got length %d", len(truncated))
+	}
+	if !strings.Contains(truncated, "...") {
+		t.Error("truncated value should end with ...")
 	}
 }
 
