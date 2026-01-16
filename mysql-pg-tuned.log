@@ -1,0 +1,10 @@
+WARNING: Config file 'config-mysql-pg-tuned.yaml' has insecure permissions (0644)
+         Other users may be able to read your database credentials.
+         Run: chmod 600 config-mysql-pg-tuned.yaml
+
+2026-01-16 03:50:33 [INFO] Connected to MySQL source: localhost:3306/so2013_mysql
+2026-01-16 03:50:33 [DEBUG] Loaded 55 AI type mappings from cache
+Error: failed to create orchestrator: creating target pool: pinging database: failed to connect to `user=postgres database=so2013_from_mysql`:
+	[::1]:5433 (localhost): dial error: dial tcp [::1]:5433: connect: connection refused
+	127.0.0.1:5433 (localhost): dial error: dial tcp 127.0.0.1:5433: connect: connection refused
+Exit code 2 (connection error (recoverable)) - safe to retry

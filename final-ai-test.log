@@ -1,269 +1,0 @@
-WARNING: Config file 'config-ai-full-test.yaml' has insecure permissions (0644)
-         Other users may be able to read your database credentials.
-         Run: chmod 600 config-ai-full-test.yaml
-
-2026-01-13 23:30:06 [INFO] Connected to MSSQL source: localhost:1433/StackOverflow2010
-2026-01-13 23:30:06 [INFO] Loaded 27 AI type mappings from cache
-2026-01-13 23:30:06 [INFO] Connected to PostgreSQL target: localhost:5433/stackoverflow
-2026-01-13 23:30:06 [INFO] AI Type Mapping enabled (provider: claude, model: claude-sonnet-4-20250514)
-2026-01-13 23:30:06 [INFO] Loaded 27 cached AI type mappings
-2026-01-13 23:30:06 [INFO] Starting migration run: 916050db
-2026-01-13 23:30:06 [INFO] Migration: mssql -> postgres
-
-2026-01-13 23:30:06 [INFO] === Configuration ===
-
-System Resources:
-  Available Memory: 24032 MB
-  Effective Max Memory: 16822 MB (hard cap 70%)
-  CPU Cores: 16
-
-Source (mssql):
-  Host: localhost
-  Port: 1433
-  Database: StackOverflow2010
-  Schema: dbo
-  User: sa
-  Password: [REDACTED]
-  Encrypt: false
-  TrustServerCert: true
-  PacketSize: 32767
-  Auth: password
-
-Target (postgres):
-  Host: localhost
-  Port: 5433
-  Database: stackoverflow
-  Schema: public
-  User: postgres
-  Password: [REDACTED]
-  SSLMode: disable
-  Auth: password
-
-Migration Settings:
-  Workers: 2
-  ChunkSize: 10000
-  ReadAheadBuffers: 4
-  MaxPartitions: 2 (auto: matches workers)
-  MaxMssqlConnections: 12 (auto: 2 workers * 1 readers + 4)
-  MaxPgConnections: 12 (auto: 2 workers * 1 writers + 4)
-  WriteAheadWriters: 1
-  ParallelReaders: 1
-  LargeTableThreshold: 5000000 (auto: default 5M)
-  MSSQLRowsPerBatch: 10000 (auto: matches chunk_size)
-  TargetMode: drop_recreate
-  StrictConsistency: false
-  CreateIndexes: true
-  CreateForeignKeys: true
-  CreateCheckConstraints: false
-  SampleValidation: false
-  SampleSize: 100 (auto: default 100)
-  DataDir: /home/johnd/.dmt
-
-Restartability:
-  CheckpointFrequency: 10 chunks
-  MaxRetries: 3
-  HistoryRetentionDays: 30
-
-Table Filters:
-  IncludeTables: [all]
-  ExcludeTables: [none]
-
-Memory Estimate:
-  Buffer Memory: ~38.1 MB (2 workers * 4 buffers * 10000 rows * 500 bytes/row)
-  Note: Actual memory depends on row sizes. Tables with large text columns use more.
-
-Notifications:
-  Slack: disabled
-
-AI Features:
-  Provider: claude
-  APIKey: [REDACTED]
-  Model: (provider default)
-  Timeout: 30s
-  TypeMapping: enabled
-    CacheFile: ~/.dmt/type-cache.json
-2026-01-13 23:30:06 [INFO] Runtime memory limit set to 16822 MB (Go GC soft limit)
-2026-01-13 23:30:06 [INFO] Extracting schema...
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for Badges: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for Comments: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for LinkTypes: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for PostLinks: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for Posts: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for PostTypes: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for Users: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for Votes: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [WARN] Warning: loading indexes for VoteTypes: mssql: Incorrect syntax near '('.
-2026-01-13 23:30:07 [INFO] Found 9 tables
-2026-01-13 23:30:07 [INFO] Creating target tables (drop and recreate)...
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table VoteTypes (2 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: VoteTypes.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table LinkTypes (2 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: LinkTypes.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: LinkTypes.Type: varchar(50,0,0) -> varchar(50)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table PostTypes (2 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostTypes.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostTypes.Type: nvarchar(50,0,0) -> varchar(50)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table Badges (4 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Badges.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Badges.Name: nvarchar(40,0,0) -> varchar(40)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Badges.UserId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Badges.Date: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table Comments (6 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Comments.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Comments.CreationDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Comments.PostId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Comments.Score: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Comments.Text: nvarchar(700,0,0) -> varchar(700)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Comments.UserId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: VoteTypes.Name: varchar(50,0,0) -> varchar(50)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table PostLinks (5 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostLinks.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostLinks.CreationDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostLinks.PostId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostLinks.RelatedPostId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: PostLinks.LinkTypeId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table Posts (20 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.AcceptedAnswerId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.AnswerCount: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.Body: nvarchar(-1,0,0) -> text
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.ClosedDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table Users (14 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.AboutMe: nvarchar(-1,0,0) -> text
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.Age: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.CreationDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.DisplayName: nvarchar(40,0,0) -> varchar(40)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.CommentCount: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.CommunityOwnedDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.CreationDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.FavoriteCount: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.LastActivityDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.LastEditDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.LastEditorDisplayName: nvarchar(40,0,0) -> varchar(40)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.LastEditorUserId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.OwnerUserId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.ParentId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.PostTypeId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.Score: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.DownVotes: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.EmailHash: nvarchar(40,0,0) -> varchar(40)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.LastAccessDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.Location: nvarchar(100,0,0) -> varchar(100)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.Reputation: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.UpVotes: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.Views: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.WebsiteUrl: nvarchar(200,0,0) -> varchar(200)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Users.AccountId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: generating DDL for table Votes (6 columns)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Votes.Id: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Votes.PostId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Votes.UserId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Votes.BountyAmount: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Votes.VoteTypeId: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Votes.CreationDate: datetime(0,0,0) -> timestamp
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.Tags: nvarchar(150,0,0) -> varchar(150)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.Title: nvarchar(250,0,0) -> varchar(250)
-2026-01-13 23:30:07 [INFO] AI Type Mapping: Posts.ViewCount: int(0,10,0) -> integer
-2026-01-13 23:30:07 [INFO] Transferring data...
-2026-01-13 23:30:07 [INFO] Calculating partition boundaries for 1 large tables...
-2026-01-13 23:30:15 [INFO]   Votes: 2 partitions (8.769s)
-2026-01-13 23:30:16 [INFO] Partition queries completed in 8.849s
-Transferring   0% |                           | (0/19310703, 0 rows/hr) [0s:0s]2026-01-13 23:30:16 [INFO] Loaded 27 AI type mappings from cache
-2026-01-13 23:30:16 [INFO] AI-driven parameter adjustment enabled (interval: 15s)
-2026-01-13 23:30:16 [INFO] AI monitoring started (evaluation interval: 15s)
-                                                                               Transferring Comments   0% |                  | (0/19310703, 0 rows/hr) [0s:0s]                                                                               Transferring (2 tables)   0% |                | (0/19310703, 0 rows/hr) [0s:0s]                                                                               Transferring (2 tables)   0% |     | (130000/19310703, 1168311 rows/s) [0s:16s]                                                                               Transferring (2 tables)   1% |     | (310000/19310703, 1442128 rows/s) [0s:13s]                                                                               Transferring (2 tables)   2% |     | (500000/19310703, 1584052 rows/s) [0s:11s]                                                                               Transferring (2 tables)   3% |     | (700000/19310703, 1670961 rows/s) [0s:11s]                                                                               Transferring (2 tables)   4% |     | (900000/19310703, 1711468 rows/s) [0s:10s]                                                                               Transferring (2 tables)   5% |     | (1070000/19310703, 1838478 rows/s) [0s:9s]                                                                               Transferring (2 tables)   6% |     | (1260000/19310703, 1838478 rows/s) [0s:9s]                                                                               Transferring (2 tables)   7% |     | (1460000/19310703, 1838478 rows/s) [0s:9s]                                                                               Transferring (2 tables)   8% |     | (1660000/19310703, 1838478 rows/s) [0s:9s]                                                                               Transferring (2 tables)   9% |     | (1862019/19310703, 1854648 rows/s) [1s:9s]                                                                               Transferring (2 tables)  10% |     | (1962021/19310703, 1854648 rows/s) [1s:9s]                                                                               Transferring (2 tables)  11% |     | (2162021/19310703, 1854648 rows/s) [1s:9s]                                                                               Transferring (2 tables)  11% |     | (2283540/19310703, 1854648 rows/s) [1s:9s]                                                                               Transferring (2 tables)  12% |     | (2373540/19310703, 1854648 rows/s) [1s:9s]                                                                               Transferring (2 tables)  12% |    | (2493540/19310703, 1634655 rows/s) [1s:10s]                                                                               Transferring (2 tables)  13% |    | (2583540/19310703, 1634655 rows/s) [1s:10s]                                                                               Transferring (2 tables)  13% |    | (2683540/19310703, 1634655 rows/s) [1s:10s]                                                                               Transferring (2 tables)  14% |    | (2783540/19310703, 1634655 rows/s) [1s:10s]                                                                               Transferring (2 tables)  14% |    | (2873540/19310703, 1634655 rows/s) [1s:10s]                                                                               Transferring (2 tables)  15% |    | (2963540/19310703, 1454156 rows/s) [2s:11s]                                                                               Transferring (2 tables)  15% |    | (3053540/19310703, 1454156 rows/s) [2s:11s]                                                                               Transferring (2 tables)  16% |    | (3133540/19310703, 1454156 rows/s) [2s:11s]                                                                               Transferring (2 tables)  16% |    | (3223540/19310703, 1454156 rows/s) [2s:11s]                                                                               Transferring (2 tables)  17% |    | (3323540/19310703, 1454156 rows/s) [2s:10s]                                                                               Transferring (2 tables)  17% |    | (3413540/19310703, 1331236 rows/s) [2s:11s]                                                                               Transferring (2 tables)  18% |    | (3503540/19310703, 1331236 rows/s) [2s:11s]                                                                               Transferring (2 tables)  18% |    | (3583540/19310703, 1331236 rows/s) [2s:11s]                                                                               Transferring (2 tables)  18% |    | (3613540/19310703, 1172036 rows/s) [3s:13s]                                                                               Transferring (2 tables)  18% |    | (3663540/19310703, 1172036 rows/s) [3s:13s]                                                                               Transferring (2 tables)  19% |    | (3743540/19310703, 1172036 rows/s) [3s:13s]                                                                               Transferring (2 tables)  19% |    | (3833540/19310703, 1172036 rows/s) [3s:13s]                                                                               Transferring (2 tables)  20% |    | (3923540/19310703, 1093015 rows/s) [3s:14s]                                                                               Transferring (2 tables)  20% |    | (4003540/19310703, 1093015 rows/s) [3s:14s]                                                                               Transferring (2 tables)  21% |    | (4093540/19310703, 1093015 rows/s) [3s:13s]                                                                               Transferring (2 tables)  21% |    | (4183540/19310703, 1093015 rows/s) [4s:13s]                                                                               Transferring (2 tables)  22% |    | (4263540/19310703, 1093015 rows/s) [4s:13s]                                                                               Transferring (2 tables)  22% |    | (4353540/19310703, 1059137 rows/s) [4s:14s]                                                                               Transferring (2 tables)  23% |    | (4443540/19310703, 1059137 rows/s) [4s:14s]                                                                               Transferring (2 tables)  23% |    | (4523540/19310703, 1059137 rows/s) [4s:13s]                                                                               Transferring (2 tables)  23% |    | (4603540/19310703, 1059137 rows/s) [4s:13s]                                                                               Transferring (2 tables)  24% |    | (4673540/19310703, 1059137 rows/s) [4s:13s]                                                                               Transferring (2 tables)  24% |    | (4763540/19310703, 1024358 rows/s) [4s:14s]                                                                               Transferring (2 tables)  25% |█   | (4863540/19310703, 1024358 rows/s) [4s:14s]                                                                               Transferring (2 tables)  25% |█   | (4943540/19310703, 1024358 rows/s) [5s:14s]                                                                               Transferring (2 tables)  26% |█   | (5033540/19310703, 1024358 rows/s) [5s:13s]                                                                               Transferring (2 tables)  26% |█   | (5133540/19310703, 1024358 rows/s) [5s:13s]                                                                               Transferring (2 tables)  27% |█   | (5223540/19310703, 1005049 rows/s) [5s:14s]                                                                               Transferring (2 tables)  27% |█   | (5293540/19310703, 1005049 rows/s) [5s:13s]                                                                               Transferring (2 tables)  27% |█   | (5383540/19310703, 1005049 rows/s) [5s:13s]                                                                               Transferring (2 tables)  28% |█   | (5473540/19310703, 1005049 rows/s) [5s:13s]                                                                               Transferring (2 tables)  28% |█    | (5573540/19310703, 902721 rows/s) [5s:15s]                                                                               Transferring (2 tables)  29% |█    | (5663540/19310703, 902721 rows/s) [5s:15s]                                                                               Transferring (2 tables)  29% |█    | (5753540/19310703, 902721 rows/s) [6s:15s]                                                                               Transferring (2 tables)  30% |█    | (5823540/19310703, 902721 rows/s) [6s:14s]                                                                               Transferring (2 tables)  30% |█    | (5868723/19310703, 902721 rows/s) [6s:14s]                                                                               Transferring Posts  30% |███       | (5888731/19310703, 779409 rows/s) [6s:17s]                                                                               Transferring (2 tables)  30% |█    | (5928731/19310703, 779409 rows/s) [6s:17s]                                                                               Transferring (2 tables)  31% |█    | (6008731/19310703, 779409 rows/s) [6s:17s]                                                                               Transferring (2 tables)  31% |█    | (6088731/19310703, 779409 rows/s) [6s:16s]                                                                               Transferring (2 tables)  31% |█    | (6178731/19310703, 779409 rows/s) [6s:16s]                                                                               Transferring (2 tables)  32% |█    | (6268129/19310703, 723717 rows/s) [6s:18s]                                                                               Transferring (2 tables)  32% |█    | (6338129/19310703, 723717 rows/s) [6s:17s]                                                                               Transferring (2 tables)  33% |█    | (6468129/19310703, 723717 rows/s) [7s:17s]                                                                               Transferring (2 tables)  34% |█    | (6578129/19310703, 723717 rows/s) [7s:17s]                                                                               Transferring (2 tables)  34% |█    | (6728129/19310703, 737974 rows/s) [7s:17s]                                                                               Transferring (2 tables)  35% |█    | (6878129/19310703, 737974 rows/s) [7s:16s]                                                                               Transferring (2 tables)  36% |█    | (7028129/19310703, 737974 rows/s) [7s:16s]                                                                               Transferring (2 tables)  37% |█    | (7168129/19310703, 737974 rows/s) [7s:16s]                                                                               Transferring (2 tables)  37% |█    | (7308129/19310703, 737974 rows/s) [7s:16s]                                                                               Transferring (2 tables)  38% |█    | (7438129/19310703, 789773 rows/s) [7s:15s]                                                                               Transferring (2 tables)  39% |█    | (7588129/19310703, 789773 rows/s) [7s:14s]                                                                               Transferring (2 tables)  39% |█    | (7718129/19310703, 789773 rows/s) [8s:14s]                                                                               Transferring (2 tables)  40% |██   | (7728129/19310703, 809090 rows/s) [8s:14s]                                                                               Transferring (2 tables)  40% |██   | (7798129/19310703, 809090 rows/s) [8s:14s]                                                                               Transferring (2 tables)  41% |██   | (7958129/19310703, 809090 rows/s) [8s:14s]                                                                               Transferring (2 tables)  41% |██   | (8108129/19310703, 809090 rows/s) [8s:13s]                                                                               Transferring (2 tables)  42% |██   | (8258129/19310703, 809090 rows/s) [8s:13s]                                                                               Transferring (2 tables)  43% |██   | (8408129/19310703, 874996 rows/s) [8s:12s]                                                                               Transferring (2 tables)  44% |██   | (8548129/19310703, 874996 rows/s) [8s:12s]                                                                               Transferring (2 tables)  44% |██   | (8678129/19310703, 874996 rows/s) [9s:12s]                                                                               Transferring (2 tables)  45% |██   | (8818129/19310703, 874996 rows/s) [9s:11s]                                                                               Transferring (2 tables)  46% |██   | (8948129/19310703, 874996 rows/s) [9s:11s]                                                                               Transferring (2 tables)  47% |██   | (9088129/19310703, 923435 rows/s) [9s:11s]                                                                               Transferring (2 tables)  47% |██   | (9238129/19310703, 923435 rows/s) [9s:10s]                                                                               Transferring (2 tables)  48% |██   | (9368129/19310703, 923435 rows/s) [9s:10s]                                                                               Transferring (2 tables)  49% |██   | (9498129/19310703, 923435 rows/s) [9s:10s]                                                                               Transferring (2 tables)  49% |█   | (9578129/19310703, 911534 rows/s) [10s:10s]                                                                               Transferring (2 tables)  50% |██  | (9678129/19310703, 911534 rows/s) [10s:10s]                                                                               Transferring (2 tables)  50% |██  | (9788129/19310703, 911534 rows/s) [10s:10s]                                                                               Transferring (2 tables)  51% |██  | (9928129/19310703, 911534 rows/s) [10s:10s]                                                                               Transferring (2 tables)  52% |█  | (10048129/19310703, 911534 rows/s) [10s:10s]                                                                               Transferring (2 tables)  52% |██  | (10178129/19310703, 945670 rows/s) [10s:9s]                                                                               Transferring (2 tables)  53% |██  | (10308129/19310703, 945670 rows/s) [10s:9s]                                                                               Transferring (2 tables)  54% |██  | (10438129/19310703, 945670 rows/s) [10s:9s]                                                                               Transferring (2 tables)  54% |██  | (10578129/19310703, 945670 rows/s) [11s:9s]                                                                               Transferring (2 tables)  55% |██  | (10698129/19310703, 945670 rows/s) [11s:9s]                                                                               Transferring (2 tables)  56% |██  | (10838129/19310703, 991530 rows/s) [11s:8s]                                                                               Transferring (2 tables)  56% |██  | (10968129/19310703, 991530 rows/s) [11s:8s]                                                                               Transferring (2 tables)  57% |██  | (11098129/19310703, 991530 rows/s) [11s:8s]                                                                               Transferring (2 tables)  58% |██  | (11228129/19310703, 991530 rows/s) [11s:8s]                                                                               Transferring (2 tables)  58% |██  | (11368129/19310703, 991530 rows/s) [11s:8s]                                                                               Transferring (2 tables)  59% |█  | (11428129/19310703, 1042984 rows/s) [12s:7s]                                                                               Transferring (2 tables)  60% |█  | (11588129/19310703, 1042984 rows/s) [12s:7s]                                                                               Transferring (2 tables)  60% |█  | (11728129/19310703, 1018738 rows/s) [12s:7s]                                                                               Transferring (2 tables)  61% |█  | (11878129/19310703, 1018738 rows/s) [12s:7s]                                                                               Transferring (2 tables)  62% |█  | (12018129/19310703, 1018738 rows/s) [12s:7s]                                                                               Transferring Posts  62% |████    | (12129811/19310703, 1018738 rows/s) [12s:7s]                                                                               Transferring (2 tables)  63% |█  | (12239811/19310703, 1034617 rows/s) [12s:6s]                                                                               Transferring (2 tables)  64% |█  | (12379811/19310703, 1034617 rows/s) [12s:6s]                                                                               Transferring (2 tables)  64% |█  | (12519811/19310703, 1034617 rows/s) [12s:6s]                                                                               Transferring (2 tables)  65% |█  | (12659811/19310703, 1034617 rows/s) [13s:6s]                                                                               Transferring (2 tables)  66% |█  | (12779811/19310703, 1034617 rows/s) [13s:6s]                                                                               Transferring (2 tables)  66% |█  | (12899811/19310703, 1026845 rows/s) [13s:6s]                                                                               Transferring (2 tables)  67% |██ | (13029811/19310703, 1026845 rows/s) [13s:6s]                                                                               Transferring (2 tables)  67% |██ | (13099811/19310703, 1026845 rows/s) [13s:6s]                                                                               Transferring (2 tables)  68% |██ | (13239811/19310703, 1026845 rows/s) [13s:5s]                                                                               Transferring (2 tables)  69% |██ | (13369811/19310703, 1064945 rows/s) [13s:5s]                                                                               Transferring (2 tables)  69% |██ | (13449811/19310703, 1064945 rows/s) [13s:5s]                                                                               Transferring (2 tables)  69% |██ | (13459811/19310703, 1064945 rows/s) [14s:5s]                                                                               Transferring (2 tables)  70% |██ | (13559811/19310703, 1064945 rows/s) [14s:5s]                                                                               Transferring (2 tables)  70% |██  | (13669811/19310703, 992459 rows/s) [14s:5s]                                                                               Transferring (2 tables)  71% |██  | (13809811/19310703, 992459 rows/s) [14s:5s]                                                                               Transferring (2 tables)  72% |██  | (13939811/19310703, 992459 rows/s) [14s:5s]                                                                               Transferring (2 tables)  72% |██  | (14089811/19310703, 992459 rows/s) [14s:5s]                                                                               Transferring (2 tables)  73% |██  | (14229811/19310703, 992459 rows/s) [14s:5s]                                                                               Transferring (2 tables)  74% |██  | (14359811/19310703, 994105 rows/s) [14s:4s]                                                                               Transferring (2 tables)  75% |███ | (14499811/19310703, 994105 rows/s) [14s:4s]                                                                               Transferring (2 tables)  75% |███ | (14629811/19310703, 994105 rows/s) [15s:4s]                                                                               Transferring (2 tables)  76% |███ | (14769811/19310703, 994105 rows/s) [15s:4s]                                                                               Transferring (2 tables)  77% |███ | (14909811/19310703, 994105 rows/s) [15s:4s]                                                                               Transferring (2 tables)  77% |██ | (15039811/19310703, 1064681 rows/s) [15s:4s]                                                                               Transferring (2 tables)  78% |██ | (15179811/19310703, 1064681 rows/s) [15s:3s]                                                                               Transferring (2 tables)  79% |██ | (15319811/19310703, 1064681 rows/s) [15s:3s]                                                                               Transferring (2 tables)  80% |██ | (15449811/19310703, 1064681 rows/s) [15s:3s]                                                                               Transferring (2 tables)  80% |██ | (15579811/19310703, 1064681 rows/s) [15s:3s]                                                                               Transferring (2 tables)  81% |██ | (15689811/19310703, 1068369 rows/s) [15s:3s]                                                                               Transferring (2 tables)  81% |██ | (15829811/19310703, 1068369 rows/s) [15s:3s]                                                                               Transferring (2 tables)  82% |██ | (15959811/19310703, 1068369 rows/s) [16s:3s]                                                                               Transferring (2 tables)  83% |██ | (16099811/19310703, 1068369 rows/s) [16s:3s]                                                                               Transferring (2 tables)  84% |██ | (16239811/19310703, 1068369 rows/s) [16s:2s]                                                                               Transferring (2 tables)  84% |██ | (16379811/19310703, 1073831 rows/s) [16s:2s]                                                                               Transferring (2 tables)  85% |██ | (16509811/19310703, 1073831 rows/s) [16s:2s]                                                                               Transferring (2 tables)  86% |██ | (16649811/19310703, 1073831 rows/s) [16s:2s]                                                                               Transferring (2 tables)  86% |██ | (16789811/19310703, 1073831 rows/s) [16s:2s]                                                                               Transferring (2 tables)  87% |██ | (16919811/19310703, 1073831 rows/s) [16s:2s]                                                                               Transferring (2 tables)  88% |██ | (17059811/19310703, 1092872 rows/s) [16s:2s]                                                                               Transferring (2 tables)  89% |██ | (17209811/19310703, 1092872 rows/s) [17s:1s]                                                                               Transferring (2 tables)  89% |██ | (17349811/19310703, 1092872 rows/s) [17s:1s]                                                                               Transferring (2 tables)  90% |██ | (17489811/19310703, 1092872 rows/s) [17s:1s]                                                                               Transferring (2 tables)  91% |██ | (17629811/19310703, 1092872 rows/s) [17s:1s]                                                                               Transferring (2 tables)  91% |██ | (17759811/19310703, 1186223 rows/s) [17s:1s]                                                                               Transferring (2 tables)  92% |██ | (17799811/19310703, 1186223 rows/s) [17s:1s]                                                                               Transferring (2 tables)  92% |██ | (17931493/19310703, 1186223 rows/s) [17s:1s]                                                                               Transferring Posts  93% |███████ | (17961508/19310703, 1186223 rows/s) [17s:1s]                                                                               Transferring Posts  93% |███████ | (17981508/19310703, 1126015 rows/s) [17s:1s]                                                                               Transferring Posts  93% |███████ | (18001508/19310703, 1126015 rows/s) [17s:1s]                                                                               Transferring Posts  93% |███████ | (18021508/19310703, 1126015 rows/s) [18s:1s]                                                                               Transferring Posts  93% |███████ | (18041508/19310703, 1126015 rows/s) [18s:1s]                                                                               Transferring Posts  93% |███████ | (18061508/19310703, 1126015 rows/s) [18s:1s]                                                                               Transferring Posts  93% |███████ | (18081508/19310703, 1016652 rows/s) [18s:1s]                                                                               Transferring Posts  93% |███████ | (18101508/19310703, 1016652 rows/s) [18s:1s]                                                                               Transferring Posts  93% |███████ | (18121508/19310703, 1016652 rows/s) [18s:1s]                                                                               Transferring Posts  93% |███████ | (18141508/19310703, 1016652 rows/s) [18s:1s]                                                                               Transferring Posts  94% |███████ | (18161508/19310703, 1016652 rows/s) [18s:1s]                                                                               Transferring Posts  94% |████████ | (18181508/19310703, 940522 rows/s) [18s:1s]                                                                               Transferring Posts  94% |████████ | (18201508/19310703, 940522 rows/s) [19s:1s]                                                                               Transferring Posts  94% |████████ | (18221508/19310703, 940522 rows/s) [19s:1s]2026-01-13 23:30:37 [INFO] AI adjustment applied: scale_up - Current configuration is very conservative with minimal resource utilization. Since CPU and memory are not saturated and throughput is stable, there's significant headroom to improve performance by increasing parallelism and chunk size. (confidence: high)
-2026-01-13 23:30:37 [WARN] AI warning: Monitor memory usage closely after scaling up
-2026-01-13 23:30:37 [WARN] AI warning: Ensure target database can handle increased connection load
-                                                                               Transferring Posts  94% |████████ | (18241508/19310703, 940522 rows/s) [19s:1s]                                                                               Transferring Posts  94% |████████ | (18261508/19310703, 940522 rows/s) [19s:1s]                                                                               Transferring Posts  94% |████████ | (18281508/19310703, 902620 rows/s) [19s:1s]                                                                               Transferring Posts  94% |████████ | (18301508/19310703, 902620 rows/s) [19s:1s]                                                                               Transferring Posts  94% |████████ | (18321508/19310703, 902620 rows/s) [19s:1s]                                                                               Transferring Posts  94% |████████ | (18331508/19310703, 902620 rows/s) [19s:1s]                                                                               Transferring Posts  95% |████████ | (18351508/19310703, 784023 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18371508/19310703, 784023 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18391508/19310703, 784023 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18411508/19310703, 664567 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18431508/19310703, 664567 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18451508/19310703, 664567 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18471508/19310703, 664567 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18491508/19310703, 664567 rows/s) [20s:1s]                                                                               Transferring Posts  95% |████████ | (18511508/19310703, 560702 rows/s) [21s:1s]                                                                               Transferring Posts  95% |████████ | (18531508/19310703, 560702 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18551508/19310703, 560702 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18571508/19310703, 560702 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18591508/19310703, 445650 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18611508/19310703, 445650 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18631508/19310703, 445650 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18651508/19310703, 445650 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18671508/19310703, 445650 rows/s) [21s:1s]                                                                               Transferring Posts  96% |████████ | (18691508/19310703, 329749 rows/s) [22s:1s]                                                                               Transferring Posts  96% |████████ | (18711508/19310703, 329749 rows/s) [22s:1s]                                                                               Transferring Posts  97% |████████ | (18731508/19310703, 329749 rows/s) [22s:1s]                                                                               Transferring Posts  97% |████████ | (18751508/19310703, 329749 rows/s) [22s:1s]                                                                               Transferring Posts  97% |████████ | (18771508/19310703, 329749 rows/s) [22s:1s]                                                                               Transferring Posts  97% |████████ | (18791508/19310703, 213894 rows/s) [22s:2s]                                                                               Transferring Posts  97% |████████ | (18811508/19310703, 213894 rows/s) [22s:2s]                                                                               Transferring Posts  97% |████████ | (18831508/19310703, 213894 rows/s) [22s:2s]                                                                               Transferring Posts  97% |████████ | (18851508/19310703, 213894 rows/s) [22s:2s]                                                                               Transferring Posts  97% |████████ | (18871508/19310703, 170373 rows/s) [23s:2s]                                                                               Transferring Posts  97% |████████ | (18891508/19310703, 170373 rows/s) [23s:2s]                                                                               Transferring Posts  97% |████████ | (18911508/19310703, 170373 rows/s) [23s:2s]                                                                               Transferring Posts  98% |████████ | (18931508/19310703, 170373 rows/s) [23s:2s]                                                                               Transferring Posts  98% |████████ | (18951508/19310703, 170373 rows/s) [23s:2s]                                                                               Transferring Posts  98% |████████ | (18971508/19310703, 169667 rows/s) [23s:1s]                                                                               Transferring Posts  98% |████████ | (18991508/19310703, 169667 rows/s) [23s:1s]                                                                               Transferring Posts  98% |████████ | (19011508/19310703, 169667 rows/s) [23s:1s]                                                                               Transferring Posts  98% |████████ | (19031508/19310703, 169667 rows/s) [24s:1s]                                                                               Transferring Posts  98% |████████ | (19041508/19310703, 162005 rows/s) [24s:1s]                                                                               Transferring Posts  98% |████████ | (19061508/19310703, 162005 rows/s) [24s:1s]                                                                               Transferring Posts  98% |████████ | (19081508/19310703, 162005 rows/s) [24s:1s]                                                                               Transferring Posts  98% |████████ | (19101508/19310703, 162005 rows/s) [24s:1s]                                                                               Transferring Posts  99% |████████ | (19121508/19310703, 162005 rows/s) [24s:1s]                                                                               Transferring Posts  99% |████████ | (19141508/19310703, 160976 rows/s) [24s:1s]                                                                               Transferring Posts  99% |████████ | (19161508/19310703, 160976 rows/s) [25s:0s]                                                                               Transferring Posts  99% |████████ | (19181508/19310703, 160976 rows/s) [25s:0s]                                                                               Transferring Posts  99% |████████ | (19201508/19310703, 160976 rows/s) [25s:0s]                                                                               Transferring Posts  99% |████████ | (19221508/19310703, 160976 rows/s) [25s:0s]                                                                               Transferring Posts  99% |████████ | (19251508/19310703, 165532 rows/s) [25s:0s]                                                                               Transferring Posts  99% |████████ | (19271508/19310703, 165532 rows/s) [25s:0s]                                                                               Transferring Posts  99% |████████ | (19291508/19310703, 165532 rows/s) [25s:0s]                                                                               Transferring Posts 100% |█████████| (19310703/19310703, 746966 rows/s)
-2026-01-13 23:30:43 [INFO] Transfer complete: 19310703 rows in 35s (552997 rows/sec)
-2026-01-13 23:30:43 [INFO] Finalizing...
-2026-01-13 23:30:43 [INFO] AI monitoring stopped
-2026-01-13 23:30:43 [INFO] Validating...
-
-2026-01-13 23:30:43 [INFO] Validation Results:
-2026-01-13 23:30:43 [INFO] -------------------
-2026-01-13 23:30:44 [INFO] Badges                         OK 1102019 rows
-2026-01-13 23:30:46 [INFO] Comments                       OK 3875183 rows
-2026-01-13 23:30:46 [INFO] LinkTypes                      OK 2 rows
-2026-01-13 23:30:46 [INFO] PostLinks                      OK 161519 rows
-2026-01-13 23:30:53 [INFO] Posts                          OK 3729195 rows
-2026-01-13 23:30:53 [INFO] PostTypes                      OK 8 rows
-2026-01-13 23:30:53 [INFO] Users                          OK 299398 rows
-2026-01-13 23:30:54 [INFO] Votes                          OK 10143364 rows
-2026-01-13 23:30:54 [INFO] VoteTypes                      OK 15 rows
-2026-01-13 23:30:54 [INFO] Migration complete: 9 tables, 19310703 rows in 46s (419795 rows/sec)
-2026-01-13 23:30:54 [INFO] 
-2026-01-13 23:30:54 [INFO] PostgreSQL identifier changes applied:
-2026-01-13 23:30:54 [INFO]   Table: 'Badges' → 'badges'
-2026-01-13 23:30:54 [INFO]     badges: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     badges: column 'Name' → 'name'
-2026-01-13 23:30:54 [INFO]     badges: column 'UserId' → 'userid'
-2026-01-13 23:30:54 [INFO]     badges: column 'Date' → 'date'
-2026-01-13 23:30:54 [INFO]   Table: 'Comments' → 'comments'
-2026-01-13 23:30:54 [INFO]     comments: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     comments: column 'CreationDate' → 'creationdate'
-2026-01-13 23:30:54 [INFO]     comments: column 'PostId' → 'postid'
-2026-01-13 23:30:54 [INFO]     comments: column 'Score' → 'score'
-2026-01-13 23:30:54 [INFO]     comments: column 'Text' → 'text'
-2026-01-13 23:30:54 [INFO]     comments: column 'UserId' → 'userid'
-2026-01-13 23:30:54 [INFO]   Table: 'LinkTypes' → 'linktypes'
-2026-01-13 23:30:54 [INFO]     linktypes: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     linktypes: column 'Type' → 'type'
-2026-01-13 23:30:54 [INFO]   Table: 'PostLinks' → 'postlinks'
-2026-01-13 23:30:54 [INFO]     postlinks: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     postlinks: column 'CreationDate' → 'creationdate'
-2026-01-13 23:30:54 [INFO]     postlinks: column 'PostId' → 'postid'
-2026-01-13 23:30:54 [INFO]     postlinks: column 'RelatedPostId' → 'relatedpostid'
-2026-01-13 23:30:54 [INFO]     postlinks: column 'LinkTypeId' → 'linktypeid'
-2026-01-13 23:30:54 [INFO]   Table: 'Posts' → 'posts'
-2026-01-13 23:30:54 [INFO]     posts: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     posts: column 'AcceptedAnswerId' → 'acceptedanswerid'
-2026-01-13 23:30:54 [INFO]     posts: column 'AnswerCount' → 'answercount'
-2026-01-13 23:30:54 [INFO]     posts: column 'Body' → 'body'
-2026-01-13 23:30:54 [INFO]     posts: column 'ClosedDate' → 'closeddate'
-2026-01-13 23:30:54 [INFO]     posts: column 'CommentCount' → 'commentcount'
-2026-01-13 23:30:54 [INFO]     posts: column 'CommunityOwnedDate' → 'communityowneddate'
-2026-01-13 23:30:54 [INFO]     posts: column 'CreationDate' → 'creationdate'
-2026-01-13 23:30:54 [INFO]     posts: column 'FavoriteCount' → 'favoritecount'
-2026-01-13 23:30:54 [INFO]     posts: column 'LastActivityDate' → 'lastactivitydate'
-2026-01-13 23:30:54 [INFO]     posts: column 'LastEditDate' → 'lasteditdate'
-2026-01-13 23:30:54 [INFO]     posts: column 'LastEditorDisplayName' → 'lasteditordisplayname'
-2026-01-13 23:30:54 [INFO]     posts: column 'LastEditorUserId' → 'lasteditoruserid'
-2026-01-13 23:30:54 [INFO]     posts: column 'OwnerUserId' → 'owneruserid'
-2026-01-13 23:30:54 [INFO]     posts: column 'ParentId' → 'parentid'
-2026-01-13 23:30:54 [INFO]     posts: column 'PostTypeId' → 'posttypeid'
-2026-01-13 23:30:54 [INFO]     posts: column 'Score' → 'score'
-2026-01-13 23:30:54 [INFO]     posts: column 'Tags' → 'tags'
-2026-01-13 23:30:54 [INFO]     posts: column 'Title' → 'title'
-2026-01-13 23:30:54 [INFO]     posts: column 'ViewCount' → 'viewcount'
-2026-01-13 23:30:54 [INFO]   Table: 'PostTypes' → 'posttypes'
-2026-01-13 23:30:54 [INFO]     posttypes: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     posttypes: column 'Type' → 'type'
-2026-01-13 23:30:54 [INFO]   Table: 'Users' → 'users'
-2026-01-13 23:30:54 [INFO]     users: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     users: column 'AboutMe' → 'aboutme'
-2026-01-13 23:30:54 [INFO]     users: column 'Age' → 'age'
-2026-01-13 23:30:54 [INFO]     users: column 'CreationDate' → 'creationdate'
-2026-01-13 23:30:54 [INFO]     users: column 'DisplayName' → 'displayname'
-2026-01-13 23:30:54 [INFO]     users: column 'DownVotes' → 'downvotes'
-2026-01-13 23:30:54 [INFO]     users: column 'EmailHash' → 'emailhash'
-2026-01-13 23:30:54 [INFO]     users: column 'LastAccessDate' → 'lastaccessdate'
-2026-01-13 23:30:54 [INFO]     users: column 'Location' → 'location'
-2026-01-13 23:30:54 [INFO]     users: column 'Reputation' → 'reputation'
-2026-01-13 23:30:54 [INFO]     users: column 'UpVotes' → 'upvotes'
-2026-01-13 23:30:54 [INFO]     users: column 'Views' → 'views'
-2026-01-13 23:30:54 [INFO]     users: column 'WebsiteUrl' → 'websiteurl'
-2026-01-13 23:30:54 [INFO]     users: column 'AccountId' → 'accountid'
-2026-01-13 23:30:54 [INFO]   Table: 'Votes' → 'votes'
-2026-01-13 23:30:54 [INFO]     votes: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     votes: column 'PostId' → 'postid'
-2026-01-13 23:30:54 [INFO]     votes: column 'UserId' → 'userid'
-2026-01-13 23:30:54 [INFO]     votes: column 'BountyAmount' → 'bountyamount'
-2026-01-13 23:30:54 [INFO]     votes: column 'VoteTypeId' → 'votetypeid'
-2026-01-13 23:30:54 [INFO]     votes: column 'CreationDate' → 'creationdate'
-2026-01-13 23:30:54 [INFO]   Table: 'VoteTypes' → 'votetypes'
-2026-01-13 23:30:54 [INFO]     votetypes: column 'Id' → 'id'
-2026-01-13 23:30:54 [INFO]     votetypes: column 'Name' → 'name'
-2026-01-13 23:30:54 [INFO] 
-2026-01-13 23:30:54 [INFO] Summary: 9 table(s) renamed, 61 column(s) renamed across 9 table(s)

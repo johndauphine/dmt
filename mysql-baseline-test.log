@@ -1,0 +1,90 @@
+WARNING: Config file 'config-mysql-baseline.yaml' has insecure permissions (0644)
+         Other users may be able to read your database credentials.
+         Run: chmod 600 config-mysql-baseline.yaml
+
+2026-01-16 04:45:56 [INFO] Connected to MySQL source: localhost:3306/perf_test
+2026-01-16 04:45:56 [INFO] Connected to PostgreSQL target: localhost:5433/perf_test_baseline
+2026-01-16 04:45:56 [INFO] AI Type Mapping enabled (provider: claude, model: claude-haiku-4-5-20251001)
+2026-01-16 04:45:56 [INFO] Starting migration run: fa1e644c
+2026-01-16 04:45:56 [INFO] Migration: mysql -> postgres
+
+2026-01-16 04:45:56 [INFO] === Configuration ===
+
+System Resources:
+  Available Memory: 36864 MB
+  Effective Max Memory: 25804 MB (hard cap 70%)
+  CPU Cores: 14
+
+Source (mysql):
+  Host: localhost
+  Port: 3306
+  Database: perf_test
+  Schema: 
+  User: root
+  Password: [REDACTED]
+  SSLMode: preferred
+  Auth: password
+
+Target (postgres):
+  Host: localhost
+  Port: 5433
+  Database: perf_test_baseline
+  Schema: public
+  User: postgres
+  Password: [REDACTED]
+  SSLMode: disable
+  Auth: password
+
+Migration Settings:
+  Workers: 4
+  ChunkSize: 50000
+  ReadAheadBuffers: 8
+  MaxPartitions: 4
+  MaxMssqlConnections: 20 (auto: 4 workers * 4 readers + 4)
+  MaxPgConnections: 20 (auto: 4 workers * 4 writers + 4)
+  WriteAheadWriters: 4
+  ParallelReaders: 4
+  LargeTableThreshold: 5000000 (auto: default 5M)
+  MSSQLRowsPerBatch: 50000 (auto: matches chunk_size)
+  TargetMode: drop_recreate
+  StrictConsistency: false
+  CreateIndexes: false
+  CreateForeignKeys: false
+  CreateCheckConstraints: false
+  SampleValidation: false
+  SampleSize: 100 (auto: default 100)
+  DataDir: /Users/john/.dmt
+
+Restartability:
+  CheckpointFrequency: 10 chunks
+  MaxRetries: 3
+  HistoryRetentionDays: 30
+
+Table Filters:
+  IncludeTables: [all]
+  ExcludeTables: [none]
+
+Memory Estimate:
+  Buffer Memory: ~762.9 MB (4 workers * 8 buffers * 50000 rows * 500 bytes/row)
+  Note: Actual memory depends on row sizes. Tables with large text columns use more.
+
+Notifications:
+  Slack: disabled
+
+AI Features:
+  Disabled (no API key)
+2026-01-16 04:45:56 [INFO] Runtime memory limit set to 25804 MB (Go GC soft limit)
+2026-01-16 04:45:56 [INFO] Extracting schema...
+2026-01-16 04:45:56 [INFO] Found 2 tables
+2026-01-16 04:45:56 [INFO] Creating target tables (drop and recreate)...
+2026-01-16 04:45:58 [INFO] Transferring data...
+Transferring   0% |                            | (0/1000010, 0 rows/hr) [0s:0s]                                                                               Transferring source_data   0% |                | (0/1000010, 0 rows/hr) [0s:0s]                                                                               Transferring (2 tables)   0% |                 | (0/1000010, 0 rows/hr) [0s:0s]                                                                               Transferring source_data   5% |        | (50010/1000010, 204737 rows/s) [0s:4s]                                                                               Transferring source_data  25% |█      | (250010/1000010, 651008 rows/s) [0s:1s]                                                                               Transferring source_data  40% |██     | (400010/1000010, 785661 rows/s) [0s:0s]                                                                               Transferring source_data  55% |███    | (550010/1000010, 832146 rows/s) [0s:0s]                                                                               Transferring source_data  70% |████   | (700010/1000010, 832146 rows/s) [0s:0s]                                                                               Transferring source_data  80% |█████  | (800010/1000010, 832146 rows/s) [0s:0s]                                                                               Transferring source_data  95% |██████ | (950010/1000010, 832146 rows/s) [0s:0s]                                                                               Transferring source_data 100% |█████| (1000010/1000010, 1051007 rows/s)
+2026-01-16 04:46:06 [INFO] Transfer complete: 10257210 rows in 11s (975966 rows/sec)
+2026-01-16 04:46:06 [INFO] Finalizing...
+2026-01-16 04:46:06 [INFO] Validating...
+
+2026-01-16 04:46:06 [INFO] Validation Results:
+2026-01-16 04:46:06 [INFO] -------------------
+2026-01-16 04:46:07 [INFO] seed                           OK 10 rows
+2026-01-16 04:46:07 [INFO] source_data                    OK 10257200 rows
+2026-01-16 04:46:07 [INFO] Migration complete: 2 tables, 1000010 rows in 11s (87578 rows/sec)
