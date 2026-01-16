@@ -1901,11 +1901,21 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 				return
 			}
 
-			// Create orchestrator with both source and target connections for full tuning analysis
+			// Try to create orchestrator with both source and target for complete tuning analysis
 			orch, err := orchestrator.New(cfg)
 			if err != nil {
-				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
-				return
+				// Full connection failed (likely target unavailable) - try source-only
+				p.Send(OutputMsg(fmt.Sprintf("⚠️  Target database unavailable: %v\n", err)))
+				p.Send(OutputMsg("Analyzing source database only...\n\n"))
+				
+				opts := orchestrator.Options{
+					SourceOnly: true,
+				}
+				orch, err = orchestrator.NewWithOptions(cfg, opts)
+				if err != nil {
+					p.Send(OutputMsg(fmt.Sprintf("❌ Error: Cannot connect to source database: %v\n", err)))
+					return
+				}
 			}
 			defer orch.Close()
 
