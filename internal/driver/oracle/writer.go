@@ -211,7 +211,14 @@ func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	_, err := w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s PURGE",
 		w.dialect.QualifyTable(schema, table)))
-	return err
+	if err != nil {
+		// ORA-00942: table or view does not exist - ignore this error
+		if strings.Contains(err.Error(), "ORA-00942") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // TruncateTable truncates a table.
@@ -512,30 +519,35 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 		return nil
 	}
 
-	// Oracle INSERT ALL syntax
-	var sb strings.Builder
-	sb.WriteString("INSERT ALL\n")
+	// Build placeholders for single-row INSERT
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = fmt.Sprintf(":%d", i+1)
+	}
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		tableName, colList, strings.Join(placeholders, ", "))
 
-	paramIdx := 1
-	args := make([]any, 0, len(rows)*len(columns))
+	// Use prepared statement with transaction for better performance
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
 
 	for _, row := range rows {
-		placeholders := make([]string, len(columns))
-		for i := range columns {
-			placeholders[i] = fmt.Sprintf(":%d", paramIdx)
-			paramIdx++
+		args := convertRowValues(row)
+		if _, err := stmt.ExecContext(ctx, args...); err != nil {
+			return fmt.Errorf("exec: %w", err)
 		}
-
-		sb.WriteString(fmt.Sprintf("    INTO %s (%s) VALUES (%s)\n",
-			tableName, colList, strings.Join(placeholders, ", ")))
-
-		args = append(args, convertRowValues(row)...)
 	}
 
-	sb.WriteString("SELECT 1 FROM DUAL")
-
-	_, err := w.db.ExecContext(ctx, sb.String(), args...)
-	return err
+	return tx.Commit()
 }
 
 // UpsertBatch performs upsert using MERGE statement.
