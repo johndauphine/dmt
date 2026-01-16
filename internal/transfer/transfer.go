@@ -319,6 +319,13 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 			schema, job.Table.Name, pkCol, pkCol,
 		)
 		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
+	case "oracle":
+		// Oracle target - use double-quote identifiers and :N positional parameters
+		query = fmt.Sprintf(
+			`DELETE FROM "%s"."%s" WHERE "%s" >= :1 AND "%s" <= :2`,
+			schema, job.Table.Name, pkCol, pkCol,
+		)
+		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
 	default:
 		// SQL Server target - use bracket identifiers and @p parameters
 		query = fmt.Sprintf(
@@ -360,6 +367,17 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 			args = []any{lastPK, maxPK}
 		} else {
 			deleteQuery = fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE `%s` > ?",
+				schema, tableName, pkCol)
+			args = []any{lastPK}
+		}
+	case "oracle":
+		// Oracle target - use double-quote identifiers and :N positional parameters
+		if maxPK != nil {
+			deleteQuery = fmt.Sprintf(`DELETE FROM "%s"."%s" WHERE "%s" > :1 AND "%s" <= :2`,
+				schema, tableName, pkCol, pkCol)
+			args = []any{lastPK, maxPK}
+		} else {
+			deleteQuery = fmt.Sprintf(`DELETE FROM "%s"."%s" WHERE "%s" > :1`,
 				schema, tableName, pkCol)
 			args = []any{lastPK}
 		}

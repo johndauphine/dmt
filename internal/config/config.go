@@ -189,6 +189,7 @@ type MigrationConfig struct {
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
 	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
 	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
+	OracleBatchSize        int      `yaml:"oracle_batch_size"`        // Oracle godror.Batch limit (default=5000)
 	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
 	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
 	// Restartability settings
@@ -561,6 +562,11 @@ func (c *Config) applyDefaults() {
 	// Default MSSQLRowsPerBatch to chunk_size if not specified
 	if c.Migration.MSSQLRowsPerBatch == 0 {
 		c.Migration.MSSQLRowsPerBatch = c.Migration.ChunkSize
+	}
+
+	// Default OracleBatchSize to 5000 (optimal for godror.Batch)
+	if c.Migration.OracleBatchSize == 0 {
+		c.Migration.OracleBatchSize = 5000
 	}
 
 	// Auto-tune UpsertMergeChunkSize for upsert mode

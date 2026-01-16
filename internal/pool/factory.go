@@ -10,6 +10,7 @@ import (
 	// Import driver packages to trigger init() registration
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
+	_ "github.com/johndauphine/dmt/internal/driver/oracle"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
@@ -41,10 +42,11 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 // Parameters:
 //   - cfg: Target database configuration
 //   - maxConns: Maximum number of connections in the pool
-//   - mssqlRowsPerBatch: Rows per batch for bulk operations (passed via WriterOptions)
+//   - mssqlRowsPerBatch: Rows per batch for MSSQL bulk operations
+//   - oracleBatchSize: Oracle godror.Batch limit
 //   - sourceType: Source database type for cross-engine type handling
 //   - typeMapper: AI type mapper for database type conversions (required)
-func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, sourceType string, typeMapper driver.TypeMapper) (TargetPool, error) {
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, oracleBatchSize int, sourceType string, typeMapper driver.TypeMapper) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
 	if dbType == "" {
@@ -60,9 +62,10 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int
 	// Create the writer using the driver's factory method
 	// This is truly pluggable - no switch statement needed
 	opts := driver.WriterOptions{
-		RowsPerBatch: mssqlRowsPerBatch,
-		SourceType:   sourceType,
-		TypeMapper:   typeMapper,
+		RowsPerBatch:    mssqlRowsPerBatch,
+		OracleBatchSize: oracleBatchSize,
+		SourceType:      sourceType,
+		TypeMapper:      typeMapper,
 	}
 	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
 }

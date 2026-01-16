@@ -71,6 +71,9 @@ type WriterOptions struct {
 	// RowsPerBatch is the number of rows per bulk insert batch.
 	RowsPerBatch int
 
+	// OracleBatchSize is the Oracle godror.Batch limit (default=5000).
+	OracleBatchSize int
+
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string
 
