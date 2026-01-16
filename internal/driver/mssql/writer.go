@@ -98,6 +98,11 @@ func (w *Writer) Ping(ctx context.Context) error {
 	return w.db.PingContext(ctx)
 }
 
+// DB returns the underlying database connection for tuning analysis.
+func (w *Writer) DB() *sql.DB {
+	return w.db
+}
+
 // MaxConns returns the configured maximum connections.
 func (w *Writer) MaxConns() int {
 	return w.maxConns

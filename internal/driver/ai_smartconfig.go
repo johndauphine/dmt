@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/shirou/gopsutil/v3/mem"
 )
@@ -41,6 +42,10 @@ type SmartConfigSuggestions struct {
 
 	// AISuggestions contains AI-recommended values (if AI was used)
 	AISuggestions *AutoTuneOutput
+
+	// Database tuning recommendations (NEW)
+	SourceTuning *dbtuning.DatabaseTuning
+	TargetTuning *dbtuning.DatabaseTuning
 }
 
 // AutoTuneInput contains system and database info for AI auto-tuning.
@@ -679,6 +684,15 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 		sb.WriteString("\n")
 	}
 
+	// Database tuning recommendations
+	if s.SourceTuning != nil {
+		sb.WriteString(s.formatDatabaseTuning(s.SourceTuning))
+	}
+
+	if s.TargetTuning != nil {
+		sb.WriteString(s.formatDatabaseTuning(s.TargetTuning))
+	}
+
 	// Warnings
 	if len(s.Warnings) > 0 {
 		sb.WriteString("# Warnings:\n")
@@ -688,4 +702,145 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	}
 
 	return sb.String()
+}
+
+// formatDatabaseTuning formats database tuning recommendations in a human-readable format.
+func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseTuning) string {
+	var sb strings.Builder
+
+	// Header with visual separator
+	sb.WriteString("\n")
+	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
+	sb.WriteString(fmt.Sprintf("# %s DATABASE TUNING (%s)\n", strings.ToUpper(tuning.Role), strings.ToUpper(tuning.DatabaseType)))
+	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
+	sb.WriteString(fmt.Sprintf("# Tuning Potential: %s\n", strings.ToUpper(tuning.TuningPotential)))
+	sb.WriteString(fmt.Sprintf("# Impact: %s\n", tuning.EstimatedImpact))
+	sb.WriteString("#" + strings.Repeat("-", 78) + "\n\n")
+
+	if len(tuning.Recommendations) == 0 {
+		sb.WriteString(fmt.Sprintf("# ✓ No tuning needed - %s database is already well-configured!\n\n", tuning.Role))
+		return sb.String()
+	}
+
+	// Group by priority
+	priority1 := []dbtuning.TuningRecommendation{}
+	priority2 := []dbtuning.TuningRecommendation{}
+	priority3 := []dbtuning.TuningRecommendation{}
+
+	for _, rec := range tuning.Recommendations {
+		switch rec.Priority {
+		case 1:
+			priority1 = append(priority1, rec)
+		case 2:
+			priority2 = append(priority2, rec)
+		case 3:
+			priority3 = append(priority3, rec)
+		}
+	}
+
+	// Format recommendations by priority
+	if len(priority1) > 0 {
+		sb.WriteString("# 🔴 CRITICAL (Priority 1) - High Impact Changes\n")
+		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
+		for i, rec := range priority1 {
+			sb.WriteString(s.formatRecommendation(i+1, rec))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(priority2) > 0 {
+		sb.WriteString("# 🟡 IMPORTANT (Priority 2) - Medium Impact Changes\n")
+		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
+		for i, rec := range priority2 {
+			sb.WriteString(s.formatRecommendation(i+1, rec))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(priority3) > 0 {
+		sb.WriteString("# 🟢 OPTIONAL (Priority 3) - Nice to Have\n")
+		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
+		for i, rec := range priority3 {
+			sb.WriteString(s.formatRecommendation(i+1, rec))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// formatRecommendation formats a single tuning recommendation in a human-readable format.
+func (s *SmartConfigSuggestions) formatRecommendation(num int, rec dbtuning.TuningRecommendation) string {
+	var sb strings.Builder
+
+	// Parameter name and number
+	sb.WriteString(fmt.Sprintf("#\n# %d. %s\n", num, rec.Parameter))
+
+	// Current vs Recommended (side by side for easy comparison)
+	sb.WriteString(fmt.Sprintf("#    Current:     %v\n", rec.CurrentValue))
+	sb.WriteString(fmt.Sprintf("#    Recommended: %v\n", rec.RecommendedValue))
+	sb.WriteString(fmt.Sprintf("#    Impact:      %s\n", strings.ToUpper(rec.Impact)))
+
+	// Wrap reason text to 75 characters for readability
+	sb.WriteString("#\n")
+	sb.WriteString("#    Why: " + s.wrapText(rec.Reason, 75, "#         ") + "\n")
+
+	// Show how to apply the change
+	if rec.CanApplyRuntime && rec.SQLCommand != "" {
+		sb.WriteString("#\n")
+		sb.WriteString("#    ✓ Can apply at runtime (no restart needed):\n")
+		// Wrap long SQL commands
+		sqlLines := strings.Split(rec.SQLCommand, ";")
+		for _, line := range sqlLines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				sb.WriteString("#      " + line + ";\n")
+			}
+		}
+	} else if rec.RequiresRestart {
+		sb.WriteString("#\n")
+		sb.WriteString("#    ⚠ Requires database restart\n")
+		if rec.ConfigFile != "" {
+			sb.WriteString("#    Add to config file:\n")
+			lines := strings.Split(rec.ConfigFile, "\n")
+			for _, line := range lines {
+				if line != "" {
+					sb.WriteString("#      " + line + "\n")
+				}
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+// wrapText wraps text to maxWidth characters with the given prefix for continuation lines
+func (s *SmartConfigSuggestions) wrapText(text string, maxWidth int, contPrefix string) string {
+	if len(text) <= maxWidth {
+		return text
+	}
+
+	var result strings.Builder
+	words := strings.Fields(text)
+	lineLen := 0
+
+	for i, word := range words {
+		wordLen := len(word)
+
+		if i == 0 {
+			// First word always goes on first line
+			result.WriteString(word)
+			lineLen = wordLen
+		} else if lineLen+1+wordLen > maxWidth {
+			// Start new line
+			result.WriteString("\n" + contPrefix + word)
+			lineLen = len(contPrefix) + wordLen
+		} else {
+			// Add to current line with space
+			result.WriteString(" " + word)
+			lineLen += 1 + wordLen
+		}
+	}
+
+	return result.String()
 }

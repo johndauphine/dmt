@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/johndauphine/dmt/internal/stats"
 )
@@ -12,6 +13,7 @@ type Writer interface {
 	// Connection management
 	Close()
 	Ping(ctx context.Context) error
+	DB() *sql.DB // Access to underlying database connection for tuning analysis
 
 	// Schema operations
 	CreateSchema(ctx context.Context, schema string) error

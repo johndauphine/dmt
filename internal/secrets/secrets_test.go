@@ -148,6 +148,47 @@ func TestGetEffectiveModel(t *testing.T) {
 	}
 }
 
+func TestGetEffectiveContextWindow(t *testing.T) {
+	tests := []struct {
+		name           string
+		contextWindow  int
+		expectedWindow int
+	}{
+		{
+			name:           "default context window",
+			contextWindow:  0,
+			expectedWindow: 8192, // conservative default
+		},
+		{
+			name:           "custom 4K context window",
+			contextWindow:  4096,
+			expectedWindow: 4096,
+		},
+		{
+			name:           "custom 32K context window",
+			contextWindow:  32768,
+			expectedWindow: 32768,
+		},
+		{
+			name:           "custom 128K context window",
+			contextWindow:  131072,
+			expectedWindow: 131072,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &Provider{
+				ContextWindow: tt.contextWindow,
+			}
+			got := provider.GetEffectiveContextWindow()
+			if got != tt.expectedWindow {
+				t.Errorf("GetEffectiveContextWindow() = %d, want %d", got, tt.expectedWindow)
+			}
+		})
+	}
+}
+
 func TestIsLocalProvider(t *testing.T) {
 	tests := []struct {
 		name     string

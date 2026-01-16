@@ -1901,13 +1901,12 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 				return
 			}
 
-			// Create source-only orchestrator (no target connection needed)
-			opts := orchestrator.Options{
-				SourceOnly: true,
-			}
-			orch, err := orchestrator.NewWithOptions(cfg, opts)
+			// Create orchestrator with both source and target for complete tuning analysis
+			// Both databases must be available for analyze to work
+			orch, err := orchestrator.New(cfg)
 			if err != nil {
-				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				p.Send(OutputMsg(fmt.Sprintf("❌ Error: Both source and target databases must be available for tuning analysis\n")))
+				p.Send(OutputMsg(fmt.Sprintf("   %v\n", err)))
 				return
 			}
 			defer orch.Close()

@@ -38,9 +38,10 @@ type AIConfig struct {
 
 // Provider represents an AI provider configuration
 type Provider struct {
-	APIKey  string `yaml:"api_key,omitempty"`  // Required for cloud providers
-	BaseURL string `yaml:"base_url,omitempty"` // Required for local providers, optional for cloud
-	Model   string `yaml:"model,omitempty"`    // Optional, uses smart defaults
+	APIKey        string `yaml:"api_key,omitempty"`        // Required for cloud providers
+	BaseURL       string `yaml:"base_url,omitempty"`       // Required for local providers, optional for cloud
+	Model         string `yaml:"model,omitempty"`          // Optional, uses smart defaults
+	ContextWindow int    `yaml:"context_window,omitempty"` // Optional, context window size in tokens (for Ollama/local providers)
 }
 
 // EncryptionConfig holds encryption-related secrets
@@ -270,6 +271,21 @@ func (p *Provider) GetEffectiveModel(providerName string) string {
 	return ""
 }
 
+// GetEffectiveContextWindow returns the context window size for a provider.
+// Returns the configured value if set, otherwise returns a conservative default of 8192 tokens.
+// Users should configure this based on their specific model's capabilities:
+// - llama3:8b, llama3.2: 8192 tokens
+// - llama3:70b, llama3.1: 131072 tokens (128K)
+// - qwen2.5, deepseek: 32768 tokens (32K)
+// - mistral, mixtral: 8192-32768 tokens (varies by version)
+func (p *Provider) GetEffectiveContextWindow() int {
+	if p.ContextWindow > 0 {
+		return p.ContextWindow
+	}
+	// Conservative default that works with most models
+	return 8192
+}
+
 // IsLocalProvider returns true if the provider is a local provider (no API key needed)
 func IsLocalProvider(name string) bool {
 	if known, ok := KnownProviders[name]; ok {
@@ -329,10 +345,17 @@ ai:
     ollama:
       base_url: "http://localhost:11434"
       model: "llama3"
+      # context_window: 8192  # optional, defaults to 8192 (conservative)
+      # Common values:
+      # - llama3:8b, llama3.2: 8192
+      # - llama3:70b, llama3.1: 131072 (128K)
+      # - qwen2.5, deepseek: 32768 (32K)
+      # - mistral, mixtral: 8192-32768 (varies)
 
     lmstudio:
       base_url: "http://localhost:1234/v1"
       model: "local-model"
+      # context_window: 8192  # optional, configure based on your model
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32

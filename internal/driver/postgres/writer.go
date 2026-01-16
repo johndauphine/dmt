@@ -3,12 +3,14 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"strings"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -48,6 +50,7 @@ type Writer struct {
 	sourceType string
 	dialect    *Dialect
 	typeMapper driver.TypeMapper
+	cachedDB   *sql.DB // Cached database/sql wrapper for tuning analysis
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -102,12 +105,25 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 // Close closes all connections.
 func (w *Writer) Close() {
+	if w.cachedDB != nil {
+		w.cachedDB.Close()
+	}
 	w.pool.Close()
 }
 
 // Ping tests the connection.
 func (w *Writer) Ping(ctx context.Context) error {
 	return w.pool.Ping(ctx)
+}
+
+// DB returns a database/sql connection for tuning analysis.
+// The connection is cached and reused across calls to avoid resource leaks.
+func (w *Writer) DB() *sql.DB {
+	if w.cachedDB == nil {
+		// Create stdlib connector from pool config (only once)
+		w.cachedDB = stdlib.OpenDBFromPool(w.pool)
+	}
+	return w.cachedDB
 }
 
 // MaxConns returns the configured maximum connections.

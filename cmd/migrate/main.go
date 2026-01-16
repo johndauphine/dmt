@@ -958,11 +958,9 @@ func analyzeConfig(c *cli.Context) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Create source-only orchestrator (no target connection needed)
-	opts := orchestrator.Options{
-		SourceOnly: true,
-	}
-	orch, err := orchestrator.NewWithOptions(cfg, opts)
+	// Create orchestrator with both source and target for complete tuning analysis
+	// Both databases must be available for analyze to work
+	orch, err := orchestrator.New(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
