@@ -50,10 +50,8 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	// Detect Oracle version
 	var version string
 	if err := db.QueryRow("SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1").Scan(&version); err != nil {
-		// May not have access to V$VERSION, try alternative
-		if err2 := db.QueryRow("SELECT * FROM V$VERSION WHERE ROWNUM = 1").Scan(&version); err2 != nil {
-			version = "Oracle (version unknown)"
-		}
+		// May not have access to V$VERSION (requires SELECT privilege)
+		version = "Oracle (version unknown)"
 	}
 
 	logging.Info("Connected to Oracle source: %s:%d/%s (%s)", cfg.Host, cfg.Port, cfg.Database, version)

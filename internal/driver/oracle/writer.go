@@ -350,14 +350,43 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 		return nil
 	}
 
-	// Reset sequence using ALTER SEQUENCE (Oracle 12.2+)
-	_, err = w.db.ExecContext(ctx,
-		fmt.Sprintf("ALTER SEQUENCE %s.%s RESTART START WITH %d",
-			w.dialect.QuoteIdentifier(schemaName),
-			w.dialect.QuoteIdentifier(seqName.String),
-			maxVal.Int64+1))
+	// Reset sequence using ALTER SEQUENCE RESTART (Oracle 12.2+)
+	// For Oracle 12.1, RESTART is not supported - we use the INCREMENT BY trick
+	qualifiedSeq := fmt.Sprintf("%s.%s",
+		w.dialect.QuoteIdentifier(schemaName),
+		w.dialect.QuoteIdentifier(seqName.String))
 
-	return err
+	nextVal := maxVal.Int64 + 1
+
+	_, err = w.db.ExecContext(ctx,
+		fmt.Sprintf("ALTER SEQUENCE %s RESTART START WITH %d", qualifiedSeq, nextVal))
+
+	if err != nil {
+		// Oracle 12.1 doesn't support RESTART - use INCREMENT BY workaround
+		// Get current sequence value
+		var currVal int64
+		if err2 := w.db.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT %s.CURRVAL FROM DUAL", qualifiedSeq)).Scan(&currVal); err2 != nil {
+			// CURRVAL not available (sequence not used yet), try NEXTVAL
+			if err3 := w.db.QueryRowContext(ctx,
+				fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)).Scan(&currVal); err3 != nil {
+				logging.Debug("Cannot reset identity sequence %s: %v", seqName.String, err)
+				return nil // Non-fatal, sequence will just continue from where it was
+			}
+		}
+
+		// Calculate increment needed to jump to target value
+		increment := nextVal - currVal - 1
+		if increment != 0 {
+			// Temporarily change INCREMENT BY, get NEXTVAL, then restore
+			_, _ = w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY %d", qualifiedSeq, increment))
+			_, _ = w.db.ExecContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq))
+			_, _ = w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq))
+		}
+		logging.Debug("Reset identity sequence %s to %d using INCREMENT BY workaround", seqName.String, nextVal)
+	}
+
+	return nil
 }
 
 // CreateIndex creates an index on the target table.
