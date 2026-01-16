@@ -529,10 +529,10 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 	}
 	defer stmt.Close()
 
-	// godror.Batch provides optimal throughput with 1000 row batches
+	// godror.Batch with 5000 row limit provides optimal throughput
 	batch := &godror.Batch{
 		Stmt:  stmt,
-		Limit: 1000,
+		Limit: 5000,
 	}
 
 	for _, row := range rows {
