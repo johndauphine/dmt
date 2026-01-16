@@ -106,7 +106,7 @@ Output format:
 ["SQL query 1", "SQL query 2", ...]
 
 Example:
-["SELECT name, setting FROM pg_settings WHERE category = 'Resource Usage'", "SELECT * FROM pg_stat_database"]`, role, dbType, role)
+["SELECT name, setting FROM pg_settings WHERE category = 'Resource Usage'", "SELECT * FROM pg_stat_database"]`, role, dbType, role, role)
 
 	logging.Debug("Sending AI prompt for SQL generation (%d bytes)", len(prompt))
 	response, err := a.aiMapper.Query(ctx, prompt)
@@ -187,11 +187,11 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 			config[queryKey+"_error"] = err.Error()
 			continue
 		}
+		defer rows.Close() // Ensure resources are always released
 
 		// Get column names
 		columns, err := rows.Columns()
 		if err != nil {
-			rows.Close()
 			continue
 		}
 
@@ -233,7 +233,6 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 			}
 			results = append(results, row)
 		}
-		rows.Close()
 
 		// Store results with metadata about truncation
 		queryResult := map[string]interface{}{
@@ -293,8 +292,9 @@ Large result sets are sampled; focus on critical parameters only.
 Task: Analyze this configuration for a %s database in a migration tool (dmt).
 
 Migration Workload Characteristics:
-- %s database performs sequential full table scans
-- Target database performs high-volume bulk inserts
+- Source databases perform sequential full table scans for data extraction
+- Target databases perform high-volume bulk inserts for data loading
+- This %s database role: optimize for its specific workload characteristics
 - No user queries during migration
 - Can tolerate 1-second data loss on crash
 - Optimize for throughput over ACID guarantees
@@ -325,7 +325,7 @@ IMPORTANT:
 - Keep "estimated_impact" brief (under 50 words)
 - Focus on: buffer pools, write optimization, I/O capacity, connections, checkpoints
 
-Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role)
+Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role, role)
 
 	logging.Debug("Sending AI prompt for recommendations (%d bytes)", len(prompt))
 	response, err := a.aiMapper.Query(ctx, prompt)
