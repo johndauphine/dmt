@@ -104,13 +104,13 @@ Focus on settings relevant for %s database in migration workloads:
 Output format (JSON array of strings):
 ["SQL query 1", "SQL query 2", ...]`, role, dbType, role)
 
-	logging.Debug("Sending AI prompt (SQL generation):\n%s", prompt)
+	logging.Debug("Sending AI prompt for SQL generation (%d bytes)", len(prompt))
 	response, err := a.aiMapper.Query(ctx, prompt)
 	if err != nil {
 		logging.Debug("AI query failed: %v", err)
 		return nil, fmt.Errorf("AI query failed: %w", err)
 	}
-	logging.Debug("AI response (SQL generation):\n%s", response)
+	logging.Debug("AI response received for SQL generation (%d bytes)", len(response))
 
 	// Strip markdown code fences if present
 	cleanResponse := response
@@ -302,13 +302,13 @@ Focus on:
 
 Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role)
 
-	logging.Debug("Sending AI prompt (recommendations):\n%s", prompt)
+	logging.Debug("Sending AI prompt for recommendations (%d bytes)", len(prompt))
 	response, err := a.aiMapper.Query(ctx, prompt)
 	if err != nil {
 		logging.Debug("AI query failed: %v", err)
 		return nil, "", "", fmt.Errorf("AI query failed: %w", err)
 	}
-	logging.Debug("AI response (recommendations):\n%s", response)
+	logging.Debug("AI response received for recommendations (%d bytes)", len(response))
 
 	// Parse JSON response
 	type AIRecommendation struct {
