@@ -367,7 +367,7 @@ IMPORTANT:
 - Keep "estimated_impact" brief (under 50 words)
 - Focus on: buffer pools, write optimization, I/O capacity, connections, checkpoints
 
-Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role, role)
+Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role)
 
 	logging.Debug("Sending AI prompt for recommendations (%d bytes)", len(prompt))
 	response, err := a.aiMapper.Query(ctx, prompt)
