@@ -170,8 +170,43 @@ Example:
 	return queries, nil
 }
 
+// validateQuery checks if an AI-generated SQL query is safe to execute.
+// Only allows read-only operations and blocks dangerous keywords.
+func validateQuery(query string) error {
+	upperQuery := strings.ToUpper(strings.TrimSpace(query))
+
+	// Block dangerous operations
+	dangerousKeywords := []string{
+		"DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "TRUNCATE",
+		"CREATE", "GRANT", "REVOKE", "RENAME", "REPLACE",
+	}
+
+	for _, keyword := range dangerousKeywords {
+		if strings.Contains(upperQuery, keyword) {
+			return fmt.Errorf("query contains dangerous keyword '%s': %s", keyword, query)
+		}
+	}
+
+	// Require query to start with safe operation
+	allowedPrefixes := []string{"SELECT", "SHOW", "EXEC", "DESCRIBE", "EXPLAIN"}
+	hasAllowedPrefix := false
+	for _, prefix := range allowedPrefixes {
+		if strings.HasPrefix(upperQuery, prefix) {
+			hasAllowedPrefix = true
+			break
+		}
+	}
+
+	if !hasAllowedPrefix {
+		return fmt.Errorf("query must start with SELECT, SHOW, EXEC, DESCRIBE, or EXPLAIN: %s", query)
+	}
+
+	return nil
+}
+
 // executeConfigQueries executes SQL queries and collects configuration data.
 // Limits each query to maxRowsPerQuery to prevent token overflow.
+// Validates all queries before execution to prevent SQL injection.
 func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB, queries []string) (map[string]interface{}, error) {
 	const maxRowsPerQuery = 15 // Balance between config detail and prompt size
 	config := make(map[string]interface{})
@@ -179,11 +214,18 @@ func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB,
 	for i, query := range queries {
 		queryKey := fmt.Sprintf("query_%d", i+1)
 
+		// Validate query for security before execution
+		if err := validateQuery(query); err != nil {
+			logging.Warn("Skipping unsafe query %d: %v", i+1, err)
+			config[queryKey+"_error"] = fmt.Sprintf("validation failed: %v", err)
+			continue
+		}
+
 		logging.Debug("Executing query %d: %s", i+1, query)
 		rows, err := db.QueryContext(ctx, query)
 		if err != nil {
 			// Log error but continue with other queries
-			logging.Debug("Query %d failed: %v", i+1, err)
+			logging.Warn("Query %d failed: %v", i+1, err)
 			config[queryKey+"_error"] = err.Error()
 			continue
 		}

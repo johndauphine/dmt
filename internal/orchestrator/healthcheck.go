@@ -199,47 +199,80 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 		EstimatedMemMB:  suggestions.EstimatedMemMB,
 	}
 
-	// Analyze source database tuning using AI-driven approach
+	// Run source and target analysis concurrently for better performance
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	// Analyze source database tuning using AI-driven approach (concurrent)
 	if o.sourcePool != nil && o.sourcePool.DB() != nil {
-		logging.Info("Analyzing source database configuration...")
-		sourceTuning, err := dbtuning.Analyze(
-			ctx,
-			o.sourcePool.DB(),
-			o.sourcePool.DBType(),
-			"source",
-			stats,
-			aiMapper,
-		)
-		if err != nil {
-			logging.Warn("Failed to analyze source database tuning: %v", err)
-		} else {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Independent timeout for source analysis
+			sourceCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+
+			logging.Info("Analyzing source database configuration...")
+			sourceTuning, err := dbtuning.Analyze(
+				sourceCtx,
+				o.sourcePool.DB(),
+				o.sourcePool.DBType(),
+				"source",
+				stats,
+				aiMapper,
+			)
+			if err != nil {
+				logging.Warn("Failed to analyze source database tuning: %v", err)
+				return
+			}
+
+			mu.Lock()
 			suggestions.SourceTuning = sourceTuning
+			mu.Unlock()
+
 			if sourceTuning.TuningPotential != "unknown" {
 				logging.Info("Source tuning: %s potential (%s)", sourceTuning.TuningPotential, sourceTuning.EstimatedImpact)
 			}
-		}
+		}()
 	}
 
-	// Analyze target database tuning using AI-driven approach
+	// Analyze target database tuning using AI-driven approach (concurrent)
 	if o.targetPool != nil && o.targetPool.DB() != nil {
-		logging.Info("Analyzing target database configuration...")
-		targetTuning, err := dbtuning.Analyze(
-			ctx,
-			o.targetPool.DB(),
-			o.targetPool.DBType(),
-			"target",
-			stats,
-			aiMapper,
-		)
-		if err != nil {
-			logging.Warn("Failed to analyze target database tuning: %v", err)
-		} else {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Independent timeout for target analysis
+			targetCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+
+			logging.Info("Analyzing target database configuration...")
+			targetTuning, err := dbtuning.Analyze(
+				targetCtx,
+				o.targetPool.DB(),
+				o.targetPool.DBType(),
+				"target",
+				stats,
+				aiMapper,
+			)
+			if err != nil {
+				logging.Warn("Failed to analyze target database tuning: %v", err)
+				return
+			}
+
+			mu.Lock()
 			suggestions.TargetTuning = targetTuning
+			mu.Unlock()
+
 			if targetTuning.TuningPotential != "unknown" {
 				logging.Info("Target tuning: %s potential (%s)", targetTuning.TuningPotential, targetTuning.EstimatedImpact)
 			}
-		}
+		}()
 	}
+
+	// Wait for all analyses to complete before returning
+	wg.Wait()
 }
 
 // Calibrate runs calibration tests to find optimal migration configuration.
