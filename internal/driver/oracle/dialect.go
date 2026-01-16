@@ -64,6 +64,10 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		params = append(params, fmt.Sprintf("timezone=%s", tz))
 	}
 
+	// Performance tuning - larger prefetch for bulk operations
+	params = append(params, "prefetchCount=5000")
+	params = append(params, "fetchArraySize=5000")
+
 	// Build Easy Connect format
 	dsn := fmt.Sprintf("%s/%s@%s:%d/%s",
 		encodedUser, encodedPassword, host, port, serviceName)

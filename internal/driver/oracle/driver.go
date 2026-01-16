@@ -28,7 +28,7 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		Port:                  1521,
 		Schema:                "", // Oracle uses username as default schema
 		SSLMode:               "",
-		WriteAheadWriters:     2,
+		WriteAheadWriters:     4,  // More parallel writers for better throughput
 		ScaleWritersWithCores: true,
 	}
 }

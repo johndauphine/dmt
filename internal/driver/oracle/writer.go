@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/godror/godror"
+	"github.com/godror/godror"
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -37,13 +37,9 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		return nil, fmt.Errorf("opening connection: %w", err)
 	}
 
-	// Configure connection pool
-	db.SetMaxOpenConns(maxConns)
-	idleConns := maxConns / 4
-	if idleConns < 1 {
-		idleConns = 1
-	}
-	db.SetMaxIdleConns(idleConns)
+	// Configure connection pool - more connections for parallel writes
+	db.SetMaxOpenConns(maxConns * 2)
+	db.SetMaxIdleConns(maxConns)
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	if err := db.Ping(); err != nil {
@@ -493,10 +489,10 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
-	// Process in batches
+	// Process in batches - larger batches perform better with godror.Batch
 	batchSize := w.rowsPerBatch
 	if batchSize <= 0 {
-		batchSize = 500 // Smaller default for INSERT ALL
+		batchSize = 5000 // Optimal batch size for Oracle bulk inserts
 	}
 
 	for start := 0; start < len(opts.Rows); start += batchSize {
@@ -519,7 +515,8 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 		return nil
 	}
 
-	// Build placeholders for single-row INSERT
+	// Use godror.Batch for efficient bulk inserts
+	// This uses Oracle's native array binding for much better performance
 	placeholders := make([]string, len(columns))
 	for i := range columns {
 		placeholders[i] = fmt.Sprintf(":%d", i+1)
@@ -527,7 +524,42 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		tableName, colList, strings.Join(placeholders, ", "))
 
-	// Use prepared statement with transaction for better performance
+	stmt, err := w.db.PrepareContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	// Use godror.Batch for efficient array binding
+	// 1000 rows provides optimal balance between throughput and memory
+	batch := &godror.Batch{
+		Stmt:  stmt,
+		Limit: 1000,
+	}
+
+	for _, row := range rows {
+		args := convertRowValues(row)
+		if err := batch.Add(ctx, args...); err != nil {
+			return fmt.Errorf("batch add: %w", err)
+		}
+	}
+
+	// Final flush for remaining rows
+	if err := batch.Flush(ctx); err != nil {
+		return fmt.Errorf("batch flush: %w", err)
+	}
+
+	return nil
+}
+
+func (w *Writer) insertBatchRowByRow(ctx context.Context, tableName, colList string, columns []string, rows [][]any) error {
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = fmt.Sprintf(":%d", i+1)
+	}
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		tableName, colList, strings.Join(placeholders, ", "))
+
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
