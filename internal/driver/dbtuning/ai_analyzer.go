@@ -147,7 +147,7 @@ Output format (JSON array of strings):
 // executeConfigQueries executes SQL queries and collects configuration data.
 // Limits each query to maxRowsPerQuery to prevent token overflow.
 func (a *AITuningAnalyzer) executeConfigQueries(ctx context.Context, db *sql.DB, queries []string) (map[string]interface{}, error) {
-	const maxRowsPerQuery = 25 // Balance between config detail and prompt size
+	const maxRowsPerQuery = 15 // Balance between config detail and prompt size
 	config := make(map[string]interface{})
 
 	for i, query := range queries {
@@ -258,11 +258,11 @@ Current Configuration:
 %s
 
 Note: Each query result includes metadata:
-- "rows": array of configuration data (limited to first 10 rows for token efficiency)
+- "rows": array of configuration data (limited to first 15 rows for token efficiency)
 - "row_count": number of rows returned
 - "truncated": true if more rows exist
 - "total_rows": total rows available (when truncated)
-Large result sets are heavily sampled; base recommendations on critical parameters only.
+Large result sets are sampled; focus on critical parameters only.
 
 Task: Analyze this configuration for a %s database in a migration tool (dmt).
 
@@ -273,7 +273,7 @@ Migration Workload Characteristics:
 - Can tolerate 1-second data loss on crash
 - Optimize for throughput over ACID guarantees
 
-Generate tuning recommendations in the following JSON format:
+Generate tuning recommendations in the following JSON format (LIMIT TO TOP 5 RECOMMENDATIONS):
 {
   "recommendations": [
     {
@@ -281,24 +281,23 @@ Generate tuning recommendations in the following JSON format:
       "current_value": "current value",
       "recommended_value": "recommended value",
       "impact": "high|medium|low",
-      "reason": "why this change helps migration performance",
+      "reason": "concise 1-2 sentence explanation",
       "priority": 1|2|3,
       "can_apply_runtime": true|false,
       "sql_command": "SET GLOBAL param = value;" or "",
       "requires_restart": true|false,
-      "config_file": "config file snippet" or ""
+      "config_file": "config snippet" or ""
     }
   ],
   "tuning_potential": "high|medium|low|none",
-  "estimated_impact": "description of expected performance improvement"
+  "estimated_impact": "brief description"
 }
 
-Focus on:
-1. Buffer pools (allocate 50-70%% RAM for dedicated servers)
-2. Write optimization (disable sync commits, increase buffer sizes)
-3. I/O capacity (optimize for SSDs)
-4. Connection limits (ensure sufficient for parallel workers)
-5. Checkpoint/WAL settings (reduce frequency during bulk loads)
+IMPORTANT:
+- Limit to TOP 5 most impactful recommendations only
+- Keep "reason" field to 1-2 sentences max
+- Keep "estimated_impact" brief (under 50 words)
+- Focus on: buffer pools, write optimization, I/O capacity, connections, checkpoints
 
 Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, stats.TotalRows, stats.AvgRowSizeBytes, stats.EstimatedMemMB, string(configJSON), role, role)
 
