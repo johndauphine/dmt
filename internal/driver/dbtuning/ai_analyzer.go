@@ -353,7 +353,9 @@ Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, s
 
 		err = json.Unmarshal([]byte(fixedJSON), &aiResp)
 		if err != nil {
-			return nil, "", "", fmt.Errorf("parsing AI response: %w\nOriginal: %s\nFixed: %s", err, jsonStr, fixedJSON)
+			// Log full JSON at debug level, but don't include it in user-facing error
+			logging.Debug("Failed to parse truncated JSON. Original length: %d, Fixed length: %d", len(jsonStr), len(fixedJSON))
+			return nil, "", "", fmt.Errorf("parsing AI response: %w (response may be truncated or malformed)", err)
 		}
 		logging.Debug("Successfully parsed truncated response with %d recommendations", len(aiResp.Recommendations))
 	}
