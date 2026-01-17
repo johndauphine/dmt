@@ -13,9 +13,80 @@ type Dialect struct{}
 
 func (d *Dialect) DBType() string { return "oracle" }
 
+// QuoteIdentifier returns the Oracle-safe identifier.
+// Oracle folds unquoted identifiers to uppercase, so this function:
+// 1. Always converts to uppercase for consistency
+// 2. Quotes if the name contains special characters, starts with a digit, or is a reserved word
+//
+// Note: Oracle quoted identifiers CAN preserve case, but we intentionally use uppercase
+// for consistency between quoted and unquoted identifiers. This ensures that:
+// - "FOO" and FOO refer to the same object
+// - AI-generated DDL works correctly (AI typically generates uppercase identifiers)
+// - Migrations remain predictable regardless of source case
 func (d *Dialect) QuoteIdentifier(name string) string {
-	// Oracle uses double quotes, escape embedded quotes by doubling
-	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	upper := strings.ToUpper(name)
+
+	// Check if name needs quoting (contains non-alphanumeric chars other than underscore)
+	needsQuote := false
+	for i, r := range name {
+		if i == 0 && r >= '0' && r <= '9' {
+			needsQuote = true
+			break
+		}
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			needsQuote = true
+			break
+		}
+	}
+
+	// Check if it's a reserved word that must be quoted
+	if !needsQuote && isOracleReservedWord(upper) {
+		needsQuote = true
+	}
+
+	if needsQuote {
+		// Quote with uppercase (Oracle convention for quoted identifiers)
+		return `"` + strings.ReplaceAll(upper, `"`, `""`) + `"`
+	}
+
+	// Return uppercase unquoted identifier
+	return upper
+}
+
+// isOracleReservedWord checks if the identifier is an Oracle reserved word.
+// These words cannot be used as unquoted identifiers.
+func isOracleReservedWord(name string) bool {
+	// Oracle reserved words that commonly appear as column names
+	reservedWords := map[string]bool{
+		// SQL reserved words
+		"ACCESS": true, "ADD": true, "ALL": true, "ALTER": true, "AND": true,
+		"ANY": true, "AS": true, "ASC": true, "AUDIT": true, "BETWEEN": true,
+		"BY": true, "CHAR": true, "CHECK": true, "CLUSTER": true, "COLUMN": true,
+		"COMMENT": true, "COMPRESS": true, "CONNECT": true, "CREATE": true, "CURRENT": true,
+		"DATE": true, "DECIMAL": true, "DEFAULT": true, "DELETE": true, "DESC": true,
+		"DISTINCT": true, "DROP": true, "ELSE": true, "EXCLUSIVE": true, "EXISTS": true,
+		"FILE": true, "FLOAT": true, "FOR": true, "FROM": true, "GRANT": true,
+		"GROUP": true, "HAVING": true, "IDENTIFIED": true, "IMMEDIATE": true, "IN": true,
+		"INCREMENT": true, "INDEX": true, "INITIAL": true, "INSERT": true, "INTEGER": true,
+		"INTERSECT": true, "INTO": true, "IS": true, "LEVEL": true, "LIKE": true,
+		"LOCK": true, "LONG": true, "MAXEXTENTS": true, "MINUS": true, "MLSLABEL": true,
+		"MODE": true, "MODIFY": true, "NOAUDIT": true, "NOCOMPRESS": true, "NOT": true,
+		"NOWAIT": true, "NULL": true, "NUMBER": true, "OF": true, "OFFLINE": true,
+		"ON": true, "ONLINE": true, "OPTION": true, "OR": true, "ORDER": true,
+		"PCTFREE": true, "PRIOR": true, "PUBLIC": true, "RAW": true, "RENAME": true,
+		"RESOURCE": true, "REVOKE": true, "ROW": true, "ROWID": true, "ROWNUM": true,
+		"ROWS": true, "SELECT": true, "SESSION": true, "SET": true, "SHARE": true,
+		"SIZE": true, "SMALLINT": true, "START": true, "SUCCESSFUL": true, "SYNONYM": true,
+		"SYSDATE": true, "TABLE": true, "THEN": true, "TO": true, "TRIGGER": true,
+		"UID": true, "UNION": true, "UNIQUE": true, "UPDATE": true, "USER": true,
+		"VALIDATE": true, "VALUES": true, "VARCHAR": true, "VARCHAR2": true, "VIEW": true,
+		"WHENEVER": true, "WHERE": true, "WITH": true,
+		// Common problematic column names
+		"NAME": true, "TYPE": true, "VALUE": true, "KEY": true, "TIME": true,
+		"TIMESTAMP": true, "YEAR": true, "MONTH": true, "DAY": true, "HOUR": true,
+		"MINUTE": true, "SECOND": true, "ZONE": true, "DATA": true, "RESULT": true,
+	}
+	return reservedWords[name]
 }
 
 func (d *Dialect) QualifyTable(schema, table string) string {

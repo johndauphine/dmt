@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,8 @@ type Writer struct {
 	sourceType   string
 	dialect      *Dialect
 	typeMapper   driver.TypeMapper
+	tableMapper  driver.TableTypeMapper  // Table-level DDL generation
+	dbContext    *driver.DatabaseContext // Cached database context for AI
 }
 
 // NewWriter creates a new SQL Server writer.
@@ -67,16 +71,23 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		return nil, fmt.Errorf("TypeMapper is required")
 	}
 
+	// Require TableTypeMapper for table-level AI DDL generation
+	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
+	if !ok {
+		db.Close()
+		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
+	}
+
 	// Log AI mapper initialization
 	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
+		logging.Info("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
 		}
 	}
 
-	return &Writer{
+	w := &Writer{
 		db:           db,
 		config:       cfg,
 		maxConns:     maxConns,
@@ -85,7 +96,126 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		sourceType:   opts.SourceType,
 		dialect:      dialect,
 		typeMapper:   opts.TypeMapper,
-	}, nil
+		tableMapper:  tableMapper,
+	}
+
+	// Gather database context for AI
+	w.dbContext = w.gatherDatabaseContext()
+
+	return w, nil
+}
+
+// gatherDatabaseContext collects SQL Server database metadata for AI context.
+func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
+	ctx := &driver.DatabaseContext{
+		DatabaseName:             w.config.Database,
+		ServerName:               w.config.Host,
+		IdentifierCase:           "insensitive",
+		CaseSensitiveIdentifiers: false,
+		MaxIdentifierLength:      128,
+		VarcharSemantics:         "byte", // VARCHAR = bytes, NVARCHAR = chars
+		BytesPerChar:             2,      // NVARCHAR uses 2 bytes per char
+	}
+
+	// Query server version
+	var version string
+	if w.db.QueryRow("SELECT @@VERSION").Scan(&version) == nil {
+		ctx.Version = version
+		// Parse major version using regex
+		// @@VERSION returns something like "Microsoft SQL Server 2022 (RTM) - 16.0.1000.6"
+		// Try to match the product year first (2016, 2017, 2019, 2022, etc.)
+		yearRegex := regexp.MustCompile(`SQL Server (\d{4})`)
+		if matches := yearRegex.FindStringSubmatch(version); len(matches) > 1 {
+			if year, err := strconv.Atoi(matches[1]); err == nil {
+				// Map year to major version number
+				switch {
+				case year >= 2022:
+					ctx.MajorVersion = 16
+				case year >= 2019:
+					ctx.MajorVersion = 15
+				case year >= 2017:
+					ctx.MajorVersion = 14
+				case year >= 2016:
+					ctx.MajorVersion = 13
+				case year >= 2014:
+					ctx.MajorVersion = 12
+				default:
+					ctx.MajorVersion = 11
+				}
+			}
+		}
+		// Fallback: try to parse version number directly (e.g., "16.0.1000.6")
+		if ctx.MajorVersion == 0 {
+			verNumRegex := regexp.MustCompile(`- (\d+)\.`)
+			if matches := verNumRegex.FindStringSubmatch(version); len(matches) > 1 {
+				if majorVer, err := strconv.Atoi(matches[1]); err == nil {
+					ctx.MajorVersion = majorVer
+				}
+			}
+		}
+		if ctx.MajorVersion == 0 {
+			logging.Warn("Could not parse SQL Server version from '%s', version-specific features may not be detected", version)
+		}
+	}
+
+	// Query database collation
+	var collation sql.NullString
+	if w.db.QueryRow("SELECT DATABASEPROPERTYEX(DB_NAME(), 'Collation')").Scan(&collation) == nil && collation.Valid {
+		ctx.Collation = collation.String
+		// Parse collation for case sensitivity
+		upperCollation := strings.ToUpper(collation.String)
+		if strings.Contains(upperCollation, "_CS_") {
+			ctx.CaseSensitiveData = true
+		} else if strings.Contains(upperCollation, "_CI_") {
+			ctx.CaseSensitiveData = false
+		}
+		// Parse for accent sensitivity
+		if strings.Contains(upperCollation, "_AS") {
+			ctx.Notes = "Accent-sensitive collation"
+		}
+	}
+
+	// Query code page from collation
+	var codePage sql.NullInt64
+	if w.db.QueryRow(`
+		SELECT COLLATIONPROPERTY(DATABASEPROPERTYEX(DB_NAME(), 'Collation'), 'CodePage')
+	`).Scan(&codePage) == nil && codePage.Valid {
+		ctx.CodePage = int(codePage.Int64)
+		switch ctx.CodePage {
+		case 65001:
+			ctx.Encoding = "UTF-8"
+		case 1252:
+			ctx.Encoding = "Latin1 (Windows-1252)"
+		case 1200:
+			ctx.Encoding = "UTF-16LE"
+		default:
+			ctx.Encoding = fmt.Sprintf("CP%d", ctx.CodePage)
+		}
+	}
+
+	// Set charset based on typical SQL Server setup
+	ctx.Charset = "SQL_Latin1_General_CP1"
+	if ctx.CodePage == 65001 {
+		ctx.Charset = "UTF-8"
+	}
+	ctx.NationalCharset = "UTF-16"
+
+	// Max varchar lengths
+	ctx.MaxVarcharLength = 8000 // VARCHAR max, NVARCHAR max is 4000 chars
+
+	// Features based on compatibility level
+	ctx.Features = []string{"NVARCHAR", "VARCHAR_MAX", "DATETIME2", "JSON"}
+	if w.compatLevel >= 130 { // SQL Server 2016+
+		ctx.Features = append(ctx.Features, "JSON_FUNCTIONS", "TEMPORAL_TABLES")
+	}
+	if w.compatLevel >= 150 { // SQL Server 2019+
+		ctx.Features = append(ctx.Features, "UTF8_SUPPORT")
+	}
+
+	logging.Debug("MSSQL context: collation=%s, code_page=%d, compat_level=%d",
+		ctx.Collation, ctx.CodePage, w.compatLevel)
+
+	return ctx
 }
 
 // Close closes all connections.
@@ -144,83 +274,36 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
 }
 
-// CreateTableWithOptions creates a table with options.
+// CreateTableWithOptions creates a table with options using AI-generated DDL.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	ddl := w.generateDDL(t, targetSchema)
+	// Use table-level AI DDL generation with full database context
+	req := driver.TableDDLRequest{
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mssql",
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
+	}
 
-	_, err := w.db.ExecContext(ctx, ddl)
+	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
 	if err != nil {
-		return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+	}
+
+	logging.Debug("AI generated DDL for %s:\n%s", t.FullName(), resp.CreateTableDDL)
+
+	// Log column type mappings
+	for colName, colType := range resp.ColumnTypes {
+		logging.Debug("  Column %s -> %s", colName, colType)
+	}
+
+	_, err = w.db.ExecContext(ctx, resp.CreateTableDDL)
+	if err != nil {
+		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, resp.CreateTableDDL)
 	}
 
 	return nil
-}
-
-func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", w.dialect.QualifyTable(targetSchema, t.Name)))
-
-	// Check if using AI mapper for logging
-	_, isAIMapper := w.typeMapper.(*driver.AITypeMapper)
-	if isAIMapper {
-		logging.Debug("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
-	}
-
-	for i, col := range t.Columns {
-		if i > 0 {
-			sb.WriteString(",\n")
-		}
-
-		// Map type using configured mapper (static or AI)
-		typeInfo := driver.TypeInfo{
-			SourceDBType: w.sourceType,
-			TargetDBType: "mssql",
-			DataType:     col.DataType,
-			MaxLength:    col.MaxLength,
-			Precision:    col.Precision,
-			Scale:        col.Scale,
-			SampleValues: col.SampleValues,
-		}
-		mssqlType := w.typeMapper.MapType(typeInfo)
-
-		// Log AI type mappings
-		if isAIMapper {
-			logging.Debug("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
-				t.Name, col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, mssqlType)
-		}
-
-		sb.WriteString(fmt.Sprintf("    %s %s", w.dialect.QuoteIdentifier(col.Name), mssqlType))
-
-		if col.IsIdentity {
-			sb.WriteString(" IDENTITY(1,1)")
-		}
-
-		if !col.IsNullable {
-			sb.WriteString(" NOT NULL")
-		} else {
-			sb.WriteString(" NULL")
-		}
-	}
-
-	// Add PRIMARY KEY constraint
-	if len(t.PrimaryKey) > 0 {
-		pkCols := make([]string, len(t.PrimaryKey))
-		for i, col := range t.PrimaryKey {
-			pkCols[i] = w.dialect.QuoteIdentifier(col)
-		}
-		pkName := fmt.Sprintf("PK_%s", t.Name)
-		if len(pkName) > 128 {
-			pkName = pkName[:128]
-		}
-		sb.WriteString(fmt.Sprintf(",\n    CONSTRAINT %s PRIMARY KEY CLUSTERED (%s)",
-			w.dialect.QuoteIdentifier(pkName),
-			strings.Join(pkCols, ", ")))
-	}
-
-	sb.WriteString("\n)")
-
-	return sb.String()
 }
 
 // DropTable drops a table.

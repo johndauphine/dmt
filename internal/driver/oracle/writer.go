@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +26,9 @@ type Writer struct {
 	sourceType      string
 	dialect         *Dialect
 	typeMapper      driver.TypeMapper
+	tableMapper     driver.TableTypeMapper // Table-level DDL generation
 	oracleVersion   string
+	dbContext       *driver.DatabaseContext // Cached database context for AI
 }
 
 // NewWriter creates a new Oracle writer.
@@ -60,15 +64,22 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		return nil, fmt.Errorf("TypeMapper is required")
 	}
 
+	// Require TableTypeMapper for table-level AI DDL generation
+	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
+	if !ok {
+		db.Close()
+		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
+	}
+
 	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
+		logging.Info("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
 		}
 	}
 
-	return &Writer{
+	w := &Writer{
 		db:              db,
 		config:          cfg,
 		maxConns:        maxConns,
@@ -76,8 +87,133 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		sourceType:      opts.SourceType,
 		dialect:         dialect,
 		typeMapper:      opts.TypeMapper,
+		tableMapper:     tableMapper,
 		oracleVersion:   version,
-	}, nil
+	}
+
+	// Gather database context for AI (best effort - don't fail if metadata unavailable)
+	w.dbContext = w.gatherDatabaseContext()
+
+	return w, nil
+}
+
+// gatherDatabaseContext collects Oracle database metadata for AI context.
+func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
+	ctx := &driver.DatabaseContext{
+		Version:                  w.oracleVersion,
+		DatabaseName:             w.config.Database,
+		ServerName:               w.config.Host,
+		IdentifierCase:           "upper",
+		CaseSensitiveIdentifiers: false, // Oracle folds to uppercase
+		CaseSensitiveData:        true,  // Default binary comparison
+		MaxIdentifierLength:      128,   // Oracle 12.2+, 30 for older
+		VarcharSemantics:         "byte",
+		BytesPerChar:             4, // AL32UTF8 max
+	}
+
+	// Query NLS parameters for character set info
+	rows, err := w.db.Query(`
+		SELECT PARAMETER, VALUE FROM NLS_DATABASE_PARAMETERS
+		WHERE PARAMETER IN ('NLS_CHARACTERSET', 'NLS_NCHAR_CHARACTERSET', 'NLS_SORT', 'NLS_COMP', 'NLS_LENGTH_SEMANTICS')
+	`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var param, value string
+			if rows.Scan(&param, &value) == nil {
+				switch param {
+				case "NLS_CHARACTERSET":
+					ctx.Charset = value
+					// Determine bytes per char based on charset
+					if strings.Contains(value, "UTF8") || strings.Contains(value, "AL32UTF8") {
+						ctx.BytesPerChar = 4
+						ctx.Encoding = "UTF-8"
+					} else if strings.Contains(value, "UTF16") {
+						ctx.BytesPerChar = 2
+						ctx.Encoding = "UTF-16"
+					} else {
+						ctx.BytesPerChar = 1
+						ctx.Encoding = value
+					}
+				case "NLS_NCHAR_CHARACTERSET":
+					ctx.NationalCharset = value
+				case "NLS_SORT":
+					ctx.Collation = value
+					// BINARY = case-sensitive, others typically case-insensitive
+					ctx.CaseSensitiveData = strings.Contains(strings.ToUpper(value), "BINARY")
+				case "NLS_COMP":
+					// BINARY = case-sensitive comparisons
+					if strings.ToUpper(value) != "BINARY" {
+						ctx.CaseSensitiveData = false
+					}
+				case "NLS_LENGTH_SEMANTICS":
+					ctx.VarcharSemantics = strings.ToLower(value)
+				}
+			}
+		}
+	}
+
+	// Query max string size (extended = 32767, standard = 4000)
+	var maxStringSize string
+	if w.db.QueryRow("SELECT VALUE FROM V$PARAMETER WHERE NAME = 'max_string_size'").Scan(&maxStringSize) == nil {
+		if strings.ToUpper(maxStringSize) == "EXTENDED" {
+			ctx.MaxVarcharLength = 32767
+			ctx.Features = append(ctx.Features, "EXTENDED_VARCHAR")
+		} else {
+			ctx.MaxVarcharLength = 4000
+		}
+	} else {
+		ctx.MaxVarcharLength = 4000 // Default
+	}
+
+	// Parse version for major version number using regex
+	// Matches patterns like "Oracle 23c", "Oracle Database 19c", "Release 21.0.0", etc.
+	versionRegex := regexp.MustCompile(`(?:Oracle[^0-9]*|Release\s+)(\d+)`)
+	if matches := versionRegex.FindStringSubmatch(w.oracleVersion); len(matches) > 1 {
+		if majorVer, err := strconv.Atoi(matches[1]); err == nil {
+			ctx.MajorVersion = majorVer
+		}
+	}
+
+	// Set identifier length based on major version
+	// Oracle 12.2+ supports 128-character identifiers
+	if ctx.MajorVersion >= 12 {
+		ctx.MaxIdentifierLength = 128
+		// Check for 12.1 which has 30-char limit
+		if ctx.MajorVersion == 12 && !strings.Contains(w.oracleVersion, "12.2") && !strings.Contains(w.oracleVersion, "12c Release 2") {
+			ctx.MaxIdentifierLength = 30
+		}
+	} else if ctx.MajorVersion > 0 {
+		ctx.MaxIdentifierLength = 30
+	} else {
+		// Unknown version - default to conservative settings
+		ctx.MajorVersion = 12
+		ctx.MaxIdentifierLength = 30
+		logging.Warn("Could not parse Oracle version from '%s', defaulting to version 12 with 30-char identifiers", w.oracleVersion)
+	}
+
+	// Add version-specific features
+	if ctx.MajorVersion >= 23 {
+		ctx.Features = append(ctx.Features, "BOOLEAN_TYPE", "JSON_RELATIONAL_DUALITY")
+	}
+
+	// Standard Oracle features
+	ctx.Features = append(ctx.Features, "CLOB", "BLOB", "NUMBER", "TIMESTAMP_WITH_TIMEZONE")
+
+	// Build notes
+	var notes []string
+	if ctx.VarcharSemantics == "byte" {
+		notes = append(notes, "VARCHAR2 uses BYTE semantics - use VARCHAR2(n CHAR) for character lengths")
+	}
+	if ctx.BytesPerChar > 1 {
+		notes = append(notes, fmt.Sprintf("Multi-byte charset: up to %d bytes per character", ctx.BytesPerChar))
+	}
+	ctx.Notes = strings.Join(notes, "; ")
+
+	logging.Debug("Oracle context: charset=%s, varchar_semantics=%s, max_identifier=%d, max_varchar=%d",
+		ctx.Charset, ctx.VarcharSemantics, ctx.MaxIdentifierLength, ctx.MaxVarcharLength)
+
+	return ctx
 }
 
 // Close closes all connections.
@@ -135,77 +271,41 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
 }
 
-// CreateTableWithOptions creates a table with options.
+// CreateTableWithOptions creates a table with options using AI-generated DDL.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	ddl := w.generateDDL(t, targetSchema)
+	// Use table-level AI DDL generation with full database context
+	req := driver.TableDDLRequest{
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "oracle",
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext, // Passed from migration coordinator
+		TargetContext: w.dbContext,        // Oracle-specific context
+	}
 
-	_, err := w.db.ExecContext(ctx, ddl)
+	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
 	if err != nil {
-		return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+	}
+
+	logging.Debug("AI generated DDL for %s:\n%s", t.FullName(), resp.CreateTableDDL)
+
+	// Log column type mappings
+	for colName, colType := range resp.ColumnTypes {
+		logging.Debug("  Column %s -> %s", colName, colType)
+	}
+
+	_, err = w.db.ExecContext(ctx, resp.CreateTableDDL)
+	if err != nil {
+		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, resp.CreateTableDDL)
 	}
 
 	return nil
 }
 
-func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", w.dialect.QualifyTable(targetSchema, t.Name)))
-
-	_, isAIMapper := w.typeMapper.(*driver.AITypeMapper)
-	if isAIMapper {
-		logging.Debug("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
-	}
-
-	for i, col := range t.Columns {
-		if i > 0 {
-			sb.WriteString(",\n")
-		}
-
-		// Map type using AI or static mapper
-		typeInfo := driver.TypeInfo{
-			SourceDBType: w.sourceType,
-			TargetDBType: "oracle",
-			DataType:     col.DataType,
-			MaxLength:    col.MaxLength,
-			Precision:    col.Precision,
-			Scale:        col.Scale,
-			SampleValues: col.SampleValues,
-		}
-		oracleType := w.typeMapper.MapType(typeInfo)
-
-		if isAIMapper {
-			logging.Debug("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
-				t.Name, col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, oracleType)
-		}
-
-		sb.WriteString(fmt.Sprintf("    %s %s", w.dialect.QuoteIdentifier(col.Name), oracleType))
-
-		// Handle identity columns (Oracle 12c+)
-		if col.IsIdentity {
-			sb.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
-		}
-
-		if !col.IsNullable {
-			sb.WriteString(" NOT NULL")
-		}
-	}
-
-	// Add PRIMARY KEY constraint
-	if len(t.PrimaryKey) > 0 {
-		pkCols := make([]string, len(t.PrimaryKey))
-		for i, col := range t.PrimaryKey {
-			pkCols[i] = w.dialect.QuoteIdentifier(col)
-		}
-		// Generate short PK name
-		pkName := truncateIdentifier(fmt.Sprintf("pk_%s", t.Name), 30)
-		sb.WriteString(fmt.Sprintf(",\n    CONSTRAINT %s PRIMARY KEY (%s)",
-			w.dialect.QuoteIdentifier(pkName), strings.Join(pkCols, ", ")))
-	}
-
-	sb.WriteString("\n)")
-
-	return sb.String()
+// GetDatabaseContext returns the database context for AI type mapping.
+func (w *Writer) GetDatabaseContext() *driver.DatabaseContext {
+	return w.dbContext
 }
 
 // DropTable drops a table.
