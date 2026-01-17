@@ -180,13 +180,8 @@ func (d *Dialect) ColumnListForSelect(cols, colTypes []string, targetDBType stri
 			continue
 		}
 
-		// Convert CLOBs to VARCHAR2 for cross-engine (limited to 4000 chars)
-		if isCrossEngine && (colType == "CLOB" || colType == "NCLOB") {
-			quoted[i] = fmt.Sprintf("DBMS_LOB.SUBSTR(%s, 4000, 1) AS %s",
-				d.QuoteIdentifier(c), d.QuoteIdentifier(c))
-			continue
-		}
-
+		// CLOBs: godror driver handles CLOB->string conversion properly.
+		// Target databases (MySQL TEXT, PostgreSQL TEXT) can handle large values.
 		quoted[i] = d.QuoteIdentifier(c)
 	}
 	return strings.Join(quoted, ", ")
@@ -293,7 +288,7 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 
 // extractColumnAliases extracts column aliases from a SELECT list
 func extractColumnAliases(cols string) string {
-	parts := strings.Split(cols, ",")
+	parts := splitColumnsRespectingParens(cols)
 	aliases := make([]string, len(parts))
 	for i, part := range parts {
 		part = strings.TrimSpace(part)
@@ -310,4 +305,39 @@ func extractColumnAliases(cols string) string {
 		}
 	}
 	return strings.Join(aliases, ", ")
+}
+
+// splitColumnsRespectingParens splits a column list on commas, but ignores
+// commas inside parentheses (e.g., function calls like DBMS_LOB.SUBSTR(col, 4000, 1))
+func splitColumnsRespectingParens(cols string) []string {
+	var parts []string
+	var current strings.Builder
+	depth := 0
+
+	for _, ch := range cols {
+		switch ch {
+		case '(':
+			depth++
+			current.WriteRune(ch)
+		case ')':
+			depth--
+			current.WriteRune(ch)
+		case ',':
+			if depth == 0 {
+				parts = append(parts, current.String())
+				current.Reset()
+			} else {
+				current.WriteRune(ch)
+			}
+		default:
+			current.WriteRune(ch)
+		}
+	}
+
+	// Don't forget the last part
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+
+	return parts
 }

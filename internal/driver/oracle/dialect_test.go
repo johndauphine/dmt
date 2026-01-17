@@ -1,0 +1,109 @@
+package oracle
+
+import (
+	"testing"
+)
+
+func TestSplitColumnsRespectingParens(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "simple columns",
+			input:    `"ID", "NAME", "AGE"`,
+			expected: []string{`"ID"`, ` "NAME"`, ` "AGE"`},
+		},
+		{
+			name:     "single column",
+			input:    `"ID"`,
+			expected: []string{`"ID"`},
+		},
+		{
+			name:     "CLOB with DBMS_LOB.SUBSTR",
+			input:    `"ID", DBMS_LOB.SUBSTR("ABOUTME", 4000, 1) AS "ABOUTME", "AGE"`,
+			expected: []string{`"ID"`, ` DBMS_LOB.SUBSTR("ABOUTME", 4000, 1) AS "ABOUTME"`, ` "AGE"`},
+		},
+		{
+			name:     "multiple CLOBs",
+			input:    `DBMS_LOB.SUBSTR("COL1", 4000, 1) AS "COL1", "ID", DBMS_LOB.SUBSTR("COL2", 4000, 1) AS "COL2"`,
+			expected: []string{`DBMS_LOB.SUBSTR("COL1", 4000, 1) AS "COL1"`, ` "ID"`, ` DBMS_LOB.SUBSTR("COL2", 4000, 1) AS "COL2"`},
+		},
+		{
+			name:     "nested parentheses",
+			input:    `NVL(SUBSTR("COL", 1, 10), 'default') AS "COL", "ID"`,
+			expected: []string{`NVL(SUBSTR("COL", 1, 10), 'default') AS "COL"`, ` "ID"`},
+		},
+		{
+			name:     "SDO_GEOMETRY conversion",
+			input:    `"ID", SDO_UTIL.TO_WKTGEOMETRY("GEOM") AS "GEOM", "NAME"`,
+			expected: []string{`"ID"`, ` SDO_UTIL.TO_WKTGEOMETRY("GEOM") AS "GEOM"`, ` "NAME"`},
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := splitColumnsRespectingParens(tt.input)
+
+			if len(result) != len(tt.expected) {
+				t.Errorf("expected %d parts, got %d: %v", len(tt.expected), len(result), result)
+				return
+			}
+
+			for i, exp := range tt.expected {
+				if result[i] != exp {
+					t.Errorf("part %d: expected %q, got %q", i, exp, result[i])
+				}
+			}
+		})
+	}
+}
+
+func TestExtractColumnAliases(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "simple columns",
+			input:    `"ID", "NAME", "AGE"`,
+			expected: `"ID", "NAME", "AGE"`,
+		},
+		{
+			name:     "CLOB with alias",
+			input:    `"ID", DBMS_LOB.SUBSTR("ABOUTME", 4000, 1) AS "ABOUTME", "AGE"`,
+			expected: `"ID", "ABOUTME", "AGE"`,
+		},
+		{
+			name:     "multiple function calls",
+			input:    `DBMS_LOB.SUBSTR("COL1", 4000, 1) AS "COL1", "ID", DBMS_LOB.SUBSTR("COL2", 4000, 1) AS "COL2"`,
+			expected: `"COL1", "ID", "COL2"`,
+		},
+		{
+			name:     "qualified column names",
+			input:    `T."ID", T."NAME"`,
+			expected: `"ID", "NAME"`,
+		},
+		{
+			name:     "mixed expressions",
+			input:    `"ID", SDO_UTIL.TO_WKTGEOMETRY("GEOM") AS "GEOM", T."NAME"`,
+			expected: `"ID", "GEOM", "NAME"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractColumnAliases(tt.input)
+			if result != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
