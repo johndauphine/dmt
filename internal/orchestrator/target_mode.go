@@ -98,8 +98,10 @@ func (s *dropRecreateStrategy) PrepareTables(ctx context.Context, tables []sourc
 		go func(table source.Table) {
 			defer createWg.Done()
 			opts := pool.TableOptions{
-				IncludeIndexes:          s.createIndexes,
-				IncludeCheckConstraints: s.createChecks,
+				// Always false - indexes and constraints are created separately in Finalize
+				// to avoid duplicate creation when AI includes them in DDL
+				IncludeIndexes:          false,
+				IncludeCheckConstraints: false,
 			}
 			if err := s.targetPool.CreateTableWithOptions(ctx, &table, s.targetSchema, opts); err != nil {
 				createErrs <- fmt.Errorf("creating table %s: %w", table.FullName(), err)
