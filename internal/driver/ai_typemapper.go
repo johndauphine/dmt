@@ -1255,8 +1255,10 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 		sb.WriteString(fmt.Sprintf("- Use fully qualified table name: %s.<TABLENAME>\n", req.TargetSchema))
 	}
 	sb.WriteString("- Include all columns with appropriate target types\n")
-	sb.WriteString("- Make ALL non-primary-key columns nullable (omit NOT NULL) to allow data migration flexibility\n")
-	sb.WriteString("- Primary key columns must be NOT NULL\n")
+	sb.WriteString("- Preserve NOT NULL constraints from source table columns where they exist\n")
+	sb.WriteString("- Only make non-primary-key columns nullable if they are nullable in the source table\n")
+	sb.WriteString("- Primary key columns must always be NOT NULL\n")
+	sb.WriteString("- If preserving a NOT NULL constraint might cause migration issues, add a SQL comment: -- Warning: NOT NULL constraint preserved from source\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
 	sb.WriteString("- Do NOT include foreign keys (these are created separately)\n")
 	if req.IncludeIndexes && len(req.SourceTable.Indexes) > 0 {
