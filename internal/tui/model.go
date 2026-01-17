@@ -867,6 +867,13 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 		p.Send(OutputMsg(fmt.Sprintf("Starting migration with %s\n", label)))
 
 		go func() {
+			// Recover from panics and report as errors
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Panic: %v", r)})
+				}
+			}()
+
 			cfg, err := loadConfigFromOrigin(configFile, profileName)
 			if err != nil {
 				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)})
@@ -890,7 +897,11 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 			p.Send(migrationStartedMsg{cancel: cancel})
 
 			// Redirect output
-			r, w, _ := os.Pipe()
+			r, w, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error creating pipe: %v", pipeErr)})
+				return
+			}
 			origStdout := os.Stdout
 			origStderr := os.Stderr
 			os.Stdout = w
@@ -949,6 +960,13 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 		p.Send(OutputMsg(fmt.Sprintf("Resuming migration with %s\n", label)))
 
 		go func() {
+			// Recover from panics and report as errors
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Panic: %v", r)})
+				}
+			}()
+
 			cfg, err := loadConfigFromOrigin(configFile, profileName)
 			if err != nil {
 				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)})
@@ -971,7 +989,11 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 			ctx, cancel := context.WithCancel(context.Background())
 			p.Send(migrationStartedMsg{cancel: cancel})
 
-			r, w, _ := os.Pipe()
+			r, w, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error creating pipe: %v", pipeErr)})
+				return
+			}
 			origStdout := os.Stdout
 			origStderr := os.Stderr
 			os.Stdout = w
@@ -1024,6 +1046,12 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			origin := "config: " + configFile
 			if profileName != "" {
 				origin = "profile: " + profileName
@@ -1061,6 +1089,12 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			origin := "config: " + configFile
 			if profileName != "" {
 				origin = "profile: " + profileName
@@ -1118,6 +1152,13 @@ func (m Model) runCalibrateCmd(configFile, profileName string, applyToConfig boo
 		}
 
 		go func() {
+			// Recover from panics and report as errors
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			origin := "config: " + configFile
 			if profileName != "" {
 				origin = "profile: " + profileName
@@ -1141,7 +1182,11 @@ func (m Model) runCalibrateCmd(configFile, profileName string, applyToConfig boo
 			}
 			defer orch.Close()
 
-			r, w, _ := os.Pipe()
+			r, w, pipeErr := os.Pipe()
+			if pipeErr != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error creating pipe: %v\n", pipeErr)))
+				return
+			}
 			origStdout := os.Stdout
 			origStderr := os.Stderr
 			os.Stdout = w
@@ -1209,6 +1254,12 @@ func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.C
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			cfg, err := loadConfigFromOrigin(configFile, profileName)
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
@@ -1246,6 +1297,12 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			cfg, err := loadConfigFromOrigin(configFile, profileName)
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
@@ -1283,6 +1340,12 @@ func (m Model) runShellCmd(shellCmd string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			cmd := exec.Command("sh", "-c", shellCmd)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -1337,6 +1400,12 @@ func (m Model) profileSaveCmd(name, configFile string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			cfg, err := config.Load(configFile)
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error loading config: %v\n", err)))
@@ -1391,6 +1460,12 @@ func (m Model) profileListCmd() tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			dataDir, err := config.DefaultDataDir()
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
@@ -1438,6 +1513,12 @@ func (m Model) profileDeleteCmd(name string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			dataDir, err := config.DefaultDataDir()
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
@@ -1469,6 +1550,12 @@ func (m Model) profileExportCmd(name, outFile string) tea.Cmd {
 		}
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
 			dataDir, err := config.DefaultDataDir()
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error resolving data dir: %v\n", err)))
