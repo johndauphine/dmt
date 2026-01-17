@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,20 +119,22 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 		BytesPerChar:             4,      // utf8mb4 max
 	}
 
-	// Parse version for major version number
+	// Parse version for major version number using regex
+	// Matches patterns like "8.0.32", "5.7.44", "10.11.6-MariaDB", etc.
+	versionRegex := regexp.MustCompile(`^(\d+)\.`)
+	if matches := versionRegex.FindStringSubmatch(version); len(matches) > 1 {
+		if majorVer, err := strconv.Atoi(matches[1]); err == nil {
+			dbCtx.MajorVersion = majorVer
+		}
+	}
+
 	if w.isMariaDB {
 		dbCtx.StorageEngine = "MariaDB"
-		if strings.Contains(version, "10.") {
-			dbCtx.MajorVersion = 10
-		} else if strings.Contains(version, "11.") {
-			dbCtx.MajorVersion = 11
-		}
-	} else {
-		if strings.Contains(version, "8.") {
-			dbCtx.MajorVersion = 8
-		} else if strings.Contains(version, "5.7") {
-			dbCtx.MajorVersion = 5
-		}
+	}
+
+	// Log warning if version couldn't be parsed
+	if dbCtx.MajorVersion == 0 {
+		logging.Warn("Could not parse MySQL/MariaDB version from '%s', version-specific features may not be detected", version)
 	}
 
 	// Query character set and collation
@@ -165,7 +169,8 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 	}
 
 	// Query lower_case_table_names for identifier case sensitivity
-	var lowerCaseTableNames int
+	// Use -1 as sentinel to distinguish "not queried" from actual value of 0
+	lowerCaseTableNames := -1
 	if w.db.QueryRow("SELECT @@lower_case_table_names").Scan(&lowerCaseTableNames) == nil {
 		switch lowerCaseTableNames {
 		case 0:
@@ -190,7 +195,12 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 	// utf8mb4: 16383 chars (65535 bytes / 4)
 	// utf8: 21844 chars (65535 bytes / 3)
 	// latin1: 65535 chars
-	dbCtx.MaxVarcharLength = 65535 / dbCtx.BytesPerChar
+	if dbCtx.BytesPerChar > 0 {
+		dbCtx.MaxVarcharLength = 65535 / dbCtx.BytesPerChar
+	} else {
+		// Fallback to safe default if charset detection failed
+		dbCtx.MaxVarcharLength = 16383 // Assume utf8mb4 (most restrictive)
+	}
 
 	// Standard MySQL features
 	dbCtx.Features = []string{"JSON", "SPATIAL", "FULLTEXT"}
@@ -201,8 +211,14 @@ func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
 		dbCtx.Features = append(dbCtx.Features, "CTE", "WINDOW_FUNCTIONS")
 	}
 
-	logging.Debug("MySQL context: charset=%s, collation=%s, storage_engine=%s, lower_case=%d",
-		dbCtx.Charset, dbCtx.Collation, dbCtx.StorageEngine, lowerCaseTableNames)
+	// Log with appropriate handling of sentinel value
+	if lowerCaseTableNames >= 0 {
+		logging.Debug("MySQL context: charset=%s, collation=%s, storage_engine=%s, lower_case=%d",
+			dbCtx.Charset, dbCtx.Collation, dbCtx.StorageEngine, lowerCaseTableNames)
+	} else {
+		logging.Debug("MySQL context: charset=%s, collation=%s, storage_engine=%s, lower_case=unknown",
+			dbCtx.Charset, dbCtx.Collation, dbCtx.StorageEngine)
+	}
 
 	return dbCtx
 }

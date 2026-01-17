@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -138,17 +140,13 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 	var version string
 	if w.pool.QueryRow(ctx, "SELECT version()").Scan(&version) == nil {
 		dbCtx.Version = version
-		// Parse major version
-		if strings.Contains(version, "PostgreSQL 16") {
-			dbCtx.MajorVersion = 16
-		} else if strings.Contains(version, "PostgreSQL 15") {
-			dbCtx.MajorVersion = 15
-		} else if strings.Contains(version, "PostgreSQL 14") {
-			dbCtx.MajorVersion = 14
-		} else if strings.Contains(version, "PostgreSQL 13") {
-			dbCtx.MajorVersion = 13
-		} else if strings.Contains(version, "PostgreSQL 12") {
-			dbCtx.MajorVersion = 12
+		// Parse major version using regex to handle any version format
+		// Matches patterns like "PostgreSQL 16.1", "PostgreSQL 17", etc.
+		versionRegex := regexp.MustCompile(`PostgreSQL\s+(\d+)`)
+		if matches := versionRegex.FindStringSubmatch(version); len(matches) > 1 {
+			if majorVer, err := strconv.Atoi(matches[1]); err == nil {
+				dbCtx.MajorVersion = majorVer
+			}
 		}
 	}
 

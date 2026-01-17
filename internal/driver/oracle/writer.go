@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -164,30 +166,35 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 		ctx.MaxVarcharLength = 4000 // Default
 	}
 
-	// Parse version for major version number
-	if strings.Contains(w.oracleVersion, "23") {
-		ctx.MajorVersion = 23
+	// Parse version for major version number using regex
+	// Matches patterns like "Oracle 23c", "Oracle Database 19c", "Release 21.0.0", etc.
+	versionRegex := regexp.MustCompile(`(?:Oracle[^0-9]*|Release\s+)(\d+)`)
+	if matches := versionRegex.FindStringSubmatch(w.oracleVersion); len(matches) > 1 {
+		if majorVer, err := strconv.Atoi(matches[1]); err == nil {
+			ctx.MajorVersion = majorVer
+		}
+	}
+
+	// Set identifier length based on major version
+	// Oracle 12.2+ supports 128-character identifiers
+	if ctx.MajorVersion >= 12 {
 		ctx.MaxIdentifierLength = 128
-		ctx.Features = append(ctx.Features, "BOOLEAN_TYPE", "JSON_RELATIONAL_DUALITY")
-	} else if strings.Contains(w.oracleVersion, "21") {
-		ctx.MajorVersion = 21
-		ctx.MaxIdentifierLength = 128
-	} else if strings.Contains(w.oracleVersion, "19") {
-		ctx.MajorVersion = 19
-		ctx.MaxIdentifierLength = 128
-	} else if strings.Contains(w.oracleVersion, "18") {
-		ctx.MajorVersion = 18
-		ctx.MaxIdentifierLength = 128
-	} else if strings.Contains(w.oracleVersion, "12") {
-		ctx.MajorVersion = 12
-		if strings.Contains(w.oracleVersion, "12.2") || strings.Contains(w.oracleVersion, "12c Release 2") {
-			ctx.MaxIdentifierLength = 128
-		} else {
+		// Check for 12.1 which has 30-char limit
+		if ctx.MajorVersion == 12 && !strings.Contains(w.oracleVersion, "12.2") && !strings.Contains(w.oracleVersion, "12c Release 2") {
 			ctx.MaxIdentifierLength = 30
 		}
-	} else {
-		ctx.MajorVersion = 11
+	} else if ctx.MajorVersion > 0 {
 		ctx.MaxIdentifierLength = 30
+	} else {
+		// Unknown version - default to conservative settings
+		ctx.MajorVersion = 12
+		ctx.MaxIdentifierLength = 30
+		logging.Warn("Could not parse Oracle version from '%s', defaulting to version 12 with 30-char identifiers", w.oracleVersion)
+	}
+
+	// Add version-specific features
+	if ctx.MajorVersion >= 23 {
+		ctx.Features = append(ctx.Features, "BOOLEAN_TYPE", "JSON_RELATIONAL_DUALITY")
 	}
 
 	// Standard Oracle features

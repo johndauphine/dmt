@@ -164,14 +164,28 @@ func NewAITypeMapperFromSecrets() (*AITypeMapper, error) {
 // This method is safe to call concurrently - it uses in-flight request tracking
 // to avoid duplicate API calls for the same type.
 // Note: For table-level DDL generation, use GenerateTableDDL instead.
-// This method panics on error - callers should use MapTypeWithError or GenerateTableDDL.
+// Deprecated: This method is deprecated. Use MapTypeWithError or GenerateTableDDL instead.
+// On error, this method logs a warning and returns a basic fallback type to avoid crashes.
 func (m *AITypeMapper) MapType(info TypeInfo) string {
 	result, err := m.MapTypeWithError(info)
 	if err != nil {
-		// No fallback - AI must succeed or caller must handle the error
-		// For production use, prefer GenerateTableDDL for table-level mapping
-		panic(fmt.Sprintf("AI type mapping failed for %s.%s: %v (use GenerateTableDDL for table-level mapping)",
-			info.SourceDBType, info.DataType, err))
+		// Log error but return a basic fallback to avoid production crashes
+		// Callers should migrate to MapTypeWithError or GenerateTableDDL for proper error handling
+		logging.Warn("AI type mapping failed for %s.%s: %v (use GenerateTableDDL for table-level mapping)",
+			info.SourceDBType, info.DataType, err)
+		// Return a basic fallback based on target database
+		switch info.TargetDBType {
+		case "oracle":
+			return "VARCHAR2(4000)"
+		case "mysql":
+			return "VARCHAR(255)"
+		case "postgres":
+			return "TEXT"
+		case "mssql":
+			return "NVARCHAR(MAX)"
+		default:
+			return "VARCHAR(255)"
+		}
 	}
 	return result
 }
@@ -1387,6 +1401,15 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	sb.WriteString("\nReserved words: If any column name is a SQL reserved word, quote it appropriately for the target database.\n")
 }
 
+// capitalizeFirst returns the string with its first character uppercased.
+// This replaces the deprecated strings.Title function.
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
 // writeVarcharGuidance writes VARCHAR semantics guidance based on context.
 func (m *AITypeMapper) writeVarcharGuidance(sb *strings.Builder, ctx *DatabaseContext, role string) {
 	if ctx.VarcharSemantics == "" {
@@ -1394,9 +1417,9 @@ func (m *AITypeMapper) writeVarcharGuidance(sb *strings.Builder, ctx *DatabaseCo
 	}
 
 	if ctx.VarcharSemantics == "char" {
-		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in CHARACTERS\n", strings.Title(role)))
+		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in CHARACTERS\n", capitalizeFirst(role)))
 	} else if ctx.VarcharSemantics == "byte" {
-		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in BYTES\n", strings.Title(role)))
+		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in BYTES\n", capitalizeFirst(role)))
 		if ctx.BytesPerChar > 1 {
 			sb.WriteString(fmt.Sprintf("- Each character may take up to %d bytes\n", ctx.BytesPerChar))
 		}

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,15 +121,40 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 	var version string
 	if w.db.QueryRow("SELECT @@VERSION").Scan(&version) == nil {
 		ctx.Version = version
-		// Parse major version
-		if strings.Contains(version, "2022") {
-			ctx.MajorVersion = 16
-		} else if strings.Contains(version, "2019") {
-			ctx.MajorVersion = 15
-		} else if strings.Contains(version, "2017") {
-			ctx.MajorVersion = 14
-		} else if strings.Contains(version, "2016") {
-			ctx.MajorVersion = 13
+		// Parse major version using regex
+		// @@VERSION returns something like "Microsoft SQL Server 2022 (RTM) - 16.0.1000.6"
+		// Try to match the product year first (2016, 2017, 2019, 2022, etc.)
+		yearRegex := regexp.MustCompile(`SQL Server (\d{4})`)
+		if matches := yearRegex.FindStringSubmatch(version); len(matches) > 1 {
+			if year, err := strconv.Atoi(matches[1]); err == nil {
+				// Map year to major version number
+				switch {
+				case year >= 2022:
+					ctx.MajorVersion = 16
+				case year >= 2019:
+					ctx.MajorVersion = 15
+				case year >= 2017:
+					ctx.MajorVersion = 14
+				case year >= 2016:
+					ctx.MajorVersion = 13
+				case year >= 2014:
+					ctx.MajorVersion = 12
+				default:
+					ctx.MajorVersion = 11
+				}
+			}
+		}
+		// Fallback: try to parse version number directly (e.g., "16.0.1000.6")
+		if ctx.MajorVersion == 0 {
+			verNumRegex := regexp.MustCompile(`- (\d+)\.`)
+			if matches := verNumRegex.FindStringSubmatch(version); len(matches) > 1 {
+				if majorVer, err := strconv.Atoi(matches[1]); err == nil {
+					ctx.MajorVersion = majorVer
+				}
+			}
+		}
+		if ctx.MajorVersion == 0 {
+			logging.Warn("Could not parse SQL Server version from '%s', version-specific features may not be detected", version)
 		}
 	}
 

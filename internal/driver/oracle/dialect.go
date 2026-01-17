@@ -13,9 +13,17 @@ type Dialect struct{}
 
 func (d *Dialect) DBType() string { return "oracle" }
 
+// QuoteIdentifier returns the Oracle-safe identifier.
+// Oracle folds unquoted identifiers to uppercase, so this function:
+// 1. Always converts to uppercase for consistency
+// 2. Quotes if the name contains special characters, starts with a digit, or is a reserved word
+//
+// Note: Oracle quoted identifiers CAN preserve case, but we intentionally use uppercase
+// for consistency between quoted and unquoted identifiers. This ensures that:
+// - "FOO" and FOO refer to the same object
+// - AI-generated DDL works correctly (AI typically generates uppercase identifiers)
+// - Migrations remain predictable regardless of source case
 func (d *Dialect) QuoteIdentifier(name string) string {
-	// Oracle folds unquoted identifiers to uppercase.
-	// Quote if name contains special characters or is a reserved word.
 	upper := strings.ToUpper(name)
 
 	// Check if name needs quoting (contains non-alphanumeric chars other than underscore)
