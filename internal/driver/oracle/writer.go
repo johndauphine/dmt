@@ -405,12 +405,16 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 		ORDER BY COLUMN_ID
 	`, schemaName, tableName)
 	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", schemaName, tableName, err)
 		return ""
 	}
 	defer rows.Close()
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("CREATE TABLE \"%s\".\"%s\" (\n", schemaName, tableName))
+	// Use dialect's QuoteIdentifier for proper escaping
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (\n",
+		w.dialect.QuoteIdentifier(schemaName),
+		w.dialect.QuoteIdentifier(tableName)))
 
 	first := true
 	for rows.Next() {
@@ -418,6 +422,7 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 		var dataLen, dataPrecision, dataScale sql.NullInt64
 
 		if err := rows.Scan(&colName, &dataType, &dataLen, &dataPrecision, &dataScale, &nullable); err != nil {
+			logging.Debug("Failed to scan column for %s.%s: %v", schemaName, tableName, err)
 			continue
 		}
 
@@ -426,7 +431,7 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 		}
 		first = false
 
-		sb.WriteString(fmt.Sprintf("    \"%s\" ", colName))
+		sb.WriteString(fmt.Sprintf("    %s ", w.dialect.QuoteIdentifier(colName)))
 
 		// Build type with precision
 		typeStr := dataType
@@ -444,6 +449,12 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 		if nullable == "N" {
 			sb.WriteString(" NOT NULL")
 		}
+	}
+
+	// Check if any columns were found
+	if first {
+		logging.Debug("No columns found for table %s.%s", schemaName, tableName)
+		return ""
 	}
 
 	sb.WriteString("\n);")

@@ -257,15 +257,19 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 	return nil
 }
 
+// fkColumnDelimiter is used to separate column names in STRING_AGG.
+// Using CHAR(1) (SOH) as it cannot appear in valid SQL Server identifiers.
+const fkColumnDelimiter = "\x01"
+
 // LoadForeignKeys loads all foreign keys for a table.
 func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT
 			fk.name AS fk_name,
-			STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS columns,
+			STRING_AGG(c.name, CHAR(1)) WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS columns,
 			rs.name AS ref_schema,
 			rt.name AS ref_table,
-			STRING_AGG(rc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_columns,
+			STRING_AGG(rc.name, CHAR(1)) WITHIN GROUP (ORDER BY fkc.constraint_column_id) AS ref_columns,
 			CASE fk.delete_referential_action
 				WHEN 0 THEN 'NO ACTION'
 				WHEN 1 THEN 'CASCADE'
@@ -300,10 +304,10 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 		var columns, refColumns string
 		if err := rows.Scan(&fk.Name, &columns, &fk.RefSchema, &fk.RefTable, &refColumns,
 			&fk.OnDelete, &fk.OnUpdate); err != nil {
-			return err
+			return fmt.Errorf("scanning FK for %s.%s: %w", t.Schema, t.Name, err)
 		}
-		fk.Columns = strings.Split(columns, ",")
-		fk.RefColumns = strings.Split(refColumns, ",")
+		fk.Columns = strings.Split(columns, fkColumnDelimiter)
+		fk.RefColumns = strings.Split(refColumns, fkColumnDelimiter)
 		t.ForeignKeys = append(t.ForeignKeys, fk)
 	}
 	return rows.Err()
@@ -329,7 +333,7 @@ func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) erro
 	for rows.Next() {
 		var chk driver.CheckConstraint
 		if err := rows.Scan(&chk.Name, &chk.Definition); err != nil {
-			return err
+			return fmt.Errorf("scanning check constraint for %s.%s: %w", t.Schema, t.Name, err)
 		}
 		t.CheckConstraints = append(t.CheckConstraints, chk)
 	}

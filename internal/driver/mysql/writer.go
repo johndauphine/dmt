@@ -380,11 +380,12 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 		dbName = w.config.Database
 	}
 
-	// MySQL has a convenient SHOW CREATE TABLE command
-	qualifiedTable := fmt.Sprintf("`%s`.`%s`", dbName, table)
+	// Use dialect's QualifyTable for proper identifier escaping (prevents SQL injection)
+	qualifiedTable := w.dialect.QualifyTable(dbName, table)
 	var tableName, createStmt string
 	err := w.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualifiedTable).Scan(&tableName, &createStmt)
 	if err != nil {
+		logging.Debug("Could not get table DDL for %s.%s: %v", dbName, table, err)
 		return ""
 	}
 	return createStmt
