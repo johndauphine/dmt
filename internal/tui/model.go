@@ -854,7 +854,14 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 // Migration commands
 
 func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
+		// Recover from any panics in this function
+		defer func() {
+			if r := recover(); r != nil {
+				result = MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error: %v", r)}
+			}
+		}()
+
 		p := GetProgramRef()
 		if p == nil {
 			return MigrationDoneMsg{Status: "failed", Message: "Internal error: no program reference"}
@@ -864,6 +871,18 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 		if profileName != "" {
 			label = profileName
 		}
+
+		// Load config synchronously to catch errors before spawning goroutine
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
+		if err != nil {
+			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
+		}
+
+		orch, err := orchestrator.New(cfg)
+		if err != nil {
+			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
+		}
+
 		p.Send(OutputMsg(fmt.Sprintf("Starting migration with %s\n", label)))
 
 		go func() {
@@ -873,18 +892,6 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 					p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Panic: %v", r)})
 				}
 			}()
-
-			cfg, err := loadConfigFromOrigin(configFile, profileName)
-			if err != nil {
-				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)})
-				return
-			}
-
-			orch, err := orchestrator.New(cfg)
-			if err != nil {
-				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing orchestrator: %v", err)})
-				return
-			}
 			defer orch.Close()
 
 			if profileName != "" {
@@ -947,7 +954,14 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 }
 
 func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
+		// Recover from any panics in this function
+		defer func() {
+			if r := recover(); r != nil {
+				result = MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error: %v", r)}
+			}
+		}()
+
 		p := GetProgramRef()
 		if p == nil {
 			return MigrationDoneMsg{Status: "failed", Message: "Internal error: no program reference"}
@@ -957,6 +971,18 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 		if profileName != "" {
 			label = profileName
 		}
+
+		// Load config synchronously to catch errors before spawning goroutine
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
+		if err != nil {
+			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
+		}
+
+		orch, err := orchestrator.New(cfg)
+		if err != nil {
+			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
+		}
+
 		p.Send(OutputMsg(fmt.Sprintf("Resuming migration with %s\n", label)))
 
 		go func() {
@@ -966,18 +992,6 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 					p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Panic: %v", r)})
 				}
 			}()
-
-			cfg, err := loadConfigFromOrigin(configFile, profileName)
-			if err != nil {
-				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)})
-				return
-			}
-
-			orch, err := orchestrator.New(cfg)
-			if err != nil {
-				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing orchestrator: %v", err)})
-				return
-			}
 			defer orch.Close()
 
 			if profileName != "" {
