@@ -25,14 +25,19 @@ import (
 // Maximum lines to keep in content buffer to prevent memory growth
 const maxContentLines = 2000
 
-// safeRun executes a function and recovers from any panic, returning an error message
-func safeRun(fn func() tea.Msg) (msg tea.Msg) {
-	defer func() {
-		if r := recover(); r != nil {
-			msg = OutputMsg(fmt.Sprintf("Error: %v\n", r))
-		}
-	}()
-	return fn()
+// safeCmd wraps a tea.Cmd to recover from panics
+func safeCmd(cmd tea.Cmd) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = OutputMsg(fmt.Sprintf("\n[ERROR] %v\n", r))
+			}
+		}()
+		return cmd()
+	}
 }
 
 // AppMode represents the current application mode
@@ -223,7 +228,16 @@ func (m *Model) getDisplayContent() string {
 }
 
 // Update handles messages and updates the model
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
+	// Recover from panics in Update
+	defer func() {
+		if r := recover(); r != nil {
+			m.appendOutput(fmt.Sprintf("\n[ERROR] Panic in Update: %v\n", r))
+			model = m
+			cmd = nil
+		}
+	}()
+
 	var (
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
@@ -311,14 +325,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			value := m.textInput.Value()
 			if m.mode == ModeWizard {
-				return m, m.handleWizardStep(value)
+				return m, safeCmd(m.handleWizardStep(value))
 			}
 			if value != "" {
 				m.appendOutput(styleUserInput.Render("> "+value) + "\n")
 				m.textInput.Reset()
 				m.history = append(m.history, value)
 				m.historyIdx = len(m.history)
-				return m, m.handleCommand(value)
+				return m, safeCmd(m.handleCommand(value))
 			}
 
 		case tea.KeyTab:
@@ -865,29 +879,28 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 
 func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
-		return safeRun(func() tea.Msg {
-			p := GetProgramRef()
-			if p == nil {
-				return MigrationDoneMsg{Status: "failed", Message: "Internal error: no program reference"}
-			}
+		p := GetProgramRef()
+		if p == nil {
+			return MigrationDoneMsg{Status: "failed", Message: "Internal error: no program reference"}
+		}
 
-			label := configFile
-			if profileName != "" {
-				label = profileName
-			}
+		label := configFile
+		if profileName != "" {
+			label = profileName
+		}
 
-			// Load config synchronously to catch errors before spawning goroutine
-			cfg, err := loadConfigFromOrigin(configFile, profileName)
-			if err != nil {
-				return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
-			}
+		// Load config synchronously to catch errors before spawning goroutine
+		cfg, err := loadConfigFromOrigin(configFile, profileName)
+		if err != nil {
+			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
+		}
 
-			orch, err := orchestrator.New(cfg)
-			if err != nil {
-				return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
-			}
+		orch, err := orchestrator.New(cfg)
+		if err != nil {
+			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
+		}
 
-			p.Send(OutputMsg(fmt.Sprintf("Starting migration with %s\n", label)))
+		p.Send(OutputMsg(fmt.Sprintf("Starting migration with %s\n", label)))
 
 		go func() {
 			// Recover from panics and report as errors
@@ -953,8 +966,7 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 			p.Send(MigrationDoneMsg{Status: "completed", Message: "Migration completed successfully!"})
 		}()
 
-			return nil
-		})
+		return nil
 	}
 }
 
@@ -2075,7 +2087,14 @@ func splitIntoWords(s string) []string {
 }
 
 // Start launches the TUI program
-func Start() error {
+func Start() (err error) {
+	// Recover from any panics
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+
 	logging.SetLevel(logging.LevelDebug)
 
 	m := InitialModel()
