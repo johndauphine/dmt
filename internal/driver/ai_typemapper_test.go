@@ -981,6 +981,8 @@ func TestBuildIndexDDLPrompt(t *testing.T) {
 		"Filter (WHERE clause): deleted_at IS NULL",
 		"Max Identifier Length: 63",
 		"Identifier Case: lower",
+		// Note: PostgreSQL-specific rules come from dialect.AIPromptAugmentation()
+		// which requires dialect registration - tested via integration tests
 	}
 
 	for _, check := range checks {
@@ -1029,6 +1031,11 @@ func TestBuildIndexDDLPrompt_Minimal(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Filter (WHERE clause):") {
 		t.Error("prompt should not contain Filter when not provided")
+	}
+
+	// PostgreSQL-specific rules should NOT be present for MySQL target
+	if strings.Contains(prompt, "CRITICAL PostgreSQL identifier rules") {
+		t.Error("prompt should not contain PostgreSQL identifier rules for MySQL target")
 	}
 }
 
@@ -1080,6 +1087,11 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 			t.Errorf("prompt should contain %q", check)
 		}
 	}
+
+	// PostgreSQL-specific rules should NOT be present for Oracle target
+	if strings.Contains(prompt, "CRITICAL PostgreSQL identifier rules") {
+		t.Error("prompt should not contain PostgreSQL identifier rules for Oracle target")
+	}
 }
 
 func TestBuildForeignKeyDDLPrompt_SameSchema(t *testing.T) {
@@ -1108,6 +1120,9 @@ func TestBuildForeignKeyDDLPrompt_SameSchema(t *testing.T) {
 	if !strings.Contains(prompt, "References Table: users") {
 		t.Error("prompt should contain References Table: users")
 	}
+
+	// Note: PostgreSQL-specific rules come from dialect.AIPromptAugmentation()
+	// which requires dialect registration - tested via integration tests
 }
 
 func TestBuildCheckConstraintDDLPrompt(t *testing.T) {
@@ -1145,6 +1160,8 @@ func TestBuildCheckConstraintDDLPrompt(t *testing.T) {
 		"(price > 0 AND price < 1000000)",
 		"Max Identifier Length: 63",
 		"Identifier Case: lower",
+		// Note: PostgreSQL-specific rules come from dialect.AIPromptAugmentation()
+		// which requires dialect registration - tested via integration tests
 	}
 
 	for _, check := range checks {
@@ -1175,6 +1192,11 @@ func TestBuildCheckConstraintDDLPrompt_NoSourceDB(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "TARGET DATABASE") {
 		t.Error("prompt should contain TARGET DATABASE")
+	}
+
+	// PostgreSQL-specific rules should NOT be present for MySQL target
+	if strings.Contains(prompt, "CRITICAL PostgreSQL identifier rules") {
+		t.Error("prompt should not contain PostgreSQL identifier rules for MySQL target")
 	}
 }
 

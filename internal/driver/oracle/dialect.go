@@ -286,6 +286,11 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 	}
 }
 
+// AIPromptAugmentation returns Oracle-specific instructions for AI DDL generation.
+func (d *Dialect) AIPromptAugmentation() string {
+	return "" // No special requirements for Oracle
+}
+
 // extractColumnAliases extracts column aliases from a SELECT list
 func extractColumnAliases(cols string) string {
 	parts := splitColumnsRespectingParens(cols)

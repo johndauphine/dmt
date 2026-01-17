@@ -1260,6 +1260,13 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("- Do NOT include indexes, foreign keys, or check constraints\n")
 	sb.WriteString("- Return ONLY the CREATE TABLE statement, no explanation or markdown\n")
 
+	// Database-specific identifier requirements from the target dialect
+	if dialect := GetDialect(req.TargetDBType); dialect != nil {
+		if aug := dialect.AIPromptAugmentation(); aug != "" {
+			sb.WriteString(aug)
+		}
+	}
+
 	// Check for reserved words in source table columns
 	reservedWords := m.findReservedWords(req.SourceTable, req.TargetDBType)
 	if len(reservedWords) > 0 {
@@ -1808,6 +1815,13 @@ func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 	sb.WriteString("- Quote identifiers appropriately for the target database\n")
 	sb.WriteString("- Return ONLY the CREATE INDEX statement, no explanation or markdown\n")
 
+	// Database-specific identifier requirements from the target dialect
+	if dialect := GetDialect(req.TargetDBType); dialect != nil {
+		if aug := dialect.AIPromptAugmentation(); aug != "" {
+			sb.WriteString(aug)
+		}
+	}
+
 	return sb.String()
 }
 
@@ -1866,6 +1880,13 @@ func (m *AITypeMapper) buildForeignKeyDDLPrompt(req FinalizationDDLRequest) stri
 	sb.WriteString("- Quote identifiers appropriately for the target database\n")
 	sb.WriteString("- Return ONLY the ALTER TABLE statement, no explanation or markdown\n")
 
+	// Database-specific identifier requirements from the target dialect
+	if dialect := GetDialect(req.TargetDBType); dialect != nil {
+		if aug := dialect.AIPromptAugmentation(); aug != "" {
+			sb.WriteString(aug)
+		}
+	}
+
 	return sb.String()
 }
 
@@ -1918,6 +1939,13 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 	sb.WriteString("- Convert functions appropriately (e.g., GETDATE() -> NOW(), SYSDATE, CURRENT_TIMESTAMP)\n")
 	sb.WriteString("- Quote identifiers appropriately for the target database\n")
 	sb.WriteString("- Return ONLY the ALTER TABLE statement, no explanation or markdown\n")
+
+	// Database-specific identifier requirements from the target dialect
+	if dialect := GetDialect(req.TargetDBType); dialect != nil {
+		if aug := dialect.AIPromptAugmentation(); aug != "" {
+			sb.WriteString(aug)
+		}
+	}
 
 	return sb.String()
 }

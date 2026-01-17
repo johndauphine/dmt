@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/driver"
@@ -66,5 +67,26 @@ func TestAvailableDrivers(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("PostgreSQL driver not in available list: %v", available)
+	}
+}
+
+func TestAIPromptAugmentation(t *testing.T) {
+	dialect := &Dialect{}
+	aug := dialect.AIPromptAugmentation()
+
+	// Verify the augmentation contains critical PostgreSQL identifier rules
+	checks := []string{
+		"CRITICAL PostgreSQL identifier rules",
+		"EXACT lowercase version of the source name",
+		"Do NOT abbreviate, shorten, or modify names",
+		"LastEditorDisplayName → lasteditordisplayname",
+		"LastEditorUserId → lasteditoruserid",
+		"Do NOT use double-quotes around identifiers",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(aug, check) {
+			t.Errorf("AIPromptAugmentation should contain %q", check)
+		}
 	}
 }

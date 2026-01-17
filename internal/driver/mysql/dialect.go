@@ -223,3 +223,8 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 		"date":      true,
 	}
 }
+
+// AIPromptAugmentation returns MySQL-specific instructions for AI DDL generation.
+func (d *Dialect) AIPromptAugmentation() string {
+	return "" // No special requirements for MySQL
+}

@@ -191,3 +191,15 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 		"date":                        true,
 	}
 }
+
+// AIPromptAugmentation returns PostgreSQL-specific instructions for AI DDL generation.
+func (d *Dialect) AIPromptAugmentation() string {
+	return `
+CRITICAL PostgreSQL identifier rules:
+- Column and table names MUST be the EXACT lowercase version of the source name
+- Do NOT abbreviate, shorten, or modify names in any way
+- Example: LastEditorDisplayName → lasteditordisplayname (not lasteditdisplayname)
+- Example: LastEditorUserId → lasteditoruserid (not lastedituserid)
+- Do NOT use double-quotes around identifiers unless the name is a reserved word
+`
+}

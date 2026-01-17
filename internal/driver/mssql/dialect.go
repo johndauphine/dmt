@@ -207,3 +207,8 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 		"datetimeoffset": true,
 	}
 }
+
+// AIPromptAugmentation returns SQL Server-specific instructions for AI DDL generation.
+func (d *Dialect) AIPromptAugmentation() string {
+	return "" // No special requirements for SQL Server
+}
