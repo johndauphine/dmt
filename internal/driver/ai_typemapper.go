@@ -1706,7 +1706,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 		}
 		prompt = m.buildIndexDDLPrompt(req)
 		entityName = req.Index.Name
-		validatePrefix = "CREATE"
+		// validatePrefix not used for index - has custom validation below
 		logging.Debug("AI index DDL generation: %s on %s.%s (%s)",
 			req.Index.Name, req.TargetSchema, req.Table.Name, req.TargetDBType)
 
