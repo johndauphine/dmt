@@ -10,12 +10,8 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
-// OutputMsg is sent when new stdout/stderr output is captured
-type OutputMsg string
-
 // CaptureOutput pipes stdout and stderr to a channel that feeds the TUI
-// If migrationID is non-empty, sends MigrationOutputMsg; otherwise sends OutputMsg
-func CaptureOutput(p *tea.Program, migrationID string) func() {
+func CaptureOutput(p *tea.Program, _ string) func() {
 	r, w, err := os.Pipe()
 	if err != nil {
 		return func() {}
@@ -40,11 +36,7 @@ func CaptureOutput(p *tea.Program, migrationID string) func() {
 		for {
 			n, err := r.Read(buf)
 			if n > 0 {
-				if migrationID != "" {
-					p.Send(MigrationOutputMsg{ID: migrationID, Output: string(buf[:n])})
-				} else {
-					p.Send(OutputMsg(string(buf[:n])))
-				}
+				p.Send(OutputMsg(string(buf[:n])))
 			}
 			if err != nil {
 				break
@@ -59,9 +51,7 @@ func CaptureOutput(p *tea.Program, migrationID string) func() {
 		// Restore logging to stdout and disable simple mode
 		logging.SetOutput(origStdout)
 		logging.SetSimpleMode(false)
-		// We don't wait for wg because scanner.Scan blocks until EOF
-		// and we want to restore immediately.
-		// However, to ensure last bytes are read, we could wait a tiny bit.
+		// Wait a tiny bit to ensure last bytes are read
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -76,19 +66,6 @@ func (w *WriterAdapter) Write(p []byte) (n int, err error) {
 		w.Program.Send(OutputMsg(string(p)))
 	} else {
 		fmt.Print(string(p))
-	}
-	return len(p), nil
-}
-
-// MigrationWriterAdapter implements io.Writer for a specific migration
-type MigrationWriterAdapter struct {
-	Program     *tea.Program
-	MigrationID string
-}
-
-func (w *MigrationWriterAdapter) Write(p []byte) (n int, err error) {
-	if w.Program != nil {
-		w.Program.Send(MigrationOutputMsg{ID: w.MigrationID, Output: string(p)})
 	}
 	return len(p), nil
 }
