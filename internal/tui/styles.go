@@ -15,6 +15,7 @@ var (
 	colorLightGray  = lipgloss.Color("#A8B0C9")
 	colorWhite      = lipgloss.Color("#E6E9F5")
 	colorBlue       = lipgloss.Color("#5B9BD5")
+	colorDark       = lipgloss.Color("#1A1B26") // Dark text for high contrast on colored backgrounds
 
 	// Base Styles
 	styleNormal = lipgloss.NewStyle().
@@ -26,30 +27,34 @@ var (
 			Foreground(colorLightGray)
 
 	styleStatusDir = lipgloss.NewStyle().
-			Foreground(colorBackground).
+			Foreground(colorDark).
 			Background(colorTeal).
 			Padding(0, 1).
 			Bold(true)
 
 	styleStatusBranch = lipgloss.NewStyle().
-				Foreground(colorWhite).
+				Foreground(colorDark).
 				Background(colorPurple).
-				Padding(0, 1)
+				Padding(0, 1).
+				Bold(true)
 
 	styleStatusClean = lipgloss.NewStyle().
-				Foreground(colorBackground).
+				Foreground(colorDark).
 				Background(colorGreen).
-				Padding(0, 1)
+				Padding(0, 1).
+				Bold(true)
 
 	styleStatusDirty = lipgloss.NewStyle().
-				Foreground(colorBackground).
+				Foreground(colorDark).
 				Background(colorRed).
-				Padding(0, 1)
+				Padding(0, 1).
+				Bold(true)
 
 	styleStatusText = lipgloss.NewStyle().
-			Foreground(colorWhite).
-			Background(colorGray).
-			Padding(0, 1)
+			Foreground(colorDark).
+			Background(colorGold).
+			Padding(0, 1).
+			Bold(true)
 
 	// Viewport Styles
 	styleViewport = lipgloss.NewStyle().
