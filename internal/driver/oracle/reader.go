@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/godror/godror"
+	"github.com/godror/godror"
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -196,6 +196,21 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 // normalizeOracleType normalizes Oracle type names
 func normalizeOracleType(dataType string) string {
 	return strings.ToUpper(strings.TrimSpace(dataType))
+}
+
+// normalizeOracleValues converts Oracle-specific types to standard Go types.
+// This ensures all target databases receive compatible types.
+func normalizeOracleValues(rows [][]any) {
+	for i := range rows {
+		for j := range rows[i] {
+			switch val := rows[i][j].(type) {
+			case godror.Number:
+				// Oracle NUMBER type - convert to string to preserve precision
+				// Target databases can parse the string into their native numeric types
+				rows[i][j] = val.String()
+			}
+		}
+	}
 }
 
 func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {
@@ -389,6 +404,9 @@ func (r *Reader) readKeysetPagination(ctx context.Context, batches chan<- driver
 			return
 		}
 
+		// Normalize Oracle-specific types for target compatibility
+		normalizeOracleValues(batch.Rows)
+
 		if len(batch.Rows) == 0 {
 			batch.Done = true
 			batches <- batch
@@ -450,6 +468,9 @@ func (r *Reader) readRowNumberPagination(ctx context.Context, batches chan<- dri
 			batches <- driver.Batch{Error: fmt.Errorf("scanning rows: %w", err), Done: true}
 			return
 		}
+
+		// Normalize Oracle-specific types for target compatibility
+		normalizeOracleValues(batch.Rows)
 
 		if len(batch.Rows) == 0 {
 			batch.Done = true
@@ -515,6 +536,9 @@ func (r *Reader) readFullTable(ctx context.Context, batches chan<- driver.Batch,
 			batches <- driver.Batch{Error: fmt.Errorf("iterating rows: %w", err), Done: true}
 			return
 		}
+
+		// Normalize Oracle-specific types for target compatibility
+		normalizeOracleValues(batch.Rows)
 
 		if len(batch.Rows) == 0 {
 			batch.Done = true
