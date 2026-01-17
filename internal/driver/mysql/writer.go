@@ -24,6 +24,8 @@ type Writer struct {
 	sourceType   string
 	dialect      *Dialect
 	typeMapper   driver.TypeMapper
+	tableMapper  driver.TableTypeMapper  // Table-level DDL generation
+	dbContext    *driver.DatabaseContext // Cached database context for AI
 	isMariaDB    bool
 }
 
@@ -68,16 +70,23 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		return nil, fmt.Errorf("TypeMapper is required")
 	}
 
+	// Require TableTypeMapper for table-level AI DDL generation
+	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
+	if !ok {
+		db.Close()
+		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
+	}
+
 	// Log AI mapper initialization
 	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
+		logging.Info("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
 		}
 	}
 
-	return &Writer{
+	w := &Writer{
 		db:           db,
 		config:       cfg,
 		maxConns:     maxConns,
@@ -85,8 +94,117 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		sourceType:   opts.SourceType,
 		dialect:      dialect,
 		typeMapper:   opts.TypeMapper,
+		tableMapper:  tableMapper,
 		isMariaDB:    isMariaDB,
-	}, nil
+	}
+
+	// Gather database context for AI
+	w.dbContext = w.gatherDatabaseContext(version)
+
+	return w, nil
+}
+
+// gatherDatabaseContext collects MySQL/MariaDB database metadata for AI context.
+func (w *Writer) gatherDatabaseContext(version string) *driver.DatabaseContext {
+	dbCtx := &driver.DatabaseContext{
+		Version:                  version,
+		DatabaseName:             w.config.Database,
+		ServerName:               w.config.Host,
+		IdentifierCase:           "preserve",
+		CaseSensitiveIdentifiers: false, // Depends on OS/config
+		MaxIdentifierLength:      64,
+		VarcharSemantics:         "char", // utf8mb4 VARCHAR is characters
+		BytesPerChar:             4,      // utf8mb4 max
+	}
+
+	// Parse version for major version number
+	if w.isMariaDB {
+		dbCtx.StorageEngine = "MariaDB"
+		if strings.Contains(version, "10.") {
+			dbCtx.MajorVersion = 10
+		} else if strings.Contains(version, "11.") {
+			dbCtx.MajorVersion = 11
+		}
+	} else {
+		if strings.Contains(version, "8.") {
+			dbCtx.MajorVersion = 8
+		} else if strings.Contains(version, "5.7") {
+			dbCtx.MajorVersion = 5
+		}
+	}
+
+	// Query character set and collation
+	var charsetVar, collationVar string
+	if w.db.QueryRow("SELECT @@character_set_database, @@collation_database").Scan(&charsetVar, &collationVar) == nil {
+		dbCtx.Charset = charsetVar
+		dbCtx.Collation = collationVar
+
+		// Determine bytes per char based on charset
+		switch {
+		case strings.HasPrefix(charsetVar, "utf8mb4"):
+			dbCtx.BytesPerChar = 4
+			dbCtx.Encoding = "UTF-8"
+		case strings.HasPrefix(charsetVar, "utf8"):
+			dbCtx.BytesPerChar = 3
+			dbCtx.Encoding = "UTF-8 (3-byte)"
+		case charsetVar == "latin1":
+			dbCtx.BytesPerChar = 1
+			dbCtx.Encoding = "Latin1"
+		default:
+			dbCtx.BytesPerChar = 1
+			dbCtx.Encoding = charsetVar
+		}
+
+		// Parse collation for case sensitivity
+		upperCollation := strings.ToUpper(collationVar)
+		if strings.Contains(upperCollation, "_CS") || strings.Contains(upperCollation, "_BIN") {
+			dbCtx.CaseSensitiveData = true
+		} else if strings.Contains(upperCollation, "_CI") {
+			dbCtx.CaseSensitiveData = false
+		}
+	}
+
+	// Query lower_case_table_names for identifier case sensitivity
+	var lowerCaseTableNames int
+	if w.db.QueryRow("SELECT @@lower_case_table_names").Scan(&lowerCaseTableNames) == nil {
+		switch lowerCaseTableNames {
+		case 0:
+			dbCtx.CaseSensitiveIdentifiers = true
+			dbCtx.IdentifierCase = "preserve"
+		case 1:
+			dbCtx.CaseSensitiveIdentifiers = false
+			dbCtx.IdentifierCase = "lower"
+		case 2:
+			dbCtx.CaseSensitiveIdentifiers = false
+			dbCtx.IdentifierCase = "preserve"
+		}
+	}
+
+	// Query default storage engine
+	var engine string
+	if w.db.QueryRow("SELECT @@default_storage_engine").Scan(&engine) == nil {
+		dbCtx.StorageEngine = engine
+	}
+
+	// Max varchar length depends on charset
+	// utf8mb4: 16383 chars (65535 bytes / 4)
+	// utf8: 21844 chars (65535 bytes / 3)
+	// latin1: 65535 chars
+	dbCtx.MaxVarcharLength = 65535 / dbCtx.BytesPerChar
+
+	// Standard MySQL features
+	dbCtx.Features = []string{"JSON", "SPATIAL", "FULLTEXT"}
+	if w.isMariaDB {
+		dbCtx.Features = append(dbCtx.Features, "SEQUENCES", "SYSTEM_VERSIONING")
+	}
+	if dbCtx.MajorVersion >= 8 || (w.isMariaDB && dbCtx.MajorVersion >= 10) {
+		dbCtx.Features = append(dbCtx.Features, "CTE", "WINDOW_FUNCTIONS")
+	}
+
+	logging.Debug("MySQL context: charset=%s, collation=%s, storage_engine=%s, lower_case=%d",
+		dbCtx.Charset, dbCtx.Collation, dbCtx.StorageEngine, lowerCaseTableNames)
+
+	return dbCtx
 }
 
 // Close closes all connections.
@@ -142,77 +260,36 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
 }
 
-// CreateTableWithOptions creates a table with options.
+// CreateTableWithOptions creates a table with options using AI-generated DDL.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	ddl := w.generateDDL(t, targetSchema)
+	// Use table-level AI DDL generation with full database context
+	req := driver.TableDDLRequest{
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mysql",
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
+	}
 
-	_, err := w.db.ExecContext(ctx, ddl)
+	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
 	if err != nil {
-		return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+	}
+
+	logging.Debug("AI generated DDL for %s:\n%s", t.FullName(), resp.CreateTableDDL)
+
+	// Log column type mappings
+	for colName, colType := range resp.ColumnTypes {
+		logging.Debug("  Column %s -> %s", colName, colType)
+	}
+
+	_, err = w.db.ExecContext(ctx, resp.CreateTableDDL)
+	if err != nil {
+		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, resp.CreateTableDDL)
 	}
 
 	return nil
-}
-
-func (w *Writer) generateDDL(t *driver.Table, targetSchema string) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", w.dialect.QualifyTable(targetSchema, t.Name)))
-
-	// Check if using AI mapper for logging
-	_, isAIMapper := w.typeMapper.(*driver.AITypeMapper)
-	if isAIMapper {
-		logging.Debug("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
-	}
-
-	for i, col := range t.Columns {
-		if i > 0 {
-			sb.WriteString(",\n")
-		}
-
-		// Map type using configured mapper (static or AI)
-		typeInfo := driver.TypeInfo{
-			SourceDBType: w.sourceType,
-			TargetDBType: "mysql",
-			DataType:     col.DataType,
-			MaxLength:    col.MaxLength,
-			Precision:    col.Precision,
-			Scale:        col.Scale,
-			SampleValues: col.SampleValues,
-		}
-		mysqlType := w.typeMapper.MapType(typeInfo)
-
-		// Log AI type mappings
-		if isAIMapper {
-			logging.Debug("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
-				t.Name, col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, mysqlType)
-		}
-
-		sb.WriteString(fmt.Sprintf("    %s %s", w.dialect.QuoteIdentifier(col.Name), mysqlType))
-
-		if col.IsIdentity {
-			sb.WriteString(" AUTO_INCREMENT")
-		}
-
-		if !col.IsNullable {
-			sb.WriteString(" NOT NULL")
-		} else {
-			sb.WriteString(" NULL")
-		}
-	}
-
-	// Add PRIMARY KEY constraint
-	if len(t.PrimaryKey) > 0 {
-		pkCols := make([]string, len(t.PrimaryKey))
-		for i, col := range t.PrimaryKey {
-			pkCols[i] = w.dialect.QuoteIdentifier(col)
-		}
-		sb.WriteString(fmt.Sprintf(",\n    PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
-	}
-
-	sb.WriteString("\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")
-
-	return sb.String()
 }
 
 // DropTable drops a table.

@@ -61,6 +61,10 @@ type Writer interface {
 type TableOptions struct {
 	// Unlogged creates an unlogged table (PostgreSQL only, for performance).
 	Unlogged bool
+
+	// SourceContext contains metadata about the source database.
+	// This is passed to AI type mapper for better DDL generation.
+	SourceContext *DatabaseContext
 }
 
 // WriteBatchOptions configures a bulk write operation.

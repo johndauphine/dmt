@@ -44,13 +44,15 @@ func sanitizePGIdentifier(ident string) string {
 
 // Writer implements driver.Writer for PostgreSQL.
 type Writer struct {
-	pool       *pgxpool.Pool
-	config     *dbconfig.TargetConfig
-	maxConns   int
-	sourceType string
-	dialect    *Dialect
-	typeMapper driver.TypeMapper
-	cachedDB   *sql.DB // Cached database/sql wrapper for tuning analysis
+	pool        *pgxpool.Pool
+	config      *dbconfig.TargetConfig
+	maxConns    int
+	sourceType  string
+	dialect     *Dialect
+	typeMapper  driver.TypeMapper
+	tableMapper driver.TableTypeMapper  // Table-level DDL generation
+	dbContext   *driver.DatabaseContext // Cached database context for AI
+	cachedDB    *sql.DB                 // Cached database/sql wrapper for tuning analysis
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -84,23 +86,118 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		return nil, fmt.Errorf("TypeMapper is required")
 	}
 
+	// Require TableTypeMapper for table-level AI DDL generation
+	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
+	if !ok {
+		pool.Close()
+		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
+	}
+
 	// Log AI mapper initialization
 	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Info("AI Type Mapping enabled (provider: %s, model: %s)",
+		logging.Info("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
 		}
 	}
 
-	return &Writer{
-		pool:       pool,
-		config:     cfg,
-		maxConns:   maxConns,
-		sourceType: opts.SourceType,
-		dialect:    dialect,
-		typeMapper: opts.TypeMapper,
-	}, nil
+	w := &Writer{
+		pool:        pool,
+		config:      cfg,
+		maxConns:    maxConns,
+		sourceType:  opts.SourceType,
+		dialect:     dialect,
+		typeMapper:  opts.TypeMapper,
+		tableMapper: tableMapper,
+	}
+
+	// Gather database context for AI
+	w.dbContext = w.gatherDatabaseContext()
+
+	return w, nil
+}
+
+// gatherDatabaseContext collects PostgreSQL database metadata for AI context.
+func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
+	ctx := context.Background()
+
+	dbCtx := &driver.DatabaseContext{
+		DatabaseName:             w.config.Database,
+		ServerName:               w.config.Host,
+		IdentifierCase:           "lower",
+		CaseSensitiveIdentifiers: true, // PostgreSQL preserves case in quotes
+		CaseSensitiveData:        true, // Default is case-sensitive
+		MaxIdentifierLength:      63,
+		VarcharSemantics:         "char", // PostgreSQL VARCHAR is always characters
+		BytesPerChar:             4,      // UTF-8 max
+		MaxVarcharLength:         10485760,
+	}
+
+	// Query server version
+	var version string
+	if w.pool.QueryRow(ctx, "SELECT version()").Scan(&version) == nil {
+		dbCtx.Version = version
+		// Parse major version
+		if strings.Contains(version, "PostgreSQL 16") {
+			dbCtx.MajorVersion = 16
+		} else if strings.Contains(version, "PostgreSQL 15") {
+			dbCtx.MajorVersion = 15
+		} else if strings.Contains(version, "PostgreSQL 14") {
+			dbCtx.MajorVersion = 14
+		} else if strings.Contains(version, "PostgreSQL 13") {
+			dbCtx.MajorVersion = 13
+		} else if strings.Contains(version, "PostgreSQL 12") {
+			dbCtx.MajorVersion = 12
+		}
+	}
+
+	// Query encoding
+	var encoding string
+	if w.pool.QueryRow(ctx, "SHOW server_encoding").Scan(&encoding) == nil {
+		dbCtx.Charset = encoding
+		dbCtx.Encoding = encoding
+		if encoding == "UTF8" {
+			dbCtx.BytesPerChar = 4
+		} else if encoding == "LATIN1" || encoding == "SQL_ASCII" {
+			dbCtx.BytesPerChar = 1
+		}
+	}
+
+	// Query collation
+	var collation sql.NullString
+	if w.pool.QueryRow(ctx, `
+		SELECT datcollate FROM pg_database WHERE datname = current_database()
+	`).Scan(&collation) == nil && collation.Valid {
+		dbCtx.Collation = collation.String
+	}
+
+	// Query LC_CTYPE for character classification
+	var lcCtype sql.NullString
+	if w.pool.QueryRow(ctx, `
+		SELECT datctype FROM pg_database WHERE datname = current_database()
+	`).Scan(&lcCtype) == nil && lcCtype.Valid {
+		if dbCtx.Notes != "" {
+			dbCtx.Notes += "; "
+		}
+		dbCtx.Notes += "LC_CTYPE=" + lcCtype.String
+	}
+
+	// Standard PostgreSQL features
+	dbCtx.Features = []string{"TEXT", "JSON", "JSONB", "ARRAY", "HSTORE", "UUID", "BYTEA", "NUMERIC"}
+
+	// Version-specific features
+	if dbCtx.MajorVersion >= 14 {
+		dbCtx.Features = append(dbCtx.Features, "MULTIRANGE")
+	}
+	if dbCtx.MajorVersion >= 15 {
+		dbCtx.Features = append(dbCtx.Features, "JSON_TABLE")
+	}
+
+	logging.Debug("PostgreSQL context: encoding=%s, collation=%s, version=%d",
+		dbCtx.Encoding, dbCtx.Collation, dbCtx.MajorVersion)
+
+	return dbCtx
 }
 
 // Close closes all connections.
@@ -160,79 +257,42 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
 }
 
-// CreateTableWithOptions creates a table with options.
+// CreateTableWithOptions creates a table with options using AI-generated DDL.
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
-	ddl := w.generateDDL(t, targetSchema, opts.Unlogged)
+	// Use table-level AI DDL generation with full database context
+	req := driver.TableDDLRequest{
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "postgres",
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
+	}
 
-	_, err := w.pool.Exec(ctx, ddl)
+	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
 	if err != nil {
-		return fmt.Errorf("creating table %s: %w", t.FullName(), err)
+		return fmt.Errorf("AI DDL generation failed for table %s: %w", t.FullName(), err)
+	}
+
+	ddl := resp.CreateTableDDL
+
+	// Handle unlogged option - modify the DDL if needed
+	if opts.Unlogged && !strings.Contains(strings.ToUpper(ddl), "UNLOGGED") {
+		ddl = strings.Replace(ddl, "CREATE TABLE", "CREATE UNLOGGED TABLE", 1)
+	}
+
+	logging.Debug("AI generated DDL for %s:\n%s", t.FullName(), ddl)
+
+	// Log column type mappings
+	for colName, colType := range resp.ColumnTypes {
+		logging.Debug("  Column %s -> %s", colName, colType)
+	}
+
+	_, err = w.pool.Exec(ctx, ddl)
+	if err != nil {
+		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, ddl)
 	}
 	return nil
-}
-
-func (w *Writer) generateDDL(t *driver.Table, targetSchema string, unlogged bool) string {
-	var sb strings.Builder
-
-	if unlogged {
-		sb.WriteString("CREATE UNLOGGED TABLE ")
-	} else {
-		sb.WriteString("CREATE TABLE ")
-	}
-	// Sanitize table name for PostgreSQL (lowercase, safe chars)
-	sanitizedTable := sanitizePGIdentifier(t.Name)
-	sb.WriteString(w.dialect.QualifyTable(targetSchema, sanitizedTable))
-	sb.WriteString(" (\n")
-
-	// Check if using AI mapper for logging
-	_, isAIMapper := w.typeMapper.(*driver.AITypeMapper)
-	if isAIMapper {
-		logging.Debug("AI Type Mapping: generating DDL for table %s (%d columns)", t.Name, len(t.Columns))
-	}
-
-	for i, col := range t.Columns {
-		if i > 0 {
-			sb.WriteString(",\n")
-		}
-		sb.WriteString("  ")
-		// Sanitize column name
-		sanitizedCol := sanitizePGIdentifier(col.Name)
-		sb.WriteString(w.dialect.QuoteIdentifier(sanitizedCol))
-		sb.WriteString(" ")
-
-		// Map type using configured mapper (static or AI)
-		typeInfo := driver.TypeInfo{
-			SourceDBType: w.sourceType,
-			TargetDBType: "postgres",
-			DataType:     col.DataType,
-			MaxLength:    col.MaxLength,
-			Precision:    col.Precision,
-			Scale:        col.Scale,
-			SampleValues: col.SampleValues,
-		}
-		pgType := w.typeMapper.MapType(typeInfo)
-
-		// Log AI type mappings
-		if isAIMapper {
-			logging.Debug("AI Type Mapping: %s.%s: %s(%d,%d,%d) -> %s",
-				t.Name, col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, pgType)
-		}
-
-		sb.WriteString(pgType)
-
-		// Identity
-		if col.IsIdentity {
-			sb.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
-		}
-
-		// Nullable
-		if !col.IsNullable && !col.IsIdentity {
-			sb.WriteString(" NOT NULL")
-		}
-	}
-
-	sb.WriteString("\n)")
-	return sb.String()
 }
 
 // DropTable drops a table.

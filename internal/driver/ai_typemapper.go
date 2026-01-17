@@ -163,22 +163,15 @@ func NewAITypeMapperFromSecrets() (*AITypeMapper, error) {
 // MapType maps a source type to the target type using AI.
 // This method is safe to call concurrently - it uses in-flight request tracking
 // to avoid duplicate API calls for the same type.
-// Returns an error if the AI API call fails (no fallback).
+// Note: For table-level DDL generation, use GenerateTableDDL instead.
+// This method panics on error - callers should use MapTypeWithError or GenerateTableDDL.
 func (m *AITypeMapper) MapType(info TypeInfo) string {
 	result, err := m.MapTypeWithError(info)
 	if err != nil {
-		// Log the error but return a safe default to avoid breaking migrations
-		// The caller should use MapTypeWithError if they want to handle errors
-		logging.Error("AI type mapping failed for %s.%s: %v", info.SourceDBType, info.DataType, err)
-		// Return a generic fallback - this should rarely happen with proper caching
-		switch info.TargetDBType {
-		case "postgres":
-			return "text"
-		case "mysql":
-			return "text"
-		default:
-			return "nvarchar(max)"
-		}
+		// No fallback - AI must succeed or caller must handle the error
+		// For production use, prefer GenerateTableDDL for table-level mapping
+		panic(fmt.Sprintf("AI type mapping failed for %s.%s: %v (use GenerateTableDDL for table-level mapping)",
+			info.SourceDBType, info.DataType, err))
 	}
 	return result
 }
@@ -1140,4 +1133,549 @@ func (m *AITypeMapper) ProviderName() string {
 // Model returns the model being used.
 func (m *AITypeMapper) Model() string {
 	return m.provider.GetEffectiveModel(m.providerName)
+}
+
+// GenerateTableDDL generates complete CREATE TABLE DDL for the target database.
+// This method provides full table context to the AI for smarter type mapping decisions.
+func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error) {
+	if req.SourceTable == nil {
+		return nil, fmt.Errorf("SourceTable is required")
+	}
+	if req.SourceDBType == "" {
+		return nil, fmt.Errorf("SourceDBType is required")
+	}
+	if req.TargetDBType == "" {
+		return nil, fmt.Errorf("TargetDBType is required")
+	}
+
+	// Build cache key based on table structure
+	cacheKey := m.tableCacheKey(req)
+
+	// Check cache first
+	m.cacheMu.RLock()
+	if cached, ok := m.cache.Get(cacheKey); ok {
+		m.cacheMu.RUnlock()
+		return m.parseTableDDLFromCache(cached, req.SourceTable)
+	}
+	m.cacheMu.RUnlock()
+
+	// Build the prompt with full table context
+	prompt := m.buildTableDDLPrompt(req)
+
+	logging.Debug("AI table DDL generation: %s.%s (%s -> %s)",
+		req.SourceTable.Schema, req.SourceTable.Name, req.SourceDBType, req.TargetDBType)
+
+	// Call AI API
+	result, err := m.CallAI(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("AI table DDL generation failed for %s.%s: %w",
+			req.SourceTable.Schema, req.SourceTable.Name, err)
+	}
+
+	// Parse the response to extract DDL
+	response, err := m.parseTableDDLResponse(result, req.SourceTable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse AI response for %s.%s: %w",
+			req.SourceTable.Schema, req.SourceTable.Name, err)
+	}
+
+	// Cache the raw DDL result
+	m.cacheMu.Lock()
+	m.cache.Set(cacheKey, response.CreateTableDDL)
+	m.cacheMu.Unlock()
+
+	// Persist cache
+	if err := m.saveCache(); err != nil {
+		logging.Warn("Failed to save AI table DDL cache: %v", err)
+	}
+
+	logging.Debug("AI generated DDL for %s.%s (%d columns mapped)",
+		req.SourceTable.Schema, req.SourceTable.Name, len(response.ColumnTypes))
+
+	return response, nil
+}
+
+// tableCacheKey generates a cache key for table-level DDL.
+// Uses a hash of the table structure to handle schema changes.
+func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
+	// Build a deterministic representation of the table structure
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("table:%s:%s:%s.%s:",
+		req.SourceDBType, req.TargetDBType, req.SourceTable.Schema, req.SourceTable.Name))
+
+	for _, col := range req.SourceTable.Columns {
+		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v;",
+			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable))
+	}
+
+	// Add PK info
+	sb.WriteString("pk:")
+	for _, pk := range req.SourceTable.PrimaryKey {
+		sb.WriteString(pk + ",")
+	}
+
+	return sb.String()
+}
+
+// buildTableDDLPrompt creates the AI prompt for table-level DDL generation.
+func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
+	var sb strings.Builder
+
+	sb.WriteString("You are a database migration expert. Generate a CREATE TABLE statement.\n\n")
+
+	// === SOURCE DATABASE CONTEXT ===
+	sb.WriteString("=== SOURCE DATABASE ===\n")
+	sb.WriteString(fmt.Sprintf("Type: %s\n", req.SourceDBType))
+	if req.SourceContext != nil {
+		m.writeContextDetails(&sb, req.SourceContext, "Source")
+	}
+	sb.WriteString("\n")
+
+	// === TARGET DATABASE CONTEXT ===
+	sb.WriteString("=== TARGET DATABASE ===\n")
+	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	if req.TargetSchema != "" {
+		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+	}
+	if req.TargetContext != nil {
+		m.writeContextDetails(&sb, req.TargetContext, "Target")
+	}
+	sb.WriteString("\n")
+
+	// === SOURCE TABLE DDL ===
+	sb.WriteString("=== SOURCE TABLE DDL ===\n")
+	sb.WriteString(m.buildSourceDDL(req.SourceTable, req.SourceDBType))
+	sb.WriteString("\n\n")
+
+	// === MIGRATION RULES ===
+	sb.WriteString("=== MIGRATION RULES ===\n")
+	m.writeMigrationRules(&sb, req)
+
+	// === OUTPUT REQUIREMENTS ===
+	sb.WriteString("\n=== OUTPUT REQUIREMENTS ===\n")
+	sb.WriteString("Generate the complete CREATE TABLE statement for the target database.\n")
+	if req.TargetSchema != "" {
+		sb.WriteString(fmt.Sprintf("- Use fully qualified table name: %s.<TABLENAME>\n", req.TargetSchema))
+	}
+	sb.WriteString("- Include all columns with appropriate target types\n")
+	sb.WriteString("- Preserve NULL/NOT NULL constraints exactly as in source\n")
+	sb.WriteString("- Include PRIMARY KEY constraint\n")
+	sb.WriteString("- Do NOT include indexes, foreign keys, or check constraints\n")
+	sb.WriteString("- Return ONLY the CREATE TABLE statement, no explanation or markdown\n")
+
+	// Check for reserved words in source table columns
+	reservedWords := m.findReservedWords(req.SourceTable, req.TargetDBType)
+	if len(reservedWords) > 0 {
+		sb.WriteString("\nWARNING: The following source columns are reserved words in the target database:\n")
+		for _, rw := range reservedWords {
+			switch req.TargetDBType {
+			case "oracle":
+				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToUpper(rw)))
+			case "mssql":
+				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as [%s]\n", rw, rw))
+			case "mysql":
+				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as `%s`\n", rw, rw))
+			case "postgres":
+				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToLower(rw)))
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+// writeContextDetails writes database context details to the prompt.
+func (m *AITypeMapper) writeContextDetails(sb *strings.Builder, ctx *DatabaseContext, label string) {
+	if ctx.Version != "" {
+		sb.WriteString(fmt.Sprintf("Version: %s\n", ctx.Version))
+	}
+	if ctx.DatabaseName != "" {
+		sb.WriteString(fmt.Sprintf("Database: %s\n", ctx.DatabaseName))
+	}
+
+	// Character encoding section
+	sb.WriteString("Character Encoding:\n")
+	if ctx.Charset != "" {
+		sb.WriteString(fmt.Sprintf("  Charset: %s\n", ctx.Charset))
+	}
+	if ctx.NationalCharset != "" {
+		sb.WriteString(fmt.Sprintf("  National Charset: %s\n", ctx.NationalCharset))
+	}
+	if ctx.Encoding != "" {
+		sb.WriteString(fmt.Sprintf("  Encoding: %s\n", ctx.Encoding))
+	}
+	if ctx.CodePage > 0 {
+		sb.WriteString(fmt.Sprintf("  Code Page: %d\n", ctx.CodePage))
+	}
+	if ctx.Collation != "" {
+		sb.WriteString(fmt.Sprintf("  Collation: %s\n", ctx.Collation))
+	}
+	if ctx.BytesPerChar > 0 {
+		sb.WriteString(fmt.Sprintf("  Max Bytes Per Char: %d\n", ctx.BytesPerChar))
+	}
+
+	// Case sensitivity section
+	sb.WriteString("Case Sensitivity:\n")
+	if ctx.IdentifierCase != "" {
+		sb.WriteString(fmt.Sprintf("  Identifier Case: %s\n", ctx.IdentifierCase))
+	}
+	if ctx.CaseSensitiveIdentifiers {
+		sb.WriteString("  Identifiers: case-sensitive\n")
+	} else {
+		sb.WriteString("  Identifiers: case-insensitive\n")
+	}
+	if ctx.CaseSensitiveData {
+		sb.WriteString("  String Comparisons: case-sensitive\n")
+	} else {
+		sb.WriteString("  String Comparisons: case-insensitive (collation-dependent)\n")
+	}
+
+	// Limits section
+	sb.WriteString("Limits:\n")
+	if ctx.MaxIdentifierLength > 0 {
+		sb.WriteString(fmt.Sprintf("  Max Identifier Length: %d\n", ctx.MaxIdentifierLength))
+	}
+	if ctx.MaxVarcharLength > 0 {
+		sb.WriteString(fmt.Sprintf("  Max VARCHAR Length: %d\n", ctx.MaxVarcharLength))
+	}
+	if ctx.VarcharSemantics != "" {
+		sb.WriteString(fmt.Sprintf("  VARCHAR Semantics: %s (lengths are in %ss)\n", ctx.VarcharSemantics, ctx.VarcharSemantics))
+	}
+
+	// Features section
+	if ctx.StorageEngine != "" {
+		sb.WriteString(fmt.Sprintf("Storage Engine: %s\n", ctx.StorageEngine))
+	}
+	if len(ctx.Features) > 0 {
+		sb.WriteString(fmt.Sprintf("Features: %s\n", strings.Join(ctx.Features, ", ")))
+	}
+	if ctx.Notes != "" {
+		sb.WriteString(fmt.Sprintf("Notes: %s\n", ctx.Notes))
+	}
+}
+
+// writeMigrationRules writes migration guidance derived dynamically from database context.
+// All rules are generated from runtime metadata - no hardcoded database-specific rules.
+func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequest) {
+	// Source database characteristics - derived from SourceContext
+	sb.WriteString("Source database characteristics:\n")
+	if req.SourceContext != nil {
+		m.writeVarcharGuidance(sb, req.SourceContext, "source")
+		m.writeEncodingGuidance(sb, req.SourceContext, "source")
+	} else {
+		sb.WriteString("- No source context available, using standard type semantics\n")
+	}
+
+	sb.WriteString("\n")
+
+	// Target database rules - derived from TargetContext
+	sb.WriteString("Target database rules:\n")
+	if req.TargetContext != nil {
+		m.writeVarcharGuidance(sb, req.TargetContext, "target")
+		m.writeEncodingGuidance(sb, req.TargetContext, "target")
+		m.writeIdentifierGuidance(sb, req.TargetContext)
+		m.writeLimitsGuidance(sb, req.TargetContext)
+	} else {
+		sb.WriteString("- No target context available, use standard type mappings\n")
+	}
+
+	// Cross-database conversion guidance
+	sb.WriteString("\nConversion guidance:\n")
+	m.writeConversionGuidance(sb, req.SourceContext, req.TargetContext)
+
+	// Reserved words note
+	sb.WriteString("\nReserved words: If any column name is a SQL reserved word, quote it appropriately for the target database.\n")
+}
+
+// writeVarcharGuidance writes VARCHAR semantics guidance based on context.
+func (m *AITypeMapper) writeVarcharGuidance(sb *strings.Builder, ctx *DatabaseContext, role string) {
+	if ctx.VarcharSemantics == "" {
+		return
+	}
+
+	if ctx.VarcharSemantics == "char" {
+		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in CHARACTERS\n", strings.Title(role)))
+	} else if ctx.VarcharSemantics == "byte" {
+		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in BYTES\n", strings.Title(role)))
+		if ctx.BytesPerChar > 1 {
+			sb.WriteString(fmt.Sprintf("- Each character may take up to %d bytes\n", ctx.BytesPerChar))
+		}
+	}
+}
+
+// writeEncodingGuidance writes character encoding guidance based on context.
+func (m *AITypeMapper) writeEncodingGuidance(sb *strings.Builder, ctx *DatabaseContext, role string) {
+	if ctx.Charset != "" {
+		sb.WriteString(fmt.Sprintf("- Character set: %s\n", ctx.Charset))
+	}
+	if ctx.BytesPerChar > 0 {
+		sb.WriteString(fmt.Sprintf("- Max bytes per character: %d\n", ctx.BytesPerChar))
+	}
+	if ctx.Encoding != "" && ctx.Encoding != ctx.Charset {
+		sb.WriteString(fmt.Sprintf("- Encoding: %s\n", ctx.Encoding))
+	}
+}
+
+// writeIdentifierGuidance writes identifier handling guidance based on context.
+func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *DatabaseContext) {
+	if ctx.IdentifierCase != "" {
+		switch strings.ToLower(ctx.IdentifierCase) {
+		case "upper":
+			sb.WriteString("- CRITICAL: Unquoted identifiers are folded to UPPERCASE\n")
+			sb.WriteString("- Use UPPERCASE for all unquoted table and column names\n")
+			sb.WriteString("- Only quote identifiers that are reserved words\n")
+		case "lower":
+			sb.WriteString("- Unquoted identifiers are folded to lowercase\n")
+			sb.WriteString("- Use lowercase for all unquoted table and column names\n")
+		case "preserve":
+			sb.WriteString("- Identifier case is preserved as written\n")
+		}
+	}
+
+	if ctx.CaseSensitiveIdentifiers {
+		sb.WriteString("- Identifiers are case-sensitive when quoted\n")
+	}
+}
+
+// writeLimitsGuidance writes database limits guidance based on context.
+func (m *AITypeMapper) writeLimitsGuidance(sb *strings.Builder, ctx *DatabaseContext) {
+	if ctx.MaxIdentifierLength > 0 {
+		sb.WriteString(fmt.Sprintf("- Maximum identifier length: %d characters\n", ctx.MaxIdentifierLength))
+	}
+	if ctx.MaxVarcharLength > 0 {
+		sb.WriteString(fmt.Sprintf("- Maximum VARCHAR length: %d\n", ctx.MaxVarcharLength))
+		if ctx.VarcharSemantics == "byte" {
+			sb.WriteString("- Use CLOB/TEXT equivalent for content exceeding max VARCHAR\n")
+		}
+	}
+}
+
+// writeConversionGuidance writes guidance for cross-database type conversion.
+func (m *AITypeMapper) writeConversionGuidance(sb *strings.Builder, srcCtx, tgtCtx *DatabaseContext) {
+	if srcCtx == nil || tgtCtx == nil {
+		sb.WriteString("- Map types based on semantic equivalence\n")
+		return
+	}
+
+	// VARCHAR semantics conversion
+	if srcCtx.VarcharSemantics == "char" && tgtCtx.VarcharSemantics == "byte" {
+		sb.WriteString("- CRITICAL: Source uses CHARACTER lengths, target uses BYTE lengths\n")
+		if tgtCtx.BytesPerChar > 1 {
+			sb.WriteString(fmt.Sprintf("- Multiply source VARCHAR lengths by %d for target, or use CHAR semantics if available\n", tgtCtx.BytesPerChar))
+		}
+		sb.WriteString("- If target supports CHAR semantics (e.g., VARCHAR2(n CHAR)), prefer that over byte multiplication\n")
+	} else if srcCtx.VarcharSemantics == "byte" && tgtCtx.VarcharSemantics == "char" {
+		sb.WriteString("- Source uses BYTE lengths, target uses CHARACTER lengths\n")
+		if srcCtx.BytesPerChar > 1 {
+			sb.WriteString(fmt.Sprintf("- Source VARCHAR(n) with %d bytes/char = approximately n/%d characters\n", srcCtx.BytesPerChar, srcCtx.BytesPerChar))
+		}
+	} else if srcCtx.VarcharSemantics == "char" && tgtCtx.VarcharSemantics == "char" {
+		sb.WriteString("- Both source and target use CHARACTER lengths - preserve lengths directly\n")
+	}
+
+	// Case handling guidance
+	if srcCtx.IdentifierCase != tgtCtx.IdentifierCase && tgtCtx.IdentifierCase != "" {
+		switch strings.ToLower(tgtCtx.IdentifierCase) {
+		case "upper":
+			sb.WriteString("- Convert all identifiers to UPPERCASE for target\n")
+		case "lower":
+			sb.WriteString("- Convert all identifiers to lowercase for target\n")
+		}
+	}
+}
+
+// findReservedWords checks source table columns for SQL reserved words.
+func (m *AITypeMapper) findReservedWords(t *Table, targetDBType string) []string {
+	// Common SQL reserved words that cause issues
+	reservedWords := map[string]bool{
+		"date": true, "time": true, "timestamp": true, "year": true, "month": true, "day": true,
+		"user": true, "order": true, "group": true, "table": true, "index": true, "key": true,
+		"type": true, "name": true, "value": true, "size": true, "number": true, "level": true,
+		"comment": true, "desc": true, "asc": true, "limit": true, "offset": true,
+		"select": true, "insert": true, "update": true, "delete": true, "from": true, "where": true,
+		"and": true, "or": true, "not": true, "null": true, "true": true, "false": true,
+		"primary": true, "foreign": true, "references": true, "constraint": true,
+		"create": true, "alter": true, "drop": true, "truncate": true,
+		"row": true, "rows": true, "column": true, "schema": true, "database": true,
+		"function": true, "procedure": true, "trigger": true, "view": true,
+		"id": false, // not reserved in most DBs
+	}
+
+	// Oracle-specific reserved words
+	if targetDBType == "oracle" {
+		reservedWords["uid"] = true
+		reservedWords["sysdate"] = true
+		reservedWords["rownum"] = true
+		reservedWords["rowid"] = true
+		reservedWords["access"] = true
+		reservedWords["file"] = true
+		reservedWords["long"] = true
+		reservedWords["raw"] = true
+		reservedWords["session"] = true
+		reservedWords["start"] = true
+	}
+
+	var found []string
+	for _, col := range t.Columns {
+		colLower := strings.ToLower(col.Name)
+		if reservedWords[colLower] {
+			found = append(found, col.Name)
+		}
+	}
+	return found
+}
+
+// buildSourceDDL creates a DDL-like representation of the source table.
+func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
+	var sb strings.Builder
+
+	tableName := t.Name
+	if t.Schema != "" {
+		tableName = t.Schema + "." + t.Name
+	}
+
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", tableName))
+
+	for i, col := range t.Columns {
+		sb.WriteString("    ")
+		sb.WriteString(col.Name)
+		sb.WriteString(" ")
+
+		// Build type with length/precision
+		typeStr := col.DataType
+		if col.MaxLength > 0 {
+			typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.MaxLength)
+		} else if col.MaxLength == -1 {
+			typeStr = fmt.Sprintf("%s(MAX)", col.DataType)
+		} else if col.Precision > 0 {
+			if col.Scale > 0 {
+				typeStr = fmt.Sprintf("%s(%d,%d)", col.DataType, col.Precision, col.Scale)
+			} else {
+				typeStr = fmt.Sprintf("%s(%d)", col.DataType, col.Precision)
+			}
+		}
+		sb.WriteString(typeStr)
+
+		// NULL constraint
+		if !col.IsNullable {
+			sb.WriteString(" NOT NULL")
+		}
+
+		// Identity
+		if col.IsIdentity {
+			switch sourceDBType {
+			case "postgres":
+				sb.WriteString(" GENERATED BY DEFAULT AS IDENTITY")
+			case "mssql":
+				sb.WriteString(" IDENTITY")
+			case "mysql":
+				sb.WriteString(" AUTO_INCREMENT")
+			}
+		}
+
+		if i < len(t.Columns)-1 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("\n")
+	}
+
+	// Primary key
+	if len(t.PrimaryKey) > 0 {
+		sb.WriteString(fmt.Sprintf("    ,PRIMARY KEY (%s)\n", strings.Join(t.PrimaryKey, ", ")))
+	}
+
+	sb.WriteString(");")
+
+	return sb.String()
+}
+
+// parseTableDDLResponse extracts the DDL and column types from AI response.
+func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
+	// Clean up the response
+	ddl := strings.TrimSpace(response)
+
+	// Remove markdown code blocks if present
+	ddl = strings.TrimPrefix(ddl, "```sql")
+	ddl = strings.TrimPrefix(ddl, "```")
+	ddl = strings.TrimSuffix(ddl, "```")
+	ddl = strings.TrimSpace(ddl)
+
+	// Basic validation - should start with CREATE TABLE
+	upperDDL := strings.ToUpper(ddl)
+	if !strings.HasPrefix(upperDDL, "CREATE TABLE") {
+		return nil, fmt.Errorf("response does not contain valid CREATE TABLE statement: %s", truncateString(ddl, 100))
+	}
+
+	// Extract column types from DDL for reference
+	columnTypes := m.extractColumnTypesFromDDL(ddl, sourceTable)
+
+	return &TableDDLResponse{
+		CreateTableDDL: ddl,
+		ColumnTypes:    columnTypes,
+		Notes:          "",
+	}, nil
+}
+
+// parseTableDDLFromCache creates a response from cached DDL.
+func (m *AITypeMapper) parseTableDDLFromCache(cachedDDL string, sourceTable *Table) (*TableDDLResponse, error) {
+	columnTypes := m.extractColumnTypesFromDDL(cachedDDL, sourceTable)
+
+	return &TableDDLResponse{
+		CreateTableDDL: cachedDDL,
+		ColumnTypes:    columnTypes,
+		Notes:          "(from cache)",
+	}, nil
+}
+
+// extractColumnTypesFromDDL attempts to extract column name -> type mappings from DDL.
+// This is best-effort for logging/debugging purposes.
+func (m *AITypeMapper) extractColumnTypesFromDDL(ddl string, sourceTable *Table) map[string]string {
+	columnTypes := make(map[string]string)
+
+	// Simple extraction: look for each source column name in the DDL
+	for _, col := range sourceTable.Columns {
+		// Look for patterns like: column_name TYPE or "column_name" TYPE
+		patterns := []string{
+			col.Name + " ",
+			col.Name + "\t",
+			`"` + col.Name + `" `,
+			`"` + col.Name + `"	`,
+			strings.ToUpper(col.Name) + " ",
+			strings.ToLower(col.Name) + " ",
+		}
+
+		for _, pattern := range patterns {
+			idx := strings.Index(ddl, pattern)
+			if idx >= 0 {
+				// Extract the type after the column name
+				start := idx + len(pattern)
+				rest := ddl[start:]
+
+				// Find end of type (comma, newline, or closing paren)
+				end := strings.IndexAny(rest, ",\n)")
+				if end > 0 {
+					typeStr := strings.TrimSpace(rest[:end])
+					// Remove NOT NULL, NULL, etc.
+					typeStr = strings.Split(typeStr, " NOT ")[0]
+					typeStr = strings.Split(typeStr, " NULL")[0]
+					typeStr = strings.Split(typeStr, " DEFAULT")[0]
+					typeStr = strings.TrimSpace(typeStr)
+					if typeStr != "" {
+						columnTypes[col.Name] = typeStr
+					}
+				}
+				break
+			}
+		}
+	}
+
+	return columnTypes
+}
+
+// truncateString truncates a string to maxLen and adds "..." if truncated.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
