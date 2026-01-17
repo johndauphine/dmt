@@ -870,3 +870,387 @@ func TestIsRetryableError_EOF(t *testing.T) {
 		})
 	}
 }
+
+// Tests for finalization DDL generation
+
+func TestGenerateFinalizationDDL_Validation(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		req         FinalizationDDLRequest
+		expectError string
+	}{
+		{
+			name:        "missing table",
+			req:         FinalizationDDLRequest{TargetDBType: "postgres", Type: DDLTypeIndex},
+			expectError: "Table is required",
+		},
+		{
+			name:        "missing target DB type",
+			req:         FinalizationDDLRequest{Table: &Table{Name: "users"}, Type: DDLTypeIndex},
+			expectError: "TargetDBType is required",
+		},
+		{
+			name: "missing index for DDLTypeIndex",
+			req: FinalizationDDLRequest{
+				Table:        &Table{Name: "users"},
+				TargetDBType: "postgres",
+				Type:         DDLTypeIndex,
+			},
+			expectError: "Index is required for DDLTypeIndex",
+		},
+		{
+			name: "missing foreign key for DDLTypeForeignKey",
+			req: FinalizationDDLRequest{
+				Table:        &Table{Name: "users"},
+				TargetDBType: "postgres",
+				Type:         DDLTypeForeignKey,
+			},
+			expectError: "ForeignKey is required for DDLTypeForeignKey",
+		},
+		{
+			name: "missing check constraint for DDLTypeCheckConstraint",
+			req: FinalizationDDLRequest{
+				Table:        &Table{Name: "users"},
+				TargetDBType: "postgres",
+				Type:         DDLTypeCheckConstraint,
+			},
+			expectError: "CheckConstraint is required for DDLTypeCheckConstraint",
+		},
+		{
+			name: "unknown DDL type",
+			req: FinalizationDDLRequest{
+				Table:        &Table{Name: "users"},
+				TargetDBType: "postgres",
+				Type:         DDLType("unknown"),
+			},
+			expectError: "unknown DDL type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := mapper.GenerateFinalizationDDL(ctx, tt.req)
+			if err == nil {
+				t.Errorf("expected error containing %q, got nil", tt.expectError)
+				return
+			}
+			if !strings.Contains(err.Error(), tt.expectError) {
+				t.Errorf("expected error containing %q, got %q", tt.expectError, err.Error())
+			}
+		})
+	}
+}
+
+func TestBuildIndexDDLPrompt(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := FinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		Table:        &Table{Name: "users"},
+		Index: &Index{
+			Name:        "idx_users_email",
+			Columns:     []string{"email", "created_at"},
+			IsUnique:    true,
+			IncludeCols: []string{"first_name", "last_name"},
+			Filter:      "deleted_at IS NULL",
+		},
+		TargetSchema: "public",
+		TargetContext: &DatabaseContext{
+			MaxIdentifierLength: 63,
+			IdentifierCase:      "lower",
+		},
+	}
+
+	prompt := mapper.buildIndexDDLPrompt(req)
+
+	// Verify prompt contains key elements
+	checks := []string{
+		"CREATE INDEX",
+		"postgres",
+		"public",
+		"users",
+		"idx_users_email",
+		"email, created_at",
+		"Is Unique: true",
+		"Include Columns: first_name, last_name",
+		"Filter (WHERE clause): deleted_at IS NULL",
+		"Max Identifier Length: 63",
+		"Identifier Case: lower",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("prompt should contain %q", check)
+		}
+	}
+}
+
+func TestBuildIndexDDLPrompt_Minimal(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := FinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		TargetDBType: "mysql",
+		Table:        &Table{Name: "orders"},
+		Index: &Index{
+			Name:     "idx_orders_status",
+			Columns:  []string{"status"},
+			IsUnique: false,
+		},
+	}
+
+	prompt := mapper.buildIndexDDLPrompt(req)
+
+	// Verify minimal prompt works
+	if !strings.Contains(prompt, "CREATE INDEX") {
+		t.Error("prompt should contain CREATE INDEX")
+	}
+	if !strings.Contains(prompt, "mysql") {
+		t.Error("prompt should contain target DB type")
+	}
+	if !strings.Contains(prompt, "orders") {
+		t.Error("prompt should contain table name")
+	}
+	if !strings.Contains(prompt, "idx_orders_status") {
+		t.Error("prompt should contain index name")
+	}
+	if !strings.Contains(prompt, "Is Unique: false") {
+		t.Error("prompt should contain IsUnique value")
+	}
+
+	// Should not contain optional fields when not provided
+	if strings.Contains(prompt, "Include Columns:") {
+		t.Error("prompt should not contain Include Columns when not provided")
+	}
+	if strings.Contains(prompt, "Filter (WHERE clause):") {
+		t.Error("prompt should not contain Filter when not provided")
+	}
+}
+
+func TestBuildForeignKeyDDLPrompt(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := FinalizationDDLRequest{
+		Type:         DDLTypeForeignKey,
+		SourceDBType: "mssql",
+		TargetDBType: "oracle",
+		Table:        &Table{Name: "orders"},
+		ForeignKey: &ForeignKey{
+			Name:       "fk_orders_user",
+			Columns:    []string{"user_id"},
+			RefSchema:  "auth",
+			RefTable:   "users",
+			RefColumns: []string{"id"},
+			OnDelete:   "CASCADE",
+			OnUpdate:   "NO ACTION",
+		},
+		TargetSchema: "sales",
+		TargetContext: &DatabaseContext{
+			MaxIdentifierLength: 30,
+			IdentifierCase:      "upper",
+		},
+	}
+
+	prompt := mapper.buildForeignKeyDDLPrompt(req)
+
+	// Verify prompt contains key elements
+	checks := []string{
+		"ALTER TABLE",
+		"foreign key",
+		"oracle",
+		"sales",
+		"orders",
+		"fk_orders_user",
+		"user_id",
+		"auth.users", // RefSchema.RefTable because RefSchema != TargetSchema
+		"id",
+		"ON DELETE: CASCADE",
+		"ON UPDATE: NO ACTION",
+		"Max Identifier Length: 30",
+		"Identifier Case: upper",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("prompt should contain %q", check)
+		}
+	}
+}
+
+func TestBuildForeignKeyDDLPrompt_SameSchema(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := FinalizationDDLRequest{
+		Type:         DDLTypeForeignKey,
+		TargetDBType: "postgres",
+		Table:        &Table{Name: "orders"},
+		ForeignKey: &ForeignKey{
+			Name:       "fk_orders_user",
+			Columns:    []string{"user_id"},
+			RefSchema:  "public",
+			RefTable:   "users",
+			RefColumns: []string{"id"},
+		},
+		TargetSchema: "public",
+	}
+
+	prompt := mapper.buildForeignKeyDDLPrompt(req)
+
+	// When RefSchema == TargetSchema, should just show table name
+	if strings.Contains(prompt, "public.users") {
+		t.Error("prompt should not include schema prefix when RefSchema == TargetSchema")
+	}
+	if !strings.Contains(prompt, "References Table: users") {
+		t.Error("prompt should contain References Table: users")
+	}
+}
+
+func TestBuildCheckConstraintDDLPrompt(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := FinalizationDDLRequest{
+		Type:         DDLTypeCheckConstraint,
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		Table:        &Table{Name: "products"},
+		CheckConstraint: &CheckConstraint{
+			Name:       "chk_products_price",
+			Definition: "(price > 0 AND price < 1000000)",
+		},
+		TargetSchema: "inventory",
+		TargetContext: &DatabaseContext{
+			MaxIdentifierLength: 63,
+			IdentifierCase:      "lower",
+		},
+	}
+
+	prompt := mapper.buildCheckConstraintDDLPrompt(req)
+
+	// Verify prompt contains key elements
+	checks := []string{
+		"ALTER TABLE",
+		"check constraint",
+		"SOURCE DATABASE",
+		"mssql",
+		"TARGET DATABASE",
+		"postgres",
+		"inventory",
+		"products",
+		"chk_products_price",
+		"(price > 0 AND price < 1000000)",
+		"Max Identifier Length: 63",
+		"Identifier Case: lower",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("prompt should contain %q", check)
+		}
+	}
+}
+
+func TestBuildCheckConstraintDDLPrompt_NoSourceDB(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := FinalizationDDLRequest{
+		Type:         DDLTypeCheckConstraint,
+		TargetDBType: "mysql",
+		Table:        &Table{Name: "users"},
+		CheckConstraint: &CheckConstraint{
+			Name:       "chk_users_age",
+			Definition: "(age >= 0)",
+		},
+	}
+
+	prompt := mapper.buildCheckConstraintDDLPrompt(req)
+
+	// When SourceDBType is empty, should not include source database section
+	if strings.Contains(prompt, "SOURCE DATABASE") {
+		t.Error("prompt should not contain SOURCE DATABASE when SourceDBType is empty")
+	}
+	if !strings.Contains(prompt, "TARGET DATABASE") {
+		t.Error("prompt should contain TARGET DATABASE")
+	}
+}
+
+func TestCleanDDLResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "plain DDL",
+			input:    "CREATE INDEX idx_test ON users (email)",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
+		{
+			name:     "DDL with whitespace",
+			input:    "  CREATE INDEX idx_test ON users (email)  \n",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
+		{
+			name:     "DDL with sql markdown",
+			input:    "```sql\nCREATE INDEX idx_test ON users (email)\n```",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
+		{
+			name:     "DDL with SQL uppercase markdown",
+			input:    "```SQL\nCREATE INDEX idx_test ON users (email)\n```",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
+		{
+			name:     "DDL with plain markdown",
+			input:    "```\nCREATE INDEX idx_test ON users (email)\n```",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
+		{
+			name:     "DDL with leading/trailing markdown and whitespace",
+			input:    "  ```sql\n  CREATE INDEX idx_test ON users (email)  \n```  ",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
+		{
+			name:     "multiline DDL",
+			input:    "```sql\nALTER TABLE orders\nADD CONSTRAINT fk_orders_user\nFOREIGN KEY (user_id) REFERENCES users(id)\n```",
+			expected: "ALTER TABLE orders\nADD CONSTRAINT fk_orders_user\nFOREIGN KEY (user_id) REFERENCES users(id)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := cleanDDLResponse(tt.input)
+			if result != tt.expected {
+				t.Errorf("cleanDDLResponse(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTruncateString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{"empty string", "", 10, ""},
+		{"short string", "hello", 10, "hello"},
+		{"exact length", "hello", 5, "hello"},
+		{"needs truncation", "hello world", 8, "hello wo..."},
+		{"zero max length", "hello", 0, "..."},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := truncateString(tt.input, tt.maxLen)
+			if result != tt.expected {
+				t.Errorf("truncateString(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
+			}
+		})
+	}
+}
