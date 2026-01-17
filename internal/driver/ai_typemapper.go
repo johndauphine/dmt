@@ -164,28 +164,11 @@ func NewAITypeMapperFromSecrets() (*AITypeMapper, error) {
 // This method is safe to call concurrently - it uses in-flight request tracking
 // to avoid duplicate API calls for the same type.
 // Note: For table-level DDL generation, use GenerateTableDDL instead.
-// Deprecated: This method is deprecated. Use MapTypeWithError or GenerateTableDDL instead.
-// On error, this method logs a warning and returns a basic fallback type to avoid crashes.
+// This method panics on error - use MapTypeWithError for error handling.
 func (m *AITypeMapper) MapType(info TypeInfo) string {
 	result, err := m.MapTypeWithError(info)
 	if err != nil {
-		// Log error but return a basic fallback to avoid production crashes
-		// Callers should migrate to MapTypeWithError or GenerateTableDDL for proper error handling
-		logging.Warn("AI type mapping failed for %s.%s: %v (use GenerateTableDDL for table-level mapping)",
-			info.SourceDBType, info.DataType, err)
-		// Return a basic fallback based on target database
-		switch info.TargetDBType {
-		case "oracle":
-			return "VARCHAR2(4000)"
-		case "mysql":
-			return "VARCHAR(255)"
-		case "postgres":
-			return "TEXT"
-		case "mssql":
-			return "NVARCHAR(MAX)"
-		default:
-			return "VARCHAR(255)"
-		}
+		panic(fmt.Sprintf("AI type mapping failed for %s.%s: %v", info.SourceDBType, info.DataType, err))
 	}
 	return result
 }
