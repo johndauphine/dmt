@@ -1197,8 +1197,8 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 	// Build a deterministic representation of the table structure
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("table:%s:%s:%s.%s:",
-		req.SourceDBType, req.TargetDBType, req.SourceTable.Schema, req.SourceTable.Name))
+	sb.WriteString(fmt.Sprintf("table:%s:%s:%s:%s.%s:",
+		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name))
 
 	for _, col := range req.SourceTable.Columns {
 		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v;",
