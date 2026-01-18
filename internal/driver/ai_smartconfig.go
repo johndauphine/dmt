@@ -32,10 +32,10 @@ type SmartConfigSuggestions struct {
 	LargeTableThreshold int64 // Row count threshold for partitioning
 
 	// Database statistics
-	TotalTables    int   // Number of tables analyzed
-	TotalRows      int64 // Total rows across all tables
+	TotalTables     int   // Number of tables analyzed
+	TotalRows       int64 // Total rows across all tables
 	AvgRowSizeBytes int64 // Average row size in bytes
-	EstimatedMemMB int64 // Estimated memory usage with these settings
+	EstimatedMemMB  int64 // Estimated memory usage with these settings
 
 	// Warnings contains any issues detected during analysis
 	Warnings []string
@@ -51,8 +51,8 @@ type SmartConfigSuggestions struct {
 // AutoTuneInput contains system and database info for AI auto-tuning.
 type AutoTuneInput struct {
 	// System info
-	CPUCores     int   `json:"cpu_cores"`
-	MemoryGB     int   `json:"memory_gb"`
+	CPUCores int `json:"cpu_cores"`
+	MemoryGB int `json:"memory_gb"`
 
 	// Database info
 	DatabaseType string `json:"database_type"` // "mssql" or "postgres"
@@ -73,12 +73,12 @@ type TableStats struct {
 
 // AutoTuneOutput contains AI-recommended configuration values.
 type AutoTuneOutput struct {
-	Workers             int   `json:"workers"`
-	ChunkSize           int   `json:"chunk_size"`
-	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
-	MaxPartitions       int   `json:"max_partitions"`
-	LargeTableThreshold int64 `json:"large_table_threshold"`
-	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
+	Workers             int    `json:"workers"`
+	ChunkSize           int    `json:"chunk_size"`
+	ReadAheadBuffers    int    `json:"read_ahead_buffers"`
+	MaxPartitions       int    `json:"max_partitions"`
+	LargeTableThreshold int64  `json:"large_table_threshold"`
+	EstimatedMemoryMB   int64  `json:"estimated_memory_mb"`
 	Reasoning           string `json:"reasoning,omitempty"`
 }
 
@@ -376,8 +376,8 @@ func formatRowCount(count int64) string {
 
 // tableInfo holds basic table metadata.
 type tableInfo struct {
-	Name     string
-	RowCount int64
+	Name            string
+	RowCount        int64
 	AvgRowSizeBytes int64
 }
 

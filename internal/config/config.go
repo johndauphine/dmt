@@ -131,6 +131,7 @@ type AutoConfig struct {
 	OriginalWriteAheadWriters    int
 	OriginalParallelReaders      int
 	OriginalMSSQLRowsPerBatch    int
+	OriginalOracleBatchSize      int
 	OriginalLargeTableThresh     int64
 	OriginalSampleSize           int
 	OriginalUpsertMergeChunkSize int
@@ -354,6 +355,7 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalWriteAheadWriters = c.Migration.WriteAheadWriters
 	c.autoConfig.OriginalParallelReaders = c.Migration.ParallelReaders
 	c.autoConfig.OriginalMSSQLRowsPerBatch = c.Migration.MSSQLRowsPerBatch
+	c.autoConfig.OriginalOracleBatchSize = c.Migration.OracleBatchSize
 	c.autoConfig.OriginalLargeTableThresh = c.Migration.LargeTableThreshold
 	c.autoConfig.OriginalSampleSize = c.Migration.SampleSize
 	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
@@ -1132,6 +1134,10 @@ func (c *Config) DebugDump() string {
 	// MSSQLRowsPerBatch
 	batchExpl := "matches chunk_size"
 	b.WriteString(fmt.Sprintf("  MSSQLRowsPerBatch: %s\n", formatAutoValue(c.Migration.MSSQLRowsPerBatch, ac.OriginalMSSQLRowsPerBatch, batchExpl)))
+
+	// OracleBatchSize
+	oracleBatchExpl := "default 5000"
+	b.WriteString(fmt.Sprintf("  OracleBatchSize: %s\n", formatAutoValue(c.Migration.OracleBatchSize, ac.OriginalOracleBatchSize, oracleBatchExpl)))
 
 	// Other settings
 	b.WriteString(fmt.Sprintf("  TargetMode: %s\n", c.Migration.TargetMode))

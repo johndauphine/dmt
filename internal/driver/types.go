@@ -74,6 +74,10 @@ func (t *Table) SupportsKeysetPagination() bool {
 	if pkType == "int4" || pkType == "int8" || pkType == "int2" {
 		return true
 	}
+	// Oracle types - NUMBER with scale 0 is integer
+	if pkType == "number" && t.PKColumns[0].Scale == 0 {
+		return true
+	}
 	return false
 }
 
@@ -109,7 +113,7 @@ type Column struct {
 	IsNullable   bool     `json:"is_nullable"`
 	IsIdentity   bool     `json:"is_identity"`
 	OrdinalPos   int      `json:"ordinal_position"`
-	SRID         int      `json:"srid,omitempty"`         // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	SRID         int      `json:"srid,omitempty"`          // Spatial Reference ID for geography/geometry columns (0 = default/unset)
 	SampleValues []string `json:"sample_values,omitempty"` // Sample data values for AI type mapping context
 }
 
