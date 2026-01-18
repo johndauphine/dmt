@@ -559,7 +559,9 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 		return nil
 	}
 
-	w.resetExplicitSequence(ctx, schemaName, seqName.String, nextVal)
+	if w.resetExplicitSequence(ctx, schemaName, seqName.String, nextVal) {
+		logging.Debug("Reset identity sequence %s to %d", seqName.String, nextVal)
+	}
 	return nil
 }
 
@@ -600,12 +602,20 @@ func (w *Writer) resetExplicitSequence(ctx context.Context, schema, seqName stri
 		return true // Already at correct value
 	}
 
-	// Temporarily change INCREMENT BY, get NEXTVAL, then restore
+	// Temporarily change INCREMENT BY, get NEXTVAL, then restore.
+	// Note: increment can be negative if target value is less than current value.
+	// Oracle supports negative INCREMENT BY values for sequences.
 	if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY %d", qualifiedSeq, increment)); err != nil {
 		logging.Warn("Failed to alter sequence %s increment: %v", seqName, err)
 		return true
 	}
-	w.db.QueryRowContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)).Scan(&currVal)
+
+	var newVal int64
+	if err := w.db.QueryRowContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)).Scan(&newVal); err != nil {
+		logging.Warn("Failed to advance sequence %s: %v", seqName, err)
+		// Still try to restore INCREMENT BY 1
+	}
+
 	if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq)); err != nil {
 		logging.Warn("Failed to restore sequence %s increment: %v", seqName, err)
 	}
