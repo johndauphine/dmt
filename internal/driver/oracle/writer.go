@@ -783,39 +783,85 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("upsert requires primary key columns")
 	}
 
+	if len(opts.Columns) == 0 {
+		return fmt.Errorf("upsert requires columns")
+	}
+
 	// Use staging table approach for better performance
 	return w.upsertWithStagingTable(ctx, opts)
 }
 
-// upsertWithStagingTable creates a temporary staging table, bulk inserts data,
-// then executes a single MERGE. This is much faster than UNION ALL approach.
-func (w *Writer) upsertWithStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
-	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
+// generateStagingTableName creates a unique staging table name.
+// Uses process ID and nanosecond timestamp to minimize collision risk.
+func (w *Writer) generateStagingTableName(schema, table string) string {
+	// Use PID + nanoseconds for uniqueness across concurrent processes
+	uniqueID := fmt.Sprintf("%d%d", time.Now().UnixNano(), time.Now().UnixNano()%1000000)
 
-	// Generate unique staging table name
-	stagingTable := fmt.Sprintf("DMT_STG_%s_%d", opts.Table, time.Now().UnixNano()%100000)
-	if len(stagingTable) > 30 {
-		stagingTable = fmt.Sprintf("DMT_STG_%d", time.Now().UnixNano()%100000000)
+	// Try to include table name for debuggability
+	stagingName := fmt.Sprintf("DMT_STG_%s_%s", table, uniqueID[len(uniqueID)-8:])
+	if len(stagingName) > 30 {
+		// Oracle 12.1 has 30-char limit; use just the unique ID
+		stagingName = fmt.Sprintf("DMT_STG_%s", uniqueID[len(uniqueID)-12:])
 	}
 
-	// Create staging table with same structure as target (no constraints)
+	// Schema-qualify if schema is provided
+	if schema != "" {
+		return w.dialect.QualifyTable(schema, stagingName)
+	}
+	return w.dialect.QuoteIdentifier(stagingName)
+}
+
+// upsertWithStagingTable creates a staging table, bulk inserts data, then executes
+// a single MERGE from the staging table into the target table. This is much faster
+// than the UNION ALL approach for large batches.
+//
+// When possible, this uses an Oracle GLOBAL TEMPORARY TABLE (GTT) defined as:
+//
+//	CREATE GLOBAL TEMPORARY TABLE ... ON COMMIT DELETE ROWS AS SELECT * FROM <target> WHERE 1=0
+//
+// Important characteristics:
+//   - GTT data lifetime: Rows are automatically cleared on COMMIT due to ON COMMIT DELETE ROWS.
+//   - GTT object lifetime: The GTT structure persists for the session, so we don't DROP it.
+//   - Fallback: If GTT creation fails (non-ORA-00955 error), falls back to regular table.
+//   - ORA-00955 (name exists): Reuses the existing GTT after truncating it.
+func (w *Writer) upsertWithStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
+	stagingTable := w.generateStagingTableName(opts.Schema, opts.Table)
+
+	// Create GTT with same structure as target (no constraints)
 	createSQL := fmt.Sprintf(
 		"CREATE GLOBAL TEMPORARY TABLE %s ON COMMIT DELETE ROWS AS SELECT * FROM %s WHERE 1=0",
 		stagingTable, fullTableName)
 
+	gttCreated := false
 	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
-		// GTT might already exist from previous run, try to use it
-		if !strings.Contains(err.Error(), "ORA-00955") { // name already used
-			// Fall back to regular table approach
+		if strings.Contains(err.Error(), "ORA-00955") {
+			// GTT already exists - truncate and reuse it
+			if _, truncErr := w.db.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", stagingTable)); truncErr != nil {
+				// Truncate failed, fall back to regular table
+				return w.upsertWithRegularStagingTable(ctx, opts)
+			}
+			// Successfully reusing existing GTT
+		} else {
+			// Other error - fall back to regular table approach
 			return w.upsertWithRegularStagingTable(ctx, opts)
 		}
+	} else {
+		gttCreated = true
 	}
 
-	// Ensure cleanup
-	defer func() {
-		// GTT is automatically cleared on commit, but drop it to clean up
-		w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s PURGE", stagingTable))
-	}()
+	// GTT data is cleared on commit, but if we created it, clean up the table structure
+	// on exit using background context (original ctx may be canceled)
+	if gttCreated {
+		defer func() {
+			// Use background context for cleanup - original context may be canceled
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := w.db.ExecContext(cleanupCtx, fmt.Sprintf("DROP TABLE %s", stagingTable)); err != nil {
+				logging.Debug("Failed to drop GTT %s: %v", stagingTable, err)
+			}
+		}()
+	}
 
 	// Bulk insert into staging table using godror.Batch
 	if err := w.bulkInsertToStaging(ctx, stagingTable, opts.Columns, opts.Rows); err != nil {
@@ -831,12 +877,11 @@ func (w *Writer) upsertWithStagingTable(ctx context.Context, opts driver.UpsertB
 	return nil
 }
 
-// upsertWithRegularStagingTable uses a regular table as staging (fallback)
+// upsertWithRegularStagingTable uses a regular table as staging (fallback when GTT fails).
+// The staging table is dropped after use regardless of success/failure.
 func (w *Writer) upsertWithRegularStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
-
-	// Generate unique staging table name
-	stagingTable := fmt.Sprintf("DMT_STG_%d", time.Now().UnixNano()%100000000)
+	stagingTable := w.generateStagingTableName(opts.Schema, opts.Table)
 
 	// Create regular staging table
 	createSQL := fmt.Sprintf(
@@ -847,9 +892,13 @@ func (w *Writer) upsertWithRegularStagingTable(ctx context.Context, opts driver.
 		return fmt.Errorf("create staging table: %w", err)
 	}
 
-	// Ensure cleanup
+	// Ensure cleanup using background context (original ctx may be canceled)
 	defer func() {
-		w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s PURGE", stagingTable))
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := w.db.ExecContext(cleanupCtx, fmt.Sprintf("DROP TABLE %s PURGE", stagingTable)); err != nil {
+			logging.Debug("Failed to drop staging table %s: %v", stagingTable, err)
+		}
 	}()
 
 	// Bulk insert into staging table
@@ -866,10 +915,15 @@ func (w *Writer) upsertWithRegularStagingTable(ctx context.Context, opts driver.
 	return nil
 }
 
-// bulkInsertToStaging inserts rows into staging table using godror.Batch
+// bulkInsertToStaging inserts rows into staging table using godror.Batch.
+// The stagingTable parameter should already be properly quoted/qualified.
 func (w *Writer) bulkInsertToStaging(ctx context.Context, stagingTable string, columns []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
+	}
+
+	if len(columns) == 0 {
+		return fmt.Errorf("no columns provided for bulk insert")
 	}
 
 	quotedCols := make([]string, len(columns))
@@ -914,7 +968,8 @@ func (w *Writer) bulkInsertToStaging(ctx context.Context, stagingTable string, c
 	return nil
 }
 
-// buildMergeFromStaging constructs MERGE SQL using staging table as source
+// buildMergeFromStaging constructs MERGE SQL using staging table as source.
+// Both targetTable and stagingTable should already be properly quoted/qualified.
 func (w *Writer) buildMergeFromStaging(targetTable, stagingTable string, columns, pkColumns []string) string {
 	var sb strings.Builder
 

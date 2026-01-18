@@ -244,24 +244,24 @@ func (m *mockAIQuerier) Query(ctx context.Context, prompt string) (string, error
 // TestGenerateInterrogationSQL tests SQL query generation parsing
 func TestGenerateInterrogationSQL(t *testing.T) {
 	tests := []struct {
-		name         string
-		aiResponse   string
-		wantQueries  int
-		wantErr      bool
-		expectedSQL  []string
+		name        string
+		aiResponse  string
+		wantQueries int
+		wantErr     bool
+		expectedSQL []string
 	}{
 		{
-			name: "json array format",
-			aiResponse: `["SELECT * FROM pg_settings", "SHOW VARIABLES"]`,
+			name:        "json array format",
+			aiResponse:  `["SELECT * FROM pg_settings", "SHOW VARIABLES"]`,
 			wantQueries: 2,
-			wantErr: false,
+			wantErr:     false,
 			expectedSQL: []string{"SELECT * FROM pg_settings", "SHOW VARIABLES"},
 		},
 		{
-			name: "json array with markdown fences",
-			aiResponse: "```json\n[\"SELECT name, setting FROM pg_settings\", \"SHOW STATUS\"]\n```",
+			name:        "json array with markdown fences",
+			aiResponse:  "```json\n[\"SELECT name, setting FROM pg_settings\", \"SHOW STATUS\"]\n```",
 			wantQueries: 2,
-			wantErr: false,
+			wantErr:     false,
 			expectedSQL: []string{"SELECT name, setting FROM pg_settings", "SHOW STATUS"},
 		},
 		{
@@ -270,7 +270,7 @@ func TestGenerateInterrogationSQL(t *testing.T) {
 SHOW VARIABLES
 SELECT @@version`,
 			wantQueries: 3,
-			wantErr: false,
+			wantErr:     false,
 			expectedSQL: []string{"SELECT * FROM pg_settings", "SHOW VARIABLES", "SELECT @@version"},
 		},
 		{
@@ -280,20 +280,20 @@ SELECT * FROM pg_settings
 # MySQL queries
 SHOW VARIABLES`,
 			wantQueries: 2,
-			wantErr: false,
+			wantErr:     false,
 			expectedSQL: []string{"SELECT * FROM pg_settings", "SHOW VARIABLES"},
 		},
 		{
-			name: "empty response",
-			aiResponse: "",
+			name:        "empty response",
+			aiResponse:  "",
 			wantQueries: 0,
-			wantErr: true,
+			wantErr:     true,
 		},
 		{
-			name: "no valid SQL",
-			aiResponse: "This is just explanatory text with no SQL queries",
+			name:        "no valid SQL",
+			aiResponse:  "This is just explanatory text with no SQL queries",
 			wantQueries: 0,
-			wantErr: true,
+			wantErr:     true,
 		},
 	}
 

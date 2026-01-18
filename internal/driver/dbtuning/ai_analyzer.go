@@ -149,8 +149,8 @@ Example:
 			// Look for SQL-like statements
 			upperLine := strings.ToUpper(line)
 			if strings.HasPrefix(upperLine, "SELECT") ||
-			   strings.HasPrefix(upperLine, "SHOW") ||
-			   strings.HasPrefix(upperLine, "EXEC") {
+				strings.HasPrefix(upperLine, "SHOW") ||
+				strings.HasPrefix(upperLine, "EXEC") {
 				queries = append(queries, line)
 			}
 		}
@@ -392,9 +392,9 @@ Return ONLY the JSON object, no other text.`, dbType, role, stats.TotalTables, s
 	}
 
 	type AIResponse struct {
-		Recommendations  []AIRecommendation `json:"recommendations"`
-		TuningPotential  string             `json:"tuning_potential"`
-		EstimatedImpact  string             `json:"estimated_impact"`
+		Recommendations []AIRecommendation `json:"recommendations"`
+		TuningPotential string             `json:"tuning_potential"`
+		EstimatedImpact string             `json:"estimated_impact"`
 	}
 
 	// Strip markdown code fences if present

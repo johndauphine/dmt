@@ -113,7 +113,7 @@ type Column struct {
 	IsNullable   bool     `json:"is_nullable"`
 	IsIdentity   bool     `json:"is_identity"`
 	OrdinalPos   int      `json:"ordinal_position"`
-	SRID         int      `json:"srid,omitempty"`         // Spatial Reference ID for geography/geometry columns (0 = default/unset)
+	SRID         int      `json:"srid,omitempty"`          // Spatial Reference ID for geography/geometry columns (0 = default/unset)
 	SampleValues []string `json:"sample_values,omitempty"` // Sample data values for AI type mapping context
 }
 

@@ -16,8 +16,8 @@ type SchemaStatistics struct {
 
 // TableInfo contains information about a specific table.
 type TableInfo struct {
-	Name     string
-	Rows     int64
+	Name      string
+	Rows      int64
 	SizeBytes int64
 }
 
