@@ -42,6 +42,11 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone 
 		return nil
 	}
 
+	// Provide a default function if nil to avoid panics
+	if checkpointFreqFn == nil {
+		checkpointFreqFn = func() int { return 10 }
+	}
+
 	var partID *int
 	rowsTotal := job.Table.RowCount
 	if job.Partition != nil {

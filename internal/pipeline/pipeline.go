@@ -721,6 +721,9 @@ func (p *Pipeline) executeRowNumberPagination(
 				completedChunks++
 				// Read checkpoint frequency dynamically to allow mid-migration tuning
 				checkpointFreq := p.GetConfig().CheckpointFrequency
+				if checkpointFreq <= 0 {
+					checkpointFreq = 10 // Fallback to default to avoid division by zero
+				}
 				if completedChunks%checkpointFreq == 0 {
 					rowsDone := resumeRowsDone + wp.written()
 					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
