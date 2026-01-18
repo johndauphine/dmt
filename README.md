@@ -663,21 +663,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/dmt/releases/lat
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-linux-amd64.tar.gz
-tar -xzf dmt-v3.52.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-linux-amd64.tar.gz
+tar -xzf dmt-v3.53.0-linux-amd64.tar.gz
 chmod +x dmt-linux-amd64
 ./dmt-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-darwin-arm64.tar.gz
-tar -xzf dmt-v3.52.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-darwin-arm64.tar.gz
+tar -xzf dmt-v3.53.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-darwin-amd64.tar.gz
-tar -xzf dmt-v3.52.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-darwin-amd64.tar.gz
+tar -xzf dmt-v3.53.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-windows-amd64.tar.gz -OutFile dmt.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-windows-amd64.tar.gz -OutFile dmt.tar.gz
 tar -xzf dmt.tar.gz
 ```
 
