@@ -772,7 +772,8 @@ func (w *Writer) insertBatchRowByRow(ctx context.Context, tableName, colList str
 	return tx.Commit()
 }
 
-// UpsertBatch performs upsert using MERGE statement.
+// UpsertBatch performs upsert using MERGE with staging table for performance.
+// Uses bulk insert into staging table followed by a single MERGE statement.
 func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
 	if len(opts.Rows) == 0 {
 		return nil
@@ -782,61 +783,143 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("upsert requires primary key columns")
 	}
 
-	// Process in batches
-	batchSize := w.oracleBatchSize
-	if batchSize <= 0 {
-		batchSize = 200 // Smaller for MERGE complexity
+	// Use staging table approach for better performance
+	return w.upsertWithStagingTable(ctx, opts)
+}
+
+// upsertWithStagingTable creates a temporary staging table, bulk inserts data,
+// then executes a single MERGE. This is much faster than UNION ALL approach.
+func (w *Writer) upsertWithStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
+
+	// Generate unique staging table name
+	stagingTable := fmt.Sprintf("DMT_STG_%s_%d", opts.Table, time.Now().UnixNano()%100000)
+	if len(stagingTable) > 30 {
+		stagingTable = fmt.Sprintf("DMT_STG_%d", time.Now().UnixNano()%100000000)
 	}
 
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
-		}
-		batch := opts.Rows[start:end]
+	// Create staging table with same structure as target (no constraints)
+	createSQL := fmt.Sprintf(
+		"CREATE GLOBAL TEMPORARY TABLE %s ON COMMIT DELETE ROWS AS SELECT * FROM %s WHERE 1=0",
+		stagingTable, fullTableName)
 
-		if err := w.mergeBatch(ctx, opts.Schema, opts.Table, opts.Columns, opts.PKColumns, batch); err != nil {
-			return err
+	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
+		// GTT might already exist from previous run, try to use it
+		if !strings.Contains(err.Error(), "ORA-00955") { // name already used
+			// Fall back to regular table approach
+			return w.upsertWithRegularStagingTable(ctx, opts)
 		}
+	}
+
+	// Ensure cleanup
+	defer func() {
+		// GTT is automatically cleared on commit, but drop it to clean up
+		w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s PURGE", stagingTable))
+	}()
+
+	// Bulk insert into staging table using godror.Batch
+	if err := w.bulkInsertToStaging(ctx, stagingTable, opts.Columns, opts.Rows); err != nil {
+		return fmt.Errorf("bulk insert to staging: %w", err)
+	}
+
+	// Execute MERGE from staging to target
+	mergeSQL := w.buildMergeFromStaging(fullTableName, stagingTable, opts.Columns, opts.PKColumns)
+	if _, err := w.db.ExecContext(ctx, mergeSQL); err != nil {
+		return fmt.Errorf("merge from staging: %w", err)
 	}
 
 	return nil
 }
 
-func (w *Writer) mergeBatch(ctx context.Context, schema, table string, columns, pkColumns []string, rows [][]any) error {
+// upsertWithRegularStagingTable uses a regular table as staging (fallback)
+func (w *Writer) upsertWithRegularStagingTable(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
+
+	// Generate unique staging table name
+	stagingTable := fmt.Sprintf("DMT_STG_%d", time.Now().UnixNano()%100000000)
+
+	// Create regular staging table
+	createSQL := fmt.Sprintf(
+		"CREATE TABLE %s AS SELECT * FROM %s WHERE 1=0",
+		stagingTable, fullTableName)
+
+	if _, err := w.db.ExecContext(ctx, createSQL); err != nil {
+		return fmt.Errorf("create staging table: %w", err)
+	}
+
+	// Ensure cleanup
+	defer func() {
+		w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE %s PURGE", stagingTable))
+	}()
+
+	// Bulk insert into staging table
+	if err := w.bulkInsertToStaging(ctx, stagingTable, opts.Columns, opts.Rows); err != nil {
+		return fmt.Errorf("bulk insert to staging: %w", err)
+	}
+
+	// Execute MERGE from staging to target
+	mergeSQL := w.buildMergeFromStaging(fullTableName, stagingTable, opts.Columns, opts.PKColumns)
+	if _, err := w.db.ExecContext(ctx, mergeSQL); err != nil {
+		return fmt.Errorf("merge from staging: %w", err)
+	}
+
+	return nil
+}
+
+// bulkInsertToStaging inserts rows into staging table using godror.Batch
+func (w *Writer) bulkInsertToStaging(ctx context.Context, stagingTable string, columns []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	fullTableName := w.dialect.QualifyTable(schema, table)
+	quotedCols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCols[i] = w.dialect.QuoteIdentifier(col)
+	}
+	colList := strings.Join(quotedCols, ", ")
 
-	// Build MERGE statement
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("MERGE INTO %s tgt\n", fullTableName))
-	sb.WriteString("USING (\n")
+	placeholders := make([]string, len(columns))
+	for i := range columns {
+		placeholders[i] = fmt.Sprintf(":%d", i+1)
+	}
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		stagingTable, colList, strings.Join(placeholders, ", "))
 
-	// Build inline view with UNION ALL
-	paramIdx := 1
-	args := make([]any, 0, len(rows)*len(columns))
+	stmt, err := w.db.PrepareContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
 
-	for i, row := range rows {
-		if i > 0 {
-			sb.WriteString("    UNION ALL\n")
-		}
-
-		sb.WriteString("    SELECT ")
-		placeholders := make([]string, len(columns))
-		for j, col := range columns {
-			placeholders[j] = fmt.Sprintf(":%d AS %s", paramIdx, w.dialect.QuoteIdentifier(col))
-			paramIdx++
-		}
-		sb.WriteString(strings.Join(placeholders, ", "))
-		sb.WriteString(" FROM DUAL\n")
-
-		args = append(args, convertRowValues(row)...)
+	batchLimit := w.oracleBatchSize
+	if batchLimit <= 0 {
+		batchLimit = 5000
+	}
+	batch := &godror.Batch{
+		Stmt:  stmt,
+		Limit: batchLimit,
 	}
 
-	sb.WriteString(") src\n")
+	for _, row := range rows {
+		args := convertRowValues(row)
+		if err := batch.Add(ctx, args...); err != nil {
+			return fmt.Errorf("batch add: %w", err)
+		}
+	}
+
+	if err := batch.Flush(ctx); err != nil {
+		return fmt.Errorf("batch flush: %w", err)
+	}
+
+	return nil
+}
+
+// buildMergeFromStaging constructs MERGE SQL using staging table as source
+func (w *Writer) buildMergeFromStaging(targetTable, stagingTable string, columns, pkColumns []string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("MERGE INTO %s tgt\n", targetTable))
+	sb.WriteString(fmt.Sprintf("USING %s src\n", stagingTable))
 
 	// Build ON clause (match on PK columns)
 	onClauses := make([]string, len(pkColumns))
@@ -878,8 +961,7 @@ func (w *Writer) mergeBatch(ctx context.Context, schema, table string, columns, 
 	sb.WriteString(fmt.Sprintf("    INSERT (%s)\n", strings.Join(quotedCols, ", ")))
 	sb.WriteString(fmt.Sprintf("    VALUES (%s)", strings.Join(srcCols, ", ")))
 
-	_, err := w.db.ExecContext(ctx, sb.String(), args...)
-	return err
+	return sb.String()
 }
 
 func convertRowValues(row []any) []any {
