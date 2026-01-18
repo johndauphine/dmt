@@ -95,6 +95,39 @@ func TestErrorDiagnosis_Format_Structure(t *testing.T) {
 	}
 }
 
+func TestErrorDiagnosis_FormatBox(t *testing.T) {
+	diag := &ErrorDiagnosis{
+		Cause:       "Data type mismatch",
+		Suggestions: []string{"Fix 1", "Fix 2"},
+		Confidence:  "high",
+		Category:    "type_mismatch",
+	}
+
+	got := diag.FormatBox()
+
+	// Should contain box characters
+	if !strings.Contains(got, "┌") || !strings.Contains(got, "┐") {
+		t.Error("FormatBox() should contain top border characters")
+	}
+	if !strings.Contains(got, "└") || !strings.Contains(got, "┘") {
+		t.Error("FormatBox() should contain bottom border characters")
+	}
+	if !strings.Contains(got, "│") {
+		t.Error("FormatBox() should contain vertical border characters")
+	}
+
+	// Should contain content
+	if !strings.Contains(got, "AI Error Diagnosis") {
+		t.Error("FormatBox() should contain title")
+	}
+	if !strings.Contains(got, "Data type mismatch") {
+		t.Error("FormatBox() should contain cause")
+	}
+	if !strings.Contains(got, "Fix 1") || !strings.Contains(got, "Fix 2") {
+		t.Error("FormatBox() should contain suggestions")
+	}
+}
+
 func TestDiagnoseSchemaError_NoAI(t *testing.T) {
 	// Without AI configured, should return empty string
 	ctx := context.Background()

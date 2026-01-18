@@ -390,8 +390,8 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		return
 	}
 
-	// Log the diagnosis
-	logging.Warn("\n%s", diagnosis.Format())
+	// Log the diagnosis in a formatted box
+	logging.Warn("\n%s", diagnosis.FormatBox())
 }
 
 // collectFailures gathers and deduplicates table failures.
