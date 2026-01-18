@@ -288,9 +288,25 @@ func (c *Config) GetMasterKey() string {
 	return c.Encryption.MasterKey
 }
 
-// GetMigrationDefaults returns the global migration defaults
+// GetMigrationDefaults returns the global migration defaults with smart defaults applied.
+// AI adjust is enabled by default when an AI provider is configured.
 func (c *Config) GetMigrationDefaults() *MigrationDefaults {
-	return &c.MigrationDefaults
+	defaults := c.MigrationDefaults
+
+	// Apply smart defaults for AI adjust:
+	// If ai_adjust wasn't explicitly set (defaults to false in Go),
+	// enable it by default when an AI provider is configured
+	if !defaults.AIAdjust && defaults.AIAdjustInterval == "" {
+		// Neither ai_adjust nor ai_adjust_interval was set - apply default
+		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
+			if provider.APIKey != "" || provider.BaseURL != "" {
+				defaults.AIAdjust = true
+				defaults.AIAdjustInterval = "30s"
+			}
+		}
+	}
+
+	return &defaults
 }
 
 // GetEffectiveBaseURL returns the base URL for a provider, using defaults if not specified
