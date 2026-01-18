@@ -198,7 +198,7 @@ type MigrationConfig struct {
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment
-	AIAdjust bool   `yaml:"ai_adjust"`           // Enable AI-driven parameter adjustment during migration (default: false, auto-enabled if AI configured)
+	AIAdjust bool   `yaml:"ai_adjust"`           // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
 	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 }
 
@@ -723,10 +723,19 @@ func (c *Config) applyDefaults() {
 			enabled := true
 			c.AI.TypeMapping.Enabled = &enabled
 		}
+
+		// AI adjust: auto-enable when AI is configured
+		if !c.Migration.AIAdjust {
+			c.Migration.AIAdjust = true
+		}
+		if c.Migration.AIAdjustInterval == "" {
+			c.Migration.AIAdjustInterval = "30s"
+		}
 	}
 
-	// Slack notification: load webhook from secrets if not provided in config
-	if c.Slack.Enabled && c.Slack.WebhookURL == "" {
+	// Slack notification: auto-enable when webhook URL is configured
+	// Load webhook from secrets if not provided in config
+	if c.Slack.WebhookURL == "" {
 		secretsCfg, err := secrets.Load()
 		if err != nil {
 			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
@@ -736,6 +745,10 @@ func (c *Config) applyDefaults() {
 		} else if secretsCfg.Notifications.Slack.WebhookURL != "" {
 			c.Slack.WebhookURL = secretsCfg.Notifications.Slack.WebhookURL
 		}
+	}
+	// Auto-enable Slack notifications when webhook URL is available
+	if c.Slack.WebhookURL != "" && !c.Slack.Enabled {
+		c.Slack.Enabled = true
 	}
 }
 

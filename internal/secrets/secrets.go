@@ -57,9 +57,9 @@ type MigrationDefaults struct {
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days
 
-	// AI features
-	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment
-	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics
+	// AI features (enabled by default when AI provider is configured)
+	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment (default: true)
+	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 
 	// Data directory
 	DataDir string `yaml:"data_dir,omitempty"` // Directory for state/checkpoint files
@@ -431,8 +431,8 @@ migration_defaults:
   max_retries: 3                  # Retry failed tables N times
   history_retention_days: 30      # Keep run history for N days
 
-  # AI features
-  ai_adjust: false                # Enable AI-driven parameter adjustment
-  # ai_adjust_interval: "30s"     # How often AI evaluates metrics
+  # AI features (enabled by default when AI provider is configured)
+  ai_adjust: true                 # Enable AI-driven parameter adjustment
+  ai_adjust_interval: "30s"       # How often AI evaluates metrics
 `
 }

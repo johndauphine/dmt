@@ -1272,7 +1272,7 @@ slack:
 			expectedWebhook:   "",
 		},
 		{
-			name: "slack disabled - no webhook loading attempted",
+			name: "slack auto-enabled when webhook in secrets",
 			configYAML: `
 source:
   type: mssql
@@ -1298,7 +1298,7 @@ notifications:
     webhook_url: "https://hooks.slack.com/services/TEST/FROM/SECRETS"
 `,
 			createSecretsFile: true,
-			expectedWebhook:   "",
+			expectedWebhook:   "https://hooks.slack.com/services/TEST/FROM/SECRETS",
 		},
 	}
 
