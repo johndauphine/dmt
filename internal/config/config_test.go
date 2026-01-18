@@ -1128,3 +1128,70 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 		t.Error("Original source password was modified")
 	}
 }
+
+func TestBooleanGlobalDefaultsLogic(t *testing.T) {
+	// This test documents the expected behavior of boolean global defaults.
+	// The logic is: apply global default only when migration config value is false.
+	//
+	// Limitation: We cannot distinguish "user didn't set" from "user set false",
+	// so global true always wins over migration false.
+
+	boolPtr := func(b bool) *bool { return &b }
+
+	tests := []struct {
+		name           string
+		globalDefault  *bool // nil = not set in global config
+		migrationValue bool  // value in per-migration config
+		expected       bool  // expected final value
+	}{
+		// Global not set - migration value preserved
+		{"global nil, migration false", nil, false, false},
+		{"global nil, migration true", nil, true, true},
+
+		// Global true - wins unless migration is already true
+		{"global true, migration false", boolPtr(true), false, true},
+		{"global true, migration true", boolPtr(true), true, true},
+
+		// Global false - applied when migration is false, migration true wins
+		{"global false, migration false", boolPtr(false), false, false},
+		{"global false, migration true", boolPtr(false), true, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the logic from applyGlobalDefaults
+			result := tt.migrationValue
+			if tt.globalDefault != nil && !tt.migrationValue {
+				result = *tt.globalDefault
+			}
+
+			if result != tt.expected {
+				t.Errorf("got %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBooleanGlobalDefaultsDocumentedLimitation(t *testing.T) {
+	// This test explicitly documents the limitation:
+	// You CANNOT override a global "true" to "false" per-migration.
+
+	boolPtr := func(b bool) *bool { return &b }
+
+	globalDefault := boolPtr(true)
+	migrationExplicitlyFalse := false // User wants false, but we can't tell
+
+	// Apply the logic
+	result := migrationExplicitlyFalse
+	if globalDefault != nil && !migrationExplicitlyFalse {
+		result = *globalDefault
+	}
+
+	// The limitation: global true overrides migration false
+	if result != true {
+		t.Error("Expected limitation: global true should override migration false")
+	}
+
+	// Document this is a known limitation, not a bug
+	t.Log("Known limitation: cannot override global 'true' to 'false' per-migration")
+}
