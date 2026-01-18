@@ -529,6 +529,12 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 		return nil // No identity sequence found
 	}
 
+	// Skip system-generated sequences (ISEQ$$_*) - they cannot be altered (ORA-32793)
+	if strings.HasPrefix(seqName.String, "ISEQ$$_") {
+		logging.Debug("Skipping system-generated sequence %s (cannot be altered)", seqName.String)
+		return nil
+	}
+
 	// Get max value
 	var maxVal sql.NullInt64
 	err = w.db.QueryRowContext(ctx,
