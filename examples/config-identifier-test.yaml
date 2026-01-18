@@ -1,5 +1,7 @@
 # Configuration for testing identifier sanitization
 #
+# For AI features and Slack notifications, configure ~/.secrets/dmt-config.yaml
+#
 # This config migrates tables with problematic identifiers that require
 # PostgreSQL sanitization (spaces, special chars, mixed case, etc.)
 #

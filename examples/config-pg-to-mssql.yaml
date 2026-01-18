@@ -1,5 +1,7 @@
 # PostgreSQL to SQL Server migration with password authentication
 #
+# For AI features and Slack notifications, configure ~/.secrets/dmt-config.yaml
+#
 # Usage:
 #   export PG_PASSWORD="your-postgres-password"
 #   export MSSQL_PASSWORD="your-mssql-password"
