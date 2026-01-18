@@ -21,6 +21,7 @@ import (
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/target"
 )
@@ -266,8 +267,8 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		state = sqliteState
 	}
 
-	// Create notifier
-	notifier := notify.New(&cfg.Slack)
+	// Create notifier from global secrets
+	notifier := notify.NewFromSecrets()
 
 	// Create target mode strategy
 	targetModeStrategy := NewTargetModeStrategy(
@@ -356,7 +357,13 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Load additional metadata if enabled
-	aiMappingEnabled := o.config.AI != nil && o.config.AI.TypeMapping != nil && o.config.AI.TypeMapping.Enabled != nil && *o.config.AI.TypeMapping.Enabled
+	// Check if AI type mapping is enabled from global secrets
+	aiMappingEnabled := false
+	if secretsCfg, err := secrets.Load(); err == nil {
+		if provider, _, err := secretsCfg.GetDefaultProvider(); err == nil && provider != nil && provider.APIKey != "" {
+			aiMappingEnabled = true // AI is enabled if we have a valid provider with API key
+		}
+	}
 	for i := range tables {
 		t := &tables[i]
 

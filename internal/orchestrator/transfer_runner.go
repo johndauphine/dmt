@@ -17,6 +17,7 @@ import (
 	"github.com/johndauphine/dmt/internal/pipeline"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
@@ -104,22 +105,27 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		return nil, err
 	}
 
-	// Setup AI-driven monitoring if enabled
+	// Setup AI-driven monitoring if enabled (from global secrets)
 	var aiMonitor *monitor.AIMonitor
-	if r.config.Migration.AIAdjust {
+	aiAdjustEnabled := false
+	aiAdjustInterval := 30 * time.Second // Default
+	if secretsCfg, err := secrets.Load(); err == nil {
+		defaults := secretsCfg.GetMigrationDefaults()
+		aiAdjustEnabled = defaults.AIAdjust
+		if defaults.AIAdjustInterval != "" {
+			if d, err := time.ParseDuration(defaults.AIAdjustInterval); err == nil {
+				aiAdjustInterval = d
+			}
+		}
+	}
+	if aiAdjustEnabled {
 		typeMapper, err := driver.GetAITypeMapper()
 		if err == nil && typeMapper != nil {
 			// Type-assert to AITypeMapper
 			if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
 				// Create a placeholder pipeline for the monitor (it will be updated per-job)
 				p := pipeline.New(nil, nil, pipeline.Config{})
-				interval := 30 * time.Second // Default
-				if r.config.Migration.AIAdjustInterval != "" {
-					if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
-						interval = d
-					}
-				}
-				aiMonitor = monitor.NewAIMonitor(p, aiMapper, interval)
+				aiMonitor = monitor.NewAIMonitor(p, aiMapper, aiAdjustInterval)
 
 				// Set connection limits from config for AI guardrails
 				aiMonitor.SetConnectionLimits(
@@ -135,7 +141,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				defer cancelMonitor()
 				go aiMonitor.Start(monitorCtx)
 
-				logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", interval)
+				logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", aiAdjustInterval)
 			} else {
 				logging.Debug("AI adjustment requested but type assertion failed")
 			}
