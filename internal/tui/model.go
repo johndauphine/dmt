@@ -2109,7 +2109,7 @@ func splitIntoWords(s string) []string {
 
 // Start launches the TUI program
 func Start() error {
-	logging.SetLevel(logging.LevelDebug)
+	logging.SetLevel(logging.LevelInfo)
 
 	m := InitialModel()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
