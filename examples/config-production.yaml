@@ -35,8 +35,8 @@ target:
 
 migration:
   # Connection pools
-  max_mssql_connections: 20
-  max_pg_connections: 40
+  max_source_connections: 20
+  max_target_connections: 40
 
   # Parallelism
   workers: 16

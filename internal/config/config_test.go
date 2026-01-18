@@ -638,16 +638,16 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	// With 8 cores: readers=2, writers=2
 	// Source connections: workers * readers + 4 = 4 * 2 + 4 = 12
 	// Target connections: workers * writers + 4 = 4 * 2 + 4 = 12
-	expectedMSSQLConns := cfg.Migration.Workers*cfg.Migration.ParallelReaders + 4
-	expectedPGConns := cfg.Migration.Workers*cfg.Migration.WriteAheadWriters + 4
+	expectedSourceConns := cfg.Migration.Workers*cfg.Migration.ParallelReaders + 4
+	expectedTargetConns := cfg.Migration.Workers*cfg.Migration.WriteAheadWriters + 4
 
-	if cfg.Migration.MaxMssqlConnections < expectedMSSQLConns {
-		t.Errorf("insufficient MSSQL connections: got %d, need at least %d",
-			cfg.Migration.MaxMssqlConnections, expectedMSSQLConns)
+	if cfg.Migration.MaxSourceConnections < expectedSourceConns {
+		t.Errorf("insufficient source connections: got %d, need at least %d",
+			cfg.Migration.MaxSourceConnections, expectedSourceConns)
 	}
-	if cfg.Migration.MaxPgConnections < expectedPGConns {
-		t.Errorf("insufficient PG connections: got %d, need at least %d",
-			cfg.Migration.MaxPgConnections, expectedPGConns)
+	if cfg.Migration.MaxTargetConnections < expectedTargetConns {
+		t.Errorf("insufficient target connections: got %d, need at least %d",
+			cfg.Migration.MaxTargetConnections, expectedTargetConns)
 	}
 }
 

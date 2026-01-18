@@ -866,8 +866,8 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `max_mssql_connections` | No | Auto-sized | Maximum SQL Server connection pool size |
-| `max_pg_connections` | No | Auto-sized | Maximum PostgreSQL connection pool size |
+| `max_source_connections` | No | Auto-sized | Maximum source database connection pool size |
+| `max_target_connections` | No | Auto-sized | Maximum target database connection pool size |
 
 **Parallelism Settings:**
 
@@ -1265,8 +1265,8 @@ target:
 
 migration:
   # Connection pools
-  max_mssql_connections: 20
-  max_pg_connections: 40
+  max_source_connections: 20
+  max_target_connections: 40
 
   # Parallelism
   workers: 16

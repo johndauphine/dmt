@@ -122,15 +122,10 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				aiMonitor = monitor.NewAIMonitor(p, aiMapper, interval)
 
 				// Set connection limits from config for AI guardrails
-				maxSource := r.config.Migration.MaxMssqlConnections
-				if r.config.Source.Type == "postgres" {
-					maxSource = r.config.Migration.MaxPgConnections
-				}
-				maxTarget := r.config.Migration.MaxPgConnections
-				if r.config.Target.Type == "mssql" {
-					maxTarget = r.config.Migration.MaxMssqlConnections
-				}
-				aiMonitor.SetConnectionLimits(maxSource, maxTarget)
+				aiMonitor.SetConnectionLimits(
+					r.config.Migration.MaxSourceConnections,
+					r.config.Migration.MaxTargetConnections,
+				)
 
 				// Set state backend for persistent history
 				aiMonitor.SetStateBackend(r.state, runID)
