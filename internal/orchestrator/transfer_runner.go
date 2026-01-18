@@ -23,13 +23,14 @@ import (
 
 // TransferRunner executes transfer jobs with a worker pool.
 type TransferRunner struct {
-	sourcePool pool.SourcePool
-	targetPool pool.TargetPool
-	state      checkpoint.StateBackend
-	config     *config.Config
-	progress   *progress.Tracker
-	notifier   notify.Provider
-	targetMode TargetModeStrategy
+	sourcePool     pool.SourcePool
+	targetPool     pool.TargetPool
+	state          checkpoint.StateBackend
+	config         *config.Config
+	progress       *progress.Tracker
+	notifier       notify.Provider
+	targetMode     TargetModeStrategy
+	errorDiagnoser *driver.AIErrorDiagnoser
 }
 
 // NewTransferRunner creates a new TransferRunner.
@@ -41,15 +42,17 @@ func NewTransferRunner(
 	prog *progress.Tracker,
 	notifier notify.Provider,
 	targetMode TargetModeStrategy,
+	errorDiagnoser *driver.AIErrorDiagnoser,
 ) *TransferRunner {
 	return &TransferRunner{
-		sourcePool: sourcePool,
-		targetPool: targetPool,
-		state:      state,
-		config:     cfg,
-		progress:   prog,
-		notifier:   notifier,
-		targetMode: targetMode,
+		sourcePool:     sourcePool,
+		targetPool:     targetPool,
+		state:          state,
+		config:         cfg,
+		progress:       prog,
+		notifier:       notifier,
+		targetMode:     targetMode,
+		errorDiagnoser: errorDiagnoser,
 	}
 }
 
@@ -294,6 +297,10 @@ retryLoop:
 
 		logging.Error("Table %s failed: %v", j.Table.Name, err)
 		r.checkGeographyError(j.Table.Name, err)
+
+		// AI error diagnosis
+		r.diagnoseError(ctx, j, err)
+
 		r.notifier.TableTransferFailed(runID, j.Table.Name, err)
 		return
 	}
@@ -339,6 +346,58 @@ func (r *TransferRunner) checkGeographyError(tableName string, err error) {
 		logging.Warn("HINT: Table %s contains geography/geometry columns which cannot be compared in MERGE statements.", tableName)
 		logging.Warn("      Use 'target_mode: drop_recreate' or exclude this table with 'exclude_tables'.")
 	}
+}
+
+// diagnoseError uses AI to analyze the error and provide suggestions.
+func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err error) {
+	if r.errorDiagnoser == nil {
+		return
+	}
+
+	// Build error context with table information
+	errCtx := &driver.ErrorContext{
+		ErrorMessage: err.Error(),
+		TableName:    j.Table.Name,
+		TableSchema:  j.Table.Schema,
+		SourceDBType: r.config.Source.Type,
+		TargetDBType: r.config.Target.Type,
+		TargetMode:   r.config.Migration.TargetMode,
+	}
+
+	// Add column info from the job's table
+	if j.Table.Columns != nil {
+		errCtx.Columns = make([]driver.Column, len(j.Table.Columns))
+		for i, col := range j.Table.Columns {
+			errCtx.Columns[i] = driver.Column{
+				Name:       col.Name,
+				DataType:   col.DataType,
+				MaxLength:  col.MaxLength,
+				Precision:  col.Precision,
+				Scale:      col.Scale,
+				IsNullable: col.IsNullable,
+				IsIdentity: col.IsIdentity,
+			}
+		}
+	}
+
+	// Call AI diagnosis (non-blocking, use short timeout)
+	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	diagnosis, diagErr := r.errorDiagnoser.Diagnose(diagCtx, errCtx)
+	if diagErr != nil {
+		logging.Debug("AI error diagnosis unavailable: %v", diagErr)
+		return
+	}
+
+	// Log the diagnosis
+	logging.Warn("  AI Diagnosis:")
+	logging.Warn("    Cause: %s", diagnosis.Cause)
+	logging.Warn("    Suggestions:")
+	for _, s := range diagnosis.Suggestions {
+		logging.Warn("      - %s", s)
+	}
+	logging.Warn("    Confidence: %s", diagnosis.Confidence)
 }
 
 // collectFailures gathers and deduplicates table failures.
