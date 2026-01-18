@@ -116,11 +116,8 @@ type TableDDLRequest struct {
 	// TargetContext contains metadata about the target database.
 	TargetContext *DatabaseContext
 
-	// IncludeIndexes indicates whether to include indexes in DDL.
-	IncludeIndexes bool
-
-	// IncludeCheckConstraints indicates whether to include CHECK constraints in DDL.
-	IncludeCheckConstraints bool
+	// Note: Indexes and CHECK constraints are always created separately in Finalize,
+	// not included in the initial CREATE TABLE DDL.
 }
 
 // TableDDLResponse contains the generated DDL and metadata.

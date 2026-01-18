@@ -39,7 +39,7 @@ func qualifyMSSQLTable(schema, table string) string {
 
 // SanitizePGIdentifier converts an identifier to PostgreSQL-friendly lowercase format.
 // Simply lowercases and replaces special chars with underscores.
-// Example: VoteTypes -> votetypes, UserId -> userid
+// Example: VoteTypes -> votetypes, UserId -> userid, User-Id -> user_id
 func SanitizePGIdentifier(ident string) string {
 	if ident == "" {
 		return "col_"
@@ -47,18 +47,14 @@ func SanitizePGIdentifier(ident string) string {
 	s := strings.ToLower(ident)
 	var sb strings.Builder
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 			sb.WriteRune(r)
 		} else {
 			sb.WriteRune('_')
 		}
 	}
 	s = sb.String()
-	// Clean up multiple consecutive underscores
-	for strings.Contains(s, "__") {
-		s = strings.ReplaceAll(s, "__", "_")
-	}
-	s = strings.Trim(s, "_")
+	// Prefix with col_ if starts with digit
 	if len(s) > 0 && unicode.IsDigit(rune(s[0])) {
 		s = "col_" + s
 	}

@@ -1258,17 +1258,9 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("- Make ALL non-primary-key columns nullable (omit NOT NULL) to allow data migration flexibility\n")
 	sb.WriteString("- Primary key columns must be NOT NULL\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
-	sb.WriteString("- Do NOT include foreign keys (these are created separately)\n")
-	if req.IncludeIndexes && len(req.SourceTable.Indexes) > 0 {
-		sb.WriteString("- Include CREATE INDEX statements for non-primary-key indexes from the source table\n")
-	} else {
-		sb.WriteString("- Do NOT include indexes (they will be created separately)\n")
-	}
-	if req.IncludeCheckConstraints && len(req.SourceTable.CheckConstraints) > 0 {
-		sb.WriteString("- Include CHECK constraints from the source table, converting syntax as needed for the target database\n")
-	} else {
-		sb.WriteString("- Do NOT include CHECK constraints\n")
-	}
+	sb.WriteString("- Do NOT include foreign keys (created separately in Finalize)\n")
+	sb.WriteString("- Do NOT include indexes (created separately in Finalize)\n")
+	sb.WriteString("- Do NOT include CHECK constraints (created separately in Finalize)\n")
 	sb.WriteString("- Return ONLY the CREATE TABLE statement, no explanation or markdown\n")
 
 	// Check for reserved words in source table columns

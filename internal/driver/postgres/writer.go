@@ -21,7 +21,7 @@ import (
 
 // sanitizePGIdentifier converts an identifier to PostgreSQL-friendly lowercase format.
 // Simply lowercases and replaces special chars with underscores.
-// Example: VoteTypes -> votetypes, UserId -> userid
+// Example: VoteTypes -> votetypes, UserId -> userid, User-Id -> user_id
 func sanitizePGIdentifier(ident string) string {
 	if ident == "" {
 		return "col_"
@@ -29,18 +29,14 @@ func sanitizePGIdentifier(ident string) string {
 	s := strings.ToLower(ident)
 	var sb strings.Builder
 	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 			sb.WriteRune(r)
 		} else {
 			sb.WriteRune('_')
 		}
 	}
 	s = sb.String()
-	// Clean up multiple consecutive underscores
-	for strings.Contains(s, "__") {
-		s = strings.ReplaceAll(s, "__", "_")
-	}
-	s = strings.Trim(s, "_")
+	// Prefix with col_ if starts with digit
 	if len(s) > 0 && unicode.IsDigit(rune(s[0])) {
 		s = "col_" + s
 	}
@@ -270,14 +266,12 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
 	// Use table-level AI DDL generation with full database context
 	req := driver.TableDDLRequest{
-		SourceDBType:            w.sourceType,
-		TargetDBType:            "postgres",
-		SourceTable:             t,
-		TargetSchema:            targetSchema,
-		SourceContext:           opts.SourceContext,
-		TargetContext:           w.dbContext,
-		IncludeIndexes:          opts.IncludeIndexes,
-		IncludeCheckConstraints: opts.IncludeCheckConstraints,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "postgres",
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
 	}
 
 	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)

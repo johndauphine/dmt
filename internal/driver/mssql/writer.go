@@ -278,14 +278,12 @@ func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema 
 func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
 	// Use table-level AI DDL generation with full database context
 	req := driver.TableDDLRequest{
-		SourceDBType:            w.sourceType,
-		TargetDBType:            "mssql",
-		SourceTable:             t,
-		TargetSchema:            targetSchema,
-		SourceContext:           opts.SourceContext,
-		TargetContext:           w.dbContext,
-		IncludeIndexes:          opts.IncludeIndexes,
-		IncludeCheckConstraints: opts.IncludeCheckConstraints,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  "mssql",
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
 	}
 
 	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)

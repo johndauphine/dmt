@@ -66,11 +66,8 @@ type TableOptions struct {
 	// This is passed to AI type mapper for better DDL generation.
 	SourceContext *DatabaseContext
 
-	// IncludeIndexes indicates whether to include indexes in DDL generation.
-	IncludeIndexes bool
-
-	// IncludeCheckConstraints indicates whether to include CHECK constraints in DDL generation.
-	IncludeCheckConstraints bool
+	// Note: Indexes and CHECK constraints are always created separately in Finalize,
+	// not included in the initial CREATE TABLE DDL.
 }
 
 // WriteBatchOptions configures a bulk write operation.
