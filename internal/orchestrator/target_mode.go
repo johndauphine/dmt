@@ -68,7 +68,7 @@ func (s *dropRecreateStrategy) ShouldTruncateBeforeTransfer() bool {
 }
 
 func (s *dropRecreateStrategy) PrepareTables(ctx context.Context, tables []source.Table) error {
-	logging.Info("Creating target tables (drop and recreate)...")
+	logging.Debug("Creating target tables (drop and recreate)...")
 
 	// Phase 1: Drop all tables in parallel (no FK dependencies since we're dropping)
 	logging.Debug("  Dropping %d tables in parallel...", len(tables))
@@ -228,7 +228,7 @@ func (s *upsertStrategy) ShouldTruncateBeforeTransfer() bool {
 }
 
 func (s *upsertStrategy) PrepareTables(ctx context.Context, tables []source.Table) error {
-	logging.Info("Validating target tables (upsert mode)...")
+	logging.Debug("Validating target tables (upsert mode)...")
 
 	var sourceMissingPK []string
 	var missingTables []string

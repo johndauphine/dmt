@@ -57,7 +57,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		version = "Oracle (version unknown)"
 	}
 
-	logging.Info("Connected to Oracle target: %s:%d/%s (%s)", cfg.Host, cfg.Port, cfg.Database, version)
+	logging.Debug("Connected to Oracle target: %s:%d/%s (%s)", cfg.Host, cfg.Port, cfg.Database, version)
 
 	if opts.TypeMapper == nil {
 		db.Close()
@@ -72,7 +72,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	}
 
 	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Info("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
+		logging.Debug("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())

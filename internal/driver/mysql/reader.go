@@ -52,7 +52,7 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 		dbType = "MariaDB"
 	}
 
-	logging.Info("Connected to %s source: %s:%d/%s", dbType, cfg.Host, cfg.Port, cfg.Database)
+	logging.Debug("Connected to %s source: %s:%d/%s", dbType, cfg.Host, cfg.Port, cfg.Database)
 
 	return &Reader{
 		db:       db,

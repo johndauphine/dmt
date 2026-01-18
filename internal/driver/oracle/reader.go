@@ -54,7 +54,7 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 		version = "Oracle (version unknown)"
 	}
 
-	logging.Info("Connected to Oracle source: %s:%d/%s (%s)", cfg.Host, cfg.Port, cfg.Database, version)
+	logging.Debug("Connected to Oracle source: %s:%d/%s (%s)", cfg.Host, cfg.Port, cfg.Database, version)
 
 	return &Reader{
 		db:            db,

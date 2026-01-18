@@ -337,8 +337,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	logging.Info("Starting migration run: %s", runID)
 	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
 
-	// Log comprehensive configuration dump (always visible at INFO level)
-	logging.Info("%s", o.config.DebugDump())
+	// Log comprehensive configuration dump
+	logging.Debug("%s", o.config.DebugDump())
 
 	// Set runtime memory limit using Go's soft limit mechanism
 	// This tells the GC to work harder to stay under the limit
@@ -346,7 +346,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	if effectiveMemMB > 0 {
 		memLimitBytes := effectiveMemMB * 1024 * 1024
 		debug.SetMemoryLimit(memLimitBytes)
-		logging.Info("Runtime memory limit set to %d MB (Go GC soft limit)", effectiveMemMB)
+		logging.Debug("Runtime memory limit set to %d MB (Go GC soft limit)", effectiveMemMB)
 	}
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
@@ -355,7 +355,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Extract schema
 	o.progress.SetPhase("extracting_schema")
-	logging.Info("Extracting schema...")
+	logging.Debug("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -421,7 +421,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	o.tables = tables
 	o.progress.SetTablesTotal(len(tables))
-	logging.Info("Found %d tables", len(tables))
+	logging.Debug("Found %d tables", len(tables))
 
 	// Refine memory settings based on actual row sizes from database stats
 	tableRowSizes := make([]config.TableRowSize, len(tables))
@@ -471,7 +471,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Transfer data
 	o.progress.SetPhase("transfer")
-	logging.Info("Transferring data...")
+	logging.Debug("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
 	tableFailures, err := o.transferAll(ctx, runID, tables, false)
 	if err != nil {
@@ -509,7 +509,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Finalize (only for successful tables)
 	o.progress.SetPhase("finalizing")
-	logging.Info("Finalizing...")
+	logging.Debug("Finalizing...")
 	o.state.UpdatePhase(runID, "finalizing")
 	if err := o.targetMode.Finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -519,7 +519,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Validate (only for successful tables)
 	o.progress.SetPhase("validating")
-	logging.Info("Validating...")
+	logging.Debug("Validating...")
 	o.state.UpdatePhase(runID, "validating")
 	o.tables = successTables // Update for validation
 	if err := o.Validate(ctx); err != nil {
@@ -530,7 +530,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// Sample validation if enabled
 	if o.config.Migration.SampleValidation {
-		logging.Info("Running sample validation...")
+		logging.Debug("Running sample validation...")
 		if err := o.validateSamples(ctx); err != nil {
 			logging.Warn("Warning: sample validation failed: %v", err)
 		}
@@ -585,24 +585,24 @@ func (o *Orchestrator) logPGIdentifierChanges(tables []source.Table) {
 		return
 	}
 
-	logging.Info("")
-	logging.Info("PostgreSQL identifier changes applied:")
+	logging.Debug("")
+	logging.Debug("PostgreSQL identifier changes applied:")
 
 	for _, tc := range report.Tables {
 		if tc.HasTableChange {
-			logging.Info("  Table: '%s' → '%s'", tc.TableName.Original, tc.TableName.Sanitized)
+			logging.Debug("  Table: '%s' → '%s'", tc.TableName.Original, tc.TableName.Sanitized)
 		}
 		for _, cc := range tc.ColumnChanges {
 			tableName := tc.TableName.Sanitized
 			if !tc.HasTableChange {
 				tableName = tc.TableName.Original
 			}
-			logging.Info("    %s: column '%s' → '%s'", tableName, cc.Original, cc.Sanitized)
+			logging.Debug("    %s: column '%s' → '%s'", tableName, cc.Original, cc.Sanitized)
 		}
 	}
 
-	logging.Info("")
-	logging.Info("Summary: %d table(s) renamed, %d column(s) renamed across %d table(s)",
+	logging.Debug("")
+	logging.Debug("Summary: %d table(s) renamed, %d column(s) renamed across %d table(s)",
 		report.TotalTableChanges, report.TotalColumnChanges, report.TablesWithChanges)
 }
 
@@ -736,7 +736,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Extract schema (needed to know all tables)
-	logging.Info("Extracting schema...")
+	logging.Debug("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -752,7 +752,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	o.tables = tables
-	logging.Info("Found %d tables in source", len(tables))
+	logging.Debug("Found %d tables in source", len(tables))
 
 	// Get tables that were successfully transferred in the previous run
 	completedTables, err := o.state.GetCompletedTables(run.ID)
@@ -788,7 +788,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 		// Finalize
 		o.progress.SetPhase("finalizing")
-		logging.Info("Finalizing...")
+		logging.Debug("Finalizing...")
 		if err := o.targetMode.Finalize(ctx, tables); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -797,7 +797,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 		// Validate
 		o.progress.SetPhase("validating")
-		logging.Info("Validating...")
+		logging.Debug("Validating...")
 		if err := o.Validate(ctx); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
 			o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -809,7 +809,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		return nil
 	}
 
-	logging.Info("Resuming transfer of %d tables", len(tablesToTransfer))
+	logging.Debug("Resuming transfer of %d tables", len(tablesToTransfer))
 
 	// For tables that need transfer, ensure target tables exist
 	// Check for chunk-level progress to avoid unnecessary truncation
@@ -869,7 +869,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Transfer only the incomplete tables
-	logging.Info("Transferring data...")
+	logging.Debug("Transferring data...")
 	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer, true)
 	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
@@ -907,7 +907,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// Finalize (uses successful tables for constraints)
 	o.tables = successTables
 	o.progress.SetPhase("finalizing")
-	logging.Info("Finalizing...")
+	logging.Debug("Finalizing...")
 	if err := o.targetMode.Finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -916,7 +916,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Validate successful tables
 	o.progress.SetPhase("validating")
-	logging.Info("Validating...")
+	logging.Debug("Validating...")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
@@ -925,7 +925,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Sample validation if enabled
 	if o.config.Migration.SampleValidation {
-		logging.Info("Running sample validation...")
+		logging.Debug("Running sample validation...")
 		if err := o.validateSamples(ctx); err != nil {
 			logging.Warn("Warning: sample validation failed: %v", err)
 		}

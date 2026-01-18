@@ -124,7 +124,7 @@ func (c *Calibrator) Run(ctx context.Context) (*CalibrationResult, error) {
 	}
 
 	// Step 1: Measure network latency
-	logging.Info("Measuring network latency...")
+	logging.Debug("Measuring network latency...")
 	sourceLatency, err := c.measureSourceLatency(ctx)
 	if err != nil {
 		logging.Warn("Failed to measure source latency: %v", err)
@@ -135,10 +135,10 @@ func (c *Calibrator) Run(ctx context.Context) (*CalibrationResult, error) {
 	}
 	result.SourceLatencyMs = float64(sourceLatency.Milliseconds())
 	result.TargetLatencyMs = float64(targetLatency.Milliseconds())
-	logging.Info("Network latency: source %.1fms, target %.1fms", result.SourceLatencyMs, result.TargetLatencyMs)
+	logging.Debug("Network latency: source %.1fms, target %.1fms", result.SourceLatencyMs, result.TargetLatencyMs)
 
 	// Step 2: Select tables for calibration
-	logging.Info("Selecting tables for calibration...")
+	logging.Debug("Selecting tables for calibration...")
 	if err := c.selectTables(ctx); err != nil {
 		return nil, fmt.Errorf("failed to select tables: %w", err)
 	}
@@ -149,7 +149,7 @@ func (c *Calibrator) Run(ctx context.Context) (*CalibrationResult, error) {
 		result.TablesUsed = append(result.TablesUsed, t.Name)
 		result.TotalSampleRows += int64(c.sampleSize)
 	}
-	logging.Info("Selected %d table(s): %v", len(c.tables), result.TablesUsed)
+	logging.Debug("Selected %d table(s): %v", len(c.tables), result.TablesUsed)
 
 	// Step 3: Create calibration schema
 	c.schemaManager = NewSchemaManager(c.targetPool, c.targetPool.DBType())
@@ -175,10 +175,10 @@ func (c *Calibrator) Run(ctx context.Context) (*CalibrationResult, error) {
 
 	// Step 5: Run calibration configurations
 	configs := GetConfigs(c.depth)
-	logging.Info("Running %d calibration configurations...", len(configs))
+	logging.Debug("Running %d calibration configurations...", len(configs))
 
 	for i, cfg := range configs {
-		logging.Info("[%d/%d] Testing: %s (chunk=%d, workers=%d, buffers=%d)",
+		logging.Debug("[%d/%d] Testing: %s (chunk=%d, workers=%d, buffers=%d)",
 			i+1, len(configs), cfg.Name, cfg.ChunkSize, cfg.Workers, cfg.ReadAheadBuffers)
 
 		// Check if context was canceled
@@ -198,16 +198,16 @@ func (c *Calibrator) Run(ctx context.Context) (*CalibrationResult, error) {
 
 		// Log result
 		if metrics.Status == StatusSuccess {
-			logging.Info("  Result: %.0f rows/sec (query=%.0f%%, write=%.0f%%)",
+			logging.Debug("  Result: %.0f rows/sec (query=%.0f%%, write=%.0f%%)",
 				metrics.RowsPerSecond, metrics.QueryTimePercent, metrics.WriteTimePercent)
 		} else {
-			logging.Warn("  Result: FAILED (%s) - %s", metrics.ErrorCategory, metrics.Error)
+			logging.Debug("  Result: FAILED (%s) - %s", metrics.ErrorCategory, metrics.Error)
 		}
 	}
 
 	// Step 6: AI analysis (if available)
 	if c.aiAnalyzer != nil {
-		logging.Info("Analyzing results with AI...")
+		logging.Debug("Analyzing results with AI...")
 		sourceDefaults := c.sourceDriver.Defaults()
 		targetDefaults := c.targetDriver.Defaults()
 
@@ -464,7 +464,7 @@ func (c *Calibrator) transferTableSample(ctx context.Context, table *driver.Tabl
 
 // gatherSystemContext collects comprehensive system information for AI.
 func (c *Calibrator) gatherSystemContext(ctx context.Context) *SystemContext {
-	logging.Info("Gathering system context for AI analysis...")
+	logging.Debug("Gathering system context for AI analysis...")
 
 	sysCtx := &SystemContext{
 		Host: GatherHostInfo(),
@@ -530,13 +530,13 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 
 	// Step 1: Gather comprehensive system context
 	sysCtx := c.gatherSystemContext(ctx)
-	logging.Info("\n%s", sysCtx.FormatSummary())
+	logging.Debug("\n%s", sysCtx.FormatSummary())
 
 	result.SourceLatencyMs = sysCtx.Network.SourceLatencyMs
 	result.TargetLatencyMs = sysCtx.Network.TargetLatencyMs
 
 	// Step 2: Select tables for calibration
-	logging.Info("Selecting tables for calibration...")
+	logging.Debug("Selecting tables for calibration...")
 	if err := c.selectTables(ctx); err != nil {
 		return nil, fmt.Errorf("failed to select tables: %w", err)
 	}
@@ -547,7 +547,7 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 		result.TablesUsed = append(result.TablesUsed, t.Name)
 		result.TotalSampleRows += int64(c.sampleSize)
 	}
-	logging.Info("Selected %d table(s): %v", len(c.tables), result.TablesUsed)
+	logging.Debug("Selected %d table(s): %v", len(c.tables), result.TablesUsed)
 
 	// Step 3: Create calibration schema
 	c.schemaManager = NewSchemaManager(c.targetPool, c.targetPool.DBType())
@@ -576,18 +576,18 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 	c.aiGuided = NewAIGuidedCalibrator(aiMapper, sysCtx)
 
 	// Step 5: Get initial configuration from AI
-	logging.Info("Asking AI for initial calibration parameters...")
+	logging.Debug("Asking AI for initial calibration parameters...")
 	initialSuggestion, err := c.aiGuided.GetInitialConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("AI initial analysis failed: %w", err)
 	}
 
-	logging.Info("AI Initial Suggestion:")
-	logging.Info("  Confidence: %s", initialSuggestion.Confidence)
-	logging.Info("  Reasoning: %s", initialSuggestion.Reasoning)
+	logging.Debug("AI Initial Suggestion:")
+	logging.Debug("  Confidence: %s", initialSuggestion.Confidence)
+	logging.Debug("  Reasoning: %s", initialSuggestion.Reasoning)
 	if len(initialSuggestion.Warnings) > 0 {
 		for _, w := range initialSuggestion.Warnings {
-			logging.Warn("  Warning: %s", w)
+			logging.Debug("  Warning: %s", w)
 		}
 	}
 
@@ -601,7 +601,7 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 			break
 		}
 
-		logging.Info("\n[Run %d/%d] Testing: %s (chunk=%d, workers=%d, buffers=%d)",
+		logging.Debug("[Run %d/%d] Testing: %s (chunk=%d, workers=%d, buffers=%d)",
 			runNum, c.maxRuns, currentConfig.Name, currentConfig.ChunkSize,
 			currentConfig.Workers, currentConfig.ReadAheadBuffers)
 
@@ -616,15 +616,15 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 
 		// Log result
 		if metrics.Status == StatusSuccess {
-			logging.Info("  Result: %.0f rows/sec (query=%.0f%%, write=%.0f%%)",
+			logging.Debug("  Result: %.0f rows/sec (query=%.0f%%, write=%.0f%%)",
 				metrics.RowsPerSecond, metrics.QueryTimePercent, metrics.WriteTimePercent)
 		} else {
-			logging.Warn("  Result: FAILED (%s) - %s", metrics.ErrorCategory, metrics.Error)
+			logging.Debug("  Result: FAILED (%s) - %s", metrics.ErrorCategory, metrics.Error)
 		}
 
 		// Ask AI what to do next
 		if runNum < c.maxRuns {
-			logging.Info("Asking AI for next configuration...")
+			logging.Debug("Asking AI for next configuration...")
 			nextSuggestion, err := c.aiGuided.GetNextConfig(ctx, &metrics)
 			if err != nil {
 				logging.Warn("AI next config failed: %v, continuing with preset", err)
@@ -636,10 +636,10 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 				continue
 			}
 
-			logging.Info("  AI Decision: %s", nextSuggestion.Reasoning)
+			logging.Debug("  AI Decision: %s", nextSuggestion.Reasoning)
 
 			if nextSuggestion.ShouldStop {
-				logging.Info("AI recommends stopping early - sufficient data collected")
+				logging.Debug("AI recommends stopping early - sufficient data collected")
 				break
 			}
 
@@ -649,7 +649,7 @@ func (c *Calibrator) RunAIGuided(ctx context.Context) (*CalibrationResult, error
 	}
 
 	// Step 7: Get final recommendation
-	logging.Info("\nAnalyzing all results with AI...")
+	logging.Debug("Analyzing all results with AI...")
 	finalRec, err := c.aiGuided.GetFinalRecommendation(ctx)
 	if err != nil {
 		logging.Warn("AI final analysis failed: %v", err)

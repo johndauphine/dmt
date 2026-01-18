@@ -178,7 +178,7 @@ func (aa *AIAdjuster) captureBaseline() {
 	}
 	aa.baselineCaptured = true
 
-	logging.Info("AI adjuster baseline captured: %.0f rows/sec, CPU %.1f%%, Memory %.1f%%",
+	logging.Debug("AI adjuster baseline captured: %.0f rows/sec, CPU %.1f%%, Memory %.1f%%",
 		aa.baselineMetrics.Throughput, aa.baselineMetrics.CPUPercent, aa.baselineMetrics.MemoryPercent)
 }
 
@@ -527,7 +527,7 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 	// Schedule effect measurement (30s later)
 	go aa.measureAdjustmentEffect(len(aa.adjustmentHistory) - 1)
 
-	logging.Info("AI adjustment #%d applied: %s - %s (confidence: %s)",
+	logging.Debug("AI adjustment #%d applied: %s - %s (confidence: %s)",
 		aa.adjustmentCount, decision.Action, decision.Reasoning, decision.Confidence)
 
 	aa.lastAdjustment = time.Now()
@@ -742,7 +742,7 @@ func (aa *AIAdjuster) recordFailure() {
 			aa.circuitOpen = false
 			aa.failureCount = 0
 			aa.cachedDecision = nil
-			logging.Info("AI adjustment circuit breaker CLOSED - resuming")
+			logging.Debug("AI adjustment circuit breaker CLOSED - resuming")
 		}()
 	}
 }

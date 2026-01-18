@@ -137,7 +137,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				defer cancelMonitor()
 				go aiMonitor.Start(monitorCtx)
 
-				logging.Info("AI-driven parameter adjustment enabled (interval: %v)", interval)
+				logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", interval)
 			} else {
 				logging.Debug("AI adjustment requested but type assertion failed")
 			}

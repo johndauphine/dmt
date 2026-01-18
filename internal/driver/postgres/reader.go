@@ -60,7 +60,7 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	db.SetMaxIdleConns(maxConns / 4)
 	db.SetConnMaxLifetime(30 * time.Minute)
 
-	logging.Info("Connected to PostgreSQL source: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
+	logging.Debug("Connected to PostgreSQL source: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
 
 	return &Reader{
 		pool:     pool,

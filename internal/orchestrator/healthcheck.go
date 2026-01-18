@@ -161,7 +161,7 @@ func isIntegerType(dataType string) bool {
 
 // AnalyzeConfig uses AI to analyze the source database and suggest optimal configuration.
 func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*driver.SmartConfigSuggestions, error) {
-	logging.Info("Analyzing source database for configuration suggestions...")
+	logging.Debug("Analyzing source database for configuration suggestions...")
 
 	// Get AI mapper from secrets
 	aiMapper, err := driver.NewAITypeMapperFromSecrets()
@@ -213,7 +213,7 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 			sourceCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
 
-			logging.Info("Analyzing source database configuration...")
+			logging.Debug("Analyzing source database configuration...")
 			sourceTuning, err := dbtuning.Analyze(
 				sourceCtx,
 				o.sourcePool.DB(),
@@ -247,7 +247,7 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 			targetCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
 
-			logging.Info("Analyzing target database configuration...")
+			logging.Debug("Analyzing target database configuration...")
 			targetTuning, err := dbtuning.Analyze(
 				targetCtx,
 				o.targetPool.DB(),

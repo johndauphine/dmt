@@ -44,7 +44,7 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	logging.Info("Connected to MSSQL source: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
+	logging.Debug("Connected to MSSQL source: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
 
 	return &Reader{
 		db:       db,

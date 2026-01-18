@@ -65,7 +65,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	if isMariaDB {
 		dbType = "MariaDB"
 	}
-	logging.Info("Connected to %s target: %s:%d/%s (%s)", dbType, cfg.Host, cfg.Port, cfg.Database, version)
+	logging.Debug("Connected to %s target: %s:%d/%s (%s)", dbType, cfg.Host, cfg.Port, cfg.Database, version)
 
 	// Validate type mapper is provided
 	if opts.TypeMapper == nil {
@@ -82,7 +82,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 
 	// Log AI mapper initialization
 	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Info("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
+		logging.Debug("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
 			aiMapper.ProviderName(), aiMapper.Model())
 		if aiMapper.CacheSize() > 0 {
 			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())

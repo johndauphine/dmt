@@ -108,7 +108,7 @@ func NewSmartConfigAnalyzer(db *sql.DB, dbType string, aiMapper *AITypeMapper) *
 
 // Analyze performs smart configuration detection on the source database.
 func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*SmartConfigSuggestions, error) {
-	logging.Info("Analyzing database schema for configuration suggestions...")
+	logging.Debug("Analyzing database schema for configuration suggestions...")
 
 	// Get all tables with their metadata
 	tables, err := s.getTables(ctx, schema)
@@ -146,13 +146,13 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	s.calculateAutoTuneParams(ctx, tables)
 
 	// Log summary
-	logging.Info("Smart config analysis complete:")
-	logging.Info("  - Tables: %d (%s rows)", s.suggestions.TotalTables, formatRowCount(s.suggestions.TotalRows))
-	logging.Info("  - Tables with date columns: %d", len(s.suggestions.DateColumns))
-	logging.Info("  - Suggested exclude tables: %d", len(s.suggestions.ExcludeTables))
-	logging.Info("  - Recommended: workers=%d, chunk_size=%d, read_ahead=%d",
+	logging.Debug("Smart config analysis complete:")
+	logging.Debug("  - Tables: %d (%s rows)", s.suggestions.TotalTables, formatRowCount(s.suggestions.TotalRows))
+	logging.Debug("  - Tables with date columns: %d", len(s.suggestions.DateColumns))
+	logging.Debug("  - Suggested exclude tables: %d", len(s.suggestions.ExcludeTables))
+	logging.Debug("  - Recommended: workers=%d, chunk_size=%d, read_ahead=%d",
 		s.suggestions.Workers, s.suggestions.ChunkSizeRecommendation, s.suggestions.ReadAheadBuffers)
-	logging.Info("  - Estimated memory: %dMB", s.suggestions.EstimatedMemMB)
+	logging.Debug("  - Estimated memory: %dMB", s.suggestions.EstimatedMemMB)
 
 	return s.suggestions, nil
 }
@@ -173,9 +173,9 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 		output, err := s.getAIAutoTune(ctx, input)
 		if err == nil && output != nil {
 			s.suggestions.AISuggestions = output
-			logging.Info("AI suggestions available (see output for comparison)")
+			logging.Debug("AI suggestions available (see output for comparison)")
 		} else {
-			logging.Warn("AI auto-tune unavailable: %v", err)
+			logging.Debug("AI auto-tune unavailable: %v", err)
 		}
 	}
 }

@@ -48,7 +48,7 @@ func (sm *SchemaManager) SchemaName() string {
 
 // CreateSchema creates the calibration schema in the target database.
 func (sm *SchemaManager) CreateSchema(ctx context.Context) error {
-	logging.Info("Creating calibration schema: %s", sm.schemaName)
+	logging.Debug("Creating calibration schema: %s", sm.schemaName)
 
 	err := sm.targetPool.CreateSchema(ctx, sm.schemaName)
 	if err != nil {
@@ -93,7 +93,7 @@ func (sm *SchemaManager) TruncateAllTables(ctx context.Context) error {
 // DropSchema drops the calibration schema and all its tables.
 // This is safe to call multiple times (idempotent).
 func (sm *SchemaManager) DropSchema(ctx context.Context) error {
-	logging.Info("Cleaning up calibration schema: %s", sm.schemaName)
+	logging.Debug("Cleaning up calibration schema: %s", sm.schemaName)
 
 	var query string
 	switch strings.ToLower(sm.dbType) {

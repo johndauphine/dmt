@@ -55,7 +55,7 @@ func (am *AIMonitor) UpdateRowsProcessed(count int64) {
 
 // Start begins the monitoring and adjustment loop.
 func (am *AIMonitor) Start(ctx context.Context) {
-	logging.Info("AI monitoring started (evaluation interval: %v)", am.interval)
+	logging.Debug("AI monitoring started (evaluation interval: %v)", am.interval)
 
 	// Start metrics collection in background
 	go am.collector.Start(ctx)
@@ -69,7 +69,7 @@ func (am *AIMonitor) Start(ctx context.Context) {
 		case <-ticker.C:
 			am.evaluateAndAdjust(ctx)
 		case <-ctx.Done():
-			logging.Info("AI monitoring stopped")
+			logging.Debug("AI monitoring stopped")
 			return
 		}
 	}
