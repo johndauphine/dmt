@@ -275,15 +275,13 @@ func (r *CalibrationResult) FormatYAML() string {
 	}
 
 	// Source/target specific chunk sizes
-	if r.Recommendation.SourceChunkSize > 0 || r.Recommendation.TargetChunkSize > 0 {
+	if r.Recommendation.SourceChunkSize > 0 {
 		sb.WriteString("\nsource:\n")
-		if r.Recommendation.SourceChunkSize > 0 {
-			sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", r.Recommendation.SourceChunkSize))
-		}
+		sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", r.Recommendation.SourceChunkSize))
+	}
+	if r.Recommendation.TargetChunkSize > 0 {
 		sb.WriteString("\ntarget:\n")
-		if r.Recommendation.TargetChunkSize > 0 {
-			sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", r.Recommendation.TargetChunkSize))
-		}
+		sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", r.Recommendation.TargetChunkSize))
 	}
 
 	sb.WriteString(fmt.Sprintf("\n  # Estimated throughput: ~%d rows/sec\n", r.Recommendation.EstimatedRowsPerSec))

@@ -1265,16 +1265,13 @@ target:
   user: migrate_user
   password: ${ORACLE_PASSWORD}
   schema: MIGRATE_USER                 # Oracle schema (usually uppercase)
+  chunk_size: 5000                     # Oracle optimal: 5000-10000 for godror.Batch
 
 migration:
   workers: 4
   chunk_size: 50000
   create_indexes: true
   create_foreign_keys: true
-
-target:
-  # ... (Oracle target config above)
-  chunk_size: 5000                     # Oracle optimal: 5000-10000 for godror.Batch
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}        # Required for type mapping

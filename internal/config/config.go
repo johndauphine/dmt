@@ -376,28 +376,12 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
-	// Schema creation defaults - these are booleans, check via explicit global config
-	// Note: booleans default to false, so we use the global config values directly
-	// unless explicitly set in the migration config (which we can't easily detect for bool)
-	// For now, global defaults are applied unconditionally for bools since the migration
-	// config typically doesn't set them explicitly
-	if defaults.CreateIndexes {
-		c.Migration.CreateIndexes = true
-	}
-	if defaults.CreateForeignKeys {
-		c.Migration.CreateForeignKeys = true
-	}
-	if defaults.CreateCheckConstraints {
-		c.Migration.CreateCheckConstraints = true
-	}
-
-	// Consistency settings
-	if defaults.StrictConsistency {
-		c.Migration.StrictConsistency = true
-	}
-	if defaults.SampleValidation {
-		c.Migration.SampleValidation = true
-	}
+	// Note: Boolean settings (CreateIndexes, CreateForeignKeys, CreateCheckConstraints,
+	// StrictConsistency, SampleValidation) are NOT applied from global defaults.
+	// This is because Go's bool type defaults to false, making it impossible to
+	// distinguish between "not set in migration config" and "explicitly set to false".
+	// Applying global boolean defaults would prevent migrations from overriding to false.
+	// Users should set boolean values explicitly in their migration configs.
 	if c.Migration.SampleSize == 0 && defaults.SampleSize > 0 {
 		c.Migration.SampleSize = defaults.SampleSize
 	}
