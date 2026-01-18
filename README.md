@@ -348,11 +348,48 @@ migration:
 - **Exclude tables**: Tables that should probably be excluded (temp, log, archive, etc.)
 - **Chunk size**: Optimal chunk size based on average row sizes
 
+### AI Error Diagnosis (New in v3.53.0)
+
+When a table transfer fails, AI automatically analyzes the error and provides actionable suggestions for resolution.
+
+**Example output:**
+```
+Table Orders failed: pq: invalid input syntax for type integer: "abc"
+
+  AI Diagnosis:
+    Cause: Data type mismatch - column contains non-numeric values being inserted into integer column
+    Suggestions:
+      - Check source data for non-numeric values in numeric columns
+      - Use TEXT type instead of INTEGER for this column
+      - Add data transformation to filter/convert invalid values
+    Confidence: high
+```
+
+**Features:**
+- **Automatic**: Runs automatically when AI is configured and a transfer fails
+- **Context-aware**: Includes table schema, column types, and source/target DB info in analysis
+- **Cached**: Same errors are diagnosed once to minimize API calls
+- **Categorized**: Errors classified as type_mismatch, constraint, permission, connection, or data_quality
+
+**Common diagnoses:**
+| Error Type | AI Diagnosis |
+|------------|--------------|
+| Type mismatch | Identifies incompatible column types and suggests mappings |
+| NULL constraint | Detects NULL values in NOT NULL columns |
+| Foreign key | Identifies missing parent records or ordering issues |
+| Permission | Suggests required grants or role assignments |
+| Connection | Diagnoses timeout, authentication, or network issues |
+
+**Requirements:**
+- AI must be configured (`ai.api_key` set)
+- Works with all supported providers (Claude, OpenAI, Gemini)
+
 ### Cost Considerations
 
 - Each unique type mapping requires one API call (cached for future runs)
 - Typical migration: 20-50 API calls on first run, zero on subsequent runs
 - Smart config analysis: 0 API calls (uses pattern matching, not AI)
+- Error diagnosis: 1 API call per unique error (cached to avoid duplicates)
 
 ## State File Backend (Airflow/Kubernetes)
 
