@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/target"
@@ -15,18 +16,19 @@ import (
 // It consolidates the common logic from executeKeysetPagination and executeRowNumberPagination.
 type writerPool struct {
 	// Configuration
-	numWriters   int
-	bufferSize   int
-	useUpsert    bool
-	targetSchema string
-	targetTable  string
-	targetCols   []string
-	colTypes     []string
-	colSRIDs     []int
-	targetPKCols []string
-	partitionID  *int
-	tgtPool      pool.TargetPool
-	prog         *progress.Tracker
+	numWriters           int
+	bufferSize           int
+	useUpsert            bool
+	upsertMergeChunkSize int
+	targetSchema         string
+	targetTable          string
+	targetCols           []string
+	colTypes             []string
+	colSRIDs             []int
+	targetPKCols         []string
+	partitionID          *int
+	tgtPool              pool.TargetPool
+	prog                 *progress.Tracker
 
 	// Channels
 	jobChan chan writeJob
@@ -46,41 +48,49 @@ type writerPool struct {
 
 // writerPoolConfig holds the configuration for creating a writer pool.
 type writerPoolConfig struct {
-	NumWriters   int
-	BufferSize   int
-	UseUpsert    bool
-	TargetSchema string
-	TargetTable  string
-	TargetCols   []string
-	ColTypes     []string
-	ColSRIDs     []int
-	TargetPKCols []string
-	PartitionID  *int
-	TgtPool      pool.TargetPool
-	Prog         *progress.Tracker
-	EnableAck    bool // Whether to enable ack channel for checkpointing
+	NumWriters           int
+	BufferSize           int
+	UseUpsert            bool
+	UpsertMergeChunkSize int
+	TargetSchema         string
+	TargetTable          string
+	TargetCols           []string
+	ColTypes             []string
+	ColSRIDs             []int
+	TargetPKCols         []string
+	PartitionID          *int
+	TgtPool              pool.TargetPool
+	Prog                 *progress.Tracker
+	EnableAck            bool // Whether to enable ack channel for checkpointing
 }
 
 // newWriterPool creates a new writer pool with the given configuration.
 func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 	writerCtx, cancel := context.WithCancel(ctx)
 
+	// Default upsert merge chunk size if not specified
+	upsertMergeChunkSize := cfg.UpsertMergeChunkSize
+	if upsertMergeChunkSize <= 0 {
+		upsertMergeChunkSize = 5000
+	}
+
 	wp := &writerPool{
-		numWriters:   cfg.NumWriters,
-		bufferSize:   cfg.BufferSize,
-		useUpsert:    cfg.UseUpsert,
-		targetSchema: cfg.TargetSchema,
-		targetTable:  cfg.TargetTable,
-		targetCols:   cfg.TargetCols,
-		colTypes:     cfg.ColTypes,
-		colSRIDs:     cfg.ColSRIDs,
-		targetPKCols: cfg.TargetPKCols,
-		partitionID:  cfg.PartitionID,
-		tgtPool:      cfg.TgtPool,
-		prog:         cfg.Prog,
-		jobChan:      make(chan writeJob, cfg.BufferSize),
-		ctx:          writerCtx,
-		cancel:       cancel,
+		numWriters:           cfg.NumWriters,
+		bufferSize:           cfg.BufferSize,
+		useUpsert:            cfg.UseUpsert,
+		upsertMergeChunkSize: upsertMergeChunkSize,
+		targetSchema:         cfg.TargetSchema,
+		targetTable:          cfg.TargetTable,
+		targetCols:           cfg.TargetCols,
+		colTypes:             cfg.ColTypes,
+		colSRIDs:             cfg.ColSRIDs,
+		targetPKCols:         cfg.TargetPKCols,
+		partitionID:          cfg.PartitionID,
+		tgtPool:              cfg.TgtPool,
+		prog:                 cfg.Prog,
+		jobChan:              make(chan writeJob, cfg.BufferSize),
+		ctx:                  writerCtx,
+		cancel:               cancel,
 	}
 
 	if cfg.EnableAck {
@@ -113,8 +123,7 @@ func (wp *writerPool) worker(writerID int) {
 		writeStart := time.Now()
 		var err error
 		if wp.useUpsert {
-			err = writeChunkUpsertWithWriter(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
-				wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, job.rows, writerID, wp.partitionID)
+			err = wp.executeUpsertWithChunking(writerID, job.rows)
 		} else {
 			err = writeChunkGeneric(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, job.rows)
 		}
@@ -141,6 +150,39 @@ func (wp *writerPool) worker(writerID int) {
 			}
 		}
 	}
+}
+
+// executeUpsertWithChunking executes an upsert job, chunking if necessary based on UpsertMergeChunkSize.
+// Chunking reduces memory pressure on the target database when processing large batches.
+func (wp *writerPool) executeUpsertWithChunking(writerID int, rows [][]any) error {
+	mergeChunkSize := wp.upsertMergeChunkSize
+
+	logging.Debug("executeUpsertWithChunking: rows=%d, mergeChunkSize=%d", len(rows), mergeChunkSize)
+
+	// If batch is small enough, execute directly
+	if len(rows) <= mergeChunkSize {
+		return writeChunkUpsertWithWriter(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+			wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, rows, writerID, wp.partitionID)
+	}
+
+	// Chunk the rows to reduce memory pressure on target database
+	numChunks := (len(rows) + mergeChunkSize - 1) / mergeChunkSize
+	logging.Debug("Upsert chunking: %d rows into %d chunks of max %d rows", len(rows), numChunks, mergeChunkSize)
+
+	for i := 0; i < len(rows); i += mergeChunkSize {
+		end := i + mergeChunkSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+
+		chunk := rows[i:end]
+		if err := writeChunkUpsertWithWriter(wp.ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+			wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, chunk, writerID, wp.partitionID); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // submit sends a write job to the pool. Returns false if context is cancelled.
