@@ -12,14 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/calibration"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
-	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/tui"
@@ -338,45 +335,6 @@ func main() {
 					&cli.StringFlag{
 						Name:  "profile",
 						Usage: "Profile name stored in SQLite",
-					},
-				},
-			},
-			{
-				Name:   "calibrate",
-				Usage:  "Run calibration tests to find optimal configuration using AI",
-				Action: runCalibration,
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-					&cli.IntFlag{
-						Name:  "sample-size",
-						Value: 10000,
-						Usage: "Number of rows per table for calibration",
-					},
-					&cli.StringSliceFlag{
-						Name:  "tables",
-						Usage: "Specific tables to use (default: auto-select)",
-					},
-					&cli.StringFlag{
-						Name:  "output",
-						Usage: "Write recommended config to YAML file",
-					},
-					&cli.BoolFlag{
-						Name:    "yes",
-						Aliases: []string{"y"},
-						Usage:   "Skip confirmation prompt",
-					},
-					&cli.BoolFlag{
-						Name:  "apply",
-						Usage: "Update the source config file with recommended values",
 					},
 				},
 			},
@@ -987,131 +945,6 @@ func analyzeConfig(c *cli.Context) error {
 
 	// Output suggestions
 	fmt.Println(suggestions.FormatYAML())
-
-	return nil
-}
-
-func runCalibration(c *cli.Context) error {
-	cfg, profileName, configPath, err := loadConfigWithOrigin(c)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Check if --apply is valid (requires file-based config, not profile)
-	if c.Bool("apply") && configPath == "" {
-		return fmt.Errorf("--apply requires a file-based config (not a profile): use -c config.yaml")
-	}
-	_ = profileName // unused for now
-
-	// Confirmation prompt unless --yes is specified
-	if !c.Bool("yes") {
-		fmt.Println("\nCalibration will:")
-		fmt.Println("  - Run 5 test migrations against your databases")
-		fmt.Println("  - Generate significant read load on source")
-		fmt.Println("  - Generate write load on target (temp schema)")
-		fmt.Println("  - Take approximately 2-5 minutes")
-		fmt.Print("\nContinue? [y/N]: ")
-
-		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "y" && input != "yes" {
-			fmt.Println("Calibration cancelled.")
-			return nil
-		}
-	}
-
-	// Get drivers
-	sourceDriver, err := driver.Get(cfg.Source.Type)
-	if err != nil {
-		return fmt.Errorf("unknown source database type: %s", cfg.Source.Type)
-	}
-	targetDriver, err := driver.Get(cfg.Target.Type)
-	if err != nil {
-		return fmt.Errorf("unknown target database type: %s", cfg.Target.Type)
-	}
-
-	// Create pools
-	const minCalibrationConns = 10
-	maxConns := cfg.Migration.Workers * 2
-	if maxConns < minCalibrationConns {
-		maxConns = minCalibrationConns
-	}
-
-	sourcePool, err := pool.NewSourcePool(&cfg.Source, maxConns)
-	if err != nil {
-		return fmt.Errorf("failed to connect to source: %w", err)
-	}
-	defer sourcePool.Close()
-
-	// Get AI type mapper (required for target pool, optional for calibration analysis)
-	var aiMapper *driver.AITypeMapper
-	aiMapper, err = driver.NewAITypeMapperFromSecrets()
-	if err != nil {
-		logging.Warn("AI not configured: %v (calibration will use best-observed configuration)", err)
-	}
-
-	// Use AI mapper as type mapper, or create a minimal one if no AI
-	var typeMapper driver.TypeMapper
-	if aiMapper != nil {
-		typeMapper = aiMapper
-	} else {
-		// Fall back to getting default type mapper
-		typeMapper, err = driver.GetAITypeMapper()
-		if err != nil {
-			return fmt.Errorf("no type mapper available - configure AI provider or run 'dmt init-secrets': %w", err)
-		}
-	}
-
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxConns, cfg.Source.Type, typeMapper)
-	if err != nil {
-		return fmt.Errorf("failed to connect to target: %w", err)
-	}
-	defer targetPool.Close()
-
-	// Create calibrator
-	cal := calibration.NewCalibrator(
-		cfg,
-		sourcePool,
-		targetPool,
-		sourceDriver,
-		targetDriver,
-		calibration.CalibratorOptions{
-			SampleSize: c.Int("sample-size"),
-			Tables:     c.StringSlice("tables"),
-			Depth:      calibration.DepthQuick,
-			AIMapper:   aiMapper,
-		},
-	)
-
-	// Run calibration
-	ctx := context.Background()
-	result, err := cal.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("calibration failed: %w", err)
-	}
-
-	// Display results
-	fmt.Println("\n" + result.FormatResultsTable())
-	fmt.Println(result.FormatRecommendation())
-
-	// Handle output options
-	if c.Bool("apply") {
-		// Update the source config file with recommended values
-		if err := result.Recommendation.ApplyToConfigFile(configPath); err != nil {
-			return fmt.Errorf("failed to apply calibration: %w", err)
-		}
-		fmt.Printf("\nConfig updated: %s\n", configPath)
-	} else if outputPath := c.String("output"); outputPath != "" {
-		yamlContent := result.FormatYAML()
-		if err := os.WriteFile(outputPath, []byte(yamlContent), 0600); err != nil {
-			return fmt.Errorf("failed to write output file: %w", err)
-		}
-		fmt.Printf("\nRecommended config written to: %s\n", outputPath)
-	} else {
-		fmt.Println("\nRecommended YAML config:")
-		fmt.Println(result.FormatYAML())
-	}
 
 	return nil
 }

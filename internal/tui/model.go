@@ -121,7 +121,6 @@ var availableCommands = []commandInfo{
 	{"/validate", "Validate migration row counts"},
 	{"/config", "Show configuration details"},
 	{"/analyze", "Analyze source database and suggest config"},
-	{"/calibrate", "Run AI calibration to find optimal config"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/wizard", "Launch configuration wizard"},
@@ -591,7 +590,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/calibrate", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -746,8 +745,6 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /validate             Validate migration
   /config [config_file] Show configuration details
   /analyze [config_file] Analyze source database and suggest configuration
-  /calibrate [config]   Run AI calibration to find optimal config
-                        Options: --apply (update config), --sample-size N
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
@@ -864,10 +861,6 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 	case "/analyze":
 		configFile, profileName := parseConfigArgs(parts)
 		return m.runAnalyzeCmd(configFile, profileName)
-
-	case "/calibrate":
-		configFile, profileName, applyToConfig, sampleSize := parseCalibrateArgs(parts)
-		return m.runCalibrateCmd(configFile, profileName, applyToConfig, sampleSize)
 
 	case "/config":
 		configFile, profileName := parseConfigArgs(parts)
@@ -1184,112 +1177,6 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 			}
 
 			p.Send(BoxedOutputMsg(suggestions.FormatYAML()))
-		}()
-
-		return nil
-	}
-}
-
-func (m Model) runCalibrateCmd(configFile, profileName string, applyToConfig bool, sampleSize int) tea.Cmd {
-	return func() tea.Msg {
-		p := GetProgramRef()
-		if p == nil {
-			return OutputMsg("Internal error: no program reference\n")
-		}
-
-		if applyToConfig && profileName != "" {
-			return OutputMsg("Error: --apply requires a file-based config (not a profile)\n")
-		}
-
-		go func() {
-			// Recover from panics and report as errors
-			defer func() {
-				if r := recover(); r != nil {
-					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
-				}
-			}()
-
-			origin := "config: " + configFile
-			if profileName != "" {
-				origin = "profile: " + profileName
-			}
-			opts := fmt.Sprintf("sample-size=%d", sampleSize)
-			if applyToConfig {
-				opts += ", apply=true"
-			}
-			p.Send(OutputMsg(fmt.Sprintf("Starting calibration with %s (%s)\n", origin, opts)))
-
-			cfg, err := loadConfigFromOrigin(configFile, profileName)
-			if err != nil {
-				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
-				return
-			}
-
-			orch, err := orchestrator.New(cfg)
-			if err != nil {
-				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
-				return
-			}
-			defer orch.Close()
-
-			r, w, pipeErr := os.Pipe()
-			if pipeErr != nil {
-				p.Send(OutputMsg(fmt.Sprintf("Error creating pipe: %v\n", pipeErr)))
-				return
-			}
-			origStdout := os.Stdout
-			origStderr := os.Stderr
-			os.Stdout = w
-			os.Stderr = w
-			logging.SetOutput(w)
-
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				buf := make([]byte, 1024)
-				for {
-					n, err := r.Read(buf)
-					if n > 0 {
-						p.Send(OutputMsg(string(buf[:n])))
-					}
-					if err != nil {
-						break
-					}
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-			defer cancel()
-
-			result, runErr := orch.Calibrate(ctx, sampleSize)
-
-			w.Close()
-			os.Stdout = origStdout
-			os.Stderr = origStderr
-			logging.SetOutput(origStdout)
-			<-done
-
-			if runErr != nil {
-				p.Send(OutputMsg(fmt.Sprintf("Calibration failed: %v\n", runErr)))
-				return
-			}
-
-			p.Send(BoxedOutputMsg(result.FormatResultsTable()))
-			if result.Recommendation != nil {
-				p.Send(OutputMsg("\nRecommended Configuration:\n"))
-				p.Send(BoxedOutputMsg(result.FormatYAML()))
-				if result.AIReasoning != "" {
-					p.Send(OutputMsg(fmt.Sprintf("\nAI Reasoning: %s\n", result.AIReasoning)))
-				}
-
-				if applyToConfig {
-					if err := result.Recommendation.ApplyToConfigFile(configFile); err != nil {
-						p.Send(OutputMsg(fmt.Sprintf("\nFailed to apply config: %v\n", err)))
-					} else {
-						p.Send(OutputMsg(fmt.Sprintf("\nConfig updated: %s\n", configFile)))
-					}
-				}
-			}
 		}()
 
 		return nil
@@ -1943,40 +1830,6 @@ func parseStatusArgs(parts []string) (string, string, bool) {
 	}
 
 	return configFile, profileName, detailed
-}
-
-func parseCalibrateArgs(parts []string) (string, string, bool, int) {
-	configFile := "config.yaml"
-	profileName := ""
-	applyToConfig := false
-	sampleSize := 10000
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		switch arg {
-		case "--apply", "-a":
-			applyToConfig = true
-		case "--sample-size", "-s":
-			if i+1 < len(parts) {
-				if n, err := fmt.Sscanf(parts[i+1], "%d", &sampleSize); err == nil && n == 1 {
-					i++
-				}
-			}
-		case "--profile":
-			if i+1 < len(parts) {
-				profileName = parts[i+1]
-				i++
-			}
-		default:
-			if strings.HasPrefix(arg, "@") {
-				configFile = arg[1:]
-			} else if !strings.HasPrefix(arg, "-") {
-				configFile = arg
-			}
-		}
-	}
-
-	return configFile, profileName, applyToConfig, sampleSize
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {

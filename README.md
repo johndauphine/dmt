@@ -16,8 +16,7 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 ```
 
 ### Features
-*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/wizard`, `/status`, `/calibrate`).
-*   **AI Calibration**: Use `/calibrate` to auto-tune migration parameters with AI analysis.
+*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/wizard`, `/status`, `/analyze`).
 *   **Resume**: Use `/resume` to continue interrupted migrations.
 *   **Auto-Completion**:
     *   **Commands**: Tab-complete commands like `/validate` or `/history`.
@@ -97,115 +96,9 @@ migration:
 - **Primary keys required** - Both source and target tables must have PKs
 - **Tables without date columns** - Fall back to full table comparison (slower)
 
-## AI-Powered Parameter Calibration (New in v3.30.0)
-
-Automatically find optimal migration parameters using AI analysis. Instead of guessing or manually tuning, `dmt calibrate` runs mini-migrations with different parameter combinations, measures real throughput, and recommends the best configuration.
-
-### Quick Start
-
-```bash
-# Run calibration and update config in-place
-./dmt calibrate --apply -y
-
-# Or view recommendations without updating
-./dmt calibrate -y
-
-# Custom sample size (default: 10,000 rows)
-./dmt calibrate --sample-size 5000 -y
-```
-
-### How It Works
-
-1. **Select tables**: Auto-selects 1-3 large tables with integer PKs
-2. **Test configurations**: Runs 5 preset configurations with sample data
-3. **Measure performance**: Collects actual throughput, query time, write time
-4. **AI analysis**: Claude AI identifies patterns and recommends optimal config
-5. **Update config** (optional): `--apply` writes recommendations to your config file
-
-### Tuned Parameters
-
-Calibration optimizes all performance parameters:
-
-**Core Parameters:**
-- `chunk_size`: Rows per batch transfer
-- `workers`: Parallel worker threads
-- `read_ahead_buffers`: Source read buffering
-- `parallel_readers`: Parallel source connections per worker
-- `write_ahead_writers`: Parallel target writers
-- `packet_size`: MSSQL TDS packet size
-
-**Extended Parameters:**
-- `max_partitions`: Partitions for large tables
-- `large_table_threshold`: Row count to trigger partitioning
-- `source.chunk_size`: Read batch size (per-source granularity)
-- `target.chunk_size`: Write batch size (per-target granularity)
-- `upsert_merge_chunk_size`: Upsert batch size
-- `max_source_connections`: Source connection pool
-- `max_target_connections`: Target connection pool
-
-### Real-World Example
-
-Calibration on StackOverflow2010 (19.3M rows):
-
-```
-Config                    Throughput    Memory    Result
-Auto-tuned (12w, 148K)    553K rows/s   High      Fast but resource-heavy
-AI-tuned (4w, 25K)        542K rows/s   Low       Similar speed, 75% fewer resources
-```
-
-### TUI Usage
-
-Launch interactive shell and use `/calibrate` command:
-
-```
-/calibrate                              # Default config.yaml, 10K sample
-/calibrate myconfig.yaml                # Specific config
-/calibrate --apply                      # Calibrate and update config
-/calibrate --sample-size 5000           # Custom sample size
-/calibrate myconfig.yaml --apply -s 20000
-```
-
-### Configuration
-
-Add to `config.yaml` to customize calibration:
-
-```yaml
-migration:
-  # Calibration will test these performance parameters
-  # Results will be written here when using --apply
-  chunk_size: 25000
-  workers: 4
-  read_ahead_buffers: 4
-```
-
-### Requirements
-
-- **AI Provider**: Set `DMT_AI_PROVIDER` and `DMT_AI_API_KEY` (uses Claude API)
-  - Without AI: Falls back to "best observed" configuration
-- **Source DB**: Read access to tables you want to test (sample data only)
-- **Target DB**: Write access (temp schema, auto-cleaned)
-
-### Environment Variables
-
-```bash
-# Optional: AI-powered recommendations (requires API key)
-export DMT_AI_PROVIDER=claude
-export DMT_AI_API_KEY=sk-ant-...
-
-# Run calibration
-./dmt calibrate --apply -y
-```
-
-### Notes
-
-- **Non-destructive**: Uses temporary schema, auto-cleanup on exit or interrupt
-- **Safe for production**: Only reads from source, writes to isolated temp schema
-- **Crash-safe**: Cleans up temp schema even if process is killed (via signal handlers)
-- **Database-agnostic**: Works with any source/target combination
-
 ## AI-Driven Real-Time Parameter Adjustment (New in v3.31.0)
 
-Continuously monitor migration performance and automatically adjust parameters in real-time. While calibration finds optimal starting parameters, this feature adapts them during execution based on actual resource usage and throughput patterns.
+Continuously monitor migration performance and automatically adjust parameters in real-time. This feature adapts parameters during execution based on actual resource usage and throughput patterns.
 
 ### Quick Start
 
@@ -295,7 +188,7 @@ ai:
 ### Best Practices
 
 1. **Use Sonnet model**: `claude-sonnet-4-20250514` recommended for optimization
-2. **Start with calibration**: Use `/calibrate` first to find good initial parameters
+2. **Start with reasonable defaults**: Use workers=4, chunk_size=50000 as starting points
 3. **Enable for long migrations**: Benefit increases with migration duration (>5 minutes)
 4. **Monitor first 30 seconds**: Watch initial adjustments to understand behavior
 5. **Production safe**: All adjustments non-destructive; circuit breaker prevents issues

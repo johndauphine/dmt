@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/calibration"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -273,50 +272,4 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 
 	// Wait for all analyses to complete before returning
 	wg.Wait()
-}
-
-// Calibrate runs calibration tests to find optimal migration configuration.
-// It executes mini-migrations with different parameter combinations and uses AI
-// to analyze results and recommend optimal settings.
-func (o *Orchestrator) Calibrate(ctx context.Context, sampleSize int) (*calibration.CalibrationResult, error) {
-	logging.Info("Starting calibration with sample size %d...", sampleSize)
-
-	// Get AI mapper from secrets (optional - calibration works without AI too)
-	aiMapper, err := driver.NewAITypeMapperFromSecrets()
-	if err != nil {
-		logging.Warn("AI not configured, calibration will use fallback recommendations: %v", err)
-		aiMapper = nil
-	}
-
-	// Get drivers for driver-specific defaults
-	sourceDriver, err := driver.Get(o.sourcePool.DBType())
-	if err != nil {
-		return nil, fmt.Errorf("getting source driver: %w", err)
-	}
-	targetDriver, err := driver.Get(o.targetPool.DBType())
-	if err != nil {
-		return nil, fmt.Errorf("getting target driver: %w", err)
-	}
-
-	// Create calibrator
-	cal := calibration.NewCalibrator(
-		o.config,
-		o.sourcePool,
-		o.targetPool,
-		sourceDriver,
-		targetDriver,
-		calibration.CalibratorOptions{
-			SampleSize: sampleSize,
-			Depth:      calibration.DepthQuick,
-			AIMapper:   aiMapper,
-		},
-	)
-
-	// Run calibration
-	result, err := cal.Run(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("calibration failed: %w", err)
-	}
-
-	return result, nil
 }
