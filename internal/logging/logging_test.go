@@ -63,6 +63,96 @@ func TestSetFormat_Text(t *testing.T) {
 	}
 }
 
+func TestParseLevel(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected Level
+		wantErr  bool
+	}{
+		// Valid lowercase
+		{"debug", LevelDebug, false},
+		{"info", LevelInfo, false},
+		{"warn", LevelWarn, false},
+		{"warning", LevelWarn, false},
+		{"error", LevelError, false},
+
+		// Valid uppercase
+		{"DEBUG", LevelDebug, false},
+		{"INFO", LevelInfo, false},
+		{"WARN", LevelWarn, false},
+		{"WARNING", LevelWarn, false},
+		{"ERROR", LevelError, false},
+
+		// Valid mixed case
+		{"Debug", LevelDebug, false},
+		{"Info", LevelInfo, false},
+		{"Warn", LevelWarn, false},
+		{"Warning", LevelWarn, false},
+		{"Error", LevelError, false},
+
+		// Invalid inputs
+		{"", LevelInfo, true},
+		{"invalid", LevelInfo, true},
+		{"trace", LevelInfo, true},
+		{"fatal", LevelInfo, true},
+		{"INFO ", LevelInfo, true}, // trailing space
+		{" info", LevelInfo, true}, // leading space
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			level, err := ParseLevel(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ParseLevel(%q) expected error, got nil", tt.input)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("ParseLevel(%q) unexpected error: %v", tt.input, err)
+				}
+				if level != tt.expected {
+					t.Errorf("ParseLevel(%q) = %v, want %v", tt.input, level, tt.expected)
+				}
+			}
+		})
+	}
+}
+
+func TestLevelString(t *testing.T) {
+	tests := []struct {
+		level    Level
+		expected string
+	}{
+		{LevelDebug, "DEBUG"},
+		{LevelInfo, "INFO"},
+		{LevelWarn, "WARN"},
+		{LevelError, "ERROR"},
+		{Level(99), "UNKNOWN"}, // unknown level
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			if got := tt.level.String(); got != tt.expected {
+				t.Errorf("Level(%d).String() = %q, want %q", tt.level, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetSetLevel(t *testing.T) {
+	// Save original level
+	original := GetLevel()
+	defer SetLevel(original)
+
+	levels := []Level{LevelDebug, LevelInfo, LevelWarn, LevelError}
+	for _, level := range levels {
+		SetLevel(level)
+		if got := GetLevel(); got != level {
+			t.Errorf("SetLevel(%v); GetLevel() = %v, want %v", level, got, level)
+		}
+	}
+}
+
 func TestJSONLogLevels(t *testing.T) {
 	tests := []struct {
 		name    string
