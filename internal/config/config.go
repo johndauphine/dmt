@@ -140,14 +140,13 @@ type AutoConfig struct {
 	TargetMemoryMB int64
 }
 
-// Config holds all configuration for the migration tool
+// Config holds all configuration for the migration tool.
+// Note: AI and Slack settings are global-only and loaded from ~/.secrets/dmt-config.yaml
 type Config struct {
 	Source    SourceConfig    `yaml:"source"`
 	Target    TargetConfig    `yaml:"target"`
 	Migration MigrationConfig `yaml:"migration"`
-	Slack     SlackConfig     `yaml:"slack"`
 	Profile   ProfileConfig   `yaml:"profile,omitempty"`
-	AI        *AIConfig       `yaml:"ai,omitempty"` // AI-assisted features
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
@@ -157,14 +156,6 @@ type Config struct {
 type ProfileConfig struct {
 	Name        string `yaml:"name,omitempty"`
 	Description string `yaml:"description,omitempty"`
-}
-
-// SlackConfig holds Slack notification settings
-type SlackConfig struct {
-	WebhookURL string `yaml:"webhook_url"`
-	Channel    string `yaml:"channel"`
-	Username   string `yaml:"username"`
-	Enabled    bool   `yaml:"enabled"`
 }
 
 // MigrationConfig holds migration behavior settings
@@ -196,50 +187,6 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
-	// AI-driven real-time parameter adjustment
-	AIAdjust bool   `yaml:"ai_adjust"`           // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
-}
-
-// AIConfig contains configuration for all AI-assisted features.
-// AI features are auto-enabled when api_key is configured.
-type AIConfig struct {
-	// APIKey is the API key for the AI provider.
-	// Supports the same secret patterns as passwords:
-	//   ${file:/path/to/key} - read from file (recommended for production)
-	//   ${env:VAR_NAME} - read from environment variable
-	//   ${VAR_NAME} - legacy env var syntax
-	//   literal value - not recommended, use file or env instead
-	APIKey string `yaml:"api_key"`
-
-	// Provider specifies which AI provider to use.
-	// Valid values: "claude", "openai", "gemini"
-	// Defaults to "claude" if not specified.
-	Provider string `yaml:"provider"`
-
-	// Model specifies which model to use (optional).
-	// Defaults to smart models for accurate inference:
-	//   Claude: claude-sonnet-4-20250514
-	//   OpenAI: gpt-4o
-	//   Gemini: gemini-2.0-flash
-	Model string `yaml:"model"`
-
-	// TimeoutSeconds is the API request timeout (default: 30).
-	TimeoutSeconds int `yaml:"timeout_seconds"`
-
-	// TypeMapping configures AI-assisted type mapping for unknown types.
-	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
-}
-
-// AITypeMappingConfig contains settings specific to AI type mapping.
-type AITypeMappingConfig struct {
-	// Enabled turns AI type mapping on/off.
-	// Auto-enabled when api_key is configured (unless explicitly set to false).
-	Enabled *bool `yaml:"enabled"`
-
-	// CacheFile is the path to the JSON cache file for type mappings.
-	// Defaults to ~/.dmt/type-cache.json
-	CacheFile string `yaml:"cache_file"`
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -397,14 +344,6 @@ func (c *Config) applyGlobalDefaults() {
 	}
 	if c.Migration.HistoryRetentionDays == 0 && defaults.HistoryRetentionDays > 0 {
 		c.Migration.HistoryRetentionDays = defaults.HistoryRetentionDays
-	}
-
-	// AI features
-	if defaults.AIAdjust {
-		c.Migration.AIAdjust = true
-	}
-	if c.Migration.AIAdjustInterval == "" && defaults.AIAdjustInterval != "" {
-		c.Migration.AIAdjustInterval = defaults.AIAdjustInterval
 	}
 
 	// Data directory
@@ -679,73 +618,8 @@ func (c *Config) applyDefaults() {
 	if c.Migration.HistoryRetentionDays == 0 {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
-
-	// AI features: load api_key from secrets if not configured in config file
-	if c.AI != nil && c.AI.Provider != "" {
-		// If no API key in config, try to load from secrets
-		if c.AI.APIKey == "" {
-			secretsCfg, err := secrets.Load()
-			if err != nil {
-				// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
-				if _, ok := err.(*secrets.SecretsNotFoundError); !ok {
-					logging.Warn("failed to load secrets configuration for AI provider: %v", err)
-				}
-			} else {
-				// Get the provider's API key from secrets
-				provider, err := secretsCfg.GetProvider(c.AI.Provider)
-				if err == nil && provider.APIKey != "" {
-					c.AI.APIKey = provider.APIKey
-				}
-			}
-		}
-	}
-
-	// AI features: apply defaults when api_key is configured
-	if c.AI != nil && c.AI.APIKey != "" {
-		// Default provider to claude if not specified
-		if c.AI.Provider == "" {
-			c.AI.Provider = "claude"
-		}
-		// Normalize provider to lowercase for case-insensitive matching
-		if c.AI.Provider != "" {
-			c.AI.Provider = driver.NormalizeAIProvider(c.AI.Provider)
-		}
-
-		// Type mapping: auto-enable if not explicitly disabled
-		if c.AI.TypeMapping == nil {
-			c.AI.TypeMapping = &AITypeMappingConfig{}
-		}
-		if c.AI.TypeMapping.Enabled == nil {
-			enabled := true
-			c.AI.TypeMapping.Enabled = &enabled
-		}
-
-		// AI adjust: auto-enable when AI is configured
-		if !c.Migration.AIAdjust {
-			c.Migration.AIAdjust = true
-		}
-		if c.Migration.AIAdjustInterval == "" {
-			c.Migration.AIAdjustInterval = "30s"
-		}
-	}
-
-	// Slack notification: auto-enable when webhook URL is configured
-	// Load webhook from secrets if not provided in config
-	if c.Slack.WebhookURL == "" {
-		secretsCfg, err := secrets.Load()
-		if err != nil {
-			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
-			if _, ok := err.(*secrets.SecretsNotFoundError); !ok {
-				logging.Warn("failed to load secrets configuration for Slack webhook: %v", err)
-			}
-		} else if secretsCfg.Notifications.Slack.WebhookURL != "" {
-			c.Slack.WebhookURL = secretsCfg.Notifications.Slack.WebhookURL
-		}
-	}
-	// Auto-enable Slack notifications when webhook URL is available
-	if c.Slack.WebhookURL != "" && !c.Slack.Enabled {
-		c.Slack.Enabled = true
-	}
+	// Note: AI and Slack settings are loaded from global secrets file (~/.secrets/dmt-config.yaml)
+	// and are not configurable per-migration
 }
 
 // TableRowSize holds row size info for a table
@@ -833,21 +707,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
 
-	// Validate AI configuration
-	if c.AI != nil {
-		// Check if AI type mapping is enabled
-		typeMappingEnabled := c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled
-
-		if typeMappingEnabled {
-			if c.AI.APIKey == "" {
-				return fmt.Errorf("ai.api_key is required when AI features are enabled")
-			}
-			if !driver.IsValidAIProvider(c.AI.Provider) {
-				return fmt.Errorf("ai.provider '%s' is not valid (supported: %v)",
-					c.AI.Provider, driver.ValidAIProviders())
-			}
-		}
-	}
+	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
 	return nil
 }
@@ -998,18 +858,7 @@ func (c *Config) Sanitized() *Config {
 	// Redact target credentials
 	sanitized.Target.Password = "[REDACTED]"
 
-	// Redact Slack webhook
-	if sanitized.Slack.WebhookURL != "" {
-		sanitized.Slack.WebhookURL = "[REDACTED]"
-	}
-
-	// Redact AI API key
-	if sanitized.AI != nil && sanitized.AI.APIKey != "" {
-		// Make a copy to avoid modifying the original
-		aiConfig := *sanitized.AI
-		aiConfig.APIKey = "[REDACTED]"
-		sanitized.AI = &aiConfig
-	}
+	// Note: AI and Slack credentials are in global secrets file, not migration config
 
 	return &sanitized
 }
@@ -1286,46 +1135,50 @@ func (c *Config) DebugDump() string {
 		}
 	}
 
-	// Slack Notifications
+	// Notifications and AI Features (loaded from global secrets)
 	b.WriteString("\nNotifications:\n")
-	if c.Slack.Enabled {
+	secretsCfg, secretsErr := secrets.Load()
+	if secretsErr == nil && secretsCfg.Notifications.Slack.WebhookURL != "" {
 		b.WriteString("  Slack: enabled\n")
-		if c.Slack.Channel != "" {
-			b.WriteString(fmt.Sprintf("  Channel: %s\n", c.Slack.Channel))
-		}
-		if c.Slack.Username != "" {
-			b.WriteString(fmt.Sprintf("  Username: %s\n", c.Slack.Username))
-		}
 		b.WriteString("  WebhookURL: [REDACTED]\n")
 	} else {
 		b.WriteString("  Slack: disabled\n")
 	}
 
-	// AI Features
+	// AI Features (from global secrets)
 	b.WriteString("\nAI Features:\n")
-	if c.AI != nil && c.AI.APIKey != "" {
-		b.WriteString(fmt.Sprintf("  Provider: %s\n", c.AI.Provider))
-		b.WriteString("  APIKey: [REDACTED]\n")
-		if c.AI.Model != "" {
-			b.WriteString(fmt.Sprintf("  Model: %s\n", c.AI.Model))
-		} else {
-			b.WriteString("  Model: (provider default)\n")
-		}
-		if c.AI.TimeoutSeconds > 0 {
-			b.WriteString(fmt.Sprintf("  Timeout: %ds\n", c.AI.TimeoutSeconds))
-		}
-
-		// Type Mapping
-		if c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled {
-			b.WriteString("  TypeMapping: enabled\n")
-			if c.AI.TypeMapping.CacheFile != "" {
-				b.WriteString(fmt.Sprintf("    CacheFile: %s\n", c.AI.TypeMapping.CacheFile))
+	if secretsErr == nil {
+		provider, providerName, err := secretsCfg.GetDefaultProvider()
+		// Check for valid provider: API-key-based (Claude, OpenAI) or local with BaseURL (Ollama, LMStudio)
+		if err == nil && provider != nil && (provider.APIKey != "" || provider.BaseURL != "") {
+			b.WriteString(fmt.Sprintf("  Provider: %s\n", providerName))
+			if provider.APIKey != "" {
+				b.WriteString("  APIKey: [REDACTED]\n")
+			}
+			if provider.BaseURL != "" {
+				b.WriteString(fmt.Sprintf("  BaseURL: %s\n", provider.BaseURL))
+			}
+			if provider.Model != "" {
+				b.WriteString(fmt.Sprintf("  Model: %s\n", provider.Model))
+			} else {
+				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
+			}
+			// AI adjust settings from migration_defaults
+			defaults := secretsCfg.GetMigrationDefaults()
+			if defaults.AIAdjust {
+				interval := defaults.AIAdjustInterval
+				if interval == "" {
+					interval = "30s"
+				}
+				b.WriteString(fmt.Sprintf("  AI Adjust: enabled (interval: %s)\n", interval))
+			} else {
+				b.WriteString("  AI Adjust: disabled\n")
 			}
 		} else {
-			b.WriteString("  TypeMapping: disabled\n")
+			b.WriteString("  Disabled (no provider configured in ~/.secrets/dmt-config.yaml)\n")
 		}
 	} else {
-		b.WriteString("  Disabled (no API key)\n")
+		b.WriteString("  Disabled (no secrets file)\n")
 	}
 
 	return b.String()

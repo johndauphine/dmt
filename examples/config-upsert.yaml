@@ -1,5 +1,7 @@
 # Incremental Sync Configuration (Upsert Mode)
 #
+# For AI features and Slack notifications, configure ~/.secrets/dmt-config.yaml
+#
 # Upsert mode performs incremental synchronization:
 # - INSERT new rows (not in target)
 # - UPDATE changed rows (all columns compared)

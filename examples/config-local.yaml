@@ -1,5 +1,7 @@
 # Minimal configuration for local development
 #
+# For AI features and Slack notifications, configure ~/.secrets/dmt-config.yaml
+#
 # For Docker-based local databases with relaxed security settings
 #
 # Usage:

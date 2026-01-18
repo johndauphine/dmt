@@ -2,14 +2,14 @@
 #
 # Full-featured configuration for production migrations with:
 # - SSL/TLS encryption
-# - Slack notifications
 # - Data validation
 # - Table filtering
+#
+# For Slack notifications and AI features, configure ~/.secrets/dmt-config.yaml
 #
 # Usage:
 #   export MSSQL_PASSWORD="secure-password"
 #   export PG_PASSWORD="secure-password"
-#   export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
 #   ./dmt -c examples/config-production.yaml run
 
 source:
@@ -68,10 +68,3 @@ migration:
 
   # State persistence
   data_dir: /var/lib/dmt
-
-# Slack notifications
-slack:
-  enabled: true
-  webhook_url: ${SLACK_WEBHOOK_URL}
-  channel: "#data-migrations"
-  username: dmt
