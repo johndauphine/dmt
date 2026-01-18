@@ -313,15 +313,25 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	return nil
 }
 
-// DropTable drops a table.
+// DropTable drops a table, disabling foreign key checks to allow dropping
+// tables that are referenced by other tables.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	_, err := w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", w.dialect.QualifyTable(schema, table)))
+	qualifiedTable := w.dialect.QualifyTable(schema, table)
+	// Disable FK checks, drop table, re-enable FK checks in a single statement
+	// to ensure atomicity within the connection
+	_, err := w.db.ExecContext(ctx, fmt.Sprintf(
+		"SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS %s; SET FOREIGN_KEY_CHECKS = 1;",
+		qualifiedTable))
 	return err
 }
 
-// TruncateTable truncates a table.
+// TruncateTable truncates a table, disabling foreign key checks to allow
+// truncating tables that are referenced by other tables.
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := w.db.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", w.dialect.QualifyTable(schema, table)))
+	qualifiedTable := w.dialect.QualifyTable(schema, table)
+	_, err := w.db.ExecContext(ctx, fmt.Sprintf(
+		"SET FOREIGN_KEY_CHECKS = 0; TRUNCATE TABLE %s; SET FOREIGN_KEY_CHECKS = 1;",
+		qualifiedTable))
 	return err
 }
 
