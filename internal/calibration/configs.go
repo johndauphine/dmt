@@ -13,7 +13,8 @@ type CalibrationConfig struct {
 	// Extended parameters (for AI-guided calibration)
 	WriteAheadWriters    int `json:"write_ahead_writers,omitempty"`
 	MaxPartitions        int `json:"max_partitions,omitempty"`
-	MSSQLRowsPerBatch    int `json:"mssql_rows_per_batch,omitempty"`
+	SourceChunkSize      int `json:"source_chunk_size,omitempty"` // Batch size for reading
+	TargetChunkSize      int `json:"target_chunk_size,omitempty"` // Batch size for writing
 	UpsertMergeChunkSize int `json:"upsert_merge_chunk_size,omitempty"`
 }
 

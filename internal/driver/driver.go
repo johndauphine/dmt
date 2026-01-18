@@ -68,11 +68,13 @@ type Driver interface {
 
 // WriterOptions contains options for creating a Writer.
 type WriterOptions struct {
-	// RowsPerBatch is the number of rows per bulk insert batch.
-	RowsPerBatch int
-
-	// OracleBatchSize is the Oracle godror.Batch limit (default=5000).
-	OracleBatchSize int
+	// ChunkSize is the number of rows per bulk insert batch.
+	// Each driver uses this value for its native bulk operations:
+	// - MSSQL: bulk.Options.RowsPerBatch
+	// - Oracle: godror.Batch limit
+	// - MySQL: multi-value INSERT batch size
+	// - PostgreSQL: COPY batch size
+	ChunkSize int
 
 	// SourceType is the source database type (for cross-engine type handling).
 	SourceType string

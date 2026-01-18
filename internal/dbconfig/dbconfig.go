@@ -17,6 +17,7 @@ type SourceConfig struct {
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
 	Encrypt         *bool  `yaml:"encrypt"`           // MSSQL: enable TLS encryption (default: true)
 	PacketSize      int    `yaml:"packet_size"`       // MSSQL: TDS packet size in bytes (default: 32767, max: 32767)
+	ChunkSize       int    `yaml:"chunk_size"`        // Rows to read per batch (default: 5000)
 	// Kerberos authentication (alternative to user/password)
 	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
 	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)
@@ -40,6 +41,7 @@ type TargetConfig struct {
 	TrustServerCert bool   `yaml:"trust_server_cert"` // MSSQL: trust server certificate (default: false)
 	Encrypt         *bool  `yaml:"encrypt"`           // MSSQL: enable TLS encryption (default: true)
 	PacketSize      int    `yaml:"packet_size"`       // MSSQL: TDS packet size in bytes (default: 32767, max: 32767)
+	ChunkSize       int    `yaml:"chunk_size"`        // Rows to write per batch (default: 5000)
 	// Kerberos authentication (alternative to user/password)
 	Auth       string `yaml:"auth"`       // "password" (default) or "kerberos"
 	Krb5Conf   string `yaml:"krb5_conf"`  // Path to krb5.conf (optional, uses system default)

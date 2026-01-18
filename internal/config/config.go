@@ -130,11 +130,11 @@ type AutoConfig struct {
 	OriginalMaxPgConns           int
 	OriginalWriteAheadWriters    int
 	OriginalParallelReaders      int
-	OriginalMSSQLRowsPerBatch    int
-	OriginalOracleBatchSize      int
 	OriginalLargeTableThresh     int64
 	OriginalSampleSize           int
 	OriginalUpsertMergeChunkSize int
+	OriginalSourceChunkSize      int
+	OriginalTargetChunkSize      int
 
 	// Target memory used for calculations
 	TargetMemoryMB int64
@@ -189,8 +189,6 @@ type MigrationConfig struct {
 	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (default=8)
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
 	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
-	MSSQLRowsPerBatch      int      `yaml:"mssql_rows_per_batch"`     // MSSQL bulk copy hint (default=chunk_size)
-	OracleBatchSize        int      `yaml:"oracle_batch_size"`        // Oracle godror.Batch limit (default=5000)
 	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
 	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
 	// Restartability settings
@@ -344,7 +342,79 @@ func DefaultDataDir() (string, error) {
 	return dir, nil
 }
 
+// applyGlobalDefaults loads migration defaults from the global secrets file
+// and applies them as base values (only if not already set in the config).
+func (c *Config) applyGlobalDefaults() {
+	secretsCfg, err := secrets.Load()
+	if err != nil {
+		// Secrets file is optional - continue without global defaults
+		return
+	}
+
+	defaults := secretsCfg.GetMigrationDefaults()
+	if defaults == nil {
+		return
+	}
+
+	// Performance settings - only apply if not set in migration config
+	if c.Migration.Workers == 0 && defaults.Workers > 0 {
+		c.Migration.Workers = defaults.Workers
+	}
+	if c.Migration.MaxConnections == 0 && defaults.MaxConnections > 0 {
+		c.Migration.MaxConnections = defaults.MaxConnections
+	}
+	if c.Migration.MaxMemoryMB == 0 && defaults.MaxMemoryMB > 0 {
+		c.Migration.MaxMemoryMB = defaults.MaxMemoryMB
+	}
+	if c.Migration.ReadAheadBuffers == 0 && defaults.ReadAheadBuffers > 0 {
+		c.Migration.ReadAheadBuffers = defaults.ReadAheadBuffers
+	}
+	if c.Migration.WriteAheadWriters == 0 && defaults.WriteAheadWriters > 0 {
+		c.Migration.WriteAheadWriters = defaults.WriteAheadWriters
+	}
+	if c.Migration.ParallelReaders == 0 && defaults.ParallelReaders > 0 {
+		c.Migration.ParallelReaders = defaults.ParallelReaders
+	}
+
+	// Note: Boolean settings (CreateIndexes, CreateForeignKeys, CreateCheckConstraints,
+	// StrictConsistency, SampleValidation) are NOT applied from global defaults.
+	// This is because Go's bool type defaults to false, making it impossible to
+	// distinguish between "not set in migration config" and "explicitly set to false".
+	// Applying global boolean defaults would prevent migrations from overriding to false.
+	// Users should set boolean values explicitly in their migration configs.
+	if c.Migration.SampleSize == 0 && defaults.SampleSize > 0 {
+		c.Migration.SampleSize = defaults.SampleSize
+	}
+
+	// Checkpoint and recovery
+	if c.Migration.CheckpointFrequency == 0 && defaults.CheckpointFrequency > 0 {
+		c.Migration.CheckpointFrequency = defaults.CheckpointFrequency
+	}
+	if c.Migration.MaxRetries == 0 && defaults.MaxRetries > 0 {
+		c.Migration.MaxRetries = defaults.MaxRetries
+	}
+	if c.Migration.HistoryRetentionDays == 0 && defaults.HistoryRetentionDays > 0 {
+		c.Migration.HistoryRetentionDays = defaults.HistoryRetentionDays
+	}
+
+	// AI features
+	if defaults.AIAdjust {
+		c.Migration.AIAdjust = true
+	}
+	if c.Migration.AIAdjustInterval == "" && defaults.AIAdjustInterval != "" {
+		c.Migration.AIAdjustInterval = defaults.AIAdjustInterval
+	}
+
+	// Data directory
+	if c.Migration.DataDir == "" && defaults.DataDir != "" {
+		c.Migration.DataDir = defaults.DataDir
+	}
+}
+
 func (c *Config) applyDefaults() {
+	// Apply global defaults from secrets file first
+	c.applyGlobalDefaults()
+
 	// Capture original values before auto-tuning
 	c.autoConfig.OriginalWorkers = c.Migration.Workers
 	c.autoConfig.OriginalChunkSize = c.Migration.ChunkSize
@@ -354,11 +424,11 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalMaxPgConns = c.Migration.MaxPgConnections
 	c.autoConfig.OriginalWriteAheadWriters = c.Migration.WriteAheadWriters
 	c.autoConfig.OriginalParallelReaders = c.Migration.ParallelReaders
-	c.autoConfig.OriginalMSSQLRowsPerBatch = c.Migration.MSSQLRowsPerBatch
-	c.autoConfig.OriginalOracleBatchSize = c.Migration.OracleBatchSize
 	c.autoConfig.OriginalLargeTableThresh = c.Migration.LargeTableThreshold
 	c.autoConfig.OriginalSampleSize = c.Migration.SampleSize
 	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
+	c.autoConfig.OriginalSourceChunkSize = c.Source.ChunkSize
+	c.autoConfig.OriginalTargetChunkSize = c.Target.ChunkSize
 
 	// Detect system resources (only if not already set, for testing)
 	if c.autoConfig.CPUCores == 0 {
@@ -561,14 +631,22 @@ func (c *Config) applyDefaults() {
 		c.Migration.MaxPgConnections = minTargetConns + 4
 	}
 
-	// Default MSSQLRowsPerBatch to chunk_size if not specified
-	if c.Migration.MSSQLRowsPerBatch == 0 {
-		c.Migration.MSSQLRowsPerBatch = c.Migration.ChunkSize
+	// Default source chunk_size to migration chunk_size if not specified
+	// This is the batch size for reading from the source database
+	if c.Source.ChunkSize == 0 {
+		c.Source.ChunkSize = c.Migration.ChunkSize
 	}
 
-	// Default OracleBatchSize to 5000 (optimal for godror.Batch)
-	if c.Migration.OracleBatchSize == 0 {
-		c.Migration.OracleBatchSize = 5000
+	// Default target chunk_size to migration chunk_size if not specified
+	// This is the batch size for writing to the target database
+	// For Oracle targets, a smaller default is optimal for godror.Batch (5000-10000)
+	if c.Target.ChunkSize == 0 {
+		if c.Target.Type == "oracle" {
+			// Oracle performs best with smaller batch sizes (5000-10000)
+			c.Target.ChunkSize = 5000
+		} else {
+			c.Target.ChunkSize = c.Migration.ChunkSize
+		}
 	}
 
 	// Auto-tune UpsertMergeChunkSize for upsert mode
@@ -1131,13 +1209,11 @@ func (c *Config) DebugDump() string {
 	// LargeTableThreshold
 	b.WriteString(fmt.Sprintf("  LargeTableThreshold: %s\n", formatAutoValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, "default 5M")))
 
-	// MSSQLRowsPerBatch
-	batchExpl := "matches chunk_size"
-	b.WriteString(fmt.Sprintf("  MSSQLRowsPerBatch: %s\n", formatAutoValue(c.Migration.MSSQLRowsPerBatch, ac.OriginalMSSQLRowsPerBatch, batchExpl)))
-
-	// OracleBatchSize
-	oracleBatchExpl := "default 5000"
-	b.WriteString(fmt.Sprintf("  OracleBatchSize: %s\n", formatAutoValue(c.Migration.OracleBatchSize, ac.OriginalOracleBatchSize, oracleBatchExpl)))
+	// Source/Target ChunkSize
+	sourceChunkExpl := "defaults to migration chunk_size"
+	b.WriteString(fmt.Sprintf("  Source.ChunkSize: %s\n", formatAutoValue(c.Source.ChunkSize, ac.OriginalSourceChunkSize, sourceChunkExpl)))
+	targetChunkExpl := "defaults to migration chunk_size (5000 for Oracle)"
+	b.WriteString(fmt.Sprintf("  Target.ChunkSize: %s\n", formatAutoValue(c.Target.ChunkSize, ac.OriginalTargetChunkSize, targetChunkExpl)))
 
 	// Other settings
 	b.WriteString(fmt.Sprintf("  TargetMode: %s\n", c.Migration.TargetMode))

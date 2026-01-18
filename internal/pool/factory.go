@@ -40,13 +40,11 @@ func NewSourcePool(cfg *config.SourceConfig, maxConns int) (SourcePool, error) {
 // Adding a new database driver requires no changes to this function.
 //
 // Parameters:
-//   - cfg: Target database configuration
+//   - cfg: Target database configuration (includes chunk_size for batch operations)
 //   - maxConns: Maximum number of connections in the pool
-//   - mssqlRowsPerBatch: Rows per batch for MSSQL bulk operations
-//   - oracleBatchSize: Oracle godror.Batch limit
 //   - sourceType: Source database type for cross-engine type handling
 //   - typeMapper: AI type mapper for database type conversions (required)
-func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int, oracleBatchSize int, sourceType string, typeMapper driver.TypeMapper) (TargetPool, error) {
+func NewTargetPool(cfg *config.TargetConfig, maxConns int, sourceType string, typeMapper driver.TypeMapper) (TargetPool, error) {
 	// Normalize empty type to default
 	dbType := cfg.Type
 	if dbType == "" {
@@ -62,10 +60,9 @@ func NewTargetPool(cfg *config.TargetConfig, maxConns int, mssqlRowsPerBatch int
 	// Create the writer using the driver's factory method
 	// This is truly pluggable - no switch statement needed
 	opts := driver.WriterOptions{
-		RowsPerBatch:    mssqlRowsPerBatch,
-		OracleBatchSize: oracleBatchSize,
-		SourceType:      sourceType,
-		TypeMapper:      typeMapper,
+		ChunkSize:  cfg.ChunkSize,
+		SourceType: sourceType,
+		TypeMapper: typeMapper,
 	}
 	return d.NewWriter((*dbconfig.TargetConfig)(cfg), maxConns, opts)
 }

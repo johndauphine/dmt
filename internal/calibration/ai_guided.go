@@ -248,7 +248,8 @@ Consider:
 ## Extended Parameters (ALWAYS include these with sensible values)
 - max_partitions: partitions for large tables (recommend: workers count)
 - large_table_threshold: row count to trigger partitioning (recommend: 1-10 million)
-- mssql_rows_per_batch: bulk copy batch hint for MSSQL (recommend: chunk_size)
+- source_chunk_size: batch size for reading from source (recommend: chunk_size)
+- target_chunk_size: batch size for writing to target (recommend: chunk_size, or 5000-10000 for Oracle targets)
 - upsert_merge_chunk_size: batch size for upsert operations (recommend: 5000-20000)
 - max_source_connections: source pool size (recommend: workers * 2 + 4)
 - max_target_connections: target pool size (recommend: workers * 2 + 4)
@@ -264,7 +265,8 @@ Return ONLY valid JSON:
     "packet_size": <int, MSSQL only, omit if not applicable>,
     "max_partitions": <int>,
     "large_table_threshold": <int>,
-    "mssql_rows_per_batch": <int>,
+    "source_chunk_size": <int>,
+    "target_chunk_size": <int>,
     "upsert_merge_chunk_size": <int>,
     "max_source_connections": <int>,
     "max_target_connections": <int>

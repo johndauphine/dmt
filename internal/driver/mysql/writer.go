@@ -22,7 +22,7 @@ type Writer struct {
 	db                 *sql.DB
 	config             *dbconfig.TargetConfig
 	maxConns           int
-	rowsPerBatch       int
+	chunkSize          int
 	sourceType         string
 	dialect            *Dialect
 	typeMapper         driver.TypeMapper
@@ -96,7 +96,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		db:                 db,
 		config:             cfg,
 		maxConns:           maxConns,
-		rowsPerBatch:       opts.RowsPerBatch,
+		chunkSize:          opts.ChunkSize,
 		sourceType:         opts.SourceType,
 		dialect:            dialect,
 		typeMapper:         opts.TypeMapper,
@@ -544,7 +544,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
 	// Process in batches to avoid max_allowed_packet limits
-	batchSize := w.rowsPerBatch
+	batchSize := w.chunkSize
 	if batchSize <= 0 {
 		batchSize = 1000 // Default batch size
 	}
@@ -635,7 +635,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Process in batches
-	batchSize := w.rowsPerBatch
+	batchSize := w.chunkSize
 	if batchSize <= 0 {
 		batchSize = 1000
 	}

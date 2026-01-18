@@ -21,7 +21,7 @@ type Writer struct {
 	db                 *sql.DB
 	config             *dbconfig.TargetConfig
 	maxConns           int
-	oracleBatchSize    int
+	chunkSize          int
 	sourceType         string
 	dialect            *Dialect
 	typeMapper         driver.TypeMapper
@@ -86,7 +86,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		db:                 db,
 		config:             cfg,
 		maxConns:           maxConns,
-		oracleBatchSize:    opts.OracleBatchSize,
+		chunkSize:          opts.ChunkSize,
 		sourceType:         opts.SourceType,
 		dialect:            dialect,
 		typeMapper:         opts.TypeMapper,
@@ -679,7 +679,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
 	// Process in batches - larger batches perform better with godror.Batch
-	batchSize := w.oracleBatchSize
+	batchSize := w.chunkSize
 	if batchSize <= 0 {
 		batchSize = 5000 // Optimal batch size for Oracle bulk inserts
 	}
@@ -719,7 +719,7 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 	defer stmt.Close()
 
 	// godror.Batch limit from config (default 5000 provides optimal throughput)
-	batchLimit := w.oracleBatchSize
+	batchLimit := w.chunkSize
 	if batchLimit <= 0 {
 		batchLimit = 5000
 	}
@@ -945,7 +945,7 @@ func (w *Writer) bulkInsertToStaging(ctx context.Context, stagingTable string, c
 	}
 	defer stmt.Close()
 
-	batchLimit := w.oracleBatchSize
+	batchLimit := w.chunkSize
 	if batchLimit <= 0 {
 		batchLimit = 5000
 	}

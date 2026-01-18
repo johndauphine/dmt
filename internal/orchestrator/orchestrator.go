@@ -237,7 +237,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	// Create target pool using factory
 	// Canonicalize source type to handle aliases (e.g., "sqlserver" -> "mssql")
 	sourceType := driver.Canonicalize(cfg.Source.Type)
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, cfg.Migration.MSSQLRowsPerBatch, cfg.Migration.OracleBatchSize, sourceType, typeMapper)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, sourceType, typeMapper)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)

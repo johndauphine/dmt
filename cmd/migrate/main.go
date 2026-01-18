@@ -1063,7 +1063,7 @@ func runCalibration(c *cli.Context) error {
 		}
 	}
 
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxConns, cfg.Migration.ChunkSize, cfg.Migration.OracleBatchSize, cfg.Source.Type, typeMapper)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, maxConns, cfg.Source.Type, typeMapper)
 	if err != nil {
 		return fmt.Errorf("failed to connect to target: %w", err)
 	}

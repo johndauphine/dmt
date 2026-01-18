@@ -55,12 +55,13 @@ type RecommendedConfig struct {
 	EstimatedRowsPerSec int64  `json:"estimated_rows_per_sec"`
 	Confidence          string `json:"confidence"` // "high", "medium", "low"
 	// Extended parameters
-	MaxPartitions         int   `json:"max_partitions,omitempty"`
-	LargeTableThreshold   int64 `json:"large_table_threshold,omitempty"`
-	MSSQLRowsPerBatch     int   `json:"mssql_rows_per_batch,omitempty"`     // MSSQL source/target only
-	UpsertMergeChunkSize  int   `json:"upsert_merge_chunk_size,omitempty"`
-	MaxSourceConnections  int   `json:"max_source_connections,omitempty"`  // Source connection pool
-	MaxTargetConnections  int   `json:"max_target_connections,omitempty"`  // Target connection pool
+	MaxPartitions        int   `json:"max_partitions,omitempty"`
+	LargeTableThreshold  int64 `json:"large_table_threshold,omitempty"`
+	SourceChunkSize      int   `json:"source_chunk_size,omitempty"`       // Batch size for reading
+	TargetChunkSize      int   `json:"target_chunk_size,omitempty"`       // Batch size for writing
+	UpsertMergeChunkSize int   `json:"upsert_merge_chunk_size,omitempty"`
+	MaxSourceConnections int   `json:"max_source_connections,omitempty"` // Source connection pool
+	MaxTargetConnections int   `json:"max_target_connections,omitempty"` // Target connection pool
 }
 
 // CalibrationResult contains all runs and the final recommendation.
@@ -208,8 +209,11 @@ func (r *CalibrationResult) FormatRecommendation() string {
 	if r.Recommendation.LargeTableThreshold > 0 {
 		sb.WriteString(fmt.Sprintf("  large_table_threshold: %d\n", r.Recommendation.LargeTableThreshold))
 	}
-	if r.Recommendation.MSSQLRowsPerBatch > 0 {
-		sb.WriteString(fmt.Sprintf("  mssql_rows_per_batch: %d\n", r.Recommendation.MSSQLRowsPerBatch))
+	if r.Recommendation.SourceChunkSize > 0 {
+		sb.WriteString(fmt.Sprintf("  source.chunk_size: %d\n", r.Recommendation.SourceChunkSize))
+	}
+	if r.Recommendation.TargetChunkSize > 0 {
+		sb.WriteString(fmt.Sprintf("  target.chunk_size: %d\n", r.Recommendation.TargetChunkSize))
 	}
 	if r.Recommendation.UpsertMergeChunkSize > 0 {
 		sb.WriteString(fmt.Sprintf("  upsert_merge_chunk_size: %d\n", r.Recommendation.UpsertMergeChunkSize))
@@ -260,9 +264,6 @@ func (r *CalibrationResult) FormatYAML() string {
 	if r.Recommendation.LargeTableThreshold > 0 {
 		sb.WriteString(fmt.Sprintf("  large_table_threshold: %d\n", r.Recommendation.LargeTableThreshold))
 	}
-	if r.Recommendation.MSSQLRowsPerBatch > 0 {
-		sb.WriteString(fmt.Sprintf("  mssql_rows_per_batch: %d\n", r.Recommendation.MSSQLRowsPerBatch))
-	}
 	if r.Recommendation.UpsertMergeChunkSize > 0 {
 		sb.WriteString(fmt.Sprintf("  upsert_merge_chunk_size: %d\n", r.Recommendation.UpsertMergeChunkSize))
 	}
@@ -273,7 +274,17 @@ func (r *CalibrationResult) FormatYAML() string {
 		sb.WriteString(fmt.Sprintf("  max_target_connections: %d\n", r.Recommendation.MaxTargetConnections))
 	}
 
-	sb.WriteString(fmt.Sprintf("  # Estimated throughput: ~%d rows/sec\n", r.Recommendation.EstimatedRowsPerSec))
+	// Source/target specific chunk sizes
+	if r.Recommendation.SourceChunkSize > 0 {
+		sb.WriteString("\nsource:\n")
+		sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", r.Recommendation.SourceChunkSize))
+	}
+	if r.Recommendation.TargetChunkSize > 0 {
+		sb.WriteString("\ntarget:\n")
+		sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", r.Recommendation.TargetChunkSize))
+	}
+
+	sb.WriteString(fmt.Sprintf("\n  # Estimated throughput: ~%d rows/sec\n", r.Recommendation.EstimatedRowsPerSec))
 
 	return sb.String()
 }
@@ -365,11 +376,45 @@ func (rec *RecommendedConfig) ApplyToConfigFile(configPath string) error {
 	if rec.LargeTableThreshold > 0 {
 		setMigrationValue("large_table_threshold", rec.LargeTableThreshold)
 	}
-	if rec.MSSQLRowsPerBatch > 0 {
-		setMigrationValue("mssql_rows_per_batch", rec.MSSQLRowsPerBatch)
-	}
 	if rec.UpsertMergeChunkSize > 0 {
 		setMigrationValue("upsert_merge_chunk_size", rec.UpsertMergeChunkSize)
+	}
+
+	// Set source/target chunk_size if recommended
+	// Helper to set a value in a section node
+	setNodeValue := func(sectionName string, key string, value interface{}) {
+		// Find or create section node
+		var sectionNode *yaml.Node
+		for i := 0; i < len(docContent.Content)-1; i += 2 {
+			if docContent.Content[i].Value == sectionName {
+				sectionNode = docContent.Content[i+1]
+				break
+			}
+		}
+		// Create section if it doesn't exist
+		if sectionNode == nil {
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: sectionName}
+			sectionNode = &yaml.Node{Kind: yaml.MappingNode}
+			docContent.Content = append(docContent.Content, keyNode, sectionNode)
+		}
+		// Look for existing key in section
+		for i := 0; i < len(sectionNode.Content)-1; i += 2 {
+			if sectionNode.Content[i].Value == key {
+				sectionNode.Content[i+1].Value = fmt.Sprintf("%v", value)
+				return
+			}
+		}
+		// Add new key-value pair
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: key}
+		valueNode := &yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%v", value)}
+		sectionNode.Content = append(sectionNode.Content, keyNode, valueNode)
+	}
+
+	if rec.SourceChunkSize > 0 {
+		setNodeValue("source", "chunk_size", rec.SourceChunkSize)
+	}
+	if rec.TargetChunkSize > 0 {
+		setNodeValue("target", "chunk_size", rec.TargetChunkSize)
 	}
 
 	// Marshal back to YAML

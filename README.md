@@ -137,7 +137,8 @@ Calibration optimizes all performance parameters:
 **Extended Parameters:**
 - `max_partitions`: Partitions for large tables
 - `large_table_threshold`: Row count to trigger partitioning
-- `mssql_rows_per_batch`: MSSQL bulk copy batch size
+- `source.chunk_size`: Read batch size (per-source granularity)
+- `target.chunk_size`: Write batch size (per-target granularity)
 - `upsert_merge_chunk_size`: Upsert batch size
 - `max_source_connections`: Source connection pool
 - `max_target_connections`: Target connection pool
@@ -990,8 +991,8 @@ The `migration` section controls how data is transferred.
 | `read_ahead_buffers` | No | Auto-scaled (4-32) | Number of chunks to buffer ahead of writers |
 | `write_ahead_writers` | No | 2 | Parallel writers per job. Use 8 for PG→MSSQL |
 | `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
-| `mssql_rows_per_batch` | No | Same as `chunk_size` | SQL Server bulk copy batch size hint |
-| `oracle_batch_size` | No | 5000 | Oracle godror.Batch limit (optimal: 5000-10000) |
+| `source.chunk_size` | No | Same as `migration.chunk_size` | Batch size for reading from source database |
+| `target.chunk_size` | No | Same as `migration.chunk_size` (5000 for Oracle) | Batch size for writing to target database |
 
 ### AI Settings
 
@@ -1264,11 +1265,11 @@ target:
   user: migrate_user
   password: ${ORACLE_PASSWORD}
   schema: MIGRATE_USER                 # Oracle schema (usually uppercase)
+  chunk_size: 5000                     # Oracle optimal: 5000-10000 for godror.Batch
 
 migration:
   workers: 4
   chunk_size: 50000
-  oracle_batch_size: 5000              # Optimal for godror.Batch
   create_indexes: true
   create_foreign_keys: true
 

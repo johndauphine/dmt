@@ -1304,6 +1304,9 @@ notifications:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Reset secrets cache first to ensure clean state from any previous tests
+			secrets.Reset()
+
 			tmpDir := t.TempDir()
 
 			// Create config file

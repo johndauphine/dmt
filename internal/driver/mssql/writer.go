@@ -22,7 +22,7 @@ type Writer struct {
 	db                 *sql.DB
 	config             *dbconfig.TargetConfig
 	maxConns           int
-	rowsPerBatch       int
+	chunkSize          int
 	compatLevel        int
 	sourceType         string
 	dialect            *Dialect
@@ -95,7 +95,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		db:                 db,
 		config:             cfg,
 		maxConns:           maxConns,
-		rowsPerBatch:       opts.RowsPerBatch,
+		chunkSize:          opts.ChunkSize,
 		compatLevel:        compatLevel,
 		sourceType:         opts.SourceType,
 		dialect:            dialect,
@@ -605,14 +605,14 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			return fmt.Errorf("expected *mssql.Conn, got %T", driverConn)
 		}
 
-		rowsPerBatch := w.rowsPerBatch
-		if rowsPerBatch <= 0 || rowsPerBatch > len(opts.Rows) {
-			rowsPerBatch = len(opts.Rows)
+		batchSize := w.chunkSize
+		if batchSize <= 0 || batchSize > len(opts.Rows) {
+			batchSize = len(opts.Rows)
 		}
 
 		bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, opts.Columns)
 		bulk.Options.Tablock = true
-		bulk.Options.RowsPerBatch = rowsPerBatch
+		bulk.Options.RowsPerBatch = batchSize
 
 		for _, row := range opts.Rows {
 			err := bulk.AddRow(convertRowForBulkCopy(row))
@@ -863,7 +863,7 @@ func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, mssql.CopyIn(tempTable, mssql.BulkOptions{
-		RowsPerBatch: w.rowsPerBatch,
+		RowsPerBatch: w.chunkSize,
 	}, cols...))
 	if err != nil {
 		return err

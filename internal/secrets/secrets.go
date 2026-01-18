@@ -25,9 +25,44 @@ const (
 
 // Config represents the complete secrets configuration
 type Config struct {
-	AI            AIConfig              `yaml:"ai"`
-	Encryption    EncryptionConfig      `yaml:"encryption"`
-	Notifications NotificationsConfig   `yaml:"notifications"`
+	AI                AIConfig              `yaml:"ai"`
+	Encryption        EncryptionConfig      `yaml:"encryption"`
+	Notifications     NotificationsConfig   `yaml:"notifications"`
+	MigrationDefaults MigrationDefaults     `yaml:"migration_defaults"`
+}
+
+// MigrationDefaults holds global default settings for migrations.
+// These can be overridden in individual migration config files.
+type MigrationDefaults struct {
+	// Performance settings (machine-dependent)
+	Workers           int   `yaml:"workers,omitempty"`             // Number of parallel workers (default: auto based on CPU)
+	MaxConnections    int   `yaml:"max_connections,omitempty"`     // Max total DB connections
+	MaxMemoryMB       int64 `yaml:"max_memory_mb,omitempty"`       // Max memory usage in MB
+	ReadAheadBuffers  int   `yaml:"read_ahead_buffers,omitempty"`  // Chunks to buffer ahead
+	WriteAheadWriters int   `yaml:"write_ahead_writers,omitempty"` // Parallel writers per job
+	ParallelReaders   int   `yaml:"parallel_readers,omitempty"`    // Parallel readers per job
+
+	// Schema creation defaults
+	CreateIndexes          bool `yaml:"create_indexes"`           // Create non-PK indexes (default: true)
+	CreateForeignKeys      bool `yaml:"create_foreign_keys"`      // Create FK constraints (default: true)
+	CreateCheckConstraints bool `yaml:"create_check_constraints"` // Create CHECK constraints (default: false)
+
+	// Consistency and validation
+	StrictConsistency bool `yaml:"strict_consistency"` // Use table locks instead of NOLOCK
+	SampleValidation  bool `yaml:"sample_validation"`  // Enable sample data validation
+	SampleSize        int  `yaml:"sample_size"`        // Rows to sample for validation
+
+	// Checkpoint and recovery
+	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks
+	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times
+	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days
+
+	// AI features
+	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment
+	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics
+
+	// Data directory
+	DataDir string `yaml:"data_dir,omitempty"` // Directory for state/checkpoint files
 }
 
 // AIConfig holds AI provider configuration
@@ -186,18 +221,21 @@ func loadFromFile() (*Config, error) {
 
 // Validate checks that the configuration is valid
 func (c *Config) Validate() error {
-	if c.AI.DefaultProvider == "" {
-		return fmt.Errorf("ai.default_provider is required")
+	// AI settings are optional - only validate if configured
+	if c.AI.DefaultProvider != "" {
+		// Check that default provider exists
+		provider, ok := c.AI.Providers[c.AI.DefaultProvider]
+		if !ok {
+			return fmt.Errorf("default provider %q not found in providers", c.AI.DefaultProvider)
+		}
+
+		// Validate the default provider has required fields
+		if err := validateProvider(c.AI.DefaultProvider, provider); err != nil {
+			return err
+		}
 	}
 
-	// Check that default provider exists
-	provider, ok := c.AI.Providers[c.AI.DefaultProvider]
-	if !ok {
-		return fmt.Errorf("default provider %q not found in providers", c.AI.DefaultProvider)
-	}
-
-	// Validate the default provider has required fields
-	return validateProvider(c.AI.DefaultProvider, provider)
+	return nil
 }
 
 func validateProvider(name string, p *Provider) error {
@@ -247,6 +285,11 @@ func (c *Config) GetProvider(name string) (*Provider, error) {
 // GetMasterKey returns the encryption master key
 func (c *Config) GetMasterKey() string {
 	return c.Encryption.MasterKey
+}
+
+// GetMigrationDefaults returns the global migration defaults
+func (c *Config) GetMigrationDefaults() *MigrationDefaults {
+	return &c.MigrationDefaults
 }
 
 // GetEffectiveBaseURL returns the base URL for a provider, using defaults if not specified
@@ -363,5 +406,33 @@ encryption:
 notifications:
   slack:
     webhook_url: ""  # Slack webhook URL for migration notifications
+
+# Global migration defaults (can be overridden per-migration)
+migration_defaults:
+  # Performance settings (auto-tuned if not set)
+  # workers: 4                    # Parallel workers (default: based on CPU cores)
+  # max_memory_mb: 0              # Max memory in MB (default: 70% of available)
+  # read_ahead_buffers: 8         # Chunks to buffer ahead
+  # write_ahead_writers: 2        # Parallel writers per job
+  # parallel_readers: 2           # Parallel readers per job
+
+  # Schema creation defaults
+  create_indexes: true            # Create non-PK indexes
+  create_foreign_keys: true       # Create FK constraints
+  create_check_constraints: false # Create CHECK constraints
+
+  # Consistency and validation
+  strict_consistency: false       # Use table locks instead of NOLOCK/MVCC
+  sample_validation: false        # Validate sample data after migration
+  sample_size: 100                # Rows to sample for validation
+
+  # Checkpoint and recovery
+  checkpoint_frequency: 10        # Save progress every N chunks
+  max_retries: 3                  # Retry failed tables N times
+  history_retention_days: 30      # Keep run history for N days
+
+  # AI features
+  ai_adjust: false                # Enable AI-driven parameter adjustment
+  # ai_adjust_interval: "30s"     # How often AI evaluates metrics
 `
 }
