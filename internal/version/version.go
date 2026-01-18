@@ -1,7 +1,7 @@
 package version
 
 // Version is the current version of dmt.
-const Version = "3.51.0"
+const Version = "3.52.0"
 
 // Name is the application name.
 const Name = "dmt"
