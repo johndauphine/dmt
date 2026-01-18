@@ -521,9 +521,6 @@ func (c *Config) applyDefaults() {
 				if writers < defaults.WriteAheadWriters {
 					writers = defaults.WriteAheadWriters
 				}
-				if writers > 4 {
-					writers = 4
-				}
 				c.Migration.WriteAheadWriters = writers
 			} else {
 				// Use fixed value (e.g., MSSQL TABLOCK serializes writes)
@@ -536,15 +533,11 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	// Auto-tune parallel readers based on CPU cores
-	// Conservative defaults to avoid overwhelming source database
 	if c.Migration.ParallelReaders == 0 {
 		cores := c.autoConfig.CPUCores
 		readers := cores / 4
 		if readers < 2 {
 			readers = 2
-		}
-		if readers > 4 {
-			readers = 4
 		}
 		c.Migration.ParallelReaders = readers
 	}

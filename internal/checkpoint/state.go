@@ -207,6 +207,33 @@ func (s *State) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_ai_adjustments_run ON ai_adjustments(run_id);
 	CREATE INDEX IF NOT EXISTS idx_ai_adjustments_action ON ai_adjustments(action);
+
+	CREATE TABLE IF NOT EXISTS ai_tuning_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp TEXT NOT NULL,
+		source_db_type TEXT NOT NULL,
+		target_db_type TEXT,
+		total_tables INTEGER NOT NULL,
+		total_rows INTEGER NOT NULL,
+		avg_row_size_bytes INTEGER,
+		cpu_cores INTEGER,
+		memory_gb INTEGER,
+		workers INTEGER NOT NULL,
+		chunk_size INTEGER NOT NULL,
+		read_ahead_buffers INTEGER,
+		write_ahead_writers INTEGER,
+		parallel_readers INTEGER,
+		max_partitions INTEGER,
+		large_table_threshold INTEGER,
+		max_source_connections INTEGER,
+		max_target_connections INTEGER,
+		estimated_memory_mb INTEGER,
+		ai_reasoning TEXT,
+		was_ai_used INTEGER NOT NULL DEFAULT 0
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_ai_tuning_timestamp ON ai_tuning_history(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_ai_tuning_source_type ON ai_tuning_history(source_db_type);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -309,6 +336,7 @@ var validTableNames = map[string]bool{
 	"profiles":              true,
 	"table_sync_timestamps": true,
 	"ai_adjustments":        true,
+	"ai_tuning_history":     true,
 }
 
 func (s *State) tableColumns(table string) ([]string, error) {
@@ -1090,6 +1118,125 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]AIAdjustmentRecord, error) 
 		}
 		if confidence.Valid {
 			r.Confidence = confidence.String
+		}
+
+		records = append(records, r)
+	}
+	return records, rows.Err()
+}
+
+// SaveAITuning saves an AI tuning recommendation from the analyze command.
+func (s *State) SaveAITuning(record AITuningRecord) error {
+	wasAIUsed := 0
+	if record.WasAIUsed {
+		wasAIUsed = 1
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO ai_tuning_history (
+			timestamp, source_db_type, target_db_type,
+			total_tables, total_rows, avg_row_size_bytes,
+			cpu_cores, memory_gb,
+			workers, chunk_size, read_ahead_buffers, write_ahead_writers,
+			parallel_readers, max_partitions, large_table_threshold,
+			max_source_connections, max_target_connections,
+			estimated_memory_mb, ai_reasoning, was_ai_used
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		record.Timestamp.Format("2006-01-02 15:04:05"),
+		record.SourceDBType, record.TargetDBType,
+		record.TotalTables, record.TotalRows, record.AvgRowSizeBytes,
+		record.CPUCores, record.MemoryGB,
+		record.Workers, record.ChunkSize, record.ReadAheadBuffers, record.WriteAheadWriters,
+		record.ParallelReaders, record.MaxPartitions, record.LargeTableThreshold,
+		record.MaxSourceConns, record.MaxTargetConns,
+		record.EstimatedMemoryMB, record.AIReasoning, wasAIUsed,
+	)
+	return err
+}
+
+// GetAITuningHistory returns the most recent AI tuning recommendations.
+func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, source_db_type, target_db_type,
+		       total_tables, total_rows, avg_row_size_bytes,
+		       cpu_cores, memory_gb,
+		       workers, chunk_size, read_ahead_buffers, write_ahead_writers,
+		       parallel_readers, max_partitions, large_table_threshold,
+		       max_source_connections, max_target_connections,
+		       estimated_memory_mb, ai_reasoning, was_ai_used
+		FROM ai_tuning_history
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []AITuningRecord
+	for rows.Next() {
+		var r AITuningRecord
+		var timestampStr string
+		var targetDBType, aiReasoning sql.NullString
+		var avgRowSize, cpuCores, memoryGB sql.NullInt64
+		var readAhead, writeAhead, parallelReaders, maxPartitions sql.NullInt64
+		var largeTableThreshold, maxSourceConns, maxTargetConns, estimatedMem sql.NullInt64
+		var wasAIUsed int
+
+		if err := rows.Scan(
+			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
+			&r.TotalTables, &r.TotalRows, &avgRowSize,
+			&cpuCores, &memoryGB,
+			&r.Workers, &r.ChunkSize, &readAhead, &writeAhead,
+			&parallelReaders, &maxPartitions, &largeTableThreshold,
+			&maxSourceConns, &maxTargetConns,
+			&estimatedMem, &aiReasoning, &wasAIUsed,
+		); err != nil {
+			return nil, err
+		}
+
+		r.Timestamp, _ = time.Parse("2006-01-02 15:04:05", timestampStr)
+		r.WasAIUsed = wasAIUsed == 1
+
+		if targetDBType.Valid {
+			r.TargetDBType = targetDBType.String
+		}
+		if aiReasoning.Valid {
+			r.AIReasoning = aiReasoning.String
+		}
+		if avgRowSize.Valid {
+			r.AvgRowSizeBytes = avgRowSize.Int64
+		}
+		if cpuCores.Valid {
+			r.CPUCores = int(cpuCores.Int64)
+		}
+		if memoryGB.Valid {
+			r.MemoryGB = int(memoryGB.Int64)
+		}
+		if readAhead.Valid {
+			r.ReadAheadBuffers = int(readAhead.Int64)
+		}
+		if writeAhead.Valid {
+			r.WriteAheadWriters = int(writeAhead.Int64)
+		}
+		if parallelReaders.Valid {
+			r.ParallelReaders = int(parallelReaders.Int64)
+		}
+		if maxPartitions.Valid {
+			r.MaxPartitions = int(maxPartitions.Int64)
+		}
+		if largeTableThreshold.Valid {
+			r.LargeTableThreshold = largeTableThreshold.Int64
+		}
+		if maxSourceConns.Valid {
+			r.MaxSourceConns = int(maxSourceConns.Int64)
+		}
+		if maxTargetConns.Valid {
+			r.MaxTargetConns = int(maxTargetConns.Int64)
+		}
+		if estimatedMem.Valid {
+			r.EstimatedMemoryMB = estimatedMem.Int64
 		}
 
 		records = append(records, r)

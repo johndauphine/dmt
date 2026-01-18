@@ -44,23 +44,23 @@ type MigrationDefaults struct {
 	ParallelReaders   int   `yaml:"parallel_readers,omitempty"`    // Parallel readers per job
 
 	// Schema creation defaults (use *bool to distinguish "not set" from "false")
-	CreateIndexes          *bool `yaml:"create_indexes"`           // Create non-PK indexes (default: true)
-	CreateForeignKeys      *bool `yaml:"create_foreign_keys"`      // Create FK constraints (default: true)
-	CreateCheckConstraints *bool `yaml:"create_check_constraints"` // Create CHECK constraints (default: false)
+	CreateIndexes          *bool `yaml:"create_indexes,omitempty"`           // Create non-PK indexes (default: true)
+	CreateForeignKeys      *bool `yaml:"create_foreign_keys,omitempty"`      // Create FK constraints (default: true)
+	CreateCheckConstraints *bool `yaml:"create_check_constraints,omitempty"` // Create CHECK constraints (default: false)
 
 	// Consistency and validation
-	StrictConsistency *bool `yaml:"strict_consistency"` // Use table locks instead of NOLOCK
-	SampleValidation  *bool `yaml:"sample_validation"`  // Enable sample data validation
-	SampleSize        int   `yaml:"sample_size"`        // Rows to sample for validation
+	StrictConsistency *bool `yaml:"strict_consistency,omitempty"` // Use table locks instead of NOLOCK
+	SampleValidation  *bool `yaml:"sample_validation,omitempty"`  // Enable sample data validation
+	SampleSize        int   `yaml:"sample_size,omitempty"`        // Rows to sample for validation
 
 	// Checkpoint and recovery
-	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks
-	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times
-	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days
+	CheckpointFrequency  int `yaml:"checkpoint_frequency,omitempty"`   // Save progress every N chunks
+	MaxRetries           int `yaml:"max_retries,omitempty"`            // Retry failed tables N times
+	HistoryRetentionDays int `yaml:"history_retention_days,omitempty"` // Keep run history for N days
 
 	// AI features (enabled by default when AI provider is configured)
-	AIAdjust         *bool  `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment (default: true)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
+	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"`          // Enable AI-driven parameter adjustment (default: true)
+	AIAdjustInterval string `yaml:"ai_adjust_interval,omitempty"` // How often AI evaluates metrics (default: 30s)
 
 	// Data directory
 	DataDir string `yaml:"data_dir,omitempty"` // Directory for state/checkpoint files
@@ -218,6 +218,113 @@ func loadFromFile() (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// Save writes the config to the secrets file, preserving existing fields.
+// It loads the current file first to preserve any fields not in the new config.
+func Save(updates *Config) error {
+	path := GetSecretsPath()
+
+	// Load existing config if it exists
+	existing := &Config{}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		_ = yaml.Unmarshal(data, existing)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading existing secrets file: %w", err)
+	}
+
+	// Merge updates into existing config
+	mergeConfig(existing, updates)
+
+	// Marshal the merged config
+	newData, err := yaml.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	// Ensure the directory exists
+	if _, err := EnsureSecretsDir(); err != nil {
+		return err
+	}
+
+	// Write with secure permissions
+	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
+		return fmt.Errorf("writing secrets file: %w", err)
+	}
+
+	// Reset the cached config so next Load() picks up changes
+	Reset()
+
+	return nil
+}
+
+// mergeConfig merges updates into existing config, only overwriting non-zero values.
+func mergeConfig(existing, updates *Config) {
+	// Only merge migration_defaults for now (the main use case)
+	mergeMigrationDefaults(&existing.MigrationDefaults, &updates.MigrationDefaults)
+}
+
+// mergeMigrationDefaults merges non-zero migration defaults.
+func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
+	if updates.Workers > 0 {
+		existing.Workers = updates.Workers
+	}
+	if updates.MaxSourceConnections > 0 {
+		existing.MaxSourceConnections = updates.MaxSourceConnections
+	}
+	if updates.MaxTargetConnections > 0 {
+		existing.MaxTargetConnections = updates.MaxTargetConnections
+	}
+	if updates.MaxMemoryMB > 0 {
+		existing.MaxMemoryMB = updates.MaxMemoryMB
+	}
+	if updates.ReadAheadBuffers > 0 {
+		existing.ReadAheadBuffers = updates.ReadAheadBuffers
+	}
+	if updates.WriteAheadWriters > 0 {
+		existing.WriteAheadWriters = updates.WriteAheadWriters
+	}
+	if updates.ParallelReaders > 0 {
+		existing.ParallelReaders = updates.ParallelReaders
+	}
+	if updates.CheckpointFrequency > 0 {
+		existing.CheckpointFrequency = updates.CheckpointFrequency
+	}
+	if updates.MaxRetries > 0 {
+		existing.MaxRetries = updates.MaxRetries
+	}
+	if updates.SampleSize > 0 {
+		existing.SampleSize = updates.SampleSize
+	}
+	if updates.HistoryRetentionDays > 0 {
+		existing.HistoryRetentionDays = updates.HistoryRetentionDays
+	}
+	if updates.DataDir != "" {
+		existing.DataDir = updates.DataDir
+	}
+	if updates.AIAdjustInterval != "" {
+		existing.AIAdjustInterval = updates.AIAdjustInterval
+	}
+	// Boolean pointers - only update if explicitly set
+	if updates.CreateIndexes != nil {
+		existing.CreateIndexes = updates.CreateIndexes
+	}
+	if updates.CreateForeignKeys != nil {
+		existing.CreateForeignKeys = updates.CreateForeignKeys
+	}
+	if updates.CreateCheckConstraints != nil {
+		existing.CreateCheckConstraints = updates.CreateCheckConstraints
+	}
+	if updates.StrictConsistency != nil {
+		existing.StrictConsistency = updates.StrictConsistency
+	}
+	if updates.SampleValidation != nil {
+		existing.SampleValidation = updates.SampleValidation
+	}
+	if updates.AIAdjust != nil {
+		existing.AIAdjust = updates.AIAdjust
+	}
 }
 
 // Validate checks that the configuration is valid

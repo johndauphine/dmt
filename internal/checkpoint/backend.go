@@ -44,6 +44,10 @@ type StateBackend interface {
 	SaveAIAdjustment(runID string, record AIAdjustmentRecord) error
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
 	GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error)
+
+	// AI tuning history for analyze command (optional - file backend returns empty/no-op)
+	SaveAITuning(record AITuningRecord) error
+	GetAITuningHistory(limit int) ([]AITuningRecord, error)
 }
 
 // HistoryBackend extends StateBackend with profile management.
@@ -60,6 +64,36 @@ type HistoryBackend interface {
 
 // Ensure State implements HistoryBackend
 var _ HistoryBackend = (*State)(nil)
+
+// AITuningRecord represents a historical AI tuning recommendation from analyze command.
+// This stores the context and recommendations for learning from past analyses.
+type AITuningRecord struct {
+	ID               int64     `json:"id"`
+	Timestamp        time.Time `json:"timestamp"`
+	SourceDBType     string    `json:"source_db_type"`
+	TargetDBType     string    `json:"target_db_type"`
+	TotalTables      int       `json:"total_tables"`
+	TotalRows        int64     `json:"total_rows"`
+	AvgRowSizeBytes  int64     `json:"avg_row_size_bytes"`
+	CPUCores         int       `json:"cpu_cores"`
+	MemoryGB         int       `json:"memory_gb"`
+
+	// Recommended parameters
+	Workers             int   `json:"workers"`
+	ChunkSize           int   `json:"chunk_size"`
+	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
+	WriteAheadWriters   int   `json:"write_ahead_writers"`
+	ParallelReaders     int   `json:"parallel_readers"`
+	MaxPartitions       int   `json:"max_partitions"`
+	LargeTableThreshold int64 `json:"large_table_threshold"`
+	MaxSourceConns      int   `json:"max_source_connections"`
+	MaxTargetConns      int   `json:"max_target_connections"`
+	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
+
+	// AI metadata
+	AIReasoning string `json:"ai_reasoning"`
+	WasAIUsed   bool   `json:"was_ai_used"` // Whether AI was used or formula fallback
+}
 
 // AIAdjustmentRecord represents a historical AI adjustment decision.
 type AIAdjustmentRecord struct {
