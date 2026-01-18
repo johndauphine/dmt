@@ -241,26 +241,30 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 	avgRowSize := s.calculateAvgRowSize(tables)
 	s.suggestions.AvgRowSizeBytes = avgRowSize
 
-	// Always calculate formula-based params first (as fallback)
-	s.calculateFormulaBasedParams(tables, avgRowSize)
+	// Build input for AI tuning
+	input := s.buildAutoTuneInput(tables, avgRowSize)
 
-	// Try AI tuning as primary source if available
+	// Try AI tuning
 	wasAIUsed := false
 	var aiReasoning string
-	input := s.buildAutoTuneInput(tables, avgRowSize)
 
 	if s.useAI && s.aiMapper != nil {
 		output, err := s.getAIAutoTune(ctx, input)
 		if err == nil && output != nil {
-			// AI succeeded - use AI values as primary, keep formula as reference
 			s.suggestions.AISuggestions = output
 			s.applyAISuggestions(output)
 			wasAIUsed = true
 			aiReasoning = output.Reasoning
-			logging.Debug("AI tuning applied as primary source")
+			logging.Debug("AI tuning applied")
 		} else {
-			logging.Debug("AI auto-tune unavailable, using formula-based: %v", err)
+			logging.Warn("AI tuning unavailable: %v - using sensible defaults", err)
+			s.applyDefaultSuggestions(input)
+			aiReasoning = "AI unavailable - using sensible defaults based on system resources"
 		}
+	} else {
+		logging.Info("AI provider not configured - using sensible defaults")
+		s.applyDefaultSuggestions(input)
+		aiReasoning = "AI not configured - using sensible defaults based on system resources"
 	}
 
 	// Save tuning result for future reference
@@ -313,6 +317,32 @@ func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput) {
 	s.suggestions.CheckpointFrequency = ai.CheckpointFrequency
 	s.suggestions.MaxRetries = ai.MaxRetries
 	s.suggestions.EstimatedMemMB = ai.EstimatedMemoryMB
+}
+
+// applyDefaultSuggestions applies sensible defaults based on system resources.
+func (s *SmartConfigAnalyzer) applyDefaultSuggestions(input AutoTuneInput) {
+	// Workers: CPU cores minus 2 for OS, minimum 2
+	workers := input.CPUCores - 2
+	if workers < 2 {
+		workers = 2
+	}
+
+	// Simple defaults that scale with available resources
+	s.suggestions.Workers = workers
+	s.suggestions.ChunkSizeRecommendation = 50000
+	s.suggestions.ReadAheadBuffers = 4
+	s.suggestions.WriteAheadWriters = 2
+	s.suggestions.ParallelReaders = 2
+	s.suggestions.MaxPartitions = workers
+	s.suggestions.LargeTableThreshold = 1000000
+	s.suggestions.MaxSourceConnections = workers + 4
+	s.suggestions.MaxTargetConnections = workers * 2 + 4
+	s.suggestions.UpsertMergeChunkSize = 5000
+	s.suggestions.CheckpointFrequency = 20
+	s.suggestions.MaxRetries = 3
+
+	// Estimate memory usage
+	s.suggestions.EstimatedMemMB = int64(workers) * 4 * int64(s.suggestions.ChunkSizeRecommendation) * input.AvgRowBytes / 1024 / 1024
 }
 
 // calculateAvgRowSize calculates average row size from top 5 largest tables.
@@ -449,63 +479,36 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 	// Get historical context from past analyses and migrations
 	historicalContext := s.formatHistoricalContext()
 
-	// Calculate environment-based guardrails (all derived from actual hardware)
-	// Max workers: CPU cores - 2 for OS overhead, minimum 2 for any parallelism
-	maxWorkers := input.CPUCores - 2
-	if maxWorkers < 2 {
-		maxWorkers = 2
-	}
-	// No arbitrary upper cap - let the hardware dictate (32-core machines can use more workers)
-
-	// Max memory: 50% of available RAM for migration buffers
-	maxMemoryMB := input.MemoryGB * 1024 / 2
-	if maxMemoryMB < 256 {
-		maxMemoryMB = 256 // Bare minimum to function
-	}
-
-	// Max connections: scale with workers, but also consider typical DB limits
-	// Formula: workers * 4 (for read/write parallelism) + overhead
-	maxConnections := maxWorkers * 4
-	if maxConnections < 10 {
-		maxConnections = 10
-	}
-	// Only cap at very high numbers to avoid overwhelming DBs
-	if input.CPUCores > 32 && maxConnections > 200 {
-		maxConnections = 200 // Even large systems rarely need more
-	}
-
-	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system constraints and historical data.
+	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system environment and historical data.
 
 System and Database Info:
 %s
 %s
-HARD CONSTRAINTS (must not exceed):
-- max_workers: %d (based on %d CPU cores)
-- max_memory_mb: %d (50%% of %dGB RAM)
-- max_connections: %d per database
+Environment Context:
+- CPU cores: %d (consider reserving 1-2 for OS)
+- Available RAM: %dGB (consider what portion to use for migration buffers)
 - Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
-  This MUST be <= max_memory_mb
 
 Parameters to tune:
-- workers: Parallel workers (1-%d)
-- chunk_size: Rows per batch (10000-500000)
-- read_ahead_buffers: Read buffers per worker (2-16)
-- write_ahead_writers: Write threads per worker (2-4)
-- parallel_readers: Parallel readers (2-4)
-- max_partitions: Large table partitions (matches workers)
-- large_table_threshold: Rows before partitioning (500000-10000000)
-- max_source_connections: Source pool size (workers + parallel_readers + 2)
-- max_target_connections: Target pool size (workers * write_ahead_writers + 2)
-- upsert_merge_chunk_size: Upsert batch size (1000-10000)
-- checkpoint_frequency: Checkpoint interval (10-100)
-- max_retries: Retry count (2-5)
+- workers: Parallel migration workers
+- chunk_size: Rows per batch (larger = higher throughput, but uses more memory)
+- read_ahead_buffers: Read buffers per worker
+- write_ahead_writers: Write threads per worker
+- parallel_readers: Parallel readers for large tables
+- max_partitions: Large table partitions (typically matches workers)
+- large_table_threshold: Row count before partitioning
+- max_source_connections: Source database connection pool size
+- max_target_connections: Target database connection pool size
+- upsert_merge_chunk_size: Batch size for upsert operations
+- checkpoint_frequency: How often to checkpoint progress
+- max_retries: Retry count for transient failures
 
 Guidelines:
-1. CHUNK SIZE is most important - larger = higher throughput, but must fit in memory
-2. Calculate memory usage and ensure it stays under max_memory_mb
-3. Balance parallelism with available CPU cores
-4. More workers = more connections needed
-5. Learn from historical data: if certain adjustments improved performance, consider applying them proactively
+1. CHUNK SIZE is most important - larger = higher throughput, balance with available memory
+2. Workers should scale with CPU cores but leave headroom for the OS
+3. Connection pool sizes should accommodate workers plus overhead
+4. Learn from historical data: apply patterns that improved performance in past migrations
+5. Consider the database types and total data volume when tuning
 
 Respond with ONLY a JSON object:
 {
@@ -523,7 +526,7 @@ Respond with ONLY a JSON object:
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
   "reasoning": "<brief explanation of choices, referencing historical data if relevant>"
-}`, string(inputJSON), historicalContext, maxWorkers, input.CPUCores, maxMemoryMB, input.MemoryGB, maxConnections, maxWorkers)
+}`, string(inputJSON), historicalContext, input.CPUCores, input.MemoryGB)
 
 	response, err := s.aiMapper.CallAI(ctx, prompt)
 	if err != nil {
@@ -543,206 +546,39 @@ Respond with ONLY a JSON object:
 		return nil, fmt.Errorf("parsing AI response: %w (response: %s)", err, response)
 	}
 
-	// Enforce guardrails - clamp values to valid ranges based on environment
-	// Workers: min 1, max based on CPU cores
+	// Trust AI recommendations - only apply minimal sanity checks for obviously invalid values
 	if output.Workers < 1 {
 		output.Workers = 1
 	}
-	if output.Workers > maxWorkers {
-		output.Workers = maxWorkers
+	if output.ChunkSize < 1000 {
+		output.ChunkSize = 1000
 	}
-
-	// Chunk size: 10K-500K range
-	if output.ChunkSize < 10000 {
-		output.ChunkSize = 10000
-	}
-	if output.ChunkSize > 500000 {
-		output.ChunkSize = 500000
-	}
-
-	// Read-ahead buffers: 2-16 range
-	if output.ReadAheadBuffers < 2 {
+	if output.ReadAheadBuffers < 1 {
 		output.ReadAheadBuffers = 2
 	}
-	if output.ReadAheadBuffers > 16 {
-		output.ReadAheadBuffers = 16
-	}
-
-	// Write-ahead writers: 2-4 range
-	if output.WriteAheadWriters < 2 {
+	if output.WriteAheadWriters < 1 {
 		output.WriteAheadWriters = 2
 	}
-	if output.WriteAheadWriters > 4 {
-		output.WriteAheadWriters = 4
-	}
-
-	// Parallel readers: 2-4 range
-	if output.ParallelReaders < 2 {
+	if output.ParallelReaders < 1 {
 		output.ParallelReaders = 2
 	}
-	if output.ParallelReaders > 4 {
-		output.ParallelReaders = 4
-	}
-
-	// Max partitions: match workers
 	if output.MaxPartitions < 1 {
 		output.MaxPartitions = output.Workers
 	}
-	if output.MaxPartitions > output.Workers {
-		output.MaxPartitions = output.Workers
-	}
-
-	// Connection limits
-	if output.MaxSourceConnections < output.Workers+2 {
+	if output.MaxSourceConnections < 1 {
 		output.MaxSourceConnections = output.Workers + output.ParallelReaders + 2
 	}
-	if output.MaxSourceConnections > maxConnections {
-		output.MaxSourceConnections = maxConnections
-	}
-	if output.MaxTargetConnections < output.Workers+2 {
+	if output.MaxTargetConnections < 1 {
 		output.MaxTargetConnections = output.Workers*output.WriteAheadWriters + 2
 	}
-	if output.MaxTargetConnections > maxConnections {
-		output.MaxTargetConnections = maxConnections
-	}
-
-	// Upsert chunk size: 1K-10K range
-	if output.UpsertMergeChunkSize < 1000 {
-		output.UpsertMergeChunkSize = 1000
-	}
-	if output.UpsertMergeChunkSize > 10000 {
-		output.UpsertMergeChunkSize = 10000
-	}
-
-	// Checkpoint frequency: 10-100 range
-	if output.CheckpointFrequency < 10 {
+	if output.CheckpointFrequency < 1 {
 		output.CheckpointFrequency = 10
 	}
-	if output.CheckpointFrequency > 100 {
-		output.CheckpointFrequency = 100
+	if output.MaxRetries < 1 {
+		output.MaxRetries = 3
 	}
-
-	// Max retries: 2-5 range
-	if output.MaxRetries < 2 {
-		output.MaxRetries = 2
-	}
-	if output.MaxRetries > 5 {
-		output.MaxRetries = 5
-	}
-
-	// Validate memory usage - reduce chunk size if needed
-	estimatedMemMB := int64(output.Workers) * int64(output.ReadAheadBuffers+output.WriteAheadWriters) *
-		int64(output.ChunkSize) * input.AvgRowBytes / 1024 / 1024
-	if estimatedMemMB > int64(maxMemoryMB) {
-		// Reduce chunk size to fit in memory
-		safeChunkSize := int64(maxMemoryMB) * 1024 * 1024 /
-			(int64(output.Workers) * int64(output.ReadAheadBuffers+output.WriteAheadWriters) * input.AvgRowBytes)
-		if safeChunkSize < 10000 {
-			safeChunkSize = 10000
-		}
-		output.ChunkSize = int(safeChunkSize)
-		// Recalculate memory
-		estimatedMemMB = int64(output.Workers) * int64(output.ReadAheadBuffers+output.WriteAheadWriters) *
-			int64(output.ChunkSize) * input.AvgRowBytes / 1024 / 1024
-	}
-	output.EstimatedMemoryMB = estimatedMemMB
 
 	return &output, nil
-}
-
-// calculateFormulaBasedParams calculates parameters using formulas (fallback).
-func (s *SmartConfigAnalyzer) calculateFormulaBasedParams(tables []tableInfo, avgRowSize int64) {
-	cores := runtime.NumCPU()
-
-	// Workers: based on CPU cores (cores - 2, clamped to 4-12)
-	s.suggestions.Workers = cores - 2
-	if s.suggestions.Workers < 4 {
-		s.suggestions.Workers = 4
-	}
-	if s.suggestions.Workers > 12 {
-		s.suggestions.Workers = 12
-	}
-
-	// Chunk size: based on average row size (target ~50MB per chunk)
-	s.suggestions.ChunkSizeRecommendation = s.calculateChunkSize(tables)
-
-	// ReadAheadBuffers: based on memory budget and workers
-	// Target ~200MB total memory, divided by workers and chunk size
-	targetMemoryMB := int64(200)
-	bytesPerChunk := int64(s.suggestions.ChunkSizeRecommendation) * avgRowSize
-	buffersPerWorker := (targetMemoryMB * 1024 * 1024) / int64(s.suggestions.Workers) / bytesPerChunk
-	s.suggestions.ReadAheadBuffers = int(buffersPerWorker)
-	if s.suggestions.ReadAheadBuffers < 2 {
-		s.suggestions.ReadAheadBuffers = 2
-	}
-	if s.suggestions.ReadAheadBuffers > 16 {
-		s.suggestions.ReadAheadBuffers = 16
-	}
-
-	// WriteAheadWriters: 2-4 parallel writers per worker for I/O pipelining
-	// More writers help when target database can handle concurrent inserts
-	s.suggestions.WriteAheadWriters = 2
-	if cores >= 8 {
-		s.suggestions.WriteAheadWriters = 3
-	}
-	if cores >= 16 {
-		s.suggestions.WriteAheadWriters = 4
-	}
-
-	// ParallelReaders: for reading partitioned tables concurrently
-	// Usually matches write-ahead writers to balance I/O pipeline
-	s.suggestions.ParallelReaders = s.suggestions.WriteAheadWriters
-
-	// MaxPartitions: match workers for parallel processing
-	s.suggestions.MaxPartitions = s.suggestions.Workers
-
-	// LargeTableThreshold: tables above this get partitioned
-	// Default 1M rows - tables larger than this benefit from parallel partitioning
-	s.suggestions.LargeTableThreshold = 1000000
-
-	// Connection pool tuning: based on workers and parallel I/O
-	// Source needs connections for workers + parallel readers
-	s.suggestions.MaxSourceConnections = s.suggestions.Workers + s.suggestions.ParallelReaders + 2
-	// Target needs connections for workers + write-ahead writers
-	s.suggestions.MaxTargetConnections = s.suggestions.Workers + s.suggestions.WriteAheadWriters*s.suggestions.Workers + 2
-	// Cap at reasonable maximums
-	if s.suggestions.MaxSourceConnections > 50 {
-		s.suggestions.MaxSourceConnections = 50
-	}
-	if s.suggestions.MaxTargetConnections > 100 {
-		s.suggestions.MaxTargetConnections = 100
-	}
-
-	// UpsertMergeChunkSize: smaller chunks for upsert to avoid lock contention
-	// Typically 20-50% of regular chunk size
-	s.suggestions.UpsertMergeChunkSize = s.suggestions.ChunkSizeRecommendation / 3
-	if s.suggestions.UpsertMergeChunkSize < 1000 {
-		s.suggestions.UpsertMergeChunkSize = 1000
-	}
-	if s.suggestions.UpsertMergeChunkSize > 10000 {
-		s.suggestions.UpsertMergeChunkSize = 10000
-	}
-
-	// CheckpointFrequency: save state every N chunks for resumability
-	// More frequent checkpoints = better resumability but more I/O
-	// Base on total data size - larger migrations need less frequent checkpoints
-	if s.suggestions.TotalRows > 100000000 { // > 100M rows
-		s.suggestions.CheckpointFrequency = 50
-	} else if s.suggestions.TotalRows > 10000000 { // > 10M rows
-		s.suggestions.CheckpointFrequency = 20
-	} else {
-		s.suggestions.CheckpointFrequency = 10
-	}
-
-	// MaxRetries: retry failed chunks before giving up
-	// More retries for larger/longer migrations
-	s.suggestions.MaxRetries = 3
-
-	// EstimatedMemoryMB: calculate expected memory usage
-	// Formula: workers * (read_ahead + write_ahead) * chunk_size * avg_row_size
-	totalBuffers := int64(s.suggestions.ReadAheadBuffers + s.suggestions.WriteAheadWriters)
-	s.suggestions.EstimatedMemMB = (int64(s.suggestions.Workers) * totalBuffers *
-		int64(s.suggestions.ChunkSizeRecommendation) * avgRowSize) / (1024 * 1024)
 }
 
 // formatRowCount formats large row counts with K/M/B suffixes.
@@ -953,52 +789,6 @@ func (s *SmartConfigAnalyzer) shouldExcludeTable(tableName string) bool {
 	}
 
 	return false
-}
-
-// calculateChunkSize recommends an optimal chunk size based on table characteristics.
-func (s *SmartConfigAnalyzer) calculateChunkSize(tables []tableInfo) int {
-	if len(tables) == 0 {
-		return 100000 // Default
-	}
-
-	// Find average row size of largest tables
-	var totalSize int64
-	var count int
-	for i, t := range tables {
-		if i >= 5 || t.RowCount == 0 { // Only consider top 5 largest tables
-			break
-		}
-		totalSize += t.AvgRowSizeBytes
-		count++
-	}
-
-	if count == 0 {
-		return 100000 // Default
-	}
-
-	avgRowSize := totalSize / int64(count)
-
-	// Target ~50MB per chunk for good throughput
-	targetChunkBytes := int64(50 * 1024 * 1024)
-
-	chunkSize := int(targetChunkBytes / avgRowSize)
-
-	// Clamp to reasonable range
-	if chunkSize < 10000 {
-		chunkSize = 10000
-	}
-	if chunkSize > 500000 {
-		chunkSize = 500000
-	}
-
-	// Round to nice number
-	if chunkSize >= 100000 {
-		chunkSize = (chunkSize / 50000) * 50000
-	} else {
-		chunkSize = (chunkSize / 10000) * 10000
-	}
-
-	return chunkSize
 }
 
 // FormatYAML returns the suggestions formatted as YAML config.
