@@ -49,7 +49,6 @@ make setup-hooks             # Configure pre-commit hooks (.githooks/)
 | `checkpoint/` | State persistence (SQLite or YAML for Airflow) |
 | `config/` | YAML parsing, secret expansion, driver validation |
 | `tui/` | Interactive terminal UI (Bubble Tea framework) |
-| `calibration/` | AI-powered parameter optimization |
 | `monitor/` | Real-time performance monitoring with AI adjustments |
 
 ### Driver Plugin System
@@ -87,16 +86,16 @@ Features:
 
 ### AI Integration
 
-Three AI use cases with shared provider abstraction (Claude, OpenAI, Gemini):
+AI features with shared provider abstraction (Claude, OpenAI, Gemini):
 1. **Type Mapper** (`driver/ai_typemapper.go`) - Cross-database type inference with caching
 2. **Smart Config** (`driver/ai_smartconfig.go`) - Analyze source and recommend config
-3. **Calibration** (`calibration/`) - Test parameter combinations, recommend optimal config
-4. **Runtime Monitor** (`monitor/ai_monitor.go`) - Adjust parameters during migration
+3. **Runtime Monitor** (`monitor/ai_monitor.go`) - Adjust parameters during migration
+4. **Error Diagnosis** (`driver/ai_errordiag.go`) - Analyze migration failures and suggest fixes
 
 ### TUI Mode
 
 Interactive mode uses Bubble Tea. Launch with `./dmt` (no args). Supports:
-- Slash commands: `/run`, `/resume`, `/calibrate`, `/wizard`, etc.
+- Slash commands: `/run`, `/resume`, `/analyze`, `/wizard`, etc.
 - File completion with `@` prefix
 - Real-time migration progress
 

@@ -80,7 +80,6 @@ export DMT_AI_API_KEY=sk-ant-...  # Your API key
 - **Cost**: Minimal (~$0.006/hour for optimization)
 
 ### Time Savings
-- Calibration phase: Not needed (AI tunes on-the-fly)
 - Manual tuning: Eliminated (AI adjusts automatically)
 - **Net result**: Faster time-to-production, better resource usage
 
@@ -340,7 +339,6 @@ Quick test:
 
 ## Related Documentation
 
-- [Calibration Feature](README.md#ai-powered-parameter-calibration) - Static tuning before migration
 - [Configuration Guide](README.md#configuration) - Full config reference
 - [Testing Guide](TEST_AI_ADJUSTMENT.md) - How to test the feature
 
