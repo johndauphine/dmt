@@ -678,16 +678,6 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		return nil, fmt.Errorf("building jobs: %w", err)
 	}
 
-	// Create AI error diagnoser if AI is configured
-	var errorDiagnoser *driver.AIErrorDiagnoser
-	typeMapper, err := driver.GetAITypeMapper()
-	if err == nil && typeMapper != nil {
-		if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
-			errorDiagnoser = driver.NewAIErrorDiagnoser(aiMapper)
-			logging.Debug("AI error diagnosis enabled")
-		}
-	}
-
 	// Execute jobs using TransferRunner
 	runner := NewTransferRunner(
 		o.sourcePool,
@@ -697,7 +687,6 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		o.progress,
 		o.notifier,
 		o.targetMode,
-		errorDiagnoser,
 	)
 
 	result, err := runner.Run(ctx, runID, buildResult, tables, resume)
