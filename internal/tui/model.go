@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/secrets"
@@ -127,6 +128,7 @@ var availableCommands = []commandInfo{
 	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
+	{"/verbosity", "Set log level (debug, info, warn, error)"},
 	{"/about", "Show application information"},
 	{"/help", "Show available commands"},
 	{"/clear", "Clear screen"},
@@ -591,7 +593,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/verbosity", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -752,6 +754,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /profile list         List saved profiles
   /profile delete NAME  Delete a saved profile
   /profile export NAME  Export a profile to a config file
+  /verbosity [LEVEL]    Set log level (debug, info, warn, error)
   /logs                 Save session logs to a file
   /clear                Clear screen
   /quit                 Exit application
@@ -767,6 +770,26 @@ Note: You can use @/path/to/file for config files.`
 			return func() tea.Msg { return OutputMsg(fmt.Sprintf("Error saving logs: %v\n", err)) }
 		}
 		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
+
+	case "/verbosity":
+		if len(parts) < 2 {
+			// Show current level
+			currentLevel := logging.GetLevel()
+			return func() tea.Msg {
+				return OutputMsg(fmt.Sprintf("Current log level: %s\nUsage: /verbosity <debug|info|warn|error>\n", currentLevel))
+			}
+		}
+		levelStr := parts[1]
+		level, err := logging.ParseLevel(levelStr)
+		if err != nil {
+			return func() tea.Msg {
+				return OutputMsg(fmt.Sprintf("Invalid log level: %s\nValid levels: debug, info, warn, error\n", levelStr))
+			}
+		}
+		logging.SetLevel(level)
+		return func() tea.Msg {
+			return OutputMsg(fmt.Sprintf("Log level set to: %s\n", levelStr))
+		}
 
 	case "/about":
 		about := fmt.Sprintf(`dmt v%s
@@ -2034,6 +2057,12 @@ func Start() error {
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	SetProgramRef(p)
+
+	// Register diagnosis handler to format as BoxedOutputMsg
+	driver.SetDiagnosisHandler(func(diagnosis *driver.ErrorDiagnosis) {
+		p.Send(BoxedOutputMsg(diagnosis.Format()))
+	})
+	defer driver.SetDiagnosisHandler(nil) // Cleanup on exit
 
 	cleanup := CaptureOutput(p)
 	defer cleanup()

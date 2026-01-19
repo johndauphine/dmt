@@ -228,3 +228,15 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 func (d *Dialect) AIPromptAugmentation() string {
 	return "" // No special requirements for MySQL
 }
+
+// AIDropTablePromptAugmentation returns MySQL-specific instructions for DROP TABLE DDL.
+func (d *Dialect) AIDropTablePromptAugmentation() string {
+	return `
+MySQL-specific requirements:
+- MySQL does NOT support CASCADE for DROP TABLE
+- You MUST disable foreign key checks before dropping: SET FOREIGN_KEY_CHECKS = 0;
+- Then DROP TABLE IF EXISTS with fully qualified table name using backticks
+- Then re-enable foreign key checks: SET FOREIGN_KEY_CHECKS = 1;
+- Return all three statements as a single response, each ending with semicolon
+`
+}

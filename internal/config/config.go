@@ -126,8 +126,8 @@ type AutoConfig struct {
 	OriginalChunkSize            int
 	OriginalReadAheadBuffers     int
 	OriginalMaxPartitions        int
-	OriginalMaxMssqlConns        int
-	OriginalMaxPgConns           int
+	OriginalMaxSourceConns       int
+	OriginalMaxTargetConns       int
 	OriginalWriteAheadWriters    int
 	OriginalParallelReaders      int
 	OriginalLargeTableThresh     int64
@@ -160,9 +160,8 @@ type ProfileConfig struct {
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxConnections         int      `yaml:"max_connections"`       // Deprecated: use max_mssql_connections and max_pg_connections
-	MaxMssqlConnections    int      `yaml:"max_mssql_connections"` // Max SQL Server connections
-	MaxPgConnections       int      `yaml:"max_pg_connections"`    // Max PostgreSQL connections
+	MaxSourceConnections int `yaml:"max_source_connections"` // Max source database connections
+	MaxTargetConnections int `yaml:"max_target_connections"` // Max target database connections
 	ChunkSize              int      `yaml:"chunk_size"`
 	MaxPartitions          int      `yaml:"max_partitions"`
 	Workers                int      `yaml:"workers"`
@@ -307,8 +306,11 @@ func (c *Config) applyGlobalDefaults() {
 	if c.Migration.Workers == 0 && defaults.Workers > 0 {
 		c.Migration.Workers = defaults.Workers
 	}
-	if c.Migration.MaxConnections == 0 && defaults.MaxConnections > 0 {
-		c.Migration.MaxConnections = defaults.MaxConnections
+	if c.Migration.MaxSourceConnections == 0 && defaults.MaxSourceConnections > 0 {
+		c.Migration.MaxSourceConnections = defaults.MaxSourceConnections
+	}
+	if c.Migration.MaxTargetConnections == 0 && defaults.MaxTargetConnections > 0 {
+		c.Migration.MaxTargetConnections = defaults.MaxTargetConnections
 	}
 	if c.Migration.MaxMemoryMB == 0 && defaults.MaxMemoryMB > 0 {
 		c.Migration.MaxMemoryMB = defaults.MaxMemoryMB
@@ -380,8 +382,8 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalChunkSize = c.Migration.ChunkSize
 	c.autoConfig.OriginalReadAheadBuffers = c.Migration.ReadAheadBuffers
 	c.autoConfig.OriginalMaxPartitions = c.Migration.MaxPartitions
-	c.autoConfig.OriginalMaxMssqlConns = c.Migration.MaxMssqlConnections
-	c.autoConfig.OriginalMaxPgConns = c.Migration.MaxPgConnections
+	c.autoConfig.OriginalMaxSourceConns = c.Migration.MaxSourceConnections
+	c.autoConfig.OriginalMaxTargetConns = c.Migration.MaxTargetConnections
 	c.autoConfig.OriginalWriteAheadWriters = c.Migration.WriteAheadWriters
 	c.autoConfig.OriginalParallelReaders = c.Migration.ParallelReaders
 	c.autoConfig.OriginalLargeTableThresh = c.Migration.LargeTableThreshold
@@ -455,15 +457,12 @@ func (c *Config) applyDefaults() {
 		}
 	}
 
-	// Handle backwards compatibility: if max_connections is set but new options aren't
-	if c.Migration.MaxConnections == 0 {
-		c.Migration.MaxConnections = 12
+	// Set default max connections for source and target
+	if c.Migration.MaxSourceConnections == 0 {
+		c.Migration.MaxSourceConnections = 12
 	}
-	if c.Migration.MaxMssqlConnections == 0 {
-		c.Migration.MaxMssqlConnections = c.Migration.MaxConnections
-	}
-	if c.Migration.MaxPgConnections == 0 {
-		c.Migration.MaxPgConnections = c.Migration.MaxConnections
+	if c.Migration.MaxTargetConnections == 0 {
+		c.Migration.MaxTargetConnections = 12
 	}
 	// Auto-detect CPU cores for workers
 	// Formula: (cores - 2), clamped to 4-12 for optimal performance
@@ -574,14 +573,11 @@ func (c *Config) applyDefaults() {
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
 	minSourceConns := c.Migration.Workers * c.Migration.ParallelReaders
 	minTargetConns := c.Migration.Workers * c.Migration.WriteAheadWriters
-	if c.Migration.MaxConnections < minTargetConns {
-		c.Migration.MaxConnections = minTargetConns + 4 // Add headroom
+	if c.Migration.MaxSourceConnections < minSourceConns {
+		c.Migration.MaxSourceConnections = minSourceConns + 4 // Add headroom
 	}
-	if c.Migration.MaxMssqlConnections < minSourceConns {
-		c.Migration.MaxMssqlConnections = minSourceConns + 4
-	}
-	if c.Migration.MaxPgConnections < minTargetConns {
-		c.Migration.MaxPgConnections = minTargetConns + 4
+	if c.Migration.MaxTargetConnections < minTargetConns {
+		c.Migration.MaxTargetConnections = minTargetConns + 4
 	}
 
 	// Default source chunk_size to migration chunk_size if not specified
@@ -1135,11 +1131,11 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  MaxPartitions: %s\n", formatAutoValue(c.Migration.MaxPartitions, ac.OriginalMaxPartitions, partitionsExpl)))
 
 	// Connection pools
-	mssqlConnsExpl := fmt.Sprintf("%d workers * %d readers + 4", c.Migration.Workers, c.Migration.ParallelReaders)
-	b.WriteString(fmt.Sprintf("  MaxMssqlConnections: %s\n", formatAutoValue(c.Migration.MaxMssqlConnections, ac.OriginalMaxMssqlConns, mssqlConnsExpl)))
+	sourceConnsExpl := fmt.Sprintf("%d workers * %d readers + 4", c.Migration.Workers, c.Migration.ParallelReaders)
+	b.WriteString(fmt.Sprintf("  MaxSourceConnections: %s\n", formatAutoValue(c.Migration.MaxSourceConnections, ac.OriginalMaxSourceConns, sourceConnsExpl)))
 
-	pgConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
-	b.WriteString(fmt.Sprintf("  MaxPgConnections: %s\n", formatAutoValue(c.Migration.MaxPgConnections, ac.OriginalMaxPgConns, pgConnsExpl)))
+	targetConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
+	b.WriteString(fmt.Sprintf("  MaxTargetConnections: %s\n", formatAutoValue(c.Migration.MaxTargetConnections, ac.OriginalMaxTargetConns, targetConnsExpl)))
 
 	// WriteAheadWriters - use driver defaults for explanation
 	var writersExpl string

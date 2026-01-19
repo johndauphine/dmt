@@ -35,9 +35,10 @@ type Config struct {
 // These can be overridden in individual migration config files.
 type MigrationDefaults struct {
 	// Performance settings (machine-dependent)
-	Workers           int   `yaml:"workers,omitempty"`             // Number of parallel workers (default: auto based on CPU)
-	MaxConnections    int   `yaml:"max_connections,omitempty"`     // Max total DB connections
-	MaxMemoryMB       int64 `yaml:"max_memory_mb,omitempty"`       // Max memory usage in MB
+	Workers              int   `yaml:"workers,omitempty"`                // Number of parallel workers (default: auto based on CPU)
+	MaxSourceConnections int   `yaml:"max_source_connections,omitempty"` // Max source DB connections
+	MaxTargetConnections int   `yaml:"max_target_connections,omitempty"` // Max target DB connections
+	MaxMemoryMB          int64 `yaml:"max_memory_mb,omitempty"`          // Max memory usage in MB
 	ReadAheadBuffers  int   `yaml:"read_ahead_buffers,omitempty"`  // Chunks to buffer ahead
 	WriteAheadWriters int   `yaml:"write_ahead_writers,omitempty"` // Parallel writers per job
 	ParallelReaders   int   `yaml:"parallel_readers,omitempty"`    // Parallel readers per job

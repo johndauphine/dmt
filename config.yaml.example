@@ -24,8 +24,8 @@ profile:
 
 migration:
   # Connection pool settings
-  max_mssql_connections: 12   # SQL Server connection pool size
-  max_pg_connections: 12      # PostgreSQL connection pool size
+  max_source_connections: 12   # Source database connection pool size
+  max_target_connections: 12   # Target database connection pool size
 
   # Rows per chunk for transfer
   chunk_size: 200000

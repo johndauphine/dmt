@@ -1,3 +1,5 @@
+//go:build cgo
+
 package oracle
 
 import (
@@ -496,7 +498,7 @@ func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (in
 	return count, err
 }
 
-// ResetSequence resets the identity sequence to max value + 1.
+// ResetSequence resets the sequence for an identity/auto-increment column to max value + 1.
 func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
 	var identityCol string
 	for _, c := range t.Columns {
@@ -514,22 +516,12 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	if schemaName == "" {
 		schemaName = strings.ToUpper(w.config.User)
 	}
+	tableName := strings.ToUpper(t.Name)
+	colName := strings.ToUpper(identityCol)
 
-	// For Oracle 12c+ IDENTITY columns, find associated sequence
-	var seqName sql.NullString
-	err := w.db.QueryRowContext(ctx, `
-		SELECT SEQUENCE_NAME
-		FROM ALL_TAB_IDENTITY_COLS
-		WHERE OWNER = :1 AND TABLE_NAME = :2 AND COLUMN_NAME = :3
-	`, schemaName, strings.ToUpper(t.Name), strings.ToUpper(identityCol)).Scan(&seqName)
-
-	if err != nil || !seqName.Valid {
-		return nil // No identity sequence found
-	}
-
-	// Get max value
+	// Get max value from the table
 	var maxVal sql.NullInt64
-	err = w.db.QueryRowContext(ctx,
+	err := w.db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT MAX(%s) FROM %s",
 			w.dialect.QuoteIdentifier(identityCol),
 			w.dialect.QualifyTable(schema, t.Name))).Scan(&maxVal)
@@ -541,58 +533,95 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 		return nil
 	}
 
-	// Reset sequence using ALTER SEQUENCE RESTART (Oracle 12.2+)
-	// For Oracle 12.1, RESTART is not supported - we use the INCREMENT BY trick
-	qualifiedSeq := fmt.Sprintf("%s.%s",
-		w.dialect.QuoteIdentifier(schemaName),
-		w.dialect.QuoteIdentifier(seqName.String))
-
 	nextVal := maxVal.Int64 + 1
 
-	_, err = w.db.ExecContext(ctx,
-		fmt.Sprintf("ALTER SEQUENCE %s RESTART START WITH %d", qualifiedSeq, nextVal))
-
-	if err != nil {
-		// Oracle 12.1 doesn't support RESTART - use INCREMENT BY workaround
-		// Note: This workaround has a small race condition window where other sessions
-		// could call NEXTVAL with the temporary INCREMENT BY value. This is acceptable
-		// because sequence reset runs during migration setup before concurrent access.
-
-		// Get current sequence value
-		var currVal int64
-		if err2 := w.db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT %s.CURRVAL FROM DUAL", qualifiedSeq)).Scan(&currVal); err2 != nil {
-			// CURRVAL not available (sequence not used yet), try NEXTVAL
-			if err3 := w.db.QueryRowContext(ctx,
-				fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)).Scan(&currVal); err3 != nil {
-				logging.Debug("Cannot reset identity sequence %s: %v", seqName.String, err)
-				return nil // Non-fatal, sequence will just continue from where it was
-			}
-		}
-
-		// Calculate increment needed to jump to target value
-		increment := nextVal - currVal - 1
-		if increment != 0 {
-			// Temporarily change INCREMENT BY, get NEXTVAL, then restore
-			if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY %d", qualifiedSeq, increment)); err != nil {
-				logging.Warn("Failed to alter sequence %s increment: %v", seqName.String, err)
-				return nil
-			}
-			if _, err := w.db.ExecContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)); err != nil {
-				logging.Warn("Failed to advance sequence %s: %v", seqName.String, err)
-				// Try to restore INCREMENT BY 1 before returning
-				w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq))
-				return nil
-			}
-			if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq)); err != nil {
-				logging.Warn("Failed to restore sequence %s increment to 1: %v", seqName.String, err)
-				return nil
-			}
-		}
-		logging.Debug("Reset identity sequence %s to %d using INCREMENT BY workaround", seqName.String, nextVal)
+	// Try explicit sequence first (SEQ_TABLENAME_COLNAME format)
+	explicitSeqName := fmt.Sprintf("SEQ_%s_%s", tableName, colName)
+	if w.resetExplicitSequence(ctx, schemaName, explicitSeqName, nextVal) {
+		return nil
 	}
 
+	// Fall back to identity column sequence lookup
+	var seqName sql.NullString
+	err = w.db.QueryRowContext(ctx, `
+		SELECT SEQUENCE_NAME
+		FROM ALL_TAB_IDENTITY_COLS
+		WHERE OWNER = :1 AND TABLE_NAME = :2 AND COLUMN_NAME = :3
+	`, schemaName, tableName, colName).Scan(&seqName)
+
+	if err != nil || !seqName.Valid {
+		return nil // No sequence found
+	}
+
+	// Skip system-generated sequences (ISEQ$$_*) - they cannot be altered (ORA-32793)
+	if strings.HasPrefix(seqName.String, "ISEQ$$_") {
+		logging.Debug("Skipping system-generated sequence %s (cannot be altered)", seqName.String)
+		return nil
+	}
+
+	if w.resetExplicitSequence(ctx, schemaName, seqName.String, nextVal) {
+		logging.Debug("Reset identity sequence %s to %d", seqName.String, nextVal)
+	}
 	return nil
+}
+
+// resetExplicitSequence resets a user-created sequence to the specified value.
+// Returns true if the sequence was found and reset, false otherwise.
+func (w *Writer) resetExplicitSequence(ctx context.Context, schema, seqName string, nextVal int64) bool {
+	qualifiedSeq := fmt.Sprintf("%s.%s",
+		w.dialect.QuoteIdentifier(schema),
+		w.dialect.QuoteIdentifier(seqName))
+
+	// Check if sequence exists
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT 1 FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = :1 AND SEQUENCE_NAME = :2
+	`, schema, seqName).Scan(&exists)
+	if err != nil {
+		return false // Sequence doesn't exist
+	}
+
+	// Try ALTER SEQUENCE RESTART (Oracle 12.2+)
+	_, err = w.db.ExecContext(ctx,
+		fmt.Sprintf("ALTER SEQUENCE %s RESTART START WITH %d", qualifiedSeq, nextVal))
+	if err == nil {
+		logging.Debug("Reset sequence %s to %d", seqName, nextVal)
+		return true
+	}
+
+	// Oracle 12.1 fallback: use INCREMENT BY workaround
+	var currVal int64
+	if err2 := w.db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)).Scan(&currVal); err2 != nil {
+		logging.Debug("Cannot get NEXTVAL for sequence %s: %v", seqName, err2)
+		return true // Sequence exists but can't reset - not fatal
+	}
+
+	increment := nextVal - currVal - 1
+	if increment == 0 {
+		return true // Already at correct value
+	}
+
+	// Temporarily change INCREMENT BY, get NEXTVAL, then restore.
+	// Note: increment can be negative if target value is less than current value.
+	// Oracle supports negative INCREMENT BY values for sequences.
+	if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY %d", qualifiedSeq, increment)); err != nil {
+		logging.Warn("Failed to alter sequence %s increment: %v", seqName, err)
+		return true
+	}
+
+	var newVal int64
+	if err := w.db.QueryRowContext(ctx, fmt.Sprintf("SELECT %s.NEXTVAL FROM DUAL", qualifiedSeq)).Scan(&newVal); err != nil {
+		logging.Warn("Failed to advance sequence %s: %v", seqName, err)
+		// Still try to restore INCREMENT BY 1
+	}
+
+	if _, err := w.db.ExecContext(ctx, fmt.Sprintf("ALTER SEQUENCE %s INCREMENT BY 1", qualifiedSeq)); err != nil {
+		logging.Warn("Failed to restore sequence %s increment: %v", seqName, err)
+	}
+
+	logging.Debug("Reset sequence %s to %d using INCREMENT BY workaround", seqName, nextVal)
+	return true
 }
 
 // CreateIndex creates an index on the target table using AI-generated DDL.

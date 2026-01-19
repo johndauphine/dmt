@@ -44,7 +44,18 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 		return nil, fmt.Errorf("pinging database: %w", err)
 	}
 
-	logging.Debug("Connected to MSSQL source: %s:%d/%s", cfg.Host, cfg.Port, cfg.Database)
+	// Check database compatibility level - require 140+ for STRING_AGG support
+	compatLevel, err := getCompatibilityLevel(db)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("checking database compatibility level: %w", err)
+	}
+	if compatLevel < 140 {
+		db.Close()
+		return nil, fmt.Errorf("database compatibility level 140+ required (found %d). Run: ALTER DATABASE [%s] SET COMPATIBILITY_LEVEL = 160", compatLevel, cfg.Database)
+	}
+
+	logging.Debug("Connected to MSSQL source: %s:%d/%s (compat level %d)", cfg.Host, cfg.Port, cfg.Database, compatLevel)
 
 	return &Reader{
 		db:       db,
@@ -733,4 +744,14 @@ func (r *Reader) readFullTable(ctx context.Context, batches chan<- driver.Batch,
 
 		queryTime = 0 // Only first batch has query time
 	}
+}
+
+// getCompatibilityLevel returns the database compatibility level.
+func getCompatibilityLevel(db *sql.DB) (int, error) {
+	var level int
+	err := db.QueryRow("SELECT compatibility_level FROM sys.databases WHERE name = DB_NAME()").Scan(&level)
+	if err != nil {
+		return 0, fmt.Errorf("querying compatibility level: %w", err)
+	}
+	return level, nil
 }

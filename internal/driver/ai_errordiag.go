@@ -274,3 +274,111 @@ func (d *AIErrorDiagnoser) ClearCache() {
 	d.cache = make(map[string]*ErrorDiagnosis)
 	d.mu.Unlock()
 }
+
+// DiagnoseSchemaError diagnoses a DDL/schema error and emits the diagnosis.
+// Uses a shared diagnoser instance for caching across multiple calls.
+// The diagnosis is emitted via the registered DiagnosisHandler (or logged as fallback).
+func DiagnoseSchemaError(ctx context.Context, tableName, tableSchema, sourceDBType, targetDBType, operation string, err error) {
+	diagnoser := getGlobalDiagnoser()
+	if diagnoser == nil {
+		return
+	}
+
+	errCtx := &ErrorContext{
+		ErrorMessage: fmt.Sprintf("%s: %v", operation, err),
+		TableName:    tableName,
+		TableSchema:  tableSchema,
+		SourceDBType: sourceDBType,
+		TargetDBType: targetDBType,
+	}
+
+	diagnosis, diagErr := diagnoser.Diagnose(ctx, errCtx)
+	if diagErr != nil {
+		logging.Debug("AI error diagnosis unavailable: %v", diagErr)
+		return
+	}
+
+	EmitDiagnosis(diagnosis)
+}
+
+// Format returns a plain text representation of the diagnosis.
+func (diag *ErrorDiagnosis) Format() string {
+	var sb strings.Builder
+
+	sb.WriteString("AI Error Diagnosis\n")
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Cause: %s\n", diag.Cause))
+	sb.WriteString("\n")
+	sb.WriteString("Suggestions:\n")
+	for i, s := range diag.Suggestions {
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(fmt.Sprintf("Confidence: %s  |  Category: %s\n", diag.Confidence, diag.Category))
+
+	return sb.String()
+}
+
+// FormatBox returns a boxed representation of the diagnosis using Unicode box characters.
+func (diag *ErrorDiagnosis) FormatBox() string {
+	var sb strings.Builder
+
+	// Box characters
+	const (
+		topLeft     = "┌"
+		topRight    = "┐"
+		bottomLeft  = "└"
+		bottomRight = "┘"
+		horizontal  = "─"
+		vertical    = "│"
+	)
+
+	// Fixed width for the box
+	width := 72
+
+	// Helper to write a padded line
+	writePadded := func(content string) {
+		// Truncate if too long
+		if len(content) > width-4 {
+			content = content[:width-7] + "..."
+		}
+		padding := width - 4 - len(content)
+		if padding < 0 {
+			padding = 0
+		}
+		sb.WriteString(vertical + " " + content + strings.Repeat(" ", padding) + " " + vertical + "\n")
+	}
+
+	// Top border with title
+	title := " AI Error Diagnosis "
+	leftPad := (width - 2 - len(title)) / 2
+	rightPad := width - 2 - len(title) - leftPad
+	sb.WriteString(topLeft + strings.Repeat(horizontal, leftPad) + title + strings.Repeat(horizontal, rightPad) + topRight + "\n")
+
+	// Empty line
+	writePadded("")
+
+	// Cause
+	writePadded("Cause: " + diag.Cause)
+
+	// Empty line
+	writePadded("")
+
+	// Suggestions
+	writePadded("Suggestions:")
+	for i, s := range diag.Suggestions {
+		writePadded(fmt.Sprintf("  %d. %s", i+1, s))
+	}
+
+	// Empty line
+	writePadded("")
+
+	// Confidence and category
+	meta := fmt.Sprintf("Confidence: %s  |  Category: %s", diag.Confidence, diag.Category)
+	writePadded(meta)
+
+	// Bottom border
+	sb.WriteString(bottomLeft + strings.Repeat(horizontal, width-2) + bottomRight)
+
+	return sb.String()
+}

@@ -591,14 +591,19 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	}
 	cfg.applyDefaults()
 
-	// Connection pools should have reasonable minimums
-	if cfg.Migration.MaxSourceConnections < 4 {
-		t.Errorf("MaxSourceConnections should be at least 4, got %d",
-			cfg.Migration.MaxSourceConnections)
+	// With 8 cores: readers=2, writers=2
+	// Source connections: workers * readers + 4 = 4 * 2 + 4 = 12
+	// Target connections: workers * writers + 4 = 4 * 2 + 4 = 12
+	expectedSourceConns := cfg.Migration.Workers*cfg.Migration.ParallelReaders + 4
+	expectedTargetConns := cfg.Migration.Workers*cfg.Migration.WriteAheadWriters + 4
+
+	if cfg.Migration.MaxSourceConnections < expectedSourceConns {
+		t.Errorf("insufficient source connections: got %d, need at least %d",
+			cfg.Migration.MaxSourceConnections, expectedSourceConns)
 	}
-	if cfg.Migration.MaxTargetConnections < 4 {
-		t.Errorf("MaxTargetConnections should be at least 4, got %d",
-			cfg.Migration.MaxTargetConnections)
+	if cfg.Migration.MaxTargetConnections < expectedTargetConns {
+		t.Errorf("insufficient target connections: got %d, need at least %d",
+			cfg.Migration.MaxTargetConnections, expectedTargetConns)
 	}
 }
 
