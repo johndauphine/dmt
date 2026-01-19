@@ -450,12 +450,12 @@ func (r *Reader) readRowNumberPagination(ctx context.Context, batches chan<- dri
 		default:
 		}
 
-		query := r.dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, "")
+		query := r.dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, "", nil)
 		limit := opts.ChunkSize
 		if endRow > 0 && rowNum+int64(limit) > endRow {
 			limit = int(endRow - rowNum)
 		}
-		args := r.dialect.BuildRowNumberArgs(rowNum, limit)
+		args := r.dialect.BuildRowNumberArgs(rowNum, limit, nil)
 
 		rows, err := r.db.QueryContext(ctx, query, args...)
 		if err != nil {

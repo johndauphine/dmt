@@ -203,7 +203,7 @@ func TestBuildKeysetQuery(t *testing.T) {
 	// With date filter
 	dateFilter := &DateFilter{Column: "updated_at", Timestamp: time.Now()}
 	pgQueryWithDate := pgDialect.BuildKeysetQuery("id", "id", "public", "users", "", false, dateFilter)
-	if !strings.Contains(pgQueryWithDate, "updated_at") || !strings.Contains(pgQueryWithDate, "IS NULL") {
+	if !strings.Contains(pgQueryWithDate, "updated_at") || !strings.Contains(pgQueryWithDate, ">=") {
 		t.Errorf("PostgreSQL keyset query missing date filter: %s", pgQueryWithDate)
 	}
 }
@@ -229,12 +229,12 @@ func TestBuildRowNumberQuery(t *testing.T) {
 	pgDialect := driver.GetDialect("postgres")
 	mssqlDialect := driver.GetDialect("mssql")
 
-	pgQuery := pgDialect.BuildRowNumberQuery("id, name", "id", "public", "users", "")
+	pgQuery := pgDialect.BuildRowNumberQuery("id, name", "id", "public", "users", "", nil)
 	if !strings.Contains(pgQuery, "ROW_NUMBER()") || !strings.Contains(pgQuery, "__rn") {
 		t.Errorf("PostgreSQL ROW_NUMBER query missing expected syntax: %s", pgQuery)
 	}
 
-	mssqlQuery := mssqlDialect.BuildRowNumberQuery("[id], [name]", "[id]", "dbo", "users", "WITH (NOLOCK)")
+	mssqlQuery := mssqlDialect.BuildRowNumberQuery("[id], [name]", "[id]", "dbo", "users", "WITH (NOLOCK)", nil)
 	if !strings.Contains(mssqlQuery, "ROW_NUMBER()") || !strings.Contains(mssqlQuery, "@rowNum") {
 		t.Errorf("MSSQL ROW_NUMBER query missing expected syntax: %s", mssqlQuery)
 	}

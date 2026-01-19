@@ -123,8 +123,9 @@ func (d *Dialect) ColumnListForSelect(cols, colTypes []string, targetDBType stri
 func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, _ string, hasMaxPK bool, dateFilter *driver.DateFilter) string {
 	dateClause := ""
 	if dateFilter != nil {
-		dateClause = fmt.Sprintf(" AND (%s > ? OR %s IS NULL)",
-			d.QuoteIdentifier(dateFilter.Column), d.QuoteIdentifier(dateFilter.Column))
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		dateClause = fmt.Sprintf(" AND %s >= ?", d.QuoteIdentifier(dateFilter.Column))
 	}
 
 	qualifiedTable := d.QualifyTable(schema, table)
@@ -159,18 +160,27 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 	return []any{lastPK, limit}
 }
 
-func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string) string {
+func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, dateFilter *driver.DateFilter) string {
 	// MySQL 8.0+ supports window functions
 	outerCols := extractColumnAliases(cols)
 	qualifiedTable := d.QualifyTable(schema, table)
+
+	// Build WHERE clause for date filter
+	whereClause := ""
+	if dateFilter != nil {
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		whereClause = fmt.Sprintf(" WHERE %s >= ?", d.QuoteIdentifier(dateFilter.Column))
+	}
+
 	return fmt.Sprintf(`
 		SELECT %s FROM (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
-			FROM %s
+			FROM %s%s
 		) AS numbered
 		WHERE __rn > ? AND __rn <= ?
 		ORDER BY __rn
-	`, outerCols, cols, orderBy, qualifiedTable)
+	`, outerCols, cols, orderBy, qualifiedTable, whereClause)
 }
 
 // extractColumnAliases extracts just the column aliases from a column expression list.
@@ -189,7 +199,11 @@ func extractColumnAliases(cols string) string {
 	return strings.Join(aliases, ", ")
 }
 
-func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
+func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver.DateFilter) []any {
+	if dateFilter != nil {
+		// Date filter parameter comes before the row number parameters
+		return []any{dateFilter.Timestamp, rowNum, rowNum + int64(limit)}
+	}
 	return []any{rowNum, rowNum + int64(limit)}
 }
 

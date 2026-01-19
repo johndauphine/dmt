@@ -375,8 +375,8 @@ func (r *Reader) readRowNumberPagination(ctx context.Context, batches chan<- dri
 		}
 
 		queryStart := time.Now()
-		query := r.dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, "")
-		args := r.dialect.BuildRowNumberArgs(currentRow, batchSize)
+		query := r.dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, "", nil)
+		args := r.dialect.BuildRowNumberArgs(currentRow, batchSize, nil)
 
 		rows, err := r.sqlDB.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
