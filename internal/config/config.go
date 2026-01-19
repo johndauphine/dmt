@@ -147,15 +147,65 @@ type Config struct {
 	Target    TargetConfig    `yaml:"target"`
 	Migration MigrationConfig `yaml:"migration"`
 	Profile   ProfileConfig   `yaml:"profile,omitempty"`
+	AI        *AIConfig       `yaml:"ai,omitempty"`
+	Slack     *SlackConfig    `yaml:"slack,omitempty"`
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
+}
+
+// SlackConfig holds Slack notification settings.
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+	Channel    string `yaml:"channel"`
+	Username   string `yaml:"username"`
+	Enabled    bool   `yaml:"enabled"`
 }
 
 // ProfileConfig holds optional profile metadata.
 type ProfileConfig struct {
 	Name        string `yaml:"name,omitempty"`
 	Description string `yaml:"description,omitempty"`
+}
+
+// AIConfig holds AI provider configuration.
+type AIConfig struct {
+	// APIKey is the API key for the AI provider.
+	// Supports the same secret patterns as passwords:
+	//   ${file:/path/to/key} - read from file (recommended for production)
+	//   ${env:VAR_NAME} - read from environment variable
+	//   ${VAR_NAME} - legacy env var syntax
+	//   literal value - not recommended, use file or env instead
+	APIKey string `yaml:"api_key"`
+
+	// Provider specifies which AI provider to use.
+	// Valid values: "claude", "openai", "gemini"
+	// Defaults to "claude" if not specified.
+	Provider string `yaml:"provider"`
+
+	// Model specifies which model to use (optional).
+	// Defaults to smart models for accurate inference:
+	//   Claude: claude-sonnet-4-20250514
+	//   OpenAI: gpt-4o
+	//   Gemini: gemini-2.0-flash
+	Model string `yaml:"model"`
+
+	// TimeoutSeconds is the API request timeout (default: 30).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+
+	// TypeMapping configures AI-assisted type mapping for unknown types.
+	TypeMapping *AITypeMappingConfig `yaml:"type_mapping"`
+}
+
+// AITypeMappingConfig contains settings specific to AI type mapping.
+type AITypeMappingConfig struct {
+	// Enabled turns AI type mapping on/off.
+	// Auto-enabled when api_key is configured (unless explicitly set to false).
+	Enabled *bool `yaml:"enabled"`
+
+	// CacheFile is the path to the JSON cache file for type mappings.
+	// Defaults to ~/.dmt/type-cache.json
+	CacheFile string `yaml:"cache_file"`
 }
 
 // MigrationConfig holds migration behavior settings
@@ -187,6 +237,9 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
+	// AI-driven real-time parameter adjustment
+	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
+	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -571,13 +624,14 @@ func (c *Config) applyDefaults() {
 
 	// Auto-size connection pools based on workers, readers, and writers
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
-	minSourceConns := c.Migration.Workers * c.Migration.ParallelReaders
-	minTargetConns := c.Migration.Workers * c.Migration.WriteAheadWriters
-	if c.Migration.MaxSourceConnections < minSourceConns {
-		c.Migration.MaxSourceConnections = minSourceConns + 4 // Add headroom
+	// Add 4 connections for headroom (orchestrator, health checks, etc.)
+	requiredSourceConns := c.Migration.Workers*c.Migration.ParallelReaders + 4
+	requiredTargetConns := c.Migration.Workers*c.Migration.WriteAheadWriters + 4
+	if c.Migration.MaxSourceConnections < requiredSourceConns {
+		c.Migration.MaxSourceConnections = requiredSourceConns
 	}
-	if c.Migration.MaxTargetConnections < minTargetConns {
-		c.Migration.MaxTargetConnections = minTargetConns + 4
+	if c.Migration.MaxTargetConnections < requiredTargetConns {
+		c.Migration.MaxTargetConnections = requiredTargetConns
 	}
 
 	// Default source chunk_size to migration chunk_size if not specified
@@ -696,7 +750,7 @@ func (c *Config) applyDefaults() {
 
 	// Slack notification: auto-enable when webhook URL is configured
 	// Load webhook from secrets if not provided in config
-	if c.Slack.WebhookURL == "" {
+	if c.Slack == nil || c.Slack.WebhookURL == "" {
 		secretsCfg, err := secrets.Load()
 		if err != nil {
 			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
@@ -704,11 +758,14 @@ func (c *Config) applyDefaults() {
 				logging.Warn("failed to load secrets configuration for Slack webhook: %v", err)
 			}
 		} else if secretsCfg.Notifications.Slack.WebhookURL != "" {
+			if c.Slack == nil {
+				c.Slack = &SlackConfig{}
+			}
 			c.Slack.WebhookURL = secretsCfg.Notifications.Slack.WebhookURL
 		}
 	}
 	// Auto-enable Slack notifications when webhook URL is available
-	if c.Slack.WebhookURL != "" && !c.Slack.Enabled {
+	if c.Slack != nil && c.Slack.WebhookURL != "" && !c.Slack.Enabled {
 		c.Slack.Enabled = true
 	}
 }
