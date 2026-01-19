@@ -196,9 +196,10 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, _ string, hasMaxP
 		if hasMaxPK {
 			paramIdx = 4
 		}
-		dateClause = fmt.Sprintf(" AND (%s > :%d OR %s IS NULL)",
-			d.QuoteIdentifier(dateFilter.Column), paramIdx,
-			d.QuoteIdentifier(dateFilter.Column))
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		dateClause = fmt.Sprintf(" AND %s >= :%d",
+			d.QuoteIdentifier(dateFilter.Column), paramIdx)
 	}
 
 	qualifiedTable := d.QualifyTable(schema, table)
@@ -234,21 +235,32 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 	return []any{lastPK, limit}
 }
 
-func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string) string {
+func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, dateFilter *driver.DateFilter) string {
 	outerCols := extractColumnAliases(cols)
 	qualifiedTable := d.QualifyTable(schema, table)
+
+	// Build WHERE clause for date filter
+	whereClause := ""
+	if dateFilter != nil {
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		whereClause = fmt.Sprintf(" WHERE %s >= :3", d.QuoteIdentifier(dateFilter.Column))
+	}
 
 	return fmt.Sprintf(`
 		SELECT %s FROM (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) AS rn
-			FROM %s
+			FROM %s%s
 		)
 		WHERE rn > :1 AND rn <= :2
 		ORDER BY rn
-	`, outerCols, cols, orderBy, qualifiedTable)
+	`, outerCols, cols, orderBy, qualifiedTable, whereClause)
 }
 
-func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
+func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver.DateFilter) []any {
+	if dateFilter != nil {
+		return []any{rowNum, rowNum + int64(limit), dateFilter.Timestamp}
+	}
 	return []any{rowNum, rowNum + int64(limit)}
 }
 

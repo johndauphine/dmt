@@ -203,7 +203,7 @@ func TestBuildKeysetQuery(t *testing.T) {
 	// With date filter
 	dateFilter := &DateFilter{Column: "updated_at", Timestamp: time.Now()}
 	pgQueryWithDate := pgDialect.BuildKeysetQuery("id", "id", "public", "users", "", false, dateFilter)
-	if !strings.Contains(pgQueryWithDate, "updated_at") || !strings.Contains(pgQueryWithDate, "IS NULL") {
+	if !strings.Contains(pgQueryWithDate, "updated_at") || !strings.Contains(pgQueryWithDate, ">=") {
 		t.Errorf("PostgreSQL keyset query missing date filter: %s", pgQueryWithDate)
 	}
 }
@@ -228,15 +228,285 @@ func TestBuildKeysetArgs(t *testing.T) {
 func TestBuildRowNumberQuery(t *testing.T) {
 	pgDialect := driver.GetDialect("postgres")
 	mssqlDialect := driver.GetDialect("mssql")
+	mysqlDialect := driver.GetDialect("mysql")
 
-	pgQuery := pgDialect.BuildRowNumberQuery("id, name", "id", "public", "users", "")
+	pgQuery := pgDialect.BuildRowNumberQuery("id, name", "id", "public", "users", "", nil)
 	if !strings.Contains(pgQuery, "ROW_NUMBER()") || !strings.Contains(pgQuery, "__rn") {
 		t.Errorf("PostgreSQL ROW_NUMBER query missing expected syntax: %s", pgQuery)
 	}
 
-	mssqlQuery := mssqlDialect.BuildRowNumberQuery("[id], [name]", "[id]", "dbo", "users", "WITH (NOLOCK)")
+	mssqlQuery := mssqlDialect.BuildRowNumberQuery("[id], [name]", "[id]", "dbo", "users", "WITH (NOLOCK)", nil)
 	if !strings.Contains(mssqlQuery, "ROW_NUMBER()") || !strings.Contains(mssqlQuery, "@rowNum") {
 		t.Errorf("MSSQL ROW_NUMBER query missing expected syntax: %s", mssqlQuery)
+	}
+
+	mysqlQuery := mysqlDialect.BuildRowNumberQuery("`id`, `name`", "`id`", "", "users", "", nil)
+	if !strings.Contains(mysqlQuery, "ROW_NUMBER()") || !strings.Contains(mysqlQuery, "__rn") {
+		t.Errorf("MySQL ROW_NUMBER query missing expected syntax: %s", mysqlQuery)
+	}
+}
+
+func TestBuildRowNumberQueryWithDateFilter(t *testing.T) {
+	testTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	dateFilter := &DateFilter{Column: "updated_at", Timestamp: testTime}
+
+	tests := []struct {
+		name         string
+		dbType       string
+		cols         string
+		orderBy      string
+		schema       string
+		table        string
+		tableHint    string
+		dateFilter   *DateFilter
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name:       "postgres with date filter",
+			dbType:     "postgres",
+			cols:       `"id", "name"`,
+			orderBy:    `"id"`,
+			schema:     "public",
+			table:      "users",
+			tableHint:  "",
+			dateFilter: dateFilter,
+			wantContains: []string{
+				"ROW_NUMBER()",
+				`"updated_at" >= $3`,
+				"WHERE",
+			},
+			wantAbsent: []string{"IS NULL"},
+		},
+		{
+			name:       "postgres without date filter",
+			dbType:     "postgres",
+			cols:       `"id", "name"`,
+			orderBy:    `"id"`,
+			schema:     "public",
+			table:      "users",
+			tableHint:  "",
+			dateFilter: nil,
+			wantContains: []string{
+				"ROW_NUMBER()",
+				"__rn > $1",
+			},
+			wantAbsent: []string{"updated_at", "$3"},
+		},
+		{
+			name:       "mssql with date filter",
+			dbType:     "mssql",
+			cols:       "[id], [name]",
+			orderBy:    "[id]",
+			schema:     "dbo",
+			table:      "users",
+			tableHint:  "WITH (NOLOCK)",
+			dateFilter: dateFilter,
+			wantContains: []string{
+				"ROW_NUMBER()",
+				"[updated_at] >= @lastSyncDate",
+				"WHERE",
+			},
+			wantAbsent: []string{"IS NULL"},
+		},
+		{
+			name:       "mssql without date filter",
+			dbType:     "mssql",
+			cols:       "[id], [name]",
+			orderBy:    "[id]",
+			schema:     "dbo",
+			table:      "users",
+			tableHint:  "WITH (NOLOCK)",
+			dateFilter: nil,
+			wantContains: []string{
+				"ROW_NUMBER()",
+				"@rowNum",
+			},
+			wantAbsent: []string{"updated_at", "@lastSyncDate"},
+		},
+		{
+			name:       "mysql with date filter",
+			dbType:     "mysql",
+			cols:       "`id`, `name`",
+			orderBy:    "`id`",
+			schema:     "",
+			table:      "users",
+			tableHint:  "",
+			dateFilter: dateFilter,
+			wantContains: []string{
+				"ROW_NUMBER()",
+				"`updated_at` >= ?",
+				"WHERE",
+			},
+			wantAbsent: []string{"IS NULL"},
+		},
+		{
+			name:       "mysql without date filter",
+			dbType:     "mysql",
+			cols:       "`id`, `name`",
+			orderBy:    "`id`",
+			schema:     "",
+			table:      "users",
+			tableHint:  "",
+			dateFilter: nil,
+			wantContains: []string{
+				"ROW_NUMBER()",
+				"__rn",
+			},
+			wantAbsent: []string{"updated_at"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dialect := driver.GetDialect(tt.dbType)
+			if dialect == nil {
+				t.Fatalf("dialect for %q not registered", tt.dbType)
+			}
+
+			query := dialect.BuildRowNumberQuery(tt.cols, tt.orderBy, tt.schema, tt.table, tt.tableHint, tt.dateFilter)
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(query, want) {
+					t.Errorf("Query missing expected substring %q.\nGot: %s", want, query)
+				}
+			}
+
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(query, absent) {
+					t.Errorf("Query should not contain %q.\nGot: %s", absent, query)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildRowNumberArgs(t *testing.T) {
+	testTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	dateFilter := &DateFilter{Column: "updated_at", Timestamp: testTime}
+
+	tests := []struct {
+		name       string
+		dbType     string
+		rowNum     int64
+		limit      int
+		dateFilter *DateFilter
+		wantCount  int
+	}{
+		{
+			name:       "postgres without date filter",
+			dbType:     "postgres",
+			rowNum:     100,
+			limit:      1000,
+			dateFilter: nil,
+			wantCount:  2, // rowNum, rowNum+limit
+		},
+		{
+			name:       "postgres with date filter",
+			dbType:     "postgres",
+			rowNum:     100,
+			limit:      1000,
+			dateFilter: dateFilter,
+			wantCount:  3, // rowNum, rowNum+limit, timestamp
+		},
+		{
+			name:       "mssql without date filter",
+			dbType:     "mssql",
+			rowNum:     100,
+			limit:      1000,
+			dateFilter: nil,
+			wantCount:  2, // named params: rowNum, rowNumEnd
+		},
+		{
+			name:       "mssql with date filter",
+			dbType:     "mssql",
+			rowNum:     100,
+			limit:      1000,
+			dateFilter: dateFilter,
+			wantCount:  3, // named params: rowNum, rowNumEnd, lastSyncDate
+		},
+		{
+			name:       "mysql without date filter",
+			dbType:     "mysql",
+			rowNum:     100,
+			limit:      1000,
+			dateFilter: nil,
+			wantCount:  2, // rowNum, rowNum+limit
+		},
+		{
+			name:       "mysql with date filter",
+			dbType:     "mysql",
+			rowNum:     100,
+			limit:      1000,
+			dateFilter: dateFilter,
+			wantCount:  3, // timestamp, rowNum, rowNum+limit (MySQL has date first)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dialect := driver.GetDialect(tt.dbType)
+			if dialect == nil {
+				t.Fatalf("dialect for %q not registered", tt.dbType)
+			}
+
+			args := dialect.BuildRowNumberArgs(tt.rowNum, tt.limit, tt.dateFilter)
+
+			if len(args) != tt.wantCount {
+				t.Errorf("BuildRowNumberArgs() returned %d args, want %d", len(args), tt.wantCount)
+			}
+		})
+	}
+}
+
+func TestBuildRowNumberArgsOrder(t *testing.T) {
+	testTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	dateFilter := &DateFilter{Column: "updated_at", Timestamp: testTime}
+
+	// Test MySQL specifically - date filter comes FIRST
+	mysqlDialect := driver.GetDialect("mysql")
+	mysqlArgs := mysqlDialect.BuildRowNumberArgs(100, 1000, dateFilter)
+
+	if len(mysqlArgs) != 3 {
+		t.Fatalf("MySQL args count = %d, want 3", len(mysqlArgs))
+	}
+
+	// First arg should be the timestamp (MySQL puts date filter first)
+	if ts, ok := mysqlArgs[0].(time.Time); !ok || !ts.Equal(testTime) {
+		t.Errorf("MySQL first arg should be timestamp, got %T: %v", mysqlArgs[0], mysqlArgs[0])
+	}
+
+	// Second arg should be rowNum (100)
+	if mysqlArgs[1] != int64(100) {
+		t.Errorf("MySQL second arg should be 100, got %v", mysqlArgs[1])
+	}
+
+	// Third arg should be rowNum + limit (1100)
+	if mysqlArgs[2] != int64(1100) {
+		t.Errorf("MySQL third arg should be 1100, got %v", mysqlArgs[2])
+	}
+
+	// Test PostgreSQL - date filter comes LAST
+	pgDialect := driver.GetDialect("postgres")
+	pgArgs := pgDialect.BuildRowNumberArgs(100, 1000, dateFilter)
+
+	if len(pgArgs) != 3 {
+		t.Fatalf("PostgreSQL args count = %d, want 3", len(pgArgs))
+	}
+
+	// First arg should be rowNum
+	if pgArgs[0] != int64(100) {
+		t.Errorf("PostgreSQL first arg should be 100, got %v", pgArgs[0])
+	}
+
+	// Second arg should be rowNum + limit
+	if pgArgs[1] != int64(1100) {
+		t.Errorf("PostgreSQL second arg should be 1100, got %v", pgArgs[1])
+	}
+
+	// Third arg should be timestamp
+	if ts, ok := pgArgs[2].(time.Time); !ok || !ts.Equal(testTime) {
+		t.Errorf("PostgreSQL third arg should be timestamp, got %T: %v", pgArgs[2], pgArgs[2])
 	}
 }
 

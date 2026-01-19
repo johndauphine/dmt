@@ -92,7 +92,9 @@ func (d *Dialect) ColumnListForSelect(cols, colTypes []string, targetDBType stri
 func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *driver.DateFilter) string {
 	dateClause := ""
 	if dateFilter != nil {
-		dateClause = fmt.Sprintf(" AND ([%s] > @lastSyncDate OR [%s] IS NULL)", dateFilter.Column, dateFilter.Column)
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		dateClause = fmt.Sprintf(" AND [%s] >= @lastSyncDate", dateFilter.Column)
 	}
 
 	if hasMaxPK {
@@ -133,18 +135,27 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 	return args
 }
 
-func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string {
+func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string, dateFilter *driver.DateFilter) string {
 	// Extract just column aliases for outer SELECT (handles expressions like "col.STAsText() AS col")
 	outerCols := extractColumnAliases(cols)
+
+	// Build WHERE clause for date filter
+	whereClause := ""
+	if dateFilter != nil {
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		whereClause = fmt.Sprintf(" WHERE [%s] >= @lastSyncDate", dateFilter.Column)
+	}
+
 	return fmt.Sprintf(`
 		WITH numbered AS (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
-			FROM %s %s
+			FROM %s %s%s
 		)
 		SELECT %s FROM numbered
 		WHERE __rn > @rowNum AND __rn <= @rowNumEnd
 		ORDER BY __rn
-	`, cols, orderBy, d.QualifyTable(schema, table), tableHint, outerCols)
+	`, cols, orderBy, d.QualifyTable(schema, table), tableHint, whereClause, outerCols)
 }
 
 // extractColumnAliases extracts just the column aliases from a column expression list.
@@ -168,11 +179,15 @@ func extractColumnAliases(cols string) string {
 	return strings.Join(aliases, ", ")
 }
 
-func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
-	return []any{
+func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver.DateFilter) []any {
+	args := []any{
 		sql.Named("rowNum", rowNum),
 		sql.Named("rowNumEnd", rowNum+int64(limit)),
 	}
+	if dateFilter != nil {
+		args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
+	}
+	return args
 }
 
 func (d *Dialect) PartitionBoundariesQuery(pkCol, schema, table string, numPartitions int) string {

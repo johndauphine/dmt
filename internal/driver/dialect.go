@@ -67,13 +67,21 @@ type Dialect interface {
 	BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *DateFilter) []any
 
 	// BuildRowNumberQuery builds a ROW_NUMBER pagination query.
-	BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string) string
+	// Parameters:
+	//   - cols: column list for SELECT
+	//   - orderBy: ORDER BY clause
+	//   - schema: table schema
+	//   - table: table name
+	//   - tableHint: optional table hint (e.g., NOLOCK)
+	//   - dateFilter: optional date filter for incremental sync
+	BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string, dateFilter *DateFilter) string
 
 	// BuildRowNumberArgs builds arguments for a ROW_NUMBER pagination query.
 	// Parameters:
 	//   - rowNum: starting row number (0-indexed)
 	//   - limit: number of rows to fetch
-	BuildRowNumberArgs(rowNum int64, limit int) []any
+	//   - dateFilter: optional date filter for incremental sync
+	BuildRowNumberArgs(rowNum int64, limit int, dateFilter *DateFilter) []any
 
 	// PartitionBoundariesQuery returns a query to get partition boundaries.
 	PartitionBoundariesQuery(pkCol, schema, table string, numPartitions int) string

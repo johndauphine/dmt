@@ -85,8 +85,10 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, _ string, hasMaxP
 		if hasMaxPK {
 			paramNum = 4
 		}
-		dateClause = fmt.Sprintf(" AND (%s > $%d OR %s IS NULL)",
-			d.QuoteIdentifier(dateFilter.Column), paramNum, d.QuoteIdentifier(dateFilter.Column))
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		dateClause = fmt.Sprintf(" AND %s >= $%d",
+			d.QuoteIdentifier(dateFilter.Column), paramNum)
 	}
 
 	if hasMaxPK {
@@ -120,18 +122,27 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 	return []any{lastPK, limit}
 }
 
-func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string) string {
+func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, dateFilter *driver.DateFilter) string {
 	// Extract just column aliases for outer SELECT (handles expressions like "ST_AsText(col) AS col")
 	outerCols := extractColumnAliases(cols)
+
+	// Build WHERE clause for date filter
+	whereClause := ""
+	if dateFilter != nil {
+		// Only include rows where the date column is >= the filter timestamp.
+		// Rows with NULL dates are excluded (they haven't been modified).
+		whereClause = fmt.Sprintf(" WHERE %s >= $3", d.QuoteIdentifier(dateFilter.Column))
+	}
+
 	return fmt.Sprintf(`
 		WITH numbered AS (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) as __rn
-			FROM %s
+			FROM %s%s
 		)
 		SELECT %s FROM numbered
 		WHERE __rn > $1 AND __rn <= $2
 		ORDER BY __rn
-	`, cols, orderBy, d.QualifyTable(schema, table), outerCols)
+	`, cols, orderBy, d.QualifyTable(schema, table), whereClause, outerCols)
 }
 
 // extractColumnAliases extracts just the column aliases from a column expression list.
@@ -155,7 +166,10 @@ func extractColumnAliases(cols string) string {
 	return strings.Join(aliases, ", ")
 }
 
-func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int) []any {
+func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver.DateFilter) []any {
+	if dateFilter != nil {
+		return []any{rowNum, rowNum + int64(limit), dateFilter.Timestamp}
+	}
 	return []any{rowNum, rowNum + int64(limit)}
 }
 

@@ -34,14 +34,14 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "postgres",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `("ModifiedDate" > $4 OR "ModifiedDate" IS NULL)`,
+			wantClause: `"ModifiedDate" >= $4`,
 		},
 		{
 			name:       "postgres with date filter no maxPK",
 			dbType:     "postgres",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `("ModifiedDate" > $3 OR "ModifiedDate" IS NULL)`,
+			wantClause: `"ModifiedDate" >= $3`,
 		},
 		{
 			name:       "mssql no date filter",
@@ -55,14 +55,14 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "mssql",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "([ModifiedDate] > @lastSyncDate OR [ModifiedDate] IS NULL)",
+			wantClause: "[ModifiedDate] >= @lastSyncDate",
 		},
 		{
 			name:       "mssql with date filter no maxPK",
 			dbType:     "mssql",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "([ModifiedDate] > @lastSyncDate OR [ModifiedDate] IS NULL)",
+			wantClause: "[ModifiedDate] >= @lastSyncDate",
 		},
 	}
 
@@ -87,10 +87,9 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			}
 
 			// Verify no date clause when filter is nil
-			// Date filter adds "(column > param OR column IS NULL)" pattern
-			// We check for "IS NULL" which only appears in date filter clause
+			// Date filter adds "column >= param" pattern
 			if tt.dateFilter == nil {
-				if strings.Contains(query, "lastSyncDate") || strings.Contains(query, "IS NULL") {
+				if strings.Contains(query, "lastSyncDate") || strings.Contains(query, "ModifiedDate") {
 					t.Errorf("Query should not contain date filter clause when dateFilter is nil.\nGot: %s", query)
 				}
 			}

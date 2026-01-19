@@ -837,8 +837,8 @@ func executeRowNumberPagination(
 			}
 
 			// ROW_NUMBER pagination with direction-aware syntax
-			query := srcDialect.BuildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint)
-			args := srcDialect.BuildRowNumberArgs(rowNum, effectiveChunkSize)
+			query := srcDialect.BuildRowNumberQuery(colList, orderBy, job.Table.Schema, job.Table.Name, tableHint, job.DateFilter)
+			args := srcDialect.BuildRowNumberArgs(rowNum, effectiveChunkSize, job.DateFilter)
 
 			// Time the query
 			queryStart := time.Now()
