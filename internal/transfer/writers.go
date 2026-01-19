@@ -6,9 +6,33 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/target"
+)
+
+// Buffer sizing constants for parallel reader/writer coordination.
+// These values prevent cascading deadlocks when readers produce faster than writers consume.
+const (
+	// jobChanBufferMultiplier scales the job channel buffer with the number of writers.
+	// A multiplier of 50 provides enough headroom for burst production while keeping
+	// memory usage reasonable (each job holds a chunk of rows).
+	jobChanBufferMultiplier = 50
+
+	// jobChanMinBuffer is the minimum job channel buffer size.
+	// This ensures adequate buffering even with small configured buffer sizes.
+	jobChanMinBuffer = 500
+
+	// ackChanBufferMultiplier scales the ack channel buffer with the number of writers.
+	// Uses a higher multiplier (100) than jobChan because acks are tiny (just PK values
+	// and sequence numbers) and checkpoint saves can temporarily slow ack processing.
+	ackChanBufferMultiplier = 100
+
+	// ackChanMinBuffer is the minimum ack channel buffer size.
+	// Higher than jobChan minimum because acks are cheap and we want to avoid
+	// any possibility of writers blocking on ack sends.
+	ackChanMinBuffer = 1000
 )
 
 // writerPool manages a pool of parallel write workers.
@@ -69,9 +93,9 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 	// With parallel readers producing chunks faster than writers can consume,
 	// a small buffer causes the consumer to block on submit(), which blocks
 	// reading from chunkChan, which blocks readers, causing deadlock.
-	jobBufferSize := cfg.BufferSize * cfg.NumWriters * 50
-	if jobBufferSize < 500 {
-		jobBufferSize = 500
+	jobBufferSize := cfg.BufferSize * cfg.NumWriters * jobChanBufferMultiplier
+	if jobBufferSize < jobChanMinBuffer {
+		jobBufferSize = jobChanMinBuffer
 	}
 
 	wp := &writerPool{
@@ -99,9 +123,9 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		// a cascading deadlock: writers block → jobChan fills → consumer blocks →
 		// chunkChan fills → all readers block.
 		// Acks are small (just PK values and sequence numbers), so a large buffer is cheap.
-		ackBufferSize := cfg.BufferSize * cfg.NumWriters * 100
-		if ackBufferSize < 1000 {
-			ackBufferSize = 1000
+		ackBufferSize := cfg.BufferSize * cfg.NumWriters * ackChanBufferMultiplier
+		if ackBufferSize < ackChanMinBuffer {
+			ackBufferSize = ackChanMinBuffer
 		}
 		wp.ackChan = make(chan writeAck, ackBufferSize)
 	}
@@ -168,8 +192,10 @@ func (wp *writerPool) worker(writerID int) {
 				// Context cancelled, exit worker
 				return
 			default:
-				// Channel full, skip this ack (checkpoint won't advance)
-				// This should be rare with the large buffer, but prevents deadlock
+				// Channel full, skip this ack (checkpoint won't advance past this point).
+				// This should be rare with the large buffer, but prevents deadlock.
+				// Log at debug level to help diagnose checkpoint issues if they occur.
+				logging.Debug("Ack channel full, skipping ack for reader %d seq %d (checkpoint may not advance)", job.readerID, job.seq)
 			}
 		}
 	}

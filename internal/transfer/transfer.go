@@ -23,6 +23,19 @@ import (
 	"github.com/johndauphine/dmt/internal/target"
 )
 
+// Buffer sizing constants for parallel reader coordination.
+// These values prevent cascading deadlocks when multiple readers produce faster than the consumer can process.
+const (
+	// chunkChanBufferMultiplier scales the chunk channel buffer with the number of readers.
+	// A multiplier of 50 provides enough headroom for burst production while keeping
+	// memory usage reasonable (each chunk holds rows from a database query).
+	chunkChanBufferMultiplier = 50
+
+	// chunkChanMinBuffer is the minimum chunk channel buffer size for parallel readers.
+	// This ensures adequate buffering even with small configured buffer sizes.
+	chunkChanMinBuffer = 500
+)
+
 // ProgressSaver is an interface for saving transfer progress
 type ProgressSaver interface {
 	SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
@@ -522,9 +535,9 @@ func executeKeysetPagination(
 	}
 	if numReaders > 1 {
 		// Scale buffer with number of readers to prevent deadlock
-		bufferSize = bufferSize * numReaders * 50
-		if bufferSize < 500 {
-			bufferSize = 500
+		bufferSize = bufferSize * numReaders * chunkChanBufferMultiplier
+		if bufferSize < chunkChanMinBuffer {
+			bufferSize = chunkChanMinBuffer
 		}
 	}
 	chunkChan := make(chan chunkResult, bufferSize)
