@@ -6,10 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 func TestNew(t *testing.T) {
@@ -24,7 +25,7 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("valid config", func(t *testing.T) {
-		cfg := &config.SlackConfig{
+		cfg := &SlackConfig{
 			Enabled:    true,
 			WebhookURL: "https://hooks.slack.com/test",
 			Channel:    "#test",
@@ -43,7 +44,7 @@ func TestNew(t *testing.T) {
 func TestIsEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
-		config   *config.SlackConfig
+		config   *SlackConfig
 		expected bool
 	}{
 		{
@@ -53,17 +54,17 @@ func TestIsEnabled(t *testing.T) {
 		},
 		{
 			name:     "disabled explicitly",
-			config:   &config.SlackConfig{Enabled: false, WebhookURL: "https://test"},
+			config:   &SlackConfig{Enabled: false, WebhookURL: "https://test"},
 			expected: false,
 		},
 		{
 			name:     "enabled but no webhook",
-			config:   &config.SlackConfig{Enabled: true, WebhookURL: ""},
+			config:   &SlackConfig{Enabled: true, WebhookURL: ""},
 			expected: false,
 		},
 		{
 			name:     "enabled with webhook",
-			config:   &config.SlackConfig{Enabled: true, WebhookURL: "https://hooks.slack.com/test"},
+			config:   &SlackConfig{Enabled: true, WebhookURL: "https://hooks.slack.com/test"},
 			expected: true,
 		},
 	}
@@ -96,7 +97,7 @@ func TestMigrationStarted(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{
+		cfg := &SlackConfig{
 			Enabled:    true,
 			WebhookURL: server.URL,
 			Channel:    "#migrations",
@@ -142,7 +143,7 @@ func TestMigrationCompleted(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{
+		cfg := &SlackConfig{
 			Enabled:    true,
 			WebhookURL: server.URL,
 		}
@@ -184,7 +185,7 @@ func TestMigrationFailed(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.MigrationFailed("run-123", nil, 5*time.Minute)
@@ -214,7 +215,7 @@ func TestMigrationFailed(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		// Create an error message longer than 500 characters
@@ -250,7 +251,7 @@ func TestMigrationFailed(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.MigrationFailed("run-789", errors.New("connection timeout"), 2*time.Minute)
@@ -288,7 +289,7 @@ func TestMigrationCompletedWithErrors(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.MigrationCompletedWithErrors("run-123", time.Now(), 5*time.Minute, 8, 2, 1000000, 50000, []string{"users", "posts"})
@@ -321,7 +322,7 @@ func TestMigrationCompletedWithErrors(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		failures := []string{"table1", "table2", "table3", "table4", "table5", "table6", "table7"}
@@ -351,7 +352,7 @@ func TestMigrationCompletedWithErrors(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.MigrationCompletedWithErrors("run-123", time.Now(), 5*time.Minute, 8, 2, 1000000, 50000, []string{"table1"})
@@ -386,7 +387,7 @@ func TestTableTransferFailed(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.TableTransferFailed("run-123", "users", nil)
@@ -415,7 +416,7 @@ func TestTableTransferFailed(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.TableTransferFailed("run-123", "orders", errors.New("duplicate key"))
@@ -448,7 +449,7 @@ func TestSend(t *testing.T) {
 		}))
 		defer server.Close()
 
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: server.URL}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: server.URL}
 		n := New(cfg)
 
 		err := n.MigrationStarted("run-123", "src", "tgt", 5)
@@ -458,7 +459,7 @@ func TestSend(t *testing.T) {
 	})
 
 	t.Run("connection error", func(t *testing.T) {
-		cfg := &config.SlackConfig{Enabled: true, WebhookURL: "http://localhost:99999"}
+		cfg := &SlackConfig{Enabled: true, WebhookURL: "http://localhost:99999"}
 		n := New(cfg)
 
 		err := n.MigrationStarted("run-123", "src", "tgt", 5)
@@ -470,7 +471,7 @@ func TestSend(t *testing.T) {
 
 func TestGetUsername(t *testing.T) {
 	t.Run("custom username", func(t *testing.T) {
-		cfg := &config.SlackConfig{Username: "custom-bot"}
+		cfg := &SlackConfig{Username: "custom-bot"}
 		n := New(cfg)
 		if got := n.getUsername(); got != "custom-bot" {
 			t.Errorf("getUsername() = %q, want %q", got, "custom-bot")
@@ -478,12 +479,91 @@ func TestGetUsername(t *testing.T) {
 	})
 
 	t.Run("default username", func(t *testing.T) {
-		cfg := &config.SlackConfig{}
+		cfg := &SlackConfig{}
 		n := New(cfg)
 		if got := n.getUsername(); got != "dmt" {
 			t.Errorf("getUsername() = %q, want %q", got, "dmt")
 		}
 	})
+}
+
+func TestNewFromSecrets(t *testing.T) {
+	t.Run("missing secrets file returns disabled notifier", func(t *testing.T) {
+		secrets.Reset() // Clear cached secrets
+		// Point to non-existent secrets file
+		t.Setenv("DMT_SECRETS_FILE", "/nonexistent/path/to/secrets.yaml")
+
+		n := NewFromSecrets()
+		if n == nil {
+			t.Fatal("expected notifier, got nil")
+		}
+		if n.IsEnabled() {
+			t.Error("expected notifier to be disabled when secrets file missing")
+		}
+	})
+
+	t.Run("secrets without webhook returns disabled notifier", func(t *testing.T) {
+		secrets.Reset() // Clear cached secrets
+		// Create temp secrets file without webhook
+		tmpDir := t.TempDir()
+		secretsPath := tmpDir + "/secrets.yaml"
+		secretsContent := `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+notifications:
+  slack:
+    webhook_url: ""
+`
+		if err := writeTestFile(t, secretsPath, secretsContent); err != nil {
+			t.Fatalf("failed to write secrets file: %v", err)
+		}
+		t.Setenv("DMT_SECRETS_FILE", secretsPath)
+
+		n := NewFromSecrets()
+		if n == nil {
+			t.Fatal("expected notifier, got nil")
+		}
+		if n.IsEnabled() {
+			t.Error("expected notifier to be disabled when webhook URL empty")
+		}
+	})
+
+	t.Run("secrets with webhook returns enabled notifier", func(t *testing.T) {
+		secrets.Reset() // Clear cached secrets
+		// Create temp secrets file with webhook
+		tmpDir := t.TempDir()
+		secretsPath := tmpDir + "/secrets.yaml"
+		secretsContent := `
+ai:
+  default_provider: claude
+  providers:
+    claude:
+      api_key: "test-key"
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/TEST"
+`
+		if err := writeTestFile(t, secretsPath, secretsContent); err != nil {
+			t.Fatalf("failed to write secrets file: %v", err)
+		}
+		t.Setenv("DMT_SECRETS_FILE", secretsPath)
+
+		n := NewFromSecrets()
+		if n == nil {
+			t.Fatal("expected notifier, got nil")
+		}
+		if !n.IsEnabled() {
+			t.Error("expected notifier to be enabled when webhook URL configured")
+		}
+	})
+}
+
+func writeTestFile(t *testing.T, path, content string) error {
+	t.Helper()
+	return os.WriteFile(path, []byte(content), 0600)
 }
 
 func TestFormatNumberWithCommas(t *testing.T) {

@@ -170,6 +170,7 @@ const (
 	DDLTypeIndex           DDLType = "index"
 	DDLTypeForeignKey      DDLType = "foreign_key"
 	DDLTypeCheckConstraint DDLType = "check_constraint"
+	DDLTypeDropTable       DDLType = "drop_table"
 )
 
 // FinalizationDDLRequest contains information needed to generate finalization DDL.
@@ -204,6 +205,29 @@ type FinalizationDDLRequest struct {
 	// TargetTableDDL is the CREATE TABLE DDL for the target table.
 	// This helps AI understand the actual table structure when generating indexes/FKs.
 	TargetTableDDL string
+}
+
+// TableDropDDLMapper handles AI-driven DDL generation for dropping tables.
+type TableDropDDLMapper interface {
+	// GenerateDropTableDDL generates DDL statement(s) for dropping a table.
+	// The AI will generate database-specific syntax that properly handles
+	// foreign key constraints and other database-specific requirements.
+	GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error)
+}
+
+// DropTableDDLRequest contains information needed to generate DROP TABLE DDL.
+type DropTableDDLRequest struct {
+	// TargetDBType is the target database type (e.g., "mysql", "postgres").
+	TargetDBType string
+
+	// TargetSchema is the schema name in the target database.
+	TargetSchema string
+
+	// TableName is the name of the table to drop.
+	TableName string
+
+	// TargetContext contains metadata about the target database.
+	TargetContext *DatabaseContext
 }
 
 // GetAITypeMapper returns the global AI type mapper loaded from secrets.

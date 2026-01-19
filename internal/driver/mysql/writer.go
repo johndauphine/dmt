@@ -28,6 +28,7 @@ type Writer struct {
 	typeMapper         driver.TypeMapper
 	tableMapper        driver.TableTypeMapper       // Table-level DDL generation
 	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
+	dropDDLMapper      driver.TableDropDDLMapper    // AI-driven DROP TABLE DDL
 	dbContext          *driver.DatabaseContext      // Cached database context for AI
 	isMariaDB          bool
 }
@@ -92,6 +93,9 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
+	// Check if type mapper implements drop DDL mapper
+	dropDDLMapper, _ := opts.TypeMapper.(driver.TableDropDDLMapper)
+
 	w := &Writer{
 		db:                 db,
 		config:             cfg,
@@ -102,6 +106,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		typeMapper:         opts.TypeMapper,
 		tableMapper:        tableMapper,
 		finalizationMapper: finalizationMapper,
+		dropDDLMapper:      dropDDLMapper,
 		isMariaDB:          isMariaDB,
 	}
 
@@ -313,15 +318,40 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	return nil
 }
 
-// DropTable drops a table.
+// DropTable drops a table using AI-generated DDL that handles foreign key constraints.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	_, err := w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", w.dialect.QualifyTable(schema, table)))
+	// Use AI-generated DROP DDL if available
+	if w.dropDDLMapper != nil {
+		ddl, err := w.dropDDLMapper.GenerateDropTableDDL(ctx, driver.DropTableDDLRequest{
+			TargetDBType:  "mysql",
+			TargetSchema:  schema,
+			TableName:     table,
+			TargetContext: w.dbContext,
+		})
+		if err != nil {
+			logging.Warn("AI DROP DDL generation failed, using fallback: %v", err)
+		} else {
+			logging.Debug("Executing AI-generated DROP DDL: %s", ddl)
+			_, err := w.db.ExecContext(ctx, ddl)
+			return err
+		}
+	}
+
+	// Fallback: Disable FK checks, drop table, re-enable FK checks in a single statement
+	qualifiedTable := w.dialect.QualifyTable(schema, table)
+	_, err := w.db.ExecContext(ctx, fmt.Sprintf(
+		"SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS %s; SET FOREIGN_KEY_CHECKS = 1;",
+		qualifiedTable))
 	return err
 }
 
-// TruncateTable truncates a table.
+// TruncateTable truncates a table, disabling foreign key checks to allow
+// truncating tables that are referenced by other tables.
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
-	_, err := w.db.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", w.dialect.QualifyTable(schema, table)))
+	qualifiedTable := w.dialect.QualifyTable(schema, table)
+	_, err := w.db.ExecContext(ctx, fmt.Sprintf(
+		"SET FOREIGN_KEY_CHECKS = 0; TRUNCATE TABLE %s; SET FOREIGN_KEY_CHECKS = 1;",
+		qualifiedTable))
 	return err
 }
 

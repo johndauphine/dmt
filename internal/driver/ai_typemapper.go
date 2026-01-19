@@ -1197,8 +1197,8 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 	// Build a deterministic representation of the table structure
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("table:%s:%s:%s.%s:",
-		req.SourceDBType, req.TargetDBType, req.SourceTable.Schema, req.SourceTable.Name))
+	sb.WriteString(fmt.Sprintf("table:%s:%s:%s:%s.%s:",
+		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name))
 
 	for _, col := range req.SourceTable.Columns {
 		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v;",
@@ -1966,4 +1966,106 @@ func cleanDDLResponse(response string) string {
 	ddl = strings.TrimSpace(ddl)
 
 	return ddl
+}
+
+// GenerateDropTableDDL generates DDL statement(s) for dropping a table.
+// The AI generates database-specific syntax that properly handles foreign key constraints.
+func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error) {
+	if req.TableName == "" {
+		return "", fmt.Errorf("TableName is required")
+	}
+	if req.TargetDBType == "" {
+		return "", fmt.Errorf("TargetDBType is required")
+	}
+
+	// Build cache key
+	cacheKey := fmt.Sprintf("drop:%s:%s.%s", req.TargetDBType, req.TargetSchema, req.TableName)
+
+	// Check cache first
+	m.cacheMu.RLock()
+	if cached, ok := m.cache.Get(cacheKey); ok {
+		m.cacheMu.RUnlock()
+		return cached, nil
+	}
+	m.cacheMu.RUnlock()
+
+	logging.Debug("AI drop table DDL generation: %s.%s (%s)", req.TargetSchema, req.TableName, req.TargetDBType)
+
+	// Build prompt
+	prompt := m.buildDropTableDDLPrompt(req)
+
+	// Call AI API
+	result, err := m.CallAI(ctx, prompt)
+	if err != nil {
+		return "", fmt.Errorf("AI drop table DDL generation failed for %s.%s: %w",
+			req.TargetSchema, req.TableName, err)
+	}
+
+	ddl := cleanDDLResponse(result)
+
+	// Basic validation - should contain DROP
+	upperDDL := strings.ToUpper(ddl)
+	if !strings.Contains(upperDDL, "DROP") {
+		return "", fmt.Errorf("response does not contain valid DROP statement: %s", truncateString(ddl, 100))
+	}
+
+	// Cache the result
+	m.cacheMu.Lock()
+	m.cache.Set(cacheKey, ddl)
+	m.cacheMu.Unlock()
+
+	// Persist cache
+	if err := m.saveCache(); err != nil {
+		logging.Warn("Failed to save AI drop table DDL cache: %v", err)
+	}
+
+	logging.Debug("AI generated DROP DDL:\n%s", ddl)
+
+	return ddl, nil
+}
+
+// buildDropTableDDLPrompt creates the AI prompt for DROP TABLE DDL generation.
+func (m *AITypeMapper) buildDropTableDDLPrompt(req DropTableDDLRequest) string {
+	var sb strings.Builder
+
+	sb.WriteString("You are a database migration expert. Generate a DROP TABLE statement.\n\n")
+
+	// Target database context
+	sb.WriteString("=== TARGET DATABASE ===\n")
+	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	if req.TargetSchema != "" {
+		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+	}
+	if req.TargetContext != nil {
+		sb.WriteString(fmt.Sprintf("Version: %s\n", req.TargetContext.Version))
+		if req.TargetContext.MaxIdentifierLength > 0 {
+			sb.WriteString(fmt.Sprintf("Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength))
+		}
+	}
+	sb.WriteString("\n")
+
+	// Table to drop
+	sb.WriteString("=== TABLE TO DROP ===\n")
+	if req.TargetSchema != "" {
+		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+	}
+	sb.WriteString(fmt.Sprintf("Table: %s\n", req.TableName))
+	sb.WriteString("\n")
+
+	// Output requirements
+	sb.WriteString("=== OUTPUT REQUIREMENTS ===\n")
+	sb.WriteString("Generate the complete statement(s) to drop the table, ensuring foreign key constraints do not block the drop.\n")
+	sb.WriteString("Return ONLY the SQL statement(s), no explanation or markdown.\n\n")
+
+	// Database-specific instructions from dialect
+	if dialect := GetDialect(req.TargetDBType); dialect != nil {
+		if aug := dialect.AIDropTablePromptAugmentation(); aug != "" {
+			sb.WriteString(aug)
+		}
+	} else {
+		sb.WriteString("- Use DROP TABLE IF EXISTS with appropriate syntax for the target database\n")
+		sb.WriteString("- Handle foreign key constraints appropriately\n")
+	}
+
+	return sb.String()
 }

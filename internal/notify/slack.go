@@ -7,12 +7,20 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/secrets"
 )
+
+// SlackConfig holds Slack notification settings (loaded from global secrets)
+type SlackConfig struct {
+	WebhookURL string
+	Channel    string
+	Username   string
+	Enabled    bool
+}
 
 // Notifier sends notifications to Slack
 type Notifier struct {
-	config     *config.SlackConfig
+	config     *SlackConfig
 	httpClient *http.Client
 }
 
@@ -43,10 +51,10 @@ type SlackField struct {
 	Short bool   `json:"short"`
 }
 
-// New creates a new Slack notifier
-func New(cfg *config.SlackConfig) *Notifier {
+// New creates a new Slack notifier from config
+func New(cfg *SlackConfig) *Notifier {
 	if cfg == nil {
-		cfg = &config.SlackConfig{Enabled: false}
+		cfg = &SlackConfig{Enabled: false}
 	}
 	return &Notifier{
 		config: cfg,
@@ -54,6 +62,20 @@ func New(cfg *config.SlackConfig) *Notifier {
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// NewFromSecrets creates a new Slack notifier from global secrets
+func NewFromSecrets() *Notifier {
+	secretsCfg, err := secrets.Load()
+	if err != nil {
+		return New(nil)
+	}
+
+	slackCfg := &SlackConfig{
+		WebhookURL: secretsCfg.Notifications.Slack.WebhookURL,
+		Enabled:    secretsCfg.Notifications.Slack.WebhookURL != "",
+	}
+	return New(slackCfg)
 }
 
 // IsEnabled returns true if notifications are enabled

@@ -126,8 +126,8 @@ type AutoConfig struct {
 	OriginalChunkSize            int
 	OriginalReadAheadBuffers     int
 	OriginalMaxPartitions        int
-	OriginalMaxMssqlConns        int
-	OriginalMaxPgConns           int
+	OriginalMaxSourceConns       int
+	OriginalMaxTargetConns       int
 	OriginalWriteAheadWriters    int
 	OriginalParallelReaders      int
 	OriginalLargeTableThresh     int64
@@ -140,17 +140,26 @@ type AutoConfig struct {
 	TargetMemoryMB int64
 }
 
-// Config holds all configuration for the migration tool
+// Config holds all configuration for the migration tool.
+// Note: AI and Slack settings are global-only and loaded from ~/.secrets/dmt-config.yaml
 type Config struct {
 	Source    SourceConfig    `yaml:"source"`
 	Target    TargetConfig    `yaml:"target"`
 	Migration MigrationConfig `yaml:"migration"`
-	Slack     SlackConfig     `yaml:"slack"`
 	Profile   ProfileConfig   `yaml:"profile,omitempty"`
-	AI        *AIConfig       `yaml:"ai,omitempty"` // AI-assisted features
+	AI        *AIConfig       `yaml:"ai,omitempty"`
+	Slack     *SlackConfig    `yaml:"slack,omitempty"`
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
+}
+
+// SlackConfig holds Slack notification settings.
+type SlackConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+	Channel    string `yaml:"channel"`
+	Username   string `yaml:"username"`
+	Enabled    bool   `yaml:"enabled"`
 }
 
 // ProfileConfig holds optional profile metadata.
@@ -159,51 +168,7 @@ type ProfileConfig struct {
 	Description string `yaml:"description,omitempty"`
 }
 
-// SlackConfig holds Slack notification settings
-type SlackConfig struct {
-	WebhookURL string `yaml:"webhook_url"`
-	Channel    string `yaml:"channel"`
-	Username   string `yaml:"username"`
-	Enabled    bool   `yaml:"enabled"`
-}
-
-// MigrationConfig holds migration behavior settings
-type MigrationConfig struct {
-	MaxConnections         int      `yaml:"max_connections"`       // Deprecated: use max_mssql_connections and max_pg_connections
-	MaxMssqlConnections    int      `yaml:"max_mssql_connections"` // Max SQL Server connections
-	MaxPgConnections       int      `yaml:"max_pg_connections"`    // Max PostgreSQL connections
-	ChunkSize              int      `yaml:"chunk_size"`
-	MaxPartitions          int      `yaml:"max_partitions"`
-	Workers                int      `yaml:"workers"`
-	LargeTableThreshold    int64    `yaml:"large_table_threshold"`
-	IncludeTables          []string `yaml:"include_tables"` // Only migrate these tables (glob patterns)
-	ExcludeTables          []string `yaml:"exclude_tables"` // Skip these tables (glob patterns)
-	DataDir                string   `yaml:"data_dir"`
-	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "upsert"
-	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
-	CreateIndexes          bool     `yaml:"create_indexes"`           // Create non-PK indexes
-	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`      // Create foreign key constraints
-	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
-	SampleValidation       bool     `yaml:"sample_validation"`        // Enable sample data validation
-	SampleSize             int      `yaml:"sample_size"`              // Number of rows to sample for validation
-	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (default=8)
-	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
-	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
-	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
-	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
-	// Restartability settings
-	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
-	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
-	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
-	// Date-based incremental sync (upsert mode only)
-	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
-	// AI-driven real-time parameter adjustment
-	AIAdjust bool   `yaml:"ai_adjust"`           // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
-}
-
-// AIConfig contains configuration for all AI-assisted features.
-// AI features are auto-enabled when api_key is configured.
+// AIConfig holds AI provider configuration.
 type AIConfig struct {
 	// APIKey is the API key for the AI provider.
 	// Supports the same secret patterns as passwords:
@@ -241,6 +206,40 @@ type AITypeMappingConfig struct {
 	// CacheFile is the path to the JSON cache file for type mappings.
 	// Defaults to ~/.dmt/type-cache.json
 	CacheFile string `yaml:"cache_file"`
+}
+
+// MigrationConfig holds migration behavior settings
+type MigrationConfig struct {
+	MaxSourceConnections int `yaml:"max_source_connections"` // Max source database connections
+	MaxTargetConnections int `yaml:"max_target_connections"` // Max target database connections
+	ChunkSize              int      `yaml:"chunk_size"`
+	MaxPartitions          int      `yaml:"max_partitions"`
+	Workers                int      `yaml:"workers"`
+	LargeTableThreshold    int64    `yaml:"large_table_threshold"`
+	IncludeTables          []string `yaml:"include_tables"` // Only migrate these tables (glob patterns)
+	ExcludeTables          []string `yaml:"exclude_tables"` // Skip these tables (glob patterns)
+	DataDir                string   `yaml:"data_dir"`
+	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "upsert"
+	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
+	CreateIndexes          bool     `yaml:"create_indexes"`           // Create non-PK indexes
+	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`      // Create foreign key constraints
+	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
+	SampleValidation       bool     `yaml:"sample_validation"`        // Enable sample data validation
+	SampleSize             int      `yaml:"sample_size"`              // Number of rows to sample for validation
+	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (default=8)
+	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
+	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
+	UpsertMergeChunkSize   int      `yaml:"upsert_merge_chunk_size"`  // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
+	MaxMemoryMB            int64    `yaml:"max_memory_mb"`            // Max memory to use (default=70% of available, hard cap at 70%)
+	// Restartability settings
+	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
+	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
+	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
+	// Date-based incremental sync (upsert mode only)
+	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
+	// AI-driven real-time parameter adjustment
+	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
+	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -360,8 +359,11 @@ func (c *Config) applyGlobalDefaults() {
 	if c.Migration.Workers == 0 && defaults.Workers > 0 {
 		c.Migration.Workers = defaults.Workers
 	}
-	if c.Migration.MaxConnections == 0 && defaults.MaxConnections > 0 {
-		c.Migration.MaxConnections = defaults.MaxConnections
+	if c.Migration.MaxSourceConnections == 0 && defaults.MaxSourceConnections > 0 {
+		c.Migration.MaxSourceConnections = defaults.MaxSourceConnections
+	}
+	if c.Migration.MaxTargetConnections == 0 && defaults.MaxTargetConnections > 0 {
+		c.Migration.MaxTargetConnections = defaults.MaxTargetConnections
 	}
 	if c.Migration.MaxMemoryMB == 0 && defaults.MaxMemoryMB > 0 {
 		c.Migration.MaxMemoryMB = defaults.MaxMemoryMB
@@ -376,12 +378,33 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
-	// Note: Boolean settings (CreateIndexes, CreateForeignKeys, CreateCheckConstraints,
-	// StrictConsistency, SampleValidation) are NOT applied from global defaults.
-	// This is because Go's bool type defaults to false, making it impossible to
-	// distinguish between "not set in migration config" and "explicitly set to false".
-	// Applying global boolean defaults would prevent migrations from overriding to false.
-	// Users should set boolean values explicitly in their migration configs.
+	// Boolean settings - apply from global defaults when explicitly set (non-nil pointer)
+	// and the migration config value is false.
+	//
+	// Limitation: Go's bool defaults to false, so we cannot distinguish between
+	// "user didn't set this" and "user explicitly set to false". This means:
+	//   - Global true  + migration unset/false → true  (global wins)
+	//   - Global true  + migration true        → true  (both agree)
+	//   - Global false + migration unset/false → false (both agree)
+	//   - Global false + migration true        → true  (migration wins)
+	//
+	// In practice: you CAN override a global "false" to "true" per-migration,
+	// but you CANNOT override a global "true" to "false" per-migration.
+	if defaults.CreateIndexes != nil && !c.Migration.CreateIndexes {
+		c.Migration.CreateIndexes = *defaults.CreateIndexes
+	}
+	if defaults.CreateForeignKeys != nil && !c.Migration.CreateForeignKeys {
+		c.Migration.CreateForeignKeys = *defaults.CreateForeignKeys
+	}
+	if defaults.CreateCheckConstraints != nil && !c.Migration.CreateCheckConstraints {
+		c.Migration.CreateCheckConstraints = *defaults.CreateCheckConstraints
+	}
+	if defaults.StrictConsistency != nil && !c.Migration.StrictConsistency {
+		c.Migration.StrictConsistency = *defaults.StrictConsistency
+	}
+	if defaults.SampleValidation != nil && !c.Migration.SampleValidation {
+		c.Migration.SampleValidation = *defaults.SampleValidation
+	}
 	if c.Migration.SampleSize == 0 && defaults.SampleSize > 0 {
 		c.Migration.SampleSize = defaults.SampleSize
 	}
@@ -395,14 +418,6 @@ func (c *Config) applyGlobalDefaults() {
 	}
 	if c.Migration.HistoryRetentionDays == 0 && defaults.HistoryRetentionDays > 0 {
 		c.Migration.HistoryRetentionDays = defaults.HistoryRetentionDays
-	}
-
-	// AI features
-	if defaults.AIAdjust {
-		c.Migration.AIAdjust = true
-	}
-	if c.Migration.AIAdjustInterval == "" && defaults.AIAdjustInterval != "" {
-		c.Migration.AIAdjustInterval = defaults.AIAdjustInterval
 	}
 
 	// Data directory
@@ -420,8 +435,8 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalChunkSize = c.Migration.ChunkSize
 	c.autoConfig.OriginalReadAheadBuffers = c.Migration.ReadAheadBuffers
 	c.autoConfig.OriginalMaxPartitions = c.Migration.MaxPartitions
-	c.autoConfig.OriginalMaxMssqlConns = c.Migration.MaxMssqlConnections
-	c.autoConfig.OriginalMaxPgConns = c.Migration.MaxPgConnections
+	c.autoConfig.OriginalMaxSourceConns = c.Migration.MaxSourceConnections
+	c.autoConfig.OriginalMaxTargetConns = c.Migration.MaxTargetConnections
 	c.autoConfig.OriginalWriteAheadWriters = c.Migration.WriteAheadWriters
 	c.autoConfig.OriginalParallelReaders = c.Migration.ParallelReaders
 	c.autoConfig.OriginalLargeTableThresh = c.Migration.LargeTableThreshold
@@ -495,15 +510,12 @@ func (c *Config) applyDefaults() {
 		}
 	}
 
-	// Handle backwards compatibility: if max_connections is set but new options aren't
-	if c.Migration.MaxConnections == 0 {
-		c.Migration.MaxConnections = 12
+	// Set default max connections for source and target
+	if c.Migration.MaxSourceConnections == 0 {
+		c.Migration.MaxSourceConnections = 12
 	}
-	if c.Migration.MaxMssqlConnections == 0 {
-		c.Migration.MaxMssqlConnections = c.Migration.MaxConnections
-	}
-	if c.Migration.MaxPgConnections == 0 {
-		c.Migration.MaxPgConnections = c.Migration.MaxConnections
+	if c.Migration.MaxTargetConnections == 0 {
+		c.Migration.MaxTargetConnections = 12
 	}
 	// Auto-detect CPU cores for workers
 	// Formula: (cores - 2), clamped to 4-12 for optimal performance
@@ -562,9 +574,6 @@ func (c *Config) applyDefaults() {
 				if writers < defaults.WriteAheadWriters {
 					writers = defaults.WriteAheadWriters
 				}
-				if writers > 4 {
-					writers = 4
-				}
 				c.Migration.WriteAheadWriters = writers
 			} else {
 				// Use fixed value (e.g., MSSQL TABLOCK serializes writes)
@@ -577,15 +586,11 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	// Auto-tune parallel readers based on CPU cores
-	// Conservative defaults to avoid overwhelming source database
 	if c.Migration.ParallelReaders == 0 {
 		cores := c.autoConfig.CPUCores
 		readers := cores / 4
 		if readers < 2 {
 			readers = 2
-		}
-		if readers > 4 {
-			readers = 4
 		}
 		c.Migration.ParallelReaders = readers
 	}
@@ -619,16 +624,14 @@ func (c *Config) applyDefaults() {
 
 	// Auto-size connection pools based on workers, readers, and writers
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
-	minSourceConns := c.Migration.Workers * c.Migration.ParallelReaders
-	minTargetConns := c.Migration.Workers * c.Migration.WriteAheadWriters
-	if c.Migration.MaxConnections < minTargetConns {
-		c.Migration.MaxConnections = minTargetConns + 4 // Add headroom
+	// Add 4 connections for headroom (orchestrator, health checks, etc.)
+	requiredSourceConns := c.Migration.Workers*c.Migration.ParallelReaders + 4
+	requiredTargetConns := c.Migration.Workers*c.Migration.WriteAheadWriters + 4
+	if c.Migration.MaxSourceConnections < requiredSourceConns {
+		c.Migration.MaxSourceConnections = requiredSourceConns
 	}
-	if c.Migration.MaxMssqlConnections < minSourceConns {
-		c.Migration.MaxMssqlConnections = minSourceConns + 4
-	}
-	if c.Migration.MaxPgConnections < minTargetConns {
-		c.Migration.MaxPgConnections = minTargetConns + 4
+	if c.Migration.MaxTargetConnections < requiredTargetConns {
+		c.Migration.MaxTargetConnections = requiredTargetConns
 	}
 
 	// Default source chunk_size to migration chunk_size if not specified
@@ -747,7 +750,7 @@ func (c *Config) applyDefaults() {
 
 	// Slack notification: auto-enable when webhook URL is configured
 	// Load webhook from secrets if not provided in config
-	if c.Slack.WebhookURL == "" {
+	if c.Slack == nil || c.Slack.WebhookURL == "" {
 		secretsCfg, err := secrets.Load()
 		if err != nil {
 			// Distinguish between "secrets file not found" (acceptable) and other errors (should be reported)
@@ -755,11 +758,14 @@ func (c *Config) applyDefaults() {
 				logging.Warn("failed to load secrets configuration for Slack webhook: %v", err)
 			}
 		} else if secretsCfg.Notifications.Slack.WebhookURL != "" {
+			if c.Slack == nil {
+				c.Slack = &SlackConfig{}
+			}
 			c.Slack.WebhookURL = secretsCfg.Notifications.Slack.WebhookURL
 		}
 	}
 	// Auto-enable Slack notifications when webhook URL is available
-	if c.Slack.WebhookURL != "" && !c.Slack.Enabled {
+	if c.Slack != nil && c.Slack.WebhookURL != "" && !c.Slack.Enabled {
 		c.Slack.Enabled = true
 	}
 }
@@ -849,21 +855,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
 
-	// Validate AI configuration
-	if c.AI != nil {
-		// Check if AI type mapping is enabled
-		typeMappingEnabled := c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled
-
-		if typeMappingEnabled {
-			if c.AI.APIKey == "" {
-				return fmt.Errorf("ai.api_key is required when AI features are enabled")
-			}
-			if !driver.IsValidAIProvider(c.AI.Provider) {
-				return fmt.Errorf("ai.provider '%s' is not valid (supported: %v)",
-					c.AI.Provider, driver.ValidAIProviders())
-			}
-		}
-	}
+	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
 	return nil
 }
@@ -1014,18 +1006,7 @@ func (c *Config) Sanitized() *Config {
 	// Redact target credentials
 	sanitized.Target.Password = "[REDACTED]"
 
-	// Redact Slack webhook
-	if sanitized.Slack.WebhookURL != "" {
-		sanitized.Slack.WebhookURL = "[REDACTED]"
-	}
-
-	// Redact AI API key
-	if sanitized.AI != nil && sanitized.AI.APIKey != "" {
-		// Make a copy to avoid modifying the original
-		aiConfig := *sanitized.AI
-		aiConfig.APIKey = "[REDACTED]"
-		sanitized.AI = &aiConfig
-	}
+	// Note: AI and Slack credentials are in global secrets file, not migration config
 
 	return &sanitized
 }
@@ -1207,11 +1188,11 @@ func (c *Config) DebugDump() string {
 	b.WriteString(fmt.Sprintf("  MaxPartitions: %s\n", formatAutoValue(c.Migration.MaxPartitions, ac.OriginalMaxPartitions, partitionsExpl)))
 
 	// Connection pools
-	mssqlConnsExpl := fmt.Sprintf("%d workers * %d readers + 4", c.Migration.Workers, c.Migration.ParallelReaders)
-	b.WriteString(fmt.Sprintf("  MaxMssqlConnections: %s\n", formatAutoValue(c.Migration.MaxMssqlConnections, ac.OriginalMaxMssqlConns, mssqlConnsExpl)))
+	sourceConnsExpl := fmt.Sprintf("%d workers * %d readers + 4", c.Migration.Workers, c.Migration.ParallelReaders)
+	b.WriteString(fmt.Sprintf("  MaxSourceConnections: %s\n", formatAutoValue(c.Migration.MaxSourceConnections, ac.OriginalMaxSourceConns, sourceConnsExpl)))
 
-	pgConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
-	b.WriteString(fmt.Sprintf("  MaxPgConnections: %s\n", formatAutoValue(c.Migration.MaxPgConnections, ac.OriginalMaxPgConns, pgConnsExpl)))
+	targetConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
+	b.WriteString(fmt.Sprintf("  MaxTargetConnections: %s\n", formatAutoValue(c.Migration.MaxTargetConnections, ac.OriginalMaxTargetConns, targetConnsExpl)))
 
 	// WriteAheadWriters - use driver defaults for explanation
 	var writersExpl string
@@ -1302,46 +1283,61 @@ func (c *Config) DebugDump() string {
 		}
 	}
 
-	// Slack Notifications
+	// Notifications and AI Features (loaded from global secrets)
 	b.WriteString("\nNotifications:\n")
-	if c.Slack.Enabled {
+	secretsCfg, secretsErr := secrets.Load()
+	if secretsErr == nil && secretsCfg.Notifications.Slack.WebhookURL != "" {
 		b.WriteString("  Slack: enabled\n")
-		if c.Slack.Channel != "" {
-			b.WriteString(fmt.Sprintf("  Channel: %s\n", c.Slack.Channel))
-		}
-		if c.Slack.Username != "" {
-			b.WriteString(fmt.Sprintf("  Username: %s\n", c.Slack.Username))
-		}
 		b.WriteString("  WebhookURL: [REDACTED]\n")
 	} else {
 		b.WriteString("  Slack: disabled\n")
 	}
 
-	// AI Features
+	// AI Features (from global secrets)
 	b.WriteString("\nAI Features:\n")
-	if c.AI != nil && c.AI.APIKey != "" {
-		b.WriteString(fmt.Sprintf("  Provider: %s\n", c.AI.Provider))
-		b.WriteString("  APIKey: [REDACTED]\n")
-		if c.AI.Model != "" {
-			b.WriteString(fmt.Sprintf("  Model: %s\n", c.AI.Model))
-		} else {
-			b.WriteString("  Model: (provider default)\n")
-		}
-		if c.AI.TimeoutSeconds > 0 {
-			b.WriteString(fmt.Sprintf("  Timeout: %ds\n", c.AI.TimeoutSeconds))
-		}
-
-		// Type Mapping
-		if c.AI.TypeMapping != nil && c.AI.TypeMapping.Enabled != nil && *c.AI.TypeMapping.Enabled {
-			b.WriteString("  TypeMapping: enabled\n")
-			if c.AI.TypeMapping.CacheFile != "" {
-				b.WriteString(fmt.Sprintf("    CacheFile: %s\n", c.AI.TypeMapping.CacheFile))
+	if secretsErr == nil {
+		provider, providerName, err := secretsCfg.GetDefaultProvider()
+		// Check for valid provider: API-key-based (Claude, OpenAI) or local with BaseURL (Ollama, LMStudio)
+		if err == nil && provider != nil && (provider.APIKey != "" || provider.BaseURL != "") {
+			b.WriteString(fmt.Sprintf("  Provider: %s\n", providerName))
+			if provider.APIKey != "" {
+				b.WriteString("  APIKey: [REDACTED]\n")
+			}
+			if provider.BaseURL != "" {
+				b.WriteString(fmt.Sprintf("  BaseURL: %s\n", provider.BaseURL))
+			}
+			if provider.Model != "" {
+				b.WriteString(fmt.Sprintf("  Model: %s\n", provider.Model))
+			} else {
+				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
+			}
+			// AI features status - check each feature separately
+			if typeMapper, err := driver.GetAITypeMapper(); err == nil && typeMapper != nil {
+				b.WriteString("  Type Mapping: enabled\n")
+			} else {
+				b.WriteString("  Type Mapping: disabled\n")
+			}
+			if diagnoser := driver.GetAIErrorDiagnoser(); diagnoser != nil {
+				b.WriteString("  Error Diagnosis: enabled\n")
+			} else {
+				b.WriteString("  Error Diagnosis: disabled\n")
+			}
+			// AI adjust settings from migration_defaults
+			defaults := secretsCfg.GetMigrationDefaults()
+			if defaults.AIAdjust != nil && *defaults.AIAdjust {
+				interval := defaults.AIAdjustInterval
+				if interval == "" {
+					interval = "30s"
+				}
+				b.WriteString(fmt.Sprintf("  AI Adjust: enabled (interval: %s)\n", interval))
+			} else {
+				b.WriteString("  AI Adjust: disabled\n")
 			}
 		} else {
-			b.WriteString("  TypeMapping: disabled\n")
+			b.WriteString("  Disabled (no provider configured in ~/.secrets/dmt-config.yaml)\n")
 		}
 	} else {
-		b.WriteString("  Disabled (no API key)\n")
+		b.WriteString("  Disabled (no secrets file)\n")
 	}
 
 	return b.String()

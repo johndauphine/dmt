@@ -21,6 +21,7 @@ import (
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/target"
 )
@@ -202,18 +203,8 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 
 // NewWithOptions creates a new orchestrator with custom options.
 func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
-	// Determine max connections based on source/target types
-	maxSourceConns := cfg.Migration.MaxMssqlConnections
-	maxTargetConns := cfg.Migration.MaxPgConnections
-	if cfg.Source.Type == "postgres" {
-		maxSourceConns = cfg.Migration.MaxPgConnections
-	}
-	if cfg.Target.Type == "mssql" {
-		maxTargetConns = cfg.Migration.MaxMssqlConnections
-	}
-
 	// Create source pool using factory
-	sourcePool, err := pool.NewSourcePool(&cfg.Source, maxSourceConns)
+	sourcePool, err := pool.NewSourcePool(&cfg.Source, cfg.Migration.MaxSourceConnections)
 	if err != nil {
 		return nil, fmt.Errorf("creating source pool: %w", err)
 	}
@@ -237,7 +228,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	// Create target pool using factory
 	// Canonicalize source type to handle aliases (e.g., "sqlserver" -> "mssql")
 	sourceType := driver.Canonicalize(cfg.Source.Type)
-	targetPool, err := pool.NewTargetPool(&cfg.Target, maxTargetConns, sourceType, typeMapper)
+	targetPool, err := pool.NewTargetPool(&cfg.Target, cfg.Migration.MaxTargetConnections, sourceType, typeMapper)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("creating target pool: %w", err)
@@ -276,8 +267,8 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		state = sqliteState
 	}
 
-	// Create notifier
-	notifier := notify.New(&cfg.Slack)
+	// Create notifier from global secrets
+	notifier := notify.NewFromSecrets()
 
 	// Create target mode strategy
 	targetModeStrategy := NewTargetModeStrategy(
@@ -287,6 +278,8 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		cfg.Migration.CreateIndexes,
 		cfg.Migration.CreateForeignKeys,
 		cfg.Migration.CreateCheckConstraints,
+		cfg.Source.Type,
+		cfg.Target.Type,
 	)
 
 	return &Orchestrator{
@@ -364,7 +357,17 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Load additional metadata if enabled
-	aiMappingEnabled := o.config.AI != nil && o.config.AI.TypeMapping != nil && o.config.AI.TypeMapping.Enabled != nil && *o.config.AI.TypeMapping.Enabled
+	// Check if AI type mapping is enabled from global secrets
+	aiMappingEnabled := false
+	if secretsCfg, err := secrets.Load(); err == nil {
+		if provider, _, err := secretsCfg.GetDefaultProvider(); err == nil && provider != nil {
+			// AI is enabled if we have a valid provider: either API-key-based (Claude, OpenAI)
+			// or local provider with BaseURL (Ollama, LMStudio)
+			if provider.APIKey != "" || provider.BaseURL != "" {
+				aiMappingEnabled = true
+			}
+		}
+	}
 	for i := range tables {
 		t := &tables[i]
 

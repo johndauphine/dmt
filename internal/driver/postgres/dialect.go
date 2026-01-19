@@ -203,3 +203,13 @@ CRITICAL PostgreSQL identifier rules:
 - Do NOT use double-quotes around identifiers unless the name is a reserved word
 `
 }
+
+// AIDropTablePromptAugmentation returns PostgreSQL-specific instructions for DROP TABLE DDL.
+func (d *Dialect) AIDropTablePromptAugmentation() string {
+	return `
+PostgreSQL-specific requirements:
+- Use DROP TABLE IF EXISTS with CASCADE to drop dependent objects
+- Quote identifiers with double quotes if they contain special characters or are reserved words
+- Use lowercase table names (PostgreSQL folds unquoted identifiers to lowercase)
+`
+}

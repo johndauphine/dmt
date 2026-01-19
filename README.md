@@ -348,11 +348,48 @@ migration:
 - **Exclude tables**: Tables that should probably be excluded (temp, log, archive, etc.)
 - **Chunk size**: Optimal chunk size based on average row sizes
 
+### AI Error Diagnosis (New in v3.53.0)
+
+When a table transfer fails, AI automatically analyzes the error and provides actionable suggestions for resolution.
+
+**Example output:**
+```
+Table Orders failed: pq: invalid input syntax for type integer: "abc"
+
+  AI Diagnosis:
+    Cause: Data type mismatch - column contains non-numeric values being inserted into integer column
+    Suggestions:
+      - Check source data for non-numeric values in numeric columns
+      - Use TEXT type instead of INTEGER for this column
+      - Add data transformation to filter/convert invalid values
+    Confidence: high
+```
+
+**Features:**
+- **Automatic**: Runs automatically when AI is configured and a transfer fails
+- **Context-aware**: Includes table schema, column types, and source/target DB info in analysis
+- **Cached**: Same errors are diagnosed once to minimize API calls
+- **Categorized**: Errors classified as type_mismatch, constraint, permission, connection, or data_quality
+
+**Common diagnoses:**
+| Error Type | AI Diagnosis |
+|------------|--------------|
+| Type mismatch | Identifies incompatible column types and suggests mappings |
+| NULL constraint | Detects NULL values in NOT NULL columns |
+| Foreign key | Identifies missing parent records or ordering issues |
+| Permission | Suggests required grants or role assignments |
+| Connection | Diagnoses timeout, authentication, or network issues |
+
+**Requirements:**
+- AI must be configured (`ai.api_key` set)
+- Works with all supported providers (Claude, OpenAI, Gemini)
+
 ### Cost Considerations
 
 - Each unique type mapping requires one API call (cached for future runs)
 - Typical migration: 20-50 API calls on first run, zero on subsequent runs
 - Smart config analysis: 0 API calls (uses pattern matching, not AI)
+- Error diagnosis: 1 API call per unique error (cached to avoid duplicates)
 
 ## State File Backend (Airflow/Kubernetes)
 
@@ -663,21 +700,21 @@ Download from [GitHub Releases](https://github.com/johndauphine/dmt/releases/lat
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-linux-amd64.tar.gz
-tar -xzf dmt-v3.52.0-linux-amd64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-linux-amd64.tar.gz
+tar -xzf dmt-v3.53.0-linux-amd64.tar.gz
 chmod +x dmt-linux-amd64
 ./dmt-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-darwin-arm64.tar.gz
-tar -xzf dmt-v3.52.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-darwin-arm64.tar.gz
+tar -xzf dmt-v3.53.0-darwin-arm64.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-darwin-amd64.tar.gz
-tar -xzf dmt-v3.52.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-darwin-amd64.tar.gz
+tar -xzf dmt-v3.53.0-darwin-amd64.tar.gz
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v3.52.0/dmt-v3.52.0-windows-amd64.tar.gz -OutFile dmt.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-windows-amd64.tar.gz -OutFile dmt.tar.gz
 tar -xzf dmt.tar.gz
 ```
 
@@ -829,8 +866,8 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `max_mssql_connections` | No | Auto-sized | Maximum SQL Server connection pool size |
-| `max_pg_connections` | No | Auto-sized | Maximum PostgreSQL connection pool size |
+| `max_source_connections` | No | Auto-sized | Maximum source database connection pool size |
+| `max_target_connections` | No | Auto-sized | Maximum target database connection pool size |
 
 **Parallelism Settings:**
 
@@ -1228,8 +1265,8 @@ target:
 
 migration:
   # Connection pools
-  max_mssql_connections: 20
-  max_pg_connections: 40
+  max_source_connections: 20
+  max_target_connections: 40
 
   # Parallelism
   workers: 16

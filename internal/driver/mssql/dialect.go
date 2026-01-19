@@ -212,3 +212,14 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 func (d *Dialect) AIPromptAugmentation() string {
 	return "" // No special requirements for SQL Server
 }
+
+// AIDropTablePromptAugmentation returns SQL Server-specific instructions for DROP TABLE DDL.
+func (d *Dialect) AIDropTablePromptAugmentation() string {
+	return `
+SQL Server-specific requirements:
+- SQL Server does not support CASCADE DROP
+- Use DROP TABLE IF EXISTS with schema-qualified table name
+- Quote identifiers with square brackets []
+- Foreign key constraints must be dropped separately before the table can be dropped
+`
+}

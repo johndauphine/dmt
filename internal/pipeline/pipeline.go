@@ -37,6 +37,11 @@ type Config struct {
 
 	// CheckpointFrequency is how often (in chunks) to save checkpoints.
 	CheckpointFrequency int
+
+	// UpsertMergeChunkSize is the batch size for upsert MERGE operations.
+	// Smaller values reduce memory pressure on the target database.
+	// Only used when TargetMode is "upsert".
+	UpsertMergeChunkSize int
 }
 
 // ApplyTiming determines when a config update should be applied.
@@ -51,11 +56,13 @@ const (
 
 // ConfigUpdate represents a requested configuration update with timing information.
 type ConfigUpdate struct {
-	ChunkSize         *int       // Pointer allows nil = "no change"
-	ReadAheadBuffers  *int
-	ParallelReaders   *int
-	WriteAheadWriters *int
-	ApplyAt           ApplyTiming
+	ChunkSize            *int // Pointer allows nil = "no change"
+	ReadAheadBuffers     *int
+	ParallelReaders      *int
+	WriteAheadWriters    *int
+	CheckpointFrequency  *int
+	UpsertMergeChunkSize *int
+	ApplyAt              ApplyTiming
 }
 
 // Pipeline orchestrates data transfer from a Reader to a Writer.
@@ -86,6 +93,9 @@ func New(reader driver.Reader, writer driver.Writer, cfg Config) *Pipeline {
 	}
 	if cfg.CheckpointFrequency <= 0 {
 		cfg.CheckpointFrequency = 10
+	}
+	if cfg.UpsertMergeChunkSize <= 0 {
+		cfg.UpsertMergeChunkSize = 5000 // Default for upsert MERGE operations
 	}
 
 	return &Pipeline{
@@ -154,10 +164,19 @@ func (p *Pipeline) applyConfigUpdate(update ConfigUpdate) {
 		p.config.WriteAheadWriters = *update.WriteAheadWriters
 		changed = true
 	}
+	if update.CheckpointFrequency != nil && *update.CheckpointFrequency >= 1 {
+		p.config.CheckpointFrequency = *update.CheckpointFrequency
+		changed = true
+	}
+	if update.UpsertMergeChunkSize != nil && *update.UpsertMergeChunkSize >= 1000 {
+		p.config.UpsertMergeChunkSize = *update.UpsertMergeChunkSize
+		changed = true
+	}
 
 	if changed {
-		logging.Debug("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d",
-			p.config.ChunkSize, p.config.ParallelReaders, p.config.WriteAheadWriters, p.config.ReadAheadBuffers)
+		logging.Debug("Config updated: chunk_size=%d, readers=%d, writers=%d, buffers=%d, checkpoint_freq=%d, upsert_chunk=%d",
+			p.config.ChunkSize, p.config.ParallelReaders, p.config.WriteAheadWriters, p.config.ReadAheadBuffers,
+			p.config.CheckpointFrequency, p.config.UpsertMergeChunkSize)
 	}
 }
 
@@ -414,10 +433,15 @@ func (p *Pipeline) executeKeysetPagination(
 		Writer:       p.writer,
 		Prog:         prog,
 		EnableAck:    enableAck,
+		UpsertMergeChunkSizeFn: func() int {
+			return p.GetConfig().UpsertMergeChunkSize
+		},
 	})
 
-	// Setup checkpoint coordinator
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, &wp.totalWritten, p.config.CheckpointFrequency)
+	// Setup checkpoint coordinator with dynamic checkpoint frequency (supports mid-migration tuning)
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), func() int {
+		return p.GetConfig().CheckpointFrequency
+	})
 	if checkpointCoord != nil {
 		wp.startAckProcessor(checkpointCoord.onAck)
 	}
@@ -439,7 +463,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {
@@ -672,10 +696,12 @@ func (p *Pipeline) executeRowNumberPagination(
 		Writer:       p.writer,
 		Prog:         prog,
 		EnableAck:    enableAck,
+		UpsertMergeChunkSizeFn: func() int {
+			return p.GetConfig().UpsertMergeChunkSize
+		},
 	})
 
 	// Setup ROW_NUMBER checkpoint handler
-	checkpointFreq := p.config.CheckpointFrequency
 	lastCheckpointRowNum := initialRowNum
 
 	if enableAck {
@@ -693,6 +719,11 @@ func (p *Pipeline) executeRowNumberPagination(
 			for {
 				lastCheckpointRowNum = ack.rowNum
 				completedChunks++
+				// Read checkpoint frequency dynamically to allow mid-migration tuning
+				checkpointFreq := p.GetConfig().CheckpointFrequency
+				if checkpointFreq <= 0 {
+					checkpointFreq = 10 // Fallback to default to avoid division by zero
+				}
 				if completedChunks%checkpointFreq == 0 {
 					rowsDone := resumeRowsDone + wp.written()
 					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
@@ -724,7 +755,7 @@ chunkLoop:
 	for result := range chunkChan {
 		if result.err != nil {
 			loopErr = result.err
-			wp.cancel()
+			wp.Cancel()
 			break
 		}
 		if result.done {

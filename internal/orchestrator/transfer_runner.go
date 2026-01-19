@@ -17,6 +17,7 @@ import (
 	"github.com/johndauphine/dmt/internal/pipeline"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
@@ -104,33 +105,35 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		return nil, err
 	}
 
-	// Setup AI-driven monitoring if enabled
+	// Setup AI-driven monitoring if enabled (from global secrets)
 	var aiMonitor *monitor.AIMonitor
-	if r.config.Migration.AIAdjust {
+	aiAdjustEnabled := false
+	aiAdjustInterval := 30 * time.Second // Default
+	if secretsCfg, err := secrets.Load(); err == nil {
+		defaults := secretsCfg.GetMigrationDefaults()
+		if defaults.AIAdjust != nil {
+			aiAdjustEnabled = *defaults.AIAdjust
+		}
+		if defaults.AIAdjustInterval != "" {
+			if d, err := time.ParseDuration(defaults.AIAdjustInterval); err == nil {
+				aiAdjustInterval = d
+			}
+		}
+	}
+	if aiAdjustEnabled {
 		typeMapper, err := driver.GetAITypeMapper()
 		if err == nil && typeMapper != nil {
 			// Type-assert to AITypeMapper
 			if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
 				// Create a placeholder pipeline for the monitor (it will be updated per-job)
 				p := pipeline.New(nil, nil, pipeline.Config{})
-				interval := 30 * time.Second // Default
-				if r.config.Migration.AIAdjustInterval != "" {
-					if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
-						interval = d
-					}
-				}
-				aiMonitor = monitor.NewAIMonitor(p, aiMapper, interval)
+				aiMonitor = monitor.NewAIMonitor(p, aiMapper, aiAdjustInterval)
 
 				// Set connection limits from config for AI guardrails
-				maxSource := r.config.Migration.MaxMssqlConnections
-				if r.config.Source.Type == "postgres" {
-					maxSource = r.config.Migration.MaxPgConnections
-				}
-				maxTarget := r.config.Migration.MaxPgConnections
-				if r.config.Target.Type == "mssql" {
-					maxTarget = r.config.Migration.MaxMssqlConnections
-				}
-				aiMonitor.SetConnectionLimits(maxSource, maxTarget)
+				aiMonitor.SetConnectionLimits(
+					r.config.Migration.MaxSourceConnections,
+					r.config.Migration.MaxTargetConnections,
+				)
 
 				// Set state backend for persistent history
 				aiMonitor.SetStateBackend(r.state, runID)
@@ -140,7 +143,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				defer cancelMonitor()
 				go aiMonitor.Start(monitorCtx)
 
-				logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", interval)
+				logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", aiAdjustInterval)
 			} else {
 				logging.Debug("AI adjustment requested but type assertion failed")
 			}
@@ -218,18 +221,64 @@ func (r *TransferRunner) preTruncateIfNeeded(ctx context.Context, jobs []transfe
 }
 
 // executeJobs runs jobs with a worker pool.
+// For partitioned tables, first partitions are processed before remaining partitions
+// to prevent race conditions in partition cleanup logic during idempotent retries.
+// Note: Table truncation is handled upfront by preTruncateIfNeeded, not by partitions.
 func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor) ([]TableFailure, error) {
-	logging.Debug("Starting worker pool with %d workers, %d jobs", r.config.Migration.Workers, len(jobs))
+	// Separate jobs into two phases:
+	// - Phase 1: Non-partitioned jobs + first partitions (no dependencies)
+	// - Phase 2: Remaining partitions (wait for first partitions to establish cleanup boundaries)
+	var firstPhaseJobs []transfer.Job
+	var remainingJobs []transfer.Job
 
-	sem := make(chan struct{}, r.config.Migration.Workers)
-	var wg sync.WaitGroup
+	for _, job := range jobs {
+		if job.Partition == nil {
+			// Non-partitioned jobs have no race condition concerns
+			firstPhaseJobs = append(firstPhaseJobs, job)
+		} else if job.Partition.IsFirstPartition {
+			firstPhaseJobs = append(firstPhaseJobs, job)
+		} else {
+			remainingJobs = append(remainingJobs, job)
+		}
+	}
+
+	logging.Debug("Starting worker pool with %d workers, %d jobs (%d first-phase, %d remaining)",
+		r.config.Migration.Workers, len(jobs), len(firstPhaseJobs), len(remainingJobs))
 
 	errCh := make(chan tableError, len(jobs))
+
+	// Phase 1: Process non-partitioned jobs and first partitions
+	// These can run in parallel since they're for different tables or establish cleanup boundaries
+	if len(firstPhaseJobs) > 0 {
+		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+			close(errCh)
+			return nil, err
+		}
+	}
+
+	// Phase 2: Process remaining partitions (after first partitions complete)
+	if len(remainingJobs) > 0 {
+		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+			close(errCh)
+			return nil, err
+		}
+	}
+
+	close(errCh)
+
+	// Collect failures
+	return r.collectFailures(errCh)
+}
+
+// executeJobBatch runs a batch of jobs with the worker pool.
+func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor) error {
+	sem := make(chan struct{}, r.config.Migration.Workers)
+	var wg sync.WaitGroup
 
 	for _, job := range jobs {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		case sem <- struct{}{}:
 		}
 
@@ -243,10 +292,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 	}
 
 	wg.Wait()
-	close(errCh)
-
-	// Collect failures
-	return r.collectFailures(errCh)
+	return nil
 }
 
 // executeJob runs a single job with retry logic.
@@ -390,14 +436,8 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		return
 	}
 
-	// Log the diagnosis
-	logging.Warn("  AI Diagnosis:")
-	logging.Warn("    Cause: %s", diagnosis.Cause)
-	logging.Warn("    Suggestions:")
-	for _, s := range diagnosis.Suggestions {
-		logging.Warn("      - %s", s)
-	}
-	logging.Warn("    Confidence: %s", diagnosis.Confidence)
+	// Emit the diagnosis (TUI will format as box, CLI falls back to logging)
+	driver.EmitDiagnosis(diagnosis)
 }
 
 // collectFailures gathers and deduplicates table failures.

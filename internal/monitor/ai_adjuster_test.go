@@ -428,6 +428,128 @@ func TestEmptyAdjustmentsNotApplied(t *testing.T) {
 	}
 }
 
+func TestCheckpointFrequencyValidation(t *testing.T) {
+	t.Run("checkpoint_frequency too small rejected", func(t *testing.T) {
+		aa := createTestAdjuster()
+		initialConfig := aa.pipeline.GetConfig()
+
+		decision := &AdjustmentDecision{
+			Action:      "scale_up",
+			Adjustments: map[string]int{"checkpoint_frequency": 0}, // Below 1 minimum
+			Reasoning:   "test",
+			Confidence:  "high",
+		}
+
+		aa.ApplyDecision(decision)
+		aa.pipeline.ApplyPendingUpdates(true)
+
+		config := aa.pipeline.GetConfig()
+		if config.CheckpointFrequency != initialConfig.CheckpointFrequency {
+			t.Errorf("expected checkpoint_frequency unchanged (too small), got %d", config.CheckpointFrequency)
+		}
+	})
+
+	t.Run("checkpoint_frequency too large rejected", func(t *testing.T) {
+		aa := createTestAdjuster()
+		initialConfig := aa.pipeline.GetConfig()
+
+		decision := &AdjustmentDecision{
+			Action:      "scale_up",
+			Adjustments: map[string]int{"checkpoint_frequency": 150}, // Above 100 max
+			Reasoning:   "test",
+			Confidence:  "high",
+		}
+
+		aa.ApplyDecision(decision)
+		aa.pipeline.ApplyPendingUpdates(true)
+
+		config := aa.pipeline.GetConfig()
+		if config.CheckpointFrequency != initialConfig.CheckpointFrequency {
+			t.Errorf("expected checkpoint_frequency unchanged (too large), got %d", config.CheckpointFrequency)
+		}
+	})
+
+	t.Run("valid checkpoint_frequency accepted", func(t *testing.T) {
+		aa := createTestAdjuster()
+
+		decision := &AdjustmentDecision{
+			Action:      "scale_up",
+			Adjustments: map[string]int{"checkpoint_frequency": 20},
+			Reasoning:   "test",
+			Confidence:  "high",
+		}
+
+		aa.ApplyDecision(decision)
+		aa.pipeline.ApplyPendingUpdates(true)
+
+		config := aa.pipeline.GetConfig()
+		if config.CheckpointFrequency != 20 {
+			t.Errorf("expected checkpoint_frequency=20, got %d", config.CheckpointFrequency)
+		}
+	})
+}
+
+func TestUpsertMergeChunkSizeValidation(t *testing.T) {
+	t.Run("upsert_merge_chunk_size too small rejected", func(t *testing.T) {
+		aa := createTestAdjuster()
+		initialConfig := aa.pipeline.GetConfig()
+
+		decision := &AdjustmentDecision{
+			Action:      "scale_down",
+			Adjustments: map[string]int{"upsert_merge_chunk_size": 500}, // Below 1000 minimum
+			Reasoning:   "test",
+			Confidence:  "high",
+		}
+
+		aa.ApplyDecision(decision)
+		aa.pipeline.ApplyPendingUpdates(true)
+
+		config := aa.pipeline.GetConfig()
+		if config.UpsertMergeChunkSize != initialConfig.UpsertMergeChunkSize {
+			t.Errorf("expected upsert_merge_chunk_size unchanged (too small), got %d", config.UpsertMergeChunkSize)
+		}
+	})
+
+	t.Run("upsert_merge_chunk_size too large rejected", func(t *testing.T) {
+		aa := createTestAdjuster()
+		initialConfig := aa.pipeline.GetConfig()
+
+		decision := &AdjustmentDecision{
+			Action:      "scale_up",
+			Adjustments: map[string]int{"upsert_merge_chunk_size": 100000}, // Above 50000 max
+			Reasoning:   "test",
+			Confidence:  "high",
+		}
+
+		aa.ApplyDecision(decision)
+		aa.pipeline.ApplyPendingUpdates(true)
+
+		config := aa.pipeline.GetConfig()
+		if config.UpsertMergeChunkSize != initialConfig.UpsertMergeChunkSize {
+			t.Errorf("expected upsert_merge_chunk_size unchanged (too large), got %d", config.UpsertMergeChunkSize)
+		}
+	})
+
+	t.Run("valid upsert_merge_chunk_size accepted", func(t *testing.T) {
+		aa := createTestAdjuster()
+
+		decision := &AdjustmentDecision{
+			Action:      "scale_up",
+			Adjustments: map[string]int{"upsert_merge_chunk_size": 10000},
+			Reasoning:   "test",
+			Confidence:  "high",
+		}
+
+		aa.ApplyDecision(decision)
+		aa.pipeline.ApplyPendingUpdates(true)
+
+		config := aa.pipeline.GetConfig()
+		if config.UpsertMergeChunkSize != 10000 {
+			t.Errorf("expected upsert_merge_chunk_size=10000, got %d", config.UpsertMergeChunkSize)
+		}
+	})
+}
+
 func TestFallbackRulesWithBaseline(t *testing.T) {
 	t.Run("within baseline tolerance returns continue", func(t *testing.T) {
 		aa := createTestAdjuster()

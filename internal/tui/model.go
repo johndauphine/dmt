@@ -16,8 +16,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -120,12 +122,13 @@ var availableCommands = []commandInfo{
 	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
 	{"/config", "Show configuration details"},
-	{"/analyze", "Analyze source database and suggest config"},
+	{"/analyze", "Analyze source database and suggest config (--apply to save)"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
+	{"/verbosity", "Set log level (debug, info, warn, error)"},
 	{"/about", "Show application information"},
 	{"/help", "Show available commands"},
 	{"/clear", "Clear screen"},
@@ -590,7 +593,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/verbosity", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -744,13 +747,14 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
   /config [config_file] Show configuration details
-  /analyze [config_file] Analyze source database and suggest configuration
+  /analyze [--apply]     Analyze source database and suggest configuration
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
   /profile list         List saved profiles
   /profile delete NAME  Delete a saved profile
   /profile export NAME  Export a profile to a config file
+  /verbosity [LEVEL]    Set log level (debug, info, warn, error)
   /logs                 Save session logs to a file
   /clear                Clear screen
   /quit                 Exit application
@@ -766,6 +770,26 @@ Note: You can use @/path/to/file for config files.`
 			return func() tea.Msg { return OutputMsg(fmt.Sprintf("Error saving logs: %v\n", err)) }
 		}
 		return func() tea.Msg { return OutputMsg(fmt.Sprintf("Logs saved to %s\n", logFile)) }
+
+	case "/verbosity":
+		if len(parts) < 2 {
+			// Show current level
+			currentLevel := logging.GetLevel()
+			return func() tea.Msg {
+				return OutputMsg(fmt.Sprintf("Current log level: %s\nUsage: /verbosity <debug|info|warn|error>\n", currentLevel))
+			}
+		}
+		levelStr := parts[1]
+		level, err := logging.ParseLevel(levelStr)
+		if err != nil {
+			return func() tea.Msg {
+				return OutputMsg(fmt.Sprintf("Invalid log level: %s\nValid levels: debug, info, warn, error\n", levelStr))
+			}
+		}
+		logging.SetLevel(level)
+		return func() tea.Msg {
+			return OutputMsg(fmt.Sprintf("Log level set to: %s\n", levelStr))
+		}
 
 	case "/about":
 		about := fmt.Sprintf(`dmt v%s
@@ -859,8 +883,8 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return m.handleProfileCommand(parts)
 
 	case "/analyze":
-		configFile, profileName := parseConfigArgs(parts)
-		return m.runAnalyzeCmd(configFile, profileName)
+		configFile, profileName, apply := parseAnalyzeArgs(parts)
+		return m.runAnalyzeCmd(configFile, profileName, apply)
 
 	case "/config":
 		configFile, profileName := parseConfigArgs(parts)
@@ -1124,7 +1148,7 @@ func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
 	}
 }
 
-func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
+func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd {
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -1150,11 +1174,21 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 				return
 			}
 
+			// Try full orchestrator first (with both source and target)
 			orch, err := orchestrator.New(cfg)
 			if err != nil {
-				p.Send(OutputMsg(fmt.Sprintf("❌ Error: Both source and target databases must be available for tuning analysis\n")))
-				p.Send(OutputMsg(fmt.Sprintf("   %v\n", err)))
-				return
+				// Full connection failed - try source-only mode for analyze
+				p.Send(OutputMsg(fmt.Sprintf("⚠️  Warning: %v\n", err)))
+				p.Send(OutputMsg("   Attempting source-only analysis...\n"))
+
+				orch, err = orchestrator.NewWithOptions(cfg, orchestrator.Options{SourceOnly: true})
+				if err != nil {
+					p.Send(OutputMsg(fmt.Sprintf("❌ Error: Cannot connect to source database\n")))
+					p.Send(OutputMsg(fmt.Sprintf("   %v\n", err)))
+					return
+				}
+				p.Send(OutputMsg("✓ Connected to source database\n"))
+				p.Send(OutputMsg("⚠️  Target database unavailable - tuning recommendations may be less accurate\n\n"))
 			}
 			defer orch.Close()
 
@@ -1177,6 +1211,15 @@ func (m Model) runAnalyzeCmd(configFile, profileName string) tea.Cmd {
 			}
 
 			p.Send(BoxedOutputMsg(suggestions.FormatYAML()))
+
+			// Apply AI-tuned parameters to secrets file if requested
+			if apply {
+				if err := applyTuningToSecrets(suggestions); err != nil {
+					p.Send(OutputMsg(fmt.Sprintf("\n❌ Failed to apply tuning: %v\n", err)))
+				} else {
+					p.Send(OutputMsg(fmt.Sprintf("\n✓ Applied AI-tuned parameters to %s\n", secrets.GetSecretsPath())))
+				}
+			}
 		}()
 
 		return nil
@@ -1832,6 +1875,52 @@ func parseStatusArgs(parts []string) (string, string, bool) {
 	return configFile, profileName, detailed
 }
 
+func parseAnalyzeArgs(parts []string) (string, string, bool) {
+	configFile := "config.yaml"
+	profileName := ""
+	apply := false
+
+	for i := 1; i < len(parts); i++ {
+		arg := parts[i]
+		switch arg {
+		case "--apply", "-a":
+			apply = true
+		case "--profile":
+			if i+1 < len(parts) {
+				profileName = parts[i+1]
+				i++
+			}
+		default:
+			if strings.HasPrefix(arg, "@") {
+				configFile = arg[1:]
+			} else {
+				configFile = arg
+			}
+		}
+	}
+
+	return configFile, profileName, apply
+}
+
+// applyTuningToSecrets saves AI-tuned parameters to the secrets config file.
+func applyTuningToSecrets(suggestions *driver.SmartConfigSuggestions) error {
+	updates := &secrets.Config{
+		MigrationDefaults: secrets.MigrationDefaults{
+			Workers:              suggestions.Workers,
+			MaxSourceConnections: suggestions.MaxSourceConnections,
+			MaxTargetConnections: suggestions.MaxTargetConnections,
+			MaxMemoryMB:          suggestions.EstimatedMemMB,
+			ReadAheadBuffers:     suggestions.ReadAheadBuffers,
+			WriteAheadWriters:    suggestions.WriteAheadWriters,
+			ParallelReaders:      suggestions.ParallelReaders,
+			CheckpointFrequency:  suggestions.CheckpointFrequency,
+			MaxRetries:           suggestions.MaxRetries,
+		},
+	}
+
+	return secrets.Save(updates)
+}
+
 func parseProfileSaveArgs(parts []string) (string, string) {
 	if len(parts) < 3 {
 		return "", "config.yaml"
@@ -1968,6 +2057,12 @@ func Start() error {
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	SetProgramRef(p)
+
+	// Register diagnosis handler to format as BoxedOutputMsg
+	driver.SetDiagnosisHandler(func(diagnosis *driver.ErrorDiagnosis) {
+		p.Send(BoxedOutputMsg(diagnosis.Format()))
+	})
+	defer driver.SetDiagnosisHandler(nil) // Cleanup on exit
 
 	cleanup := CaptureOutput(p)
 	defer cleanup()

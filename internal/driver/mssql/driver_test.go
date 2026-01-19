@@ -121,3 +121,4 @@ func TestIsASCIINumeric(t *testing.T) {
 		})
 	}
 }
+
