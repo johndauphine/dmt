@@ -213,11 +213,17 @@ func (wp *writerPool) submit(job writeJob) bool {
 
 // wait closes the job channel and waits for all workers to complete.
 func (wp *writerPool) wait() {
+	logging.Debug("writerPool.wait: closing jobChan (len=%d)", len(wp.jobChan))
 	close(wp.jobChan)
+	logging.Debug("writerPool.wait: waiting for %d writers to finish", wp.numWriters)
 	wp.writerWg.Wait()
+	logging.Debug("writerPool.wait: all writers finished")
 	if wp.ackChan != nil {
+		logging.Debug("writerPool.wait: closing ackChan (len=%d)", len(wp.ackChan))
 		close(wp.ackChan)
+		logging.Debug("writerPool.wait: waiting for ack processor")
 		wp.ackWg.Wait()
+		logging.Debug("writerPool.wait: ack processor finished")
 	}
 }
 

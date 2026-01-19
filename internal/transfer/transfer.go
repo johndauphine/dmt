@@ -613,6 +613,7 @@ func executeKeysetPagination(
 	// Close chunkChan when all readers are done
 	go func() {
 		readerWg.Wait()
+		logging.Debug("All %d parallel readers finished, closing chunkChan (len=%d)", numReaders, len(chunkChan))
 		close(chunkChan)
 	}()
 
@@ -709,8 +710,11 @@ chunkLoop:
 		chunkCount++
 	}
 
+	logging.Debug("Consumer loop finished, calling wp.wait()")
+
 	// Wait for writers to finish
 	wp.wait()
+	logging.Debug("wp.wait() completed")
 
 	if loopErr != nil {
 		return stats, loopErr
@@ -1013,8 +1017,11 @@ chunkLoop:
 		chunkCount++
 	}
 
+	logging.Debug("Consumer loop finished, calling wp.wait()")
+
 	// Wait for writers to finish
 	wp.wait()
+	logging.Debug("wp.wait() completed")
 
 	if loopErr != nil {
 		return stats, loopErr
