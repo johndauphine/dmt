@@ -23,6 +23,19 @@ import (
 	"github.com/johndauphine/dmt/internal/target"
 )
 
+// Buffer sizing constants for parallel reader coordination.
+// These values prevent cascading deadlocks when multiple readers produce faster than the consumer can process.
+const (
+	// chunkChanBufferMultiplier scales the chunk channel buffer with the number of readers.
+	// A multiplier of 50 provides enough headroom for burst production while keeping
+	// memory usage reasonable (each chunk holds rows from a database query).
+	chunkChanBufferMultiplier = 50
+
+	// chunkChanMinBuffer is the minimum chunk channel buffer size for parallel readers.
+	// This ensures adequate buffering even with small configured buffer sizes.
+	chunkChanMinBuffer = 500
+)
+
 // ProgressSaver is an interface for saving transfer progress
 type ProgressSaver interface {
 	SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
@@ -507,18 +520,27 @@ func executeKeysetPagination(
 		}
 	}
 
-	// Create buffered channel for read-ahead pipeline
-	bufferSize := cfg.Migration.ReadAheadBuffers
-	if bufferSize < 0 {
-		bufferSize = 0
-	}
-	chunkChan := make(chan chunkResult, bufferSize)
-
 	// Determine number of parallel readers
 	numReaders := cfg.Migration.ParallelReaders
 	if numReaders < 1 {
 		numReaders = 1
 	}
+
+	// Create buffered channel for read-ahead pipeline
+	// With parallel readers, use a larger buffer to prevent readers from blocking
+	// when the consumer is temporarily slow (e.g., waiting for writers).
+	bufferSize := cfg.Migration.ReadAheadBuffers
+	if bufferSize < 0 {
+		bufferSize = 0
+	}
+	if numReaders > 1 {
+		// Scale buffer with number of readers to prevent deadlock
+		bufferSize = bufferSize * numReaders * chunkChanBufferMultiplier
+		if bufferSize < chunkChanMinBuffer {
+			bufferSize = chunkChanMinBuffer
+		}
+	}
+	chunkChan := make(chan chunkResult, bufferSize)
 
 	// Split PK range for parallel readers
 	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
