@@ -222,36 +222,41 @@ func (r *TransferRunner) preTruncateIfNeeded(ctx context.Context, jobs []transfe
 
 // executeJobs runs jobs with a worker pool.
 // For partitioned tables, first partitions are processed before remaining partitions
-// to ensure table setup (truncation) completes before parallel inserts begin.
+// to prevent race conditions in partition cleanup logic during idempotent retries.
+// Note: Table truncation is handled upfront by preTruncateIfNeeded, not by partitions.
 func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor) ([]TableFailure, error) {
-	// Separate first-partitions from remaining-partitions
-	// First partitions handle table setup (truncation), remaining partitions just insert
-	var firstPartitionJobs []transfer.Job
+	// Separate jobs into two phases:
+	// - Phase 1: Non-partitioned jobs + first partitions (no dependencies)
+	// - Phase 2: Remaining partitions (wait for first partitions to establish cleanup boundaries)
+	var firstPhaseJobs []transfer.Job
 	var remainingJobs []transfer.Job
 
 	for _, job := range jobs {
-		if job.Partition != nil && job.Partition.IsFirstPartition {
-			firstPartitionJobs = append(firstPartitionJobs, job)
+		if job.Partition == nil {
+			// Non-partitioned jobs have no race condition concerns
+			firstPhaseJobs = append(firstPhaseJobs, job)
+		} else if job.Partition.IsFirstPartition {
+			firstPhaseJobs = append(firstPhaseJobs, job)
 		} else {
 			remainingJobs = append(remainingJobs, job)
 		}
 	}
 
-	logging.Debug("Starting worker pool with %d workers, %d jobs (%d first-partition, %d remaining)",
-		r.config.Migration.Workers, len(jobs), len(firstPartitionJobs), len(remainingJobs))
+	logging.Debug("Starting worker pool with %d workers, %d jobs (%d first-phase, %d remaining)",
+		r.config.Migration.Workers, len(jobs), len(firstPhaseJobs), len(remainingJobs))
 
 	errCh := make(chan tableError, len(jobs))
 
-	// Phase 1: Process first-partition jobs (they handle table setup)
-	// These can run in parallel since they're for different tables
-	if len(firstPartitionJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, firstPartitionJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+	// Phase 1: Process non-partitioned jobs and first partitions
+	// These can run in parallel since they're for different tables or establish cleanup boundaries
+	if len(firstPhaseJobs) > 0 {
+		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
 			close(errCh)
 			return nil, err
 		}
 	}
 
-	// Phase 2: Process remaining jobs (after first partitions are done)
+	// Phase 2: Process remaining partitions (after first partitions complete)
 	if len(remainingJobs) > 0 {
 		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
 			close(errCh)

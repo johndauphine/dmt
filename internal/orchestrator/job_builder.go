@@ -200,7 +200,7 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 
 	result.TableJobCounts[t.Name] = len(partitions)
 	for _, p := range partitions {
-		// Mark the first partition - it handles table setup (drop/truncate)
+		// Mark the first partition for coordinated cleanup during retries
 		p.IsFirstPartition = (p.PartitionID == 1)
 
 		taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
@@ -245,7 +245,7 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 			StartRow:         startRow,
 			EndRow:           endRow,
 			RowCount:         endRow - startRow,
-			IsFirstPartition: i == 0, // First partition handles table setup
+			IsFirstPartition: i == 0, // First partition for coordinated cleanup during retries
 		}
 
 		taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
