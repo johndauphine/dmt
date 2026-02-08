@@ -29,4 +29,9 @@ vendor/
 /dist/
 
 # Logs
-session.logconfig.yaml
+*.log
+
+# Dev artifacts
+*.bak
+*.png
+*.jpg

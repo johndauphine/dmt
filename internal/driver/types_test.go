@@ -203,10 +203,10 @@ func TestSupportsKeysetPagination_OracleSpecific(t *testing.T) {
 
 func TestGetPKColumn(t *testing.T) {
 	tests := []struct {
-		name      string
-		table     Table
-		wantNil   bool
-		wantName  string
+		name     string
+		table    Table
+		wantNil  bool
+		wantName string
 	}{
 		{
 			name: "single PK column",
@@ -283,7 +283,7 @@ func TestIsIntegerType(t *testing.T) {
 		{"double", false},
 		{"uuid", false},
 		{"timestamp", false},
-		{"INT", false},   // Uppercase - function is case-sensitive
+		{"INT", false},    // Uppercase - function is case-sensitive
 		{"NUMBER", false}, // Oracle NUMBER not in IsIntegerType (handled separately)
 	}
 

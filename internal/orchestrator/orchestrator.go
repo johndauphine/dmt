@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,7 +20,6 @@ import (
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/target"
 )
@@ -357,17 +355,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Load additional metadata if enabled
-	// Check if AI type mapping is enabled from global secrets
-	aiMappingEnabled := false
-	if secretsCfg, err := secrets.Load(); err == nil {
-		if provider, _, err := secretsCfg.GetDefaultProvider(); err == nil && provider != nil {
-			// AI is enabled if we have a valid provider: either API-key-based (Claude, OpenAI)
-			// or local provider with BaseURL (Ollama, LMStudio)
-			if provider.APIKey != "" || provider.BaseURL != "" {
-				aiMappingEnabled = true
-			}
-		}
-	}
 	for i := range tables {
 		t := &tables[i]
 
@@ -389,30 +376,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 		}
 
-		// Sample rows for AI type mapping context (one query per table for all columns)
-		// DISABLED: For privacy, AI type mapping now works without sample data
-		if false && aiMappingEnabled {
-			columnNames := make([]string, len(t.Columns))
-			for j := range t.Columns {
-				columnNames[j] = t.Columns[j].Name
-			}
-			samples, err := o.sourcePool.SampleRows(ctx, t.Schema, t.Name, columnNames, 5)
-			if err != nil {
-				logging.Debug("Sampling rows from %s: %v", t.Name, err)
-			} else {
-				sampleCount := 0
-				for j := range t.Columns {
-					col := &t.Columns[j]
-					if colSamples, ok := samples[col.Name]; ok && len(colSamples) > 0 {
-						col.SampleValues = colSamples
-						sampleCount++
-					}
-				}
-				if sampleCount > 0 {
-					logging.Debug("AI Type Mapping: sampled %d rows from %s for type inference context", 5, t.Name)
-				}
-			}
-		}
 	}
 
 	// Apply table filters
@@ -989,20 +952,3 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	return nil
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// Unused import suppression
-var _ = sql.Named

@@ -67,7 +67,7 @@ type AutoTuneInput struct {
 	MemoryGB int `json:"memory_gb"`
 
 	// Database info
-	DatabaseType string `json:"database_type"`        // source: "mssql", "postgres", "mysql", "oracle"
+	DatabaseType string `json:"database_type"`         // source: "mssql", "postgres", "mysql", "oracle"
 	TargetType   string `json:"target_type,omitempty"` // target database type
 	TotalTables  int    `json:"total_tables"`
 	TotalRows    int64  `json:"total_rows"`
@@ -86,14 +86,14 @@ type TableStats struct {
 
 // AutoTuneOutput contains AI-recommended configuration values.
 type AutoTuneOutput struct {
-	Workers             int    `json:"workers"`
-	ChunkSize           int    `json:"chunk_size"`
-	ReadAheadBuffers    int    `json:"read_ahead_buffers"`
-	WriteAheadWriters   int    `json:"write_ahead_writers"`
-	ParallelReaders     int    `json:"parallel_readers"`
-	MaxPartitions       int    `json:"max_partitions"`
-	LargeTableThreshold int64  `json:"large_table_threshold"`
-	EstimatedMemoryMB   int64  `json:"estimated_memory_mb"`
+	Workers             int   `json:"workers"`
+	ChunkSize           int   `json:"chunk_size"`
+	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
+	WriteAheadWriters   int   `json:"write_ahead_writers"`
+	ParallelReaders     int   `json:"parallel_readers"`
+	MaxPartitions       int   `json:"max_partitions"`
+	LargeTableThreshold int64 `json:"large_table_threshold"`
+	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
 
 	// Connection pool tuning
 	MaxSourceConnections int `json:"max_source_connections"`
@@ -129,26 +129,26 @@ type AIAdjustmentRecord struct {
 
 // AITuningRecord represents a historical AI tuning recommendation.
 type AITuningRecord struct {
-	Timestamp        time.Time `json:"timestamp"`
-	SourceDBType     string    `json:"source_db_type"`
-	TargetDBType     string    `json:"target_db_type"`
-	TotalTables      int       `json:"total_tables"`
-	TotalRows        int64     `json:"total_rows"`
-	AvgRowSizeBytes  int64     `json:"avg_row_size_bytes"`
-	CPUCores         int       `json:"cpu_cores"`
-	MemoryGB         int       `json:"memory_gb"`
-	Workers          int       `json:"workers"`
-	ChunkSize        int       `json:"chunk_size"`
-	ReadAheadBuffers  int      `json:"read_ahead_buffers"`
-	WriteAheadWriters int      `json:"write_ahead_writers"`
-	ParallelReaders   int      `json:"parallel_readers"`
-	MaxPartitions     int      `json:"max_partitions"`
-	LargeTableThreshold  int64 `json:"large_table_threshold"`
-	MaxSourceConnections int   `json:"max_source_connections"`
-	MaxTargetConnections int   `json:"max_target_connections"`
-	EstimatedMemoryMB int64    `json:"estimated_memory_mb"`
-	AIReasoning      string    `json:"ai_reasoning"`
-	WasAIUsed        bool      `json:"was_ai_used"`
+	Timestamp            time.Time `json:"timestamp"`
+	SourceDBType         string    `json:"source_db_type"`
+	TargetDBType         string    `json:"target_db_type"`
+	TotalTables          int       `json:"total_tables"`
+	TotalRows            int64     `json:"total_rows"`
+	AvgRowSizeBytes      int64     `json:"avg_row_size_bytes"`
+	CPUCores             int       `json:"cpu_cores"`
+	MemoryGB             int       `json:"memory_gb"`
+	Workers              int       `json:"workers"`
+	ChunkSize            int       `json:"chunk_size"`
+	ReadAheadBuffers     int       `json:"read_ahead_buffers"`
+	WriteAheadWriters    int       `json:"write_ahead_writers"`
+	ParallelReaders      int       `json:"parallel_readers"`
+	MaxPartitions        int       `json:"max_partitions"`
+	LargeTableThreshold  int64     `json:"large_table_threshold"`
+	MaxSourceConnections int       `json:"max_source_connections"`
+	MaxTargetConnections int       `json:"max_target_connections"`
+	EstimatedMemoryMB    int64     `json:"estimated_memory_mb"`
+	AIReasoning          string    `json:"ai_reasoning"`
+	WasAIUsed            bool      `json:"was_ai_used"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -343,7 +343,7 @@ func (s *SmartConfigAnalyzer) applyDefaultSuggestions(input AutoTuneInput) {
 	s.suggestions.MaxPartitions = workers
 	s.suggestions.LargeTableThreshold = 1000000
 	s.suggestions.MaxSourceConnections = workers + 4
-	s.suggestions.MaxTargetConnections = workers * 2 + 4
+	s.suggestions.MaxTargetConnections = workers*2 + 4
 	s.suggestions.UpsertMergeChunkSize = 5000
 	s.suggestions.CheckpointFrequency = 20
 	s.suggestions.MaxRetries = 3
@@ -443,9 +443,9 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	if err == nil && len(adjustments) > 0 {
 		// Summarize adjustments by action type
 		actionStats := make(map[string]struct {
-			count      int
-			avgEffect  float64
-			totalRows  float64
+			count     int
+			avgEffect float64
+			totalRows float64
 		})
 		for _, adj := range adjustments {
 			stat := actionStats[adj.Action]

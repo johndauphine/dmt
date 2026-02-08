@@ -210,8 +210,8 @@ type AITypeMappingConfig struct {
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxSourceConnections int `yaml:"max_source_connections"` // Max source database connections
-	MaxTargetConnections int `yaml:"max_target_connections"` // Max target database connections
+	MaxSourceConnections   int      `yaml:"max_source_connections"` // Max source database connections
+	MaxTargetConnections   int      `yaml:"max_target_connections"` // Max target database connections
 	ChunkSize              int      `yaml:"chunk_size"`
 	MaxPartitions          int      `yaml:"max_partitions"`
 	Workers                int      `yaml:"workers"`

@@ -8,8 +8,8 @@ import (
 
 func TestErrorDiagnosis_Format(t *testing.T) {
 	tests := []struct {
-		name     string
-		diag     *ErrorDiagnosis
+		name         string
+		diag         *ErrorDiagnosis
 		wantContains []string
 	}{
 		{

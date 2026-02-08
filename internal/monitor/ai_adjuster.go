@@ -64,8 +64,8 @@ type AIAdjuster struct {
 	systemResources SystemResources
 
 	// Baseline metrics
-	baselineMetrics   *PerformanceSnapshot
-	baselineCaptured  bool
+	baselineMetrics  *PerformanceSnapshot
+	baselineCaptured bool
 
 	// Adjustment history for AI learning
 	adjustmentHistory []AdjustmentRecord
@@ -346,9 +346,9 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		if history, err := aa.state.GetAIAdjustments(50); err == nil && len(history) > 0 {
 			// Calculate effectiveness by action type
 			actionStats := make(map[string]struct {
-				count      int
-				effective  int
-				avgEffect  float64
+				count       int
+				effective   int
+				avgEffect   float64
 				totalEffect float64
 			})
 
