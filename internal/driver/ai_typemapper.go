@@ -1441,7 +1441,7 @@ func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *Databas
 			sb.WriteString("- Use UPPERCASE for all unquoted table and column names\n")
 			sb.WriteString("- Only quote identifiers that are reserved words\n")
 		case "lower":
-			if sourceDBType == targetDBType {
+			if Canonicalize(sourceDBType) == Canonicalize(targetDBType) {
 				sb.WriteString("- CRITICAL: Source and target are the same database engine\n")
 				sb.WriteString("- Preserve ALL source column and table names EXACTLY as-is, including underscores\n")
 				sb.WriteString("- Do NOT remove, add, or modify any characters in identifier names\n")
