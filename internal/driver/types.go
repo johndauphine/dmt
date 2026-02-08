@@ -140,10 +140,10 @@ func (c *Column) IsSpatialType() bool {
 type Partition struct {
 	TableName        string `json:"table_name"`
 	PartitionID      int    `json:"partition_id"`
-	MinPK            any    `json:"min_pk"`            // For keyset pagination
-	MaxPK            any    `json:"max_pk"`            // For keyset pagination
-	StartRow         int64  `json:"start_row"`         // For ROW_NUMBER pagination (0-indexed)
-	EndRow           int64  `json:"end_row"`           // For ROW_NUMBER pagination (exclusive)
+	MinPK            any    `json:"min_pk"`    // For keyset pagination
+	MaxPK            any    `json:"max_pk"`    // For keyset pagination
+	StartRow         int64  `json:"start_row"` // For ROW_NUMBER pagination (0-indexed)
+	EndRow           int64  `json:"end_row"`   // For ROW_NUMBER pagination (exclusive)
 	RowCount         int64  `json:"row_count"`
 	IsFirstPartition bool   `json:"is_first_partition"` // True for partition 1; coordinates partition cleanup during retries
 }

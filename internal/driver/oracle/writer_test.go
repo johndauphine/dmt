@@ -11,12 +11,12 @@ func TestBuildMergeFromStaging(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		targetTable string
-		stagingTable string
-		columns     []string
-		pkColumns   []string
-		wantContains []string
+		name            string
+		targetTable     string
+		stagingTable    string
+		columns         []string
+		pkColumns       []string
+		wantContains    []string
 		wantNotContains []string
 	}{
 		{

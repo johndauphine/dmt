@@ -13,11 +13,11 @@ import (
 
 // AIMonitor orchestrates real-time performance monitoring and AI-driven adjustment.
 type AIMonitor struct {
-	collector      *MetricsCollector
-	adjuster       *AIAdjuster
-	pipeline       *pipeline.Pipeline
-	interval       time.Duration
-	rowsProcessed  int64
+	collector     *MetricsCollector
+	adjuster      *AIAdjuster
+	pipeline      *pipeline.Pipeline
+	interval      time.Duration
+	rowsProcessed int64
 }
 
 // NewAIMonitor creates a new AI monitoring system.

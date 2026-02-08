@@ -14,11 +14,11 @@ import (
 
 // PerformanceSnapshot captures a single measurement of migration performance.
 type PerformanceSnapshot struct {
-	Timestamp        time.Time
-	ElapsedSeconds   float64
-	RowsProcessed    int64
-	Throughput       float64 // rows/sec
-	ThroughputTrend  float64 // % change from previous sample
+	Timestamp       time.Time
+	ElapsedSeconds  float64
+	RowsProcessed   int64
+	Throughput      float64 // rows/sec
+	ThroughputTrend float64 // % change from previous sample
 
 	// Resource usage
 	MemoryUsedMB  int64
@@ -237,12 +237,4 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	}
 
 	return result
-}
-
-// max returns the maximum of two int64 values.
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }

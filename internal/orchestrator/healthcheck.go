@@ -10,10 +10,10 @@ import (
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
-	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 // HealthCheck tests connectivity to source and target databases.

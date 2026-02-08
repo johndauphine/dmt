@@ -19,10 +19,3 @@ func (s PoolStats) String() string {
 		s.DBType, s.ActiveConns, s.MaxConns, s.IdleConns,
 		s.WaitCount, float64(s.WaitTimeMs)/float64(max(s.WaitCount, 1)))
 }
-
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
