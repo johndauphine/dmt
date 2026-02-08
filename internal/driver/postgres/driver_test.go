@@ -77,10 +77,11 @@ func TestAIPromptAugmentation(t *testing.T) {
 	// Verify the augmentation contains critical PostgreSQL identifier rules
 	checks := []string{
 		"CRITICAL PostgreSQL identifier rules",
-		"EXACT lowercase version of the source name",
-		"Do NOT abbreviate, shorten, or modify names",
+		"MUST preserve the EXACT characters from the source name",
+		"Do NOT abbreviate, shorten, remove underscores, or modify names",
+		"user_id → user_id (NOT userid)",
 		"LastEditorDisplayName → lasteditordisplayname",
-		"LastEditorUserId → lasteditoruserid",
+		"created_at → created_at (NOT createdat)",
 		"Do NOT use double-quotes around identifiers",
 	}
 
