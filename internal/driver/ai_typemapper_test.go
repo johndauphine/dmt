@@ -1276,3 +1276,74 @@ func TestTruncateString(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	tests := []struct {
+		name         string
+		sourceDBType string
+		targetDBType string
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name:         "same engine preserves identifiers",
+			sourceDBType: "postgres",
+			targetDBType: "postgres",
+			wantContains: []string{
+				"Source and target are the same database engine",
+				"Preserve ALL source column and table names EXACTLY as-is",
+				"user_id -> user_id (NOT userid)",
+				"created_at -> created_at (NOT createdat)",
+			},
+			wantAbsent: []string{
+				"UserId -> userid",
+			},
+		},
+		{
+			name:         "same engine mssql",
+			sourceDBType: "mssql",
+			targetDBType: "mssql",
+			wantContains: []string{
+				"Source and target are the same database engine",
+				"Preserve ALL source column and table names EXACTLY as-is",
+			},
+			wantAbsent: []string{
+				"UserId -> userid",
+			},
+		},
+		{
+			name:         "cross engine uses lowercase guidance",
+			sourceDBType: "mssql",
+			targetDBType: "postgres",
+			wantContains: []string{
+				"Unquoted identifiers are folded to lowercase",
+				"UserId -> userid",
+			},
+			wantAbsent: []string{
+				"Source and target are the same database engine",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sb strings.Builder
+			ctx := &DatabaseContext{IdentifierCase: "lower"}
+			mapper.writeIdentifierGuidance(&sb, ctx, tt.sourceDBType, tt.targetDBType)
+			result := sb.String()
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("expected guidance to contain %q, got:\n%s", want, result)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(result, absent) {
+					t.Errorf("expected guidance NOT to contain %q, got:\n%s", absent, result)
+				}
+			}
+		})
+	}
+}

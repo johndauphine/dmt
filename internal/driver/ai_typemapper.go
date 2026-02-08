@@ -1380,7 +1380,7 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	if req.TargetContext != nil {
 		m.writeVarcharGuidance(sb, req.TargetContext, "target")
 		m.writeEncodingGuidance(sb, req.TargetContext, "target")
-		m.writeIdentifierGuidance(sb, req.TargetContext)
+		m.writeIdentifierGuidance(sb, req.TargetContext, req.SourceDBType, req.TargetDBType)
 		m.writeLimitsGuidance(sb, req.TargetContext)
 	} else {
 		sb.WriteString("- No target context available, use standard type mappings\n")
@@ -1433,7 +1433,7 @@ func (m *AITypeMapper) writeEncodingGuidance(sb *strings.Builder, ctx *DatabaseC
 }
 
 // writeIdentifierGuidance writes identifier handling guidance based on context.
-func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *DatabaseContext) {
+func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *DatabaseContext, sourceDBType, targetDBType string) {
 	if ctx.IdentifierCase != "" {
 		switch strings.ToLower(ctx.IdentifierCase) {
 		case "upper":
@@ -1441,9 +1441,17 @@ func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *Databas
 			sb.WriteString("- Use UPPERCASE for all unquoted table and column names\n")
 			sb.WriteString("- Only quote identifiers that are reserved words\n")
 		case "lower":
-			sb.WriteString("- CRITICAL: Unquoted identifiers are folded to lowercase\n")
-			sb.WriteString("- Use lowercase for all table and column names (e.g., UserId -> userid, not user_id)\n")
-			sb.WriteString("- Do NOT convert to snake_case - just lowercase the original name directly\n")
+			if Canonicalize(sourceDBType) == Canonicalize(targetDBType) {
+				sb.WriteString("- CRITICAL: Source and target are the same database engine\n")
+				sb.WriteString("- Preserve ALL source column and table names EXACTLY as-is, including underscores\n")
+				sb.WriteString("- Do NOT remove, add, or modify any characters in identifier names\n")
+				sb.WriteString("- Example: user_id -> user_id (NOT userid)\n")
+				sb.WriteString("- Example: created_at -> created_at (NOT createdat)\n")
+			} else {
+				sb.WriteString("- CRITICAL: Unquoted identifiers are folded to lowercase\n")
+				sb.WriteString("- Use lowercase for all table and column names (e.g., UserId -> userid, not user_id)\n")
+				sb.WriteString("- Do NOT convert to snake_case - just lowercase the original name directly\n")
+			}
 		case "preserve":
 			sb.WriteString("- Identifier case is preserved as written\n")
 		}
