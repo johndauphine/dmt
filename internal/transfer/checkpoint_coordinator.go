@@ -24,6 +24,9 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone 
 	if job.Saver == nil || job.TaskID <= 0 {
 		return nil
 	}
+	if checkpointFreq == nil {
+		checkpointFreq = func() int { return 10 }
+	}
 
 	var partID *int
 	rowsTotal := job.Table.RowCount

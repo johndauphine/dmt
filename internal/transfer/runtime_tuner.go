@@ -36,7 +36,7 @@ type runtimeTuner struct {
 }
 
 // NewRuntimeTuner creates a RuntimeTuner with the given initial values.
-func NewRuntimeTuner(initial RuntimeSnapshot) *runtimeTuner {
+func NewRuntimeTuner(initial RuntimeSnapshot) RuntimeTuner {
 	return &runtimeTuner{snapshot: initial}
 }
 

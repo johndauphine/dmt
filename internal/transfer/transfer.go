@@ -609,8 +609,13 @@ func executeKeysetPagination(
 		partitionID = &job.Partition.PartitionID
 	}
 
-	// Create writer pool
+	// Create writer pool — prefer tuner snapshot for initial writer count
 	numWriters := cfg.Migration.WriteAheadWriters
+	if tuner != nil {
+		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
+			numWriters = tw
+		}
+	}
 	if numWriters < 1 {
 		numWriters = 1
 	}
@@ -906,8 +911,13 @@ func executeRowNumberPagination(
 		partitionRows = job.Table.RowCount
 	}
 
-	// Create writer pool
+	// Create writer pool — prefer tuner snapshot for initial writer count
 	numWriters := cfg.Migration.WriteAheadWriters
+	if tuner != nil {
+		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
+			numWriters = tw
+		}
+	}
 	if numWriters < 1 {
 		numWriters = 1
 	}
