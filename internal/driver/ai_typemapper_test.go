@@ -176,7 +176,7 @@ func TestAITypeMapper_CanMap(t *testing.T) {
 	if !mapper.CanMap("mysql", "postgres") {
 		t.Error("expected CanMap to return true")
 	}
-	if !mapper.CanMap("oracle", "mssql") {
+	if !mapper.CanMap("mssql", "mysql") {
 		t.Error("expected CanMap to return true for any combination")
 	}
 }
@@ -1045,7 +1045,7 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeForeignKey,
 		SourceDBType: "mssql",
-		TargetDBType: "oracle",
+		TargetDBType: "mysql",
 		Table:        &Table{Name: "orders"},
 		ForeignKey: &ForeignKey{
 			Name:       "fk_orders_user",
@@ -1058,8 +1058,8 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 		},
 		TargetSchema: "sales",
 		TargetContext: &DatabaseContext{
-			MaxIdentifierLength: 30,
-			IdentifierCase:      "upper",
+			MaxIdentifierLength: 64,
+			IdentifierCase:      "lower",
 		},
 	}
 
@@ -1069,7 +1069,7 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 	checks := []string{
 		"ALTER TABLE",
 		"foreign key",
-		"oracle",
+		"mysql",
 		"sales",
 		"orders",
 		"fk_orders_user",
@@ -1078,8 +1078,8 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 		"id",
 		"ON DELETE: CASCADE",
 		"ON UPDATE: NO ACTION",
-		"Max Identifier Length: 30",
-		"Identifier Case: upper",
+		"Max Identifier Length: 64",
+		"Identifier Case: lower",
 	}
 
 	for _, check := range checks {
@@ -1088,9 +1088,9 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 		}
 	}
 
-	// PostgreSQL-specific rules should NOT be present for Oracle target
+	// PostgreSQL-specific rules should NOT be present for MySQL target
 	if strings.Contains(prompt, "CRITICAL PostgreSQL identifier rules") {
-		t.Error("prompt should not contain PostgreSQL identifier rules for Oracle target")
+		t.Error("prompt should not contain PostgreSQL identifier rules for MySQL target")
 	}
 }
 

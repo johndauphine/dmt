@@ -12,7 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -55,7 +55,7 @@ type SystemResources struct {
 type AIAdjuster struct {
 	aiMapper       *driver.AITypeMapper
 	collector      *MetricsCollector
-	pipeline       *pipeline.Pipeline
+	tuner          transfer.RuntimeTuner
 	startTime      time.Time
 	lastAdjustment time.Time
 	adjustmentsMu  sync.Mutex
@@ -94,11 +94,11 @@ type AIAdjuster struct {
 }
 
 // NewAIAdjuster creates a new AI adjuster.
-func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, p *pipeline.Pipeline) *AIAdjuster {
+func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, tuner transfer.RuntimeTuner) *AIAdjuster {
 	aa := &AIAdjuster{
 		aiMapper:          aiMapper,
 		collector:         collector,
-		pipeline:          p,
+		tuner:             tuner,
 		startTime:         time.Now(),
 		callInterval:      30 * time.Second, // Throttle to 30s intervals
 		cacheDuration:     60 * time.Second, // Cache decisions for 60s
@@ -239,7 +239,7 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	metrics := aa.collector.GetRecentMetrics(5) // Last 5 samples for trend
 	trends := aa.collector.AnalyzeTrends()
-	config := aa.pipeline.GetConfig()
+	config := aa.tuner.Snapshot()
 
 	var sb strings.Builder
 
@@ -438,7 +438,7 @@ func (aa *AIAdjuster) parseDecision(response string) (*AdjustmentDecision, error
 	return &decision, nil
 }
 
-// ApplyDecision applies an adjustment decision to the pipeline.
+// ApplyDecision applies an adjustment decision via the runtime tuner.
 func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 	if decision.Action == "continue" {
 		return nil // No changes
@@ -463,33 +463,32 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		}
 	}
 
-	// Build config update
-	update := pipeline.ConfigUpdate{
-		ApplyAt: pipeline.ApplyNextChunk,
-	}
+	// Build runtime update
+	update := transfer.RuntimeUpdate{}
 
 	for param, value := range decision.Adjustments {
+		v := value // capture loop variable
 		switch param {
 		case "chunk_size":
-			update.ChunkSize = &value
+			update.ChunkSize = &v
 		case "workers":
-			update.WriteAheadWriters = &value
+			update.WriteAheadWriters = &v
 		case "parallel_readers":
-			update.ParallelReaders = &value
+			update.ParallelReaders = &v
 		case "read_ahead_buffers":
-			update.ReadAheadBuffers = &value
+			update.ReadAheadBuffers = &v
 		case "checkpoint_frequency":
-			update.CheckpointFrequency = &value
+			update.CheckpointFrequency = &v
 		case "upsert_merge_chunk_size":
-			update.UpsertMergeChunkSize = &value
+			update.UpsertMergeChunkSize = &v
 		default:
 			logging.Debug("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
 		}
 	}
 
-	// Apply to pipeline
-	if err := aa.pipeline.UpdateConfig(update); err != nil {
-		return fmt.Errorf("failed to apply config update: %w", err)
+	// Apply to tuner (takes effect immediately)
+	if err := aa.tuner.Update(update); err != nil {
+		return fmt.Errorf("failed to apply runtime update: %w", err)
 	}
 
 	// Track this adjustment
@@ -658,7 +657,7 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	}
 
 	latest := metrics[0]
-	config := aa.pipeline.GetConfig()
+	config := aa.tuner.Snapshot()
 
 	// Check if we're close to baseline (stable)
 	if aa.baselineMetrics != nil && aa.baselineMetrics.Throughput > 0 {

@@ -642,14 +642,8 @@ func (c *Config) applyDefaults() {
 
 	// Default target chunk_size to migration chunk_size if not specified
 	// This is the batch size for writing to the target database
-	// For Oracle targets, a smaller default is optimal for godror.Batch (5000-10000)
 	if c.Target.ChunkSize == 0 {
-		if c.Target.Type == "oracle" {
-			// Oracle performs best with smaller batch sizes (5000-10000)
-			c.Target.ChunkSize = 5000
-		} else {
-			c.Target.ChunkSize = c.Migration.ChunkSize
-		}
+		c.Target.ChunkSize = c.Migration.ChunkSize
 	}
 
 	// Auto-tune UpsertMergeChunkSize for upsert mode
@@ -1218,7 +1212,7 @@ func (c *Config) DebugDump() string {
 	// Source/Target ChunkSize
 	sourceChunkExpl := "defaults to migration chunk_size"
 	b.WriteString(fmt.Sprintf("  Source.ChunkSize: %s\n", formatAutoValue(c.Source.ChunkSize, ac.OriginalSourceChunkSize, sourceChunkExpl)))
-	targetChunkExpl := "defaults to migration chunk_size (5000 for Oracle)"
+	targetChunkExpl := "defaults to migration chunk_size"
 	b.WriteString(fmt.Sprintf("  Target.ChunkSize: %s\n", formatAutoValue(c.Target.ChunkSize, ac.OriginalTargetChunkSize, targetChunkExpl)))
 
 	// Other settings

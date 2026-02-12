@@ -1276,8 +1276,6 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 		sb.WriteString("\nWARNING: The following source columns are reserved words in the target database:\n")
 		for _, rw := range reservedWords {
 			switch req.TargetDBType {
-			case "oracle":
-				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToUpper(rw)))
 			case "mssql":
 				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as [%s]\n", rw, rw))
 			case "mysql":
@@ -1524,20 +1522,6 @@ func (m *AITypeMapper) findReservedWords(t *Table, targetDBType string) []string
 		"row": true, "rows": true, "column": true, "schema": true, "database": true,
 		"function": true, "procedure": true, "trigger": true, "view": true,
 		"id": false, // not reserved in most DBs
-	}
-
-	// Oracle-specific reserved words
-	if targetDBType == "oracle" {
-		reservedWords["uid"] = true
-		reservedWords["sysdate"] = true
-		reservedWords["rownum"] = true
-		reservedWords["rowid"] = true
-		reservedWords["access"] = true
-		reservedWords["file"] = true
-		reservedWords["long"] = true
-		reservedWords["raw"] = true
-		reservedWords["session"] = true
-		reservedWords["start"] = true
 	}
 
 	var found []string

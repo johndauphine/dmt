@@ -71,7 +71,6 @@ type WriterOptions struct {
 	// ChunkSize is the number of rows per bulk insert batch.
 	// Each driver uses this value for its native bulk operations:
 	// - MSSQL: bulk.Options.RowsPerBatch
-	// - Oracle: godror.Batch limit
 	// - MySQL: multi-value INSERT batch size
 	// - PostgreSQL: COPY batch size
 	ChunkSize int

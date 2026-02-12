@@ -2,37 +2,36 @@ package monitor
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/johndauphine/dmt/internal/transfer"
 )
 
 // AIMonitor orchestrates real-time performance monitoring and AI-driven adjustment.
 type AIMonitor struct {
 	collector     *MetricsCollector
 	adjuster      *AIAdjuster
-	pipeline      *pipeline.Pipeline
+	tuner         transfer.RuntimeTuner
 	interval      time.Duration
 	rowsProcessed int64
 }
 
 // NewAIMonitor creates a new AI monitoring system.
 func NewAIMonitor(
-	p *pipeline.Pipeline,
+	tuner transfer.RuntimeTuner,
 	aiMapper *driver.AITypeMapper,
 	interval time.Duration,
 ) *AIMonitor {
-	collector := NewMetricsCollector(p, interval)
-	adjuster := NewAIAdjuster(aiMapper, collector, p)
+	collector := NewMetricsCollector(tuner, interval)
+	adjuster := NewAIAdjuster(aiMapper, collector, tuner)
 
 	return &AIMonitor{
 		collector: collector,
 		adjuster:  adjuster,
-		pipeline:  p,
+		tuner:     tuner,
 		interval:  interval,
 	}
 }
@@ -91,12 +90,7 @@ func (am *AIMonitor) evaluateAndAdjust(ctx context.Context) {
 	// Apply if action is not "continue"
 	if decision.Action != "continue" {
 		if err := am.adjuster.ApplyDecision(decision); err != nil {
-			// Queue full is expected when reapplying cached decisions - log as debug only
-			if strings.Contains(err.Error(), "queue full") {
-				logging.Debug("AI decision not applied (queue full): %v", err)
-			} else {
-				logging.Warn("Failed to apply AI decision: %v", err)
-			}
+			logging.Warn("Failed to apply AI decision: %v", err)
 		}
 	}
 

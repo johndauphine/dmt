@@ -8,6 +8,7 @@ Technical documentation, planning documents, and implementation notes for dmt.
 |----------|-------------|
 | [BENCHMARKS.md](BENCHMARKS.md) | Performance benchmarks comparing Go and Rust implementations |
 | [RESTARTABILITY.md](RESTARTABILITY.md) | Checkpoint and resume functionality documentation |
+| [AI_REFACTOR_HANDOFF.md](AI_REFACTOR_HANDOFF.md) | Execution handoff for AI-led architecture simplification and code reduction |
 | [UPSERT_PERF_PLAN.md](UPSERT_PERF_PLAN.md) | Upsert performance improvement plan |
 
 ### Planning & Development Notes
