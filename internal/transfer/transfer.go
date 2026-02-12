@@ -191,7 +191,10 @@ func (s *TransferStats) String() string {
 		s.Rows)
 }
 
-// Execute runs a transfer job using the optimal pagination strategy
+// Execute runs a transfer job using the optimal pagination strategy.
+// If tuner is non-nil, runtime parameters (writer count, checkpoint frequency,
+// upsert merge chunk size) are read dynamically and writer scaling is applied
+// at chunk boundaries.
 func Execute(
 	ctx context.Context,
 	srcPool pool.SourcePool,
@@ -199,6 +202,7 @@ func Execute(
 	cfg *config.Config,
 	job Job,
 	prog *progress.Tracker,
+	tuner RuntimeTuner,
 ) (*TransferStats, error) {
 	// Track table start/end for accurate progress display
 	prog.StartTable(job.Table.Name)
@@ -278,11 +282,11 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -332,13 +336,6 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 			schema, job.Table.Name, pkCol, pkCol,
 		)
 		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
-	case "oracle":
-		// Oracle target - use double-quote identifiers and :N positional parameters
-		query = fmt.Sprintf(
-			`DELETE FROM "%s"."%s" WHERE "%s" >= :1 AND "%s" <= :2`,
-			schema, job.Table.Name, pkCol, pkCol,
-		)
-		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
 	default:
 		// SQL Server target - use bracket identifiers and @p parameters
 		query = fmt.Sprintf(
@@ -380,17 +377,6 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 			args = []any{lastPK, maxPK}
 		} else {
 			deleteQuery = fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE `%s` > ?",
-				schema, tableName, pkCol)
-			args = []any{lastPK}
-		}
-	case "oracle":
-		// Oracle target - use double-quote identifiers and :N positional parameters
-		if maxPK != nil {
-			deleteQuery = fmt.Sprintf(`DELETE FROM "%s"."%s" WHERE "%s" > :1 AND "%s" <= :2`,
-				schema, tableName, pkCol, pkCol)
-			args = []any{lastPK, maxPK}
-		} else {
-			deleteQuery = fmt.Sprintf(`DELETE FROM "%s"."%s" WHERE "%s" > :1`,
 				schema, tableName, pkCol)
 			args = []any{lastPK}
 		}
@@ -475,6 +461,7 @@ func executeKeysetPagination(
 	resumeLastPK any,
 	resumeRowsDone int64,
 	targetTableName string,
+	tuner RuntimeTuner,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -622,31 +609,44 @@ func executeKeysetPagination(
 		partitionID = &job.Partition.PartitionID
 	}
 
-	// Create writer pool
+	// Create writer pool — prefer tuner snapshot for initial writer count
 	numWriters := cfg.Migration.WriteAheadWriters
+	if tuner != nil {
+		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
+			numWriters = tw
+		}
+	}
 	if numWriters < 1 {
 		numWriters = 1
 	}
 
+	// Build callbacks: if tuner is present, read dynamically; otherwise use static config values
+	upsertChunkFn := func() int { return cfg.Migration.UpsertMergeChunkSize }
+	checkpointFreqFn := func() int { return cfg.Migration.CheckpointFrequency }
+	if tuner != nil {
+		upsertChunkFn = func() int { return tuner.Snapshot().UpsertMergeChunkSize }
+		checkpointFreqFn = func() int { return tuner.Snapshot().CheckpointFrequency }
+	}
+
 	wp := newWriterPool(ctx, writerPoolConfig{
-		NumWriters:           numWriters,
-		BufferSize:           bufferSize,
-		UseUpsert:            cfg.Migration.TargetMode == "upsert",
-		UpsertMergeChunkSize: cfg.Migration.UpsertMergeChunkSize,
-		TargetSchema:         cfg.Target.Schema,
-		TargetTable:          targetTableName,
-		TargetCols:           targetCols,
-		ColTypes:             colTypes,
-		ColSRIDs:             colSRIDs,
-		TargetPKCols:         buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
-		PartitionID:          partitionID,
-		TgtPool:              tgtPool,
-		Prog:                 prog,
-		EnableAck:            job.Saver != nil && job.TaskID > 0,
+		NumWriters:             numWriters,
+		BufferSize:             bufferSize,
+		UseUpsert:              cfg.Migration.TargetMode == "upsert",
+		UpsertMergeChunkSizeFn: upsertChunkFn,
+		TargetSchema:           cfg.Target.Schema,
+		TargetTable:            targetTableName,
+		TargetCols:             targetCols,
+		ColTypes:               colTypes,
+		ColSRIDs:               colSRIDs,
+		TargetPKCols:           buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:            partitionID,
+		TgtPool:                tgtPool,
+		Prog:                   prog,
+		EnableAck:              job.Saver != nil && job.TaskID > 0,
 	})
 
-	// Setup checkpoint coordinator
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), cfg.Migration.CheckpointFrequency)
+	// Setup checkpoint coordinator with dynamic checkpoint frequency
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), checkpointFreqFn)
 	if checkpointCoord != nil {
 		wp.startAckProcessor(checkpointCoord.onAck)
 	}
@@ -698,6 +698,18 @@ chunkLoop:
 				loopErr = ctx.Err()
 			}
 			break chunkLoop
+		}
+
+		// Check for tuner-driven writer scaling at chunk boundaries
+		if tuner != nil {
+			if desired := tuner.Snapshot().WriteAheadWriters; desired > 0 && desired != numWriters {
+				if err := wp.ScaleWorkers(desired); err != nil {
+					logging.Warn("Failed to scale workers: %v", err)
+				} else {
+					logging.Debug("Scaled writers from %d to %d (tuner)", numWriters, desired)
+					numWriters = desired
+				}
+			}
 		}
 
 		// Log overlap stats periodically
@@ -758,6 +770,7 @@ func executeRowNumberPagination(
 	resumeLastPK any,
 	resumeRowsDone int64,
 	targetTableName string,
+	tuner RuntimeTuner,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -898,35 +911,56 @@ func executeRowNumberPagination(
 		partitionRows = job.Table.RowCount
 	}
 
-	// Create writer pool
+	// Create writer pool — prefer tuner snapshot for initial writer count
 	numWriters := cfg.Migration.WriteAheadWriters
+	if tuner != nil {
+		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
+			numWriters = tw
+		}
+	}
 	if numWriters < 1 {
 		numWriters = 1
 	}
 
+	// Build callbacks: if tuner is present, read dynamically; otherwise use static config values
+	upsertChunkFn := func() int { return cfg.Migration.UpsertMergeChunkSize }
+	checkpointFreqFn := func() int {
+		f := cfg.Migration.CheckpointFrequency
+		if f <= 0 {
+			f = 10
+		}
+		return f
+	}
+	if tuner != nil {
+		upsertChunkFn = func() int { return tuner.Snapshot().UpsertMergeChunkSize }
+		checkpointFreqFn = func() int {
+			f := tuner.Snapshot().CheckpointFrequency
+			if f <= 0 {
+				f = 10
+			}
+			return f
+		}
+	}
+
 	enableAck := job.Saver != nil && job.TaskID > 0
 	wp := newWriterPool(ctx, writerPoolConfig{
-		NumWriters:           numWriters,
-		BufferSize:           bufferSize,
-		UseUpsert:            cfg.Migration.TargetMode == "upsert",
-		UpsertMergeChunkSize: cfg.Migration.UpsertMergeChunkSize,
-		TargetSchema:         cfg.Target.Schema,
-		TargetTable:          targetTableName,
-		TargetCols:           targetCols,
-		ColTypes:             colTypes,
-		ColSRIDs:             colSRIDs,
-		TargetPKCols:         buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
-		PartitionID:          partitionID,
-		TgtPool:              tgtPool,
-		Prog:                 prog,
-		EnableAck:            enableAck,
+		NumWriters:             numWriters,
+		BufferSize:             bufferSize,
+		UseUpsert:              cfg.Migration.TargetMode == "upsert",
+		UpsertMergeChunkSizeFn: upsertChunkFn,
+		TargetSchema:           cfg.Target.Schema,
+		TargetTable:            targetTableName,
+		TargetCols:             targetCols,
+		ColTypes:               colTypes,
+		ColSRIDs:               colSRIDs,
+		TargetPKCols:           buildTargetPKCols(job.Table.PrimaryKey, tgtPool),
+		PartitionID:            partitionID,
+		TgtPool:                tgtPool,
+		Prog:                   prog,
+		EnableAck:              enableAck,
 	})
 
 	// Setup ROW_NUMBER checkpoint handler
-	checkpointFreq := cfg.Migration.CheckpointFrequency
-	if checkpointFreq <= 0 {
-		checkpointFreq = 10
-	}
 	lastCheckpointRowNum := initialRowNum
 
 	if enableAck {
@@ -942,7 +976,8 @@ func executeRowNumberPagination(
 			for {
 				lastCheckpointRowNum = ack.rowNum
 				completedChunks++
-				if completedChunks%checkpointFreq == 0 {
+				freq := checkpointFreqFn()
+				if completedChunks%freq == 0 {
 					rowsDone := resumeRowsDone + wp.written()
 					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
 						logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
@@ -1006,6 +1041,18 @@ chunkLoop:
 				loopErr = ctx.Err()
 			}
 			break chunkLoop
+		}
+
+		// Check for tuner-driven writer scaling at chunk boundaries
+		if tuner != nil {
+			if desired := tuner.Snapshot().WriteAheadWriters; desired > 0 && desired != numWriters {
+				if err := wp.ScaleWorkers(desired); err != nil {
+					logging.Warn("Failed to scale workers: %v", err)
+				} else {
+					logging.Debug("Scaled writers from %d to %d (tuner)", numWriters, desired)
+					numWriters = desired
+				}
+			}
 		}
 
 		// Log overlap stats periodically
@@ -1092,12 +1139,6 @@ func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 func processValue(val any, colType string) any {
 	if val == nil {
 		return nil
-	}
-
-	// Handle Oracle NUMBER type - convert to string to preserve precision
-	// This must happen before other type checks since godror.Number can represent any numeric type
-	if converted, handled := processOracleValue(val); handled {
-		return converted
 	}
 
 	switch colType {

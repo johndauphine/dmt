@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/shirou/gopsutil/v3/cpu"
 )
 
@@ -62,7 +62,7 @@ type TrendAnalysis struct {
 
 // MetricsCollector continuously collects performance metrics during migration.
 type MetricsCollector struct {
-	pipeline      *pipeline.Pipeline
+	tuner         transfer.RuntimeTuner
 	startTime     time.Time
 	interval      time.Duration
 	rowsProcessed atomic.Int64
@@ -72,9 +72,9 @@ type MetricsCollector struct {
 }
 
 // NewMetricsCollector creates a new metrics collector.
-func NewMetricsCollector(p *pipeline.Pipeline, interval time.Duration) *MetricsCollector {
+func NewMetricsCollector(tuner transfer.RuntimeTuner, interval time.Duration) *MetricsCollector {
 	return &MetricsCollector{
-		pipeline:  p,
+		tuner:     tuner,
 		startTime: time.Now(),
 		interval:  interval,
 		metrics:   make([]PerformanceSnapshot, 0, 128), // Pre-allocate for ~64 minutes of data
@@ -132,13 +132,13 @@ func (mc *MetricsCollector) collectSnapshot() {
 		snapshot.CPUPercent = cpuPercent[0]
 	}
 
-	// Get current config
-	config := mc.pipeline.GetConfig()
+	// Get current config from tuner
+	snap := mc.tuner.Snapshot()
 	snapshot.CurrentConfig = ConfigSnapshot{
-		ChunkSize:         config.ChunkSize,
-		ReadAheadBuffers:  config.ReadAheadBuffers,
-		ParallelReaders:   config.ParallelReaders,
-		WriteAheadWriters: config.WriteAheadWriters,
+		ChunkSize:         snap.ChunkSize,
+		ReadAheadBuffers:  snap.ReadAheadBuffers,
+		ParallelReaders:   snap.ParallelReaders,
+		WriteAheadWriters: snap.WriteAheadWriters,
 	}
 
 	// Calculate trend

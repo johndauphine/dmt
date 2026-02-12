@@ -14,7 +14,6 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/monitor"
 	"github.com/johndauphine/dmt/internal/notify"
-	"github.com/johndauphine/dmt/internal/pipeline"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/secrets"
@@ -107,6 +106,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 
 	// Setup AI-driven monitoring if enabled (from global secrets)
 	var aiMonitor *monitor.AIMonitor
+	var tuner transfer.RuntimeTuner
 	aiAdjustEnabled := false
 	aiAdjustInterval := 30 * time.Second // Default
 	if secretsCfg, err := secrets.Load(); err == nil {
@@ -125,9 +125,16 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		if err == nil && typeMapper != nil {
 			// Type-assert to AITypeMapper
 			if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
-				// Create a placeholder pipeline for the monitor (it will be updated per-job)
-				p := pipeline.New(nil, nil, pipeline.Config{})
-				aiMonitor = monitor.NewAIMonitor(p, aiMapper, aiAdjustInterval)
+				// Create runtime tuner with initial values from config
+				tuner = transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
+					ChunkSize:            r.config.Migration.ChunkSize,
+					ReadAheadBuffers:     r.config.Migration.ReadAheadBuffers,
+					ParallelReaders:      r.config.Migration.ParallelReaders,
+					WriteAheadWriters:    r.config.Migration.WriteAheadWriters,
+					CheckpointFrequency:  r.config.Migration.CheckpointFrequency,
+					UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
+				})
+				aiMonitor = monitor.NewAIMonitor(tuner, aiMapper, aiAdjustInterval)
 
 				// Set connection limits from config for AI guardrails
 				aiMonitor.SetConnectionLimits(
@@ -153,7 +160,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	}
 
 	// Execute jobs with worker pool
-	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, aiMonitor)
+	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, aiMonitor, tuner)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +231,7 @@ func (r *TransferRunner) preTruncateIfNeeded(ctx context.Context, jobs []transfe
 // For partitioned tables, first partitions are processed before remaining partitions
 // to prevent race conditions in partition cleanup logic during idempotent retries.
 // Note: Table truncation is handled upfront by preTruncateIfNeeded, not by partitions.
-func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor) ([]TableFailure, error) {
+func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) ([]TableFailure, error) {
 	// Separate jobs into two phases:
 	// - Phase 1: Non-partitioned jobs + first partitions (no dependencies)
 	// - Phase 2: Remaining partitions (wait for first partitions to establish cleanup boundaries)
@@ -250,7 +257,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 	// Phase 1: Process non-partitioned jobs and first partitions
 	// These can run in parallel since they're for different tables or establish cleanup boundaries
 	if len(firstPhaseJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, aiMonitor, tuner); err != nil {
 			close(errCh)
 			return nil, err
 		}
@@ -258,7 +265,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 
 	// Phase 2: Process remaining partitions (after first partitions complete)
 	if len(remainingJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, aiMonitor); err != nil {
+		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, aiMonitor, tuner); err != nil {
 			close(errCh)
 			return nil, err
 		}
@@ -271,7 +278,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 }
 
 // executeJobBatch runs a batch of jobs with the worker pool.
-func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor) error {
+func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) error {
 	sem := make(chan struct{}, r.config.Migration.Workers)
 	var wg sync.WaitGroup
 
@@ -287,7 +294,7 @@ func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, aiMonitor)
+			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, aiMonitor, tuner)
 		}(job)
 	}
 
@@ -296,7 +303,7 @@ func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs
 }
 
 // executeJob runs a single job with retry logic.
-func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor) {
+func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) {
 	// Mark task as running
 	r.state.UpdateTaskStatus(j.TaskID, "running", "")
 
@@ -322,7 +329,7 @@ retryLoop:
 			}
 		}
 
-		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress)
+		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner)
 		if err == nil {
 			break
 		}

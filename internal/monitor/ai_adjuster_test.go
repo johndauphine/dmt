@@ -4,13 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/johndauphine/dmt/internal/transfer"
 )
 
 // createTestAdjuster creates an AIAdjuster configured for testing.
 func createTestAdjuster() *AIAdjuster {
-	// Create a real pipeline with test config
-	p := pipeline.New(nil, nil, pipeline.Config{
+	// Create a runtime tuner with test config
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
 		ChunkSize:         25000,
 		WriteAheadWriters: 4,
 		ParallelReaders:   2,
@@ -18,7 +18,7 @@ func createTestAdjuster() *AIAdjuster {
 	})
 
 	// Create a real metrics collector
-	mc := NewMetricsCollector(p, 30*time.Second)
+	mc := NewMetricsCollector(tuner, 30*time.Second)
 
 	// Pre-populate with test metrics
 	mc.metrics = []PerformanceSnapshot{
@@ -29,7 +29,7 @@ func createTestAdjuster() *AIAdjuster {
 
 	aa := &AIAdjuster{
 		collector:         mc,
-		pipeline:          p,
+		tuner:             tuner,
 		startTime:         time.Now().Add(-3 * time.Minute),
 		callInterval:      30 * time.Second,
 		cacheDuration:     60 * time.Second,
@@ -84,12 +84,10 @@ func TestConsecutiveAdjustments(t *testing.T) {
 			t.Fatalf("first apply failed: %v", err)
 		}
 
-		// Simulate pipeline consuming the config update
-		aa.pipeline.ApplyPendingUpdates(true)
-
-		config := aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != 5 {
-			t.Errorf("expected workers=5 after first apply, got %d", config.WriteAheadWriters)
+		// Update is applied immediately via tuner
+		snap := aa.tuner.Snapshot()
+		if snap.WriteAheadWriters != 5 {
+			t.Errorf("expected workers=5 after first apply, got %d", snap.WriteAheadWriters)
 		}
 
 		// Apply another adjustment immediately
@@ -105,13 +103,10 @@ func TestConsecutiveAdjustments(t *testing.T) {
 			t.Fatalf("second apply returned error: %v", err)
 		}
 
-		// Simulate pipeline consuming any pending updates
-		aa.pipeline.ApplyPendingUpdates(true)
-
-		// Workers should have changed (no cooldown)
-		config = aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != 6 {
-			t.Errorf("expected workers=6, got %d", config.WriteAheadWriters)
+		// Workers should have changed immediately
+		snap = aa.tuner.Snapshot()
+		if snap.WriteAheadWriters != 6 {
+			t.Errorf("expected workers=6, got %d", snap.WriteAheadWriters)
 		}
 	})
 
@@ -126,7 +121,6 @@ func TestConsecutiveAdjustments(t *testing.T) {
 			Confidence:  "high",
 		}
 		aa.ApplyDecision(decision1)
-		aa.pipeline.ApplyPendingUpdates(true)
 
 		// Apply scale_down immediately
 		decision2 := &AdjustmentDecision{
@@ -141,13 +135,10 @@ func TestConsecutiveAdjustments(t *testing.T) {
 			t.Fatalf("apply failed: %v", err)
 		}
 
-		// Simulate pipeline consuming the config update
-		aa.pipeline.ApplyPendingUpdates(true)
-
 		// Workers should have changed
-		config := aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != 3 {
-			t.Errorf("expected workers=3, got %d", config.WriteAheadWriters)
+		snap := aa.tuner.Snapshot()
+		if snap.WriteAheadWriters != 3 {
+			t.Errorf("expected workers=3, got %d", snap.WriteAheadWriters)
 		}
 	})
 }
@@ -158,7 +149,7 @@ func TestSystemResourceValidation(t *testing.T) {
 		aa.systemResources.CPUCores = 8
 		aa.systemResources.MaxTargetConnections = 20 // High enough to not be the limit
 
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
@@ -168,12 +159,11 @@ func TestSystemResourceValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
 		// Workers should NOT have changed (exceeds CPU cores)
-		config := aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != initialConfig.WriteAheadWriters {
-			t.Errorf("expected workers unchanged (validation failed), got %d", config.WriteAheadWriters)
+		snap := aa.tuner.Snapshot()
+		if snap.WriteAheadWriters != initialSnap.WriteAheadWriters {
+			t.Errorf("expected workers unchanged (validation failed), got %d", snap.WriteAheadWriters)
 		}
 	})
 
@@ -182,7 +172,7 @@ func TestSystemResourceValidation(t *testing.T) {
 		aa.systemResources.CPUCores = 16
 		aa.systemResources.MaxTargetConnections = 6 // Lower than CPU cores
 
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
@@ -192,12 +182,11 @@ func TestSystemResourceValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
 		// Workers should NOT have changed (exceeds max connections)
-		config := aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != initialConfig.WriteAheadWriters {
-			t.Errorf("expected workers unchanged (validation failed), got %d", config.WriteAheadWriters)
+		snap := aa.tuner.Snapshot()
+		if snap.WriteAheadWriters != initialSnap.WriteAheadWriters {
+			t.Errorf("expected workers unchanged (validation failed), got %d", snap.WriteAheadWriters)
 		}
 	})
 
@@ -218,17 +207,15 @@ func TestSystemResourceValidation(t *testing.T) {
 			t.Fatalf("apply failed: %v", err)
 		}
 
-		aa.pipeline.ApplyPendingUpdates(true)
-
-		config := aa.pipeline.GetConfig()
-		if config.WriteAheadWriters != 6 {
-			t.Errorf("expected workers=6, got %d", config.WriteAheadWriters)
+		snap := aa.tuner.Snapshot()
+		if snap.WriteAheadWriters != 6 {
+			t.Errorf("expected workers=6, got %d", snap.WriteAheadWriters)
 		}
 	})
 
 	t.Run("chunk_size too small rejected", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "reduce_chunk",
@@ -238,17 +225,16 @@ func TestSystemResourceValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.ChunkSize != initialConfig.ChunkSize {
-			t.Errorf("expected chunk_size unchanged (too small), got %d", config.ChunkSize)
+		snap := aa.tuner.Snapshot()
+		if snap.ChunkSize != initialSnap.ChunkSize {
+			t.Errorf("expected chunk_size unchanged (too small), got %d", snap.ChunkSize)
 		}
 	})
 
 	t.Run("chunk_size too large rejected", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
@@ -258,11 +244,10 @@ func TestSystemResourceValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.ChunkSize != initialConfig.ChunkSize {
-			t.Errorf("expected chunk_size unchanged (too large), got %d", config.ChunkSize)
+		snap := aa.tuner.Snapshot()
+		if snap.ChunkSize != initialSnap.ChunkSize {
+			t.Errorf("expected chunk_size unchanged (too large), got %d", snap.ChunkSize)
 		}
 	})
 
@@ -277,11 +262,10 @@ func TestSystemResourceValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.ChunkSize != 10000 {
-			t.Errorf("expected chunk_size=10000, got %d", config.ChunkSize)
+		snap := aa.tuner.Snapshot()
+		if snap.ChunkSize != 10000 {
+			t.Errorf("expected chunk_size=10000, got %d", snap.ChunkSize)
 		}
 	})
 }
@@ -347,7 +331,6 @@ func TestAdjustmentHistory(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
 		if len(aa.adjustmentHistory) != 1 {
 			t.Errorf("expected 1 history record, got %d", len(aa.adjustmentHistory))
@@ -376,7 +359,6 @@ func TestAdjustmentHistory(t *testing.T) {
 				Confidence:  "high",
 			}
 			aa.ApplyDecision(decision)
-			aa.pipeline.ApplyPendingUpdates(true)
 		}
 
 		if len(aa.adjustmentHistory) != 3 {
@@ -387,7 +369,7 @@ func TestAdjustmentHistory(t *testing.T) {
 
 func TestContinueActionNotApplied(t *testing.T) {
 	aa := createTestAdjuster()
-	initialConfig := aa.pipeline.GetConfig()
+	initialSnap := aa.tuner.Snapshot()
 
 	decision := &AdjustmentDecision{
 		Action:      "continue",
@@ -401,9 +383,9 @@ func TestContinueActionNotApplied(t *testing.T) {
 		t.Fatalf("apply returned error: %v", err)
 	}
 
-	config := aa.pipeline.GetConfig()
-	if config.WriteAheadWriters != initialConfig.WriteAheadWriters {
-		t.Errorf("continue action should not change config, workers changed to %d", config.WriteAheadWriters)
+	snap := aa.tuner.Snapshot()
+	if snap.WriteAheadWriters != initialSnap.WriteAheadWriters {
+		t.Errorf("continue action should not change config, workers changed to %d", snap.WriteAheadWriters)
 	}
 }
 
@@ -431,7 +413,7 @@ func TestEmptyAdjustmentsNotApplied(t *testing.T) {
 func TestCheckpointFrequencyValidation(t *testing.T) {
 	t.Run("checkpoint_frequency too small rejected", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
@@ -441,17 +423,16 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.CheckpointFrequency != initialConfig.CheckpointFrequency {
-			t.Errorf("expected checkpoint_frequency unchanged (too small), got %d", config.CheckpointFrequency)
+		snap := aa.tuner.Snapshot()
+		if snap.CheckpointFrequency != initialSnap.CheckpointFrequency {
+			t.Errorf("expected checkpoint_frequency unchanged (too small), got %d", snap.CheckpointFrequency)
 		}
 	})
 
 	t.Run("checkpoint_frequency too large rejected", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
@@ -461,11 +442,10 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.CheckpointFrequency != initialConfig.CheckpointFrequency {
-			t.Errorf("expected checkpoint_frequency unchanged (too large), got %d", config.CheckpointFrequency)
+		snap := aa.tuner.Snapshot()
+		if snap.CheckpointFrequency != initialSnap.CheckpointFrequency {
+			t.Errorf("expected checkpoint_frequency unchanged (too large), got %d", snap.CheckpointFrequency)
 		}
 	})
 
@@ -480,11 +460,10 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.CheckpointFrequency != 20 {
-			t.Errorf("expected checkpoint_frequency=20, got %d", config.CheckpointFrequency)
+		snap := aa.tuner.Snapshot()
+		if snap.CheckpointFrequency != 20 {
+			t.Errorf("expected checkpoint_frequency=20, got %d", snap.CheckpointFrequency)
 		}
 	})
 }
@@ -492,7 +471,7 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 	t.Run("upsert_merge_chunk_size too small rejected", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_down",
@@ -502,17 +481,16 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.UpsertMergeChunkSize != initialConfig.UpsertMergeChunkSize {
-			t.Errorf("expected upsert_merge_chunk_size unchanged (too small), got %d", config.UpsertMergeChunkSize)
+		snap := aa.tuner.Snapshot()
+		if snap.UpsertMergeChunkSize != initialSnap.UpsertMergeChunkSize {
+			t.Errorf("expected upsert_merge_chunk_size unchanged (too small), got %d", snap.UpsertMergeChunkSize)
 		}
 	})
 
 	t.Run("upsert_merge_chunk_size too large rejected", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialConfig := aa.pipeline.GetConfig()
+		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
@@ -522,11 +500,10 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.UpsertMergeChunkSize != initialConfig.UpsertMergeChunkSize {
-			t.Errorf("expected upsert_merge_chunk_size unchanged (too large), got %d", config.UpsertMergeChunkSize)
+		snap := aa.tuner.Snapshot()
+		if snap.UpsertMergeChunkSize != initialSnap.UpsertMergeChunkSize {
+			t.Errorf("expected upsert_merge_chunk_size unchanged (too large), got %d", snap.UpsertMergeChunkSize)
 		}
 	})
 
@@ -541,11 +518,10 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 		}
 
 		aa.ApplyDecision(decision)
-		aa.pipeline.ApplyPendingUpdates(true)
 
-		config := aa.pipeline.GetConfig()
-		if config.UpsertMergeChunkSize != 10000 {
-			t.Errorf("expected upsert_merge_chunk_size=10000, got %d", config.UpsertMergeChunkSize)
+		snap := aa.tuner.Snapshot()
+		if snap.UpsertMergeChunkSize != 10000 {
+			t.Errorf("expected upsert_merge_chunk_size=10000, got %d", snap.UpsertMergeChunkSize)
 		}
 	})
 }
