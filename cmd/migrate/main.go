@@ -635,6 +635,19 @@ func getStateFile(c *cli.Context) string {
 	return ""
 }
 
+// getConfigPath returns the config path from the context lineage.
+// Because --config has a non-empty default ("config.yaml"), we use IsSet
+// to find the first context where the user explicitly provided the flag.
+// This ensures "dmt -c X run" and "dmt run -c X" both work correctly.
+func getConfigPath(c *cli.Context) (path string, isSet bool) {
+	for _, ctx := range c.Lineage() {
+		if ctx != nil && ctx.IsSet("config") {
+			return ctx.String("config"), true
+		}
+	}
+	return "config.yaml", false
+}
+
 func loadConfigWithOrigin(c *cli.Context) (*config.Config, string, string, error) {
 	profileName := c.String("profile")
 	if profileName != "" {
@@ -642,8 +655,8 @@ func loadConfigWithOrigin(c *cli.Context) (*config.Config, string, string, error
 		return cfg, profileName, "", err
 	}
 
-	configPath := c.String("config")
-	if _, err := os.Stat(configPath); os.IsNotExist(err) && !c.IsSet("config") {
+	configPath, configIsSet := getConfigPath(c)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) && !configIsSet {
 		return nil, "", "", fmt.Errorf("configuration file not found: %s", configPath)
 	}
 	cfg, err := config.Load(configPath)
@@ -669,7 +682,7 @@ func loadProfileConfig(name string) (*config.Config, error) {
 }
 
 func saveProfile(c *cli.Context) error {
-	configPath := c.String("config")
+	configPath, _ := getConfigPath(c)
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
