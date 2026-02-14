@@ -119,11 +119,12 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Limit concurrent COPY operations to prevent I/O saturation on
 	// wide-row tables. When many writers call CopyFrom simultaneously,
 	// PostgreSQL's WAL and buffer management can't keep up, causing TCP
-	// backpressure that stalls all writers. Capping at max(maxConns/2, 2)
-	// keeps throughput high while preventing I/O storms.
+	// backpressure that stalls all writers. Capping at max(1, maxConns/2)
+	// keeps throughput high while preventing I/O storms and never exceeds
+	// the connection pool size when maxConns is small.
 	copyConcurrency := maxConns / 2
-	if copyConcurrency < 2 {
-		copyConcurrency = 2
+	if copyConcurrency < 1 {
+		copyConcurrency = 1
 	}
 
 	w := &Writer{
@@ -727,6 +728,10 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 // UpsertBatch performs an upsert using staging table + INSERT ON CONFLICT.
 func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	if len(opts.Rows) == 0 {
+		return nil
+	}
+
 	// Limit concurrent COPY operations to prevent I/O saturation
 	select {
 	case w.copySem <- struct{}{}:
