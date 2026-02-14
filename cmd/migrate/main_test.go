@@ -90,6 +90,92 @@ func TestGetStateFile(t *testing.T) {
 	}
 }
 
+func TestGetConfigPath(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		expectedPath string
+		expectedSet  bool
+	}{
+		{
+			name:         "no flag set returns default",
+			args:         []string{"app", "run"},
+			expectedPath: "config.yaml",
+			expectedSet:  false,
+		},
+		{
+			name:         "config after subcommand",
+			args:         []string{"app", "run", "-c", "myconfig.yaml"},
+			expectedPath: "myconfig.yaml",
+			expectedSet:  true,
+		},
+		{
+			name:         "config before subcommand",
+			args:         []string{"app", "-c", "myconfig.yaml", "run"},
+			expectedPath: "myconfig.yaml",
+			expectedSet:  true,
+		},
+		{
+			name:         "long flag after subcommand",
+			args:         []string{"app", "run", "--config", "/etc/dmt/prod.yaml"},
+			expectedPath: "/etc/dmt/prod.yaml",
+			expectedSet:  true,
+		},
+		{
+			name:         "long flag before subcommand",
+			args:         []string{"app", "--config", "/etc/dmt/prod.yaml", "run"},
+			expectedPath: "/etc/dmt/prod.yaml",
+			expectedSet:  true,
+		},
+		{
+			name:         "command-level takes precedence over app-level",
+			args:         []string{"app", "-c", "global.yaml", "run", "-c", "local.yaml"},
+			expectedPath: "local.yaml",
+			expectedSet:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "config.yaml",
+					},
+				},
+				Commands: []*cli.Command{
+					{
+						Name: "run",
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:    "config",
+								Aliases: []string{"c"},
+								Value:   "config.yaml",
+							},
+						},
+						Action: func(c *cli.Context) error {
+							path, isSet := getConfigPath(c)
+							if path != tt.expectedPath {
+								t.Errorf("getConfigPath() path = %q, want %q", path, tt.expectedPath)
+							}
+							if isSet != tt.expectedSet {
+								t.Errorf("getConfigPath() isSet = %v, want %v", isSet, tt.expectedSet)
+							}
+							return nil
+						},
+					},
+				},
+			}
+
+			if err := app.Run(tt.args); err != nil {
+				t.Fatalf("app.Run() error: %v", err)
+			}
+		})
+	}
+}
+
 func TestOutputJSON(t *testing.T) {
 	t.Run("output to stdout", func(t *testing.T) {
 		result := &orchestrator.MigrationResult{
