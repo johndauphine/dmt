@@ -116,15 +116,13 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
-	// Limit concurrent COPY operations to prevent I/O saturation on
-	// wide-row tables. When many writers call CopyFrom simultaneously,
-	// PostgreSQL's WAL and buffer management can't keep up, causing TCP
-	// backpressure that stalls all writers. Capping at max(1, maxConns/2)
-	// keeps throughput high while preventing I/O storms and never exceeds
-	// the connection pool size when maxConns is small.
-	copyConcurrency := maxConns / 2
-	if copyConcurrency < 1 {
-		copyConcurrency = 1
+	// Limit concurrent COPY operations as a safety net. With adaptive
+	// sub-batch sizing (each COPY targets ~5MB), I/O pressure is
+	// self-regulating, so we allow maxConns-1 (leaving one connection
+	// free for non-COPY operations like DDL or sequence resets).
+	copyConcurrency := maxConns - 1
+	if copyConcurrency < 2 {
+		copyConcurrency = 2
 	}
 
 	w := &Writer{
@@ -669,13 +667,61 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
-// maxCopyBatchRows limits how many rows are sent per COPY FROM operation.
-// For wide-row tables (e.g. large text/bytea columns), a single CopyFrom with
-// many rows can push hundreds of MB through pgx's io.Pipe, overwhelming
-// PostgreSQL's WAL/buffer management and causing TCP backpressure that stalls
-// all concurrent writers. Keeping sub-batches small ensures each CopyFrom
-// completes quickly, preventing I/O saturation.
-const maxCopyBatchRows = 2000
+// Adaptive COPY sub-batch sizing. Each CopyFrom targets ~5MB of data so that
+// narrow-row tables (e.g. Votes at ~6 bytes/row) use large batches while
+// wide-row tables (e.g. Posts at ~10KB/row) use small ones, keeping I/O
+// consistent without unnecessarily throttling throughput.
+const (
+	targetCopyBytes  = 5 << 20 // 5 MB per COPY operation
+	minCopyBatchRows = 100
+	maxCopyBatchRows = 50_000
+)
+
+// estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
+// the average serialized row size in bytes. Fixed-width types (numbers, bools)
+// count as 8 bytes; strings and byte slices use their actual length.
+// Returns at least 64 to avoid degenerate batch sizes on empty/tiny rows.
+func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
+	if len(rows) == 0 {
+		return 64
+	}
+	n := sampleSize
+	if n > len(rows) {
+		n = len(rows)
+	}
+	total := 0
+	for i := 0; i < n; i++ {
+		for _, v := range rows[i] {
+			switch val := v.(type) {
+			case string:
+				total += len(val)
+			case []byte:
+				total += len(val)
+			default:
+				total += 8
+			}
+		}
+	}
+	avg := total / n
+	if avg < 64 {
+		return 64
+	}
+	return avg
+}
+
+// copyBatchSize returns the number of rows to send in a single CopyFrom call,
+// targeting targetCopyBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
+func copyBatchSize(rows [][]any) int {
+	avg := estimateAvgRowBytes(rows, 10)
+	n := targetCopyBytes / avg
+	if n < minCopyBatchRows {
+		return minCopyBatchRows
+	}
+	if n > maxCopyBatchRows {
+		return maxCopyBatchRows
+	}
+	return n
+}
 
 // WriteBatch writes a batch of rows using COPY protocol.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -706,9 +752,10 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
-	// Sub-batch rows to avoid stalling on wide-row tables.
-	for start := 0; start < len(opts.Rows); start += maxCopyBatchRows {
-		end := start + maxCopyBatchRows
+	// Adaptive sub-batching: narrow rows get large batches, wide rows get small ones.
+	batchSize := copyBatchSize(opts.Rows)
+	for start := 0; start < len(opts.Rows); start += batchSize {
+		end := start + batchSize
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
@@ -758,9 +805,10 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("creating staging table: %w", err)
 	}
 
-	// COPY into staging (sub-batched to avoid stalls on wide-row tables)
-	for start := 0; start < len(opts.Rows); start += maxCopyBatchRows {
-		end := start + maxCopyBatchRows
+	// Adaptive sub-batching for staging COPY
+	batchSize := copyBatchSize(opts.Rows)
+	for start := 0; start < len(opts.Rows); start += batchSize {
+		end := start + batchSize
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
