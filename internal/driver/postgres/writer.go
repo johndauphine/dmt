@@ -63,6 +63,7 @@ type Writer struct {
 	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
 	dbContext          *driver.DatabaseContext      // Cached database context for AI
 	cachedDB           *sql.DB                      // Cached database/sql wrapper for tuning analysis
+	copySem            chan struct{}                 // Limits concurrent COPY operations to prevent I/O saturation
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -115,6 +116,16 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
+	// Limit concurrent COPY operations to prevent I/O saturation on
+	// wide-row tables. When many writers call CopyFrom simultaneously,
+	// PostgreSQL's WAL and buffer management can't keep up, causing TCP
+	// backpressure that stalls all writers. Capping at max(maxConns/2, 2)
+	// keeps throughput high while preventing I/O storms.
+	copyConcurrency := maxConns / 2
+	if copyConcurrency < 2 {
+		copyConcurrency = 2
+	}
+
 	w := &Writer{
 		pool:               pool,
 		config:             cfg,
@@ -124,6 +135,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		typeMapper:         opts.TypeMapper,
 		tableMapper:        tableMapper,
 		finalizationMapper: finalizationMapper,
+		copySem:            make(chan struct{}, copyConcurrency),
 	}
 
 	// Gather database context for AI
@@ -656,8 +668,28 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
+// maxCopyBatchRows limits how many rows are sent per COPY FROM operation.
+// For wide-row tables (e.g. large text/bytea columns), a single CopyFrom with
+// many rows can push hundreds of MB through pgx's io.Pipe, overwhelming
+// PostgreSQL's WAL/buffer management and causing TCP backpressure that stalls
+// all concurrent writers. Keeping sub-batches small ensures each CopyFrom
+// completes quickly, preventing I/O saturation.
+const maxCopyBatchRows = 2000
+
 // WriteBatch writes a batch of rows using COPY protocol.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
+	if len(opts.Rows) == 0 {
+		return nil
+	}
+
+	// Limit concurrent COPY operations to prevent I/O saturation
+	select {
+	case w.copySem <- struct{}{}:
+		defer func() { <-w.copySem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -671,17 +703,38 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		sanitizedCols[i] = sanitizePGIdentifier(col)
 	}
 
-	_, err = conn.Conn().CopyFrom(
-		ctx,
-		pgx.Identifier{opts.Schema, sanitizedTable},
-		sanitizedCols,
-		pgx.CopyFromRows(opts.Rows),
-	)
-	return err
+	ident := pgx.Identifier{opts.Schema, sanitizedTable}
+
+	// Sub-batch rows to avoid stalling on wide-row tables.
+	for start := 0; start < len(opts.Rows); start += maxCopyBatchRows {
+		end := start + maxCopyBatchRows
+		if end > len(opts.Rows) {
+			end = len(opts.Rows)
+		}
+
+		_, err = conn.Conn().CopyFrom(
+			ctx,
+			ident,
+			sanitizedCols,
+			pgx.CopyFromRows(opts.Rows[start:end]),
+		)
+		if err != nil {
+			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
+		}
+	}
+	return nil
 }
 
 // UpsertBatch performs an upsert using staging table + INSERT ON CONFLICT.
 func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	// Limit concurrent COPY operations to prevent I/O saturation
+	select {
+	case w.copySem <- struct{}{}:
+		defer func() { <-w.copySem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -700,15 +753,21 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("creating staging table: %w", err)
 	}
 
-	// COPY into staging
-	_, err = conn.Conn().CopyFrom(
-		ctx,
-		pgx.Identifier{stagingTable},
-		opts.Columns,
-		pgx.CopyFromRows(opts.Rows),
-	)
-	if err != nil {
-		return fmt.Errorf("copying to staging: %w", err)
+	// COPY into staging (sub-batched to avoid stalls on wide-row tables)
+	for start := 0; start < len(opts.Rows); start += maxCopyBatchRows {
+		end := start + maxCopyBatchRows
+		if end > len(opts.Rows) {
+			end = len(opts.Rows)
+		}
+		_, err = conn.Conn().CopyFrom(
+			ctx,
+			pgx.Identifier{stagingTable},
+			opts.Columns,
+			pgx.CopyFromRows(opts.Rows[start:end]),
+		)
+		if err != nil {
+			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
+		}
 	}
 
 	// Build INSERT ... ON CONFLICT
