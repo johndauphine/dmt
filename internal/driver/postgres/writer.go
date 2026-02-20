@@ -63,6 +63,7 @@ type Writer struct {
 	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
 	dbContext          *driver.DatabaseContext      // Cached database context for AI
 	cachedDB           *sql.DB                      // Cached database/sql wrapper for tuning analysis
+	copySem            chan struct{}                 // Limits concurrent COPY operations to prevent I/O saturation
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -115,6 +116,15 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
+	// Limit concurrent COPY operations as a safety net. With adaptive
+	// sub-batch sizing (each COPY targets ~5MB), I/O pressure is
+	// self-regulating, so we allow maxConns-1 (leaving one connection
+	// free for non-COPY operations like DDL or sequence resets).
+	copyConcurrency := maxConns - 1
+	if copyConcurrency < 1 {
+		copyConcurrency = 1
+	}
+
 	w := &Writer{
 		pool:               pool,
 		config:             cfg,
@@ -124,6 +134,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		typeMapper:         opts.TypeMapper,
 		tableMapper:        tableMapper,
 		finalizationMapper: finalizationMapper,
+		copySem:            make(chan struct{}, copyConcurrency),
 	}
 
 	// Gather database context for AI
@@ -656,8 +667,76 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
+// Adaptive COPY sub-batch sizing. Each CopyFrom targets ~5MB of data so that
+// narrow-row tables (e.g. Votes at ~6 bytes/row) use large batches while
+// wide-row tables (e.g. Posts at ~10KB/row) use small ones, keeping I/O
+// consistent without unnecessarily throttling throughput.
+const (
+	targetCopyBytes  = 5 << 20 // 5 MB per COPY operation
+	minCopyBatchRows = 100
+	maxCopyBatchRows = 50_000
+)
+
+// estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
+// the average serialized row size in bytes. Fixed-width types (numbers, bools)
+// count as 8 bytes; strings and byte slices use their actual length.
+// Returns at least 64 to avoid degenerate batch sizes on empty/tiny rows.
+func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
+	if len(rows) == 0 {
+		return 64
+	}
+	n := sampleSize
+	if n > len(rows) {
+		n = len(rows)
+	}
+	total := 0
+	for i := 0; i < n; i++ {
+		for _, v := range rows[i] {
+			switch val := v.(type) {
+			case string:
+				total += len(val)
+			case []byte:
+				total += len(val)
+			default:
+				total += 8
+			}
+		}
+	}
+	avg := total / n
+	if avg < 64 {
+		return 64
+	}
+	return avg
+}
+
+// copyBatchSize returns the number of rows to send in a single CopyFrom call,
+// targeting targetCopyBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
+func copyBatchSize(rows [][]any) int {
+	avg := estimateAvgRowBytes(rows, 10)
+	n := targetCopyBytes / avg
+	if n < minCopyBatchRows {
+		return minCopyBatchRows
+	}
+	if n > maxCopyBatchRows {
+		return maxCopyBatchRows
+	}
+	return n
+}
+
 // WriteBatch writes a batch of rows using COPY protocol.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
+	if len(opts.Rows) == 0 {
+		return nil
+	}
+
+	// Limit concurrent COPY operations to prevent I/O saturation
+	select {
+	case w.copySem <- struct{}{}:
+		defer func() { <-w.copySem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -671,17 +750,43 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		sanitizedCols[i] = sanitizePGIdentifier(col)
 	}
 
-	_, err = conn.Conn().CopyFrom(
-		ctx,
-		pgx.Identifier{opts.Schema, sanitizedTable},
-		sanitizedCols,
-		pgx.CopyFromRows(opts.Rows),
-	)
-	return err
+	ident := pgx.Identifier{opts.Schema, sanitizedTable}
+
+	// Adaptive sub-batching: narrow rows get large batches, wide rows get small ones.
+	batchSize := copyBatchSize(opts.Rows)
+	for start := 0; start < len(opts.Rows); start += batchSize {
+		end := start + batchSize
+		if end > len(opts.Rows) {
+			end = len(opts.Rows)
+		}
+
+		_, err = conn.Conn().CopyFrom(
+			ctx,
+			ident,
+			sanitizedCols,
+			pgx.CopyFromRows(opts.Rows[start:end]),
+		)
+		if err != nil {
+			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
+		}
+	}
+	return nil
 }
 
 // UpsertBatch performs an upsert using staging table + INSERT ON CONFLICT.
 func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	if len(opts.Rows) == 0 {
+		return nil
+	}
+
+	// Limit concurrent COPY operations to prevent I/O saturation
+	select {
+	case w.copySem <- struct{}{}:
+		defer func() { <-w.copySem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -700,15 +805,22 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("creating staging table: %w", err)
 	}
 
-	// COPY into staging
-	_, err = conn.Conn().CopyFrom(
-		ctx,
-		pgx.Identifier{stagingTable},
-		opts.Columns,
-		pgx.CopyFromRows(opts.Rows),
-	)
-	if err != nil {
-		return fmt.Errorf("copying to staging: %w", err)
+	// Adaptive sub-batching for staging COPY
+	batchSize := copyBatchSize(opts.Rows)
+	for start := 0; start < len(opts.Rows); start += batchSize {
+		end := start + batchSize
+		if end > len(opts.Rows) {
+			end = len(opts.Rows)
+		}
+		_, err = conn.Conn().CopyFrom(
+			ctx,
+			pgx.Identifier{stagingTable},
+			opts.Columns,
+			pgx.CopyFromRows(opts.Rows[start:end]),
+		)
+		if err != nil {
+			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
+		}
 	}
 
 	// Build INSERT ... ON CONFLICT
