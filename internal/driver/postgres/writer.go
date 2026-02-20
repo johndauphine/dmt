@@ -121,8 +121,8 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// self-regulating, so we allow maxConns-1 (leaving one connection
 	// free for non-COPY operations like DDL or sequence resets).
 	copyConcurrency := maxConns - 1
-	if copyConcurrency < 2 {
-		copyConcurrency = 2
+	if copyConcurrency < 1 {
+		copyConcurrency = 1
 	}
 
 	w := &Writer{
