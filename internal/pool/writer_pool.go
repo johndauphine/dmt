@@ -182,6 +182,11 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 		// Check if worker should exit (for scaling down)
 		select {
 		case <-workerCtx.Done():
+			// Re-queue the job so another worker picks it up
+			select {
+			case wp.jobChan <- job:
+			case <-wp.ctx.Done():
+			}
 			return
 		default:
 		}
