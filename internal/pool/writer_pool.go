@@ -179,18 +179,6 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 	defer wp.writerWg.Done()
 
 	for job := range wp.jobChan {
-		// Check if worker should exit (for scaling down)
-		select {
-		case <-workerCtx.Done():
-			// Re-queue the job so another worker picks it up
-			select {
-			case wp.jobChan <- job:
-			case <-wp.ctx.Done():
-			}
-			return
-		default:
-		}
-
 		writeStart := time.Now()
 		err := wp.writeFunc(wp.ctx, writerID, job.Rows)
 
@@ -231,6 +219,15 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 				// Log at debug level to help diagnose checkpoint issues if they occur.
 				logging.Debug("Ack channel full, skipping ack for reader %d seq %d (checkpoint may not advance)", job.ReaderID, job.Seq)
 			}
+		}
+
+		// Check if worker should exit (for scaling down).
+		// This check is AFTER processing to ensure a job already pulled from
+		// the channel is never dropped — the worker finishes it before exiting.
+		select {
+		case <-workerCtx.Done():
+			return
+		default:
 		}
 	}
 }
