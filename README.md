@@ -600,50 +600,36 @@ sensor = PythonSensor(
 
 ## Supported Databases
 
-| Database | As Source | As Target | Write Method |
-|----------|-----------|-----------|--------------|
-| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) |
-| SQL Server | ✓ | ✓ | TDS bulk copy |
-| MySQL | ✓ | ✓ | Multi-row INSERT |
-| Oracle 12c+ | ✓ | ✓ | godror.Batch array binding |
+| Database | As Source | As Target | Write Method | Auth |
+|----------|-----------|-----------|--------------|------|
+| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) | Password, Kerberos |
+| SQL Server | ✓ | ✓ | TDS bulk copy | Password, Kerberos |
+| MySQL | ✓ | ✓ | Multi-row INSERT | Password |
 
-All combinations are supported (e.g., MSSQL→Oracle, MySQL→PostgreSQL, Oracle→MySQL).
+All combinations are supported, including same-engine migrations (PG→PG, MSSQL→MSSQL, MySQL→MySQL).
 
-### Same-Engine Migrations (New in v1.43.0)
+### Same-Engine Migrations
 
-Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
+Use cases: database cloning, environment sync (dev → staging → prod), disaster recovery, data center migrations.
 
 ```yaml
-# PostgreSQL to PostgreSQL
 source:
   type: postgres
   host: source-pg.example.com
-  # ...
-
 target:
   type: postgres
   host: target-pg.example.com
-  # ...
-
 migration:
   target_mode: upsert  # or drop_recreate
 ```
 
-**Use cases:**
-- Database cloning
-- Environment sync (dev → staging → prod)
-- Disaster recovery
-- Data center migrations
+### PostGIS Spatial Data Support
 
-### PostGIS Spatial Data Support (v1.43.0)
+Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 
-Cross-engine migrations (PG→MSSQL) now correctly preserve spatial reference systems:
-
-- **SRID preservation** - Reads SRID from PostGIS `geometry_columns`/`geography_columns` metadata
+- **SRID preservation** - reads SRID from PostGIS `geometry_columns`/`geography_columns` metadata
 - **Automatic conversion** - WKT text converted to SQL Server geography/geometry with correct SRID
-- **Default fallback** - Uses SRID 4326 (WGS84) when source SRID is 0 or unset
-
-Previously, all spatial data was converted with hardcoded SRID 4326. Now the actual SRID from PostGIS is used (e.g., 2163 for NAD83, 3857 for Web Mercator).
+- **Default fallback** - uses SRID 4326 (WGS84) when source SRID is 0 or unset
 
 ## Features
 
