@@ -5,9 +5,9 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/dmt)](https://go.dev/)
 [![License](https://img.shields.io/github/license/johndauphine/dmt)](LICENSE)
 
-High-performance CLI tool for database migrations between SQL Server, PostgreSQL, MySQL, and Oracle.
+High-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL.
 
-## Interactive Mode (New!)
+## Interactive Mode
 
 Launch the tool without arguments to enter the **Interactive Shell**, a modern TUI designed for ease of use.
 
@@ -25,29 +25,15 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 *   **Live Monitoring**: Watch migration progress with real-time logs and visual status indicators.
 *   **Git Integration**: View your current branch and repository status directly in the status bar.
 
-## Security Notice
+## Security
 
-### v1.43.0 Security Fixes
+- **Credential redaction** - passwords are never stored in the state database or logs
+- **DSN injection protection** - connection strings URL-encode credentials to prevent injection
+- **SQL injection protection** - internal SQLite queries use whitelist validation for table names
+- **Secret templates** - use `${env:VAR}` or `${file:/path}` instead of plaintext passwords in config
+- **Secure permissions** - state files (0600) and data directories (0700) enforced automatically
 
-**v1.43.0** addresses security vulnerabilities identified during code review:
-
-- **DSN Injection Fix**: Connection strings now properly URL-encode credentials to prevent injection via special characters in usernames, passwords, or database names
-- **SQL Injection Fix**: Internal SQLite queries now use whitelist validation for table names
-
-**Upgrade recommended** for all users to ensure secure credential handling.
-
-### Credential Storage (v1.10.0+)
-
-**Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.dmt/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
-
-**Recommended actions:**
-1. **Upgrade to v1.43.0 or later** - Includes all security fixes and credential sanitization
-2. **Rotate your database passwords** if you used earlier versions with sensitive credentials
-3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.dmt/migrate.db`
-
-Starting with v1.10.0, credentials are always redacted before being stored.
-
-## Incremental Sync (New in v1.43.0)
+## Incremental Sync
 
 For large databases with frequent updates, use **date-based incremental loading** to dramatically reduce sync times. Instead of transferring all rows every time, only rows modified since the last sync are transferred.
 
@@ -265,17 +251,19 @@ This auto-enables AI type mapping. Provider defaults to Claude (Anthropic).
 
 | Provider | Config Value | Default Model | API Key Variable |
 |----------|--------------|---------------|------------------|
-| **Claude** (default) | `claude` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| **Claude** (default) | `claude` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
 | **Google Gemini** | `gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
+| **Ollama** (local) | `ollama` | - | - |
+| **LM Studio** (local) | `lmstudio` | - | - |
 
 ### Full Configuration
 
 ```yaml
 ai:
   api_key: ${ANTHROPIC_API_KEY}  # Required - your API key
-  provider: claude               # Optional - claude (default), openai, or gemini
-  model: claude-sonnet-4-20250514  # Optional - uses provider default if not set
+  provider: claude               # Optional - claude (default), openai, gemini, ollama, lmstudio
+  model: claude-sonnet-4-6       # Optional - uses provider default if not set
 
   type_mapping:
     enabled: true                # Auto-enabled when api_key is set
@@ -328,7 +316,7 @@ migration:
 - **Exclude tables**: Tables that should probably be excluded (temp, log, archive, etc.)
 - **Chunk size**: Optimal chunk size based on average row sizes
 
-### AI Error Diagnosis (New in v3.53.0)
+### AI Error Diagnosis
 
 When a table transfer fails, AI automatically analyzes the error and provides actionable suggestions for resolution.
 
@@ -590,13 +578,13 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **222K-645K rows/sec** depending on direction and mode
+- **222K-645K rows/sec** depending on direction and row width
 - **PG → MSSQL**: 645K rows/sec (PG streaming + TDS bulk copy)
 - **PG → PG**: 563K rows/sec (COPY protocol both ends)
-- **MSSQL → PG**: 248K rows/sec (32KB TDS packets + COPY)
+- **MSSQL → PG**: 339K rows/sec with AI tuning (106.5M rows in 5m14s)
 - **MSSQL → MSSQL**: 222K rows/sec (TDS both ends)
-- **Auto-tuning** based on CPU cores and available RAM
-- **2-6x faster** than equivalent Python/Airflow solutions
+- **Auto-tuning** based on CPU cores, available RAM, and AI-driven adjustments
+- **Single binary** - no runtime dependencies, no CGO
 
 ## Supported Databases
 
@@ -733,7 +721,7 @@ tar -xzf dmt.tar.gz
 
 ### Build from source
 
-Requires Go 1.21+
+Requires Go 1.24+
 
 ```bash
 git clone https://github.com/johndauphine/dmt.git
@@ -827,10 +815,10 @@ The `source` section configures the database to migrate FROM.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `type` | No | `mssql` | Database type: `mssql`, `postgres`, `mysql`, or `oracle` |
+| `type` | No | `mssql` | Database type: `mssql`, `postgres`, or `mysql` |
 | `host` | **Yes** | - | Database server hostname or IP address |
-| `port` | No | Auto | Database server port (1433/5432/3306/1521) |
-| `database` | **Yes** | - | Database name (or service name for Oracle) |
+| `port` | No | Auto | Database server port (1433/5432/3306) |
+| `database` | **Yes** | - | Database name |
 | `user` | Yes* | - | Username for authentication (*not required for Kerberos) |
 | `password` | Yes* | - | Password for authentication (*not required for Kerberos). Supports `${ENV_VAR}` syntax |
 | `schema` | No | Auto | Schema containing tables to migrate |
@@ -861,10 +849,10 @@ The `target` section configures the database to migrate TO. It uses the same par
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `type` | No | `postgres` | Database type: `mssql`, `postgres`, `mysql`, or `oracle` |
+| `type` | No | `postgres` | Database type: `mssql`, `postgres`, or `mysql` |
 | `host` | **Yes** | - | Database server hostname or IP address |
-| `port` | No | Auto | Database server port (5432/1433/3306/1521) |
-| `database` | **Yes** | - | Database name (or service name for Oracle) |
+| `port` | No | Auto | Database server port (5432/1433/3306) |
+| `database` | **Yes** | - | Database name |
 | `user` | Yes* | - | Username for authentication |
 | `password` | Yes* | - | Password for authentication |
 | `schema` | No | Auto | Target schema for migrated tables |
@@ -935,7 +923,7 @@ The `migration` section controls how data is transferred.
 | `write_ahead_writers` | No | 2 | Parallel writers per job. Use 8 for PG→MSSQL |
 | `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
 | `source.chunk_size` | No | Same as `migration.chunk_size` | Batch size for reading from source database |
-| `target.chunk_size` | No | Same as `migration.chunk_size` (5000 for Oracle) | Batch size for writing to target database |
+| `target.chunk_size` | No | Same as `migration.chunk_size` | Batch size for writing to target database |
 
 ### AI Settings
 
@@ -944,8 +932,8 @@ The `ai` section configures AI-powered features.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `ai.api_key` | Yes (if using AI) | - | API key for the AI provider |
-| `ai.provider` | No | `claude` | AI provider: `claude`, `openai`, or `gemini` |
-| `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.0-flash`) |
+| `ai.provider` | No | `claude` | AI provider: `claude`, `openai`, `gemini`, `ollama`, or `lmstudio` |
+| `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.0-flash`) |
 | `ai.timeout_seconds` | No | `30` | API request timeout |
 | `ai.type_mapping.enabled` | No | Auto | Enable AI type mapping (auto-enabled when api_key is set) |
 | `ai.type_mapping.cache_file` | No | `~/.dmt/type-cache.json` | Path to cache AI type mappings |
@@ -1038,7 +1026,6 @@ Ready-to-use example configuration files are available in the [`examples/`](exam
 | `config-mssql-to-pg-kerberos.yaml` | SQL Server → PostgreSQL with Kerberos |
 | `config-pg-to-mssql.yaml` | PostgreSQL → SQL Server with password auth |
 | `config-pg-to-mssql-kerberos.yaml` | PostgreSQL → SQL Server with Kerberos |
-| `config-mssql-to-oracle.yaml` | SQL Server → Oracle |
 | `config-local.yaml` | Minimal config for local Docker development |
 | `config-production.yaml` | Full production config with all options |
 
@@ -1183,49 +1170,7 @@ migration:
   parallel_readers: 1
 ```
 
-### Example 5: SQL Server to Oracle
-
-Migration from SQL Server to Oracle Database:
-
-```yaml
-# config-mssql-to-oracle.yaml
-source:
-  type: mssql
-  host: sqlserver.example.com
-  port: 1433
-  database: SourceDatabase
-  user: sa
-  password: ${MSSQL_PASSWORD}
-  schema: dbo
-  encrypt: "true"
-  trust_server_cert: false
-
-target:
-  type: oracle
-  host: oracle.example.com
-  port: 1521
-  database: ORCL                       # Oracle service name
-  user: migrate_user
-  password: ${ORACLE_PASSWORD}
-  schema: MIGRATE_USER                 # Oracle schema (usually uppercase)
-  chunk_size: 5000                     # Oracle optimal: 5000-10000 for godror.Batch
-
-migration:
-  workers: 4
-  chunk_size: 50000
-  create_indexes: true
-  create_foreign_keys: true
-
-ai:
-  api_key: ${ANTHROPIC_API_KEY}        # Required for type mapping
-```
-
-**Oracle requirements:**
-- Oracle Instant Client must be installed and in `LD_LIBRARY_PATH`
-- Target schema must exist before migration
-- User must have CREATE TABLE, CREATE SEQUENCE privileges
-
-### Example 6: Minimal Configuration (Local Development)
+### Example 5: Minimal Configuration (Local Development)
 
 Simplest config for local Docker databases:
 
@@ -1249,7 +1194,7 @@ target:
   ssl_mode: disable                  # Disable SSL for local dev
 ```
 
-### Example 7: Production Configuration with All Options
+### Example 6: Production Configuration with All Options
 
 Full production configuration with Slack notifications and validation:
 
@@ -1325,6 +1270,9 @@ slack:
 # Run a new migration
 ./dmt -c config.yaml run
 
+# Dry-run (preview plan without executing)
+./dmt -c config.yaml run --dry-run
+
 # Resume an interrupted migration (continues from last checkpoint)
 ./dmt -c config.yaml resume
 
@@ -1337,11 +1285,20 @@ slack:
 # View migration history
 ./dmt -c config.yaml history
 
-# View details for a specific run (shows error if failed)
+# View details for a specific run
 ./dmt -c config.yaml history --run <run-id>
 
-# Analyze source database and get configuration suggestions
+# Test database connections
+./dmt -c config.yaml health-check
+
+# Analyze source database and get AI configuration suggestions
 ./dmt -c config.yaml analyze
+
+# Create a new config file interactively
+./dmt init
+
+# Create a secrets file template
+./dmt init-secrets
 ```
 
 ### Headless Mode (Airflow/Kubernetes)
@@ -1391,8 +1348,8 @@ Votes                          OK 52928720 rows
 
 ## How It Works
 
-1. **Extract schema** - Reads table structure, PKs, indexes, FKs, and check constraints from SQL Server
-2. **Create tables** - Generates PostgreSQL DDL with proper type mapping and identity columns
+1. **Extract schema** - Reads table structure, PKs, indexes, FKs, and check constraints from source
+2. **Create tables** - Generates target DDL with proper type mapping and identity columns
 3. **Transfer data** - Uses optimal pagination strategy per table:
    - **Keyset pagination** for single-column integer PKs (fastest)
    - **ROW_NUMBER pagination** for composite/varchar PKs
@@ -1500,48 +1457,16 @@ Identity columns are mapped to `GENERATED BY DEFAULT AS IDENTITY` with proper se
 
 Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 
-### Oracle Type Mapping
-
-Oracle uses AI-assisted type mapping for cross-engine migrations. Common mappings:
-
-| Source Type | Oracle Type |
-|-------------|-------------|
-| int/integer | NUMBER(10) |
-| bigint | NUMBER(19) |
-| smallint | NUMBER(5) |
-| boolean/bit | NUMBER(1) |
-| decimal/numeric | NUMBER(p,s) |
-| float/double | BINARY_DOUBLE |
-| varchar/text | VARCHAR2(n) or CLOB |
-| char | CHAR(n) |
-| date | DATE |
-| timestamp | TIMESTAMP |
-| timestamptz | TIMESTAMP WITH TIME ZONE |
-| uuid | RAW(16) or VARCHAR2(36) |
-| bytea/varbinary | BLOB |
-| json/jsonb | CLOB |
-
-Identity columns use `GENERATED BY DEFAULT AS IDENTITY` (Oracle 12c+).
-
-**Oracle-specific notes:**
-- Identifier limit: 30 characters (pre-12.2) or 128 characters (12.2+)
-- Long identifiers are automatically truncated with a hash suffix for uniqueness
-- Requires Oracle Instant Client for the godror driver
-
 ### Unknown Types
 
 For types not in the built-in mappings (custom domains, user-defined types, etc.), enable [AI-assisted type mapping](#ai-assisted-type-mapping-new-in-v2240) to automatically infer the best target type.
 
 ## Benchmarks
 
-### Test Environment (v2.1.0)
+### Small Dataset (WideWorldImporters, 701K rows)
+
 - **Hardware**: WSL2 on Windows, 32GB RAM, 16 cores
-- **Dataset**: WideWorldImporters Sales (701K rows, 9 tables)
-- **Databases**: PostgreSQL 15 and SQL Server 2022 (both in Docker)
-
-### Complete Benchmark Matrix
-
-All migration directions with drop_recreate mode:
+- **Databases**: PostgreSQL 15 and SQL Server 2022 (Docker)
 
 | Direction | Transfer | Overall |
 |-----------|----------|---------|
@@ -1550,41 +1475,17 @@ All migration directions with drop_recreate mode:
 | **MSSQL → PG** | 302K rows/sec | 248K rows/sec |
 | **MSSQL → MSSQL** | 280K rows/sec | 222K rows/sec |
 
-*Note: v2.1.0 introduced pluggable driver architecture with no performance regression. 32KB TDS packet size enabled by default.*
+### Large Dataset (Stack Overflow 2013, 106.5M rows)
 
-### Key Observations
+- **Hardware**: macOS, Apple Silicon, 18GB RAM
+- **Databases**: SQL Server 2022 and PostgreSQL 17 (Docker)
 
-- **PG → MSSQL** is fastest due to efficient PG streaming + TDS bulk copy
-- **PG → PG** uses COPY protocol on both ends for excellent throughput
-- **MSSQL source** directions are slower due to TDS protocol read overhead
-- **Cold start impact**: First run after container start may be 5-10x slower
+| Configuration | Duration | Throughput |
+|---------------|----------|------------|
+| **AI-tuned (Haiku)** | 5m 14s | **339K rows/sec** |
+| **AI-tuned (Sonnet)** | 5m 14s | **339K rows/sec** |
 
-Performance varies based on:
-- Network latency between source and target
-- Table structure (wide tables are slower)
-- Data types (LOBs are slower)
-- Available CPU cores and memory (auto-tuned)
-
-## Comparison with Airflow DAG
-
-| Feature | dmt (Go) | Airflow DAG (Python) |
-|---------|----------------------|---------------------|
-| Throughput | 222-645K rows/sec | ~50-80k rows/sec |
-| Memory usage | ~50MB | ~200-400MB |
-| Resume granularity | Chunk-level | Partition-level |
-| Dependencies | None (single binary) | Python, Airflow, etc. |
-| Scheduling | External (cron, etc.) | Built-in |
-| Monitoring | Slack, CLI | Airflow UI |
-
-Use the Go version for:
-- One-time migrations
-- Maximum performance
-- Minimal dependencies
-
-Use the Airflow DAG for:
-- Scheduled/recurring migrations
-- Integration with existing Airflow infrastructure
-- Complex workflow orchestration
+Performance varies based on network latency, table width, data types, and available CPU/memory.
 
 ## Development
 
