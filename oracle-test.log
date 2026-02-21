@@ -1,91 +1,0 @@
-WARNING: Config file 'config-oracle-test.yaml' has insecure permissions (0644)
-         Other users may be able to read your database credentials.
-         Run: chmod 600 config-oracle-test.yaml
-
-2026-01-16 05:03:24 [INFO] Connected to MySQL source: localhost:3306/perf_test
-godror WARNING: discrepancy between SESSIONTIMEZONE ("-06:00"=-600) and SYSTIMESTAMP ("+00:00"=0) - set connection timezone, see https://github.com/godror/godror/blob/master/doc/timezone.md
-2026-01-16 05:03:29 [INFO] Connected to Oracle target: localhost:1521/FREEPDB1 (Oracle AI Database 26ai Free Release 23.26.0.0.0 - Develop, Learn, and Run for Free)
-2026-01-16 05:03:29 [INFO] AI Type Mapping enabled (provider: claude, model: claude-haiku-4-5-20251001)
-2026-01-16 05:03:29 [INFO] Starting migration run: 80a33cba
-2026-01-16 05:03:29 [INFO] Migration: mysql -> oracle
-
-2026-01-16 05:03:29 [INFO] === Configuration ===
-
-System Resources:
-  Available Memory: 36864 MB
-  Effective Max Memory: 25804 MB (hard cap 70%)
-  CPU Cores: 14
-
-Source (mysql):
-  Host: localhost
-  Port: 3306
-  Database: perf_test
-  Schema: 
-  User: root
-  Password: [REDACTED]
-  SSLMode: preferred
-  Auth: password
-
-Target (oracle):
-  Host: localhost
-  Port: 1521
-  Database: FREEPDB1
-  Schema: TESTUSER
-  User: testuser
-  Password: [REDACTED]
-  SSLMode: 
-  Auth: password
-
-Migration Settings:
-  Workers: 4
-  ChunkSize: 50000
-  ReadAheadBuffers: 8
-  MaxPartitions: 4
-  MaxMssqlConnections: 20 (auto: 4 workers * 4 readers + 4)
-  MaxPgConnections: 20 (auto: 4 workers * 4 writers + 4)
-  WriteAheadWriters: 4
-  ParallelReaders: 4
-  LargeTableThreshold: 5000000 (auto: default 5M)
-  MSSQLRowsPerBatch: 50000 (auto: matches chunk_size)
-  TargetMode: drop_recreate
-  StrictConsistency: false
-  CreateIndexes: true
-  CreateForeignKeys: true
-  CreateCheckConstraints: false
-  SampleValidation: false
-  SampleSize: 100 (auto: default 100)
-  DataDir: /Users/john/.dmt
-
-Restartability:
-  CheckpointFrequency: 10 chunks
-  MaxRetries: 3
-  HistoryRetentionDays: 30
-
-Table Filters:
-  IncludeTables: [all]
-  ExcludeTables: [none]
-
-Memory Estimate:
-  Buffer Memory: ~762.9 MB (4 workers * 8 buffers * 50000 rows * 500 bytes/row)
-  Note: Actual memory depends on row sizes. Tables with large text columns use more.
-
-Notifications:
-  Slack: disabled
-
-AI Features:
-  Disabled (no API key)
-2026-01-16 05:03:29 [INFO] Runtime memory limit set to 25804 MB (Go GC soft limit)
-2026-01-16 05:03:29 [INFO] Extracting schema...
-2026-01-16 05:03:29 [INFO] Found 2 tables
-2026-01-16 05:03:29 [INFO] Creating target tables (drop and recreate)...
-2026-01-16 05:03:32 [INFO] Transferring data...
-Transferring   0% |                            | (0/1000010, 0 rows/hr) [0s:0s]                                                                               Transferring source_data   0% |                | (0/1000010, 0 rows/hr) [0s:0s]                                                                               Transferring (2 tables)   0% |                 | (0/1000010, 0 rows/hr) [0s:0s]                                                                               Transferring (2 tables)   0% |            | (3/1000010, 5 rows/s) [0s:60h55m7s]                                                                               Transferring source_data   5% |        | (50010/1000010, 47629 rows/s) [1s:19s]                                                                               Transferring source_data  15% |█      | (150010/1000010, 278598 rows/s) [1s:3s]                                                                               Transferring source_data  25% |█      | (250010/1000010, 278598 rows/s) [1s:2s]                                                                               Transferring source_data  30% |██     | (300010/1000010, 278598 rows/s) [1s:2s]                                                                               Transferring source_data  40% |██     | (400010/1000010, 327699 rows/s) [1s:1s]                                                                               Transferring source_data  45% |███    | (450010/1000010, 327699 rows/s) [2s:1s]                                                                               Transferring source_data  55% |███    | (550010/1000010, 327699 rows/s) [2s:1s]                                                                               Transferring source_data  65% |████   | (650010/1000010, 346920 rows/s) [2s:1s]                                                                               Transferring source_data  70% |████   | (700010/1000010, 346920 rows/s) [2s:0s]                                                                               Transferring source_data  80% |█████  | (800010/1000010, 340390 rows/s) [3s:0s]                                                                               Transferring source_data  90% |██████ | (900010/1000010, 340390 rows/s) [3s:0s]                                                                               Transferring source_data  95% |██████ | (950010/1000010, 326150 rows/s) [3s:0s]                                                                               Transferring source_data 100% |██████| (1000010/1000010, 279753 rows/s)
-2026-01-16 05:04:02 [INFO] Transfer complete: 10257210 rows in 33s (308528 rows/sec)
-2026-01-16 05:04:02 [INFO] Finalizing...
-2026-01-16 05:04:15 [INFO] Validating...
-
-2026-01-16 05:04:15 [INFO] Validation Results:
-2026-01-16 05:04:15 [INFO] -------------------
-2026-01-16 05:04:15 [INFO] seed                           OK 10 rows
-2026-01-16 05:04:15 [INFO] source_data                    OK 10257200 rows
-2026-01-16 05:04:15 [INFO] Migration complete: 2 tables, 1000010 rows in 46s (21580 rows/sec)
