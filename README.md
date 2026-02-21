@@ -667,30 +667,77 @@ Previously, all spatial data was converted with hardcoded SRID 4326. Now the act
 
 ## Features
 
-- **Bidirectional migration** - SQL Server ↔ PostgreSQL
-- **AI-assisted type mapping** - LLM-powered type inference for complex migrations (Claude, OpenAI, Gemini)
-- **Incremental sync** - Date-based highwater marks for fast delta transfers (seconds vs minutes)
-- **Auto-tuning** - Workers, connection pools, and buffers sized based on CPU/RAM
-- **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or TDS bulk copy (PG→MSSQL)
-- **Pipelined I/O** - Read-ahead buffering and parallel writers for maximum throughput
-- **Keyset pagination** for single-column integer PKs (no OFFSET performance degradation)
-- **ROW_NUMBER pagination** for composite/varchar PKs
-- **Parallel partitioning** - Large tables split via NTILE for concurrent transfer
-- **Chunk-level resume** - Progress saved every 10 chunks, resume from exact position
-- **Table-level resume** - Skip already-completed tables on restart
-- **Idempotent retries** - Partition cleanup on retry prevents duplicates
-- **Identity column support** - Preserves auto-increment behavior with sequence reset
-- **Row count validation** after transfer
-- **Sample data validation** - Random row verification with composite PK support
-- **Slack notifications** - Get notified on start, completion, and failures
-- **Progress bar** with real-time throughput stats
-- **Index creation** - Non-PK indexes (optional)
-- **Foreign key creation** (optional)
-- **Check constraint creation** (optional)
-- **Table filtering** - Include/exclude tables with glob patterns
-- **Strict consistency mode** - Disable NOLOCK for consistent reads
-- **YAML configuration** with environment variable support
-- **Single binary** - no runtime dependencies
+### Database Support
+- **PostgreSQL, SQL Server, MySQL** - migrate between any combination
+- **Bulk copy protocols** - PostgreSQL COPY, TDS bulk copy, MySQL LOAD DATA for maximum throughput
+- **Kerberos authentication** - SPNEGO/keytab support for SQL Server and PostgreSQL
+- **SSL/TLS encryption** - configurable per connection
+
+### Transfer Engine
+- **Pipelined I/O** - read-ahead buffering with parallel writers (222K-645K rows/sec)
+- **Keyset pagination** - efficient partitioning for integer PKs (no OFFSET degradation)
+- **ROW_NUMBER pagination** - automatic fallback for composite/varchar PKs
+- **Parallel partitioning** - large tables split via NTILE for concurrent transfer
+- **Auto-tuning** - workers, connection pools, and buffers sized from CPU/RAM
+- **Memory-bounded** - configurable memory cap (default: 70% available RAM)
+
+### AI Integration
+- **Multi-provider** - Claude, OpenAI, Gemini, Ollama, LM Studio
+- **Type mapping** - LLM-powered cross-database type inference with caching
+- **Smart config analysis** - analyze source database and recommend optimal parameters (`analyze` command)
+- **Real-time parameter tuning** - monitor performance and auto-adjust workers, chunk size, buffers mid-migration
+- **Error diagnosis** - AI-powered root cause analysis with remediation suggestions
+
+### Checkpoint & Resume
+- **Chunk-level resume** - progress saved every N chunks, resume from exact position
+- **Table-level resume** - skip already-completed tables on restart
+- **Idempotent retries** - partition cleanup on retry prevents duplicates
+- **State backends** - SQLite (default) or YAML file for Airflow/headless environments
+- **Config validation** - prevents resume with mismatched configuration
+
+### Incremental Sync
+- **Upsert mode** - INSERT new rows, UPDATE changed rows, preserve target-only data
+- **Date-based highwater marks** - only transfer rows modified since last sync
+- **Configurable date columns** - tries multiple column names in order
+
+### Interactive Mode (TUI)
+- **Slash commands** - `/run`, `/resume`, `/analyze`, `/wizard`, `/status`, `/history`, `/validate`, and more
+- **Auto-completion** - tab-complete commands and `@` file browser for config selection
+- **Configuration wizard** - interactive setup for source, target, and tuning parameters
+- **Live monitoring** - real-time migration progress with log capture
+
+### CLI & Automation
+- **Commands** - `run`, `resume`, `status`, `validate`, `history`, `health-check`, `analyze`, `init`, `profile`
+- **Dry-run mode** - preview migration plan without execution
+- **JSON output** - structured results to stdout or file for orchestration tools
+- **Exit codes** - semantic codes for retry logic (success, transient, config error, cancelled)
+- **Airflow integration** - YAML state files, explicit run IDs, BashOperator/KubernetesPodOperator support
+- **Graceful shutdown** - SIGINT/SIGTERM handling with configurable timeout and checkpoint save
+
+### Security
+- **Encrypted profiles** - AES-encrypted configs stored in SQLite with master key
+- **Secret templates** - `${env:VAR}`, `${file:/path}` for credentials (no plaintext in config)
+- **Credential redaction** - passwords never stored in state database or logs
+- **Secure permissions** - 0600 files, 0700 directories enforced automatically
+
+### Schema Management
+- **Full schema transfer** - tables, primary keys, indexes, foreign keys, check constraints
+- **Identity/sequence reset** - preserves auto-increment values after transfer
+- **Table filtering** - include/exclude tables with glob patterns
+- **Strict consistency mode** - table locks instead of NOLOCK for consistent reads
+
+### Observability
+- **Progress bar** - real-time throughput stats with ETA
+- **Slack notifications** - start, completion, and failure alerts
+- **JSON progress** - streaming updates to stderr for monitoring dashboards
+- **Verbosity levels** - debug, info, warn, error with text or JSON log format
+- **Row count validation** - automatic post-transfer verification
+- **Sample data validation** - random row verification with composite PK support
+
+### Deployment
+- **Single binary** - no runtime dependencies, no CGO
+- **Cross-platform** - Linux, macOS (Intel + Apple Silicon), Windows
+- **YAML configuration** - with environment variable expansion
 
 ## Installation
 
