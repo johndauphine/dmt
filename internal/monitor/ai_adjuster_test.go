@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -144,49 +145,43 @@ func TestConsecutiveAdjustments(t *testing.T) {
 }
 
 func TestSystemResourceValidation(t *testing.T) {
-	t.Run("workers cannot exceed CPU cores", func(t *testing.T) {
+	t.Run("workers beyond CPU cores are accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
 		aa.systemResources.CPUCores = 8
-		aa.systemResources.MaxTargetConnections = 20 // High enough to not be the limit
-
-		initialSnap := aa.tuner.Snapshot()
+		aa.systemResources.MaxTargetConnections = 20
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
-			Adjustments: map[string]int{"workers": 12}, // Exceeds 8 cores
+			Adjustments: map[string]int{"workers": 12}, // Exceeds 8 cores but allowed
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
 
 		aa.ApplyDecision(decision)
 
-		// Workers should NOT have changed (exceeds CPU cores)
 		snap := aa.tuner.Snapshot()
-		if snap.WriteAheadWriters != initialSnap.WriteAheadWriters {
-			t.Errorf("expected workers unchanged (validation failed), got %d", snap.WriteAheadWriters)
+		if snap.WriteAheadWriters != 12 {
+			t.Errorf("expected workers=12 (no safety guard), got %d", snap.WriteAheadWriters)
 		}
 	})
 
-	t.Run("workers cannot exceed max connections", func(t *testing.T) {
+	t.Run("workers beyond max connections are accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
 		aa.systemResources.CPUCores = 16
-		aa.systemResources.MaxTargetConnections = 6 // Lower than CPU cores
-
-		initialSnap := aa.tuner.Snapshot()
+		aa.systemResources.MaxTargetConnections = 6
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
-			Adjustments: map[string]int{"workers": 10}, // Exceeds 6 connections
+			Adjustments: map[string]int{"workers": 10}, // Exceeds 6 connections but allowed
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
 
 		aa.ApplyDecision(decision)
 
-		// Workers should NOT have changed (exceeds max connections)
 		snap := aa.tuner.Snapshot()
-		if snap.WriteAheadWriters != initialSnap.WriteAheadWriters {
-			t.Errorf("expected workers unchanged (validation failed), got %d", snap.WriteAheadWriters)
+		if snap.WriteAheadWriters != 10 {
+			t.Errorf("expected workers=10 (no safety guard), got %d", snap.WriteAheadWriters)
 		}
 	})
 
@@ -213,13 +208,12 @@ func TestSystemResourceValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("chunk_size too small rejected", func(t *testing.T) {
+	t.Run("small chunk_size accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "reduce_chunk",
-			Adjustments: map[string]int{"chunk_size": 500}, // Below 1000 minimum
+			Adjustments: map[string]int{"chunk_size": 500},
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
@@ -227,18 +221,17 @@ func TestSystemResourceValidation(t *testing.T) {
 		aa.ApplyDecision(decision)
 
 		snap := aa.tuner.Snapshot()
-		if snap.ChunkSize != initialSnap.ChunkSize {
-			t.Errorf("expected chunk_size unchanged (too small), got %d", snap.ChunkSize)
+		if snap.ChunkSize != 500 {
+			t.Errorf("expected chunk_size=500 (no safety guard), got %d", snap.ChunkSize)
 		}
 	})
 
-	t.Run("chunk_size too large rejected", func(t *testing.T) {
+	t.Run("large chunk_size accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
-			Adjustments: map[string]int{"chunk_size": 1000000}, // Above 500000 max
+			Adjustments: map[string]int{"chunk_size": 1000000},
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
@@ -246,8 +239,8 @@ func TestSystemResourceValidation(t *testing.T) {
 		aa.ApplyDecision(decision)
 
 		snap := aa.tuner.Snapshot()
-		if snap.ChunkSize != initialSnap.ChunkSize {
-			t.Errorf("expected chunk_size unchanged (too large), got %d", snap.ChunkSize)
+		if snap.ChunkSize != 1000000 {
+			t.Errorf("expected chunk_size=1000000 (no safety guard), got %d", snap.ChunkSize)
 		}
 	})
 
@@ -411,13 +404,12 @@ func TestEmptyAdjustmentsNotApplied(t *testing.T) {
 }
 
 func TestCheckpointFrequencyValidation(t *testing.T) {
-	t.Run("checkpoint_frequency too small rejected", func(t *testing.T) {
+	t.Run("checkpoint_frequency zero clamped to 1", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
-			Adjustments: map[string]int{"checkpoint_frequency": 0}, // Below 1 minimum
+			Adjustments: map[string]int{"checkpoint_frequency": 0},
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
@@ -425,18 +417,17 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 		aa.ApplyDecision(decision)
 
 		snap := aa.tuner.Snapshot()
-		if snap.CheckpointFrequency != initialSnap.CheckpointFrequency {
-			t.Errorf("expected checkpoint_frequency unchanged (too small), got %d", snap.CheckpointFrequency)
+		if snap.CheckpointFrequency != 1 {
+			t.Errorf("expected checkpoint_frequency=1 (clamped from 0), got %d", snap.CheckpointFrequency)
 		}
 	})
 
-	t.Run("checkpoint_frequency too large rejected", func(t *testing.T) {
+	t.Run("large checkpoint_frequency accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
-			Adjustments: map[string]int{"checkpoint_frequency": 150}, // Above 100 max
+			Adjustments: map[string]int{"checkpoint_frequency": 150},
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
@@ -444,8 +435,8 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 		aa.ApplyDecision(decision)
 
 		snap := aa.tuner.Snapshot()
-		if snap.CheckpointFrequency != initialSnap.CheckpointFrequency {
-			t.Errorf("expected checkpoint_frequency unchanged (too large), got %d", snap.CheckpointFrequency)
+		if snap.CheckpointFrequency != 150 {
+			t.Errorf("expected checkpoint_frequency=150 (no safety guard), got %d", snap.CheckpointFrequency)
 		}
 	})
 
@@ -469,13 +460,12 @@ func TestCheckpointFrequencyValidation(t *testing.T) {
 }
 
 func TestUpsertMergeChunkSizeValidation(t *testing.T) {
-	t.Run("upsert_merge_chunk_size too small rejected", func(t *testing.T) {
+	t.Run("small upsert_merge_chunk_size accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_down",
-			Adjustments: map[string]int{"upsert_merge_chunk_size": 500}, // Below 1000 minimum
+			Adjustments: map[string]int{"upsert_merge_chunk_size": 500},
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
@@ -483,18 +473,17 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 		aa.ApplyDecision(decision)
 
 		snap := aa.tuner.Snapshot()
-		if snap.UpsertMergeChunkSize != initialSnap.UpsertMergeChunkSize {
-			t.Errorf("expected upsert_merge_chunk_size unchanged (too small), got %d", snap.UpsertMergeChunkSize)
+		if snap.UpsertMergeChunkSize != 500 {
+			t.Errorf("expected upsert_merge_chunk_size=500 (no safety guard), got %d", snap.UpsertMergeChunkSize)
 		}
 	})
 
-	t.Run("upsert_merge_chunk_size too large rejected", func(t *testing.T) {
+	t.Run("large upsert_merge_chunk_size accepted (no safety guard)", func(t *testing.T) {
 		aa := createTestAdjuster()
-		initialSnap := aa.tuner.Snapshot()
 
 		decision := &AdjustmentDecision{
 			Action:      "scale_up",
-			Adjustments: map[string]int{"upsert_merge_chunk_size": 100000}, // Above 50000 max
+			Adjustments: map[string]int{"upsert_merge_chunk_size": 100000},
 			Reasoning:   "test",
 			Confidence:  "high",
 		}
@@ -502,8 +491,8 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 		aa.ApplyDecision(decision)
 
 		snap := aa.tuner.Snapshot()
-		if snap.UpsertMergeChunkSize != initialSnap.UpsertMergeChunkSize {
-			t.Errorf("expected upsert_merge_chunk_size unchanged (too large), got %d", snap.UpsertMergeChunkSize)
+		if snap.UpsertMergeChunkSize != 100000 {
+			t.Errorf("expected upsert_merge_chunk_size=100000 (no safety guard), got %d", snap.UpsertMergeChunkSize)
 		}
 	})
 
@@ -524,6 +513,72 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 			t.Errorf("expected upsert_merge_chunk_size=10000, got %d", snap.UpsertMergeChunkSize)
 		}
 	})
+}
+
+func TestSkipNearCompletion(t *testing.T) {
+	t.Run("skips adjustments when transfer >90% complete", func(t *testing.T) {
+		aa := createTestAdjuster()
+		aa.baselineCaptured = true
+		aa.baselineMetrics = &PerformanceSnapshot{Throughput: 100000}
+
+		// Set total rows and update collector to show >90%
+		aa.SetTotalRows(100000)
+		aa.collector.metrics = []PerformanceSnapshot{
+			{RowsProcessed: 95000, Throughput: 100000, CPUPercent: 50, MemoryPercent: 60},
+		}
+
+		decision, err := aa.Evaluate(nil)
+		if err != nil {
+			t.Fatalf("Evaluate returned error: %v", err)
+		}
+		if decision == nil {
+			t.Fatal("expected a decision, got nil")
+		}
+		if decision.Action != "continue" {
+			t.Errorf("expected action 'continue' when >90%% complete, got %q", decision.Action)
+		}
+	})
+
+	t.Run("does not skip when transfer <90% complete", func(t *testing.T) {
+		aa := createTestAdjuster()
+		aa.baselineCaptured = true
+		aa.baselineMetrics = &PerformanceSnapshot{Throughput: 100000}
+
+		// Set total rows and update collector to show 50%
+		aa.SetTotalRows(100000)
+		aa.collector.metrics = []PerformanceSnapshot{
+			{RowsProcessed: 50000, Throughput: 100000, CPUPercent: 50, MemoryPercent: 60},
+		}
+
+		// At 50%, fallbackRules should be called (not the completion skip)
+		// Since there's no aiMapper, Evaluate will use fallback rules
+		decision := aa.fallbackRules()
+		if decision == nil {
+			t.Fatal("expected a fallback decision")
+		}
+		// Fallback should not mention completion
+		if decision.Action == "continue" && strings.Contains(decision.Reasoning, "complete") {
+			t.Error("should not skip adjustments when <90% complete")
+		}
+	})
+}
+
+func TestReadAheadBuffersZeroAllowed(t *testing.T) {
+	aa := createTestAdjuster()
+
+	decision := &AdjustmentDecision{
+		Action:      "scale_down",
+		Adjustments: map[string]int{"read_ahead_buffers": 0},
+		Reasoning:   "disable buffering",
+		Confidence:  "high",
+	}
+
+	aa.ApplyDecision(decision)
+
+	snap := aa.tuner.Snapshot()
+	if snap.ReadAheadBuffers != 0 {
+		t.Errorf("expected read_ahead_buffers=0 (valid), got %d", snap.ReadAheadBuffers)
+	}
 }
 
 func TestFallbackRulesWithBaseline(t *testing.T) {

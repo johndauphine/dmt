@@ -1,12 +1,12 @@
-# StackOverflow2010 benchmark - AI-suggested tuning
-# Source: mssql-so2010 (port 1433)
-# Target: postgres-target (port 5432)
+# StackOverflow2013 benchmark - AI-suggested tuning
+# Source: mssql (port 1433)
+# Target: postgres (port 5432)
 
 source:
   type: mssql
   host: localhost
   port: 1433
-  database: StackOverflow2010
+  database: StackOverflow2013
   user: sa
   password: ${MSSQL_PASSWORD}  # Set via environment variable
   schema: dbo
@@ -17,7 +17,7 @@ target:
   type: postgres
   host: localhost
   port: 5432
-  database: stackoverflow
+  database: so2013
   user: postgres
   password: ${POSTGRES_PASSWORD}  # Set via environment variable
   schema: public

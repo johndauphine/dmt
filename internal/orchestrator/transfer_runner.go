@@ -145,6 +145,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 				// Set state backend for persistent history
 				aiMonitor.SetStateBackend(r.state, runID)
 
+				// Set total rows so adjuster skips adjustments near completion
+				aiMonitor.SetTotalRows(totalRows)
+
 				// Start monitoring in background
 				monitorCtx, cancelMonitor := context.WithCancel(ctx)
 				defer cancelMonitor()

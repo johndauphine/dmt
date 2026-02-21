@@ -46,6 +46,11 @@ func (am *AIMonitor) SetStateBackend(state checkpoint.StateBackend, runID string
 	am.adjuster.SetStateBackend(state, runID)
 }
 
+// SetTotalRows sets the total rows so the adjuster skips adjustments near completion.
+func (am *AIMonitor) SetTotalRows(total int64) {
+	am.adjuster.SetTotalRows(total)
+}
+
 // UpdateRowsProcessed updates the count of rows transferred.
 func (am *AIMonitor) UpdateRowsProcessed(count int64) {
 	am.rowsProcessed = count
