@@ -136,6 +136,8 @@ func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, t
 // SetTotalRows sets the total rows for the migration so the adjuster can
 // skip adjustments when the transfer is nearly complete.
 func (aa *AIAdjuster) SetTotalRows(total int64) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
 	aa.totalRows = total
 }
 
@@ -328,8 +330,14 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	if memInfo, err := mem.VirtualMemory(); err == nil {
 		availMB := int64(memInfo.Available / 1024 / 1024)
 		usedMB := int64(memInfo.Used / 1024 / 1024)
-		sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (%.1f%% free)\n", availMB, float64(availMB)/float64(aa.systemResources.MemoryTotalMB)*100))
-		sb.WriteString(fmt.Sprintf("- Used RAM: %d MB (%.1f%% used)\n", usedMB, float64(usedMB)/float64(aa.systemResources.MemoryTotalMB)*100))
+		totalMB := int64(memInfo.Total / 1024 / 1024)
+		if totalMB > 0 {
+			sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (%.1f%% free)\n", availMB, float64(availMB)/float64(totalMB)*100))
+			sb.WriteString(fmt.Sprintf("- Used RAM: %d MB (%.1f%% used)\n", usedMB, float64(usedMB)/float64(totalMB)*100))
+		} else {
+			sb.WriteString(fmt.Sprintf("- Available RAM: %d MB\n", availMB))
+			sb.WriteString(fmt.Sprintf("- Used RAM: %d MB\n", usedMB))
+		}
 	} else {
 		sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (at startup)\n", aa.systemResources.MemoryAvailableMB))
 	}
@@ -556,11 +564,15 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		throughputBefore = metrics[0].Throughput
 	}
 
-	// Clamp adjustments to absolute minimums only (let AI learn from effectiveness tracking)
+	// Clamp adjustments to per-parameter minimums (let AI learn from effectiveness tracking)
 	for param, value := range decision.Adjustments {
-		if value < 1 {
-			logging.Debug("AI adjustment clamped: %s=%d → 1 (minimum)", param, value)
-			decision.Adjustments[param] = 1
+		minVal := 1
+		if param == "read_ahead_buffers" {
+			minVal = 0 // read_ahead_buffers=0 is valid (disables buffering)
+		}
+		if value < minVal {
+			logging.Debug("AI adjustment clamped: %s=%d → %d (minimum)", param, value, minVal)
+			decision.Adjustments[param] = minVal
 		}
 	}
 

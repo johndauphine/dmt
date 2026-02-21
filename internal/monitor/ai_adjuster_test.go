@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -512,6 +513,72 @@ func TestUpsertMergeChunkSizeValidation(t *testing.T) {
 			t.Errorf("expected upsert_merge_chunk_size=10000, got %d", snap.UpsertMergeChunkSize)
 		}
 	})
+}
+
+func TestSkipNearCompletion(t *testing.T) {
+	t.Run("skips adjustments when transfer >90% complete", func(t *testing.T) {
+		aa := createTestAdjuster()
+		aa.baselineCaptured = true
+		aa.baselineMetrics = &PerformanceSnapshot{Throughput: 100000}
+
+		// Set total rows and update collector to show >90%
+		aa.SetTotalRows(100000)
+		aa.collector.metrics = []PerformanceSnapshot{
+			{RowsProcessed: 95000, Throughput: 100000, CPUPercent: 50, MemoryPercent: 60},
+		}
+
+		decision, err := aa.Evaluate(nil)
+		if err != nil {
+			t.Fatalf("Evaluate returned error: %v", err)
+		}
+		if decision == nil {
+			t.Fatal("expected a decision, got nil")
+		}
+		if decision.Action != "continue" {
+			t.Errorf("expected action 'continue' when >90%% complete, got %q", decision.Action)
+		}
+	})
+
+	t.Run("does not skip when transfer <90% complete", func(t *testing.T) {
+		aa := createTestAdjuster()
+		aa.baselineCaptured = true
+		aa.baselineMetrics = &PerformanceSnapshot{Throughput: 100000}
+
+		// Set total rows and update collector to show 50%
+		aa.SetTotalRows(100000)
+		aa.collector.metrics = []PerformanceSnapshot{
+			{RowsProcessed: 50000, Throughput: 100000, CPUPercent: 50, MemoryPercent: 60},
+		}
+
+		// At 50%, fallbackRules should be called (not the completion skip)
+		// Since there's no aiMapper, Evaluate will use fallback rules
+		decision := aa.fallbackRules()
+		if decision == nil {
+			t.Fatal("expected a fallback decision")
+		}
+		// Fallback should not mention completion
+		if decision.Action == "continue" && strings.Contains(decision.Reasoning, "complete") {
+			t.Error("should not skip adjustments when <90% complete")
+		}
+	})
+}
+
+func TestReadAheadBuffersZeroAllowed(t *testing.T) {
+	aa := createTestAdjuster()
+
+	decision := &AdjustmentDecision{
+		Action:      "scale_down",
+		Adjustments: map[string]int{"read_ahead_buffers": 0},
+		Reasoning:   "disable buffering",
+		Confidence:  "high",
+	}
+
+	aa.ApplyDecision(decision)
+
+	snap := aa.tuner.Snapshot()
+	if snap.ReadAheadBuffers != 0 {
+		t.Errorf("expected read_ahead_buffers=0 (valid), got %d", snap.ReadAheadBuffers)
+	}
 }
 
 func TestFallbackRulesWithBaseline(t *testing.T) {

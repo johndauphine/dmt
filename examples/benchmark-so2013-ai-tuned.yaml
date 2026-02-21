@@ -1,6 +1,6 @@
 # StackOverflow2013 benchmark - AI-suggested tuning
 # Source: mssql (port 1433)
-# Target: postgres (port 5433)
+# Target: postgres (port 5432)
 
 source:
   type: mssql
