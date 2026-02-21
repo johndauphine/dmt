@@ -96,9 +96,9 @@ migration:
 - **Primary keys required** - Both source and target tables must have PKs
 - **Tables without date columns** - Fall back to full table comparison (slower)
 
-## AI-Driven Real-Time Parameter Adjustment (New in v3.31.0)
+## AI-Driven Real-Time Parameter Adjustment
 
-Continuously monitor migration performance and automatically adjust parameters in real-time. This feature adapts parameters during execution based on actual resource usage and throughput patterns.
+Continuously monitor migration performance and automatically adjust parameters in real-time. The tuner receives live system resource data (CPU cores, available RAM, connection limits) and makes informed decisions without hard-coded safety guards — an effectiveness tracker measures each adjustment's impact and pauses tuning if consecutive changes hurt performance.
 
 ### Quick Start
 
@@ -106,111 +106,91 @@ Enable in `config.yaml`:
 
 ```yaml
 migration:
-  # Use calibration to find initial parameters
-  chunk_size: 10000
-  workers: 4
-  read_ahead_buffers: 8
-
-  # Enable AI-driven real-time adjustment
   ai_adjust: true
   ai_adjust_interval: 30s
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}
   provider: claude
-  model: claude-sonnet-4-20250514  # Recommended for best results
 ```
 
 ### How It Works
 
-1. **Continuous Monitoring**: Every 30 seconds, collects 30+ performance metrics:
-   - Throughput (rows/sec), memory usage, CPU utilization
+1. **Continuous Monitoring**: Every 30 seconds, collects performance metrics:
+   - Windowed throughput (rows/sec), memory usage, CPU utilization
    - Query latency, write latency, queue depth
-   - Current configuration state
 
-2. **Trend Analysis**: Detects patterns:
-   - Throughput declining >10% over 3 samples
-   - Memory increasing >5% per sample
-   - CPU or memory saturation (>90% / >85%)
+2. **Resource-Aware Prompting**: The AI receives live system state:
+   - CPU cores, available/used RAM, max database connections
+   - Current parameter values and adjustment history
+   - Effectiveness of previous adjustments
 
-3. **AI Decision Making**: Claude analyzes trends and recommends adjustments:
+3. **AI Decision Making**: Analyzes trends and recommends adjustments:
    - **Scale up**: Increase workers or chunk_size if resources available
    - **Scale down**: Reduce workers to minimize lock contention
    - **Reduce chunk**: Decrease batch size if memory pressure detected
    - **Continue**: Maintain current parameters if performance optimal
 
-4. **Safe Application**: Updates applied at chunk boundaries, never mid-transfer
-   - Includes validation: rollback if throughput degrades >20%
-   - Circuit breaker: disables after 3 consecutive failures
+4. **Safety Mechanisms**:
+   - **Post-adjustment cooldown** (90s) — waits for metrics to stabilize before next adjustment
+   - **Effectiveness tracking** — measures throughput change after each adjustment
+   - **Consecutive-negative breaker** — pauses tuning after 3 adjustments that hurt performance
+   - **Completion skip** — no adjustments when transfer is >90% complete
+   - **API circuit breaker** — disables after 3 consecutive API/parse failures
+   - Updates applied at chunk boundaries, never mid-transfer
 
-### Performance Impact
+### Performance
 
-Tested on Stack Overflow 2013 (106.5M rows):
+Tested on Stack Overflow 2013 dataset (106.5M rows, MSSQL to PostgreSQL):
 
 ```
-Configuration                Duration    Throughput      Result
-─────────────────────────────────────────────────────────────────
-Baseline (No AI)             5m 33s      319,680 r/s     Control
-AI-tuned (with Sonnet)       5m 23s      329,332 r/s     +3% faster ✓
+Configuration                Duration    Throughput
+──────────────────────────────────────────────────────────
+AI-tuned (Haiku)             5m 14s      339,393 r/s
+AI-tuned (Sonnet)            5m 14s      339,780 r/s
 ```
 
-**Key Finding**: claude-sonnet-4-20250514 model delivers superior optimization decisions due to better reasoning about hardware constraints and parameter relationships.
+Haiku and Sonnet produce identical results — Haiku recommended for lower cost.
 
 ### Configuration
 
 ```yaml
 migration:
-  # AI adjustment settings
-  ai_adjust: true                  # Enable/disable real-time optimization
+  ai_adjust: true                  # Enable/disable (default: true when AI configured)
   ai_adjust_interval: 30s          # Evaluation interval (default: 30s)
 
-  # Initial parameters (AI starts here, then adjusts)
-  chunk_size: 10000                # Batch size (10K-200K range)
-  workers: 4                       # Parallel workers (1-16 range)
-  read_ahead_buffers: 8            # Source buffering
-  write_ahead_writers: 2           # Target writers
-  parallel_readers: 2              # Parallel source connections
+  # Initial parameters (AI adjusts from here)
+  chunk_size: 10000
+  workers: 4
+  read_ahead_buffers: 8
+  write_ahead_writers: 2
+  parallel_readers: 2
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}
-  provider: claude
-  model: claude-sonnet-4-20250514  # Recommended; claude-opus-4-20251701 also good
-  timeout_seconds: 30              # AI decision timeout
+  provider: claude                 # Also: openai, gemini, ollama, lmstudio
+  model: claude-haiku-4-5-20251001 # Recommended (cheapest, same results as Sonnet)
+  timeout_seconds: 30
 ```
 
-### Cost & Performance
+### Cost
 
-- **API Calls**: ~2-3 per minute with decision caching (60s cache)
-- **Cost**: ~$0.01-0.02 per hour of migration
-- **Benefit**: 3-5% throughput improvement on production workloads
+- **API Calls**: ~1-2 per minute (60s cache + 90s cooldown between adjustments)
+- **Cost**: ~$0.005-0.01 per hour with Haiku
 - **Fallback**: Heuristic rules apply if AI unavailable
-
-### Best Practices
-
-1. **Use Sonnet model**: `claude-sonnet-4-20250514` recommended for optimization
-2. **Start with reasonable defaults**: Use workers=4, chunk_size=50000 as starting points
-3. **Enable for long migrations**: Benefit increases with migration duration (>5 minutes)
-4. **Monitor first 30 seconds**: Watch initial adjustments to understand behavior
-5. **Production safe**: All adjustments non-destructive; circuit breaker prevents issues
-
-### Limitations
-
-- **Short migrations** (<2 minutes): Limited adjustment cycles, minimal benefit
-- **Variable workloads**: Adjustment lags behind rapid changes (30s interval)
-- **Fixed optimal config**: Some workloads have inherently optimal parameters that can't be improved
 
 ### Troubleshooting
 
 **AI adjustment not happening:**
 - Check logs for "AI monitoring started" message
 - Verify `ai_adjust: true` in config
-- Verify API key set: `echo $ANTHROPIC_API_KEY`
-- Check evaluation interval - defaults to 30s
+- Verify API key: `echo $ANTHROPIC_API_KEY`
+- Tuner skips adjustments when >90% complete or during 90s post-adjustment cooldown
 
 **Performance degradation:**
-- Ensure initial parameters are reasonable (e.g., workers=4, not workers=1)
-- Check CPU/memory saturation in system metrics
-- Disable with `ai_adjust: false` and use fixed parameters
+- The effectiveness tracker will automatically pause after 3 negative adjustments
+- Check `--verbosity debug` logs for "AI adjustment effect" measurements
+- Disable with `ai_adjust: false` to use fixed parameters
 
 ## Encrypted Profiles (SQLite)
 
