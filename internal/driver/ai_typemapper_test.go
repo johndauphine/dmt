@@ -86,7 +86,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"claude", "claude-sonnet-4-20250514"},
+		{"claude", "claude-sonnet-4-6"},
 		{"openai", "gpt-4o"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},

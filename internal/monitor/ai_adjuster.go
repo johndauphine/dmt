@@ -20,6 +20,15 @@ const (
 	// effectivenessThreshold defines the minimum percentage improvement
 	// for an adjustment to be considered effective
 	effectivenessThreshold = 5.0
+
+	// adjustmentCooldown is the minimum time between applying adjustments.
+	// This gives ~3 metric samples (at 30s intervals) to stabilize before
+	// the next adjustment, preventing cascading changes.
+	adjustmentCooldown = 90 * time.Second
+
+	// negativeEffectThreshold is the number of consecutive adjustments with
+	// negative impact before the effectiveness circuit breaker fires.
+	negativeEffectThreshold = 3
 )
 
 // AdjustmentDecision represents AI's recommendation for parameter adjustments.
@@ -82,11 +91,16 @@ type AIAdjuster struct {
 	cacheDuration  time.Duration
 	cachedDecision *AdjustmentDecision
 
-	// Circuit breaker
+	// Circuit breaker (API failures)
 	failureCount     int
 	failureThreshold int
 	resetTimeout     time.Duration
 	circuitOpen      bool
+
+	// Effectiveness circuit breaker (consecutive bad adjustments)
+	consecutiveNegative     int
+	effectivenessOpenedAt   time.Time     // when effectiveness breaker fired
+	effectivenessResetAfter time.Duration // auto-reset timeout
 
 	// Persistent history
 	state checkpoint.StateBackend
@@ -103,10 +117,11 @@ func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, t
 		callInterval:      30 * time.Second, // Throttle to 30s intervals
 		cacheDuration:     60 * time.Second, // Cache decisions for 60s
 		failureThreshold:  3,
-		resetTimeout:      5 * time.Minute,
-		circuitOpen:       false,
-		maxHistorySize:    10, // Keep last 10 adjustments
-		adjustmentHistory: make([]AdjustmentRecord, 0, 10),
+		resetTimeout:           5 * time.Minute,
+		circuitOpen:            false,
+		effectivenessResetAfter: 10 * time.Minute,
+		maxHistorySize:         10, // Keep last 10 adjustments
+		adjustmentHistory:      make([]AdjustmentRecord, 0, 10),
 	}
 
 	// Gather system resources
@@ -190,9 +205,44 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 	// Capture baseline when we have enough data
 	aa.captureBaseline()
 
-	// Check circuit breaker
+	// Check circuit breaker (API failures)
 	if aa.circuitOpen {
 		return nil, fmt.Errorf("circuit breaker OPEN - AI adjustments temporarily disabled")
+	}
+
+	// Check effectiveness circuit breaker (consecutive bad adjustments)
+	if aa.consecutiveNegative >= negativeEffectThreshold {
+		// Auto-reset after timeout to allow retrying
+		if !aa.effectivenessOpenedAt.IsZero() && time.Since(aa.effectivenessOpenedAt) >= aa.effectivenessResetAfter {
+			logging.Debug("AI adjuster effectiveness breaker reset after %v", aa.effectivenessResetAfter)
+			aa.consecutiveNegative = 0
+			aa.effectivenessOpenedAt = time.Time{}
+		} else {
+			if aa.effectivenessOpenedAt.IsZero() {
+				aa.effectivenessOpenedAt = time.Now()
+			}
+			logging.Warn("AI adjuster paused: %d consecutive adjustments had negative effect (resets in %v)",
+				aa.consecutiveNegative, aa.effectivenessResetAfter-time.Since(aa.effectivenessOpenedAt))
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   fmt.Sprintf("Pausing adjustments after %d consecutive negative effects", aa.consecutiveNegative),
+				Confidence:  "high",
+				Adjustments: make(map[string]int),
+			}, nil
+		}
+	}
+
+	// Check post-adjustment cooldown: wait for metrics to stabilize after
+	// the last adjustment before evaluating again
+	if !aa.lastAdjustment.IsZero() && time.Since(aa.lastAdjustment) < adjustmentCooldown {
+		remaining := adjustmentCooldown - time.Since(aa.lastAdjustment)
+		logging.Debug("AI adjuster cooldown: %.0fs remaining after last adjustment", remaining.Seconds())
+		return &AdjustmentDecision{
+			Action:      "continue",
+			Reasoning:   fmt.Sprintf("Cooling down after last adjustment (%.0fs remaining)", remaining.Seconds()),
+			Confidence:  "high",
+			Adjustments: make(map[string]int),
+		}, nil
 	}
 
 	// Check cache
@@ -408,18 +458,32 @@ Return ONLY valid JSON:
 	return sb.String()
 }
 
+// extractJSON finds the outermost JSON object in a string by matching braces.
+// Handles responses wrapped in markdown fences, with trailing prose, etc.
+func extractJSON(s string) string {
+	first := strings.Index(s, "{")
+	if first == -1 {
+		return ""
+	}
+	last := strings.LastIndex(s, "}")
+	if last == -1 || last <= first {
+		return ""
+	}
+	return s[first : last+1]
+}
+
 // parseDecision parses the AI response into an AdjustmentDecision.
 func (aa *AIAdjuster) parseDecision(response string) (*AdjustmentDecision, error) {
-	// Clean up response
-	response = strings.TrimSpace(response)
-	response = strings.TrimPrefix(response, "```json")
-	response = strings.TrimPrefix(response, "```")
-	response = strings.TrimSuffix(response, "```")
-	response = strings.TrimSpace(response)
+	// Extract JSON by finding the outermost { ... } pair.
+	// This handles markdown fences, trailing prose, and other wrapper text.
+	jsonStr := extractJSON(response)
+	if jsonStr == "" {
+		return nil, fmt.Errorf("no JSON object found in response: %s", response)
+	}
 
 	var decision AdjustmentDecision
-	if err := json.Unmarshal([]byte(response), &decision); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w\nResponse: %s", err, response)
+	if err := json.Unmarshal([]byte(jsonStr), &decision); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w\nExtracted: %s", err, jsonStr)
 	}
 
 	// Validate
@@ -567,6 +631,15 @@ func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
 		record.EffectPercent = (record.ThroughputAfter - record.ThroughputBefore) / record.ThroughputBefore * 100
 		logging.Debug("AI adjustment effect: %s → throughput %+.1f%% (%.0f → %.0f rows/sec)",
 			record.Action, record.EffectPercent, record.ThroughputBefore, record.ThroughputAfter)
+
+		// Track consecutive negative effects for effectiveness circuit breaker
+		if record.EffectPercent < -5.0 {
+			aa.consecutiveNegative++
+			logging.Debug("AI adjuster consecutive negative effects: %d/%d",
+				aa.consecutiveNegative, negativeEffectThreshold)
+		} else if record.EffectPercent > 0 {
+			aa.consecutiveNegative = 0
+		}
 	}
 
 	// Update database with effect measurement

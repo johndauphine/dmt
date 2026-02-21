@@ -426,6 +426,7 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 type claudeRequest struct {
 	Model     string          `json:"model"`
 	MaxTokens int             `json:"max_tokens"`
+	System    string          `json:"system,omitempty"`
 	Messages  []claudeMessage `json:"messages"`
 }
 
@@ -656,9 +657,21 @@ func calculateBackoff(attempt int) time.Duration {
 
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
+
+	// Detect if this is a type mapping query (short, simple) vs a complex query
+	// (AI monitor, smart config, error diagnosis). Complex queries get a system
+	// prompt to improve structured output reliability.
+	maxTokens := 1024
+	systemPrompt := ""
+	if len(prompt) > 500 {
+		systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
+		maxTokens = 4096
+	}
+
 	reqBody := claudeRequest{
 		Model:     model,
-		MaxTokens: 1024,
+		MaxTokens: maxTokens,
+		System:    systemPrompt,
 		Messages: []claudeMessage{
 			{Role: "user", Content: prompt},
 		},

@@ -185,7 +185,7 @@ type AIConfig struct {
 
 	// Model specifies which model to use (optional).
 	// Defaults to smart models for accurate inference:
-	//   Claude: claude-sonnet-4-20250514
+	//   Claude: claude-sonnet-4-6
 	//   OpenAI: gpt-4o
 	//   Gemini: gemini-2.0-flash
 	Model string `yaml:"model"`
