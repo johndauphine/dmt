@@ -102,6 +102,9 @@ type AIAdjuster struct {
 	effectivenessOpenedAt   time.Time     // when effectiveness breaker fired
 	effectivenessResetAfter time.Duration // auto-reset timeout
 
+	// Transfer progress
+	totalRows int64
+
 	// Persistent history
 	state checkpoint.StateBackend
 	runID string
@@ -128,6 +131,12 @@ func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, t
 	aa.gatherSystemResources()
 
 	return aa
+}
+
+// SetTotalRows sets the total rows for the migration so the adjuster can
+// skip adjustments when the transfer is nearly complete.
+func (aa *AIAdjuster) SetTotalRows(total int64) {
+	aa.totalRows = total
 }
 
 // SetConnectionLimits sets the max connection limits for source and target.
@@ -245,6 +254,23 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 		}, nil
 	}
 
+	// Skip adjustments when transfer is nearly complete (>90%)
+	if aa.totalRows > 0 {
+		metrics := aa.collector.GetRecentMetrics(1)
+		if len(metrics) > 0 && metrics[0].RowsProcessed > 0 {
+			pct := float64(metrics[0].RowsProcessed) / float64(aa.totalRows) * 100
+			if pct >= 90 {
+				logging.Debug("AI adjuster skipping: transfer %.1f%% complete", pct)
+				return &AdjustmentDecision{
+					Action:      "continue",
+					Reasoning:   fmt.Sprintf("Transfer %.1f%% complete, no adjustments needed", pct),
+					Confidence:  "high",
+					Adjustments: make(map[string]int),
+				}, nil
+			}
+		}
+	}
+
 	// Check cache
 	if aa.cachedDecision != nil && time.Since(aa.lastAICall) < aa.cacheDuration {
 		logging.Debug("Using cached AI decision (age %.0fs)", time.Since(aa.lastAICall).Seconds())
@@ -295,11 +321,18 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 
 	sb.WriteString("Real-time database migration parameter adjustment.\n\n")
 
-	// System Resources
+	// System Resources (refresh available memory)
 	sb.WriteString("## System Resources\n")
 	sb.WriteString(fmt.Sprintf("- CPU cores: %d\n", aa.systemResources.CPUCores))
-	sb.WriteString(fmt.Sprintf("- Memory: %d MB available / %d MB total\n",
-		aa.systemResources.MemoryAvailableMB, aa.systemResources.MemoryTotalMB))
+	sb.WriteString(fmt.Sprintf("- Total RAM: %d MB\n", aa.systemResources.MemoryTotalMB))
+	if memInfo, err := mem.VirtualMemory(); err == nil {
+		availMB := int64(memInfo.Available / 1024 / 1024)
+		usedMB := int64(memInfo.Used / 1024 / 1024)
+		sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (%.1f%% free)\n", availMB, float64(availMB)/float64(aa.systemResources.MemoryTotalMB)*100))
+		sb.WriteString(fmt.Sprintf("- Used RAM: %d MB (%.1f%% used)\n", usedMB, float64(usedMB)/float64(aa.systemResources.MemoryTotalMB)*100))
+	} else {
+		sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (at startup)\n", aa.systemResources.MemoryAvailableMB))
+	}
 	if aa.systemResources.MaxSourceConnections > 0 {
 		sb.WriteString(fmt.Sprintf("- Max source connections: %d\n", aa.systemResources.MaxSourceConnections))
 	}
@@ -426,11 +459,15 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 
 	// Guidelines
 	sb.WriteString(`## Guidelines
-Based on system resources above, determine safe parameter ranges:
-- workers: Should not exceed CPU cores or max DB connections
-- chunk_size: Larger = better throughput, but watch memory usage
+Consider system resources when choosing parameter values:
+- workers: Consider CPU cores and max DB connections. More workers than cores may cause contention. More workers than max connections will fail.
+- parallel_readers: Consider max source connections. Each reader uses a connection.
+- chunk_size: Larger = better throughput, but each chunk is held in memory. Memory per chunk = chunk_size × avg_row_bytes.
+- read_ahead_buffers: Total buffered memory = workers × read_ahead_buffers × chunk_size × avg_row_bytes.
 - checkpoint_frequency: Higher = fewer checkpoints = better throughput; Lower = more safety on failure
 - upsert_merge_chunk_size: Smaller = less memory pressure on target DB; Only relevant in upsert mode
+
+There are no hard limits — you are free to try any value. If a change hurts performance, the effectiveness tracker will detect it and pause adjustments.
 
 Decision rules:
 1. **If within ±10% of baseline** → "continue" (stable, no changes needed)
@@ -519,11 +556,11 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		throughputBefore = metrics[0].Throughput
 	}
 
-	// Validate adjustments against system resources (AI-informed limits)
+	// Clamp adjustments to absolute minimums only (let AI learn from effectiveness tracking)
 	for param, value := range decision.Adjustments {
-		if err := aa.validateParameterWithResources(param, value); err != nil {
-			logging.Warn("AI adjustment rejected: %v", err)
-			return nil
+		if value < 1 {
+			logging.Debug("AI adjustment clamped: %s=%d → 1 (minimum)", param, value)
+			decision.Adjustments[param] = 1
 		}
 	}
 
@@ -660,51 +697,6 @@ func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
 			logging.Debug("Failed to update AI adjustment effect: %v", err)
 		}
 	}
-}
-
-// validateParameterWithResources validates against system resources.
-func (aa *AIAdjuster) validateParameterWithResources(param string, value int) error {
-	switch param {
-	case "chunk_size":
-		if value < 1000 || value > 500000 {
-			return fmt.Errorf("chunk_size %d out of safe range (1K-500K)", value)
-		}
-	case "workers":
-		// Max workers shouldn't exceed CPU cores or connection limits
-		maxWorkers := aa.systemResources.CPUCores
-		if aa.systemResources.MaxTargetConnections > 0 && aa.systemResources.MaxTargetConnections < maxWorkers {
-			maxWorkers = aa.systemResources.MaxTargetConnections
-		}
-		if maxWorkers < 1 {
-			maxWorkers = 16 // Fallback
-		}
-		if value < 1 || value > maxWorkers {
-			return fmt.Errorf("workers %d out of safe range (1-%d based on system resources)", value, maxWorkers)
-		}
-	case "parallel_readers":
-		maxReaders := 4
-		if aa.systemResources.MaxSourceConnections > 0 && aa.systemResources.MaxSourceConnections < maxReaders {
-			maxReaders = aa.systemResources.MaxSourceConnections
-		}
-		if value < 1 || value > maxReaders {
-			return fmt.Errorf("parallel_readers %d out of safe range (1-%d)", value, maxReaders)
-		}
-	case "read_ahead_buffers":
-		if value < 2 || value > 32 {
-			return fmt.Errorf("read_ahead_buffers %d out of safe range (2-32)", value)
-		}
-	case "checkpoint_frequency":
-		if value < 1 || value > 100 {
-			return fmt.Errorf("checkpoint_frequency %d out of safe range (1-100)", value)
-		}
-	case "upsert_merge_chunk_size":
-		if value < 1000 || value > 50000 {
-			return fmt.Errorf("upsert_merge_chunk_size %d out of safe range (1K-50K)", value)
-		}
-	default:
-		return fmt.Errorf("unknown parameter: %s", param)
-	}
-	return nil
 }
 
 // fallbackRules returns a decision based on simple heuristic rules.
