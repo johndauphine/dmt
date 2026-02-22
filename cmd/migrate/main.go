@@ -44,6 +44,10 @@ func main() {
 				Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 			},
 			&cli.StringFlag{
+				Name:  "profile",
+				Usage: "Profile name stored in SQLite",
+			},
+			&cli.StringFlag{
 				Name:  "run-id",
 				Usage: "Explicit run ID (for Airflow, default: auto-generated UUID)",
 			},
@@ -114,16 +118,6 @@ func main() {
 				Action: runMigration,
 				Flags: []cli.Flag{
 					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-					&cli.StringFlag{
 						Name:  "source-schema",
 						Value: "dbo",
 						Usage: "Source schema name",
@@ -138,10 +132,6 @@ func main() {
 						Value: 8,
 						Usage: "Number of parallel workers",
 					},
-					&cli.StringFlag{
-						Name:  "state-file",
-						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
-					},
 					&cli.BoolFlag{
 						Name:  "dry-run",
 						Usage: "Preview migration plan without executing",
@@ -153,20 +143,6 @@ func main() {
 				Usage:  "Resume an interrupted migration",
 				Action: resumeMigration,
 				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-					&cli.StringFlag{
-						Name:  "state-file",
-						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
-					},
 					&cli.BoolFlag{
 						Name:  "force-resume",
 						Usage: "Force resume even if config has changed",
@@ -178,20 +154,6 @@ func main() {
 				Usage:  "Show status of current/last run",
 				Action: showStatus,
 				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-					&cli.StringFlag{
-						Name:  "state-file",
-						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
-					},
 					&cli.BoolFlag{
 						Name:  "json",
 						Usage: "Output status as JSON",
@@ -202,44 +164,14 @@ func main() {
 				Name:   "validate",
 				Usage:  "Validate row counts between source and target",
 				Action: validateMigration,
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-					&cli.StringFlag{
-						Name:  "state-file",
-						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
-					},
-				},
 			},
 			{
 				Name:  "history",
 				Usage: "List all migration runs, or view details of a specific run",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-					&cli.StringFlag{
 						Name:  "run",
 						Usage: "Show details for a specific run ID",
-					},
-					&cli.StringFlag{
-						Name:  "state-file",
-						Usage: "Use YAML state file instead of SQLite (for Airflow/headless)",
 					},
 				},
 				Action: showHistory,
@@ -257,12 +189,6 @@ func main() {
 								Name:    "name",
 								Aliases: []string{"n"},
 								Usage:   "Profile name (inferred from profile.name or filename if omitted)",
-							},
-							&cli.StringFlag{
-								Name:    "config",
-								Aliases: []string{"c"},
-								Value:   "config.yaml",
-								Usage:   "Path to configuration file",
 							},
 						},
 					},
@@ -309,34 +235,12 @@ func main() {
 				Name:   "health-check",
 				Usage:  "Test database connections",
 				Action: healthCheck,
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
-				},
 			},
 			{
 				Name:   "analyze",
 				Usage:  "Analyze source database and suggest optimal configuration",
 				Action: analyzeConfig,
 				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "config",
-						Aliases: []string{"c"},
-						Value:   "config.yaml",
-						Usage:   "Configuration file path",
-					},
-					&cli.StringFlag{
-						Name:  "profile",
-						Usage: "Profile name stored in SQLite",
-					},
 					&cli.BoolFlag{
 						Name:  "apply",
 						Usage: "Apply AI-tuned parameters to ~/.secrets/dmt-config.yaml",
@@ -415,7 +319,7 @@ func runMigration(c *cli.Context) error {
 
 	// Build orchestrator options
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		StateFile: c.String("state-file"),
 		RunID:     c.String("run-id"),
 	}
 
@@ -496,7 +400,7 @@ func resumeMigration(c *cli.Context) error {
 	}
 
 	opts := orchestrator.Options{
-		StateFile:   getStateFile(c),
+		StateFile:   c.String("state-file"),
 		ForceResume: c.Bool("force-resume"),
 	}
 
@@ -545,7 +449,7 @@ func showStatus(c *cli.Context) error {
 	}
 
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		StateFile: c.String("state-file"),
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
@@ -584,7 +488,7 @@ func validateMigration(c *cli.Context) error {
 	}
 
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		StateFile: c.String("state-file"),
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
@@ -603,7 +507,7 @@ func showHistory(c *cli.Context) error {
 	}
 
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		StateFile: c.String("state-file"),
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
@@ -618,21 +522,6 @@ func showHistory(c *cli.Context) error {
 	}
 
 	return orch.ShowHistory()
-}
-
-// getStateFile returns the state file path from the context.
-// Checks both command-level and global flags.
-func getStateFile(c *cli.Context) string {
-	// Check command-level flag first, then walk up the context lineage
-	for _, ctx := range c.Lineage() {
-		if ctx == nil {
-			continue
-		}
-		if sf := ctx.String("state-file"); sf != "" {
-			return sf
-		}
-	}
-	return ""
 }
 
 func loadConfigWithOrigin(c *cli.Context) (*config.Config, string, string, error) {
@@ -861,7 +750,7 @@ func healthCheck(c *cli.Context) error {
 	}
 
 	opts := orchestrator.Options{
-		StateFile: getStateFile(c),
+		StateFile: c.String("state-file"),
 	}
 
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
