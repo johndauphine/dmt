@@ -87,6 +87,129 @@ func TestRuntimeTunerMultiFieldUpdate(t *testing.T) {
 	}
 }
 
+func TestRuntimeTunerMetricsStartAtZero(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+	m := tuner.Metrics()
+
+	if m.ActiveJobs != 0 {
+		t.Errorf("ActiveJobs = %d, want 0", m.ActiveJobs)
+	}
+	if m.QueueDepth != 0 {
+		t.Errorf("QueueDepth = %d, want 0", m.QueueDepth)
+	}
+	if m.ErrorCount != 0 {
+		t.Errorf("ErrorCount = %d, want 0", m.ErrorCount)
+	}
+	if m.TotalQueryNs != 0 || m.TotalScanNs != 0 || m.TotalWriteNs != 0 || m.TotalTransferRows != 0 {
+		t.Error("expected all transfer time fields to start at 0")
+	}
+}
+
+func TestRuntimeTunerReportActiveJobs(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	tuner.ReportActiveJobs(1)
+	tuner.ReportActiveJobs(1)
+	tuner.ReportActiveJobs(1)
+	if got := tuner.Metrics().ActiveJobs; got != 3 {
+		t.Errorf("ActiveJobs = %d, want 3", got)
+	}
+
+	tuner.ReportActiveJobs(-1)
+	if got := tuner.Metrics().ActiveJobs; got != 2 {
+		t.Errorf("ActiveJobs = %d, want 2 after -1", got)
+	}
+}
+
+func TestRuntimeTunerReportQueueDepth(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	tuner.ReportQueueDepth(10)
+	tuner.ReportQueueDepth(5)
+	if got := tuner.Metrics().QueueDepth; got != 15 {
+		t.Errorf("QueueDepth = %d, want 15", got)
+	}
+
+	// Simulate job cleanup reporting negative delta
+	tuner.ReportQueueDepth(-15)
+	if got := tuner.Metrics().QueueDepth; got != 0 {
+		t.Errorf("QueueDepth = %d, want 0 after cleanup", got)
+	}
+
+	// Slight negative due to concurrency should be clamped to 0
+	tuner.ReportQueueDepth(-1)
+	if got := tuner.Metrics().QueueDepth; got != 0 {
+		t.Errorf("QueueDepth = %d, want 0 (clamped)", got)
+	}
+}
+
+func TestRuntimeTunerReportError(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	tuner.ReportError()
+	tuner.ReportError()
+	tuner.ReportError()
+
+	if got := tuner.Metrics().ErrorCount; got != 3 {
+		t.Errorf("ErrorCount = %d, want 3", got)
+	}
+}
+
+func TestRuntimeTunerReportTransferTime(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	tuner.ReportTransferTime(100, 200, 300, 1000)
+	tuner.ReportTransferTime(150, 250, 350, 2000)
+
+	m := tuner.Metrics()
+	if m.TotalQueryNs != 250 {
+		t.Errorf("TotalQueryNs = %d, want 250", m.TotalQueryNs)
+	}
+	if m.TotalScanNs != 450 {
+		t.Errorf("TotalScanNs = %d, want 450", m.TotalScanNs)
+	}
+	if m.TotalWriteNs != 650 {
+		t.Errorf("TotalWriteNs = %d, want 650", m.TotalWriteNs)
+	}
+	if m.TotalTransferRows != 3000 {
+		t.Errorf("TotalTransferRows = %d, want 3000", m.TotalTransferRows)
+	}
+}
+
+func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tuner.ReportActiveJobs(1)
+			tuner.ReportQueueDepth(5)
+			tuner.ReportError()
+			tuner.ReportTransferTime(10, 20, 30, 100)
+		}()
+	}
+	wg.Wait()
+
+	m := tuner.Metrics()
+	if m.ActiveJobs != 100 {
+		t.Errorf("ActiveJobs = %d, want 100", m.ActiveJobs)
+	}
+	if m.QueueDepth != 500 {
+		t.Errorf("QueueDepth = %d, want 500", m.QueueDepth)
+	}
+	if m.ErrorCount != 100 {
+		t.Errorf("ErrorCount = %d, want 100", m.ErrorCount)
+	}
+	if m.TotalQueryNs != 1000 {
+		t.Errorf("TotalQueryNs = %d, want 1000", m.TotalQueryNs)
+	}
+	if m.TotalTransferRows != 10000 {
+		t.Errorf("TotalTransferRows = %d, want 10000", m.TotalTransferRows)
+	}
+}
+
 func TestRuntimeTunerConcurrentAccess(t *testing.T) {
 	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000, WriteAheadWriters: 2})
 

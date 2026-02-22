@@ -162,16 +162,18 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 
 				// Compute and set table summary for data profile context
 				var totalTableRows int64
+				var rowsWithSize int64
 				var weightedRowBytes int64
 				for _, t := range tables {
 					totalTableRows += t.RowCount
 					if t.EstimatedRowSize > 0 {
+						rowsWithSize += t.RowCount
 						weightedRowBytes += t.RowCount * t.EstimatedRowSize
 					}
 				}
 				var avgRowBytes int64
-				if totalTableRows > 0 && weightedRowBytes > 0 {
-					avgRowBytes = weightedRowBytes / totalTableRows
+				if rowsWithSize > 0 && weightedRowBytes > 0 {
+					avgRowBytes = weightedRowBytes / rowsWithSize
 				}
 				aiMonitor.SetTableSummary(monitor.TableSummary{
 					TotalTables: len(tables),
