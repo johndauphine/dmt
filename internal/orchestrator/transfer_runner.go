@@ -18,6 +18,7 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
 
@@ -150,6 +151,33 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 
 				// Set total rows so adjuster skips adjustments near completion
 				aiMonitor.SetTotalRows(totalRows)
+
+				// Set live pool stats callback
+				aiMonitor.SetPoolStatsFunc(func() (stats.PoolStats, stats.PoolStats) {
+					return r.sourcePool.PoolStats(), r.targetPool.PoolStats()
+				})
+
+				// Set progress tracker for table-level completion
+				aiMonitor.SetProgressTracker(r.progress)
+
+				// Compute and set table summary for data profile context
+				var totalTableRows int64
+				var weightedRowBytes int64
+				for _, t := range tables {
+					totalTableRows += t.RowCount
+					if t.EstimatedRowSize > 0 {
+						weightedRowBytes += t.RowCount * t.EstimatedRowSize
+					}
+				}
+				var avgRowBytes int64
+				if totalTableRows > 0 && weightedRowBytes > 0 {
+					avgRowBytes = weightedRowBytes / totalTableRows
+				}
+				aiMonitor.SetTableSummary(monitor.TableSummary{
+					TotalTables: len(tables),
+					TotalRows:   totalTableRows,
+					AvgRowBytes: avgRowBytes,
+				})
 
 				// Start monitoring in background
 				monitorCtx, cancelMonitor := context.WithCancel(ctx)

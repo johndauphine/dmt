@@ -7,6 +7,8 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
 
@@ -54,6 +56,21 @@ func (am *AIMonitor) SetStateBackend(state checkpoint.StateBackend, runID string
 // SetTotalRows sets the total rows so the adjuster skips adjustments near completion.
 func (am *AIMonitor) SetTotalRows(total int64) {
 	am.adjuster.SetTotalRows(total)
+}
+
+// SetPoolStatsFunc sets a callback for live source and target pool statistics.
+func (am *AIMonitor) SetPoolStatsFunc(fn func() (stats.PoolStats, stats.PoolStats)) {
+	am.adjuster.SetPoolStatsFunc(fn)
+}
+
+// SetProgressTracker sets the progress tracker for table-level completion stats.
+func (am *AIMonitor) SetProgressTracker(tracker *progress.Tracker) {
+	am.adjuster.SetProgressTracker(tracker)
+}
+
+// SetTableSummary sets static table metadata for AI context.
+func (am *AIMonitor) SetTableSummary(summary TableSummary) {
+	am.adjuster.SetTableSummary(summary)
 }
 
 // UpdateRowsProcessed updates the count of rows transferred.

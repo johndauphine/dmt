@@ -270,6 +270,21 @@ func (t *Tracker) TableFailed() {
 	t.tablesFailed.Add(1)
 }
 
+// TablesTotal returns the total number of tables to transfer.
+func (t *Tracker) TablesTotal() int {
+	return t.tablesTotal
+}
+
+// TablesComplete returns the number of tables successfully completed.
+func (t *Tracker) TablesComplete() int {
+	return int(t.tablesComplete.Load())
+}
+
+// TablesFailed returns the number of tables that failed to transfer.
+func (t *Tracker) TablesFailed() int {
+	return int(t.tablesFailed.Load())
+}
+
 // Current returns the current count
 func (t *Tracker) Current() int64 {
 	return t.current.Load()

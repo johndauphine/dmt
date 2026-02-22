@@ -12,6 +12,8 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/shirou/gopsutil/v3/mem"
 )
@@ -58,6 +60,13 @@ type SystemResources struct {
 	MemoryAvailableMB    int64
 	MaxSourceConnections int
 	MaxTargetConnections int
+}
+
+// TableSummary captures aggregate table metadata for AI context.
+type TableSummary struct {
+	TotalTables int
+	TotalRows   int64
+	AvgRowBytes int64
 }
 
 // AIAdjuster uses AI to analyze metrics and recommend parameter adjustments.
@@ -109,6 +118,15 @@ type AIAdjuster struct {
 	// Persistent history
 	state checkpoint.StateBackend
 	runID string
+
+	// Connection pool stats callback (live, called at prompt-build time)
+	poolStatsFunc func() (stats.PoolStats, stats.PoolStats)
+
+	// Table-level completion progress
+	progressTracker *progress.Tracker
+
+	// Static table metadata
+	tableSummary TableSummary
 }
 
 // NewAIAdjuster creates a new AI adjuster.
@@ -170,6 +188,27 @@ func (aa *AIAdjuster) SetStateBackend(state checkpoint.StateBackend, runID strin
 			logging.Debug("AI adjuster loaded %d historical adjustments from past migrations", len(history))
 		}
 	}
+}
+
+// SetPoolStatsFunc sets a callback that returns live source and target pool stats.
+func (aa *AIAdjuster) SetPoolStatsFunc(fn func() (stats.PoolStats, stats.PoolStats)) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.poolStatsFunc = fn
+}
+
+// SetProgressTracker sets the progress tracker for table-level completion stats.
+func (aa *AIAdjuster) SetProgressTracker(tracker *progress.Tracker) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.progressTracker = tracker
+}
+
+// SetTableSummary sets static table metadata computed from the tables list.
+func (aa *AIAdjuster) SetTableSummary(summary TableSummary) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.tableSummary = summary
 }
 
 // gatherSystemResources collects system information for AI context.
@@ -358,6 +397,22 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	}
 	sb.WriteString("\n")
 
+	// Connection pool stats (live)
+	if aa.poolStatsFunc != nil {
+		src, tgt := aa.poolStatsFunc()
+		sb.WriteString("## Connection Pool Stats\n")
+		sb.WriteString(fmt.Sprintf("- Source (%s): %d/%d active, %d idle", src.DBType, src.ActiveConns, src.MaxConns, src.IdleConns))
+		if src.WaitCount > 0 {
+			sb.WriteString(fmt.Sprintf(", %d waits (%.1fms avg)", src.WaitCount, float64(src.WaitTimeMs)/float64(src.WaitCount)))
+		}
+		sb.WriteString("\n")
+		sb.WriteString(fmt.Sprintf("- Target (%s): %d/%d active, %d idle", tgt.DBType, tgt.ActiveConns, tgt.MaxConns, tgt.IdleConns))
+		if tgt.WaitCount > 0 {
+			sb.WriteString(fmt.Sprintf(", %d waits (%.1fms avg)", tgt.WaitCount, float64(tgt.WaitTimeMs)/float64(tgt.WaitCount)))
+		}
+		sb.WriteString("\n\n")
+	}
+
 	// Baseline metrics
 	if aa.baselineMetrics != nil {
 		sb.WriteString("## Baseline Performance\n")
@@ -372,6 +427,36 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		sb.WriteString("## Migration Mode\n")
 		sb.WriteString(fmt.Sprintf("- Target mode: %s\n", aa.targetMode))
 		sb.WriteString("\n")
+	}
+
+	// Data profile (static)
+	if aa.tableSummary.TotalTables > 0 {
+		sb.WriteString("## Data Profile\n")
+		sb.WriteString(fmt.Sprintf("- Total tables: %d\n", aa.tableSummary.TotalTables))
+		sb.WriteString(fmt.Sprintf("- Total rows: %d\n", aa.tableSummary.TotalRows))
+		if aa.tableSummary.AvgRowBytes > 0 {
+			sb.WriteString(fmt.Sprintf("- Avg row size: %d bytes\n", aa.tableSummary.AvgRowBytes))
+			estMB := int64(config.WriteAheadWriters) * int64(config.ReadAheadBuffers) *
+				int64(config.ChunkSize) * aa.tableSummary.AvgRowBytes / 1024 / 1024
+			sb.WriteString(fmt.Sprintf("- Est. pipeline memory (workers×buffers×chunk×row): %d MB\n", estMB))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Table-level progress (live)
+	if aa.progressTracker != nil {
+		total := aa.progressTracker.TablesTotal()
+		complete := aa.progressTracker.TablesComplete()
+		failed := aa.progressTracker.TablesFailed()
+		if total > 0 {
+			sb.WriteString("## Table Progress\n")
+			sb.WriteString(fmt.Sprintf("- Tables complete: %d/%d\n", complete, total))
+			if failed > 0 {
+				sb.WriteString(fmt.Sprintf("- Tables failed: %d\n", failed))
+			}
+			sb.WriteString(fmt.Sprintf("- Tables remaining: %d\n", total-complete-failed))
+			sb.WriteString("\n")
+		}
 	}
 
 	// Current performance
@@ -513,6 +598,9 @@ Bottleneck diagnosis:
 - Write time >60% → target is the bottleneck. Consider smaller chunk_size or fewer workers to reduce write contention.
 - Query+scan time >60% → source is the bottleneck. Consider more parallel_readers to increase read throughput.
 - Balanced time split → pipeline is well-tuned, prefer "continue".
+- Pool active connections near max → connection pool is saturated. Reducing workers or parallel_readers will free connections.
+- Pool wait count rising → connections are being queued, a strong signal the pool is the bottleneck.
+- Use avg row size from Data Profile to calculate memory impact: pipeline memory ≈ workers × read_ahead_buffers × chunk_size × avg_row_bytes.
 
 There are no hard limits — you are free to try any value. If a change hurts performance, the effectiveness tracker will detect it and pause adjustments.
 
