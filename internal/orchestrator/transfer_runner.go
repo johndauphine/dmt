@@ -380,6 +380,15 @@ retryLoop:
 		ts.stats.ScanTime += stats.ScanTime
 		ts.stats.WriteTime += stats.WriteTime
 		ts.stats.Rows += stats.Rows
+		// Report transfer time breakdown for AI monitoring
+		if tuner != nil {
+			tuner.ReportTransferTime(
+				stats.QueryTime.Nanoseconds(),
+				stats.ScanTime.Nanoseconds(),
+				stats.WriteTime.Nanoseconds(),
+				stats.Rows,
+			)
+		}
 		// Update row counter for AI monitoring
 		if aiMonitor != nil {
 			aiMonitor.UpdateRowsProcessed(r.progress.Current())

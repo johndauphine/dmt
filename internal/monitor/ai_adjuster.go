@@ -427,6 +427,17 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	sb.WriteString(fmt.Sprintf("- Throughput trend: %.1f%% (>20%% decline = significant)\n", trends.ThroughputDecline))
 	sb.WriteString("\n")
 
+	// Transfer time breakdown (from latest snapshot)
+	if len(metrics) > 0 {
+		latest := metrics[len(metrics)-1]
+		if latest.QueryTimePercent > 0 || latest.WriteTimePercent > 0 {
+			sb.WriteString("## Transfer Time Breakdown (since last sample)\n")
+			sb.WriteString(fmt.Sprintf("- Source query + row scanning: %.0f%%\n", latest.QueryTimePercent))
+			sb.WriteString(fmt.Sprintf("- Target write: %.0f%%\n", latest.WriteTimePercent))
+			sb.WriteString("\n")
+		}
+	}
+
 	// Current config
 	sb.WriteString("## Current Configuration\n")
 	sb.WriteString(fmt.Sprintf("- workers: %d\n", config.WriteAheadWriters))
@@ -499,6 +510,9 @@ Bottleneck diagnosis:
 - Queue depth LOW/ZERO → readers can't keep up (read-bound). Consider increasing parallel_readers or read_ahead_buffers.
 - Active jobs shows how many tables are being transferred concurrently. If active_jobs < configured workers, some jobs finished early.
 - Error count tracks failed tables. Rising errors suggest reducing pressure (fewer workers, smaller chunks).
+- Write time >60% → target is the bottleneck. Consider smaller chunk_size or fewer workers to reduce write contention.
+- Query+scan time >60% → source is the bottleneck. Consider more parallel_readers to increase read throughput.
+- Balanced time split → pipeline is well-tuned, prefer "continue".
 
 There are no hard limits — you are free to try any value. If a change hurts performance, the effectiveness tracker will detect it and pause adjustments.
 

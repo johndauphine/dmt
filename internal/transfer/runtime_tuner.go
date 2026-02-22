@@ -31,16 +31,23 @@ type RuntimeMetrics struct {
 	ActiveJobs int // Number of concurrently executing transfer jobs
 	QueueDepth int // Aggregate read-ahead queue depth across all active jobs
 	ErrorCount int // Cumulative count of failed tables
+
+	// Cumulative transfer time breakdown (nanoseconds)
+	TotalQueryNs      int64
+	TotalScanNs       int64
+	TotalWriteNs      int64
+	TotalTransferRows int64
 }
 
 // RuntimeTuner provides thread-safe access to runtime migration parameters.
 type RuntimeTuner interface {
 	Snapshot() RuntimeSnapshot
 	Update(RuntimeUpdate) error
-	ReportActiveJobs(delta int)  // Atomically adjust active job count (+1 on start, -1 on end)
-	ReportQueueDepth(delta int)  // Atomically adjust aggregate queue depth (use deltas per job)
-	ReportError()                // Atomically increment error count
-	Metrics() RuntimeMetrics     // Read current operational metrics
+	ReportActiveJobs(delta int)                               // Atomically adjust active job count (+1 on start, -1 on end)
+	ReportQueueDepth(delta int)                               // Atomically adjust aggregate queue depth (use deltas per job)
+	ReportError()                                             // Atomically increment error count
+	ReportTransferTime(queryNs, scanNs, writeNs, rows int64) // Atomically add cumulative transfer time breakdown
+	Metrics() RuntimeMetrics                                  // Read current operational metrics
 }
 
 // runtimeTuner is the concrete implementation of RuntimeTuner.
@@ -50,6 +57,12 @@ type runtimeTuner struct {
 	activeJobs atomic.Int32
 	queueDepth atomic.Int32
 	errorCount atomic.Int32
+
+	// Cumulative transfer time breakdown
+	totalQueryNs      atomic.Int64
+	totalScanNs       atomic.Int64
+	totalWriteNs      atomic.Int64
+	totalTransferRows atomic.Int64
 }
 
 // NewRuntimeTuner creates a RuntimeTuner with the given initial values.
@@ -86,6 +99,14 @@ func (rt *runtimeTuner) ReportError() {
 	rt.errorCount.Add(1)
 }
 
+// ReportTransferTime atomically adds to cumulative transfer time breakdown.
+func (rt *runtimeTuner) ReportTransferTime(queryNs, scanNs, writeNs, rows int64) {
+	rt.totalQueryNs.Add(queryNs)
+	rt.totalScanNs.Add(scanNs)
+	rt.totalWriteNs.Add(writeNs)
+	rt.totalTransferRows.Add(rows)
+}
+
 // Metrics returns the current operational metrics.
 func (rt *runtimeTuner) Metrics() RuntimeMetrics {
 	qd := int(rt.queueDepth.Load())
@@ -93,9 +114,13 @@ func (rt *runtimeTuner) Metrics() RuntimeMetrics {
 		qd = 0 // Guard against slight negative from concurrent delta reporting
 	}
 	return RuntimeMetrics{
-		ActiveJobs: int(rt.activeJobs.Load()),
-		QueueDepth: qd,
-		ErrorCount: int(rt.errorCount.Load()),
+		ActiveJobs:        int(rt.activeJobs.Load()),
+		QueueDepth:        qd,
+		ErrorCount:        int(rt.errorCount.Load()),
+		TotalQueryNs:      rt.totalQueryNs.Load(),
+		TotalScanNs:       rt.totalScanNs.Load(),
+		TotalWriteNs:      rt.totalWriteNs.Load(),
+		TotalTransferRows: rt.totalTransferRows.Load(),
 	}
 }
 
