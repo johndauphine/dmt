@@ -104,10 +104,15 @@ ai:
 
 1. **Continuous Monitoring**: Every 30 seconds, collects performance metrics:
    - Windowed throughput (rows/sec), memory usage, CPU utilization
-   - Query latency, write latency, queue depth
+   - Transfer time breakdown (source query/scan vs. target write percentages)
+   - Connection pool utilization (active, idle, wait counts per pool)
+   - Queue depth, active workers, error count
 
 2. **Resource-Aware Prompting**: The AI receives live system state:
    - CPU cores, available/used RAM, max database connections
+   - Connection pool saturation (active/idle/waits for source and target)
+   - Data profile: total tables, total rows, avg row size, estimated pipeline memory
+   - Table-level progress (complete/failed/remaining)
    - Current parameter values and adjustment history
    - Effectiveness of previous adjustments
 
@@ -130,13 +135,13 @@ ai:
 Tested on Stack Overflow 2013 dataset (106.5M rows, MSSQL to PostgreSQL):
 
 ```
-Configuration                Duration    Throughput
-──────────────────────────────────────────────────────────
-AI-tuned (Haiku)             5m 14s      339,393 r/s
-AI-tuned (Sonnet)            5m 14s      339,780 r/s
+Configuration                     Transfer    Overall    Throughput
+──────────────────────────────────────────────────────────────────────
+AI startup + runtime tuning       2m 33s      3m 08s     697K rows/sec
+Runtime tuning only               5m 14s      5m 50s     339K rows/sec
 ```
 
-Haiku and Sonnet produce identical results — Haiku recommended for lower cost.
+AI startup tuning analyzes source schema and system resources to set optimal initial parameters. Runtime tuning monitors live metrics (throughput, CPU, memory, pool utilization, transfer time breakdown) and adjusts parameters mid-migration. Haiku and Sonnet produce identical tuning results — Haiku recommended for lower cost.
 
 ### Configuration
 
@@ -578,8 +583,8 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **222K-717K rows/sec** depending on direction and row width
-- **MSSQL → PG**: 717K rows/sec with AI startup tuning (106.5M rows in 2m29s)
+- **222K-697K rows/sec** depending on direction and row width
+- **MSSQL → PG**: 697K rows/sec with AI startup + runtime tuning (106.5M rows in 2m33s)
 - **PG → MSSQL**: 645K rows/sec (PG streaming + TDS bulk copy)
 - **PG → PG**: 563K rows/sec (COPY protocol both ends)
 - **MSSQL → MSSQL**: 222K rows/sec (TDS both ends)
@@ -628,7 +633,7 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 - **SSL/TLS encryption** - configurable per connection
 
 ### Transfer Engine
-- **Pipelined I/O** - read-ahead buffering with parallel writers (222K-717K rows/sec)
+- **Pipelined I/O** - read-ahead buffering with parallel writers (222K-697K rows/sec)
 - **Keyset pagination** - efficient partitioning for integer PKs (no OFFSET degradation)
 - **ROW_NUMBER pagination** - automatic fallback for composite/varchar PKs
 - **Parallel partitioning** - large tables split via NTILE for concurrent transfer
@@ -1327,8 +1332,8 @@ Found 11 tables
 Pagination: 9 keyset, 1 ROW_NUMBER, 1 no PK
 Creating target tables (drop and recreate)...
 Transferring data...
-Transferring 100% |███████████| (106534570/106534570, 717K rows/s)
-Transferred 106534570 rows in 2m29s (716909 rows/sec)
+Transferring 100% |███████████| (106534570/106534570, 697K rows/s)
+Transferred 106534570 rows in 2m33s (697008 rows/sec)
 
 Transfer Profile (per table):
 ------------------------------
@@ -1482,7 +1487,7 @@ For types not in the built-in mappings (custom domains, user-defined types, etc.
 
 | Configuration | Transfer | Overall | Throughput |
 |---------------|----------|---------|------------|
-| **AI startup + runtime tuning** | 2m 29s | 3m 05s | **717K rows/sec** |
+| **AI startup + runtime tuning** | 2m 33s | 3m 08s | **697K rows/sec** |
 | **Runtime tuning only** | 5m 14s | 5m 50s | 339K rows/sec |
 
 AI startup tuning analyzes source schema and system resources to set optimal initial parameters, delivering a 2x speedup over runtime-only tuning.
