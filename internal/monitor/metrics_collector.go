@@ -274,7 +274,7 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	}
 
 	// Memory saturation
-	if recent[len(recent)-1].MemoryPercent > 85 {
+	if recent[len(recent)-1].MemoryPercent > 75 {
 		result.MemorySaturated = true
 	}
 

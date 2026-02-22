@@ -607,7 +607,7 @@ There are no hard limits — you are free to try any value. If a change hurts pe
 Decision rules:
 1. **If within ±10% of baseline** → "continue" (stable, no changes needed)
 2. **If >20% below baseline + CPU/memory available** → consider "scale_up"
-3. **If memory >85%** → "reduce_chunk" or reduce upsert_merge_chunk_size
+3. **If memory >75%** → "reduce_chunk" or reduce upsert_merge_chunk_size
 4. **If CPU >90% sustained** → consider "scale_down"
 5. **If past adjustment didn't help** → don't repeat same action
 6. **If stable and low failure risk** → consider increasing checkpoint_frequency for throughput
