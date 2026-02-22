@@ -679,7 +679,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 
 // applyAITuning uses AI to optimize migration parameters before transfer begins.
 // Only overrides formula-computed values (where Original* == 0), never user-specified values.
-// Falls back silently to formula defaults on any failure.
+// Falls back to formula defaults on any failure (logged at Debug/Warn level).
 func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	// Check if AI is available
 	aiMapper, err := driver.NewAITypeMapperFromSecrets()

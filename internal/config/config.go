@@ -135,6 +135,8 @@ type AutoConfig struct {
 	OriginalUpsertMergeChunkSize int
 	OriginalSourceChunkSize      int
 	OriginalTargetChunkSize      int
+	OriginalCheckpointFrequency  int
+	OriginalMaxRetries           int
 
 	// Target memory used for calculations
 	TargetMemoryMB int64
@@ -444,6 +446,8 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
 	c.autoConfig.OriginalSourceChunkSize = c.Source.ChunkSize
 	c.autoConfig.OriginalTargetChunkSize = c.Target.ChunkSize
+	c.autoConfig.OriginalCheckpointFrequency = c.Migration.CheckpointFrequency
+	c.autoConfig.OriginalMaxRetries = c.Migration.MaxRetries
 
 	// Detect system resources (only if not already set, for testing)
 	if c.autoConfig.CPUCores == 0 {
@@ -1088,8 +1092,8 @@ func (c *Config) AutoConfig() AutoConfig {
 // ParamChange records a parameter change from formula to AI value.
 type ParamChange struct {
 	Name     string
-	OldValue int
-	NewValue int
+	OldValue int64
+	NewValue int64
 }
 
 // ApplyAISuggestions overrides formula-computed defaults with AI recommendations.
@@ -1102,13 +1106,13 @@ func (c *Config) ApplyAISuggestions(s *driver.SmartConfigSuggestions) []ParamCha
 	// Helper to conditionally apply a suggestion
 	apply := func(name string, original int, current *int, suggested int) {
 		if original == 0 && suggested > 0 && suggested != *current {
-			changes = append(changes, ParamChange{name, *current, suggested})
+			changes = append(changes, ParamChange{name, int64(*current), int64(suggested)})
 			*current = suggested
 		}
 	}
 	applyInt64 := func(name string, original int64, current *int64, suggested int64) {
 		if original == 0 && suggested > 0 && suggested != *current {
-			changes = append(changes, ParamChange{name, int(*current), int(suggested)})
+			changes = append(changes, ParamChange{name, *current, suggested})
 			*current = suggested
 		}
 	}
@@ -1122,14 +1126,8 @@ func (c *Config) ApplyAISuggestions(s *driver.SmartConfigSuggestions) []ParamCha
 	apply("max_partitions", ac.OriginalMaxPartitions, &c.Migration.MaxPartitions, s.MaxPartitions)
 	applyInt64("large_table_threshold", ac.OriginalLargeTableThresh, &c.Migration.LargeTableThreshold, s.LargeTableThreshold)
 	apply("upsert_merge_chunk_size", ac.OriginalUpsertMergeChunkSize, &c.Migration.UpsertMergeChunkSize, s.UpsertMergeChunkSize)
-	if s.CheckpointFrequency > 0 && c.Migration.CheckpointFrequency == 10 { // 10 is the formula default
-		changes = append(changes, ParamChange{"checkpoint_frequency", c.Migration.CheckpointFrequency, s.CheckpointFrequency})
-		c.Migration.CheckpointFrequency = s.CheckpointFrequency
-	}
-	if s.MaxRetries > 0 && c.Migration.MaxRetries == 3 { // 3 is the formula default
-		changes = append(changes, ParamChange{"max_retries", c.Migration.MaxRetries, s.MaxRetries})
-		c.Migration.MaxRetries = s.MaxRetries
-	}
+	apply("checkpoint_frequency", ac.OriginalCheckpointFrequency, &c.Migration.CheckpointFrequency, s.CheckpointFrequency)
+	apply("max_retries", ac.OriginalMaxRetries, &c.Migration.MaxRetries, s.MaxRetries)
 
 	// Re-derive dependent values after core parameter changes
 	if len(changes) > 0 {

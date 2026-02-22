@@ -397,6 +397,10 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 		memoryGB = int(v.Total / (1024 * 1024 * 1024))
 		availableMemoryMB = int64(v.Available / (1024 * 1024))
 	}
+	// Fallback: if available memory is unknown, estimate as 50% of total
+	if availableMemoryMB == 0 {
+		availableMemoryMB = int64(memoryGB) * 1024 / 2
+	}
 	if sw, err := mem.SwapMemory(); err == nil {
 		swapTotalMB = int64(sw.Total / (1024 * 1024))
 	}
