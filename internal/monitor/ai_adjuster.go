@@ -103,7 +103,8 @@ type AIAdjuster struct {
 	effectivenessResetAfter time.Duration // auto-reset timeout
 
 	// Transfer progress
-	totalRows int64
+	totalRows  int64
+	targetMode string // "drop_recreate" or "upsert"
 
 	// Persistent history
 	state checkpoint.StateBackend
@@ -147,6 +148,13 @@ func (aa *AIAdjuster) SetConnectionLimits(maxSource, maxTarget int) {
 	defer aa.adjustmentsMu.Unlock()
 	aa.systemResources.MaxSourceConnections = maxSource
 	aa.systemResources.MaxTargetConnections = maxTarget
+}
+
+// SetTargetMode sets the migration target mode (drop_recreate or upsert).
+func (aa *AIAdjuster) SetTargetMode(mode string) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.targetMode = mode
 }
 
 // SetStateBackend sets the state backend for persistent history.
@@ -359,6 +367,13 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		sb.WriteString("\n")
 	}
 
+	// Migration mode
+	if aa.targetMode != "" {
+		sb.WriteString("## Migration Mode\n")
+		sb.WriteString(fmt.Sprintf("- Target mode: %s\n", aa.targetMode))
+		sb.WriteString("\n")
+	}
+
 	// Current performance
 	sb.WriteString("## Current Performance\n")
 	if len(metrics) > 0 {
@@ -371,6 +386,9 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		sb.WriteString("\n")
 		sb.WriteString(fmt.Sprintf("- CPU: %.1f%%\n", latest.CPUPercent))
 		sb.WriteString(fmt.Sprintf("- Memory: %d MB (%.1f%%)\n", latest.MemoryUsedMB, latest.MemoryPercent))
+		sb.WriteString(fmt.Sprintf("- Active jobs: %d (concurrent table transfers)\n", latest.ActiveWorkers))
+		sb.WriteString(fmt.Sprintf("- Queue depth: %d (chunks buffered in read-ahead pipeline)\n", latest.QueueDepth))
+		sb.WriteString(fmt.Sprintf("- Error count: %d (failed tables)\n", latest.ErrorCount))
 		sb.WriteString(fmt.Sprintf("- Elapsed: %.0f seconds\n", latest.ElapsedSeconds))
 		sb.WriteString(fmt.Sprintf("- Rows processed: %d\n", latest.RowsProcessed))
 	}
@@ -476,6 +494,12 @@ Consider system resources when choosing parameter values:
 - checkpoint_frequency: Higher = fewer checkpoints = better throughput; Lower = more safety on failure
 - upsert_merge_chunk_size: Smaller = less memory pressure on target DB; Only relevant in upsert mode
 
+Bottleneck diagnosis:
+- Queue depth HIGH (many chunks buffered) → writers can't keep up (write-bound). Consider reducing chunk_size or workers to reduce write contention.
+- Queue depth LOW/ZERO → readers can't keep up (read-bound). Consider increasing parallel_readers or read_ahead_buffers.
+- Active jobs shows how many tables are being transferred concurrently. If active_jobs < configured workers, some jobs finished early.
+- Error count tracks failed tables. Rising errors suggest reducing pressure (fewer workers, smaller chunks).
+
 There are no hard limits — you are free to try any value. If a change hurts performance, the effectiveness tracker will detect it and pause adjustments.
 
 Decision rules:
@@ -485,6 +509,7 @@ Decision rules:
 4. **If CPU >90% sustained** → consider "scale_down"
 5. **If past adjustment didn't help** → don't repeat same action
 6. **If stable and low failure risk** → consider increasing checkpoint_frequency for throughput
+7. **If error count is rising** → consider reducing workers or chunk_size to reduce pressure
 
 Important: Only adjust if there's a significant problem. Stability is preferred.
 

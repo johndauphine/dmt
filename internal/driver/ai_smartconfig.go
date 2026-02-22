@@ -72,8 +72,9 @@ type AutoTuneInput struct {
 	MaxMemoryMB       int64  `json:"max_memory_mb"` // User-configured cap (0 = none)
 
 	// Database info
-	DatabaseType string `json:"database_type"`         // source: "mssql", "postgres", "mysql", "oracle"
-	TargetType   string `json:"target_type,omitempty"` // target database type
+	DatabaseType string `json:"database_type"`           // source: "mssql", "postgres", "mysql", "oracle"
+	TargetType   string `json:"target_type,omitempty"`   // target database type
+	TargetMode   string `json:"target_mode,omitempty"`   // "drop_recreate" or "upsert"
 	TotalTables  int    `json:"total_tables"`
 	TotalRows    int64  `json:"total_rows"`
 	AvgRowBytes  int64  `json:"avg_row_bytes"`
@@ -161,6 +162,7 @@ type SmartConfigAnalyzer struct {
 	db              *sql.DB
 	dbType          string // "mssql" or "postgres"
 	targetDBType    string // target database type (if known)
+	targetMode      string // "drop_recreate" or "upsert"
 	aiMapper        *AITypeMapper
 	useAI           bool
 	suggestions     *SmartConfigSuggestions
@@ -196,6 +198,11 @@ func (s *SmartConfigAnalyzer) SetMaxMemoryMB(mb int64) {
 // SetTargetDBType sets the target database type for more accurate recommendations.
 func (s *SmartConfigAnalyzer) SetTargetDBType(targetType string) {
 	s.targetDBType = targetType
+}
+
+// SetTargetMode sets the migration target mode (drop_recreate or upsert).
+func (s *SmartConfigAnalyzer) SetTargetMode(mode string) {
+	s.targetMode = mode
 }
 
 // Analyze performs smart configuration detection on the source database.
@@ -427,6 +434,7 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 		MaxMemoryMB:       s.maxMemoryMB,
 		DatabaseType:      s.dbType,
 		TargetType:        s.targetDBType,
+		TargetMode:        s.targetMode,
 		TotalTables:       s.suggestions.TotalTables,
 		TotalRows:         s.suggestions.TotalRows,
 		AvgRowBytes:       avgRowSize,

@@ -141,6 +141,12 @@ func (mc *MetricsCollector) collectSnapshot() {
 		WriteAheadWriters: snap.WriteAheadWriters,
 	}
 
+	// Populate operational metrics from tuner
+	metrics := mc.tuner.Metrics()
+	snapshot.ActiveWorkers = metrics.ActiveJobs
+	snapshot.QueueDepth = metrics.QueueDepth
+	snapshot.ErrorCount = metrics.ErrorCount
+
 	// Hold lock for windowed throughput calculation, trend, and append
 	mc.metricsMu.Lock()
 

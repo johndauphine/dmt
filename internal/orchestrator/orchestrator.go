@@ -698,10 +698,11 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		analyzer.SetHistoryProvider(&stateHistoryAdapter{state: o.state})
 	}
 
-	// Set target DB type for cross-engine awareness
+	// Set target DB type and migration mode for cross-engine awareness
 	if o.targetPool != nil {
 		analyzer.SetTargetDBType(o.targetPool.DBType())
 	}
+	analyzer.SetTargetMode(o.config.Migration.TargetMode)
 
 	// Pass user-configured memory cap
 	if o.config.Migration.MaxMemoryMB > 0 {

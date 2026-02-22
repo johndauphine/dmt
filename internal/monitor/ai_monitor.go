@@ -41,6 +41,11 @@ func (am *AIMonitor) SetConnectionLimits(maxSource, maxTarget int) {
 	am.adjuster.SetConnectionLimits(maxSource, maxTarget)
 }
 
+// SetTargetMode sets the migration target mode (drop_recreate or upsert).
+func (am *AIMonitor) SetTargetMode(mode string) {
+	am.adjuster.SetTargetMode(mode)
+}
+
 // SetStateBackend sets the state backend for persistent history.
 func (am *AIMonitor) SetStateBackend(state checkpoint.StateBackend, runID string) {
 	am.adjuster.SetStateBackend(state, runID)
