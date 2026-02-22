@@ -1085,6 +1085,79 @@ func (c *Config) AutoConfig() AutoConfig {
 	return c.autoConfig
 }
 
+// ParamChange records a parameter change from formula to AI value.
+type ParamChange struct {
+	Name     string
+	OldValue int
+	NewValue int
+}
+
+// ApplyAISuggestions overrides formula-computed defaults with AI recommendations.
+// Only parameters the user didn't explicitly set (Original* == 0) are overridden.
+// Returns a list of parameters that were changed.
+func (c *Config) ApplyAISuggestions(s *driver.SmartConfigSuggestions) []ParamChange {
+	ac := c.autoConfig
+	var changes []ParamChange
+
+	// Helper to conditionally apply a suggestion
+	apply := func(name string, original int, current *int, suggested int) {
+		if original == 0 && suggested > 0 && suggested != *current {
+			changes = append(changes, ParamChange{name, *current, suggested})
+			*current = suggested
+		}
+	}
+	applyInt64 := func(name string, original int64, current *int64, suggested int64) {
+		if original == 0 && suggested > 0 && suggested != *current {
+			changes = append(changes, ParamChange{name, int(*current), int(suggested)})
+			*current = suggested
+		}
+	}
+
+	// Core tunable parameters
+	apply("workers", ac.OriginalWorkers, &c.Migration.Workers, s.Workers)
+	apply("chunk_size", ac.OriginalChunkSize, &c.Migration.ChunkSize, s.ChunkSizeRecommendation)
+	apply("read_ahead_buffers", ac.OriginalReadAheadBuffers, &c.Migration.ReadAheadBuffers, s.ReadAheadBuffers)
+	apply("write_ahead_writers", ac.OriginalWriteAheadWriters, &c.Migration.WriteAheadWriters, s.WriteAheadWriters)
+	apply("parallel_readers", ac.OriginalParallelReaders, &c.Migration.ParallelReaders, s.ParallelReaders)
+	apply("max_partitions", ac.OriginalMaxPartitions, &c.Migration.MaxPartitions, s.MaxPartitions)
+	applyInt64("large_table_threshold", ac.OriginalLargeTableThresh, &c.Migration.LargeTableThreshold, s.LargeTableThreshold)
+	apply("upsert_merge_chunk_size", ac.OriginalUpsertMergeChunkSize, &c.Migration.UpsertMergeChunkSize, s.UpsertMergeChunkSize)
+	if s.CheckpointFrequency > 0 && c.Migration.CheckpointFrequency == 10 { // 10 is the formula default
+		changes = append(changes, ParamChange{"checkpoint_frequency", c.Migration.CheckpointFrequency, s.CheckpointFrequency})
+		c.Migration.CheckpointFrequency = s.CheckpointFrequency
+	}
+	if s.MaxRetries > 0 && c.Migration.MaxRetries == 3 { // 3 is the formula default
+		changes = append(changes, ParamChange{"max_retries", c.Migration.MaxRetries, s.MaxRetries})
+		c.Migration.MaxRetries = s.MaxRetries
+	}
+
+	// Re-derive dependent values after core parameter changes
+	if len(changes) > 0 {
+		// Connection pools (only if user didn't specify)
+		if ac.OriginalMaxSourceConns == 0 {
+			required := c.Migration.Workers*c.Migration.ParallelReaders + 4
+			if required != c.Migration.MaxSourceConnections {
+				c.Migration.MaxSourceConnections = required
+			}
+		}
+		if ac.OriginalMaxTargetConns == 0 {
+			required := c.Migration.Workers*c.Migration.WriteAheadWriters + 4
+			if required != c.Migration.MaxTargetConnections {
+				c.Migration.MaxTargetConnections = required
+			}
+		}
+		// Source/Target chunk sizes default to migration chunk_size
+		if ac.OriginalSourceChunkSize == 0 {
+			c.Source.ChunkSize = c.Migration.ChunkSize
+		}
+		if ac.OriginalTargetChunkSize == 0 {
+			c.Target.ChunkSize = c.Migration.ChunkSize
+		}
+	}
+
+	return changes
+}
+
 // DebugDump returns a comprehensive configuration dump with auto-tuning explanations
 func (c *Config) DebugDump() string {
 	var b strings.Builder

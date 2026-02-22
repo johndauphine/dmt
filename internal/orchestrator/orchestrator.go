@@ -389,6 +389,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.progress.SetTablesTotal(len(tables))
 	logging.Debug("Found %d tables", len(tables))
 
+	// Apply AI-recommended parameters (if AI is available)
+	o.applyAITuning(ctx)
+
 	// Refine memory settings based on actual row sizes from database stats
 	tableRowSizes := make([]config.TableRowSize, len(tables))
 	for i, t := range tables {
@@ -674,6 +677,62 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	return result.TableFailures, nil
 }
 
+// applyAITuning uses AI to optimize migration parameters before transfer begins.
+// Only overrides formula-computed values (where Original* == 0), never user-specified values.
+// Falls back silently to formula defaults on any failure.
+func (o *Orchestrator) applyAITuning(ctx context.Context) {
+	// Check if AI is available
+	aiMapper, err := driver.NewAITypeMapperFromSecrets()
+	if err != nil {
+		logging.Debug("AI tuning skipped: %v", err)
+		return
+	}
+
+	logging.Debug("Running AI parameter tuning...")
+
+	// Create analyzer (same pattern as AnalyzeConfig in healthcheck.go)
+	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType(), aiMapper)
+
+	// Set up history provider for learning from past runs
+	if o.state != nil {
+		analyzer.SetHistoryProvider(&stateHistoryAdapter{state: o.state})
+	}
+
+	// Set target DB type for cross-engine awareness
+	if o.targetPool != nil {
+		analyzer.SetTargetDBType(o.targetPool.DBType())
+	}
+
+	// Pass user-configured memory cap
+	if o.config.Migration.MaxMemoryMB > 0 {
+		analyzer.SetMaxMemoryMB(o.config.Migration.MaxMemoryMB)
+	}
+
+	// Run analysis with timeout to avoid delaying migration start
+	analyzeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	suggestions, err := analyzer.Analyze(analyzeCtx, o.config.Source.Schema)
+	if err != nil {
+		logging.Warn("AI tuning failed, using formula defaults: %v", err)
+		return
+	}
+
+	// Apply suggestions only where user didn't specify values
+	changes := o.config.ApplyAISuggestions(suggestions)
+	if len(changes) > 0 {
+		logging.Info("AI tuning applied %d parameter(s):", len(changes))
+		for _, c := range changes {
+			logging.Info("  %s: %d -> %d", c.Name, c.OldValue, c.NewValue)
+		}
+		if suggestions.AISuggestions != nil && suggestions.AISuggestions.Reasoning != "" {
+			logging.Info("AI reasoning: %s", suggestions.AISuggestions.Reasoning)
+		}
+	} else {
+		logging.Debug("AI tuning: no changes needed")
+	}
+}
+
 // Resume continues an interrupted migration
 func (o *Orchestrator) Resume(ctx context.Context) error {
 	run, err := o.state.GetLastIncompleteRun()
@@ -730,6 +789,9 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	o.tables = tables
 	logging.Debug("Found %d tables in source", len(tables))
+
+	// Apply AI-recommended parameters (if AI is available)
+	o.applyAITuning(ctx)
 
 	// Get tables that were successfully transferred in the previous run
 	completedTables, err := o.state.GetCompletedTables(run.ID)

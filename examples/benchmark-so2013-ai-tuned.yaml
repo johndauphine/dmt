@@ -25,3 +25,4 @@ target:
 
 migration:
   target_mode: drop_recreate
+  max_memory_mb: 8192  # Safety cap passed to AI tuner
