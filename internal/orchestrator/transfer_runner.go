@@ -18,6 +18,7 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
 
@@ -142,11 +143,43 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 					r.config.Migration.MaxTargetConnections,
 				)
 
+				// Set migration mode so AI knows drop_recreate vs upsert
+				aiMonitor.SetTargetMode(r.config.Migration.TargetMode)
+
 				// Set state backend for persistent history
 				aiMonitor.SetStateBackend(r.state, runID)
 
 				// Set total rows so adjuster skips adjustments near completion
 				aiMonitor.SetTotalRows(totalRows)
+
+				// Set live pool stats callback
+				aiMonitor.SetPoolStatsFunc(func() (stats.PoolStats, stats.PoolStats) {
+					return r.sourcePool.PoolStats(), r.targetPool.PoolStats()
+				})
+
+				// Set progress tracker for table-level completion
+				aiMonitor.SetProgressTracker(r.progress)
+
+				// Compute and set table summary for data profile context
+				var totalTableRows int64
+				var rowsWithSize int64
+				var weightedRowBytes int64
+				for _, t := range tables {
+					totalTableRows += t.RowCount
+					if t.EstimatedRowSize > 0 {
+						rowsWithSize += t.RowCount
+						weightedRowBytes += t.RowCount * t.EstimatedRowSize
+					}
+				}
+				var avgRowBytes int64
+				if rowsWithSize > 0 && weightedRowBytes > 0 {
+					avgRowBytes = weightedRowBytes / rowsWithSize
+				}
+				aiMonitor.SetTableSummary(monitor.TableSummary{
+					TotalTables: len(tables),
+					TotalRows:   totalTableRows,
+					AvgRowBytes: avgRowBytes,
+				})
 
 				// Start monitoring in background
 				monitorCtx, cancelMonitor := context.WithCancel(ctx)
@@ -307,6 +340,12 @@ func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs
 
 // executeJob runs a single job with retry logic.
 func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) {
+	// Report active job metrics for AI monitoring
+	if tuner != nil {
+		tuner.ReportActiveJobs(1)
+		defer tuner.ReportActiveJobs(-1)
+	}
+
 	// Mark task as running
 	r.state.UpdateTaskStatus(j.TaskID, "running", "")
 
@@ -348,6 +387,9 @@ retryLoop:
 
 	if err != nil {
 		ts.jobsFailed++
+		if tuner != nil {
+			tuner.ReportError()
+		}
 		r.state.UpdateTaskStatus(j.TaskID, "failed", err.Error())
 		errCh <- tableError{tableName: j.Table.Name, err: err}
 
@@ -368,6 +410,15 @@ retryLoop:
 		ts.stats.ScanTime += stats.ScanTime
 		ts.stats.WriteTime += stats.WriteTime
 		ts.stats.Rows += stats.Rows
+		// Report transfer time breakdown for AI monitoring
+		if tuner != nil {
+			tuner.ReportTransferTime(
+				stats.QueryTime.Nanoseconds(),
+				stats.ScanTime.Nanoseconds(),
+				stats.WriteTime.Nanoseconds(),
+				stats.Rows,
+			)
+		}
 		// Update row counter for AI monitoring
 		if aiMonitor != nil {
 			aiMonitor.UpdateRowsProcessed(r.progress.Current())

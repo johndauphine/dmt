@@ -2,6 +2,9 @@ package monitor
 
 import (
 	"testing"
+	"time"
+
+	"github.com/johndauphine/dmt/internal/transfer"
 )
 
 func TestAnalyzeTrends(t *testing.T) {
@@ -147,6 +150,70 @@ func TestAnalyzeTrends(t *testing.T) {
 			t.Error("expected MemoryIncreasing=true when memory increases >5% per sample")
 		}
 	})
+}
+
+func TestWindowedTimePercentages(t *testing.T) {
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000, ReadAheadBuffers: 4})
+	mc := NewMetricsCollector(tuner, 30*time.Second)
+
+	// First snapshot: report some transfer time
+	tuner.ReportTransferTime(400, 100, 500, 1000) // query=400, scan=100, write=500 → source=50%, write=50%
+	mc.collectSnapshot()
+
+	metrics := mc.GetRecentMetrics(1)
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d", len(metrics))
+	}
+
+	// Source (query+scan) should be 50%, write should be 50%
+	if metrics[0].QueryTimePercent < 49 || metrics[0].QueryTimePercent > 51 {
+		t.Errorf("QueryTimePercent = %.1f%%, want ~50%%", metrics[0].QueryTimePercent)
+	}
+	if metrics[0].WriteTimePercent < 49 || metrics[0].WriteTimePercent > 51 {
+		t.Errorf("WriteTimePercent = %.1f%%, want ~50%%", metrics[0].WriteTimePercent)
+	}
+
+	// Second snapshot: report more time, heavily write-bound
+	tuner.ReportTransferTime(100, 0, 900, 2000) // delta: query=100, scan=0, write=900 → source=10%, write=90%
+	mc.collectSnapshot()
+
+	metrics = mc.GetRecentMetrics(1)
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d", len(metrics))
+	}
+
+	// Should reflect windowed (delta) percentages, not cumulative
+	if metrics[0].QueryTimePercent < 8 || metrics[0].QueryTimePercent > 12 {
+		t.Errorf("QueryTimePercent = %.1f%%, want ~10%% (windowed)", metrics[0].QueryTimePercent)
+	}
+	if metrics[0].WriteTimePercent < 88 || metrics[0].WriteTimePercent > 92 {
+		t.Errorf("WriteTimePercent = %.1f%%, want ~90%% (windowed)", metrics[0].WriteTimePercent)
+	}
+}
+
+func TestWindowedTimePercentagesZeroDelta(t *testing.T) {
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000, ReadAheadBuffers: 4})
+	mc := NewMetricsCollector(tuner, 30*time.Second)
+
+	// Report some time then collect
+	tuner.ReportTransferTime(500, 500, 1000, 100)
+	mc.collectSnapshot()
+
+	// No new time reported — delta is zero
+	mc.collectSnapshot()
+
+	metrics := mc.GetRecentMetrics(1)
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d", len(metrics))
+	}
+
+	// With zero delta, both should be 0
+	if metrics[0].QueryTimePercent != 0 {
+		t.Errorf("QueryTimePercent = %.1f%%, want 0%% (no delta)", metrics[0].QueryTimePercent)
+	}
+	if metrics[0].WriteTimePercent != 0 {
+		t.Errorf("WriteTimePercent = %.1f%%, want 0%% (no delta)", metrics[0].WriteTimePercent)
+	}
 }
 
 func TestGetRecentMetrics(t *testing.T) {

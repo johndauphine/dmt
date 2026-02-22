@@ -660,6 +660,7 @@ func executeKeysetPagination(
 	var lastWriteEnd time.Time
 	var lastPK any
 	var loopErr error
+	var lastReportedQueueDepth int // for delta-based queue depth reporting
 
 	// Process chunks and dispatch writes
 chunkLoop:
@@ -671,6 +672,13 @@ chunkLoop:
 		}
 		if result.done {
 			break
+		}
+
+		// Report read-ahead queue depth to tuner (delta-based for aggregation)
+		if tuner != nil {
+			currentQueueDepth := len(chunkChan)
+			tuner.ReportQueueDepth(currentQueueDepth - lastReportedQueueDepth)
+			lastReportedQueueDepth = currentQueueDepth
 		}
 
 		stats.QueryTime += result.queryTime
@@ -720,6 +728,11 @@ chunkLoop:
 		}
 
 		chunkCount++
+	}
+
+	// Clean up queue depth reporting
+	if tuner != nil && lastReportedQueueDepth != 0 {
+		tuner.ReportQueueDepth(-lastReportedQueueDepth)
 	}
 
 	logging.Debug("Consumer loop finished, calling wp.wait()")
@@ -1003,6 +1016,7 @@ func executeRowNumberPagination(
 	var totalOverlap time.Duration
 	var lastWriteEnd time.Time
 	var loopErr error
+	var lastReportedQueueDepth int // for delta-based queue depth reporting
 
 	// Process chunks and dispatch writes
 chunkLoop:
@@ -1014,6 +1028,13 @@ chunkLoop:
 		}
 		if result.done {
 			break
+		}
+
+		// Report read-ahead queue depth to tuner (delta-based for aggregation)
+		if tuner != nil {
+			currentQueueDepth := len(chunkChan)
+			tuner.ReportQueueDepth(currentQueueDepth - lastReportedQueueDepth)
+			lastReportedQueueDepth = currentQueueDepth
 		}
 
 		stats.QueryTime += result.queryTime
@@ -1063,6 +1084,11 @@ chunkLoop:
 		}
 
 		chunkCount++
+	}
+
+	// Clean up queue depth reporting
+	if tuner != nil && lastReportedQueueDepth != 0 {
+		tuner.ReportQueueDepth(-lastReportedQueueDepth)
 	}
 
 	logging.Debug("Consumer loop finished, calling wp.wait()")

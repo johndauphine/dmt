@@ -71,6 +71,11 @@ type MetricsCollector struct {
 	prevRowsProcessed int64
 	prevTimestamp     time.Time
 
+	// Previous snapshot state for windowed transfer time calculation
+	prevQueryNs int64
+	prevScanNs  int64
+	prevWriteNs int64
+
 	metricsMu sync.RWMutex
 	metrics   []PerformanceSnapshot
 }
@@ -141,8 +146,27 @@ func (mc *MetricsCollector) collectSnapshot() {
 		WriteAheadWriters: snap.WriteAheadWriters,
 	}
 
-	// Hold lock for windowed throughput calculation, trend, and append
+	// Populate operational metrics from tuner
+	metrics := mc.tuner.Metrics()
+	snapshot.ActiveWorkers = metrics.ActiveJobs
+	snapshot.QueueDepth = metrics.QueueDepth
+	snapshot.ErrorCount = metrics.ErrorCount
+
+	// Hold lock for windowed throughput/time calculation, trend, and append
 	mc.metricsMu.Lock()
+
+	// Calculate windowed transfer time percentages (delta since last snapshot)
+	deltaQuery := metrics.TotalQueryNs - mc.prevQueryNs
+	deltaScan := metrics.TotalScanNs - mc.prevScanNs
+	deltaWrite := metrics.TotalWriteNs - mc.prevWriteNs
+	deltaTotal := deltaQuery + deltaScan + deltaWrite
+	if deltaTotal > 0 {
+		snapshot.QueryTimePercent = float64(deltaQuery+deltaScan) / float64(deltaTotal) * 100
+		snapshot.WriteTimePercent = float64(deltaWrite) / float64(deltaTotal) * 100
+	}
+	mc.prevQueryNs = metrics.TotalQueryNs
+	mc.prevScanNs = metrics.TotalScanNs
+	mc.prevWriteNs = metrics.TotalWriteNs
 
 	// Calculate windowed throughput (rows processed since last snapshot)
 	// This avoids the cumulative average problem where early fast tables
