@@ -12,42 +12,26 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-func TestGetStateFile(t *testing.T) {
+func TestGlobalStateFileFlag(t *testing.T) {
 	tests := []struct {
 		name           string
 		globalFlag     string
-		commandFlag    string
 		expectedResult string
 	}{
 		{
 			name:           "no flag set",
 			globalFlag:     "",
-			commandFlag:    "",
 			expectedResult: "",
 		},
 		{
 			name:           "global flag set",
 			globalFlag:     "/tmp/global-state.yaml",
-			commandFlag:    "",
 			expectedResult: "/tmp/global-state.yaml",
-		},
-		{
-			name:           "command flag set",
-			globalFlag:     "",
-			commandFlag:    "/tmp/command-state.yaml",
-			expectedResult: "/tmp/command-state.yaml",
-		},
-		{
-			name:           "both flags set - command takes precedence",
-			globalFlag:     "/tmp/global-state.yaml",
-			commandFlag:    "/tmp/command-state.yaml",
-			expectedResult: "/tmp/command-state.yaml",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create app with global and command flags
 			app := &cli.App{
 				Flags: []cli.Flag{
 					&cli.StringFlag{
@@ -57,15 +41,10 @@ func TestGetStateFile(t *testing.T) {
 				Commands: []*cli.Command{
 					{
 						Name: "run",
-						Flags: []cli.Flag{
-							&cli.StringFlag{
-								Name: "state-file",
-							},
-						},
 						Action: func(c *cli.Context) error {
-							result := getStateFile(c)
+							result := c.String("state-file")
 							if result != tt.expectedResult {
-								t.Errorf("getStateFile() = %q, want %q", result, tt.expectedResult)
+								t.Errorf("state-file = %q, want %q", result, tt.expectedResult)
 							}
 							return nil
 						},
@@ -73,15 +52,11 @@ func TestGetStateFile(t *testing.T) {
 				},
 			}
 
-			// Build args
 			args := []string{"app"}
 			if tt.globalFlag != "" {
 				args = append(args, "--state-file", tt.globalFlag)
 			}
 			args = append(args, "run")
-			if tt.commandFlag != "" {
-				args = append(args, "--state-file", tt.commandFlag)
-			}
 
 			if err := app.Run(args); err != nil {
 				t.Fatalf("app.Run() error: %v", err)
@@ -338,17 +313,8 @@ func TestCLIFlagParsing(t *testing.T) {
 			name: "log-format flag default",
 			args: []string{"app", "run"},
 			validate: func(c *cli.Context) error {
-				// Walk up to find global context
-				for _, ctx := range c.Lineage() {
-					if ctx == nil {
-						continue
-					}
-					if lf := ctx.String("log-format"); lf != "" {
-						if lf != "text" {
-							t.Errorf("log-format = %q, want %q", lf, "text")
-						}
-						return nil
-					}
+				if lf := c.String("log-format"); lf != "text" {
+					t.Errorf("log-format = %q, want %q", lf, "text")
 				}
 				return nil
 			},
@@ -357,16 +323,8 @@ func TestCLIFlagParsing(t *testing.T) {
 			name: "log-format flag json",
 			args: []string{"app", "--log-format", "json", "run"},
 			validate: func(c *cli.Context) error {
-				for _, ctx := range c.Lineage() {
-					if ctx == nil {
-						continue
-					}
-					if lf := ctx.String("log-format"); lf != "" {
-						if lf != "json" {
-							t.Errorf("log-format = %q, want %q", lf, "json")
-						}
-						return nil
-					}
+				if lf := c.String("log-format"); lf != "json" {
+					t.Errorf("log-format = %q, want %q", lf, "json")
 				}
 				return nil
 			},
@@ -375,16 +333,8 @@ func TestCLIFlagParsing(t *testing.T) {
 			name: "verbosity flag",
 			args: []string{"app", "--verbosity", "debug", "run"},
 			validate: func(c *cli.Context) error {
-				for _, ctx := range c.Lineage() {
-					if ctx == nil {
-						continue
-					}
-					if v := ctx.String("verbosity"); v != "" {
-						if v != "debug" {
-							t.Errorf("verbosity = %q, want %q", v, "debug")
-						}
-						return nil
-					}
+				if v := c.String("verbosity"); v != "debug" {
+					t.Errorf("verbosity = %q, want %q", v, "debug")
 				}
 				return nil
 			},
@@ -393,15 +343,39 @@ func TestCLIFlagParsing(t *testing.T) {
 			name: "output-json flag",
 			args: []string{"app", "--output-json", "run"},
 			validate: func(c *cli.Context) error {
-				for _, ctx := range c.Lineage() {
-					if ctx == nil {
-						continue
-					}
-					if ctx.Bool("output-json") {
-						return nil
-					}
+				if !c.Bool("output-json") {
+					t.Error("expected output-json to be true")
 				}
-				t.Error("expected output-json to be true")
+				return nil
+			},
+		},
+		{
+			name: "config flag before subcommand",
+			args: []string{"app", "--config", "custom.yaml", "run"},
+			validate: func(c *cli.Context) error {
+				if cfg := c.String("config"); cfg != "custom.yaml" {
+					t.Errorf("config = %q, want %q", cfg, "custom.yaml")
+				}
+				return nil
+			},
+		},
+		{
+			name: "profile flag before subcommand",
+			args: []string{"app", "--profile", "myprofile", "run"},
+			validate: func(c *cli.Context) error {
+				if p := c.String("profile"); p != "myprofile" {
+					t.Errorf("profile = %q, want %q", p, "myprofile")
+				}
+				return nil
+			},
+		},
+		{
+			name: "state-file flag before subcommand",
+			args: []string{"app", "--state-file", "/tmp/state.yaml", "run"},
+			validate: func(c *cli.Context) error {
+				if sf := c.String("state-file"); sf != "/tmp/state.yaml" {
+					t.Errorf("state-file = %q, want %q", sf, "/tmp/state.yaml")
+				}
 				return nil
 			},
 		},
@@ -413,6 +387,7 @@ func TestCLIFlagParsing(t *testing.T) {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "config", Aliases: []string{"c"}, Value: "config.yaml"},
 					&cli.StringFlag{Name: "state-file"},
+					&cli.StringFlag{Name: "profile"},
 					&cli.StringFlag{Name: "run-id"},
 					&cli.BoolFlag{Name: "output-json"},
 					&cli.StringFlag{Name: "output-file"},
@@ -423,11 +398,9 @@ func TestCLIFlagParsing(t *testing.T) {
 					{
 						Name: "run",
 						Flags: []cli.Flag{
-							&cli.StringFlag{Name: "profile"},
 							&cli.StringFlag{Name: "source-schema", Value: "dbo"},
 							&cli.StringFlag{Name: "target-schema", Value: "public"},
 							&cli.IntFlag{Name: "workers", Value: 8},
-							&cli.StringFlag{Name: "state-file"},
 						},
 						Action: tt.validate,
 					},
@@ -484,8 +457,6 @@ func TestResumeCommandFlags(t *testing.T) {
 			{
 				Name: "resume",
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "profile"},
-					&cli.StringFlag{Name: "state-file"},
 					&cli.BoolFlag{Name: "force-resume"},
 				},
 				Action: func(c *cli.Context) error {
@@ -533,8 +504,8 @@ func TestProfileSubcommands(t *testing.T) {
 		validate func(c *cli.Context) error
 	}{
 		{
-			name: "profile save with name",
-			args: []string{"app", "profile", "save", "--name", "myprofile", "--config", "test.yaml"},
+			name: "profile save with name and global config",
+			args: []string{"app", "--config", "test.yaml", "profile", "save", "--name", "myprofile"},
 			validate: func(c *cli.Context) error {
 				if c.String("name") != "myprofile" {
 					t.Errorf("name = %q, want %q", c.String("name"), "myprofile")
@@ -573,6 +544,9 @@ func TestProfileSubcommands(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "config", Aliases: []string{"c"}, Value: "config.yaml"},
+				},
 				Commands: []*cli.Command{
 					{
 						Name: "profile",
@@ -582,7 +556,6 @@ func TestProfileSubcommands(t *testing.T) {
 								Action: tt.validate,
 								Flags: []cli.Flag{
 									&cli.StringFlag{Name: "name", Aliases: []string{"n"}},
-									&cli.StringFlag{Name: "config", Aliases: []string{"c"}, Value: "config.yaml"},
 								},
 							},
 							{
