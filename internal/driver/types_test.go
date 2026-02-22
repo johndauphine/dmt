@@ -77,36 +77,6 @@ func TestSupportsKeysetPagination(t *testing.T) {
 			expected: true,
 		},
 
-		// Oracle NUMBER types
-		{
-			name: "Oracle NUMBER with scale 0 (integer)",
-			table: Table{
-				PKColumns: []Column{{Name: "id", DataType: "NUMBER", Scale: 0}},
-			},
-			expected: true,
-		},
-		{
-			name: "Oracle number lowercase with scale 0",
-			table: Table{
-				PKColumns: []Column{{Name: "id", DataType: "number", Scale: 0}},
-			},
-			expected: true,
-		},
-		{
-			name: "Oracle NUMBER with scale > 0 (decimal)",
-			table: Table{
-				PKColumns: []Column{{Name: "id", DataType: "NUMBER", Scale: 2}},
-			},
-			expected: false, // Decimal types should not use keyset
-		},
-		{
-			name: "Oracle NUMBER with precision and scale",
-			table: Table{
-				PKColumns: []Column{{Name: "price", DataType: "NUMBER", Precision: 10, Scale: 4}},
-			},
-			expected: false, // Has decimal places
-		},
-
 		// Non-integer types (should return false)
 		{
 			name: "VARCHAR PK",
@@ -162,51 +132,12 @@ func TestSupportsKeysetPagination(t *testing.T) {
 	}
 }
 
-func TestSupportsKeysetPagination_OracleSpecific(t *testing.T) {
-	// Detailed Oracle NUMBER tests
-	tests := []struct {
-		name      string
-		dataType  string
-		precision int
-		scale     int
-		expected  bool
-	}{
-		{"NUMBER(10,0) - integer", "NUMBER", 10, 0, true},
-		{"NUMBER(19,0) - big integer", "NUMBER", 19, 0, true},
-		{"NUMBER(5,0) - small integer", "NUMBER", 5, 0, true},
-		{"NUMBER(10,2) - decimal", "NUMBER", 10, 2, false},
-		{"NUMBER(15,4) - high precision decimal", "NUMBER", 15, 4, false},
-		{"NUMBER - no precision/scale", "NUMBER", 0, 0, true}, // Default is integer
-		{"number lowercase", "number", 10, 0, true},
-		{"Number mixed case", "Number", 10, 0, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			table := Table{
-				PKColumns: []Column{{
-					Name:      "id",
-					DataType:  tt.dataType,
-					Precision: tt.precision,
-					Scale:     tt.scale,
-				}},
-			}
-
-			result := table.SupportsKeysetPagination()
-			if result != tt.expected {
-				t.Errorf("SupportsKeysetPagination() for %s = %v, want %v",
-					tt.name, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestGetPKColumn(t *testing.T) {
 	tests := []struct {
-		name      string
-		table     Table
-		wantNil   bool
-		wantName  string
+		name     string
+		table    Table
+		wantNil  bool
+		wantName string
 	}{
 		{
 			name: "single PK column",
@@ -283,8 +214,7 @@ func TestIsIntegerType(t *testing.T) {
 		{"double", false},
 		{"uuid", false},
 		{"timestamp", false},
-		{"INT", false},   // Uppercase - function is case-sensitive
-		{"NUMBER", false}, // Oracle NUMBER not in IsIntegerType (handled separately)
+		{"INT", false}, // Uppercase - function is case-sensitive
 	}
 
 	for _, tt := range tests {

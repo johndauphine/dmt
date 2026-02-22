@@ -68,15 +68,15 @@ var _ HistoryBackend = (*State)(nil)
 // AITuningRecord represents a historical AI tuning recommendation from analyze command.
 // This stores the context and recommendations for learning from past analyses.
 type AITuningRecord struct {
-	ID               int64     `json:"id"`
-	Timestamp        time.Time `json:"timestamp"`
-	SourceDBType     string    `json:"source_db_type"`
-	TargetDBType     string    `json:"target_db_type"`
-	TotalTables      int       `json:"total_tables"`
-	TotalRows        int64     `json:"total_rows"`
-	AvgRowSizeBytes  int64     `json:"avg_row_size_bytes"`
-	CPUCores         int       `json:"cpu_cores"`
-	MemoryGB         int       `json:"memory_gb"`
+	ID              int64     `json:"id"`
+	Timestamp       time.Time `json:"timestamp"`
+	SourceDBType    string    `json:"source_db_type"`
+	TargetDBType    string    `json:"target_db_type"`
+	TotalTables     int       `json:"total_tables"`
+	TotalRows       int64     `json:"total_rows"`
+	AvgRowSizeBytes int64     `json:"avg_row_size_bytes"`
+	CPUCores        int       `json:"cpu_cores"`
+	MemoryGB        int       `json:"memory_gb"`
 
 	// Recommended parameters
 	Workers             int   `json:"workers"`

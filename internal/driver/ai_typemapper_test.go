@@ -86,7 +86,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"claude", "claude-sonnet-4-20250514"},
+		{"claude", "claude-sonnet-4-6"},
 		{"openai", "gpt-4o"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},
@@ -176,7 +176,7 @@ func TestAITypeMapper_CanMap(t *testing.T) {
 	if !mapper.CanMap("mysql", "postgres") {
 		t.Error("expected CanMap to return true")
 	}
-	if !mapper.CanMap("oracle", "mssql") {
+	if !mapper.CanMap("mssql", "mysql") {
 		t.Error("expected CanMap to return true for any combination")
 	}
 }
@@ -1045,7 +1045,7 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeForeignKey,
 		SourceDBType: "mssql",
-		TargetDBType: "oracle",
+		TargetDBType: "mysql",
 		Table:        &Table{Name: "orders"},
 		ForeignKey: &ForeignKey{
 			Name:       "fk_orders_user",
@@ -1058,8 +1058,8 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 		},
 		TargetSchema: "sales",
 		TargetContext: &DatabaseContext{
-			MaxIdentifierLength: 30,
-			IdentifierCase:      "upper",
+			MaxIdentifierLength: 64,
+			IdentifierCase:      "lower",
 		},
 	}
 
@@ -1069,7 +1069,7 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 	checks := []string{
 		"ALTER TABLE",
 		"foreign key",
-		"oracle",
+		"mysql",
 		"sales",
 		"orders",
 		"fk_orders_user",
@@ -1078,8 +1078,8 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 		"id",
 		"ON DELETE: CASCADE",
 		"ON UPDATE: NO ACTION",
-		"Max Identifier Length: 30",
-		"Identifier Case: upper",
+		"Max Identifier Length: 64",
+		"Identifier Case: lower",
 	}
 
 	for _, check := range checks {
@@ -1088,9 +1088,9 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 		}
 	}
 
-	// PostgreSQL-specific rules should NOT be present for Oracle target
+	// PostgreSQL-specific rules should NOT be present for MySQL target
 	if strings.Contains(prompt, "CRITICAL PostgreSQL identifier rules") {
-		t.Error("prompt should not contain PostgreSQL identifier rules for Oracle target")
+		t.Error("prompt should not contain PostgreSQL identifier rules for MySQL target")
 	}
 }
 
@@ -1272,6 +1272,77 @@ func TestTruncateString(t *testing.T) {
 			result := truncateString(tt.input, tt.maxLen)
 			if result != tt.expected {
 				t.Errorf("truncateString(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	tests := []struct {
+		name         string
+		sourceDBType string
+		targetDBType string
+		wantContains []string
+		wantAbsent   []string
+	}{
+		{
+			name:         "same engine preserves identifiers",
+			sourceDBType: "postgres",
+			targetDBType: "postgres",
+			wantContains: []string{
+				"Source and target are the same database engine",
+				"Preserve ALL source column and table names EXACTLY as-is",
+				"user_id -> user_id (NOT userid)",
+				"created_at -> created_at (NOT createdat)",
+			},
+			wantAbsent: []string{
+				"UserId -> userid",
+			},
+		},
+		{
+			name:         "same engine mssql",
+			sourceDBType: "mssql",
+			targetDBType: "mssql",
+			wantContains: []string{
+				"Source and target are the same database engine",
+				"Preserve ALL source column and table names EXACTLY as-is",
+			},
+			wantAbsent: []string{
+				"UserId -> userid",
+			},
+		},
+		{
+			name:         "cross engine uses lowercase guidance",
+			sourceDBType: "mssql",
+			targetDBType: "postgres",
+			wantContains: []string{
+				"Unquoted identifiers are folded to lowercase",
+				"UserId -> userid",
+			},
+			wantAbsent: []string{
+				"Source and target are the same database engine",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sb strings.Builder
+			ctx := &DatabaseContext{IdentifierCase: "lower"}
+			mapper.writeIdentifierGuidance(&sb, ctx, tt.sourceDBType, tt.targetDBType)
+			result := sb.String()
+
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("expected guidance to contain %q, got:\n%s", want, result)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(result, absent) {
+					t.Errorf("expected guidance NOT to contain %q, got:\n%s", absent, result)
+				}
 			}
 		})
 	}

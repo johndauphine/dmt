@@ -426,6 +426,7 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 type claudeRequest struct {
 	Model     string          `json:"model"`
 	MaxTokens int             `json:"max_tokens"`
+	System    string          `json:"system,omitempty"`
 	Messages  []claudeMessage `json:"messages"`
 }
 
@@ -656,9 +657,21 @@ func calculateBackoff(attempt int) time.Duration {
 
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
+
+	// Detect if this is a type mapping query (short, simple) vs a complex query
+	// (AI monitor, smart config, error diagnosis). Complex queries get a system
+	// prompt to improve structured output reliability.
+	maxTokens := 1024
+	systemPrompt := ""
+	if len(prompt) > 500 {
+		systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
+		maxTokens = 4096
+	}
+
 	reqBody := claudeRequest{
 		Model:     model,
-		MaxTokens: 1024,
+		MaxTokens: maxTokens,
+		System:    systemPrompt,
 		Messages: []claudeMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -1276,8 +1289,6 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 		sb.WriteString("\nWARNING: The following source columns are reserved words in the target database:\n")
 		for _, rw := range reservedWords {
 			switch req.TargetDBType {
-			case "oracle":
-				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToUpper(rw)))
 			case "mssql":
 				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as [%s]\n", rw, rw))
 			case "mysql":
@@ -1380,7 +1391,7 @@ func (m *AITypeMapper) writeMigrationRules(sb *strings.Builder, req TableDDLRequ
 	if req.TargetContext != nil {
 		m.writeVarcharGuidance(sb, req.TargetContext, "target")
 		m.writeEncodingGuidance(sb, req.TargetContext, "target")
-		m.writeIdentifierGuidance(sb, req.TargetContext)
+		m.writeIdentifierGuidance(sb, req.TargetContext, req.SourceDBType, req.TargetDBType)
 		m.writeLimitsGuidance(sb, req.TargetContext)
 	} else {
 		sb.WriteString("- No target context available, use standard type mappings\n")
@@ -1433,7 +1444,7 @@ func (m *AITypeMapper) writeEncodingGuidance(sb *strings.Builder, ctx *DatabaseC
 }
 
 // writeIdentifierGuidance writes identifier handling guidance based on context.
-func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *DatabaseContext) {
+func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *DatabaseContext, sourceDBType, targetDBType string) {
 	if ctx.IdentifierCase != "" {
 		switch strings.ToLower(ctx.IdentifierCase) {
 		case "upper":
@@ -1441,9 +1452,17 @@ func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *Databas
 			sb.WriteString("- Use UPPERCASE for all unquoted table and column names\n")
 			sb.WriteString("- Only quote identifiers that are reserved words\n")
 		case "lower":
-			sb.WriteString("- CRITICAL: Unquoted identifiers are folded to lowercase\n")
-			sb.WriteString("- Use lowercase for all table and column names (e.g., UserId -> userid, not user_id)\n")
-			sb.WriteString("- Do NOT convert to snake_case - just lowercase the original name directly\n")
+			if Canonicalize(sourceDBType) == Canonicalize(targetDBType) {
+				sb.WriteString("- CRITICAL: Source and target are the same database engine\n")
+				sb.WriteString("- Preserve ALL source column and table names EXACTLY as-is, including underscores\n")
+				sb.WriteString("- Do NOT remove, add, or modify any characters in identifier names\n")
+				sb.WriteString("- Example: user_id -> user_id (NOT userid)\n")
+				sb.WriteString("- Example: created_at -> created_at (NOT createdat)\n")
+			} else {
+				sb.WriteString("- CRITICAL: Unquoted identifiers are folded to lowercase\n")
+				sb.WriteString("- Use lowercase for all table and column names (e.g., UserId -> userid, not user_id)\n")
+				sb.WriteString("- Do NOT convert to snake_case - just lowercase the original name directly\n")
+			}
 		case "preserve":
 			sb.WriteString("- Identifier case is preserved as written\n")
 		}
@@ -1516,20 +1535,6 @@ func (m *AITypeMapper) findReservedWords(t *Table, targetDBType string) []string
 		"row": true, "rows": true, "column": true, "schema": true, "database": true,
 		"function": true, "procedure": true, "trigger": true, "view": true,
 		"id": false, // not reserved in most DBs
-	}
-
-	// Oracle-specific reserved words
-	if targetDBType == "oracle" {
-		reservedWords["uid"] = true
-		reservedWords["sysdate"] = true
-		reservedWords["rownum"] = true
-		reservedWords["rowid"] = true
-		reservedWords["access"] = true
-		reservedWords["file"] = true
-		reservedWords["long"] = true
-		reservedWords["raw"] = true
-		reservedWords["session"] = true
-		reservedWords["start"] = true
 	}
 
 	var found []string

@@ -210,10 +210,13 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 func (d *Dialect) AIPromptAugmentation() string {
 	return `
 CRITICAL PostgreSQL identifier rules:
-- Column and table names MUST be the EXACT lowercase version of the source name
-- Do NOT abbreviate, shorten, or modify names in any way
-- Example: LastEditorDisplayName → lasteditordisplayname (not lasteditdisplayname)
-- Example: LastEditorUserId → lasteditoruserid (not lastedituserid)
+- Column and table names MUST preserve the exact spelling and underscores from the source name
+- The ONLY allowed transformation is lowercasing letters in identifiers
+- Do NOT abbreviate, shorten, remove underscores, or change any non-letter characters
+- Underscores MUST be preserved: user_id → user_id (NOT userid)
+- CamelCase is only lowercased: LastEditorDisplayName → lasteditordisplayname
+- Example: created_at → created_at (NOT createdat)
+- Example: post_id → post_id (NOT postid)
 - Do NOT use double-quotes around identifiers unless the name is a reserved word
 
 CRITICAL PostgreSQL IDENTITY column rules:

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -63,11 +64,15 @@ type SmartConfigSuggestions struct {
 // AutoTuneInput contains system and database info for AI auto-tuning.
 type AutoTuneInput struct {
 	// System info
-	CPUCores int `json:"cpu_cores"`
-	MemoryGB int `json:"memory_gb"`
+	CPUCores          int    `json:"cpu_cores"`
+	MemoryGB          int    `json:"memory_gb"`
+	AvailableMemoryMB int64  `json:"available_memory_mb"` // Free + reclaimable memory
+	SwapTotalMB       int64  `json:"swap_total_mb"`
+	Platform          string `json:"platform"`      // "linux", "wsl2", "darwin", "windows"
+	MaxMemoryMB       int64  `json:"max_memory_mb"` // User-configured cap (0 = none)
 
 	// Database info
-	DatabaseType string `json:"database_type"`        // source: "mssql", "postgres", "mysql", "oracle"
+	DatabaseType string `json:"database_type"`         // source: "mssql", "postgres", "mysql", "oracle"
 	TargetType   string `json:"target_type,omitempty"` // target database type
 	TotalTables  int    `json:"total_tables"`
 	TotalRows    int64  `json:"total_rows"`
@@ -86,14 +91,14 @@ type TableStats struct {
 
 // AutoTuneOutput contains AI-recommended configuration values.
 type AutoTuneOutput struct {
-	Workers             int    `json:"workers"`
-	ChunkSize           int    `json:"chunk_size"`
-	ReadAheadBuffers    int    `json:"read_ahead_buffers"`
-	WriteAheadWriters   int    `json:"write_ahead_writers"`
-	ParallelReaders     int    `json:"parallel_readers"`
-	MaxPartitions       int    `json:"max_partitions"`
-	LargeTableThreshold int64  `json:"large_table_threshold"`
-	EstimatedMemoryMB   int64  `json:"estimated_memory_mb"`
+	Workers             int   `json:"workers"`
+	ChunkSize           int   `json:"chunk_size"`
+	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
+	WriteAheadWriters   int   `json:"write_ahead_writers"`
+	ParallelReaders     int   `json:"parallel_readers"`
+	MaxPartitions       int   `json:"max_partitions"`
+	LargeTableThreshold int64 `json:"large_table_threshold"`
+	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
 
 	// Connection pool tuning
 	MaxSourceConnections int `json:"max_source_connections"`
@@ -129,26 +134,26 @@ type AIAdjustmentRecord struct {
 
 // AITuningRecord represents a historical AI tuning recommendation.
 type AITuningRecord struct {
-	Timestamp        time.Time `json:"timestamp"`
-	SourceDBType     string    `json:"source_db_type"`
-	TargetDBType     string    `json:"target_db_type"`
-	TotalTables      int       `json:"total_tables"`
-	TotalRows        int64     `json:"total_rows"`
-	AvgRowSizeBytes  int64     `json:"avg_row_size_bytes"`
-	CPUCores         int       `json:"cpu_cores"`
-	MemoryGB         int       `json:"memory_gb"`
-	Workers          int       `json:"workers"`
-	ChunkSize        int       `json:"chunk_size"`
-	ReadAheadBuffers  int      `json:"read_ahead_buffers"`
-	WriteAheadWriters int      `json:"write_ahead_writers"`
-	ParallelReaders   int      `json:"parallel_readers"`
-	MaxPartitions     int      `json:"max_partitions"`
-	LargeTableThreshold  int64 `json:"large_table_threshold"`
-	MaxSourceConnections int   `json:"max_source_connections"`
-	MaxTargetConnections int   `json:"max_target_connections"`
-	EstimatedMemoryMB int64    `json:"estimated_memory_mb"`
-	AIReasoning      string    `json:"ai_reasoning"`
-	WasAIUsed        bool      `json:"was_ai_used"`
+	Timestamp            time.Time `json:"timestamp"`
+	SourceDBType         string    `json:"source_db_type"`
+	TargetDBType         string    `json:"target_db_type"`
+	TotalTables          int       `json:"total_tables"`
+	TotalRows            int64     `json:"total_rows"`
+	AvgRowSizeBytes      int64     `json:"avg_row_size_bytes"`
+	CPUCores             int       `json:"cpu_cores"`
+	MemoryGB             int       `json:"memory_gb"`
+	Workers              int       `json:"workers"`
+	ChunkSize            int       `json:"chunk_size"`
+	ReadAheadBuffers     int       `json:"read_ahead_buffers"`
+	WriteAheadWriters    int       `json:"write_ahead_writers"`
+	ParallelReaders      int       `json:"parallel_readers"`
+	MaxPartitions        int       `json:"max_partitions"`
+	LargeTableThreshold  int64     `json:"large_table_threshold"`
+	MaxSourceConnections int       `json:"max_source_connections"`
+	MaxTargetConnections int       `json:"max_target_connections"`
+	EstimatedMemoryMB    int64     `json:"estimated_memory_mb"`
+	AIReasoning          string    `json:"ai_reasoning"`
+	WasAIUsed            bool      `json:"was_ai_used"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -160,6 +165,7 @@ type SmartConfigAnalyzer struct {
 	useAI           bool
 	suggestions     *SmartConfigSuggestions
 	historyProvider TuningHistoryProvider
+	maxMemoryMB     int64 // user-configured memory cap (passed to AI)
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -180,6 +186,11 @@ func NewSmartConfigAnalyzer(db *sql.DB, dbType string, aiMapper *AITypeMapper) *
 // SetHistoryProvider sets the history provider for learning from past analyses.
 func (s *SmartConfigAnalyzer) SetHistoryProvider(provider TuningHistoryProvider) {
 	s.historyProvider = provider
+}
+
+// SetMaxMemoryMB sets the user-configured memory cap so AI can respect it.
+func (s *SmartConfigAnalyzer) SetMaxMemoryMB(mb int64) {
+	s.maxMemoryMB = mb
 }
 
 // SetTargetDBType sets the target database type for more accurate recommendations.
@@ -343,7 +354,7 @@ func (s *SmartConfigAnalyzer) applyDefaultSuggestions(input AutoTuneInput) {
 	s.suggestions.MaxPartitions = workers
 	s.suggestions.LargeTableThreshold = 1000000
 	s.suggestions.MaxSourceConnections = workers + 4
-	s.suggestions.MaxTargetConnections = workers * 2 + 4
+	s.suggestions.MaxTargetConnections = workers*2 + 4
 	s.suggestions.UpsertMergeChunkSize = 5000
 	s.suggestions.CheckpointFrequency = 20
 	s.suggestions.MaxRetries = 3
@@ -381,8 +392,17 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 	// Get system info
 	cores := runtime.NumCPU()
 	memoryGB := 8 // Default
+	var availableMemoryMB, swapTotalMB int64
 	if v, err := mem.VirtualMemory(); err == nil {
 		memoryGB = int(v.Total / (1024 * 1024 * 1024))
+		availableMemoryMB = int64(v.Available / (1024 * 1024))
+	}
+	// Fallback: if available memory is unknown, estimate as 50% of total
+	if availableMemoryMB == 0 {
+		availableMemoryMB = int64(memoryGB) * 1024 / 2
+	}
+	if sw, err := mem.SwapMemory(); err == nil {
+		swapTotalMB = int64(sw.Total / (1024 * 1024))
 	}
 
 	// Build largest tables list
@@ -399,14 +419,31 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 	}
 
 	return AutoTuneInput{
-		CPUCores:      cores,
-		MemoryGB:      memoryGB,
-		DatabaseType:  s.dbType,
-		TotalTables:   s.suggestions.TotalTables,
-		TotalRows:     s.suggestions.TotalRows,
-		AvgRowBytes:   avgRowSize,
-		LargestTables: largestTables,
+		CPUCores:          cores,
+		MemoryGB:          memoryGB,
+		AvailableMemoryMB: availableMemoryMB,
+		SwapTotalMB:       swapTotalMB,
+		Platform:          detectPlatform(),
+		MaxMemoryMB:       s.maxMemoryMB,
+		DatabaseType:      s.dbType,
+		TargetType:        s.targetDBType,
+		TotalTables:       s.suggestions.TotalTables,
+		TotalRows:         s.suggestions.TotalRows,
+		AvgRowBytes:       avgRowSize,
+		LargestTables:     largestTables,
 	}
+}
+
+// detectPlatform returns the runtime platform, detecting WSL2 specifically.
+func detectPlatform() string {
+	if runtime.GOOS != "linux" {
+		return runtime.GOOS
+	}
+	data, err := os.ReadFile("/proc/version")
+	if err == nil && strings.Contains(strings.ToLower(string(data)), "microsoft") {
+		return "wsl2"
+	}
+	return "linux"
 }
 
 // formatHistoricalContext builds a historical context string from past tuning data.
@@ -443,9 +480,9 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	if err == nil && len(adjustments) > 0 {
 		// Summarize adjustments by action type
 		actionStats := make(map[string]struct {
-			count      int
-			avgEffect  float64
-			totalRows  float64
+			count     int
+			avgEffect float64
+			totalRows float64
 		})
 		for _, adj := range adjustments {
 			stat := actionStats[adj.Action]
@@ -486,15 +523,34 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 	// Get historical context from past analyses and migrations
 	historicalContext := s.formatHistoricalContext()
 
+	// Build memory constraint description
+	memConstraint := fmt.Sprintf("Total RAM: %dGB, Available: %dMB", input.MemoryGB, input.AvailableMemoryMB)
+	if input.MaxMemoryMB > 0 {
+		memConstraint += fmt.Sprintf(", User cap: %dMB", input.MaxMemoryMB)
+	}
+	if input.SwapTotalMB > 0 {
+		memConstraint += fmt.Sprintf(", Swap: %dMB", input.SwapTotalMB)
+	}
+	if input.Platform == "wsl2" {
+		memConstraint += " (WSL2 - shared memory with Windows host, OOM kills crash the VM)"
+	}
+
 	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system environment and historical data.
 
 System and Database Info:
 %s
 %s
-Environment Context:
-- CPU cores: %d (consider reserving 1-2 for OS)
-- Available RAM: %dGB (consider what portion to use for migration buffers)
+Host Environment:
+- Platform: %s
+- CPU cores: %d (reserve 1-2 for OS and other processes)
+- Memory: %s
 - Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+
+CRITICAL MEMORY CONSTRAINT:
+- estimated_memory_mb MUST NOT exceed available_memory_mb minus 2GB headroom
+- The host may be running database containers (Docker), IDEs, and other processes
+- On WSL2, exceeding available memory crashes the entire VM — be conservative
+- If a user memory cap (max_memory_mb) is set, stay well within it
 
 Parameters to tune:
 - workers: Parallel migration workers
@@ -511,11 +567,12 @@ Parameters to tune:
 - max_retries: Retry count for transient failures
 
 Guidelines:
-1. CHUNK SIZE is most important - larger = higher throughput, balance with available memory
-2. Workers should scale with CPU cores but leave headroom for the OS
-3. Connection pool sizes should accommodate workers plus overhead
-4. Learn from historical data: apply patterns that improved performance in past migrations
-5. Consider the database types and total data volume when tuning
+1. MEMORY SAFETY FIRST - never exceed available memory. Start conservative, the runtime AI monitor can scale up.
+2. CHUNK SIZE is most important for throughput - larger = faster, but balance with memory
+3. Workers should scale with CPU cores but leave headroom
+4. Connection pool sizes should accommodate workers * readers/writers plus overhead
+5. Learn from historical data: apply patterns that improved performance in past migrations
+6. Consider the database types and total data volume when tuning
 
 Respond with ONLY a JSON object:
 {
@@ -532,8 +589,8 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief explanation of choices, referencing historical data if relevant>"
-}`, string(inputJSON), historicalContext, input.CPUCores, input.MemoryGB)
+  "reasoning": "<brief explanation of choices, referencing memory constraints and historical data>"
+}`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint)
 
 	response, err := s.aiMapper.CallAI(ctx, prompt)
 	if err != nil {
@@ -601,15 +658,34 @@ func GetOfflineAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutp
 		return nil, fmt.Errorf("marshaling input: %w", err)
 	}
 
+	// Build memory constraint description
+	memConstraint := fmt.Sprintf("Total RAM: %dGB, Available: %dMB", input.MemoryGB, input.AvailableMemoryMB)
+	if input.MaxMemoryMB > 0 {
+		memConstraint += fmt.Sprintf(", User cap: %dMB", input.MaxMemoryMB)
+	}
+	if input.SwapTotalMB > 0 {
+		memConstraint += fmt.Sprintf(", Swap: %dMB", input.SwapTotalMB)
+	}
+	if input.Platform == "wsl2" {
+		memConstraint += " (WSL2 - shared memory with Windows host, OOM kills crash the VM)"
+	}
+
 	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system environment.
 
 System and Database Info:
 %s
 
-Environment Context:
-- CPU cores: %d (consider reserving 1-2 for OS)
-- Available RAM: %dGB (consider what portion to use for migration buffers)
+Host Environment:
+- Platform: %s
+- CPU cores: %d (reserve 1-2 for OS and other processes)
+- Memory: %s
 - Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+
+CRITICAL MEMORY CONSTRAINT:
+- estimated_memory_mb MUST NOT exceed available_memory_mb minus 2GB headroom
+- The host may be running database containers (Docker), IDEs, and other processes
+- On WSL2, exceeding available memory crashes the entire VM — be conservative
+- If a user memory cap (max_memory_mb) is set, stay well within it
 
 Parameters to tune:
 - workers: Parallel migration workers
@@ -626,9 +702,10 @@ Parameters to tune:
 - max_retries: Retry count for transient failures
 
 Guidelines:
-1. CHUNK SIZE is most important - larger = higher throughput, balance with available memory
-2. Workers should scale with CPU cores but leave headroom for the OS
-3. Connection pool sizes should accommodate workers plus overhead
+1. MEMORY SAFETY FIRST - never exceed available memory. Start conservative, the runtime AI monitor can scale up.
+2. CHUNK SIZE is most important for throughput - larger = faster, but balance with memory
+3. Workers should scale with CPU cores but leave headroom
+4. Connection pool sizes should accommodate workers * readers/writers plus overhead
 
 Respond with ONLY a JSON object:
 {
@@ -645,8 +722,8 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief explanation of choices>"
-}`, string(inputJSON), input.CPUCores, input.MemoryGB)
+  "reasoning": "<brief explanation of choices, referencing memory constraints>"
+}`, string(inputJSON), input.Platform, input.CPUCores, memConstraint)
 
 	response, err := aiMapper.CallAI(ctx, prompt)
 	if err != nil {

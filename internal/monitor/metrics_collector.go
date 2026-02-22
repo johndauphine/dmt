@@ -8,17 +8,17 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/shirou/gopsutil/v3/cpu"
 )
 
 // PerformanceSnapshot captures a single measurement of migration performance.
 type PerformanceSnapshot struct {
-	Timestamp        time.Time
-	ElapsedSeconds   float64
-	RowsProcessed    int64
-	Throughput       float64 // rows/sec
-	ThroughputTrend  float64 // % change from previous sample
+	Timestamp       time.Time
+	ElapsedSeconds  float64
+	RowsProcessed   int64
+	Throughput      float64 // rows/sec
+	ThroughputTrend float64 // % change from previous sample
 
 	// Resource usage
 	MemoryUsedMB  int64
@@ -62,19 +62,23 @@ type TrendAnalysis struct {
 
 // MetricsCollector continuously collects performance metrics during migration.
 type MetricsCollector struct {
-	pipeline      *pipeline.Pipeline
+	tuner         transfer.RuntimeTuner
 	startTime     time.Time
 	interval      time.Duration
 	rowsProcessed atomic.Int64
+
+	// Previous snapshot state for windowed throughput calculation
+	prevRowsProcessed int64
+	prevTimestamp     time.Time
 
 	metricsMu sync.RWMutex
 	metrics   []PerformanceSnapshot
 }
 
 // NewMetricsCollector creates a new metrics collector.
-func NewMetricsCollector(p *pipeline.Pipeline, interval time.Duration) *MetricsCollector {
+func NewMetricsCollector(tuner transfer.RuntimeTuner, interval time.Duration) *MetricsCollector {
 	return &MetricsCollector{
-		pipeline:  p,
+		tuner:     tuner,
 		startTime: time.Now(),
 		interval:  interval,
 		metrics:   make([]PerformanceSnapshot, 0, 128), // Pre-allocate for ~64 minutes of data
@@ -84,6 +88,11 @@ func NewMetricsCollector(p *pipeline.Pipeline, interval time.Duration) *MetricsC
 // UpdateRowCount updates the number of rows processed.
 func (mc *MetricsCollector) UpdateRowCount(count int64) {
 	mc.rowsProcessed.Store(count)
+}
+
+// GetCurrentRowCount returns the live row count (not from a snapshot).
+func (mc *MetricsCollector) GetCurrentRowCount() int64 {
+	return mc.rowsProcessed.Load()
 }
 
 // Start begins collecting metrics at regular intervals.
@@ -109,37 +118,47 @@ func (mc *MetricsCollector) collectSnapshot() {
 		RowsProcessed:  mc.rowsProcessed.Load(),
 	}
 
-	// Calculate throughput
-	if snapshot.ElapsedSeconds > 0 {
-		snapshot.Throughput = float64(snapshot.RowsProcessed) / snapshot.ElapsedSeconds
-	}
-
-	// Get memory stats
+	// Collect expensive I/O metrics outside the lock
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	snapshot.MemoryUsedMB = int64(m.Alloc / 1024 / 1024)
 
-	// Estimate memory percent (rough estimate based on available system memory)
-	// For more accuracy, would need to query actual system memory
 	totalMemBytes := int64(m.Sys)
 	if totalMemBytes > 0 {
 		snapshot.MemoryPercent = float64(m.Alloc) / float64(totalMemBytes) * 100
 	}
 
-	// Get CPU usage (requires a short measurement window)
 	cpuPercent, err := cpu.Percent(100*time.Millisecond, false)
 	if err == nil && len(cpuPercent) > 0 {
 		snapshot.CPUPercent = cpuPercent[0]
 	}
 
-	// Get current config
-	config := mc.pipeline.GetConfig()
+	snap := mc.tuner.Snapshot()
 	snapshot.CurrentConfig = ConfigSnapshot{
-		ChunkSize:         config.ChunkSize,
-		ReadAheadBuffers:  config.ReadAheadBuffers,
-		ParallelReaders:   config.ParallelReaders,
-		WriteAheadWriters: config.WriteAheadWriters,
+		ChunkSize:         snap.ChunkSize,
+		ReadAheadBuffers:  snap.ReadAheadBuffers,
+		ParallelReaders:   snap.ParallelReaders,
+		WriteAheadWriters: snap.WriteAheadWriters,
 	}
+
+	// Hold lock for windowed throughput calculation, trend, and append
+	mc.metricsMu.Lock()
+
+	// Calculate windowed throughput (rows processed since last snapshot)
+	// This avoids the cumulative average problem where early fast tables
+	// inflate the average and mask real-time slowdowns.
+	now := time.Now()
+	if !mc.prevTimestamp.IsZero() {
+		intervalSec := now.Sub(mc.prevTimestamp).Seconds()
+		if intervalSec > 0 {
+			snapshot.Throughput = float64(snapshot.RowsProcessed-mc.prevRowsProcessed) / intervalSec
+		}
+	} else if snapshot.ElapsedSeconds > 0 {
+		// First snapshot: use cumulative as fallback
+		snapshot.Throughput = float64(snapshot.RowsProcessed) / snapshot.ElapsedSeconds
+	}
+	mc.prevRowsProcessed = snapshot.RowsProcessed
+	mc.prevTimestamp = now
 
 	// Calculate trend
 	if len(mc.metrics) > 0 {
@@ -149,7 +168,6 @@ func (mc *MetricsCollector) collectSnapshot() {
 		}
 	}
 
-	mc.metricsMu.Lock()
 	mc.metrics = append(mc.metrics, snapshot)
 	mc.metricsMu.Unlock()
 
@@ -237,12 +255,4 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	}
 
 	return result
-}
-
-// max returns the maximum of two int64 values.
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }

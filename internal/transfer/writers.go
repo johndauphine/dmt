@@ -13,55 +13,55 @@ import (
 // writerPool wraps pool.WriterPool with transfer-specific functionality.
 type writerPool struct {
 	*pool.WriterPool
-	tgtPool              pool.TargetPool
-	targetSchema         string
-	targetTable          string
-	targetCols           []string
-	colTypes             []string
-	colSRIDs             []int
-	targetPKCols         []string
-	partitionID          *int
-	useUpsert            bool
-	upsertMergeChunkSize int
+	tgtPool                pool.TargetPool
+	targetSchema           string
+	targetTable            string
+	targetCols             []string
+	colTypes               []string
+	colSRIDs               []int
+	targetPKCols           []string
+	partitionID            *int
+	useUpsert              bool
+	upsertMergeChunkSizeFn func() int
 }
 
 // writerPoolConfig holds the configuration for creating a writer pool.
 type writerPoolConfig struct {
-	NumWriters           int
-	BufferSize           int
-	UseUpsert            bool
-	UpsertMergeChunkSize int
-	TargetSchema         string
-	TargetTable          string
-	TargetCols           []string
-	ColTypes             []string
-	ColSRIDs             []int
-	TargetPKCols         []string
-	PartitionID          *int
-	TgtPool              pool.TargetPool
-	Prog                 *progress.Tracker
-	EnableAck            bool // Whether to enable ack channel for checkpointing
+	NumWriters             int
+	BufferSize             int
+	UseUpsert              bool
+	UpsertMergeChunkSizeFn func() int
+	TargetSchema           string
+	TargetTable            string
+	TargetCols             []string
+	ColTypes               []string
+	ColSRIDs               []int
+	TargetPKCols           []string
+	PartitionID            *int
+	TgtPool                pool.TargetPool
+	Prog                   *progress.Tracker
+	EnableAck              bool // Whether to enable ack channel for checkpointing
 }
 
 // newWriterPool creates a new writer pool with the given configuration.
 func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
-	// Default upsert merge chunk size if not specified
-	upsertMergeChunkSize := cfg.UpsertMergeChunkSize
-	if upsertMergeChunkSize <= 0 {
-		upsertMergeChunkSize = 5000
+	// Default upsert merge chunk size callback if not specified
+	upsertFn := cfg.UpsertMergeChunkSizeFn
+	if upsertFn == nil {
+		upsertFn = func() int { return 5000 }
 	}
 
 	wp := &writerPool{
-		tgtPool:              cfg.TgtPool,
-		targetSchema:         cfg.TargetSchema,
-		targetTable:          cfg.TargetTable,
-		targetCols:           cfg.TargetCols,
-		colTypes:             cfg.ColTypes,
-		colSRIDs:             cfg.ColSRIDs,
-		targetPKCols:         cfg.TargetPKCols,
-		partitionID:          cfg.PartitionID,
-		useUpsert:            cfg.UseUpsert,
-		upsertMergeChunkSize: upsertMergeChunkSize,
+		tgtPool:                cfg.TgtPool,
+		targetSchema:           cfg.TargetSchema,
+		targetTable:            cfg.TargetTable,
+		targetCols:             cfg.TargetCols,
+		colTypes:               cfg.ColTypes,
+		colSRIDs:               cfg.ColSRIDs,
+		targetPKCols:           cfg.TargetPKCols,
+		partitionID:            cfg.PartitionID,
+		useUpsert:              cfg.UseUpsert,
+		upsertMergeChunkSizeFn: upsertFn,
 	}
 
 	// Create the base writer pool with our write function
@@ -87,7 +87,10 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 // executeUpsertWithChunking executes an upsert job, chunking if necessary based on UpsertMergeChunkSize.
 // Chunking reduces memory pressure on the target database when processing large batches.
 func (wp *writerPool) executeUpsertWithChunking(ctx context.Context, writerID int, rows [][]any) error {
-	mergeChunkSize := wp.upsertMergeChunkSize
+	mergeChunkSize := wp.upsertMergeChunkSizeFn()
+	if mergeChunkSize <= 0 {
+		mergeChunkSize = 5000
+	}
 
 	logging.Debug("executeUpsertWithChunking: rows=%d, mergeChunkSize=%d", len(rows), mergeChunkSize)
 

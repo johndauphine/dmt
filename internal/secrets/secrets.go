@@ -25,10 +25,10 @@ const (
 
 // Config represents the complete secrets configuration
 type Config struct {
-	AI                AIConfig              `yaml:"ai"`
-	Encryption        EncryptionConfig      `yaml:"encryption"`
-	Notifications     NotificationsConfig   `yaml:"notifications"`
-	MigrationDefaults MigrationDefaults     `yaml:"migration_defaults"`
+	AI                AIConfig            `yaml:"ai"`
+	Encryption        EncryptionConfig    `yaml:"encryption"`
+	Notifications     NotificationsConfig `yaml:"notifications"`
+	MigrationDefaults MigrationDefaults   `yaml:"migration_defaults"`
 }
 
 // MigrationDefaults holds global default settings for migrations.
@@ -39,9 +39,9 @@ type MigrationDefaults struct {
 	MaxSourceConnections int   `yaml:"max_source_connections,omitempty"` // Max source DB connections
 	MaxTargetConnections int   `yaml:"max_target_connections,omitempty"` // Max target DB connections
 	MaxMemoryMB          int64 `yaml:"max_memory_mb,omitempty"`          // Max memory usage in MB
-	ReadAheadBuffers  int   `yaml:"read_ahead_buffers,omitempty"`  // Chunks to buffer ahead
-	WriteAheadWriters int   `yaml:"write_ahead_writers,omitempty"` // Parallel writers per job
-	ParallelReaders   int   `yaml:"parallel_readers,omitempty"`    // Parallel readers per job
+	ReadAheadBuffers     int   `yaml:"read_ahead_buffers,omitempty"`     // Chunks to buffer ahead
+	WriteAheadWriters    int   `yaml:"write_ahead_writers,omitempty"`    // Parallel writers per job
+	ParallelReaders      int   `yaml:"parallel_readers,omitempty"`       // Parallel readers per job
 
 	// Schema creation defaults (use *bool to distinguish "not set" from "false")
 	CreateIndexes          *bool `yaml:"create_indexes,omitempty"`           // Create non-PK indexes (default: true)
@@ -117,7 +117,7 @@ var KnownProviders = map[string]struct {
 
 // DefaultModels maps providers to their default models
 var DefaultModels = map[string]string{
-	"claude":   "claude-sonnet-4-20250514",
+	"claude":   "claude-sonnet-4-6",
 	"openai":   "gpt-4o",
 	"gemini":   "gemini-2.0-flash",
 	"ollama":   "llama3",
@@ -499,7 +499,7 @@ ai:
     # Cloud providers (require API key)
     claude:
       api_key: ""  # Get from https://console.anthropic.com/
-      model: "claude-sonnet-4-20250514"  # optional
+      model: "claude-sonnet-4-6"  # optional
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/

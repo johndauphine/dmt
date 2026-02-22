@@ -14,18 +14,18 @@ type keysetCheckpointCoordinator struct {
 	rowsTotal      int64
 	resumeRowsDone int64
 	totalWritten   *int64
-	checkpointFreq int
+	checkpointFreq func() int
 
 	states          []readerCheckpointState
 	completedChunks int
 }
 
-func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone int64, totalWritten *int64, checkpointFreq int) *keysetCheckpointCoordinator {
+func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone int64, totalWritten *int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
 	if job.Saver == nil || job.TaskID <= 0 {
 		return nil
 	}
-	if checkpointFreq <= 0 {
-		checkpointFreq = 10
+	if checkpointFreq == nil {
+		checkpointFreq = func() int { return 10 }
 	}
 
 	var partID *int
@@ -80,7 +80,11 @@ func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 	for {
 		c.applyAck(state, ack)
 		c.completedChunks++
-		if c.completedChunks%c.checkpointFreq == 0 {
+		freq := c.checkpointFreq()
+		if freq <= 0 {
+			freq = 10
+		}
+		if c.completedChunks%freq == 0 {
 			safeLastPK := c.safeCheckpoint()
 			if safeLastPK != nil {
 				rowsDone := c.resumeRowsDone + atomic.LoadInt64(c.totalWritten)

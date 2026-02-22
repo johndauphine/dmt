@@ -70,6 +70,64 @@ func TestAvailableDrivers(t *testing.T) {
 	}
 }
 
+func TestEstimateAvgRowBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		rows [][]any
+		want int // minimum expected
+	}{
+		{"empty rows", nil, 64},
+		{"narrow int rows", [][]any{{1, 2, 3}}, 64},            // 3*8=24, clamped to 64
+		{"string rows", [][]any{{"hello world", 42}}, 64},      // 11+8=19, clamped to 64
+		{"wide rows", [][]any{{string(make([]byte, 10000))}}, 10000},
+		{"mixed", [][]any{
+			{string(make([]byte, 500)), 1, true},
+			{string(make([]byte, 300)), 2, false},
+		}, 200}, // avg ~(516+316)/2 = 416
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := estimateAvgRowBytes(tt.rows, 10)
+			if got < tt.want {
+				t.Errorf("estimateAvgRowBytes() = %d, want >= %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCopyBatchSize(t *testing.T) {
+	// Narrow rows (~64 bytes): 5MB/64 = 81920, clamped to maxCopyBatchRows (50000)
+	narrow := make([][]any, 100)
+	for i := range narrow {
+		narrow[i] = []any{i, i + 1}
+	}
+	got := copyBatchSize(narrow)
+	if got != maxCopyBatchRows {
+		t.Errorf("narrow rows: copyBatchSize() = %d, want %d", got, maxCopyBatchRows)
+	}
+
+	// Wide rows (~10KB each): 5MB/10240 = 512
+	wide := make([][]any, 100)
+	for i := range wide {
+		wide[i] = []any{string(make([]byte, 10000)), i}
+	}
+	got = copyBatchSize(wide)
+	if got < minCopyBatchRows || got > 1000 {
+		t.Errorf("wide rows: copyBatchSize() = %d, want in [%d, 1000]", got, minCopyBatchRows)
+	}
+
+	// Very wide rows (~100KB each): 5MB/102408 = ~51, clamped to minCopyBatchRows (100)
+	veryWide := make([][]any, 10)
+	for i := range veryWide {
+		veryWide[i] = []any{string(make([]byte, 100000)), string(make([]byte, 2400))}
+	}
+	got = copyBatchSize(veryWide)
+	if got != minCopyBatchRows {
+		t.Errorf("very wide rows: copyBatchSize() = %d, want %d", got, minCopyBatchRows)
+	}
+}
+
 func TestAIPromptAugmentation(t *testing.T) {
 	dialect := &Dialect{}
 	aug := dialect.AIPromptAugmentation()
@@ -77,10 +135,12 @@ func TestAIPromptAugmentation(t *testing.T) {
 	// Verify the augmentation contains critical PostgreSQL identifier rules
 	checks := []string{
 		"CRITICAL PostgreSQL identifier rules",
-		"EXACT lowercase version of the source name",
-		"Do NOT abbreviate, shorten, or modify names",
+		"MUST preserve the exact spelling and underscores from the source name",
+		"ONLY allowed transformation is lowercasing letters",
+		"Do NOT abbreviate, shorten, remove underscores, or change any non-letter characters",
+		"user_id → user_id (NOT userid)",
 		"LastEditorDisplayName → lasteditordisplayname",
-		"LastEditorUserId → lasteditoruserid",
+		"created_at → created_at (NOT createdat)",
 		"Do NOT use double-quotes around identifiers",
 	}
 

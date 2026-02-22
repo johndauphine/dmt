@@ -135,6 +135,8 @@ type AutoConfig struct {
 	OriginalUpsertMergeChunkSize int
 	OriginalSourceChunkSize      int
 	OriginalTargetChunkSize      int
+	OriginalCheckpointFrequency  int
+	OriginalMaxRetries           int
 
 	// Target memory used for calculations
 	TargetMemoryMB int64
@@ -185,7 +187,7 @@ type AIConfig struct {
 
 	// Model specifies which model to use (optional).
 	// Defaults to smart models for accurate inference:
-	//   Claude: claude-sonnet-4-20250514
+	//   Claude: claude-sonnet-4-6
 	//   OpenAI: gpt-4o
 	//   Gemini: gemini-2.0-flash
 	Model string `yaml:"model"`
@@ -210,8 +212,8 @@ type AITypeMappingConfig struct {
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxSourceConnections int `yaml:"max_source_connections"` // Max source database connections
-	MaxTargetConnections int `yaml:"max_target_connections"` // Max target database connections
+	MaxSourceConnections   int      `yaml:"max_source_connections"` // Max source database connections
+	MaxTargetConnections   int      `yaml:"max_target_connections"` // Max target database connections
 	ChunkSize              int      `yaml:"chunk_size"`
 	MaxPartitions          int      `yaml:"max_partitions"`
 	Workers                int      `yaml:"workers"`
@@ -444,6 +446,8 @@ func (c *Config) applyDefaults() {
 	c.autoConfig.OriginalUpsertMergeChunkSize = c.Migration.UpsertMergeChunkSize
 	c.autoConfig.OriginalSourceChunkSize = c.Source.ChunkSize
 	c.autoConfig.OriginalTargetChunkSize = c.Target.ChunkSize
+	c.autoConfig.OriginalCheckpointFrequency = c.Migration.CheckpointFrequency
+	c.autoConfig.OriginalMaxRetries = c.Migration.MaxRetries
 
 	// Detect system resources (only if not already set, for testing)
 	if c.autoConfig.CPUCores == 0 {
@@ -642,14 +646,8 @@ func (c *Config) applyDefaults() {
 
 	// Default target chunk_size to migration chunk_size if not specified
 	// This is the batch size for writing to the target database
-	// For Oracle targets, a smaller default is optimal for godror.Batch (5000-10000)
 	if c.Target.ChunkSize == 0 {
-		if c.Target.Type == "oracle" {
-			// Oracle performs best with smaller batch sizes (5000-10000)
-			c.Target.ChunkSize = 5000
-		} else {
-			c.Target.ChunkSize = c.Migration.ChunkSize
-		}
+		c.Target.ChunkSize = c.Migration.ChunkSize
 	}
 
 	// Auto-tune UpsertMergeChunkSize for upsert mode
@@ -1091,6 +1089,73 @@ func (c *Config) AutoConfig() AutoConfig {
 	return c.autoConfig
 }
 
+// ParamChange records a parameter change from formula to AI value.
+type ParamChange struct {
+	Name     string
+	OldValue int64
+	NewValue int64
+}
+
+// ApplyAISuggestions overrides formula-computed defaults with AI recommendations.
+// Only parameters the user didn't explicitly set (Original* == 0) are overridden.
+// Returns a list of parameters that were changed.
+func (c *Config) ApplyAISuggestions(s *driver.SmartConfigSuggestions) []ParamChange {
+	ac := c.autoConfig
+	var changes []ParamChange
+
+	// Helper to conditionally apply a suggestion
+	apply := func(name string, original int, current *int, suggested int) {
+		if original == 0 && suggested > 0 && suggested != *current {
+			changes = append(changes, ParamChange{name, int64(*current), int64(suggested)})
+			*current = suggested
+		}
+	}
+	applyInt64 := func(name string, original int64, current *int64, suggested int64) {
+		if original == 0 && suggested > 0 && suggested != *current {
+			changes = append(changes, ParamChange{name, *current, suggested})
+			*current = suggested
+		}
+	}
+
+	// Core tunable parameters
+	apply("workers", ac.OriginalWorkers, &c.Migration.Workers, s.Workers)
+	apply("chunk_size", ac.OriginalChunkSize, &c.Migration.ChunkSize, s.ChunkSizeRecommendation)
+	apply("read_ahead_buffers", ac.OriginalReadAheadBuffers, &c.Migration.ReadAheadBuffers, s.ReadAheadBuffers)
+	apply("write_ahead_writers", ac.OriginalWriteAheadWriters, &c.Migration.WriteAheadWriters, s.WriteAheadWriters)
+	apply("parallel_readers", ac.OriginalParallelReaders, &c.Migration.ParallelReaders, s.ParallelReaders)
+	apply("max_partitions", ac.OriginalMaxPartitions, &c.Migration.MaxPartitions, s.MaxPartitions)
+	applyInt64("large_table_threshold", ac.OriginalLargeTableThresh, &c.Migration.LargeTableThreshold, s.LargeTableThreshold)
+	apply("upsert_merge_chunk_size", ac.OriginalUpsertMergeChunkSize, &c.Migration.UpsertMergeChunkSize, s.UpsertMergeChunkSize)
+	apply("checkpoint_frequency", ac.OriginalCheckpointFrequency, &c.Migration.CheckpointFrequency, s.CheckpointFrequency)
+	apply("max_retries", ac.OriginalMaxRetries, &c.Migration.MaxRetries, s.MaxRetries)
+
+	// Re-derive dependent values after core parameter changes
+	if len(changes) > 0 {
+		// Connection pools (only if user didn't specify)
+		if ac.OriginalMaxSourceConns == 0 {
+			required := c.Migration.Workers*c.Migration.ParallelReaders + 4
+			if required != c.Migration.MaxSourceConnections {
+				c.Migration.MaxSourceConnections = required
+			}
+		}
+		if ac.OriginalMaxTargetConns == 0 {
+			required := c.Migration.Workers*c.Migration.WriteAheadWriters + 4
+			if required != c.Migration.MaxTargetConnections {
+				c.Migration.MaxTargetConnections = required
+			}
+		}
+		// Source/Target chunk sizes default to migration chunk_size
+		if ac.OriginalSourceChunkSize == 0 {
+			c.Source.ChunkSize = c.Migration.ChunkSize
+		}
+		if ac.OriginalTargetChunkSize == 0 {
+			c.Target.ChunkSize = c.Migration.ChunkSize
+		}
+	}
+
+	return changes
+}
+
 // DebugDump returns a comprehensive configuration dump with auto-tuning explanations
 func (c *Config) DebugDump() string {
 	var b strings.Builder
@@ -1218,7 +1283,7 @@ func (c *Config) DebugDump() string {
 	// Source/Target ChunkSize
 	sourceChunkExpl := "defaults to migration chunk_size"
 	b.WriteString(fmt.Sprintf("  Source.ChunkSize: %s\n", formatAutoValue(c.Source.ChunkSize, ac.OriginalSourceChunkSize, sourceChunkExpl)))
-	targetChunkExpl := "defaults to migration chunk_size (5000 for Oracle)"
+	targetChunkExpl := "defaults to migration chunk_size"
 	b.WriteString(fmt.Sprintf("  Target.ChunkSize: %s\n", formatAutoValue(c.Target.ChunkSize, ac.OriginalTargetChunkSize, targetChunkExpl)))
 
 	// Other settings

@@ -12,7 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pipeline"
+	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -20,6 +20,15 @@ const (
 	// effectivenessThreshold defines the minimum percentage improvement
 	// for an adjustment to be considered effective
 	effectivenessThreshold = 5.0
+
+	// adjustmentCooldown is the minimum time between applying adjustments.
+	// This gives ~3 metric samples (at 30s intervals) to stabilize before
+	// the next adjustment, preventing cascading changes.
+	adjustmentCooldown = 90 * time.Second
+
+	// negativeEffectThreshold is the number of consecutive adjustments with
+	// negative impact before the effectiveness circuit breaker fires.
+	negativeEffectThreshold = 3
 )
 
 // AdjustmentDecision represents AI's recommendation for parameter adjustments.
@@ -55,7 +64,7 @@ type SystemResources struct {
 type AIAdjuster struct {
 	aiMapper       *driver.AITypeMapper
 	collector      *MetricsCollector
-	pipeline       *pipeline.Pipeline
+	tuner          transfer.RuntimeTuner
 	startTime      time.Time
 	lastAdjustment time.Time
 	adjustmentsMu  sync.Mutex
@@ -64,8 +73,8 @@ type AIAdjuster struct {
 	systemResources SystemResources
 
 	// Baseline metrics
-	baselineMetrics   *PerformanceSnapshot
-	baselineCaptured  bool
+	baselineMetrics  *PerformanceSnapshot
+	baselineCaptured bool
 
 	// Adjustment history for AI learning
 	adjustmentHistory []AdjustmentRecord
@@ -82,11 +91,19 @@ type AIAdjuster struct {
 	cacheDuration  time.Duration
 	cachedDecision *AdjustmentDecision
 
-	// Circuit breaker
+	// Circuit breaker (API failures)
 	failureCount     int
 	failureThreshold int
 	resetTimeout     time.Duration
 	circuitOpen      bool
+
+	// Effectiveness circuit breaker (consecutive bad adjustments)
+	consecutiveNegative     int
+	effectivenessOpenedAt   time.Time     // when effectiveness breaker fired
+	effectivenessResetAfter time.Duration // auto-reset timeout
+
+	// Transfer progress
+	totalRows int64
 
 	// Persistent history
 	state checkpoint.StateBackend
@@ -94,25 +111,34 @@ type AIAdjuster struct {
 }
 
 // NewAIAdjuster creates a new AI adjuster.
-func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, p *pipeline.Pipeline) *AIAdjuster {
+func NewAIAdjuster(aiMapper *driver.AITypeMapper, collector *MetricsCollector, tuner transfer.RuntimeTuner) *AIAdjuster {
 	aa := &AIAdjuster{
 		aiMapper:          aiMapper,
 		collector:         collector,
-		pipeline:          p,
+		tuner:             tuner,
 		startTime:         time.Now(),
 		callInterval:      30 * time.Second, // Throttle to 30s intervals
 		cacheDuration:     60 * time.Second, // Cache decisions for 60s
 		failureThreshold:  3,
-		resetTimeout:      5 * time.Minute,
-		circuitOpen:       false,
-		maxHistorySize:    10, // Keep last 10 adjustments
-		adjustmentHistory: make([]AdjustmentRecord, 0, 10),
+		resetTimeout:           5 * time.Minute,
+		circuitOpen:            false,
+		effectivenessResetAfter: 10 * time.Minute,
+		maxHistorySize:         10, // Keep last 10 adjustments
+		adjustmentHistory:      make([]AdjustmentRecord, 0, 10),
 	}
 
 	// Gather system resources
 	aa.gatherSystemResources()
 
 	return aa
+}
+
+// SetTotalRows sets the total rows for the migration so the adjuster can
+// skip adjustments when the transfer is nearly complete.
+func (aa *AIAdjuster) SetTotalRows(total int64) {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+	aa.totalRows = total
 }
 
 // SetConnectionLimits sets the max connection limits for source and target.
@@ -190,9 +216,62 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 	// Capture baseline when we have enough data
 	aa.captureBaseline()
 
-	// Check circuit breaker
+	// Check circuit breaker (API failures)
 	if aa.circuitOpen {
 		return nil, fmt.Errorf("circuit breaker OPEN - AI adjustments temporarily disabled")
+	}
+
+	// Check effectiveness circuit breaker (consecutive bad adjustments)
+	if aa.consecutiveNegative >= negativeEffectThreshold {
+		// Auto-reset after timeout to allow retrying
+		if !aa.effectivenessOpenedAt.IsZero() && time.Since(aa.effectivenessOpenedAt) >= aa.effectivenessResetAfter {
+			logging.Debug("AI adjuster effectiveness breaker reset after %v", aa.effectivenessResetAfter)
+			aa.consecutiveNegative = 0
+			aa.effectivenessOpenedAt = time.Time{}
+		} else {
+			if aa.effectivenessOpenedAt.IsZero() {
+				aa.effectivenessOpenedAt = time.Now()
+			}
+			logging.Warn("AI adjuster paused: %d consecutive adjustments had negative effect (resets in %v)",
+				aa.consecutiveNegative, aa.effectivenessResetAfter-time.Since(aa.effectivenessOpenedAt))
+			return &AdjustmentDecision{
+				Action:      "continue",
+				Reasoning:   fmt.Sprintf("Pausing adjustments after %d consecutive negative effects", aa.consecutiveNegative),
+				Confidence:  "high",
+				Adjustments: make(map[string]int),
+			}, nil
+		}
+	}
+
+	// Check post-adjustment cooldown: wait for metrics to stabilize after
+	// the last adjustment before evaluating again
+	if !aa.lastAdjustment.IsZero() && time.Since(aa.lastAdjustment) < adjustmentCooldown {
+		remaining := adjustmentCooldown - time.Since(aa.lastAdjustment)
+		logging.Debug("AI adjuster cooldown: %.0fs remaining after last adjustment", remaining.Seconds())
+		return &AdjustmentDecision{
+			Action:      "continue",
+			Reasoning:   fmt.Sprintf("Cooling down after last adjustment (%.0fs remaining)", remaining.Seconds()),
+			Confidence:  "high",
+			Adjustments: make(map[string]int),
+		}, nil
+	}
+
+	// Skip adjustments when transfer is nearly complete (>90%)
+	// Use live row count (not snapshot) to avoid 30s stale data gap
+	if aa.totalRows > 0 {
+		currentRows := aa.collector.GetCurrentRowCount()
+		if currentRows > 0 {
+			pct := float64(currentRows) / float64(aa.totalRows) * 100
+			if pct >= 90 {
+				logging.Debug("AI adjuster skipping: transfer %.1f%% complete", pct)
+				return &AdjustmentDecision{
+					Action:      "continue",
+					Reasoning:   fmt.Sprintf("Transfer %.1f%% complete, no adjustments needed", pct),
+					Confidence:  "high",
+					Adjustments: make(map[string]int),
+				}, nil
+			}
+		}
 	}
 
 	// Check cache
@@ -239,17 +318,30 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 	metrics := aa.collector.GetRecentMetrics(5) // Last 5 samples for trend
 	trends := aa.collector.AnalyzeTrends()
-	config := aa.pipeline.GetConfig()
+	config := aa.tuner.Snapshot()
 
 	var sb strings.Builder
 
 	sb.WriteString("Real-time database migration parameter adjustment.\n\n")
 
-	// System Resources
+	// System Resources (refresh available memory)
 	sb.WriteString("## System Resources\n")
 	sb.WriteString(fmt.Sprintf("- CPU cores: %d\n", aa.systemResources.CPUCores))
-	sb.WriteString(fmt.Sprintf("- Memory: %d MB available / %d MB total\n",
-		aa.systemResources.MemoryAvailableMB, aa.systemResources.MemoryTotalMB))
+	sb.WriteString(fmt.Sprintf("- Total RAM: %d MB\n", aa.systemResources.MemoryTotalMB))
+	if memInfo, err := mem.VirtualMemory(); err == nil {
+		availMB := int64(memInfo.Available / 1024 / 1024)
+		usedMB := int64(memInfo.Used / 1024 / 1024)
+		totalMB := int64(memInfo.Total / 1024 / 1024)
+		if totalMB > 0 {
+			sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (%.1f%% free)\n", availMB, float64(availMB)/float64(totalMB)*100))
+			sb.WriteString(fmt.Sprintf("- Used RAM: %d MB (%.1f%% used)\n", usedMB, float64(usedMB)/float64(totalMB)*100))
+		} else {
+			sb.WriteString(fmt.Sprintf("- Available RAM: %d MB\n", availMB))
+			sb.WriteString(fmt.Sprintf("- Used RAM: %d MB\n", usedMB))
+		}
+	} else {
+		sb.WriteString(fmt.Sprintf("- Available RAM: %d MB (at startup)\n", aa.systemResources.MemoryAvailableMB))
+	}
 	if aa.systemResources.MaxSourceConnections > 0 {
 		sb.WriteString(fmt.Sprintf("- Max source connections: %d\n", aa.systemResources.MaxSourceConnections))
 	}
@@ -346,9 +438,9 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		if history, err := aa.state.GetAIAdjustments(50); err == nil && len(history) > 0 {
 			// Calculate effectiveness by action type
 			actionStats := make(map[string]struct {
-				count      int
-				effective  int
-				avgEffect  float64
+				count       int
+				effective   int
+				avgEffect   float64
 				totalEffect float64
 			})
 
@@ -376,11 +468,15 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 
 	// Guidelines
 	sb.WriteString(`## Guidelines
-Based on system resources above, determine safe parameter ranges:
-- workers: Should not exceed CPU cores or max DB connections
-- chunk_size: Larger = better throughput, but watch memory usage
+Consider system resources when choosing parameter values:
+- workers: Consider CPU cores and max DB connections. More workers than cores may cause contention. More workers than max connections will fail.
+- parallel_readers: Consider max source connections. Each reader uses a connection.
+- chunk_size: Larger = better throughput, but each chunk is held in memory. Memory per chunk = chunk_size × avg_row_bytes.
+- read_ahead_buffers: Total buffered memory = workers × read_ahead_buffers × chunk_size × avg_row_bytes.
 - checkpoint_frequency: Higher = fewer checkpoints = better throughput; Lower = more safety on failure
 - upsert_merge_chunk_size: Smaller = less memory pressure on target DB; Only relevant in upsert mode
+
+There are no hard limits — you are free to try any value. If a change hurts performance, the effectiveness tracker will detect it and pause adjustments.
 
 Decision rules:
 1. **If within ±10% of baseline** → "continue" (stable, no changes needed)
@@ -408,18 +504,32 @@ Return ONLY valid JSON:
 	return sb.String()
 }
 
+// extractJSON finds the outermost JSON object in a string by matching braces.
+// Handles responses wrapped in markdown fences, with trailing prose, etc.
+func extractJSON(s string) string {
+	first := strings.Index(s, "{")
+	if first == -1 {
+		return ""
+	}
+	last := strings.LastIndex(s, "}")
+	if last == -1 || last <= first {
+		return ""
+	}
+	return s[first : last+1]
+}
+
 // parseDecision parses the AI response into an AdjustmentDecision.
 func (aa *AIAdjuster) parseDecision(response string) (*AdjustmentDecision, error) {
-	// Clean up response
-	response = strings.TrimSpace(response)
-	response = strings.TrimPrefix(response, "```json")
-	response = strings.TrimPrefix(response, "```")
-	response = strings.TrimSuffix(response, "```")
-	response = strings.TrimSpace(response)
+	// Extract JSON by finding the outermost { ... } pair.
+	// This handles markdown fences, trailing prose, and other wrapper text.
+	jsonStr := extractJSON(response)
+	if jsonStr == "" {
+		return nil, fmt.Errorf("no JSON object found in response: %s", response)
+	}
 
 	var decision AdjustmentDecision
-	if err := json.Unmarshal([]byte(response), &decision); err != nil {
-		return nil, fmt.Errorf("invalid JSON: %w\nResponse: %s", err, response)
+	if err := json.Unmarshal([]byte(jsonStr), &decision); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w\nExtracted: %s", err, jsonStr)
 	}
 
 	// Validate
@@ -438,7 +548,7 @@ func (aa *AIAdjuster) parseDecision(response string) (*AdjustmentDecision, error
 	return &decision, nil
 }
 
-// ApplyDecision applies an adjustment decision to the pipeline.
+// ApplyDecision applies an adjustment decision via the runtime tuner.
 func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 	if decision.Action == "continue" {
 		return nil // No changes
@@ -455,41 +565,44 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 		throughputBefore = metrics[0].Throughput
 	}
 
-	// Validate adjustments against system resources (AI-informed limits)
+	// Clamp adjustments to per-parameter minimums (let AI learn from effectiveness tracking)
 	for param, value := range decision.Adjustments {
-		if err := aa.validateParameterWithResources(param, value); err != nil {
-			logging.Warn("AI adjustment rejected: %v", err)
-			return nil
+		minVal := 1
+		if param == "read_ahead_buffers" {
+			minVal = 0 // read_ahead_buffers=0 is valid (disables buffering)
+		}
+		if value < minVal {
+			logging.Debug("AI adjustment clamped: %s=%d → %d (minimum)", param, value, minVal)
+			decision.Adjustments[param] = minVal
 		}
 	}
 
-	// Build config update
-	update := pipeline.ConfigUpdate{
-		ApplyAt: pipeline.ApplyNextChunk,
-	}
+	// Build runtime update
+	update := transfer.RuntimeUpdate{}
 
 	for param, value := range decision.Adjustments {
+		v := value // capture loop variable
 		switch param {
 		case "chunk_size":
-			update.ChunkSize = &value
+			update.ChunkSize = &v
 		case "workers":
-			update.WriteAheadWriters = &value
+			update.WriteAheadWriters = &v
 		case "parallel_readers":
-			update.ParallelReaders = &value
+			update.ParallelReaders = &v
 		case "read_ahead_buffers":
-			update.ReadAheadBuffers = &value
+			update.ReadAheadBuffers = &v
 		case "checkpoint_frequency":
-			update.CheckpointFrequency = &value
+			update.CheckpointFrequency = &v
 		case "upsert_merge_chunk_size":
-			update.UpsertMergeChunkSize = &value
+			update.UpsertMergeChunkSize = &v
 		default:
 			logging.Debug("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
 		}
 	}
 
-	// Apply to pipeline
-	if err := aa.pipeline.UpdateConfig(update); err != nil {
-		return fmt.Errorf("failed to apply config update: %w", err)
+	// Apply to tuner (takes effect immediately)
+	if err := aa.tuner.Update(update); err != nil {
+		return fmt.Errorf("failed to apply runtime update: %w", err)
 	}
 
 	// Track this adjustment
@@ -568,6 +681,15 @@ func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
 		record.EffectPercent = (record.ThroughputAfter - record.ThroughputBefore) / record.ThroughputBefore * 100
 		logging.Debug("AI adjustment effect: %s → throughput %+.1f%% (%.0f → %.0f rows/sec)",
 			record.Action, record.EffectPercent, record.ThroughputBefore, record.ThroughputAfter)
+
+		// Track consecutive negative effects for effectiveness circuit breaker
+		if record.EffectPercent < -5.0 {
+			aa.consecutiveNegative++
+			logging.Debug("AI adjuster consecutive negative effects: %d/%d",
+				aa.consecutiveNegative, negativeEffectThreshold)
+		} else if record.EffectPercent > 0 {
+			aa.consecutiveNegative = 0
+		}
 	}
 
 	// Update database with effect measurement
@@ -588,51 +710,6 @@ func (aa *AIAdjuster) measureAdjustmentEffect(historyIndex int) {
 			logging.Debug("Failed to update AI adjustment effect: %v", err)
 		}
 	}
-}
-
-// validateParameterWithResources validates against system resources.
-func (aa *AIAdjuster) validateParameterWithResources(param string, value int) error {
-	switch param {
-	case "chunk_size":
-		if value < 1000 || value > 500000 {
-			return fmt.Errorf("chunk_size %d out of safe range (1K-500K)", value)
-		}
-	case "workers":
-		// Max workers shouldn't exceed CPU cores or connection limits
-		maxWorkers := aa.systemResources.CPUCores
-		if aa.systemResources.MaxTargetConnections > 0 && aa.systemResources.MaxTargetConnections < maxWorkers {
-			maxWorkers = aa.systemResources.MaxTargetConnections
-		}
-		if maxWorkers < 1 {
-			maxWorkers = 16 // Fallback
-		}
-		if value < 1 || value > maxWorkers {
-			return fmt.Errorf("workers %d out of safe range (1-%d based on system resources)", value, maxWorkers)
-		}
-	case "parallel_readers":
-		maxReaders := 4
-		if aa.systemResources.MaxSourceConnections > 0 && aa.systemResources.MaxSourceConnections < maxReaders {
-			maxReaders = aa.systemResources.MaxSourceConnections
-		}
-		if value < 1 || value > maxReaders {
-			return fmt.Errorf("parallel_readers %d out of safe range (1-%d)", value, maxReaders)
-		}
-	case "read_ahead_buffers":
-		if value < 2 || value > 32 {
-			return fmt.Errorf("read_ahead_buffers %d out of safe range (2-32)", value)
-		}
-	case "checkpoint_frequency":
-		if value < 1 || value > 100 {
-			return fmt.Errorf("checkpoint_frequency %d out of safe range (1-100)", value)
-		}
-	case "upsert_merge_chunk_size":
-		if value < 1000 || value > 50000 {
-			return fmt.Errorf("upsert_merge_chunk_size %d out of safe range (1K-50K)", value)
-		}
-	default:
-		return fmt.Errorf("unknown parameter: %s", param)
-	}
-	return nil
 }
 
 // fallbackRules returns a decision based on simple heuristic rules.
@@ -658,7 +735,7 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	}
 
 	latest := metrics[0]
-	config := aa.pipeline.GetConfig()
+	config := aa.tuner.Snapshot()
 
 	// Check if we're close to baseline (stable)
 	if aa.baselineMetrics != nil && aa.baselineMetrics.Throughput > 0 {

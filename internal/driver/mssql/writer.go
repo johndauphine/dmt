@@ -579,6 +579,13 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 	return err
 }
 
+// maxBulkBatchRows limits how many rows are sent per TDS bulk copy context.
+// The go-mssqldb driver accumulates all AddRow data in an in-memory session
+// buffer before flushing on Done(). For wide-row tables (e.g. nvarchar columns),
+// large batches can exhaust the server's network/memory buffers and cause EOF.
+// Sub-batching keeps each flush under ~4MB for typical row widths.
+const maxBulkBatchRows = 10000
+
 // WriteBatch writes a batch of rows using TDS bulk copy.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
 	if len(opts.Rows) == 0 {
@@ -605,29 +612,33 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			return fmt.Errorf("expected *mssql.Conn, got %T", driverConn)
 		}
 
-		batchSize := w.chunkSize
-		if batchSize <= 0 || batchSize > len(opts.Rows) {
-			batchSize = len(opts.Rows)
-		}
-
-		bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, opts.Columns)
-		bulk.Options.Tablock = true
-		bulk.Options.RowsPerBatch = batchSize
-
-		for _, row := range opts.Rows {
-			err := bulk.AddRow(convertRowForBulkCopy(row))
-			if err != nil {
-				return fmt.Errorf("adding row: %w", err)
+		// Sub-batch rows to avoid accumulating too much data in the TDS
+		// session buffer between CreateBulkContext and Done().
+		for start := 0; start < len(opts.Rows); start += maxBulkBatchRows {
+			end := start + maxBulkBatchRows
+			if end > len(opts.Rows) {
+				end = len(opts.Rows)
 			}
-		}
+			subBatch := opts.Rows[start:end]
 
-		rowsAffected, err := bulk.Done()
-		if err != nil {
-			return fmt.Errorf("finalizing bulk insert: %w", err)
-		}
+			bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, opts.Columns)
+			bulk.Options.Tablock = true
+			bulk.Options.RowsPerBatch = len(subBatch)
 
-		if rowsAffected != int64(len(opts.Rows)) {
-			return fmt.Errorf("bulk insert: expected %d rows, got %d", len(opts.Rows), rowsAffected)
+			for _, row := range subBatch {
+				if err := bulk.AddRow(convertRowForBulkCopy(row)); err != nil {
+					return fmt.Errorf("adding row: %w", err)
+				}
+			}
+
+			rowsAffected, err := bulk.Done()
+			if err != nil {
+				return fmt.Errorf("finalizing bulk insert: %w", err)
+			}
+
+			if rowsAffected != int64(len(subBatch)) {
+				return fmt.Errorf("bulk insert: expected %d rows, got %d", len(subBatch), rowsAffected)
+			}
 		}
 
 		return nil

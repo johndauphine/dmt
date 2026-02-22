@@ -17,7 +17,7 @@ ai:
   providers:
     claude:
       api_key: "test-key"
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-4-6"
     ollama:
       base_url: "http://localhost:11434"
       model: "llama3"
@@ -73,7 +73,7 @@ ai:
   default_provider: claude
   providers:
     claude:
-      model: "claude-sonnet-4-20250514"
+      model: "claude-sonnet-4-6"
 
 encryption:
   master_key: "test"
@@ -136,7 +136,7 @@ func TestGetEffectiveModel(t *testing.T) {
 
 	// Should return default model when not specified
 	model := provider.GetEffectiveModel("claude")
-	if model != "claude-sonnet-4-20250514" {
+	if model != "claude-sonnet-4-6" {
 		t.Errorf("Expected default Claude model, got %q", model)
 	}
 

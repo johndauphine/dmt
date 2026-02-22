@@ -5,9 +5,9 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/dmt)](https://go.dev/)
 [![License](https://img.shields.io/github/license/johndauphine/dmt)](LICENSE)
 
-High-performance CLI tool for database migrations between SQL Server, PostgreSQL, MySQL, and Oracle.
+High-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL.
 
-## Interactive Mode (New!)
+## Interactive Mode
 
 Launch the tool without arguments to enter the **Interactive Shell**, a modern TUI designed for ease of use.
 
@@ -25,29 +25,15 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 *   **Live Monitoring**: Watch migration progress with real-time logs and visual status indicators.
 *   **Git Integration**: View your current branch and repository status directly in the status bar.
 
-## Security Notice
+## Security
 
-### v1.43.0 Security Fixes
+- **Credential redaction** - passwords are never stored in the state database or logs
+- **DSN injection protection** - connection strings URL-encode credentials to prevent injection
+- **SQL injection protection** - internal SQLite queries use whitelist validation for table names
+- **Secret templates** - use `${env:VAR}` or `${file:/path}` instead of plaintext passwords in config
+- **Secure permissions** - state files (0600) and data directories (0700) enforced automatically
 
-**v1.43.0** addresses security vulnerabilities identified during code review:
-
-- **DSN Injection Fix**: Connection strings now properly URL-encode credentials to prevent injection via special characters in usernames, passwords, or database names
-- **SQL Injection Fix**: Internal SQLite queries now use whitelist validation for table names
-
-**Upgrade recommended** for all users to ensure secure credential handling.
-
-### Credential Storage (v1.10.0+)
-
-**Versions prior to v1.10.0** stored database credentials in plaintext in the SQLite state database (`~/.dmt/migrate.db`). If you used an earlier version, your passwords may be stored in this file.
-
-**Recommended actions:**
-1. **Upgrade to v1.43.0 or later** - Includes all security fixes and credential sanitization
-2. **Rotate your database passwords** if you used earlier versions with sensitive credentials
-3. **Delete the state database** if you want to ensure all traces are removed: `rm ~/.dmt/migrate.db`
-
-Starting with v1.10.0, credentials are always redacted before being stored.
-
-## Incremental Sync (New in v1.43.0)
+## Incremental Sync
 
 For large databases with frequent updates, use **date-based incremental loading** to dramatically reduce sync times. Instead of transferring all rows every time, only rows modified since the last sync are transferred.
 
@@ -96,9 +82,9 @@ migration:
 - **Primary keys required** - Both source and target tables must have PKs
 - **Tables without date columns** - Fall back to full table comparison (slower)
 
-## AI-Driven Real-Time Parameter Adjustment (New in v3.31.0)
+## AI-Driven Real-Time Parameter Adjustment
 
-Continuously monitor migration performance and automatically adjust parameters in real-time. This feature adapts parameters during execution based on actual resource usage and throughput patterns.
+Continuously monitor migration performance and automatically adjust parameters in real-time. The tuner receives live system resource data (CPU cores, available RAM, connection limits) and makes informed decisions without hard-coded safety guards — an effectiveness tracker measures each adjustment's impact and pauses tuning if consecutive changes hurt performance.
 
 ### Quick Start
 
@@ -106,111 +92,91 @@ Enable in `config.yaml`:
 
 ```yaml
 migration:
-  # Use calibration to find initial parameters
-  chunk_size: 10000
-  workers: 4
-  read_ahead_buffers: 8
-
-  # Enable AI-driven real-time adjustment
   ai_adjust: true
   ai_adjust_interval: 30s
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}
   provider: claude
-  model: claude-sonnet-4-20250514  # Recommended for best results
 ```
 
 ### How It Works
 
-1. **Continuous Monitoring**: Every 30 seconds, collects 30+ performance metrics:
-   - Throughput (rows/sec), memory usage, CPU utilization
+1. **Continuous Monitoring**: Every 30 seconds, collects performance metrics:
+   - Windowed throughput (rows/sec), memory usage, CPU utilization
    - Query latency, write latency, queue depth
-   - Current configuration state
 
-2. **Trend Analysis**: Detects patterns:
-   - Throughput declining >10% over 3 samples
-   - Memory increasing >5% per sample
-   - CPU or memory saturation (>90% / >85%)
+2. **Resource-Aware Prompting**: The AI receives live system state:
+   - CPU cores, available/used RAM, max database connections
+   - Current parameter values and adjustment history
+   - Effectiveness of previous adjustments
 
-3. **AI Decision Making**: Claude analyzes trends and recommends adjustments:
+3. **AI Decision Making**: Analyzes trends and recommends adjustments:
    - **Scale up**: Increase workers or chunk_size if resources available
    - **Scale down**: Reduce workers to minimize lock contention
    - **Reduce chunk**: Decrease batch size if memory pressure detected
    - **Continue**: Maintain current parameters if performance optimal
 
-4. **Safe Application**: Updates applied at chunk boundaries, never mid-transfer
-   - Includes validation: rollback if throughput degrades >20%
-   - Circuit breaker: disables after 3 consecutive failures
+4. **Safety Mechanisms**:
+   - **Post-adjustment cooldown** (90s) — waits for metrics to stabilize before next adjustment
+   - **Effectiveness tracking** — measures throughput change after each adjustment
+   - **Consecutive-negative breaker** — pauses tuning after 3 adjustments that hurt performance
+   - **Completion skip** — no adjustments when transfer is >90% complete
+   - **API circuit breaker** — disables after 3 consecutive API/parse failures
+   - Updates applied at chunk boundaries, never mid-transfer
 
-### Performance Impact
+### Performance
 
-Tested on Stack Overflow 2013 (106.5M rows):
+Tested on Stack Overflow 2013 dataset (106.5M rows, MSSQL to PostgreSQL):
 
 ```
-Configuration                Duration    Throughput      Result
-─────────────────────────────────────────────────────────────────
-Baseline (No AI)             5m 33s      319,680 r/s     Control
-AI-tuned (with Sonnet)       5m 23s      329,332 r/s     +3% faster ✓
+Configuration                Duration    Throughput
+──────────────────────────────────────────────────────────
+AI-tuned (Haiku)             5m 14s      339,393 r/s
+AI-tuned (Sonnet)            5m 14s      339,780 r/s
 ```
 
-**Key Finding**: claude-sonnet-4-20250514 model delivers superior optimization decisions due to better reasoning about hardware constraints and parameter relationships.
+Haiku and Sonnet produce identical results — Haiku recommended for lower cost.
 
 ### Configuration
 
 ```yaml
 migration:
-  # AI adjustment settings
-  ai_adjust: true                  # Enable/disable real-time optimization
+  ai_adjust: true                  # Enable/disable (default: true when AI configured)
   ai_adjust_interval: 30s          # Evaluation interval (default: 30s)
 
-  # Initial parameters (AI starts here, then adjusts)
-  chunk_size: 10000                # Batch size (10K-200K range)
-  workers: 4                       # Parallel workers (1-16 range)
-  read_ahead_buffers: 8            # Source buffering
-  write_ahead_writers: 2           # Target writers
-  parallel_readers: 2              # Parallel source connections
+  # Initial parameters (AI adjusts from here)
+  chunk_size: 10000
+  workers: 4
+  read_ahead_buffers: 8
+  write_ahead_writers: 2
+  parallel_readers: 2
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}
-  provider: claude
-  model: claude-sonnet-4-20250514  # Recommended; claude-opus-4-20251701 also good
-  timeout_seconds: 30              # AI decision timeout
+  provider: claude                 # Also: openai, gemini, ollama, lmstudio
+  model: claude-haiku-4-5-20251001 # Recommended (cheapest, same results as Sonnet)
+  timeout_seconds: 30
 ```
 
-### Cost & Performance
+### Cost
 
-- **API Calls**: ~2-3 per minute with decision caching (60s cache)
-- **Cost**: ~$0.01-0.02 per hour of migration
-- **Benefit**: 3-5% throughput improvement on production workloads
+- **API Calls**: ~1-2 per minute (60s cache + 90s cooldown between adjustments)
+- **Cost**: ~$0.005-0.01 per hour with Haiku
 - **Fallback**: Heuristic rules apply if AI unavailable
-
-### Best Practices
-
-1. **Use Sonnet model**: `claude-sonnet-4-20250514` recommended for optimization
-2. **Start with reasonable defaults**: Use workers=4, chunk_size=50000 as starting points
-3. **Enable for long migrations**: Benefit increases with migration duration (>5 minutes)
-4. **Monitor first 30 seconds**: Watch initial adjustments to understand behavior
-5. **Production safe**: All adjustments non-destructive; circuit breaker prevents issues
-
-### Limitations
-
-- **Short migrations** (<2 minutes): Limited adjustment cycles, minimal benefit
-- **Variable workloads**: Adjustment lags behind rapid changes (30s interval)
-- **Fixed optimal config**: Some workloads have inherently optimal parameters that can't be improved
 
 ### Troubleshooting
 
 **AI adjustment not happening:**
 - Check logs for "AI monitoring started" message
 - Verify `ai_adjust: true` in config
-- Verify API key set: `echo $ANTHROPIC_API_KEY`
-- Check evaluation interval - defaults to 30s
+- Verify API key: `echo $ANTHROPIC_API_KEY`
+- Tuner skips adjustments when >90% complete or during 90s post-adjustment cooldown
 
 **Performance degradation:**
-- Ensure initial parameters are reasonable (e.g., workers=4, not workers=1)
-- Check CPU/memory saturation in system metrics
-- Disable with `ai_adjust: false` and use fixed parameters
+- The effectiveness tracker will automatically pause after 3 negative adjustments
+- Check `--verbosity debug` logs for "AI adjustment effect" measurements
+- Disable with `ai_adjust: false` to use fixed parameters
 
 ## Encrypted Profiles (SQLite)
 
@@ -285,17 +251,19 @@ This auto-enables AI type mapping. Provider defaults to Claude (Anthropic).
 
 | Provider | Config Value | Default Model | API Key Variable |
 |----------|--------------|---------------|------------------|
-| **Claude** (default) | `claude` | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| **Claude** (default) | `claude` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
 | **Google Gemini** | `gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
+| **Ollama** (local) | `ollama` | - | - |
+| **LM Studio** (local) | `lmstudio` | - | - |
 
 ### Full Configuration
 
 ```yaml
 ai:
   api_key: ${ANTHROPIC_API_KEY}  # Required - your API key
-  provider: claude               # Optional - claude (default), openai, or gemini
-  model: claude-sonnet-4-20250514  # Optional - uses provider default if not set
+  provider: claude               # Optional - claude (default), openai, gemini, ollama, lmstudio
+  model: claude-sonnet-4-6       # Optional - uses provider default if not set
 
   type_mapping:
     enabled: true                # Auto-enabled when api_key is set
@@ -348,7 +316,7 @@ migration:
 - **Exclude tables**: Tables that should probably be excluded (temp, log, archive, etc.)
 - **Chunk size**: Optimal chunk size based on average row sizes
 
-### AI Error Diagnosis (New in v3.53.0)
+### AI Error Diagnosis
 
 When a table transfer fails, AI automatically analyzes the error and provides actionable suggestions for resolution.
 
@@ -610,87 +578,120 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **222K-645K rows/sec** depending on direction and mode
+- **222K-717K rows/sec** depending on direction and row width
+- **MSSQL → PG**: 717K rows/sec with AI startup tuning (106.5M rows in 2m29s)
 - **PG → MSSQL**: 645K rows/sec (PG streaming + TDS bulk copy)
 - **PG → PG**: 563K rows/sec (COPY protocol both ends)
-- **MSSQL → PG**: 248K rows/sec (32KB TDS packets + COPY)
 - **MSSQL → MSSQL**: 222K rows/sec (TDS both ends)
-- **Auto-tuning** based on CPU cores and available RAM
-- **2-6x faster** than equivalent Python/Airflow solutions
+- **Auto-tuning** based on CPU cores, available RAM, and AI-driven adjustments
+- **Single binary** - no runtime dependencies, no CGO
 
 ## Supported Databases
 
-| Database | As Source | As Target | Write Method |
-|----------|-----------|-----------|--------------|
-| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) |
-| SQL Server | ✓ | ✓ | TDS bulk copy |
-| MySQL | ✓ | ✓ | Multi-row INSERT |
-| Oracle 12c+ | ✓ | ✓ | godror.Batch array binding |
+| Database | As Source | As Target | Write Method | Auth |
+|----------|-----------|-----------|--------------|------|
+| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) | Password, Kerberos |
+| SQL Server | ✓ | ✓ | TDS bulk copy | Password, Kerberos |
+| MySQL | ✓ | ✓ | Multi-row INSERT | Password |
 
-All combinations are supported (e.g., MSSQL→Oracle, MySQL→PostgreSQL, Oracle→MySQL).
+All combinations are supported, including same-engine migrations (PG→PG, MSSQL→MSSQL, MySQL→MySQL).
 
-### Same-Engine Migrations (New in v1.43.0)
+### Same-Engine Migrations
 
-Same-engine migrations (PG→PG, MSSQL→MSSQL) are now supported with all target modes:
+Use cases: database cloning, environment sync (dev → staging → prod), disaster recovery, data center migrations.
 
 ```yaml
-# PostgreSQL to PostgreSQL
 source:
   type: postgres
   host: source-pg.example.com
-  # ...
-
 target:
   type: postgres
   host: target-pg.example.com
-  # ...
-
 migration:
   target_mode: upsert  # or drop_recreate
 ```
 
-**Use cases:**
-- Database cloning
-- Environment sync (dev → staging → prod)
-- Disaster recovery
-- Data center migrations
+### PostGIS Spatial Data Support
 
-### PostGIS Spatial Data Support (v1.43.0)
+Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 
-Cross-engine migrations (PG→MSSQL) now correctly preserve spatial reference systems:
-
-- **SRID preservation** - Reads SRID from PostGIS `geometry_columns`/`geography_columns` metadata
+- **SRID preservation** - reads SRID from PostGIS `geometry_columns`/`geography_columns` metadata
 - **Automatic conversion** - WKT text converted to SQL Server geography/geometry with correct SRID
-- **Default fallback** - Uses SRID 4326 (WGS84) when source SRID is 0 or unset
-
-Previously, all spatial data was converted with hardcoded SRID 4326. Now the actual SRID from PostGIS is used (e.g., 2163 for NAD83, 3857 for Web Mercator).
+- **Default fallback** - uses SRID 4326 (WGS84) when source SRID is 0 or unset
 
 ## Features
 
-- **Bidirectional migration** - SQL Server ↔ PostgreSQL
-- **AI-assisted type mapping** - LLM-powered type inference for complex migrations (Claude, OpenAI, Gemini)
-- **Incremental sync** - Date-based highwater marks for fast delta transfers (seconds vs minutes)
-- **Auto-tuning** - Workers, connection pools, and buffers sized based on CPU/RAM
-- **Fast transfers** using PostgreSQL COPY protocol (MSSQL→PG) or TDS bulk copy (PG→MSSQL)
-- **Pipelined I/O** - Read-ahead buffering and parallel writers for maximum throughput
-- **Keyset pagination** for single-column integer PKs (no OFFSET performance degradation)
-- **ROW_NUMBER pagination** for composite/varchar PKs
-- **Parallel partitioning** - Large tables split via NTILE for concurrent transfer
-- **Chunk-level resume** - Progress saved every 10 chunks, resume from exact position
-- **Table-level resume** - Skip already-completed tables on restart
-- **Idempotent retries** - Partition cleanup on retry prevents duplicates
-- **Identity column support** - Preserves auto-increment behavior with sequence reset
-- **Row count validation** after transfer
-- **Sample data validation** - Random row verification with composite PK support
-- **Slack notifications** - Get notified on start, completion, and failures
-- **Progress bar** with real-time throughput stats
-- **Index creation** - Non-PK indexes (optional)
-- **Foreign key creation** (optional)
-- **Check constraint creation** (optional)
-- **Table filtering** - Include/exclude tables with glob patterns
-- **Strict consistency mode** - Disable NOLOCK for consistent reads
-- **YAML configuration** with environment variable support
-- **Single binary** - no runtime dependencies
+### Database Support
+- **PostgreSQL, SQL Server, MySQL** - migrate between any combination
+- **Bulk copy protocols** - PostgreSQL COPY, TDS bulk copy, MySQL LOAD DATA for maximum throughput
+- **Kerberos authentication** - SPNEGO/keytab support for SQL Server and PostgreSQL
+- **SSL/TLS encryption** - configurable per connection
+
+### Transfer Engine
+- **Pipelined I/O** - read-ahead buffering with parallel writers (222K-717K rows/sec)
+- **Keyset pagination** - efficient partitioning for integer PKs (no OFFSET degradation)
+- **ROW_NUMBER pagination** - automatic fallback for composite/varchar PKs
+- **Parallel partitioning** - large tables split via NTILE for concurrent transfer
+- **Auto-tuning** - workers, connection pools, and buffers sized from CPU/RAM
+- **Memory-bounded** - configurable memory cap (default: 70% available RAM)
+
+### AI Integration
+- **Multi-provider** - Claude, OpenAI, Gemini, Ollama, LM Studio
+- **Type mapping** - LLM-powered cross-database type inference with caching
+- **Smart config analysis** - analyze source database and recommend optimal parameters (`analyze` command)
+- **Real-time parameter tuning** - monitor performance and auto-adjust workers, chunk size, buffers mid-migration
+- **Error diagnosis** - AI-powered root cause analysis with remediation suggestions
+
+### Checkpoint & Resume
+- **Chunk-level resume** - progress saved every N chunks, resume from exact position
+- **Table-level resume** - skip already-completed tables on restart
+- **Idempotent retries** - partition cleanup on retry prevents duplicates
+- **State backends** - SQLite (default) or YAML file for Airflow/headless environments
+- **Config validation** - prevents resume with mismatched configuration
+
+### Incremental Sync
+- **Upsert mode** - INSERT new rows, UPDATE changed rows, preserve target-only data
+- **Date-based highwater marks** - only transfer rows modified since last sync
+- **Configurable date columns** - tries multiple column names in order
+
+### Interactive Mode (TUI)
+- **Slash commands** - `/run`, `/resume`, `/analyze`, `/wizard`, `/status`, `/history`, `/validate`, and more
+- **Auto-completion** - tab-complete commands and `@` file browser for config selection
+- **Configuration wizard** - interactive setup for source, target, and tuning parameters
+- **Live monitoring** - real-time migration progress with log capture
+
+### CLI & Automation
+- **Commands** - `run`, `resume`, `status`, `validate`, `history`, `health-check`, `analyze`, `init`, `profile`
+- **Dry-run mode** - preview migration plan without execution
+- **JSON output** - structured results to stdout or file for orchestration tools
+- **Exit codes** - semantic codes for retry logic (success, transient, config error, cancelled)
+- **Airflow integration** - YAML state files, explicit run IDs, BashOperator/KubernetesPodOperator support
+- **Graceful shutdown** - SIGINT/SIGTERM handling with configurable timeout and checkpoint save
+
+### Security
+- **Encrypted profiles** - AES-encrypted configs stored in SQLite with master key
+- **Secret templates** - `${env:VAR}`, `${file:/path}` for credentials (no plaintext in config)
+- **Credential redaction** - passwords never stored in state database or logs
+- **Secure permissions** - 0600 files, 0700 directories enforced automatically
+
+### Schema Management
+- **Full schema transfer** - tables, primary keys, indexes, foreign keys, check constraints
+- **Identity/sequence reset** - preserves auto-increment values after transfer
+- **Table filtering** - include/exclude tables with glob patterns
+- **Strict consistency mode** - table locks instead of NOLOCK for consistent reads
+
+### Observability
+- **Progress bar** - real-time throughput stats with ETA
+- **Slack notifications** - start, completion, and failure alerts
+- **JSON progress** - streaming updates to stderr for monitoring dashboards
+- **Verbosity levels** - debug, info, warn, error with text or JSON log format
+- **Row count validation** - automatic post-transfer verification
+- **Sample data validation** - random row verification with composite PK support
+
+### Deployment
+- **Single binary** - no runtime dependencies, no CGO
+- **Cross-platform** - Linux, macOS (Intel + Apple Silicon), Windows
+- **YAML configuration** - with environment variable expansion
 
 ## Installation
 
@@ -720,7 +721,7 @@ tar -xzf dmt.tar.gz
 
 ### Build from source
 
-Requires Go 1.21+
+Requires Go 1.24+
 
 ```bash
 git clone https://github.com/johndauphine/dmt.git
@@ -814,10 +815,10 @@ The `source` section configures the database to migrate FROM.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `type` | No | `mssql` | Database type: `mssql`, `postgres`, `mysql`, or `oracle` |
+| `type` | No | `mssql` | Database type: `mssql`, `postgres`, or `mysql` |
 | `host` | **Yes** | - | Database server hostname or IP address |
-| `port` | No | Auto | Database server port (1433/5432/3306/1521) |
-| `database` | **Yes** | - | Database name (or service name for Oracle) |
+| `port` | No | Auto | Database server port (1433/5432/3306) |
+| `database` | **Yes** | - | Database name |
 | `user` | Yes* | - | Username for authentication (*not required for Kerberos) |
 | `password` | Yes* | - | Password for authentication (*not required for Kerberos). Supports `${ENV_VAR}` syntax |
 | `schema` | No | Auto | Schema containing tables to migrate |
@@ -848,10 +849,10 @@ The `target` section configures the database to migrate TO. It uses the same par
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `type` | No | `postgres` | Database type: `mssql`, `postgres`, `mysql`, or `oracle` |
+| `type` | No | `postgres` | Database type: `mssql`, `postgres`, or `mysql` |
 | `host` | **Yes** | - | Database server hostname or IP address |
-| `port` | No | Auto | Database server port (5432/1433/3306/1521) |
-| `database` | **Yes** | - | Database name (or service name for Oracle) |
+| `port` | No | Auto | Database server port (5432/1433/3306) |
+| `database` | **Yes** | - | Database name |
 | `user` | Yes* | - | Username for authentication |
 | `password` | Yes* | - | Password for authentication |
 | `schema` | No | Auto | Target schema for migrated tables |
@@ -922,7 +923,7 @@ The `migration` section controls how data is transferred.
 | `write_ahead_writers` | No | 2 | Parallel writers per job. Use 8 for PG→MSSQL |
 | `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
 | `source.chunk_size` | No | Same as `migration.chunk_size` | Batch size for reading from source database |
-| `target.chunk_size` | No | Same as `migration.chunk_size` (5000 for Oracle) | Batch size for writing to target database |
+| `target.chunk_size` | No | Same as `migration.chunk_size` | Batch size for writing to target database |
 
 ### AI Settings
 
@@ -931,8 +932,8 @@ The `ai` section configures AI-powered features.
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `ai.api_key` | Yes (if using AI) | - | API key for the AI provider |
-| `ai.provider` | No | `claude` | AI provider: `claude`, `openai`, or `gemini` |
-| `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.0-flash`) |
+| `ai.provider` | No | `claude` | AI provider: `claude`, `openai`, `gemini`, `ollama`, or `lmstudio` |
+| `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-4-6`, `gpt-4o`, `gemini-2.0-flash`) |
 | `ai.timeout_seconds` | No | `30` | API request timeout |
 | `ai.type_mapping.enabled` | No | Auto | Enable AI type mapping (auto-enabled when api_key is set) |
 | `ai.type_mapping.cache_file` | No | `~/.dmt/type-cache.json` | Path to cache AI type mappings |
@@ -1025,7 +1026,6 @@ Ready-to-use example configuration files are available in the [`examples/`](exam
 | `config-mssql-to-pg-kerberos.yaml` | SQL Server → PostgreSQL with Kerberos |
 | `config-pg-to-mssql.yaml` | PostgreSQL → SQL Server with password auth |
 | `config-pg-to-mssql-kerberos.yaml` | PostgreSQL → SQL Server with Kerberos |
-| `config-mssql-to-oracle.yaml` | SQL Server → Oracle |
 | `config-local.yaml` | Minimal config for local Docker development |
 | `config-production.yaml` | Full production config with all options |
 
@@ -1170,49 +1170,7 @@ migration:
   parallel_readers: 1
 ```
 
-### Example 5: SQL Server to Oracle
-
-Migration from SQL Server to Oracle Database:
-
-```yaml
-# config-mssql-to-oracle.yaml
-source:
-  type: mssql
-  host: sqlserver.example.com
-  port: 1433
-  database: SourceDatabase
-  user: sa
-  password: ${MSSQL_PASSWORD}
-  schema: dbo
-  encrypt: "true"
-  trust_server_cert: false
-
-target:
-  type: oracle
-  host: oracle.example.com
-  port: 1521
-  database: ORCL                       # Oracle service name
-  user: migrate_user
-  password: ${ORACLE_PASSWORD}
-  schema: MIGRATE_USER                 # Oracle schema (usually uppercase)
-  chunk_size: 5000                     # Oracle optimal: 5000-10000 for godror.Batch
-
-migration:
-  workers: 4
-  chunk_size: 50000
-  create_indexes: true
-  create_foreign_keys: true
-
-ai:
-  api_key: ${ANTHROPIC_API_KEY}        # Required for type mapping
-```
-
-**Oracle requirements:**
-- Oracle Instant Client must be installed and in `LD_LIBRARY_PATH`
-- Target schema must exist before migration
-- User must have CREATE TABLE, CREATE SEQUENCE privileges
-
-### Example 6: Minimal Configuration (Local Development)
+### Example 5: Minimal Configuration (Local Development)
 
 Simplest config for local Docker databases:
 
@@ -1236,7 +1194,7 @@ target:
   ssl_mode: disable                  # Disable SSL for local dev
 ```
 
-### Example 7: Production Configuration with All Options
+### Example 6: Production Configuration with All Options
 
 Full production configuration with Slack notifications and validation:
 
@@ -1312,6 +1270,9 @@ slack:
 # Run a new migration
 ./dmt -c config.yaml run
 
+# Dry-run (preview plan without executing)
+./dmt -c config.yaml run --dry-run
+
 # Resume an interrupted migration (continues from last checkpoint)
 ./dmt -c config.yaml resume
 
@@ -1324,11 +1285,20 @@ slack:
 # View migration history
 ./dmt -c config.yaml history
 
-# View details for a specific run (shows error if failed)
+# View details for a specific run
 ./dmt -c config.yaml history --run <run-id>
 
-# Analyze source database and get configuration suggestions
+# Test database connections
+./dmt -c config.yaml health-check
+
+# Analyze source database and get AI configuration suggestions
 ./dmt -c config.yaml analyze
+
+# Create a new config file interactively
+./dmt init
+
+# Create a secrets file template
+./dmt init-secrets
 ```
 
 ### Headless Mode (Airflow/Kubernetes)
@@ -1357,8 +1327,8 @@ Found 11 tables
 Pagination: 9 keyset, 1 ROW_NUMBER, 1 no PK
 Creating target tables (drop and recreate)...
 Transferring data...
-Transferring 100% |███████████| (106535072/106535072, 158384 rows/s)
-Transferred 106535070 rows in 11m13s (158384 rows/sec)
+Transferring 100% |███████████| (106534570/106534570, 717K rows/s)
+Transferred 106534570 rows in 2m29s (716909 rows/sec)
 
 Transfer Profile (per table):
 ------------------------------
@@ -1378,8 +1348,8 @@ Votes                          OK 52928720 rows
 
 ## How It Works
 
-1. **Extract schema** - Reads table structure, PKs, indexes, FKs, and check constraints from SQL Server
-2. **Create tables** - Generates PostgreSQL DDL with proper type mapping and identity columns
+1. **Extract schema** - Reads table structure, PKs, indexes, FKs, and check constraints from source
+2. **Create tables** - Generates target DDL with proper type mapping and identity columns
 3. **Transfer data** - Uses optimal pagination strategy per table:
    - **Keyset pagination** for single-column integer PKs (fastest)
    - **ROW_NUMBER pagination** for composite/varchar PKs
@@ -1487,48 +1457,16 @@ Identity columns are mapped to `GENERATED BY DEFAULT AS IDENTITY` with proper se
 
 Serial/identity columns are mapped to `IDENTITY(1,1)` with proper seed reset.
 
-### Oracle Type Mapping
-
-Oracle uses AI-assisted type mapping for cross-engine migrations. Common mappings:
-
-| Source Type | Oracle Type |
-|-------------|-------------|
-| int/integer | NUMBER(10) |
-| bigint | NUMBER(19) |
-| smallint | NUMBER(5) |
-| boolean/bit | NUMBER(1) |
-| decimal/numeric | NUMBER(p,s) |
-| float/double | BINARY_DOUBLE |
-| varchar/text | VARCHAR2(n) or CLOB |
-| char | CHAR(n) |
-| date | DATE |
-| timestamp | TIMESTAMP |
-| timestamptz | TIMESTAMP WITH TIME ZONE |
-| uuid | RAW(16) or VARCHAR2(36) |
-| bytea/varbinary | BLOB |
-| json/jsonb | CLOB |
-
-Identity columns use `GENERATED BY DEFAULT AS IDENTITY` (Oracle 12c+).
-
-**Oracle-specific notes:**
-- Identifier limit: 30 characters (pre-12.2) or 128 characters (12.2+)
-- Long identifiers are automatically truncated with a hash suffix for uniqueness
-- Requires Oracle Instant Client for the godror driver
-
 ### Unknown Types
 
 For types not in the built-in mappings (custom domains, user-defined types, etc.), enable [AI-assisted type mapping](#ai-assisted-type-mapping-new-in-v2240) to automatically infer the best target type.
 
 ## Benchmarks
 
-### Test Environment (v2.1.0)
+### Small Dataset (WideWorldImporters, 701K rows)
+
 - **Hardware**: WSL2 on Windows, 32GB RAM, 16 cores
-- **Dataset**: WideWorldImporters Sales (701K rows, 9 tables)
-- **Databases**: PostgreSQL 15 and SQL Server 2022 (both in Docker)
-
-### Complete Benchmark Matrix
-
-All migration directions with drop_recreate mode:
+- **Databases**: PostgreSQL 15 and SQL Server 2022 (Docker)
 
 | Direction | Transfer | Overall |
 |-----------|----------|---------|
@@ -1537,41 +1475,19 @@ All migration directions with drop_recreate mode:
 | **MSSQL → PG** | 302K rows/sec | 248K rows/sec |
 | **MSSQL → MSSQL** | 280K rows/sec | 222K rows/sec |
 
-*Note: v2.1.0 introduced pluggable driver architecture with no performance regression. 32KB TDS packet size enabled by default.*
+### Large Dataset (Stack Overflow 2013, 106.5M rows)
 
-### Key Observations
+- **Hardware**: macOS, Apple Silicon, 36GB RAM
+- **Databases**: SQL Server 2022 and PostgreSQL 17 (Docker, 16GB limit)
 
-- **PG → MSSQL** is fastest due to efficient PG streaming + TDS bulk copy
-- **PG → PG** uses COPY protocol on both ends for excellent throughput
-- **MSSQL source** directions are slower due to TDS protocol read overhead
-- **Cold start impact**: First run after container start may be 5-10x slower
+| Configuration | Transfer | Overall | Throughput |
+|---------------|----------|---------|------------|
+| **AI startup + runtime tuning** | 2m 29s | 3m 05s | **717K rows/sec** |
+| **Runtime tuning only** | 5m 14s | 5m 50s | 339K rows/sec |
 
-Performance varies based on:
-- Network latency between source and target
-- Table structure (wide tables are slower)
-- Data types (LOBs are slower)
-- Available CPU cores and memory (auto-tuned)
+AI startup tuning analyzes source schema and system resources to set optimal initial parameters, delivering a 2x speedup over runtime-only tuning.
 
-## Comparison with Airflow DAG
-
-| Feature | dmt (Go) | Airflow DAG (Python) |
-|---------|----------------------|---------------------|
-| Throughput | 222-645K rows/sec | ~50-80k rows/sec |
-| Memory usage | ~50MB | ~200-400MB |
-| Resume granularity | Chunk-level | Partition-level |
-| Dependencies | None (single binary) | Python, Airflow, etc. |
-| Scheduling | External (cron, etc.) | Built-in |
-| Monitoring | Slack, CLI | Airflow UI |
-
-Use the Go version for:
-- One-time migrations
-- Maximum performance
-- Minimal dependencies
-
-Use the Airflow DAG for:
-- Scheduled/recurring migrations
-- Integration with existing Airflow infrastructure
-- Complex workflow orchestration
+Performance varies based on network latency, table width, data types, and available CPU/memory.
 
 ## Development
 

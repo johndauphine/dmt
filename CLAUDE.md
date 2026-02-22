@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DMT is a high-performance CLI tool for database migrations between SQL Server, PostgreSQL, MySQL, and Oracle. Written in Go, it achieves 222K-645K rows/sec throughput through bulk copy protocols and parallel I/O pipelines.
+DMT is a high-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL. Written in Go, it achieves 222K-717K rows/sec throughput through bulk copy protocols, parallel I/O pipelines, and AI-driven parameter tuning.
 
 ## Build and Test Commands
 
