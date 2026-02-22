@@ -578,10 +578,10 @@ sensor = PythonSensor(
 
 ## Performance
 
-- **222K-645K rows/sec** depending on direction and row width
+- **222K-717K rows/sec** depending on direction and row width
+- **MSSQL → PG**: 717K rows/sec with AI startup tuning (106.5M rows in 2m29s)
 - **PG → MSSQL**: 645K rows/sec (PG streaming + TDS bulk copy)
 - **PG → PG**: 563K rows/sec (COPY protocol both ends)
-- **MSSQL → PG**: 339K rows/sec with AI tuning (106.5M rows in 5m14s)
 - **MSSQL → MSSQL**: 222K rows/sec (TDS both ends)
 - **Auto-tuning** based on CPU cores, available RAM, and AI-driven adjustments
 - **Single binary** - no runtime dependencies, no CGO
@@ -628,7 +628,7 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 - **SSL/TLS encryption** - configurable per connection
 
 ### Transfer Engine
-- **Pipelined I/O** - read-ahead buffering with parallel writers (222K-645K rows/sec)
+- **Pipelined I/O** - read-ahead buffering with parallel writers (222K-717K rows/sec)
 - **Keyset pagination** - efficient partitioning for integer PKs (no OFFSET degradation)
 - **ROW_NUMBER pagination** - automatic fallback for composite/varchar PKs
 - **Parallel partitioning** - large tables split via NTILE for concurrent transfer
@@ -1327,8 +1327,8 @@ Found 11 tables
 Pagination: 9 keyset, 1 ROW_NUMBER, 1 no PK
 Creating target tables (drop and recreate)...
 Transferring data...
-Transferring 100% |███████████| (106535072/106535072, 158384 rows/s)
-Transferred 106535070 rows in 11m13s (158384 rows/sec)
+Transferring 100% |███████████| (106534570/106534570, 717K rows/s)
+Transferred 106534570 rows in 2m29s (716909 rows/sec)
 
 Transfer Profile (per table):
 ------------------------------
@@ -1477,13 +1477,15 @@ For types not in the built-in mappings (custom domains, user-defined types, etc.
 
 ### Large Dataset (Stack Overflow 2013, 106.5M rows)
 
-- **Hardware**: macOS, Apple Silicon, 18GB RAM
-- **Databases**: SQL Server 2022 and PostgreSQL 17 (Docker)
+- **Hardware**: macOS, Apple Silicon, 36GB RAM
+- **Databases**: SQL Server 2022 and PostgreSQL 17 (Docker, 16GB limit)
 
-| Configuration | Duration | Throughput |
-|---------------|----------|------------|
-| **AI-tuned (Haiku)** | 5m 14s | **339K rows/sec** |
-| **AI-tuned (Sonnet)** | 5m 14s | **339K rows/sec** |
+| Configuration | Transfer | Overall | Throughput |
+|---------------|----------|---------|------------|
+| **AI startup + runtime tuning** | 2m 29s | 3m 05s | **717K rows/sec** |
+| **Runtime tuning only** | 5m 14s | 5m 50s | 339K rows/sec |
+
+AI startup tuning analyzes source schema and system resources to set optimal initial parameters, delivering a 2x speedup over runtime-only tuning.
 
 Performance varies based on network latency, table width, data types, and available CPU/memory.
 
