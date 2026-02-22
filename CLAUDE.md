@@ -42,10 +42,9 @@ make setup-hooks             # Configure pre-commit hooks (.githooks/)
 
 | Package | Purpose |
 |---------|---------|
-| `driver/` | Pluggable database drivers (postgres, mssql, mysql, oracle) |
+| `driver/` | Pluggable database drivers (postgres, mssql, mysql) |
 | `orchestrator/` | Migration workflow coordinator (9 task types) |
 | `transfer/` | Data transfer pipeline with read-ahead buffering |
-| `pipeline/` | Configurable producer-consumer pipeline with runtime tuning |
 | `checkpoint/` | State persistence (SQLite or YAML for Airflow) |
 | `config/` | YAML parsing, secret expansion, driver validation |
 | `tui/` | Interactive terminal UI (Bubble Tea framework) |
@@ -58,7 +57,7 @@ Each database driver registers via `init()` with the global registry in `driver/
 - `Writer` - Table creation, bulk insert, upsert, constraint management
 - `TypeMapper` - Cross-database type conversion (with AI fallback)
 
-Driver packages: `driver/postgres/`, `driver/mssql/`, `driver/mysql/`, `driver/oracle/`
+Driver packages: `driver/postgres/`, `driver/mssql/`, `driver/mysql/`
 
 ### Migration Task Flow
 
@@ -143,7 +142,7 @@ go test -race ./...
 
 ### Driver Development
 
-When adding or modifying database drivers (`internal/driver/postgres/`, `mssql/`, `mysql/`, `oracle/`):
+When adding or modifying database drivers (`internal/driver/postgres/`, `mssql/`, `mysql/`):
 1. Drivers must implement `Reader`, `Writer`, and optionally `TypeMapper` interfaces
 2. Register in `init()` function - see `driver/registry.go` for self-registration pattern
 3. Add integration tests with `_integration_test.go` suffix (skipped in `-short` mode)
@@ -158,13 +157,6 @@ AI code is consolidated in `internal/driver/`:
 - `internal/monitor/ai_monitor.go` - Runtime parameter adjustment
 
 All AI features share provider abstraction supporting Claude, OpenAI, and Gemini.
-
-### Pipeline Tuning
-
-The `internal/pipeline/` package supports runtime config updates via `ConfigUpdate` channel:
-- Updates can be applied at chunk or table boundaries (`ApplyTiming`)
-- Thread-safe via `configMu` RWMutex
-- Used by AI monitor to adjust workers/chunk_size mid-migration
 
 ## Development Workflow
 
