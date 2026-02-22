@@ -257,10 +257,11 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 	}
 
 	// Skip adjustments when transfer is nearly complete (>90%)
+	// Use live row count (not snapshot) to avoid 30s stale data gap
 	if aa.totalRows > 0 {
-		metrics := aa.collector.GetRecentMetrics(1)
-		if len(metrics) > 0 && metrics[0].RowsProcessed > 0 {
-			pct := float64(metrics[0].RowsProcessed) / float64(aa.totalRows) * 100
+		currentRows := aa.collector.GetCurrentRowCount()
+		if currentRows > 0 {
+			pct := float64(currentRows) / float64(aa.totalRows) * 100
 			if pct >= 90 {
 				logging.Debug("AI adjuster skipping: transfer %.1f%% complete", pct)
 				return &AdjustmentDecision{

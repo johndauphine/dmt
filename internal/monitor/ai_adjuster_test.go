@@ -521,11 +521,9 @@ func TestSkipNearCompletion(t *testing.T) {
 		aa.baselineCaptured = true
 		aa.baselineMetrics = &PerformanceSnapshot{Throughput: 100000}
 
-		// Set total rows and update collector to show >90%
+		// Set total rows and update live row count to show >90%
 		aa.SetTotalRows(100000)
-		aa.collector.metrics = []PerformanceSnapshot{
-			{RowsProcessed: 95000, Throughput: 100000, CPUPercent: 50, MemoryPercent: 60},
-		}
+		aa.collector.UpdateRowCount(95000)
 
 		decision, err := aa.Evaluate(nil)
 		if err != nil {
