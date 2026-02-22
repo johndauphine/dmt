@@ -90,6 +90,11 @@ func (mc *MetricsCollector) UpdateRowCount(count int64) {
 	mc.rowsProcessed.Store(count)
 }
 
+// GetCurrentRowCount returns the live row count (not from a snapshot).
+func (mc *MetricsCollector) GetCurrentRowCount() int64 {
+	return mc.rowsProcessed.Load()
+}
+
 // Start begins collecting metrics at regular intervals.
 func (mc *MetricsCollector) Start(ctx context.Context) {
 	ticker := time.NewTicker(mc.interval)
