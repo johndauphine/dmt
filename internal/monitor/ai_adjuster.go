@@ -290,8 +290,20 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 		}
 	}
 
-	// Memory saturation guardrail: bypass cooldown to prevent OOM crashes.
-	// This must run before the cooldown check so memory pressure is always handled.
+	// Check post-adjustment cooldown: wait for metrics to stabilize after
+	// the last adjustment before evaluating again
+	if !aa.lastAdjustment.IsZero() && time.Since(aa.lastAdjustment) < adjustmentCooldown {
+		remaining := adjustmentCooldown - time.Since(aa.lastAdjustment)
+		logging.Debug("AI adjuster cooldown: %.0fs remaining after last adjustment", remaining.Seconds())
+		return &AdjustmentDecision{
+			Action:      "continue",
+			Reasoning:   fmt.Sprintf("Cooling down after last adjustment (%.0fs remaining)", remaining.Seconds()),
+			Confidence:  "high",
+			Adjustments: make(map[string]int),
+		}, nil
+	}
+
+	// Memory saturation guardrail: reduce chunk_size before calling the AI.
 	trends := aa.collector.AnalyzeTrends()
 	if trends.MemorySaturated {
 		config := aa.tuner.Snapshot()
@@ -308,19 +320,6 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 				Adjustments: map[string]int{"chunk_size": newChunkSize},
 			}, nil
 		}
-	}
-
-	// Check post-adjustment cooldown: wait for metrics to stabilize after
-	// the last adjustment before evaluating again
-	if !aa.lastAdjustment.IsZero() && time.Since(aa.lastAdjustment) < adjustmentCooldown {
-		remaining := adjustmentCooldown - time.Since(aa.lastAdjustment)
-		logging.Debug("AI adjuster cooldown: %.0fs remaining after last adjustment", remaining.Seconds())
-		return &AdjustmentDecision{
-			Action:      "continue",
-			Reasoning:   fmt.Sprintf("Cooling down after last adjustment (%.0fs remaining)", remaining.Seconds()),
-			Confidence:  "high",
-			Adjustments: make(map[string]int),
-		}, nil
 	}
 
 	// Skip adjustments when transfer is nearly complete (>90%)
