@@ -290,6 +290,26 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 		}
 	}
 
+	// Memory saturation guardrail: bypass cooldown to prevent OOM crashes.
+	// This must run before the cooldown check so memory pressure is always handled.
+	trends := aa.collector.AnalyzeTrends()
+	if trends.MemorySaturated {
+		config := aa.tuner.Snapshot()
+		newChunkSize := config.ChunkSize / 2
+		if newChunkSize < 5000 {
+			newChunkSize = 5000
+		}
+		if newChunkSize != config.ChunkSize {
+			logging.Warn("Memory guardrail triggered (>75%%): reducing chunk_size %d -> %d", config.ChunkSize, newChunkSize)
+			return &AdjustmentDecision{
+				Action:      "reduce_chunk",
+				Reasoning:   "Memory saturated - emergency chunk size reduction to prevent OOM",
+				Confidence:  "high",
+				Adjustments: map[string]int{"chunk_size": newChunkSize},
+			}, nil
+		}
+	}
+
 	// Check post-adjustment cooldown: wait for metrics to stabilize after
 	// the last adjustment before evaluating again
 	if !aa.lastAdjustment.IsZero() && time.Since(aa.lastAdjustment) < adjustmentCooldown {
