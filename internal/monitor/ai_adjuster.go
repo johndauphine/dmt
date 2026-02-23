@@ -320,6 +320,7 @@ func (aa *AIAdjuster) Evaluate(ctx context.Context) (*AdjustmentDecision, error)
 				Adjustments: map[string]int{"chunk_size": newChunkSize},
 			}, nil
 		}
+		logging.Warn("Memory saturated (>75%%) but chunk_size already at minimum (%d) — cannot reduce further", config.ChunkSize)
 	}
 
 	// Skip adjustments when transfer is nearly complete (>90%)

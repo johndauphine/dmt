@@ -8,7 +8,7 @@ source:
   port: 5433
   database: bench
   user: postgres
-  password: "TestPass123!"
+  password: ${POSTGRES_PASSWORD}
   schema: public
   ssl_mode: disable
 
@@ -18,7 +18,7 @@ target:
   port: 5434
   database: bench
   user: postgres
-  password: "TestPass123!"
+  password: ${POSTGRES_PASSWORD}
   schema: public
   ssl_mode: disable
 
