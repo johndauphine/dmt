@@ -1,0 +1,36 @@
+# SO2013 PG to PG migration - AI tuning benchmark
+# Source: pg-test (port 5432) - 106.5M rows from MSSQL->PG migration
+# Target: pg-target (port 5434)
+
+source:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2013
+  user: postgres
+  password: ${POSTGRES_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+target:
+  type: postgres
+  host: localhost
+  port: 5434
+  database: so2013
+  user: postgres
+  password: ${POSTGRES_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+ai:
+  api_key: ${ANTHROPIC_API_KEY}
+  provider: claude
+  model: claude-haiku-4-5-20251001
+
+migration:
+  target_mode: drop_recreate
+  workers: 4
+  chunk_size: 100000
+  ai_adjust: true
+  ai_adjust_interval: 30s
+  max_memory_mb: 8192
