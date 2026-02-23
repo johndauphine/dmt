@@ -1231,7 +1231,8 @@ func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	var sb strings.Builder
 
-	sb.WriteString("You are a database migration expert. Generate a CREATE TABLE statement.\n\n")
+	sb.WriteString("You are a database migration expert. Generate a CREATE TABLE statement.\n")
+	sb.WriteString("IMPORTANT: Your entire response must be ONLY the raw SQL statement. No JSON, no markdown, no explanation.\n\n")
 
 	// === SOURCE DATABASE CONTEXT ===
 	sb.WriteString("=== SOURCE DATABASE ===\n")
@@ -1274,7 +1275,9 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("- Do NOT include foreign keys (created separately in Finalize)\n")
 	sb.WriteString("- Do NOT include indexes (created separately in Finalize)\n")
 	sb.WriteString("- Do NOT include CHECK constraints (created separately in Finalize)\n")
-	sb.WriteString("- Return ONLY the CREATE TABLE statement, no explanation or markdown\n")
+	sb.WriteString("- Return ONLY the raw CREATE TABLE SQL statement as plain text\n")
+	sb.WriteString("- Do NOT wrap the response in JSON, markdown code blocks, or any other format\n")
+	sb.WriteString("- The response must start with 'CREATE TABLE' and end with a semicolon\n")
 
 	// Database-specific identifier requirements from the target dialect
 	if dialect := GetDialect(req.TargetDBType); dialect != nil {
@@ -1613,14 +1616,8 @@ func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
 
 // parseTableDDLResponse extracts the DDL and column types from AI response.
 func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
-	// Clean up the response
-	ddl := strings.TrimSpace(response)
-
-	// Remove markdown code blocks if present
-	ddl = strings.TrimPrefix(ddl, "```sql")
-	ddl = strings.TrimPrefix(ddl, "```")
-	ddl = strings.TrimSuffix(ddl, "```")
-	ddl = strings.TrimSpace(ddl)
+	// Clean up the response (strips markdown code blocks, extracts SQL from JSON wrappers)
+	ddl := cleanDDLResponse(response)
 
 	// Basic validation - should start with CREATE TABLE
 	upperDDL := strings.ToUpper(ddl)

@@ -122,16 +122,16 @@ func TestAnalyzeTrends(t *testing.T) {
 	t.Run("memory saturated", func(t *testing.T) {
 		mc := &MetricsCollector{
 			metrics: []PerformanceSnapshot{
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 80},
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 85},
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 90}, // >85%
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 70},
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 75},
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 80}, // >75%
 			},
 		}
 
 		trends := mc.AnalyzeTrends()
 
 		if !trends.MemorySaturated {
-			t.Error("expected MemorySaturated=true when memory >85%")
+			t.Error("expected MemorySaturated=true when memory >75%")
 		}
 	})
 

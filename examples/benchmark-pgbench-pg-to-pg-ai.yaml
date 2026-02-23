@@ -1,0 +1,34 @@
+# pgbench PG to PG migration - AI tuning benchmark
+# Source: pg-source (port 5433) - 100M rows, ~15GB
+# Target: pg-target (port 5434)
+
+source:
+  type: postgres
+  host: localhost
+  port: 5433
+  database: bench
+  user: postgres
+  password: ${POSTGRES_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+target:
+  type: postgres
+  host: localhost
+  port: 5434
+  database: bench
+  user: postgres
+  password: ${POSTGRES_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+ai:
+  type_mapping:
+    enabled: false
+
+migration:
+  target_mode: drop_recreate
+  workers: 6
+  chunk_size: 100000
+  create_indexes: true
+  create_foreign_keys: true
