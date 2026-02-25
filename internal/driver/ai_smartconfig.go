@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -491,13 +492,18 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 			if shown >= 5 {
 				break
 			}
-			// Show actual parameter values from the adjustment
+			// Show actual parameter values from the adjustment (sorted for deterministic output)
+			keys := make([]string, 0, len(adj.Adjustments))
+			for k := range adj.Adjustments {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
 			paramStr := ""
-			for param, val := range adj.Adjustments {
+			for _, param := range keys {
 				if paramStr != "" {
 					paramStr += ", "
 				}
-				paramStr += fmt.Sprintf("%s→%d", param, val)
+				paramStr += fmt.Sprintf("%s→%d", param, adj.Adjustments[param])
 			}
 			if paramStr == "" {
 				paramStr = "(no parameter changes)"
