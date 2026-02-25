@@ -518,7 +518,12 @@ func executeKeysetPagination(
 		}
 	}
 
-	// Determine number of parallel readers
+	// Determine number of parallel readers.
+	// Note: numReaders and bufferSize are intentionally NOT made dynamic via the tuner
+	// (unlike chunkSizeFn above). Changing numReaders mid-transfer would require
+	// spawning/cancelling goroutines with PK range re-splitting; changing bufferSize
+	// would require recreating the channel. WriteAheadWriters scaling is handled
+	// separately via wp.ScaleWorkers() at chunk boundaries.
 	numReaders := cfg.Migration.ParallelReaders
 	if numReaders < 1 {
 		numReaders = 1
@@ -862,7 +867,8 @@ func executeRowNumberPagination(
 		initialRowNum = endRow
 	}
 
-	// Create buffered channel for read-ahead pipeline
+	// Create buffered channel for read-ahead pipeline.
+	// bufferSize is intentionally static — see comment in executeKeysetPagination.
 	bufferSize := cfg.Migration.ReadAheadBuffers
 	if bufferSize < 0 {
 		bufferSize = 0
