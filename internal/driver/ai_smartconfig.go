@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -462,63 +463,109 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 	var sb strings.Builder
 
-	// Get recent tuning recommendations
+	// Section 1: Parameter trajectory from past tuning runs
 	tuningHistory, err := s.historyProvider.GetAITuningHistory(5)
 	if err == nil && len(tuningHistory) > 0 {
-		sb.WriteString("\nHISTORICAL TUNING RECOMMENDATIONS (from similar analyses):\n")
-		for i, h := range tuningHistory {
+		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses, oldest first):\n")
+		for i := len(tuningHistory) - 1; i >= 0; i-- {
+			h := tuningHistory[i]
 			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
-				i+1, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
+				len(tuningHistory)-i, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
 				h.TotalTables, formatRowCount(h.TotalRows)))
-			sb.WriteString(fmt.Sprintf("     workers=%d, chunk=%d, read_ahead=%d, write_ahead=%d\n",
+			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead=%d, write_ahead=%d\n",
 				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters))
-			if h.AIReasoning != "" {
-				// Truncate long reasoning
-				reasoning := h.AIReasoning
-				if len(reasoning) > 100 {
-					reasoning = reasoning[:100] + "..."
-				}
-				sb.WriteString(fmt.Sprintf("     reason: %s\n", reasoning))
-			}
+		}
+
+		// Detect and warn about downward trends
+		if trend := detectParameterTrend(tuningHistory); trend != "" {
+			sb.WriteString(fmt.Sprintf("  WARNING: %s\n", trend))
 		}
 	}
 
-	// Get recent runtime adjustments (what worked during actual migrations)
+	// Section 2: Runtime adjustments as reactive context (NOT recommendations)
 	adjustments, err := s.historyProvider.GetAIAdjustments(10)
 	if err == nil && len(adjustments) > 0 {
-		// Summarize adjustments by action type
-		actionStats := make(map[string]struct {
-			count     int
-			avgEffect float64
-			totalRows float64
-		})
-		for _, adj := range adjustments {
-			stat := actionStats[adj.Action]
-			stat.count++
-			stat.avgEffect += adj.EffectPercent
-			actionStats[adj.Action] = stat
-		}
-
-		sb.WriteString("\nRUNTIME ADJUSTMENT HISTORY (what worked during migrations):\n")
-		for action, stat := range actionStats {
-			avgEffect := stat.avgEffect / float64(stat.count)
-			sb.WriteString(fmt.Sprintf("  - %s: used %d times, avg effect: %.1f%% improvement\n",
-				action, stat.count, avgEffect))
-		}
-
-		// Show some specific examples with high positive effects
-		sb.WriteString("  Best performing adjustments:\n")
+		sb.WriteString("\nRUNTIME ADJUSTMENT LOG (reactive changes made DURING migrations):\n")
+		sb.WriteString("  NOTE: These were responses to specific runtime conditions (memory pressure,\n")
+		sb.WriteString("  CPU saturation, throughput drops). They are NOT recommendations for starting parameters.\n")
 		shown := 0
 		for _, adj := range adjustments {
-			if adj.EffectPercent > 10 && shown < 3 {
-				sb.WriteString(fmt.Sprintf("    - %s: %.1f%% improvement (before: %.0f rows/s, after: %.0f rows/s)\n",
-					adj.Action, adj.EffectPercent, adj.ThroughputBefore, adj.ThroughputAfter))
-				shown++
+			if shown >= 5 {
+				break
 			}
+			// Show actual parameter values from the adjustment (sorted for deterministic output)
+			keys := make([]string, 0, len(adj.Adjustments))
+			for k := range adj.Adjustments {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			paramStr := ""
+			for _, param := range keys {
+				if paramStr != "" {
+					paramStr += ", "
+				}
+				paramStr += fmt.Sprintf("%s→%d", param, adj.Adjustments[param])
+			}
+			if paramStr == "" {
+				paramStr = "(no parameter changes)"
+			}
+			sb.WriteString(fmt.Sprintf("  - %s: %s (throughput at time: %.0f rows/s)\n",
+				adj.Action, paramStr, adj.ThroughputBefore))
+			shown++
 		}
 	}
 
 	return sb.String()
+}
+
+// detectParameterTrend checks if key parameters are monotonically decreasing
+// across tuning history (which may indicate a downward spiral).
+// History is ordered newest-first from the database query.
+func detectParameterTrend(history []AITuningRecord) string {
+	if len(history) < 2 {
+		return ""
+	}
+
+	var warnings []string
+
+	// Check for monotonic decrease (newest-first, so history[0] is most recent)
+	chunkDecreasing := true
+	workerDecreasing := true
+	for i := 0; i < len(history)-1; i++ {
+		if !chunkDecreasing && !workerDecreasing {
+			break
+		}
+		// i is newer, i+1 is older
+		if history[i].ChunkSize >= history[i+1].ChunkSize {
+			chunkDecreasing = false
+		}
+		if history[i].Workers >= history[i+1].Workers {
+			workerDecreasing = false
+		}
+	}
+
+	oldest := history[len(history)-1]
+	newest := history[0]
+
+	if chunkDecreasing && oldest.ChunkSize > 0 {
+		pctDrop := 100.0 * float64(oldest.ChunkSize-newest.ChunkSize) / float64(oldest.ChunkSize)
+		if pctDrop > 30 {
+			warnings = append(warnings, fmt.Sprintf(
+				"chunk_size decreased %.0f%% over %d runs (%d → %d) — this may be a feedback loop, not a genuine constraint",
+				pctDrop, len(history), oldest.ChunkSize, newest.ChunkSize))
+		}
+	}
+
+	if workerDecreasing && oldest.Workers > 0 {
+		pctDrop := 100.0 * float64(oldest.Workers-newest.Workers) / float64(oldest.Workers)
+		if pctDrop > 30 {
+			warnings = append(warnings, fmt.Sprintf(
+				"workers decreased %.0f%% over %d runs (%d → %d) — this may be a feedback loop, not a genuine constraint",
+				pctDrop, len(history), oldest.Workers, newest.Workers))
+		}
+	}
+
+	return strings.Join(warnings, "; ")
 }
 
 // getAIAutoTune calls the AI to get auto-tuned parameters.
@@ -579,8 +626,9 @@ Guidelines:
 2. CHUNK SIZE is most important for throughput - larger = faster, but balance with memory
 3. Workers should scale with CPU cores but leave headroom
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead
-5. Learn from historical data: apply patterns that improved performance in past migrations
+5. Historical context: Runtime adjustments shown above were REACTIVE to specific problems during migrations — do NOT proactively reduce parameters based on those reactive adjustments. If the parameter trajectory shows values decreasing across successive runs, this may be a feedback loop, not a genuine constraint. Optimize for maximum throughput within memory constraints.
 6. Consider the database types and total data volume when tuning
+7. AVOID PARAMETER REGRESSION: If parameters have been decreasing across runs without clear memory/CPU pressure in the current system, prefer values closer to earlier (larger) values. The runtime AI monitor can scale down if needed during migration.
 
 Respond with ONLY a JSON object:
 {
