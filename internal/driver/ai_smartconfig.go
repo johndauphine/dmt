@@ -466,10 +466,11 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	// Section 1: Parameter trajectory from past tuning runs
 	tuningHistory, err := s.historyProvider.GetAITuningHistory(5)
 	if err == nil && len(tuningHistory) > 0 {
-		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses):\n")
-		for i, h := range tuningHistory {
+		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses, oldest first):\n")
+		for i := len(tuningHistory) - 1; i >= 0; i-- {
+			h := tuningHistory[i]
 			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
-				i+1, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
+				len(tuningHistory)-i, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
 				h.TotalTables, formatRowCount(h.TotalRows)))
 			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead=%d, write_ahead=%d\n",
 				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters))
@@ -531,6 +532,9 @@ func detectParameterTrend(history []AITuningRecord) string {
 	chunkDecreasing := true
 	workerDecreasing := true
 	for i := 0; i < len(history)-1; i++ {
+		if !chunkDecreasing && !workerDecreasing {
+			break
+		}
 		// i is newer, i+1 is older
 		if history[i].ChunkSize >= history[i+1].ChunkSize {
 			chunkDecreasing = false
