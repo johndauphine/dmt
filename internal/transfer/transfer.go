@@ -474,7 +474,19 @@ func executeKeysetPagination(
 	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
-	chunkSize := cfg.Migration.ChunkSize
+	baseChunkSize := cfg.Migration.ChunkSize
+
+	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
+	// guardrail reductions (e.g. memory pressure halving) take effect on in-flight readers.
+	chunkSizeFn := func() int { return baseChunkSize }
+	if tuner != nil {
+		chunkSizeFn = func() int {
+			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+				return cs
+			}
+			return baseChunkSize
+		}
+	}
 
 	// Get PK range for parallel readers
 	var minPKVal, maxPKVal any
@@ -547,6 +559,9 @@ func executeKeysetPagination(
 					return
 				default:
 				}
+
+				// Read chunk_size dynamically so guardrail reductions take effect immediately
+				chunkSize := chunkSizeFn()
 
 				// Always use bounded query for parallel readers
 				query := srcDialect.BuildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true, job.DateFilter)
@@ -809,7 +824,19 @@ func executeRowNumberPagination(
 	}
 	orderBy := strings.Join(pkCols, ", ")
 
-	chunkSize := cfg.Migration.ChunkSize
+	baseChunkSize := cfg.Migration.ChunkSize
+
+	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
+	// guardrail reductions take effect on in-flight readers.
+	chunkSizeFn := func() int { return baseChunkSize }
+	if tuner != nil {
+		chunkSizeFn = func() int {
+			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+				return cs
+			}
+			return baseChunkSize
+		}
+	}
 
 	// Determine row range for this job
 	var startRow, endRow int64
@@ -855,6 +882,9 @@ func executeRowNumberPagination(
 				return
 			default:
 			}
+
+			// Read chunk_size dynamically so guardrail reductions take effect immediately
+			chunkSize := chunkSizeFn()
 
 			// Adjust chunk size if near end of partition
 			effectiveChunkSize := chunkSize
