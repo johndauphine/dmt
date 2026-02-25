@@ -210,6 +210,95 @@ func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
 	}
 }
 
+func TestDynamicChunkSizeFn(t *testing.T) {
+	baseChunkSize := 320000
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: baseChunkSize})
+
+	// Build the same closure used by executeKeysetPagination / executeRowNumberPagination
+	chunkSizeFn := func() int {
+		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+			return cs
+		}
+		return baseChunkSize
+	}
+
+	// Initially returns the tuner's value
+	if got := chunkSizeFn(); got != 320000 {
+		t.Errorf("initial chunkSizeFn() = %d, want 320000", got)
+	}
+
+	// Simulate memory guardrail halving chunk_size
+	half := 160000
+	tuner.Update(RuntimeUpdate{ChunkSize: &half})
+	if got := chunkSizeFn(); got != 160000 {
+		t.Errorf("after guardrail chunkSizeFn() = %d, want 160000", got)
+	}
+
+	// Second halving
+	quarter := 80000
+	tuner.Update(RuntimeUpdate{ChunkSize: &quarter})
+	if got := chunkSizeFn(); got != 80000 {
+		t.Errorf("after second halving chunkSizeFn() = %d, want 80000", got)
+	}
+
+	// Zero falls back to baseChunkSize
+	zero := 0
+	tuner.Update(RuntimeUpdate{ChunkSize: &zero})
+	if got := chunkSizeFn(); got != baseChunkSize {
+		t.Errorf("zero chunkSizeFn() = %d, want baseChunkSize %d", got, baseChunkSize)
+	}
+}
+
+func TestDynamicChunkSizeFnWithoutTuner(t *testing.T) {
+	baseChunkSize := 200000
+
+	// Without a tuner, chunkSizeFn always returns the base value
+	chunkSizeFn := func() int { return baseChunkSize }
+
+	if got := chunkSizeFn(); got != 200000 {
+		t.Errorf("chunkSizeFn() = %d, want 200000", got)
+	}
+}
+
+func TestDynamicChunkSizeFnConcurrent(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 320000})
+	baseChunkSize := 320000
+
+	chunkSizeFn := func() int {
+		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+			return cs
+		}
+		return baseChunkSize
+	}
+
+	var wg sync.WaitGroup
+
+	// Simulate concurrent readers calling chunkSizeFn while guardrail updates
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				cs := chunkSizeFn()
+				if cs <= 0 {
+					t.Errorf("chunkSizeFn() returned %d, want > 0", cs)
+				}
+			}
+		}()
+	}
+
+	// Concurrent guardrail updates
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(v int) {
+			defer wg.Done()
+			tuner.Update(RuntimeUpdate{ChunkSize: &v})
+		}(160000 + i*1000)
+	}
+
+	wg.Wait()
+}
+
 func TestRuntimeTunerConcurrentAccess(t *testing.T) {
 	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000, WriteAheadWriters: 2})
 

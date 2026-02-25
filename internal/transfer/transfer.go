@@ -474,7 +474,19 @@ func executeKeysetPagination(
 	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
-	chunkSize := cfg.Migration.ChunkSize
+	baseChunkSize := cfg.Migration.ChunkSize
+
+	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
+	// guardrail reductions (e.g. memory pressure halving) take effect on in-flight readers.
+	chunkSizeFn := func() int { return baseChunkSize }
+	if tuner != nil {
+		chunkSizeFn = func() int {
+			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+				return cs
+			}
+			return baseChunkSize
+		}
+	}
 
 	// Get PK range for parallel readers
 	var minPKVal, maxPKVal any
@@ -506,7 +518,12 @@ func executeKeysetPagination(
 		}
 	}
 
-	// Determine number of parallel readers
+	// Determine number of parallel readers.
+	// Note: numReaders and bufferSize are intentionally NOT made dynamic via the tuner
+	// (unlike chunkSizeFn above). Changing numReaders mid-transfer would require
+	// spawning/cancelling goroutines with PK range re-splitting; changing bufferSize
+	// would require recreating the channel. WriteAheadWriters scaling is handled
+	// separately via wp.ScaleWorkers() at chunk boundaries.
 	numReaders := cfg.Migration.ParallelReaders
 	if numReaders < 1 {
 		numReaders = 1
@@ -547,6 +564,9 @@ func executeKeysetPagination(
 					return
 				default:
 				}
+
+				// Read chunk_size dynamically so guardrail reductions take effect immediately
+				chunkSize := chunkSizeFn()
 
 				// Always use bounded query for parallel readers
 				query := srcDialect.BuildKeysetQuery(colList, pkCol, job.Table.Schema, job.Table.Name, tableHint, true, job.DateFilter)
@@ -809,7 +829,19 @@ func executeRowNumberPagination(
 	}
 	orderBy := strings.Join(pkCols, ", ")
 
-	chunkSize := cfg.Migration.ChunkSize
+	baseChunkSize := cfg.Migration.ChunkSize
+
+	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
+	// guardrail reductions take effect on in-flight readers.
+	chunkSizeFn := func() int { return baseChunkSize }
+	if tuner != nil {
+		chunkSizeFn = func() int {
+			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+				return cs
+			}
+			return baseChunkSize
+		}
+	}
 
 	// Determine row range for this job
 	var startRow, endRow int64
@@ -835,7 +867,8 @@ func executeRowNumberPagination(
 		initialRowNum = endRow
 	}
 
-	// Create buffered channel for read-ahead pipeline
+	// Create buffered channel for read-ahead pipeline.
+	// bufferSize is intentionally static — see comment in executeKeysetPagination.
 	bufferSize := cfg.Migration.ReadAheadBuffers
 	if bufferSize < 0 {
 		bufferSize = 0
@@ -855,6 +888,9 @@ func executeRowNumberPagination(
 				return
 			default:
 			}
+
+			// Read chunk_size dynamically so guardrail reductions take effect immediately
+			chunkSize := chunkSizeFn()
 
 			// Adjust chunk size if near end of partition
 			effectiveChunkSize := chunkSize
