@@ -658,14 +658,23 @@ func calculateBackoff(attempt int) time.Duration {
 func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
 
-	// Detect if this is a type mapping query (short, simple) vs a complex query
-	// (AI monitor, smart config, error diagnosis). Complex queries get a system
-	// prompt to improve structured output reliability.
+	// Detect if this is a type mapping query (short, simple) vs a complex query.
+	// DDL generation prompts need raw SQL output, while AI monitor/smart config
+	// prompts need structured JSON output. Use prompt content to distinguish.
 	maxTokens := 1024
 	systemPrompt := ""
 	if len(prompt) > 500 {
-		systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
 		maxTokens = 4096
+		upperPrompt := strings.ToUpper(prompt[:min(len(prompt), 200)])
+		isDDL := strings.Contains(upperPrompt, "CREATE TABLE") ||
+			strings.Contains(upperPrompt, "CREATE INDEX") ||
+			strings.Contains(upperPrompt, "ALTER TABLE") ||
+			strings.Contains(upperPrompt, "DROP TABLE")
+		if isDDL {
+			systemPrompt = "You are a database migration expert. Return ONLY the raw SQL statement. No JSON, no markdown, no explanation."
+		} else {
+			systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
+		}
 	}
 
 	reqBody := claudeRequest{
@@ -1616,8 +1625,7 @@ func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
 
 // parseTableDDLResponse extracts the DDL and column types from AI response.
 func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
-	// Clean up the response (strips markdown code blocks, extracts SQL from JSON wrappers)
-	ddl := cleanDDLResponse(response)
+	ddl := strings.TrimSpace(response)
 
 	// Basic validation - should start with CREATE TABLE
 	upperDDL := strings.ToUpper(ddl)
@@ -1753,7 +1761,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			req.Table.Name, entityName, err)
 	}
 
-	ddl := cleanDDLResponse(result)
+	ddl := strings.TrimSpace(result)
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
@@ -1819,7 +1827,8 @@ func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 	sb.WriteString("- Include INCLUDE clause if target supports it (SQL Server, PostgreSQL 11+)\n")
 	sb.WriteString("- Include WHERE clause for filtered indexes if target supports it\n")
 	sb.WriteString("- Quote identifiers appropriately for the target database\n")
-	sb.WriteString("- Return ONLY the CREATE INDEX statement, no explanation or markdown\n")
+	sb.WriteString("- Return ONLY the raw CREATE INDEX SQL statement as plain text\n")
+	sb.WriteString("- Do NOT wrap the response in JSON, markdown code blocks, or any other format\n")
 
 	// Database-specific identifier requirements from the target dialect
 	if dialect := GetDialect(req.TargetDBType); dialect != nil {
@@ -1884,7 +1893,8 @@ func (m *AITypeMapper) buildForeignKeyDDLPrompt(req FinalizationDDLRequest) stri
 	sb.WriteString("- Include ON DELETE and ON UPDATE actions if specified\n")
 	sb.WriteString("- Map referential actions to target database syntax (NO ACTION, CASCADE, SET NULL, etc.)\n")
 	sb.WriteString("- Quote identifiers appropriately for the target database\n")
-	sb.WriteString("- Return ONLY the ALTER TABLE statement, no explanation or markdown\n")
+	sb.WriteString("- Return ONLY the raw ALTER TABLE SQL statement as plain text\n")
+	sb.WriteString("- Do NOT wrap the response in JSON, markdown code blocks, or any other format\n")
 
 	// Database-specific identifier requirements from the target dialect
 	if dialect := GetDialect(req.TargetDBType); dialect != nil {
@@ -1944,7 +1954,8 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 	sb.WriteString("- Convert the check expression syntax from source database to target database\n")
 	sb.WriteString("- Convert functions appropriately (e.g., GETDATE() -> NOW(), SYSDATE, CURRENT_TIMESTAMP)\n")
 	sb.WriteString("- Quote identifiers appropriately for the target database\n")
-	sb.WriteString("- Return ONLY the ALTER TABLE statement, no explanation or markdown\n")
+	sb.WriteString("- Return ONLY the raw ALTER TABLE SQL statement as plain text\n")
+	sb.WriteString("- Do NOT wrap the response in JSON, markdown code blocks, or any other format\n")
 
 	// Database-specific identifier requirements from the target dialect
 	if dialect := GetDialect(req.TargetDBType); dialect != nil {
@@ -1954,20 +1965,6 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 	}
 
 	return sb.String()
-}
-
-// cleanDDLResponse cleans up the AI response to extract just the DDL.
-func cleanDDLResponse(response string) string {
-	ddl := strings.TrimSpace(response)
-
-	// Remove markdown code blocks if present
-	ddl = strings.TrimPrefix(ddl, "```sql")
-	ddl = strings.TrimPrefix(ddl, "```SQL")
-	ddl = strings.TrimPrefix(ddl, "```")
-	ddl = strings.TrimSuffix(ddl, "```")
-	ddl = strings.TrimSpace(ddl)
-
-	return ddl
 }
 
 // GenerateDropTableDDL generates DDL statement(s) for dropping a table.
@@ -2003,7 +2000,7 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 			req.TargetSchema, req.TableName, err)
 	}
 
-	ddl := cleanDDLResponse(result)
+	ddl := strings.TrimSpace(result)
 
 	// Basic validation - should contain DROP
 	upperDDL := strings.ToUpper(ddl)
@@ -2057,7 +2054,8 @@ func (m *AITypeMapper) buildDropTableDDLPrompt(req DropTableDDLRequest) string {
 	// Output requirements
 	sb.WriteString("=== OUTPUT REQUIREMENTS ===\n")
 	sb.WriteString("Generate the complete statement(s) to drop the table, ensuring foreign key constraints do not block the drop.\n")
-	sb.WriteString("Return ONLY the SQL statement(s), no explanation or markdown.\n\n")
+	sb.WriteString("Return ONLY the raw SQL statement(s) as plain text.\n")
+	sb.WriteString("Do NOT wrap the response in JSON, markdown code blocks, or any other format.\n\n")
 
 	// Database-specific instructions from dialect
 	if dialect := GetDialect(req.TargetDBType); dialect != nil {

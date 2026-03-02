@@ -1200,59 +1200,6 @@ func TestBuildCheckConstraintDDLPrompt_NoSourceDB(t *testing.T) {
 	}
 }
 
-func TestCleanDDLResponse(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "plain DDL",
-			input:    "CREATE INDEX idx_test ON users (email)",
-			expected: "CREATE INDEX idx_test ON users (email)",
-		},
-		{
-			name:     "DDL with whitespace",
-			input:    "  CREATE INDEX idx_test ON users (email)  \n",
-			expected: "CREATE INDEX idx_test ON users (email)",
-		},
-		{
-			name:     "DDL with sql markdown",
-			input:    "```sql\nCREATE INDEX idx_test ON users (email)\n```",
-			expected: "CREATE INDEX idx_test ON users (email)",
-		},
-		{
-			name:     "DDL with SQL uppercase markdown",
-			input:    "```SQL\nCREATE INDEX idx_test ON users (email)\n```",
-			expected: "CREATE INDEX idx_test ON users (email)",
-		},
-		{
-			name:     "DDL with plain markdown",
-			input:    "```\nCREATE INDEX idx_test ON users (email)\n```",
-			expected: "CREATE INDEX idx_test ON users (email)",
-		},
-		{
-			name:     "DDL with leading/trailing markdown and whitespace",
-			input:    "  ```sql\n  CREATE INDEX idx_test ON users (email)  \n```  ",
-			expected: "CREATE INDEX idx_test ON users (email)",
-		},
-		{
-			name:     "multiline DDL",
-			input:    "```sql\nALTER TABLE orders\nADD CONSTRAINT fk_orders_user\nFOREIGN KEY (user_id) REFERENCES users(id)\n```",
-			expected: "ALTER TABLE orders\nADD CONSTRAINT fk_orders_user\nFOREIGN KEY (user_id) REFERENCES users(id)",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := cleanDDLResponse(tt.input)
-			if result != tt.expected {
-				t.Errorf("cleanDDLResponse(%q) = %q, want %q", tt.input, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestTruncateString(t *testing.T) {
 	tests := []struct {
 		name     string
