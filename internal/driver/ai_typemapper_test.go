@@ -1241,6 +1241,11 @@ func TestCleanDDLResponse(t *testing.T) {
 			input:    "```sql\nALTER TABLE orders\nADD CONSTRAINT fk_orders_user\nFOREIGN KEY (user_id) REFERENCES users(id)\n```",
 			expected: "ALTER TABLE orders\nADD CONSTRAINT fk_orders_user\nFOREIGN KEY (user_id) REFERENCES users(id)",
 		},
+		{
+			name:     "DDL with json markdown tag",
+			input:    "```json\nCREATE INDEX idx_test ON users (email)\n```",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
 	}
 
 	for _, tt := range tests {
