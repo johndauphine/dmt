@@ -1246,6 +1246,11 @@ func TestCleanDDLResponse(t *testing.T) {
 			input:    "```json\nCREATE INDEX idx_test ON users (email)\n```",
 			expected: "CREATE INDEX idx_test ON users (email)",
 		},
+		{
+			name:     "single-line fenced block",
+			input:    "```sql CREATE INDEX idx_test ON users (email)```",
+			expected: "CREATE INDEX idx_test ON users (email)",
+		},
 	}
 
 	for _, tt := range tests {

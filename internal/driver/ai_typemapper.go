@@ -1974,10 +1974,15 @@ func cleanDDLResponse(response string) string {
 
 	// Remove markdown code blocks with any language tag (```sql, ```json, etc.)
 	if strings.HasPrefix(ddl, "```") {
+		ddl = strings.TrimPrefix(ddl, "```")
+		ddl = strings.TrimSuffix(ddl, "```")
 		if idx := strings.Index(ddl, "\n"); idx >= 0 {
+			// Multi-line: drop the language tag line
+			ddl = ddl[idx+1:]
+		} else if idx := strings.IndexByte(ddl, ' '); idx >= 0 {
+			// Single-line: drop the language tag before the space
 			ddl = ddl[idx+1:]
 		}
-		ddl = strings.TrimSuffix(ddl, "```")
 		ddl = strings.TrimSpace(ddl)
 	}
 
