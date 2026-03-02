@@ -1625,8 +1625,7 @@ func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
 
 // parseTableDDLResponse extracts the DDL and column types from AI response.
 func (m *AITypeMapper) parseTableDDLResponse(response string, sourceTable *Table) (*TableDDLResponse, error) {
-	// Clean up the response (strips markdown code blocks, extracts SQL from JSON wrappers)
-	ddl := cleanDDLResponse(response)
+	ddl := strings.TrimSpace(response)
 
 	// Basic validation - should start with CREATE TABLE
 	upperDDL := strings.ToUpper(ddl)
@@ -1762,7 +1761,7 @@ func (m *AITypeMapper) GenerateFinalizationDDL(ctx context.Context, req Finaliza
 			req.Table.Name, entityName, err)
 	}
 
-	ddl := cleanDDLResponse(result)
+	ddl := strings.TrimSpace(result)
 
 	// Validate response starts with expected prefix
 	upperDDL := strings.ToUpper(ddl)
@@ -1968,27 +1967,6 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 	return sb.String()
 }
 
-// cleanDDLResponse cleans up the AI response to extract just the DDL.
-func cleanDDLResponse(response string) string {
-	ddl := strings.TrimSpace(response)
-
-	// Remove markdown code blocks with any language tag (```sql, ```json, etc.)
-	if strings.HasPrefix(ddl, "```") {
-		ddl = strings.TrimPrefix(ddl, "```")
-		ddl = strings.TrimSuffix(ddl, "```")
-		if idx := strings.Index(ddl, "\n"); idx >= 0 {
-			// Multi-line: drop the language tag line
-			ddl = ddl[idx+1:]
-		} else if idx := strings.IndexByte(ddl, ' '); idx >= 0 {
-			// Single-line: drop the language tag before the space
-			ddl = ddl[idx+1:]
-		}
-		ddl = strings.TrimSpace(ddl)
-	}
-
-	return ddl
-}
-
 // GenerateDropTableDDL generates DDL statement(s) for dropping a table.
 // The AI generates database-specific syntax that properly handles foreign key constraints.
 func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error) {
@@ -2022,7 +2000,7 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 			req.TargetSchema, req.TableName, err)
 	}
 
-	ddl := cleanDDLResponse(result)
+	ddl := strings.TrimSpace(result)
 
 	// Basic validation - should contain DROP
 	upperDDL := strings.ToUpper(ddl)
