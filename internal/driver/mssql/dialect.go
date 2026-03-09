@@ -35,7 +35,7 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		if encrypt {
 			dsn += "&encrypt=true"
 		} else {
-			dsn += "&encrypt=false"
+			dsn += "&encrypt=disable"
 		}
 	}
 	if trustCert, ok := opts["trustServerCertificate"].(bool); ok && trustCert {
