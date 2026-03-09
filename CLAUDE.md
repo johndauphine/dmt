@@ -24,6 +24,7 @@ go test -v ./internal/orchestrator/...
 go test -race ./...          # Race detector
 
 # Development
+make run                     # Build and run with config.yaml
 make fmt                     # Format code
 make lint                    # Run golangci-lint
 make check                   # Format + test
@@ -44,6 +45,8 @@ make setup-hooks             # Configure pre-commit hooks (.githooks/)
 
 ### Core Packages
 
+All packages live under `internal/`.
+
 | Package | Purpose |
 |---------|---------|
 | `driver/` | Pluggable database drivers + AI integrations (type mapping, smart config, error diagnosis) |
@@ -62,6 +65,8 @@ make setup-hooks             # Configure pre-commit hooks (.githooks/)
 | `progress/` | Progress bar (schollz/progressbar/v3) and JSON reporter |
 | `notify/` | Slack webhook notifications |
 | `exitcodes/` | Exit code constants (0-7) with error classification |
+| `stats/` | WriterPool stats collection |
+| `version/` | Version string injected via `-ldflags` at build time |
 | `source/` | Type aliases: `source.Table` = `driver.Table` etc. |
 | `target/` | PostgreSQL identifier sanitization (lowercasing, special char replacement) |
 
