@@ -661,11 +661,23 @@ func executeKeysetPagination(
 		checkpointFreqFn = func() int { return tuner.Snapshot().CheckpointFrequency }
 	}
 
+	// Build batch size callback: per-table override from tuner, or 0 (let writer use its default)
+	batchSizeFn := func() int { return 0 }
+	if tuner != nil {
+		batchSizeFn = func() int {
+			if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
+				return bs
+			}
+			return 0
+		}
+	}
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
+		BatchSizeFn:            batchSizeFn,
 		TargetSchema:           cfg.Target.Schema,
 		TargetTable:            targetTableName,
 		TargetCols:             targetCols,
@@ -1013,12 +1025,24 @@ func executeRowNumberPagination(
 		}
 	}
 
+	// Build batch size callback: per-table override from tuner, or 0 (let writer use its default)
+	batchSizeFn := func() int { return 0 }
+	if tuner != nil {
+		batchSizeFn = func() int {
+			if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
+				return bs
+			}
+			return 0
+		}
+	}
+
 	enableAck := job.Saver != nil && job.TaskID > 0
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
+		BatchSizeFn:            batchSizeFn,
 		TargetSchema:           cfg.Target.Schema,
 		TargetTable:            targetTableName,
 		TargetCols:             targetCols,
@@ -1338,12 +1362,13 @@ func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string,
 }
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool
-func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any) error {
+func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any, batchSize int) error {
 	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
-		Schema:  schema,
-		Table:   table,
-		Columns: cols,
-		Rows:    rows,
+		Schema:    schema,
+		Table:     table,
+		Columns:   cols,
+		Rows:      rows,
+		BatchSize: batchSize,
 	})
 }
 
@@ -1354,7 +1379,7 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 // colTypes is passed to skip geography/geometry from change detection in MSSQL MERGE
 // colSRIDs is passed for geography/geometry SRID in STGeomFromText conversion (PG→MSSQL)
 func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
-	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
 	return tgtPool.UpsertBatch(ctx, pool.UpsertBatchOptions{
 		Schema:      schema,
 		Table:       table,
@@ -1363,6 +1388,7 @@ func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, sc
 		ColumnSRIDs: colSRIDs,
 		PKColumns:   pkCols,
 		Rows:        rows,
+		BatchSize:   batchSize,
 		WriterID:    writerID,
 		PartitionID: partitionID,
 	})

@@ -60,7 +60,9 @@ type RuntimeTuner interface {
 	Snapshot() RuntimeSnapshot
 	Update(RuntimeUpdate) error
 	TableChunkSize(tableName string) (int, bool)  // Returns per-table chunk size override if set
-	SetTableChunkSize(tableName string, size int) // Sets per-table chunk size override
+	SetTableChunkSize(tableName string, size int)  // Sets per-table chunk size override
+	TableBatchSize(tableName string) (int, bool)   // Returns per-table batch size override if set
+	SetTableBatchSize(tableName string, size int)   // Sets per-table batch size override
 	ReportActiveJobs(delta int)                               // Atomically adjust active job count (+1 on start, -1 on end)
 	ReportQueueDepth(delta int)                               // Atomically adjust aggregate queue depth (use deltas per job)
 	ReportError()                                             // Atomically increment error count
@@ -72,7 +74,8 @@ type RuntimeTuner interface {
 type runtimeTuner struct {
 	mu              sync.RWMutex
 	snapshot        RuntimeSnapshot
-	tableChunkSizes map[string]int // per-table chunk size overrides
+	tableChunkSizes map[string]int // per-table chunk size overrides (reader)
+	tableBatchSizes map[string]int // per-table batch size overrides (writer)
 	activeJobs      atomic.Int32
 	queueDepth      atomic.Int32
 	errorCount      atomic.Int32
@@ -89,6 +92,7 @@ func NewRuntimeTuner(initial RuntimeSnapshot) RuntimeTuner {
 	return &runtimeTuner{
 		snapshot:        initial,
 		tableChunkSizes: make(map[string]int),
+		tableBatchSizes: make(map[string]int),
 	}
 }
 
@@ -112,6 +116,21 @@ func (rt *runtimeTuner) SetTableChunkSize(tableName string, size int) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.tableChunkSizes[tableName] = size
+}
+
+// TableBatchSize returns the per-table batch size override if set.
+func (rt *runtimeTuner) TableBatchSize(tableName string) (int, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	size, ok := rt.tableBatchSizes[tableName]
+	return size, ok
+}
+
+// SetTableBatchSize sets a per-table batch size override.
+func (rt *runtimeTuner) SetTableBatchSize(tableName string, size int) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.tableBatchSizes[tableName] = size
 }
 
 // ReportActiveJobs atomically adjusts the active job count.

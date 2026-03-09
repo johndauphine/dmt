@@ -22,7 +22,7 @@ type Writer struct {
 	db                 *sql.DB
 	config             *dbconfig.TargetConfig
 	maxConns           int
-	chunkSize          int
+	defaultBatchSize   int
 	sourceType         string
 	dialect            *Dialect
 	typeMapper         driver.TypeMapper
@@ -100,7 +100,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		db:                 db,
 		config:             cfg,
 		maxConns:           maxConns,
-		chunkSize:          opts.ChunkSize,
+		defaultBatchSize:   opts.BatchSize,
 		sourceType:         opts.SourceType,
 		dialect:            dialect,
 		typeMapper:         opts.TypeMapper,
@@ -573,10 +573,14 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
-	// Process in batches to avoid max_allowed_packet limits
-	batchSize := w.chunkSize
+	// Process in batches to avoid max_allowed_packet limits and placeholder limits.
+	// Per-call BatchSize (from AI tuner) takes priority over the writer's default.
+	batchSize := opts.BatchSize
 	if batchSize <= 0 {
-		batchSize = 1000 // Default batch size
+		batchSize = w.defaultBatchSize
+	}
+	if batchSize <= 0 {
+		batchSize = 1000 // Fallback default
 	}
 
 	for start := 0; start < len(opts.Rows); start += batchSize {
@@ -664,8 +668,12 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		updateClause = " ON DUPLICATE KEY UPDATE " + strings.Join(updateClauses, ", ")
 	}
 
-	// Process in batches
-	batchSize := w.chunkSize
+	// Process in batches.
+	// Per-call BatchSize (from AI tuner) takes priority over the writer's default.
+	batchSize := opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = w.defaultBatchSize
+	}
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
