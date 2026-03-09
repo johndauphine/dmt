@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/driver"
@@ -88,6 +89,30 @@ func TestQuoteIdentifierWithSpecialChars(t *testing.T) {
 			result := dialect.QuoteIdentifier(tt.input)
 			if result != tt.expected {
 				t.Errorf("QuoteIdentifier(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildDSNEncrypt(t *testing.T) {
+	dialect := &Dialect{}
+
+	tests := []struct {
+		name     string
+		encrypt  bool
+		expected string
+	}{
+		{"encrypt true", true, "&encrypt=true"},
+		{"encrypt false uses disable", false, "&encrypt=disable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dsn := dialect.BuildDSN("localhost", 1433, "testdb", "sa", "pass", map[string]any{
+				"encrypt": tt.encrypt,
+			})
+			if !strings.Contains(dsn, tt.expected) {
+				t.Errorf("BuildDSN with encrypt=%v should contain %q, got %q", tt.encrypt, tt.expected, dsn)
 			}
 		})
 	}

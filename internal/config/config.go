@@ -906,7 +906,7 @@ func (c *Config) TargetDSN() string {
 func (c *Config) buildMSSQLDSN(host string, port int, database, user, password string, encrypt bool,
 	trustServerCert bool, packetSize int, auth, krb5Conf, keytab, realm, spn string) string {
 
-	encryptStr := "false"
+	encryptStr := "disable"
 	if encrypt {
 		encryptStr = "true"
 	}
