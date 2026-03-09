@@ -949,6 +949,124 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	}
 }
 
+// EvaluateWriteError asks the AI to recommend a new chunk_size after a write error.
+// Returns the recommended chunk size, or 0 if the AI cannot help (error should be fatal).
+// Implements transfer.WriteErrorAdjuster.
+func (aa *AIAdjuster) EvaluateWriteError(ctx context.Context, errCtx transfer.WriteErrorContext) int {
+	aa.adjustmentsMu.Lock()
+	defer aa.adjustmentsMu.Unlock()
+
+	// Build a focused prompt for the error
+	prompt := aa.buildWriteErrorPrompt(errCtx)
+
+	// Call AI (bypass cooldown/circuit breaker — this is error recovery, not periodic tuning)
+	response, err := aa.aiMapper.CallAI(ctx, prompt)
+	if err != nil {
+		logging.Warn("AI error diagnosis failed: %v, using fallback", err)
+		return aa.fallbackChunkSize(errCtx)
+	}
+
+	decision, err := aa.parseDecision(response)
+	if err != nil {
+		logging.Warn("Failed to parse AI error response: %v, using fallback", err)
+		return aa.fallbackChunkSize(errCtx)
+	}
+
+	if newSize, ok := decision.Adjustments["chunk_size"]; ok && newSize > 0 {
+		logging.Info("AI recommended chunk_size=%d for table %s: %s", newSize, errCtx.TableName, decision.Reasoning)
+		return newSize
+	}
+
+	// AI didn't recommend a chunk_size change — error is not chunk-size related
+	return 0
+}
+
+// buildWriteErrorPrompt constructs a prompt for AI to diagnose a write error and recommend chunk_size.
+func (aa *AIAdjuster) buildWriteErrorPrompt(errCtx transfer.WriteErrorContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("A database write operation failed during migration. Analyze the error and recommend a new chunk_size if the error is related to batch size.\n\n")
+
+	sb.WriteString("## Error Context\n")
+	sb.WriteString(fmt.Sprintf("- Table: %s\n", errCtx.TableName))
+	sb.WriteString(fmt.Sprintf("- Target database: %s\n", errCtx.TargetDBType))
+	sb.WriteString(fmt.Sprintf("- Column count: %d\n", errCtx.ColumnCount))
+	sb.WriteString(fmt.Sprintf("- Current chunk_size: %d\n", errCtx.ChunkSize))
+	sb.WriteString(fmt.Sprintf("- Rows in failed batch: %d\n", errCtx.RowCount))
+	sb.WriteString(fmt.Sprintf("- Total placeholders: %d (rows × columns)\n", errCtx.RowCount*errCtx.ColumnCount))
+	sb.WriteString(fmt.Sprintf("- Error: %s\n\n", errCtx.ErrorMessage))
+
+	sb.WriteString("## Current Configuration\n")
+	config := aa.tuner.Snapshot()
+	sb.WriteString(fmt.Sprintf("- Global chunk_size: %d\n", config.ChunkSize))
+	sb.WriteString(fmt.Sprintf("- workers: %d\n", config.WriteAheadWriters))
+	sb.WriteString("\n")
+
+	sb.WriteString(`## Instructions
+Analyze the error and determine if it can be fixed by reducing chunk_size.
+
+Known database limits:
+- MySQL: max 65,535 prepared statement placeholders (chunk_size × columns must be < 65,535)
+- MySQL: max_allowed_packet limits total query size
+- PostgreSQL: max 65,535 parameters per query
+- SQL Server: max 2,100 parameters per query (but uses bulk copy, so this rarely applies)
+
+If the error IS related to batch size:
+- Calculate the optimal chunk_size that avoids the error while maximizing throughput
+- Apply a 10% safety margin below the hard limit
+- Consider that this chunk_size will apply to future batches for this table
+
+If the error is NOT related to batch size:
+- Set chunk_size to 0 to indicate this error cannot be fixed by chunk_size adjustment
+
+Return ONLY valid JSON:
+{
+  "action": "adjust_chunk_size",
+  "adjustments": {
+    "chunk_size": <recommended value, or 0 if not a chunk_size issue>
+  },
+  "reasoning": "<explain the root cause and how the new chunk_size fixes it>",
+  "confidence": "high|medium|low"
+}`)
+
+	return sb.String()
+}
+
+// fallbackChunkSize computes a safe chunk_size when the AI is unavailable.
+func (aa *AIAdjuster) fallbackChunkSize(errCtx transfer.WriteErrorContext) int {
+	if errCtx.ColumnCount <= 0 {
+		return 0
+	}
+
+	// Check for known placeholder limits by target DB type
+	var maxPlaceholders int
+	switch errCtx.TargetDBType {
+	case "mysql":
+		maxPlaceholders = 65535
+	case "postgres":
+		maxPlaceholders = 65535
+	case "mssql":
+		maxPlaceholders = 2100
+	default:
+		return 0
+	}
+
+	// Calculate with 10% safety margin
+	safeChunkSize := int(float64(maxPlaceholders) / float64(errCtx.ColumnCount) * 0.9)
+	if safeChunkSize < 1 {
+		safeChunkSize = 1
+	}
+
+	// Only return if it's actually smaller than what failed
+	if safeChunkSize < errCtx.RowCount {
+		logging.Info("Fallback chunk_size=%d for table %s (%d columns, %d max placeholders)",
+			safeChunkSize, errCtx.TableName, errCtx.ColumnCount, maxPlaceholders)
+		return safeChunkSize
+	}
+
+	return 0
+}
+
 // recordFailure tracks AI call failures for circuit breaker logic.
 func (aa *AIAdjuster) recordFailure() {
 	aa.failureCount++

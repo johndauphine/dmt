@@ -73,6 +73,11 @@ func (am *AIMonitor) SetTableSummary(summary TableSummary) {
 	am.adjuster.SetTableSummary(summary)
 }
 
+// Adjuster returns the AI adjuster for direct use by the transfer pipeline.
+func (am *AIMonitor) Adjuster() *AIAdjuster {
+	return am.adjuster
+}
+
 // UpdateRowsProcessed updates the count of rows transferred.
 func (am *AIMonitor) UpdateRowsProcessed(count int64) {
 	am.rowsProcessed = count

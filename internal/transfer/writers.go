@@ -23,6 +23,11 @@ type writerPool struct {
 	partitionID            *int
 	useUpsert              bool
 	upsertMergeChunkSizeFn func() int
+
+	// AI-driven error recovery
+	tuner      RuntimeTuner
+	aiAdjuster WriteErrorAdjuster
+	tableName  string // original table name (for tuner per-table overrides)
 }
 
 // writerPoolConfig holds the configuration for creating a writer pool.
@@ -41,6 +46,11 @@ type writerPoolConfig struct {
 	TgtPool                pool.TargetPool
 	Prog                   *progress.Tracker
 	EnableAck              bool // Whether to enable ack channel for checkpointing
+
+	// AI-driven error recovery
+	Tuner      RuntimeTuner
+	AIAdjuster WriteErrorAdjuster
+	TableName  string
 }
 
 // newWriterPool creates a new writer pool with the given configuration.
@@ -62,6 +72,9 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		partitionID:            cfg.PartitionID,
 		useUpsert:              cfg.UseUpsert,
 		upsertMergeChunkSizeFn: upsertFn,
+		tuner:                  cfg.Tuner,
+		aiAdjuster:             cfg.AIAdjuster,
+		tableName:              cfg.TableName,
 	}
 
 	// Create the base writer pool with our write function
@@ -77,11 +90,76 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 }
 
 // executeWrite handles both regular writes and upserts with chunking.
+// On failure, it asks the AI for a new chunk_size and retries with smaller sub-batches.
 func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]any) error {
+	var err error
 	if wp.useUpsert {
-		return wp.executeUpsertWithChunking(ctx, writerID, rows)
+		err = wp.executeUpsertWithChunking(ctx, writerID, rows)
+	} else {
+		err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows)
 	}
-	return writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows)
+
+	if err == nil {
+		return nil
+	}
+
+	// Try AI-driven chunk size adjustment for error recovery
+	newChunkSize := wp.evaluateAndAdjust(ctx, rows, err)
+	if newChunkSize <= 0 || newChunkSize >= len(rows) {
+		return err // AI says not a chunk_size issue, or can't help
+	}
+
+	logging.Info("Retrying table %s with chunk_size=%d (was %d rows)", wp.tableName, newChunkSize, len(rows))
+
+	// Retry with smaller sub-batches
+	return wp.retryWithChunkSize(ctx, writerID, rows, newChunkSize)
+}
+
+// evaluateAndAdjust asks the AI adjuster to recommend a new chunk_size for the error.
+// Returns the recommended size, or 0 if the error is not chunk-size related.
+func (wp *writerPool) evaluateAndAdjust(ctx context.Context, rows [][]any, writeErr error) int {
+	if wp.aiAdjuster == nil {
+		return 0
+	}
+
+	errCtx := WriteErrorContext{
+		TableName:    wp.tableName,
+		ColumnCount:  len(wp.targetCols),
+		ChunkSize:    len(rows),
+		RowCount:     len(rows),
+		ErrorMessage: writeErr.Error(),
+		TargetDBType: wp.tgtPool.DBType(),
+	}
+
+	newSize := wp.aiAdjuster.EvaluateWriteError(ctx, errCtx)
+	if newSize > 0 && wp.tuner != nil {
+		wp.tuner.SetTableChunkSize(wp.tableName, newSize)
+	}
+	return newSize
+}
+
+// retryWithChunkSize re-batches the failed rows into smaller sub-batches and writes them.
+func (wp *writerPool) retryWithChunkSize(ctx context.Context, writerID int, rows [][]any, chunkSize int) error {
+	for i := 0; i < len(rows); i += chunkSize {
+		end := i + chunkSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+
+		chunk := rows[i:end]
+		var err error
+		if wp.useUpsert {
+			err = writeChunkUpsertWithWriter(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+				wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, chunk, writerID, wp.partitionID)
+		} else {
+			err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, chunk)
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // executeUpsertWithChunking executes an upsert job, chunking if necessary based on UpsertMergeChunkSize.

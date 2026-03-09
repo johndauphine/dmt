@@ -203,7 +203,14 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 	tuner RuntimeTuner,
+	aiAdjuster ...WriteErrorAdjuster,
 ) (*TransferStats, error) {
+	// Extract optional AI adjuster
+	var adjuster WriteErrorAdjuster
+	if len(aiAdjuster) > 0 {
+		adjuster = aiAdjuster[0]
+	}
+
 	// Track table start/end for accurate progress display
 	prog.StartTable(job.Table.Name)
 	defer prog.EndTable(job.Table.Name)
@@ -282,11 +289,11 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -462,6 +469,7 @@ func executeKeysetPagination(
 	resumeRowsDone int64,
 	targetTableName string,
 	tuner RuntimeTuner,
+	aiAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -477,10 +485,15 @@ func executeKeysetPagination(
 	baseChunkSize := cfg.Migration.ChunkSize
 
 	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
-	// guardrail reductions (e.g. memory pressure halving) take effect on in-flight readers.
+	// adjustments (AI-driven, error-driven) take effect on in-flight readers.
+	// Priority: per-table override → global tuner value → config default.
+	tableName := job.Table.Name
 	chunkSizeFn := func() int { return baseChunkSize }
 	if tuner != nil {
 		chunkSizeFn = func() int {
+			if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+				return cs
+			}
 			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
 				return cs
 			}
@@ -663,6 +676,9 @@ func executeKeysetPagination(
 		TgtPool:                tgtPool,
 		Prog:                   prog,
 		EnableAck:              job.Saver != nil && job.TaskID > 0,
+		Tuner:                  tuner,
+		AIAdjuster:             aiAdjuster,
+		TableName:              job.Table.Name,
 	})
 
 	// Setup checkpoint coordinator with dynamic checkpoint frequency
@@ -804,6 +820,7 @@ func executeRowNumberPagination(
 	resumeRowsDone int64,
 	targetTableName string,
 	tuner RuntimeTuner,
+	aiAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -832,10 +849,15 @@ func executeRowNumberPagination(
 	baseChunkSize := cfg.Migration.ChunkSize
 
 	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
-	// guardrail reductions take effect on in-flight readers.
+	// adjustments (AI-driven, error-driven) take effect on in-flight readers.
+	// Priority: per-table override → global tuner value → config default.
+	tableName := job.Table.Name
 	chunkSizeFn := func() int { return baseChunkSize }
 	if tuner != nil {
 		chunkSizeFn = func() int {
+			if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+				return cs
+			}
 			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
 				return cs
 			}
@@ -1007,6 +1029,9 @@ func executeRowNumberPagination(
 		TgtPool:                tgtPool,
 		Prog:                   prog,
 		EnableAck:              enableAck,
+		Tuner:                  tuner,
+		AIAdjuster:             aiAdjuster,
+		TableName:              job.Table.Name,
 	})
 
 	// Setup ROW_NUMBER checkpoint handler
