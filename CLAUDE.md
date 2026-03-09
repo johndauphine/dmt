@@ -24,7 +24,7 @@ go test -v ./internal/orchestrator/...
 go test -race ./...          # Race detector
 
 # Development
-make run                     # Build and run with config.yaml
+make run                     # Build and run with config.yaml (copy config.yaml.example first)
 make fmt                     # Format code
 make lint                    # Run golangci-lint
 make check                   # Format + test
@@ -45,7 +45,7 @@ make setup-hooks             # Configure pre-commit hooks (.githooks/)
 
 ### Core Packages
 
-All packages live under `internal/`.
+All non-command packages live under `internal/` (entrypoints live under `cmd/`).
 
 | Package | Purpose |
 |---------|---------|
