@@ -20,6 +20,7 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/internal/setup"
 	"github.com/johndauphine/dmt/internal/version"
 	"gopkg.in/yaml.v3"
 )
@@ -51,6 +52,7 @@ const (
 	ModeNormal AppMode = iota
 	ModeWizard
 	ModeMigration
+	ModeSetup
 )
 
 type wizardStep int
@@ -110,6 +112,9 @@ type Model struct {
 	wizardStep wizardStep
 	wizardData config.Config
 	wizardFile string
+
+	// Setup wizard state
+	setupState *setup.State
 }
 
 type commandInfo struct {
@@ -125,6 +130,7 @@ var availableCommands = []commandInfo{
 	{"/analyze", "Analyze source database and suggest config (--apply to save)"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
+	{"/setup", "Guided setup: secrets, config, connection test, AI analysis"},
 	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
@@ -159,6 +165,12 @@ type MigrationDoneMsg struct {
 type WizardFinishedMsg struct {
 	Err     error
 	Message string
+}
+
+// SetupConnTestMsg carries a connection test result with step correlation
+type SetupConnTestMsg struct {
+	Step   setup.Step
+	Result *setup.ConnTestResult
 }
 
 // migrationStartedMsg carries the cancel function
@@ -227,7 +239,7 @@ func (m *Model) appendOutput(text string) {
 // getDisplayContent returns content with progress line appended if present
 func (m *Model) getDisplayContent() string {
 	content := m.content.String()
-	if m.progressLine != "" && m.mode != ModeWizard {
+	if m.progressLine != "" && m.mode != ModeWizard && m.mode != ModeSetup {
 		content += styleSystemOutput.Render("  "+m.progressLine) + "\n"
 	}
 	return content
@@ -305,6 +317,13 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			// Cancel setup wizard
+			if m.mode == ModeSetup {
+				m.mode = ModeNormal
+				m.setupState = nil
+				m.appendOutput(styleSystemOutput.Render("Setup cancelled") + "\n")
+				return m, nil
+			}
 			// Cancel wizard
 			if m.mode == ModeWizard {
 				m.mode = ModeNormal
@@ -321,6 +340,12 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeyEsc:
+			if m.mode == ModeSetup {
+				m.mode = ModeNormal
+				m.setupState = nil
+				m.appendOutput(styleSystemOutput.Render("Setup cancelled") + "\n")
+				return m, nil
+			}
 			if m.mode == ModeWizard {
 				m.mode = ModeNormal
 				m.appendOutput(styleSystemOutput.Render("Wizard cancelled") + "\n")
@@ -330,6 +355,9 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 
 		case tea.KeyEnter:
 			value := m.textInput.Value()
+			if m.mode == ModeSetup {
+				return m, safeCmd(m.handleSetupStep(value))
+			}
 			if m.mode == ModeWizard {
 				return m, safeCmd(m.handleWizardStep(value))
 			}
@@ -442,6 +470,20 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 		}
 
 		m.appendOutput("\n" + text + "\n")
+
+	case SetupConnTestMsg:
+		// Verify step correlation - prevent stale messages from advancing wrong steps
+		if m.setupState == nil || msg.Step != m.setupState.CurrentStep {
+			break // stale message, ignore
+		}
+		if msg.Result.Connected {
+			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Connected! (%dms)", msg.Result.LatencyMs)) + "\n")
+			m.setupState.Process("")
+		} else {
+			m.appendOutput(styleError.Render(fmt.Sprintf("  Failed: %s (%dms)", msg.Result.Error, msg.Result.LatencyMs)) + "\n")
+			m.setupState.Process(msg.Result.Error)
+		}
+		return m, safeCmd(m.processSetupAutoSteps())
 
 	case BoxedOutputMsg:
 		output := strings.TrimSpace(string(msg))
@@ -593,7 +635,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/wizard", "/logs", "/profile", "/verbosity", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/setup", "/wizard", "/logs", "/profile", "/verbosity", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -660,6 +702,8 @@ func (m Model) statusBarView() string {
 		modeText = styleStatusText.Render(" [wizard] ")
 	case ModeMigration:
 		modeText = styleStatusText.Render(" [migrating] ")
+	case ModeSetup:
+		modeText = styleStatusText.Render(" [setup] ")
 	}
 
 	status := ""
@@ -740,6 +784,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 	case "/help":
 		help := `Available Commands:
+  /setup                Guided setup: secrets, config, test, AI analysis
   /wizard               Launch the configuration wizard
   /run [config_file]    Start migration (default: config.yaml)
   /run --profile NAME   Start migration using a saved profile
@@ -805,6 +850,14 @@ Features:
 
 Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return func() tea.Msg { return BoxedOutputMsg(about) }
+
+	case "/setup":
+		m.mode = ModeSetup
+		m.setupState = setup.NewState()
+		m.textInput.Reset()
+		m.textInput.Placeholder = ""
+		m.appendOutput("\n--- SETUP WIZARD ---\n")
+		return m.processSetupAutoSteps()
 
 	case "/wizard":
 		m.mode = ModeWizard
@@ -1792,6 +1845,149 @@ func (m *Model) finishWizard() tea.Cmd {
 		}
 
 		return WizardFinishedMsg{Message: fmt.Sprintf("Configuration saved to %s!\nYou can now run the migration with /run @%s", filename, filename)}
+	}
+}
+
+// Setup wizard handling
+
+func (m *Model) handleSetupStep(input string) tea.Cmd {
+	info := m.setupState.Prompt()
+
+	// Display input (masked or normal)
+	if input != "" {
+		if info.IsMasked {
+			m.appendOutput(styleUserInput.Render("  ******") + "\n")
+		} else {
+			m.appendOutput(styleUserInput.Render("> "+input) + "\n")
+		}
+		m.textInput.Reset()
+	} else {
+		m.appendOutput(styleUserInput.Render("  (default)") + "\n")
+	}
+
+	// Reset echo mode
+	m.textInput.EchoMode = textinput.EchoNormal
+
+	if errMsg := m.setupState.Process(input); errMsg != "" {
+		m.appendOutput(styleError.Render("  "+errMsg) + "\n")
+		// Re-render prompt
+		m.renderSetupPrompt()
+		return nil
+	}
+
+	// Process any following auto steps
+	return m.processSetupAutoSteps()
+}
+
+func (m *Model) processSetupAutoSteps() tea.Cmd {
+	for {
+		if m.setupState.CurrentStep == setup.StepDone {
+			msg := fmt.Sprintf("Setup complete! Configuration saved to %s\nYou can now run the migration with /run @%s", m.setupState.ConfigPath, m.setupState.ConfigPath)
+			wizardDone := func() tea.Msg {
+				return WizardFinishedMsg{Message: msg}
+			}
+			if m.setupState.RunAnalysis {
+				configPath := m.setupState.ConfigPath
+				return tea.Batch(wizardDone, m.runAnalyzeCmd(configPath, "", false))
+			}
+			return wizardDone
+		}
+
+		info := m.setupState.Prompt()
+
+		if !info.IsAutoAction {
+			// Show section header and prompt
+			m.renderSetupPrompt()
+			return nil
+		}
+
+		// Handle auto steps
+		switch m.setupState.CurrentStep {
+		case setup.StepCheckSecrets:
+			if info.SectionHeader != "" {
+				m.appendOutput(fmt.Sprintf("\n=== %s ===\n", info.SectionHeader))
+			}
+			result := setup.CheckExistingSecrets()
+			if result == "has_ai" {
+				m.appendOutput(styleSuccess.Render("  AI provider already configured, skipping AI setup") + "\n")
+			}
+			m.setupState.Process(result)
+
+		case setup.StepWriteSecrets:
+			if err := m.setupState.WriteSecretsFile(); err != nil {
+				m.appendOutput(styleError.Render(fmt.Sprintf("  Error saving secrets: %s", err)) + "\n")
+				m.setupState.Process(err.Error())
+			} else {
+				m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Secrets saved to %s", secrets.GetSecretsPath())) + "\n")
+				m.setupState.Process("")
+			}
+
+		case setup.StepSourceConnTest, setup.StepTargetConnTest:
+			if info.SectionHeader != "" {
+				m.appendOutput(fmt.Sprintf("\n=== %s ===\n", info.SectionHeader))
+			}
+			m.appendOutput(styleSystemOutput.Render("  "+info.Text) + "\n")
+			// Launch async connection test
+			return m.runSetupConnTest(m.setupState.CurrentStep)
+
+		case setup.StepWriteConfig:
+			if err := m.setupState.WriteConfigFile(); err != nil {
+				m.appendOutput(styleError.Render(fmt.Sprintf("  Error saving config: %s", err)) + "\n")
+				m.setupState.Process(err.Error())
+			} else {
+				m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Configuration saved to %s", m.setupState.ConfigPath)) + "\n")
+				m.setupState.Process("")
+			}
+
+		default:
+			// Unknown auto step, skip it
+			m.setupState.Process("")
+		}
+	}
+}
+
+func (m *Model) renderSetupPrompt() {
+	info := m.setupState.Prompt()
+
+	if info.SectionHeader != "" {
+		m.appendOutput(fmt.Sprintf("\n=== %s ===\n", info.SectionHeader))
+	}
+
+	prompt := info.Text
+	if info.Default != "" {
+		prompt += fmt.Sprintf(" [%s]", info.Default)
+	}
+	prompt += ": "
+	m.appendOutput(prompt)
+
+	if info.IsMasked {
+		m.textInput.EchoMode = textinput.EchoPassword
+	} else {
+		m.textInput.EchoMode = textinput.EchoNormal
+	}
+}
+
+func (m *Model) runSetupConnTest(step setup.Step) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		var result *setup.ConnTestResult
+		if step == setup.StepSourceConnTest {
+			result = setup.TestConnection(ctx,
+				m.setupState.Config.Source.Type, m.setupState.Config.Source.Host,
+				m.setupState.Config.Source.Port, m.setupState.Config.Source.Database,
+				m.setupState.Config.Source.User, m.setupState.Config.Source.Password,
+				m.setupState.Config.Source.DSNOptions())
+		} else {
+			result = setup.TestConnection(ctx,
+				m.setupState.Config.Target.Type, m.setupState.Config.Target.Host,
+				m.setupState.Config.Target.Port, m.setupState.Config.Target.Database,
+				m.setupState.Config.Target.User, m.setupState.Config.Target.Password,
+				m.setupState.Config.Target.DSNOptions())
+		}
+
+		return SetupConnTestMsg{Step: step, Result: result}
 	}
 }
 

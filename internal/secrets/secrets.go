@@ -261,8 +261,23 @@ func Save(updates *Config) error {
 
 // mergeConfig merges updates into existing config, only overwriting non-zero values.
 func mergeConfig(existing, updates *Config) {
-	// Only merge migration_defaults for now (the main use case)
+	mergeAIConfig(&existing.AI, &updates.AI)
 	mergeMigrationDefaults(&existing.MigrationDefaults, &updates.MigrationDefaults)
+}
+
+// mergeAIConfig merges AI configuration updates into existing config.
+func mergeAIConfig(existing, updates *AIConfig) {
+	if updates.DefaultProvider != "" {
+		existing.DefaultProvider = updates.DefaultProvider
+	}
+	if len(updates.Providers) > 0 {
+		if existing.Providers == nil {
+			existing.Providers = make(map[string]*Provider)
+		}
+		for name, provider := range updates.Providers {
+			existing.Providers[name] = provider
+		}
+	}
 }
 
 // mergeMigrationDefaults merges non-zero migration defaults.
