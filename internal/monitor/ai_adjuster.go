@@ -962,13 +962,15 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 // Returns the recommended chunk size, or 0 if the AI cannot help (error should be fatal).
 // Implements transfer.WriteErrorAdjuster.
 func (aa *AIAdjuster) EvaluateWriteError(ctx context.Context, errCtx transfer.WriteErrorContext) int {
+	// Build the prompt while holding the lock (reads tuner snapshot)
 	aa.adjustmentsMu.Lock()
-	defer aa.adjustmentsMu.Unlock()
-
-	// Build a focused prompt for the error
 	prompt := aa.buildWriteErrorPrompt(errCtx)
+	aa.adjustmentsMu.Unlock()
 
-	// Call AI (bypass cooldown/circuit breaker — this is error recovery, not periodic tuning)
+	// AI call is a potentially long network request — do NOT hold the lock
+	if aa.aiMapper == nil {
+		return aa.fallbackChunkSize(errCtx)
+	}
 	response, err := aa.aiMapper.CallAI(ctx, prompt)
 	if err != nil {
 		logging.Warn("AI error diagnosis failed: %v, using fallback", err)
@@ -1048,9 +1050,36 @@ Return ONLY valid JSON:
 	return sb.String()
 }
 
+// isPlaceholderLimitError checks if the error message indicates a placeholder/parameter limit issue.
+func isPlaceholderLimitError(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	patterns := []string{
+		"placeholder",
+		"parameter",
+		"prepared statement",
+		"max_allowed_packet",
+		"too many",
+		"65535",
+		"2100",
+		"args",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // fallbackChunkSize computes a safe batch_size when the AI is unavailable.
+// Only returns a reduced size for errors related to placeholder/parameter limits.
 func (aa *AIAdjuster) fallbackChunkSize(errCtx transfer.WriteErrorContext) int {
 	if errCtx.ColumnCount <= 0 {
+		return 0
+	}
+
+	// Only apply fallback for placeholder-limit-related errors
+	if !isPlaceholderLimitError(errCtx.ErrorMessage) {
 		return 0
 	}
 

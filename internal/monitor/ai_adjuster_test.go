@@ -579,6 +579,185 @@ func TestReadAheadBuffersZeroAllowed(t *testing.T) {
 	}
 }
 
+func TestIsPlaceholderLimitError(t *testing.T) {
+	tests := []struct {
+		name     string
+		errMsg   string
+		expected bool
+	}{
+		{"placeholder keyword", "too many placeholders in query", true},
+		{"parameter keyword", "exceeded parameter limit", true},
+		{"prepared statement", "prepared statement has too many args", true},
+		{"max_allowed_packet", "max_allowed_packet exceeded", true},
+		{"too many keyword", "too many values in INSERT", true},
+		{"65535 limit", "cannot exceed 65535 parameters", true},
+		{"2100 limit", "exceeds 2100 parameter limit", true},
+		{"args keyword", "too many args for prepared statement", true},
+		{"unrelated error", "connection refused", false},
+		{"timeout error", "context deadline exceeded", false},
+		{"permission error", "access denied for user", false},
+		{"empty string", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isPlaceholderLimitError(tt.errMsg)
+			if got != tt.expected {
+				t.Errorf("isPlaceholderLimitError(%q) = %v, want %v", tt.errMsg, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestFallbackChunkSize(t *testing.T) {
+	t.Run("returns 0 for non-placeholder errors", func(t *testing.T) {
+		aa := createTestAdjuster()
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  10,
+			ChunkSize:    1000,
+			RowCount:     1000,
+			ErrorMessage: "connection refused",
+			TargetDBType: "mysql",
+		}
+
+		result := aa.fallbackChunkSize(errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 for non-placeholder error, got %d", result)
+		}
+	})
+
+	t.Run("returns safe chunk size for MySQL placeholder error", func(t *testing.T) {
+		aa := createTestAdjuster()
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  100,
+			ChunkSize:    1000,
+			RowCount:     1000,
+			ErrorMessage: "too many placeholders",
+			TargetDBType: "mysql",
+		}
+
+		result := aa.fallbackChunkSize(errCtx)
+		// MySQL limit: 65535 / 100 * 0.9 = 589
+		expected := 589
+		if result != expected {
+			t.Errorf("expected %d, got %d", expected, result)
+		}
+	})
+
+	t.Run("returns safe chunk size for MSSQL placeholder error", func(t *testing.T) {
+		aa := createTestAdjuster()
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  10,
+			ChunkSize:    500,
+			RowCount:     500,
+			ErrorMessage: "exceeds 2100 parameter limit",
+			TargetDBType: "mssql",
+		}
+
+		result := aa.fallbackChunkSize(errCtx)
+		// MSSQL limit: 2100 / 10 * 0.9 = 189
+		expected := 189
+		if result != expected {
+			t.Errorf("expected %d, got %d", expected, result)
+		}
+	})
+
+	t.Run("returns 0 when column count is zero", func(t *testing.T) {
+		aa := createTestAdjuster()
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  0,
+			ChunkSize:    1000,
+			RowCount:     1000,
+			ErrorMessage: "too many placeholders",
+			TargetDBType: "mysql",
+		}
+
+		result := aa.fallbackChunkSize(errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 for zero column count, got %d", result)
+		}
+	})
+
+	t.Run("returns 0 for unknown target DB", func(t *testing.T) {
+		aa := createTestAdjuster()
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  10,
+			ChunkSize:    1000,
+			RowCount:     1000,
+			ErrorMessage: "too many placeholders",
+			TargetDBType: "sqlite",
+		}
+
+		result := aa.fallbackChunkSize(errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 for unknown DB type, got %d", result)
+		}
+	})
+
+	t.Run("returns 0 when calculated size >= row count", func(t *testing.T) {
+		aa := createTestAdjuster()
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  2,
+			ChunkSize:    100,
+			RowCount:     100,
+			ErrorMessage: "too many placeholders",
+			TargetDBType: "mysql",
+		}
+
+		// MySQL: 65535 / 2 * 0.9 = 29490, which is >= 100 rows
+		result := aa.fallbackChunkSize(errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 when safe size >= row count, got %d", result)
+		}
+	})
+}
+
+func TestEvaluateWriteError(t *testing.T) {
+	t.Run("returns 0 when aiMapper is nil", func(t *testing.T) {
+		aa := createTestAdjuster()
+		// aiMapper is nil by default in createTestAdjuster
+
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  10,
+			ChunkSize:    1000,
+			RowCount:     1000,
+			ErrorMessage: "connection refused",
+			TargetDBType: "mysql",
+		}
+
+		result := aa.EvaluateWriteError(nil, errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 when aiMapper is nil and error is not placeholder-related, got %d", result)
+		}
+	})
+
+	t.Run("falls back to placeholder logic when aiMapper nil and placeholder error", func(t *testing.T) {
+		aa := createTestAdjuster()
+
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "test_table",
+			ColumnCount:  100,
+			ChunkSize:    1000,
+			RowCount:     1000,
+			ErrorMessage: "too many placeholders",
+			TargetDBType: "mysql",
+		}
+
+		result := aa.EvaluateWriteError(nil, errCtx)
+		expected := 589
+		if result != expected {
+			t.Errorf("expected fallback %d when aiMapper nil, got %d", expected, result)
+		}
+	})
+}
+
 func TestFallbackRulesWithBaseline(t *testing.T) {
 	t.Run("within baseline tolerance returns continue", func(t *testing.T) {
 		aa := createTestAdjuster()
