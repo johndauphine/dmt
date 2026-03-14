@@ -22,7 +22,7 @@ type Writer struct {
 	db                 *sql.DB
 	config             *dbconfig.TargetConfig
 	maxConns           int
-	chunkSize          int
+	defaultBatchSize   int
 	compatLevel        int
 	sourceType         string
 	dialect            *Dialect
@@ -95,7 +95,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		db:                 db,
 		config:             cfg,
 		maxConns:           maxConns,
-		chunkSize:          opts.ChunkSize,
+		defaultBatchSize:   opts.BatchSize,
 		compatLevel:        compatLevel,
 		sourceType:         opts.SourceType,
 		dialect:            dialect,
@@ -874,7 +874,7 @@ func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, mssql.CopyIn(tempTable, mssql.BulkOptions{
-		RowsPerBatch: w.chunkSize,
+		RowsPerBatch: w.defaultBatchSize,
 	}, cols...))
 	if err != nil {
 		return err

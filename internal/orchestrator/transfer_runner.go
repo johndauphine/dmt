@@ -371,7 +371,11 @@ retryLoop:
 			}
 		}
 
-		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner)
+		if aiMonitor != nil {
+			stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner, aiMonitor.Adjuster())
+		} else {
+			stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner)
+		}
 		if err == nil {
 			break
 		}

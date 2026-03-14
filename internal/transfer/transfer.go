@@ -203,7 +203,14 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 	tuner RuntimeTuner,
+	aiAdjuster ...WriteErrorAdjuster,
 ) (*TransferStats, error) {
+	// Extract optional AI adjuster
+	var adjuster WriteErrorAdjuster
+	if len(aiAdjuster) > 0 {
+		adjuster = aiAdjuster[0]
+	}
+
 	// Track table start/end for accurate progress display
 	prog.StartTable(job.Table.Name)
 	defer prog.EndTable(job.Table.Name)
@@ -282,11 +289,11 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
-	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner)
+	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)
 }
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -462,6 +469,7 @@ func executeKeysetPagination(
 	resumeRowsDone int64,
 	targetTableName string,
 	tuner RuntimeTuner,
+	aiAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -477,10 +485,15 @@ func executeKeysetPagination(
 	baseChunkSize := cfg.Migration.ChunkSize
 
 	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
-	// guardrail reductions (e.g. memory pressure halving) take effect on in-flight readers.
+	// adjustments (AI-driven, error-driven) take effect on in-flight readers.
+	// Priority: per-table override → global tuner value → config default.
+	tableName := job.Table.Name
 	chunkSizeFn := func() int { return baseChunkSize }
 	if tuner != nil {
 		chunkSizeFn = func() int {
+			if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+				return cs
+			}
 			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
 				return cs
 			}
@@ -648,11 +661,23 @@ func executeKeysetPagination(
 		checkpointFreqFn = func() int { return tuner.Snapshot().CheckpointFrequency }
 	}
 
+	// Build batch size callback: per-table override from tuner, or 0 (let writer use its default)
+	batchSizeFn := func() int { return 0 }
+	if tuner != nil {
+		batchSizeFn = func() int {
+			if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
+				return bs
+			}
+			return 0
+		}
+	}
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
+		BatchSizeFn:            batchSizeFn,
 		TargetSchema:           cfg.Target.Schema,
 		TargetTable:            targetTableName,
 		TargetCols:             targetCols,
@@ -663,6 +688,9 @@ func executeKeysetPagination(
 		TgtPool:                tgtPool,
 		Prog:                   prog,
 		EnableAck:              job.Saver != nil && job.TaskID > 0,
+		Tuner:                  tuner,
+		AIAdjuster:             aiAdjuster,
+		TableName:              job.Table.Name,
 	})
 
 	// Setup checkpoint coordinator with dynamic checkpoint frequency
@@ -804,6 +832,7 @@ func executeRowNumberPagination(
 	resumeRowsDone int64,
 	targetTableName string,
 	tuner RuntimeTuner,
+	aiAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -832,10 +861,15 @@ func executeRowNumberPagination(
 	baseChunkSize := cfg.Migration.ChunkSize
 
 	// chunkSizeFn reads chunk_size dynamically from the tuner so that runtime
-	// guardrail reductions take effect on in-flight readers.
+	// adjustments (AI-driven, error-driven) take effect on in-flight readers.
+	// Priority: per-table override → global tuner value → config default.
+	tableName := job.Table.Name
 	chunkSizeFn := func() int { return baseChunkSize }
 	if tuner != nil {
 		chunkSizeFn = func() int {
+			if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+				return cs
+			}
 			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
 				return cs
 			}
@@ -991,12 +1025,24 @@ func executeRowNumberPagination(
 		}
 	}
 
+	// Build batch size callback: per-table override from tuner, or 0 (let writer use its default)
+	batchSizeFn := func() int { return 0 }
+	if tuner != nil {
+		batchSizeFn = func() int {
+			if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
+				return bs
+			}
+			return 0
+		}
+	}
+
 	enableAck := job.Saver != nil && job.TaskID > 0
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
+		BatchSizeFn:            batchSizeFn,
 		TargetSchema:           cfg.Target.Schema,
 		TargetTable:            targetTableName,
 		TargetCols:             targetCols,
@@ -1007,6 +1053,9 @@ func executeRowNumberPagination(
 		TgtPool:                tgtPool,
 		Prog:                   prog,
 		EnableAck:              enableAck,
+		Tuner:                  tuner,
+		AIAdjuster:             aiAdjuster,
+		TableName:              job.Table.Name,
 	})
 
 	// Setup ROW_NUMBER checkpoint handler
@@ -1313,12 +1362,13 @@ func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string,
 }
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool
-func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any) error {
+func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any, batchSize int) error {
 	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
-		Schema:  schema,
-		Table:   table,
-		Columns: cols,
-		Rows:    rows,
+		Schema:    schema,
+		Table:     table,
+		Columns:   cols,
+		Rows:      rows,
+		BatchSize: batchSize,
 	})
 }
 
@@ -1329,7 +1379,7 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 // colTypes is passed to skip geography/geometry from change detection in MSSQL MERGE
 // colSRIDs is passed for geography/geometry SRID in STGeomFromText conversion (PG→MSSQL)
 func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
-	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int) error {
+	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
 	return tgtPool.UpsertBatch(ctx, pool.UpsertBatchOptions{
 		Schema:      schema,
 		Table:       table,
@@ -1338,6 +1388,7 @@ func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, sc
 		ColumnSRIDs: colSRIDs,
 		PKColumns:   pkCols,
 		Rows:        rows,
+		BatchSize:   batchSize,
 		WriterID:    writerID,
 		PartitionID: partitionID,
 	})

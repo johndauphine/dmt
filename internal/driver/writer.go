@@ -88,6 +88,10 @@ type WriteBatchOptions struct {
 
 	// Rows is the data to write.
 	Rows [][]any
+
+	// BatchSize overrides the writer's default batch size for this call.
+	// If 0, the writer uses its configured default.
+	BatchSize int
 }
 
 // UpsertBatchOptions configures an upsert operation.
@@ -112,6 +116,10 @@ type UpsertBatchOptions struct {
 
 	// Rows is the data to upsert.
 	Rows [][]any
+
+	// BatchSize overrides the writer's default batch size for this call.
+	// If 0, the writer uses its configured default.
+	BatchSize int
 
 	// WriterID identifies this writer for per-writer staging table isolation.
 	WriterID int

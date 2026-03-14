@@ -585,7 +585,8 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 Consider system resources when choosing parameter values:
 - workers: Consider CPU cores and max DB connections. More workers than cores may cause contention. More workers than max connections will fail.
 - parallel_readers: Consider max source connections. Each reader uses a connection.
-- chunk_size: Larger = better throughput, but each chunk is held in memory. Memory per chunk = chunk_size × avg_row_bytes.
+- chunk_size: Rows per source query (reader side). Larger = better throughput, but each chunk is held in memory. Memory per chunk = chunk_size × avg_row_bytes.
+- batch_size: Rows per INSERT statement (writer side). Controls how many rows are sent in a single write to the target DB. Must respect target DB placeholder limits (e.g. MySQL: rows × columns < 65,535). If 0, the writer uses its configured default.
 - read_ahead_buffers: Total buffered memory = workers × read_ahead_buffers × chunk_size × avg_row_bytes.
 - checkpoint_frequency: Higher = fewer checkpoints = better throughput; Lower = more safety on failure
 - upsert_merge_chunk_size: Smaller = less memory pressure on target DB; Only relevant in upsert mode
@@ -595,7 +596,7 @@ Bottleneck diagnosis:
 - Queue depth LOW/ZERO → readers can't keep up (read-bound). Consider increasing parallel_readers or read_ahead_buffers.
 - Active jobs shows how many tables are being transferred concurrently. If active_jobs < configured workers, some jobs finished early.
 - Error count tracks failed tables. Rising errors suggest reducing pressure (fewer workers, smaller chunks).
-- Write time >60% → target is the bottleneck. Consider smaller chunk_size or fewer workers to reduce write contention.
+- Write time >60% → target is the bottleneck. Consider smaller batch_size or fewer workers to reduce write contention.
 - Query+scan time >60% → source is the bottleneck. Consider more parallel_readers to increase read throughput.
 - Balanced time split → pipeline is well-tuned, prefer "continue".
 - Pool active connections near max → connection pool is saturated. Reducing workers or parallel_readers will free connections.
@@ -611,16 +612,18 @@ Decision rules:
 4. **If CPU >90% sustained** → consider "scale_down"
 5. **If past adjustment didn't help** → don't repeat same action
 6. **If stable and low failure risk** → consider increasing checkpoint_frequency for throughput
-7. **If error count is rising** → consider reducing workers or chunk_size to reduce pressure
+7. **If error count is rising** → consider reducing workers, chunk_size, or batch_size to reduce pressure
+8. **If write errors due to placeholder limits** → reduce batch_size for affected tables
 
 Important: Only adjust if there's a significant problem. Stability is preferred.
 
 Return ONLY valid JSON:
 {
-  "action": "continue|scale_up|scale_down|reduce_chunk|adjust_checkpoint|adjust_upsert_chunk",
+  "action": "continue|scale_up|scale_down|reduce_chunk|reduce_batch|adjust_checkpoint|adjust_upsert_chunk",
   "adjustments": {
     "workers": <new value or omit>,
     "chunk_size": <new value or omit>,
+    "batch_size": <new value or omit>,
     "checkpoint_frequency": <new value or omit>,
     "upsert_merge_chunk_size": <new value or omit>
   },
@@ -722,6 +725,12 @@ func (aa *AIAdjuster) ApplyDecision(decision *AdjustmentDecision) error {
 			update.CheckpointFrequency = &v
 		case "upsert_merge_chunk_size":
 			update.UpsertMergeChunkSize = &v
+		case "batch_size":
+			// batch_size is per-table, not a global tuner parameter.
+			// It's handled via SetTableBatchSize in EvaluateWriteError.
+			// If AI suggests it in periodic tuning, log but skip — it requires table context.
+			logging.Debug("AIAdjuster: batch_size=%d suggested in periodic tuning (per-table only, skipping global apply)", value)
+			continue
 		default:
 			logging.Debug("AIAdjuster: unknown adjustment parameter %q (value=%d); ignoring", param, value)
 		}
@@ -947,6 +956,160 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 		Confidence:  "high",
 		Adjustments: make(map[string]int),
 	}
+}
+
+// EvaluateWriteError asks the AI to recommend a new chunk_size after a write error.
+// Returns the recommended chunk size, or 0 if the AI cannot help (error should be fatal).
+// Implements transfer.WriteErrorAdjuster.
+func (aa *AIAdjuster) EvaluateWriteError(ctx context.Context, errCtx transfer.WriteErrorContext) int {
+	// Build the prompt while holding the lock (reads tuner snapshot)
+	aa.adjustmentsMu.Lock()
+	prompt := aa.buildWriteErrorPrompt(errCtx)
+	aa.adjustmentsMu.Unlock()
+
+	// AI call is a potentially long network request — do NOT hold the lock
+	if aa.aiMapper == nil {
+		return aa.fallbackChunkSize(errCtx)
+	}
+	response, err := aa.aiMapper.CallAI(ctx, prompt)
+	if err != nil {
+		logging.Warn("AI error diagnosis failed: %v, using fallback", err)
+		return aa.fallbackChunkSize(errCtx)
+	}
+
+	decision, err := aa.parseDecision(response)
+	if err != nil {
+		logging.Warn("Failed to parse AI error response: %v, using fallback", err)
+		return aa.fallbackChunkSize(errCtx)
+	}
+
+	// Check for batch_size (preferred) or chunk_size (backward compat) in response
+	if newSize, ok := decision.Adjustments["batch_size"]; ok && newSize > 0 {
+		logging.Info("AI recommended batch_size=%d for table %s: %s", newSize, errCtx.TableName, decision.Reasoning)
+		return newSize
+	}
+	if newSize, ok := decision.Adjustments["chunk_size"]; ok && newSize > 0 {
+		logging.Info("AI recommended batch_size=%d (via chunk_size) for table %s: %s", newSize, errCtx.TableName, decision.Reasoning)
+		return newSize
+	}
+
+	// AI didn't recommend a batch size change — error is not batch-size related
+	return 0
+}
+
+// buildWriteErrorPrompt constructs a prompt for AI to diagnose a write error and recommend batch_size.
+func (aa *AIAdjuster) buildWriteErrorPrompt(errCtx transfer.WriteErrorContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("A database write operation failed during migration. Analyze the error and recommend a new batch_size if the error is related to the number of rows per INSERT statement.\n\n")
+
+	sb.WriteString("## Error Context\n")
+	sb.WriteString(fmt.Sprintf("- Table: %s\n", errCtx.TableName))
+	sb.WriteString(fmt.Sprintf("- Target database: %s\n", errCtx.TargetDBType))
+	sb.WriteString(fmt.Sprintf("- Column count: %d\n", errCtx.ColumnCount))
+	sb.WriteString(fmt.Sprintf("- Current batch_size: %d (rows per INSERT)\n", errCtx.ChunkSize))
+	sb.WriteString(fmt.Sprintf("- Rows in failed batch: %d\n", errCtx.RowCount))
+	sb.WriteString(fmt.Sprintf("- Total placeholders: %d (rows × columns)\n", errCtx.RowCount*errCtx.ColumnCount))
+	sb.WriteString(fmt.Sprintf("- Error: %s\n\n", errCtx.ErrorMessage))
+
+	sb.WriteString("## Current Configuration\n")
+	config := aa.tuner.Snapshot()
+	sb.WriteString(fmt.Sprintf("- Global chunk_size (reader): %d\n", config.ChunkSize))
+	sb.WriteString(fmt.Sprintf("- workers: %d\n", config.WriteAheadWriters))
+	sb.WriteString("\n")
+
+	sb.WriteString(`## Instructions
+Analyze the error and determine if it can be fixed by reducing batch_size (rows per INSERT statement).
+
+Note: batch_size controls the writer side (rows per INSERT). chunk_size controls the reader side (rows per source query). They are independent parameters.
+
+Known database limits:
+- MySQL: max 65,535 prepared statement placeholders (batch_size × columns must be < 65,535)
+- MySQL: max_allowed_packet limits total query size
+- PostgreSQL: max 65,535 parameters per query
+- SQL Server: max 2,100 parameters per query (but uses bulk copy, so this rarely applies)
+
+If the error IS related to batch size:
+- Calculate the optimal batch_size that avoids the error while maximizing throughput
+- Apply a 10% safety margin below the hard limit
+- Consider that this batch_size will apply to future batches for this table
+
+If the error is NOT related to batch size:
+- Set batch_size to 0 to indicate this error cannot be fixed by batch_size adjustment
+
+Return ONLY valid JSON:
+{
+  "action": "adjust_batch_size",
+  "adjustments": {
+    "batch_size": <recommended value, or 0 if not a batch_size issue>
+  },
+  "reasoning": "<explain the root cause and how the new batch_size fixes it>",
+  "confidence": "high|medium|low"
+}`)
+
+	return sb.String()
+}
+
+// isPlaceholderLimitError checks if the error message indicates a placeholder/parameter limit issue.
+func isPlaceholderLimitError(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	patterns := []string{
+		"placeholder",
+		"parameter",
+		"prepared statement",
+		"max_allowed_packet",
+		"too many",
+		"65535",
+		"2100",
+		"args",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// fallbackChunkSize computes a safe batch_size when the AI is unavailable.
+// Only returns a reduced size for errors related to placeholder/parameter limits.
+func (aa *AIAdjuster) fallbackChunkSize(errCtx transfer.WriteErrorContext) int {
+	if errCtx.ColumnCount <= 0 {
+		return 0
+	}
+
+	// Only apply fallback for placeholder-limit-related errors
+	if !isPlaceholderLimitError(errCtx.ErrorMessage) {
+		return 0
+	}
+
+	// Check for known placeholder limits by target DB type
+	var maxPlaceholders int
+	switch errCtx.TargetDBType {
+	case "mysql":
+		maxPlaceholders = 65535
+	case "postgres":
+		maxPlaceholders = 65535
+	case "mssql":
+		maxPlaceholders = 2100
+	default:
+		return 0
+	}
+
+	// Calculate with 10% safety margin
+	safeChunkSize := int(float64(maxPlaceholders) / float64(errCtx.ColumnCount) * 0.9)
+	if safeChunkSize < 1 {
+		safeChunkSize = 1
+	}
+
+	// Only return if it's actually smaller than what failed
+	if safeChunkSize < errCtx.RowCount {
+		logging.Info("Fallback chunk_size=%d for table %s (%d columns, %d max placeholders)",
+			safeChunkSize, errCtx.TableName, errCtx.ColumnCount, maxPlaceholders)
+		return safeChunkSize
+	}
+
+	return 0
 }
 
 // recordFailure tracks AI call failures for circuit breaker logic.

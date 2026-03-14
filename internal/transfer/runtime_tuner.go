@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 )
@@ -39,10 +40,29 @@ type RuntimeMetrics struct {
 	TotalTransferRows int64
 }
 
+// WriteErrorContext provides context about a write error for AI-driven chunk size adjustment.
+type WriteErrorContext struct {
+	TableName    string
+	ColumnCount  int
+	ChunkSize    int
+	RowCount     int
+	ErrorMessage string
+	TargetDBType string
+}
+
+// WriteErrorAdjuster evaluates write errors and recommends chunk_size adjustments.
+type WriteErrorAdjuster interface {
+	EvaluateWriteError(ctx context.Context, errCtx WriteErrorContext) int
+}
+
 // RuntimeTuner provides thread-safe access to runtime migration parameters.
 type RuntimeTuner interface {
 	Snapshot() RuntimeSnapshot
 	Update(RuntimeUpdate) error
+	TableChunkSize(tableName string) (int, bool)  // Returns per-table chunk size override if set
+	SetTableChunkSize(tableName string, size int)  // Sets per-table chunk size override
+	TableBatchSize(tableName string) (int, bool)   // Returns per-table batch size override if set
+	SetTableBatchSize(tableName string, size int)   // Sets per-table batch size override
 	ReportActiveJobs(delta int)                               // Atomically adjust active job count (+1 on start, -1 on end)
 	ReportQueueDepth(delta int)                               // Atomically adjust aggregate queue depth (use deltas per job)
 	ReportError()                                             // Atomically increment error count
@@ -52,11 +72,13 @@ type RuntimeTuner interface {
 
 // runtimeTuner is the concrete implementation of RuntimeTuner.
 type runtimeTuner struct {
-	mu         sync.RWMutex
-	snapshot   RuntimeSnapshot
-	activeJobs atomic.Int32
-	queueDepth atomic.Int32
-	errorCount atomic.Int32
+	mu              sync.RWMutex
+	snapshot        RuntimeSnapshot
+	tableChunkSizes map[string]int // per-table chunk size overrides (reader)
+	tableBatchSizes map[string]int // per-table batch size overrides (writer)
+	activeJobs      atomic.Int32
+	queueDepth      atomic.Int32
+	errorCount      atomic.Int32
 
 	// Cumulative transfer time breakdown
 	totalQueryNs      atomic.Int64
@@ -67,7 +89,11 @@ type runtimeTuner struct {
 
 // NewRuntimeTuner creates a RuntimeTuner with the given initial values.
 func NewRuntimeTuner(initial RuntimeSnapshot) RuntimeTuner {
-	return &runtimeTuner{snapshot: initial}
+	return &runtimeTuner{
+		snapshot:        initial,
+		tableChunkSizes: make(map[string]int),
+		tableBatchSizes: make(map[string]int),
+	}
 }
 
 // Snapshot returns a copy of the current runtime parameters.
@@ -75,6 +101,36 @@ func (rt *runtimeTuner) Snapshot() RuntimeSnapshot {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	return rt.snapshot
+}
+
+// TableChunkSize returns the per-table chunk size override if set.
+func (rt *runtimeTuner) TableChunkSize(tableName string) (int, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	size, ok := rt.tableChunkSizes[tableName]
+	return size, ok
+}
+
+// SetTableChunkSize sets a per-table chunk size override.
+func (rt *runtimeTuner) SetTableChunkSize(tableName string, size int) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.tableChunkSizes[tableName] = size
+}
+
+// TableBatchSize returns the per-table batch size override if set.
+func (rt *runtimeTuner) TableBatchSize(tableName string) (int, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	size, ok := rt.tableBatchSizes[tableName]
+	return size, ok
+}
+
+// SetTableBatchSize sets a per-table batch size override.
+func (rt *runtimeTuner) SetTableBatchSize(tableName string, size int) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.tableBatchSizes[tableName] = size
 }
 
 // ReportActiveJobs atomically adjusts the active job count.
