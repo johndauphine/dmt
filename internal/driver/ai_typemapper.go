@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/ident"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
@@ -1264,8 +1265,19 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 
 	// === SOURCE TABLE DDL ===
 	sb.WriteString("=== SOURCE TABLE DDL ===\n")
-	sb.WriteString(m.buildSourceDDL(req.SourceTable, req.SourceDBType))
+	sb.WriteString(m.buildSourceDDLWithTarget(req.SourceTable, req.SourceDBType, req.TargetDBType))
 	sb.WriteString("\n\n")
+
+	// === REQUIRED TARGET COLUMN NAMES ===
+	// Provide the exact column names the AI must use in the target DDL.
+	// These match what the data transfer phase will use, preventing mismatches.
+	sb.WriteString("=== REQUIRED TARGET COLUMN NAMES ===\n")
+	sb.WriteString("You MUST use exactly these column names in the target CREATE TABLE. Do NOT modify, abbreviate, add, or remove any characters:\n")
+	for _, col := range req.SourceTable.Columns {
+		tgt := targetIdentifier(col.Name, req.TargetDBType)
+		sb.WriteString(fmt.Sprintf("  %s -> %s\n", col.Name, tgt))
+	}
+	sb.WriteString("\n")
 
 	// === MIGRATION RULES ===
 	sb.WriteString("=== MIGRATION RULES ===\n")
@@ -1274,9 +1286,13 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	// === OUTPUT REQUIREMENTS ===
 	sb.WriteString("\n=== OUTPUT REQUIREMENTS ===\n")
 	sb.WriteString("Generate the complete CREATE TABLE statement for the target database.\n")
+	targetTableName := targetIdentifier(req.SourceTable.Name, req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("- Use fully qualified table name: %s.<TABLENAME>\n", req.TargetSchema))
+		sb.WriteString(fmt.Sprintf("- Use fully qualified table name: %s.%s\n", req.TargetSchema, targetTableName))
+	} else {
+		sb.WriteString(fmt.Sprintf("- Use table name: %s\n", targetTableName))
 	}
+	sb.WriteString("- Use the EXACT column names from the REQUIRED TARGET COLUMN NAMES section above\n")
 	sb.WriteString("- Include all columns with appropriate target types\n")
 	sb.WriteString("- Make ALL non-primary-key columns nullable (omit NOT NULL) to allow data migration flexibility\n")
 	sb.WriteString("- Primary key columns must be NOT NULL\n")
@@ -1559,8 +1575,24 @@ func (m *AITypeMapper) findReservedWords(t *Table, targetDBType string) []string
 	return found
 }
 
+// targetIdentifier returns the exact column/table name the transfer phase will
+// use for the target database. Uses the shared ident.SanitizePG implementation
+// so prompt-generated names always match what WriteBatch/CopyFrom expects.
+func targetIdentifier(name, targetDBType string) string {
+	if targetDBType != "postgres" {
+		return name
+	}
+	return ident.SanitizePG(name)
+}
+
 // buildSourceDDL creates a DDL-like representation of the source table.
 func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
+	return m.buildSourceDDLWithTarget(t, sourceDBType, "")
+}
+
+// buildSourceDDLWithTarget creates a DDL-like representation of the source table
+// with required target column names annotated inline.
+func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDBType string) string {
 	var sb strings.Builder
 
 	tableName := t.Name
@@ -1610,6 +1642,15 @@ func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
 		if i < len(t.Columns)-1 {
 			sb.WriteString(",")
 		}
+
+		// Annotate with required target column name
+		if targetDBType != "" {
+			tgt := targetIdentifier(col.Name, targetDBType)
+			if tgt != col.Name {
+				sb.WriteString(fmt.Sprintf("  -- target column: %s", tgt))
+			}
+		}
+
 		sb.WriteString("\n")
 	}
 
