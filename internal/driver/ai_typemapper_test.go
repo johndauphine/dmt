@@ -1224,6 +1224,103 @@ func TestTruncateString(t *testing.T) {
 	}
 }
 
+func TestTargetIdentifier(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		targetDB   string
+		expected   string
+	}{
+		{"pg lowercase", "PackedByPersonID", "postgres", "packedbypersonid"},
+		{"pg already lower", "userid", "postgres", "userid"},
+		{"pg with underscore", "last_edited_by", "postgres", "last_edited_by"},
+		{"pg special chars", "User-Id", "postgres", "user_id"},
+		{"pg starts with digit", "1column", "postgres", "col_1column"},
+		{"pg empty", "", "postgres", "col_"},
+		{"mssql preserves case", "PackedByPersonID", "mssql", "PackedByPersonID"},
+		{"mysql preserves case", "PackedByPersonID", "mysql", "PackedByPersonID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := targetIdentifier(tt.input, tt.targetDB)
+			if got != tt.expected {
+				t.Errorf("targetIdentifier(%q, %q) = %q, want %q", tt.input, tt.targetDB, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildTableDDLPrompt_IncludesTargetColumnNames(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := TableDDLRequest{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		TargetSchema: "sales",
+		SourceTable: &Table{
+			Schema: "Sales",
+			Name:   "Invoices",
+			Columns: []Column{
+				{Name: "InvoiceID", DataType: "int", IsNullable: false},
+				{Name: "CustomerID", DataType: "int", IsNullable: true},
+				{Name: "PackedByPersonID", DataType: "int", IsNullable: true},
+			},
+			PrimaryKey: []string{"InvoiceID"},
+		},
+	}
+
+	prompt := mapper.buildTableDDLPrompt(req)
+
+	// Verify the prompt includes exact target column name mappings
+	checks := []string{
+		"REQUIRED TARGET COLUMN NAMES",
+		"InvoiceID -> invoiceid",
+		"CustomerID -> customerid",
+		"PackedByPersonID -> packedbypersonid",
+		"EXACT column names",
+		"sales.invoices", // target table name should be lowercased
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("prompt should contain %q\nprompt:\n%s", check, prompt)
+		}
+	}
+
+	// Verify source DDL annotations
+	if !strings.Contains(prompt, "-- target column: invoiceid") {
+		t.Error("source DDL should annotate target column names")
+	}
+}
+
+func TestBuildTableDDLPrompt_SameEngine_NoAnnotations(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+
+	req := TableDDLRequest{
+		SourceDBType: "mssql",
+		TargetDBType: "mssql",
+		SourceTable: &Table{
+			Name: "Invoices",
+			Columns: []Column{
+				{Name: "InvoiceID", DataType: "int"},
+				{Name: "PackedByPersonID", DataType: "int"},
+			},
+		},
+	}
+
+	prompt := mapper.buildTableDDLPrompt(req)
+
+	// For same-engine, names don't change so annotations shouldn't appear
+	if strings.Contains(prompt, "-- target column:") {
+		t.Error("same-engine migration should not have target column annotations (names are identical)")
+	}
+
+	// But the required names section should still be present
+	if !strings.Contains(prompt, "InvoiceID -> InvoiceID") {
+		t.Error("same-engine prompt should still list required column names")
+	}
+}
+
 func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
 	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
 
