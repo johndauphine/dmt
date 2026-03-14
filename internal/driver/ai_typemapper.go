@@ -15,8 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
+	"github.com/johndauphine/dmt/internal/ident"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
@@ -1576,34 +1576,16 @@ func (m *AITypeMapper) findReservedWords(t *Table, targetDBType string) []string
 }
 
 // targetIdentifier returns the exact column/table name the transfer phase will
-// use for the target database. This mirrors target.SanitizePGIdentifier without
-// importing the target package (which would create a circular dependency).
+// use for the target database. Uses the shared ident.SanitizePG implementation
+// so prompt-generated names always match what WriteBatch/CopyFrom expects.
 func targetIdentifier(name, targetDBType string) string {
 	if targetDBType != "postgres" {
 		return name
 	}
-	s := strings.ToLower(name)
-	var sb strings.Builder
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune('_')
-		}
-	}
-	result := sb.String()
-	if len(result) > 0 && unicode.IsDigit(rune(result[0])) {
-		result = "col_" + result
-	}
-	if result == "" {
-		return "col_"
-	}
-	return result
+	return ident.SanitizePG(name)
 }
 
 // buildSourceDDL creates a DDL-like representation of the source table.
-// When targetDBType is set, each column includes a comment showing the exact
-// target column name that must be used in the generated DDL.
 func (m *AITypeMapper) buildSourceDDL(t *Table, sourceDBType string) string {
 	return m.buildSourceDDLWithTarget(t, sourceDBType, "")
 }
