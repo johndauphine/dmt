@@ -1,0 +1,34 @@
+# WideWorldImporters - local test containers
+# MSSQL (mssql-test:1433) -> PostgreSQL (pg-test:5432)
+# 31 tables, ~13M rows across 5 schemas
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: WideWorldImporters
+  user: sa
+  password: ${env:MSSQL_PASSWORD}
+  schema: Sales
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: wideworldimporters
+  user: postgres
+  password: ${env:PG_PASSWORD}
+  schema: sales
+  ssl_mode: disable
+
+migration:
+  create_indexes: true
+  create_foreign_keys: false
+
+  exclude_tables:
+    - Customers_Archive
+    - BuyingGroups_Archive
+    - CustomerCategories_Archive
+    - Customers  # geography column requires PostGIS
