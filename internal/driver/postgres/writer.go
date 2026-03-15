@@ -222,10 +222,14 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 }
 
 // Close closes all connections.
+// Reset() is called first to immediately close idle connections and mark acquired
+// connections for destruction. This prevents Close() from blocking indefinitely
+// when a connection is held by a stalled operation (e.g. a COPY waiting for data).
 func (w *Writer) Close() {
 	if w.cachedDB != nil {
 		w.cachedDB.Close()
 	}
+	w.pool.Reset()
 	w.pool.Close()
 }
 
