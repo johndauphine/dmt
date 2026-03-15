@@ -72,8 +72,11 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 }
 
 // Close closes all connections.
+// Reset() is called first to immediately close idle connections and mark acquired
+// connections for destruction, preventing Close() from blocking on stalled operations.
 func (r *Reader) Close() error {
 	if r.pool != nil {
+		r.pool.Reset()
 		r.pool.Close()
 	}
 	if r.sqlDB != nil {
