@@ -43,16 +43,12 @@ func (s *State) WriteConfigFile() error {
 
 // CheckExistingSecrets checks if a secrets file with valid AI config exists.
 // Returns "has_ai" if a valid AI provider is configured, "no_ai" otherwise.
-// Does not use secrets.Load() singleton to avoid caching issues.
+// Uses secrets.Reset() + secrets.Load() for full validation including
+// file permission checks and config validation.
 func CheckExistingSecrets() string {
-	path := secrets.GetSecretsPath()
-	data, err := os.ReadFile(path)
+	secrets.Reset()
+	cfg, err := secrets.Load()
 	if err != nil {
-		return "no_ai"
-	}
-
-	var cfg secrets.Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return "no_ai"
 	}
 

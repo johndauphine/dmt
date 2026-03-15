@@ -356,6 +356,10 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 		case tea.KeyEnter:
 			value := m.textInput.Value()
 			if m.mode == ModeSetup {
+				// Ignore Enter during auto-action steps (connection tests, writes)
+				if m.setupState != nil && m.setupState.Prompt().IsAutoAction {
+					return m, nil
+				}
 				return m, safeCmd(m.handleSetupStep(value))
 			}
 			if m.mode == ModeWizard {
@@ -1915,12 +1919,13 @@ func (m *Model) processSetupAutoSteps() tea.Cmd {
 
 		case setup.StepWriteSecrets:
 			if err := m.setupState.WriteSecretsFile(); err != nil {
-				m.appendOutput(styleError.Render(fmt.Sprintf("  Error saving secrets: %s", err)) + "\n")
-				m.setupState.Process(err.Error())
-			} else {
-				m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Secrets saved to %s", secrets.GetSecretsPath())) + "\n")
-				m.setupState.Process("")
+				errMsg := m.setupState.Process(err.Error())
+				m.appendOutput(styleError.Render(fmt.Sprintf("  %s", errMsg)) + "\n")
+				m.renderSetupPrompt()
+				return nil
 			}
+			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Secrets saved to %s", secrets.GetSecretsPath())) + "\n")
+			m.setupState.Process("")
 
 		case setup.StepSourceConnTest, setup.StepTargetConnTest:
 			if info.SectionHeader != "" {
@@ -1932,12 +1937,13 @@ func (m *Model) processSetupAutoSteps() tea.Cmd {
 
 		case setup.StepWriteConfig:
 			if err := m.setupState.WriteConfigFile(); err != nil {
-				m.appendOutput(styleError.Render(fmt.Sprintf("  Error saving config: %s", err)) + "\n")
-				m.setupState.Process(err.Error())
-			} else {
-				m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Configuration saved to %s", m.setupState.ConfigPath)) + "\n")
-				m.setupState.Process("")
+				errMsg := m.setupState.Process(err.Error())
+				m.appendOutput(styleError.Render(fmt.Sprintf("  %s", errMsg)) + "\n")
+				m.renderSetupPrompt()
+				return nil
 			}
+			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Configuration saved to %s", m.setupState.ConfigPath)) + "\n")
+			m.setupState.Process("")
 
 		default:
 			// Unknown auto step, skip it

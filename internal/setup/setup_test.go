@@ -741,6 +741,75 @@ func TestPostgresSSLDefaults(t *testing.T) {
 	}
 }
 
+func TestWriteSecretsFailureGoesBackToProvider(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("y")
+	s.Process("claude")
+	s.Process("sk-test-key")
+
+	if s.CurrentStep != StepWriteSecrets {
+		t.Fatalf("expected StepWriteSecrets, got %d", s.CurrentStep)
+	}
+
+	// Simulate write failure
+	errMsg := s.Process("permission denied")
+	if errMsg == "" {
+		t.Fatal("expected error message on write failure")
+	}
+	if s.CurrentStep != StepAIProvider {
+		t.Fatalf("expected StepAIProvider after write failure, got %d", s.CurrentStep)
+	}
+}
+
+func TestWriteConfigFailureGoesBackToConfigPath(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("n")
+
+	// Fill source
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5432")
+	s.Process("testdb")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // conn test success
+
+	// Fill target
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5432")
+	s.Process("targetdb")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // conn test success
+
+	// Migration settings
+	s.Process("drop_recreate")
+	s.Process("y")
+	s.Process("y")
+	s.Process("4")
+	s.Process("config.yaml") // config path
+
+	if s.CurrentStep != StepWriteConfig {
+		t.Fatalf("expected StepWriteConfig, got %d", s.CurrentStep)
+	}
+
+	// Simulate write failure
+	errMsg := s.Process("read-only filesystem")
+	if errMsg == "" {
+		t.Fatal("expected error message on write failure")
+	}
+	if s.CurrentStep != StepConfigPath {
+		t.Fatalf("expected StepConfigPath after write failure, got %d", s.CurrentStep)
+	}
+}
+
 func TestConfigPath(t *testing.T) {
 	s := NewState()
 	if s.ConfigPath != "config.yaml" {

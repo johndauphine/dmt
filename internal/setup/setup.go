@@ -373,7 +373,9 @@ func (s *State) Process(input string) string {
 
 	case StepWriteSecrets:
 		if input != "" {
-			return input
+			// Write failed — go back to provider selection so user can fix
+			s.CurrentStep = StepAIProvider
+			return fmt.Sprintf("Failed to save secrets: %s", input)
 		}
 		s.CurrentStep = StepSourceType
 
@@ -636,7 +638,9 @@ func (s *State) Process(input string) string {
 
 	case StepWriteConfig:
 		if input != "" {
-			return input
+			// Write failed — go back to config path so user can fix
+			s.CurrentStep = StepConfigPath
+			return fmt.Sprintf("Failed to save config: %s", input)
 		}
 		if s.AIConfigured && s.SourceConnOK {
 			s.CurrentStep = StepRunAnalysis
