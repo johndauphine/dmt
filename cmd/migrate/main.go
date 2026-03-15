@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -740,6 +741,11 @@ func setupSignalHandler(c *cli.Context, cancel context.CancelFunc, cleanup func(
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// Guard against concurrent cleanup from timer and second signal racing.
+	// AfterFunc.Stop() doesn't wait for an in-flight callback, so both paths
+	// could invoke forceCleanupAndExit simultaneously without this guard.
+	var exitOnce sync.Once
+
 	go func() {
 		sig := <-sigCh
 		sigName := "SIGINT"
@@ -752,15 +758,19 @@ func setupSignalHandler(c *cli.Context, cancel context.CancelFunc, cleanup func(
 
 		// Start shutdown timer
 		shutdownTimer := time.AfterFunc(shutdownTimeout, func() {
-			fmt.Fprintln(os.Stderr, "Shutdown timeout reached, forcing exit...")
-			forceCleanupAndExit(cleanup)
+			exitOnce.Do(func() {
+				fmt.Fprintln(os.Stderr, "Shutdown timeout reached, forcing exit...")
+				forceCleanupAndExit(cleanup)
+			})
 		})
 
 		// Wait for second signal for immediate exit
 		<-sigCh
 		shutdownTimer.Stop()
-		fmt.Fprintln(os.Stderr, "Second signal received, forcing immediate exit...")
-		forceCleanupAndExit(cleanup)
+		exitOnce.Do(func() {
+			fmt.Fprintln(os.Stderr, "Second signal received, forcing immediate exit...")
+			forceCleanupAndExit(cleanup)
+		})
 	}()
 }
 
