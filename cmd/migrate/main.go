@@ -20,6 +20,7 @@ import (
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/internal/setup"
 	"github.com/johndauphine/dmt/internal/tui"
 	"github.com/johndauphine/dmt/internal/version"
 	"github.com/urfave/cli/v2"
@@ -278,6 +279,24 @@ func main() {
 						Name:    "force",
 						Aliases: []string{"f"},
 						Usage:   "Overwrite existing secrets file",
+					},
+				},
+			},
+			{
+				Name:   "setup",
+				Usage:  "Guided setup wizard: secrets, config, connection test, and AI analysis",
+				Action: runSetup,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "output",
+						Aliases: []string{"o"},
+						Value:   "config.yaml",
+						Usage:   "Output config file path",
+					},
+					&cli.BoolFlag{
+						Name:    "force",
+						Aliases: []string{"f"},
+						Usage:   "Overwrite existing files",
 					},
 				},
 			},
@@ -987,62 +1006,64 @@ func initSecrets(c *cli.Context) error {
 	return nil
 }
 
+// CLI prompt helpers
+
+func cliPrompt(reader *bufio.Reader, label, defaultValue string) string {
+	if defaultValue != "" {
+		fmt.Printf("%s [%s]: ", label, defaultValue)
+	} else {
+		fmt.Printf("%s: ", label)
+	}
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return defaultValue
+	}
+	return input
+}
+
+func cliPromptInt(reader *bufio.Reader, label string, defaultValue int) int {
+	result := cliPrompt(reader, label, fmt.Sprintf("%d", defaultValue))
+	if val, err := fmt.Sscanf(result, "%d", &defaultValue); err != nil || val != 1 {
+		return defaultValue
+	}
+	return defaultValue
+}
+
+func cliPromptBool(reader *bufio.Reader, label string, defaultValue bool) bool {
+	defStr := "n"
+	if defaultValue {
+		defStr = "y"
+	}
+	result := strings.ToLower(cliPrompt(reader, label+" (y/n)", defStr))
+	return result == "y" || result == "yes"
+}
+
+func cliPromptPassword(label string) string {
+	fmt.Printf("%s: ", label)
+	password, err := term.ReadPassword(int(syscall.Stdin))
+	fmt.Println() // newline after hidden input
+	if err != nil {
+		return ""
+	}
+	return string(password)
+}
+
+func cliPromptChoice(reader *bufio.Reader, label string, choices []string, defaultValue string) string {
+	for {
+		result := cliPrompt(reader, label, defaultValue)
+		for _, choice := range choices {
+			if result == choice {
+				return result
+			}
+		}
+		fmt.Printf("  Invalid choice. Options: %s\n", strings.Join(choices, ", "))
+	}
+}
+
 // runCLIWizard runs an interactive CLI wizard to create a config
 func runCLIWizard(advanced bool) (*config.Config, error) {
 	reader := bufio.NewReader(os.Stdin)
-
-	prompt := func(label, defaultValue string) string {
-		if defaultValue != "" {
-			fmt.Printf("%s [%s]: ", label, defaultValue)
-		} else {
-			fmt.Printf("%s: ", label)
-		}
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input)
-		if input == "" {
-			return defaultValue
-		}
-		return input
-	}
-
-	promptInt := func(label string, defaultValue int) int {
-		result := prompt(label, fmt.Sprintf("%d", defaultValue))
-		if val, err := fmt.Sscanf(result, "%d", &defaultValue); err != nil || val != 1 {
-			return defaultValue
-		}
-		return defaultValue
-	}
-
-	promptBool := func(label string, defaultValue bool) bool {
-		defStr := "n"
-		if defaultValue {
-			defStr = "y"
-		}
-		result := strings.ToLower(prompt(label+" (y/n)", defStr))
-		return result == "y" || result == "yes"
-	}
-
-	promptPassword := func(label string) string {
-		fmt.Printf("%s: ", label)
-		password, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Println() // newline after hidden input
-		if err != nil {
-			return ""
-		}
-		return string(password)
-	}
-
-	promptChoice := func(label string, choices []string, defaultValue string) string {
-		for {
-			result := prompt(label, defaultValue)
-			for _, choice := range choices {
-				if result == choice {
-					return result
-				}
-			}
-			fmt.Printf("  Invalid choice. Options: %s\n", strings.Join(choices, ", "))
-		}
-	}
 
 	cfg := &config.Config{}
 
@@ -1050,43 +1071,206 @@ func runCLIWizard(advanced bool) (*config.Config, error) {
 	targetModes := []string{"drop_recreate", "upsert"}
 
 	fmt.Println("\n=== Source Database ===")
-	cfg.Source.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "mssql")
-	cfg.Source.Host = prompt("Host", "localhost")
+	cfg.Source.Type = cliPromptChoice(reader, "Database type (mssql/postgres)", dbTypes, "mssql")
+	cfg.Source.Host = cliPrompt(reader, "Host", "localhost")
 	defaultPort := 1433
 	if cfg.Source.Type == "postgres" {
 		defaultPort = 5432
 	}
-	cfg.Source.Port = promptInt("Port", defaultPort)
-	cfg.Source.Database = prompt("Database name", "")
-	cfg.Source.User = prompt("Username", "sa")
-	cfg.Source.Password = promptPassword("Password")
-	cfg.Source.Schema = prompt("Schema", "dbo")
+	cfg.Source.Port = cliPromptInt(reader, "Port", defaultPort)
+	cfg.Source.Database = cliPrompt(reader, "Database name", "")
+	cfg.Source.User = cliPrompt(reader, "Username", "sa")
+	cfg.Source.Password = cliPromptPassword("Password")
+	cfg.Source.Schema = cliPrompt(reader, "Schema", "dbo")
 
 	fmt.Println("\n=== Target Database ===")
-	cfg.Target.Type = promptChoice("Database type (mssql/postgres)", dbTypes, "postgres")
-	cfg.Target.Host = prompt("Host", "localhost")
+	cfg.Target.Type = cliPromptChoice(reader, "Database type (mssql/postgres)", dbTypes, "postgres")
+	cfg.Target.Host = cliPrompt(reader, "Host", "localhost")
 	defaultPort = 5432
 	if cfg.Target.Type == "mssql" {
 		defaultPort = 1433
 	}
-	cfg.Target.Port = promptInt("Port", defaultPort)
-	cfg.Target.Database = prompt("Database name", "")
-	cfg.Target.User = prompt("Username", "postgres")
-	cfg.Target.Password = promptPassword("Password")
-	cfg.Target.Schema = prompt("Schema", "public")
+	cfg.Target.Port = cliPromptInt(reader, "Port", defaultPort)
+	cfg.Target.Database = cliPrompt(reader, "Database name", "")
+	cfg.Target.User = cliPrompt(reader, "Username", "postgres")
+	cfg.Target.Password = cliPromptPassword("Password")
+	cfg.Target.Schema = cliPrompt(reader, "Schema", "public")
 
 	fmt.Println("\n=== Migration Settings ===")
-	cfg.Migration.TargetMode = promptChoice("Target mode (drop_recreate/upsert)", targetModes, "drop_recreate")
-	cfg.Migration.CreateIndexes = promptBool("Create indexes", false)
-	cfg.Migration.CreateForeignKeys = promptBool("Create foreign keys", false)
+	cfg.Migration.TargetMode = cliPromptChoice(reader, "Target mode (drop_recreate/upsert)", targetModes, "drop_recreate")
+	cfg.Migration.CreateIndexes = cliPromptBool(reader, "Create indexes", false)
+	cfg.Migration.CreateForeignKeys = cliPromptBool(reader, "Create foreign keys", false)
 
 	if advanced {
 		fmt.Println("\n=== Advanced Settings ===")
-		cfg.Migration.Workers = promptInt("Workers", 6)
-		cfg.Migration.ChunkSize = promptInt("Chunk size", 100000)
+		cfg.Migration.Workers = cliPromptInt(reader, "Workers", 6)
+		cfg.Migration.ChunkSize = cliPromptInt(reader, "Chunk size", 100000)
 	}
 
 	return cfg, nil
+}
+
+// runSetup runs the unified setup wizard
+func runSetup(c *cli.Context) error {
+	reader := bufio.NewReader(os.Stdin)
+	state := setup.NewState()
+
+	if c.IsSet("output") {
+		state.ConfigPath = c.String("output")
+	}
+	state.Force = c.Bool("force")
+
+	fmt.Println("\n=== DMT Setup Wizard ===")
+
+	for state.CurrentStep != setup.StepDone {
+		info := state.Prompt()
+
+		// Display section header
+		if info.SectionHeader != "" {
+			fmt.Printf("\n=== %s ===\n", info.SectionHeader)
+		}
+
+		if info.IsAutoAction {
+			var result string
+			switch state.CurrentStep {
+			case setup.StepCheckSecrets:
+				result = setup.CheckExistingSecrets()
+				if result == "has_ai" {
+					fmt.Println("  AI provider already configured, skipping AI setup")
+				}
+
+			case setup.StepSourceConnTest, setup.StepTargetConnTest:
+				fmt.Printf("  %s\n", info.Text)
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				var connResult *setup.ConnTestResult
+				if state.CurrentStep == setup.StepSourceConnTest {
+					connResult = setup.TestConnection(ctx,
+						state.Config.Source.Type, state.Config.Source.Host,
+						state.Config.Source.Port, state.Config.Source.Database,
+						state.Config.Source.User, state.Config.Source.Password,
+						state.Config.Source.DSNOptions())
+				} else {
+					connResult = setup.TestConnection(ctx,
+						state.Config.Target.Type, state.Config.Target.Host,
+						state.Config.Target.Port, state.Config.Target.Database,
+						state.Config.Target.User, state.Config.Target.Password,
+						state.Config.Target.DSNOptions())
+				}
+				cancel()
+
+				if connResult.Connected {
+					fmt.Printf("  Connected! (%dms)\n", connResult.LatencyMs)
+					result = ""
+				} else {
+					fmt.Printf("  Failed: %s (%dms)\n", connResult.Error, connResult.LatencyMs)
+					result = connResult.Error
+				}
+
+			case setup.StepWriteSecrets:
+				if err := state.WriteSecretsFile(); err != nil {
+					result = err.Error()
+					fmt.Printf("  Error: %s\n", result)
+				} else {
+					fmt.Printf("  Secrets saved to %s\n", secrets.GetSecretsPath())
+				}
+
+			case setup.StepWriteConfig:
+				// Check if file exists (unless --force)
+				if !state.Force {
+					if _, err := os.Stat(state.ConfigPath); err == nil {
+						fmt.Printf("  File %s already exists. Overwrite? (y/n) [n]: ", state.ConfigPath)
+						answer, _ := reader.ReadString('\n')
+						if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+							state.CurrentStep = setup.StepConfigPath
+							continue
+						}
+					}
+				}
+				if err := state.WriteConfigFile(); err != nil {
+					result = err.Error()
+					fmt.Printf("  Error: %s\n", result)
+				} else {
+					fmt.Printf("  Configuration saved to %s\n", state.ConfigPath)
+				}
+			}
+
+			if errMsg := state.Process(result); errMsg != "" {
+				fmt.Printf("  Error: %s\n", errMsg)
+			}
+			continue
+		}
+
+		// User input step - loop until valid
+		for {
+			var input string
+			if info.IsMasked {
+				input = cliPromptPassword(info.Text)
+			} else {
+				input = cliPrompt(reader, info.Text, info.Default)
+			}
+
+			if errMsg := state.Process(input); errMsg != "" {
+				fmt.Printf("  %s\n", errMsg)
+				continue
+			}
+			break
+		}
+	}
+
+	fmt.Println("\nSetup complete!")
+
+	// Run AI analysis if requested
+	if state.RunAnalysis {
+		fmt.Println("\nRunning AI analysis...")
+		cfg, err := config.Load(state.ConfigPath)
+		if err != nil {
+			fmt.Printf("Error loading config for analysis: %v\n", err)
+			return nil
+		}
+
+		orch, err := orchestrator.New(cfg)
+		if err != nil {
+			// Try source-only
+			logging.Warn("Cannot connect to both databases: %v", err)
+			orch, err = orchestrator.NewWithOptions(cfg, orchestrator.Options{SourceOnly: true})
+			if err != nil {
+				fmt.Printf("Cannot connect for analysis: %v\n", err)
+				return nil
+			}
+		}
+		defer orch.Close()
+
+		schema := cfg.Source.Schema
+		if schema == "" {
+			if cfg.Source.Type == "postgres" {
+				schema = "public"
+			} else {
+				schema = "dbo"
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		suggestions, err := orch.AnalyzeConfig(ctx, schema)
+		if err != nil {
+			fmt.Printf("Analysis failed: %v\n", err)
+			return nil
+		}
+
+		fmt.Println(suggestions.FormatYAML())
+
+		answer := cliPrompt(reader, "Apply tuning to secrets? (y/n)", "n")
+		if strings.ToLower(answer) == "y" {
+			if err := applyTuningToSecrets(suggestions); err != nil {
+				fmt.Printf("Error applying tuning: %v\n", err)
+			} else {
+				fmt.Printf("Applied AI-tuned parameters to %s\n", secrets.GetSecretsPath())
+			}
+		}
+	}
+
+	return nil
 }
 
 // printDryRunResult prints the dry-run result in human-readable format
