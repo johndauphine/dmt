@@ -12,28 +12,51 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 )
 
-// Buffer sizing constants for parallel reader/writer coordination.
-// These values prevent cascading deadlocks when readers produce faster than writers consume.
-const (
-	// jobChanBufferMultiplier scales the job channel buffer with the number of writers.
-	// A multiplier of 50 provides enough headroom for burst production while keeping
-	// memory usage reasonable (each job holds a chunk of rows).
-	jobChanBufferMultiplier = 50
+// PipelineBufferConfig contains the parameters needed to compute pipeline buffer sizes.
+// All values come from system detection, user config, or per-table metadata.
+type PipelineBufferConfig struct {
+	MemoryBudgetMB   int64 // Memory available for the pipeline (from EffectiveMaxMemoryMB minus connection overhead)
+	ChunkSize        int   // Rows per batch
+	RowBytes         int64 // Bytes per row for this specific table
+	NumWriters       int   // Writer goroutines (each holds one chunk being written)
+	ReadAheadBuffers int   // Read-ahead buffers (each holds one chunk queued for reading)
+}
 
-	// jobChanMinBuffer is the minimum job channel buffer size.
-	// This ensures adequate buffering even with small configured buffer sizes.
-	jobChanMinBuffer = 500
+// CalculateJobBufferSize derives the jobChan buffer depth from the memory budget
+// and per-table data characteristics.
+//
+// The pipeline memory model:
+//
+//	total_in_flight = readAheadBuffers + jobChanDepth + numWriters  (in chunks)
+//	total_memory    = total_in_flight * chunkSize * rowBytes        (in bytes)
+//
+// We solve for jobChanDepth: how many chunks can be queued between the consumer
+// and writers, given the memory budget and this table's actual row size.
+func CalculateJobBufferSize(cfg PipelineBufferConfig) int {
+	bytesPerChunk := int64(cfg.ChunkSize) * cfg.RowBytes
+	if bytesPerChunk <= 0 || cfg.MemoryBudgetMB <= 0 {
+		return cfg.NumWriters + 1 // can't calculate; use minimum safe value
+	}
 
-	// ackChanBufferMultiplier scales the ack channel buffer with the number of writers.
-	// Uses a higher multiplier (100) than jobChan because acks are tiny (just PK values
-	// and sequence numbers) and checkpoint saves can temporarily slow ack processing.
-	ackChanBufferMultiplier = 100
+	budgetBytes := cfg.MemoryBudgetMB * 1024 * 1024
 
-	// ackChanMinBuffer is the minimum ack channel buffer size.
-	// Higher than jobChan minimum because acks are cheap and we want to avoid
-	// any possibility of writers blocking on ack sends.
-	ackChanMinBuffer = 1000
-)
+	// Total chunks that fit in the memory budget
+	totalSlots := int(budgetBytes / bytesPerChunk)
+
+	// Subtract slots already consumed by active readers and writers
+	activeSlots := cfg.ReadAheadBuffers + cfg.NumWriters
+
+	// Remaining slots are available for jobChan buffering
+	jobDepth := totalSlots - activeSlots
+
+	// Minimum: numWriters + 1 to prevent deadlock (each writer needs a pending job,
+	// plus one slot for the consumer to submit without blocking).
+	if jobDepth < cfg.NumWriters+1 {
+		jobDepth = cfg.NumWriters + 1
+	}
+
+	return jobDepth
+}
 
 // WriteJob represents a batch of rows to write.
 type WriteJob struct {
@@ -95,24 +118,23 @@ type WriterPool struct {
 
 // WriterPoolConfig holds the configuration for creating a writer pool.
 type WriterPoolConfig struct {
-	NumWriters int
-	BufferSize int
-	WriteFunc  WriteFunc
-	Prog       *progress.Tracker
-	EnableAck  bool // Whether to enable ack channel for checkpointing
+	NumWriters    int
+	BufferSize    int // read-ahead buffer size
+	JobBufferSize int // jobChan buffer size — must be computed by CalculateJobBufferSize
+	WriteFunc     WriteFunc
+	Prog          *progress.Tracker
+	EnableAck     bool // Whether to enable ack channel for checkpointing
 }
 
 // NewWriterPool creates a new writer pool with the given configuration.
 func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 	writerCtx, cancel := context.WithCancel(ctx)
 
-	// Use a larger buffer for jobChan to prevent consumer from blocking.
-	// With parallel readers producing chunks faster than writers can consume,
-	// a small buffer causes the consumer to block on submit(), which blocks
-	// reading from chunkChan, which blocks readers, causing deadlock.
-	jobBufferSize := cfg.BufferSize * cfg.NumWriters * jobChanBufferMultiplier
-	if jobBufferSize < jobChanMinBuffer {
-		jobBufferSize = jobChanMinBuffer
+	// JobBufferSize must be computed by the caller via CalculateJobBufferSize.
+	// Enforce the minimum to prevent deadlock.
+	jobBufferSize := cfg.JobBufferSize
+	if jobBufferSize < cfg.NumWriters+1 {
+		jobBufferSize = cfg.NumWriters + 1
 	}
 	logging.Debug("WriterPool: creating jobChan with buffer size %d (writers=%d, bufferSize=%d)",
 		jobBufferSize, cfg.NumWriters, cfg.BufferSize)
@@ -130,16 +152,11 @@ func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 	}
 
 	if cfg.EnableAck {
-		// Use a much larger buffer for ackChan to prevent writers from blocking.
-		// With parallel readers, writers can produce acks faster than the ack processor
-		// can consume them (especially during checkpoint saves). A small buffer causes
-		// a cascading deadlock: writers block → jobChan fills → consumer blocks →
-		// chunkChan fills → all readers block.
-		// Acks are small (just PK values and sequence numbers), so a large buffer is cheap.
-		ackBufferSize := cfg.BufferSize * cfg.NumWriters * ackChanBufferMultiplier
-		if ackBufferSize < ackChanMinBuffer {
-			ackBufferSize = ackChanMinBuffer
-		}
+		// Ack buffer depth = job buffer + writers in flight.
+		// Each writer produces one ack per completed job, and the ack processor
+		// runs continuously. This ensures the buffer can hold all pending acks
+		// even if checkpoint saves temporarily pause processing.
+		ackBufferSize := jobBufferSize + cfg.NumWriters
 		logging.Debug("WriterPool: creating ackChan with buffer size %d", ackBufferSize)
 		wp.ackChan = make(chan WriteAck, ackBufferSize)
 	}

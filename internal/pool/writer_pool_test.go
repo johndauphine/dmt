@@ -173,3 +173,101 @@ func TestScaleUpAndDown(t *testing.T) {
 		t.Errorf("expected %d rows written, got %d (lost %d)", expected, got, expected-got)
 	}
 }
+
+func TestCalculateJobBufferSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     PipelineBufferConfig
+		wantMin int // result must be >= this
+		wantMax int // result must be <= this (0 = no upper check)
+	}{
+		{
+			name: "narrow rows get large buffer",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   2048,
+				ChunkSize:        8000,
+				RowBytes:         37, // Votes table
+				NumWriters:       6,
+				ReadAheadBuffers: 3,
+			},
+			// 2GB / (8000*37) = ~7282 total slots, minus 6+3 active = ~7273
+			wantMin: 5000,
+		},
+		{
+			name: "wide rows get small buffer",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   2048,
+				ChunkSize:        8000,
+				RowBytes:         2290, // Posts table
+				NumWriters:       6,
+				ReadAheadBuffers: 3,
+			},
+			// 2GB / (8000*2290) = ~117 total slots, minus 9 active = ~108
+			wantMin: 7,   // at least numWriters+1
+			wantMax: 150,
+		},
+		{
+			name: "zero memory returns safe minimum",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   0,
+				ChunkSize:        50000,
+				RowBytes:         573,
+				NumWriters:       6,
+				ReadAheadBuffers: 3,
+			},
+			wantMin: 7, // numWriters+1
+			wantMax: 7, // exactly the minimum
+		},
+		{
+			name: "zero row bytes returns safe minimum",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   1024,
+				ChunkSize:        10000,
+				RowBytes:         0,
+				NumWriters:       4,
+				ReadAheadBuffers: 2,
+			},
+			wantMin: 5, // numWriters+1
+			wantMax: 5,
+		},
+		{
+			name: "tiny budget clamps to minimum",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   1, // 1MB
+				ChunkSize:        100000,
+				RowBytes:         10000,
+				NumWriters:       8,
+				ReadAheadBuffers: 4,
+			},
+			wantMin: 9, // numWriters+1
+		},
+		{
+			name: "active slots subtracted from total",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   100,
+				ChunkSize:        1000,
+				RowBytes:         100,
+				NumWriters:       4,
+				ReadAheadBuffers: 3,
+			},
+			// 100MB / (1000*100) = 1048 total slots, minus 4+3 = 1041
+			wantMin: 1000,
+			wantMax: 1100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CalculateJobBufferSize(tt.cfg)
+			if got < tt.wantMin {
+				t.Errorf("CalculateJobBufferSize() = %d, want >= %d", got, tt.wantMin)
+			}
+			if tt.wantMax > 0 && got > tt.wantMax {
+				t.Errorf("CalculateJobBufferSize() = %d, want <= %d", got, tt.wantMax)
+			}
+			if got < tt.cfg.NumWriters+1 {
+				t.Errorf("CalculateJobBufferSize() = %d, must be >= numWriters+1 (%d)", got, tt.cfg.NumWriters+1)
+			}
+		})
+	}
+}

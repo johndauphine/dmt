@@ -454,6 +454,48 @@ func parseNumericPK(value any) (int64, bool) {
 	return 0, false
 }
 
+// calculatePipelineBufferSize derives the jobChan buffer depth for a specific table
+// from the system's memory budget and the table's actual row size. No magic numbers —
+// all values come from system detection, user config, or per-table metadata.
+func calculatePipelineBufferSize(cfg *config.Config, job Job, tableName string, tuner RuntimeTuner, numWriters int, readAheadBuffers int) int {
+	// Resolve chunk size: per-table override → global tuner → config default
+	chunkSize := cfg.Migration.ChunkSize
+	if tuner != nil {
+		if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+			chunkSize = cs
+		} else if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+			chunkSize = cs
+		}
+	}
+
+	// Derive memory budget from system-detected or user-configured limits.
+	// Use user cap if set, otherwise auto-detected effective limit.
+	effectiveMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
+	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < effectiveMemMB {
+		effectiveMemMB = cfg.Migration.MaxMemoryMB
+	}
+
+	// Subtract estimated connection pool overhead from pipeline budget.
+	// Each database connection holds driver buffers and prepared statement caches.
+	connCount := int64(cfg.Migration.MaxSourceConnections + cfg.Migration.MaxTargetConnections)
+	if connCount == 0 {
+		connCount = int64(numWriters * 4) // estimate if not configured
+	}
+	connOverheadMB := connCount * 10 // ~10MB per Go database/sql connection
+	pipelineBudgetMB := effectiveMemMB - connOverheadMB
+	if pipelineBudgetMB <= 0 {
+		pipelineBudgetMB = effectiveMemMB / 2 // fallback: half of effective memory
+	}
+
+	return pool.CalculateJobBufferSize(pool.PipelineBufferConfig{
+		MemoryBudgetMB:   pipelineBudgetMB,
+		ChunkSize:        chunkSize,
+		RowBytes:         job.Table.EstimatedRowSize,
+		NumWriters:       numWriters,
+		ReadAheadBuffers: readAheadBuffers,
+	})
+}
+
 // executeKeysetPagination uses WHERE pk > last_pk for efficient pagination
 // with async read-ahead pipelining to overlap reads and writes
 func executeKeysetPagination(
@@ -672,9 +714,18 @@ func executeKeysetPagination(
 		}
 	}
 
+	// Compute job buffer size from memory budget and actual row size.
+	// This adapts the pipeline to the table being transferred — narrow-row tables
+	// (Votes at 37B) get large buffers for throughput, wide-row tables (Posts at
+	// 2290B) get small buffers to prevent memory balloon.
+	jobBufSize := calculatePipelineBufferSize(cfg, job, tableName, tuner, numWriters, bufferSize)
+	logging.Debug("Pipeline %s: jobBufferSize=%d (chunk=%d, rowBytes=%d, writers=%d, readAhead=%d)",
+		job.Table.Name, jobBufSize, cfg.Migration.ChunkSize, job.Table.EstimatedRowSize, numWriters, bufferSize)
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
+		JobBufferSize:          jobBufSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
 		BatchSizeFn:            batchSizeFn,
@@ -1037,9 +1088,14 @@ func executeRowNumberPagination(
 	}
 
 	enableAck := job.Saver != nil && job.TaskID > 0
+
+	// Compute job buffer size from memory budget and row size (same as keyset path)
+	rnJobBufSize := calculatePipelineBufferSize(cfg, job, tableName, tuner, numWriters, bufferSize)
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
+		JobBufferSize:          rnJobBufSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
 		BatchSizeFn:            batchSizeFn,
