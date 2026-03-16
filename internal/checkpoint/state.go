@@ -1188,12 +1188,17 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 	return err
 }
 
-// UpdateAITuningResult updates the most recent tuning record with final migration throughput.
+// UpdateAITuningResult updates the most recent tuning record that hasn't been
+// populated with results yet. This avoids race conditions with concurrent
+// analyze runs by targeting NULL final_throughput rather than MAX(id).
 func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64) error {
 	_, err := s.db.Exec(`
 		UPDATE ai_tuning_history
 		SET final_throughput = ?, final_duration_seconds = ?
-		WHERE id = (SELECT MAX(id) FROM ai_tuning_history)
+		WHERE id = (
+			SELECT MAX(id) FROM ai_tuning_history
+			WHERE final_throughput IS NULL
+		)
 	`, throughput, durationSecs)
 	return err
 }

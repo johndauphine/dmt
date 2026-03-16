@@ -850,6 +850,10 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 
 		o.state.CompleteRun(run.ID, "success", "")
+		duration := time.Since(startTime)
+		if err := o.state.UpdateAITuningResult(0, duration.Seconds()); err != nil {
+			logging.Debug("Failed to update AI tuning result: %v", err)
+		}
 		logging.Info("Resume complete!")
 		return nil
 	}
