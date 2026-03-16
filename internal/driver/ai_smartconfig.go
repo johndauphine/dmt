@@ -122,6 +122,8 @@ type TuningHistoryProvider interface {
 	GetAITuningHistory(limit int) ([]AITuningRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error
+	// UpdateAITuningResult updates the most recent tuning record with final throughput
+	UpdateAITuningResult(throughput float64, durationSecs float64) error
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment from runtime migration.
@@ -156,6 +158,8 @@ type AITuningRecord struct {
 	EstimatedMemoryMB    int64     `json:"estimated_memory_mb"`
 	AIReasoning          string    `json:"ai_reasoning"`
 	WasAIUsed            bool      `json:"was_ai_used"`
+	FinalThroughput      float64   `json:"final_throughput,omitempty"`      // rows/sec from completed migration
+	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -472,8 +476,12 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
 				len(tuningHistory)-i, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
 				h.TotalTables, formatRowCount(h.TotalRows)))
-			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead=%d, write_ahead=%d\n",
+			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead=%d, write_ahead=%d",
 				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters))
+			if h.FinalThroughput > 0 {
+				sb.WriteString(fmt.Sprintf(" → result: %.0f rows/sec (%.0fs)", h.FinalThroughput, h.FinalDurationSecs))
+			}
+			sb.WriteString("\n")
 		}
 
 		// Detect and warn about downward trends

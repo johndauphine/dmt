@@ -403,6 +403,11 @@ func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 	})
 }
 
+// UpdateAITuningResult updates the most recent tuning record with final migration throughput.
+func (a *stateHistoryAdapter) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+	return a.state.UpdateAITuningResult(throughput, durationSecs)
+}
+
 // addDatabaseTuningRecommendations adds source and target database tuning recommendations.
 func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, suggestions *driver.SmartConfigSuggestions, aiMapper *driver.AITypeMapper) {
 	// AI mapper is passed from AnalyzeConfig to avoid refetching
