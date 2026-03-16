@@ -35,6 +35,7 @@ type writerPool struct {
 type writerPoolConfig struct {
 	NumWriters             int
 	BufferSize             int
+	JobBufferSize          int   // computed by pool.CalculateJobBufferSize
 	UseUpsert              bool
 	UpsertMergeChunkSizeFn func() int
 	BatchSizeFn            func() int // dynamic writer batch size
@@ -88,11 +89,12 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 
 	// Create the base writer pool with our write function
 	wp.WriterPool = pool.NewWriterPool(ctx, pool.WriterPoolConfig{
-		NumWriters: cfg.NumWriters,
-		BufferSize: cfg.BufferSize,
-		WriteFunc:  wp.executeWrite,
-		Prog:       cfg.Prog,
-		EnableAck:  cfg.EnableAck,
+		NumWriters:    cfg.NumWriters,
+		BufferSize:    cfg.BufferSize,
+		JobBufferSize: cfg.JobBufferSize,
+		WriteFunc:     wp.executeWrite,
+		Prog:          cfg.Prog,
+		EnableAck:     cfg.EnableAck,
 	})
 
 	return wp

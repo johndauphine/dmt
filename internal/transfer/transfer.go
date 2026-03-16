@@ -672,9 +672,25 @@ func executeKeysetPagination(
 		}
 	}
 
+	// Compute job buffer size from memory budget and actual row size.
+	// This adapts the pipeline to the table being transferred — narrow-row tables
+	// (Votes at 37B) get large buffers for throughput, wide-row tables (Posts at
+	// 2290B) get small buffers to prevent memory balloon.
+	chunkSize := cfg.Migration.ChunkSize
+	if tuner != nil {
+		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+			chunkSize = cs
+		}
+	}
+	pipelineMemoryMB := int(cfg.Migration.MaxMemoryMB / 2) // half the budget for pipeline buffers
+	jobBufSize := pool.CalculateJobBufferSize(pipelineMemoryMB, chunkSize, job.Table.EstimatedRowSize, numWriters)
+	logging.Debug("Pipeline %s: jobBufferSize=%d (pipelineMB=%d, chunk=%d, rowBytes=%d, writers=%d)",
+		job.Table.Name, jobBufSize, pipelineMemoryMB, chunkSize, job.Table.EstimatedRowSize, numWriters)
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
+		JobBufferSize:          jobBufSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
 		BatchSizeFn:            batchSizeFn,
@@ -1037,9 +1053,21 @@ func executeRowNumberPagination(
 	}
 
 	enableAck := job.Saver != nil && job.TaskID > 0
+
+	// Compute job buffer size from memory budget and row size (same as keyset path)
+	rnChunkSize := cfg.Migration.ChunkSize
+	if tuner != nil {
+		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+			rnChunkSize = cs
+		}
+	}
+	rnPipelineMemMB := int(cfg.Migration.MaxMemoryMB / 2)
+	rnJobBufSize := pool.CalculateJobBufferSize(rnPipelineMemMB, rnChunkSize, job.Table.EstimatedRowSize, numWriters)
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
+		JobBufferSize:          rnJobBufSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
 		UpsertMergeChunkSizeFn: upsertChunkFn,
 		BatchSizeFn:            batchSizeFn,

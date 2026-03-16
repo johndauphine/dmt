@@ -63,9 +63,63 @@ lint:
 	golangci-lint run
 
 # Docker test databases
+# Data directories persist across container recreations
+MSSQL_DATA_DIR=$(HOME)/docker-data/mssql
+PG_DATA_DIR=$(HOME)/docker-data/postgres
+
 test-dbs-up:
-	docker run -d --name mssql-test -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=TestPass2024' -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
-	docker run -d --name pg-test -e 'POSTGRES_PASSWORD=TestPass2024' -p 5432:5432 postgres:16-alpine
+	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
+	docker run -d --name mssql-test \
+		-e 'ACCEPT_EULA=Y' \
+		-e 'MSSQL_SA_PASSWORD=Str0ngP4ssw0rd' \
+		-v $(MSSQL_DATA_DIR):/var/opt/mssql \
+		-p 1433:1433 \
+		mcr.microsoft.com/mssql/server:2022-latest
+	docker run -d --name pg-test \
+		-e 'POSTGRES_PASSWORD=TestPass123!' \
+		-v $(PG_DATA_DIR):/var/lib/postgresql/data \
+		-p 5432:5432 \
+		postgres:16-alpine
+
+# Performance-tuned containers for benchmarking
+# Tuned for 8GB Docker RAM (proven optimal on M5 Pro/24GB, same principle here):
+#   MSSQL: 4GB buffer pool — matches M5 Pro sweet spot
+#   PostgreSQL: 1GB shared_buffers + aggressive WAL settings
+#   ~3GB headroom for container OS, WAL files, page cache
+# Host retains 28GB for DMT pipeline buffers + macOS
+bench-dbs-up:
+	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
+	docker run -d --name mssql-test \
+		-e 'ACCEPT_EULA=Y' \
+		-e 'MSSQL_SA_PASSWORD=Str0ngP4ssw0rd' \
+		-e 'MSSQL_MEMORY_LIMIT_MB=4096' \
+		-v $(MSSQL_DATA_DIR):/var/opt/mssql \
+		-p 1433:1433 \
+		mcr.microsoft.com/mssql/server:2022-latest
+	docker run -d --name pg-test \
+		-e 'POSTGRES_PASSWORD=TestPass123!' \
+		-v $(PG_DATA_DIR):/var/lib/postgresql/data \
+		--shm-size=2g \
+		-p 5432:5432 \
+		postgres:16-alpine \
+		-c shared_buffers=1GB \
+		-c effective_cache_size=4GB \
+		-c work_mem=256MB \
+		-c maintenance_work_mem=512MB \
+		-c wal_buffers=64MB \
+		-c max_wal_size=4GB \
+		-c min_wal_size=1GB \
+		-c checkpoint_completion_target=0.9 \
+		-c checkpoint_timeout=30min \
+		-c wal_level=minimal \
+		-c max_wal_senders=0 \
+		-c synchronous_commit=off \
+		-c full_page_writes=off \
+		-c fsync=off \
+		-c max_connections=200 \
+		-c random_page_cost=1.1 \
+		-c effective_io_concurrency=200 \
+		-c huge_pages=off
 
 test-dbs-down:
 	docker rm -f mssql-test pg-test 2>/dev/null || true
