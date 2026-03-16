@@ -488,6 +488,11 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 		if trend := detectParameterTrend(tuningHistory); trend != "" {
 			sb.WriteString(fmt.Sprintf("  WARNING: %s\n", trend))
 		}
+
+		// Summarize chunk_size vs throughput relationship if we have data
+		if summary := summarizeChunkPerformance(tuningHistory); summary != "" {
+			sb.WriteString(summary)
+		}
 	}
 
 	// Section 2: Runtime adjustments as reactive context (NOT recommendations)
@@ -576,6 +581,50 @@ func detectParameterTrend(history []AITuningRecord) string {
 	return strings.Join(warnings, "; ")
 }
 
+// summarizeChunkPerformance aggregates throughput by chunk_size to show
+// the relationship between chunk size and actual performance.
+func summarizeChunkPerformance(history []AITuningRecord) string {
+	// Group throughput by chunk_size
+	type chunkStats struct {
+		totalThroughput float64
+		count           int
+	}
+	byChunk := make(map[int]*chunkStats)
+	for _, h := range history {
+		if h.FinalThroughput <= 0 {
+			continue
+		}
+		s, ok := byChunk[h.ChunkSize]
+		if !ok {
+			s = &chunkStats{}
+			byChunk[h.ChunkSize] = s
+		}
+		s.totalThroughput += h.FinalThroughput
+		s.count++
+	}
+
+	if len(byChunk) < 2 {
+		return ""
+	}
+
+	// Sort chunk sizes for consistent output
+	sizes := make([]int, 0, len(byChunk))
+	for size := range byChunk {
+		sizes = append(sizes, size)
+	}
+	sort.Ints(sizes)
+
+	var sb strings.Builder
+	sb.WriteString("\n  CHUNK SIZE vs THROUGHPUT (averaged across runs):\n")
+	for _, size := range sizes {
+		s := byChunk[size]
+		avg := s.totalThroughput / float64(s.count)
+		sb.WriteString(fmt.Sprintf("    chunk_size=%d → avg %.0f rows/sec (%d runs)\n", size, avg, s.count))
+	}
+
+	return sb.String()
+}
+
 // getAIAutoTune calls the AI to get auto-tuned parameters.
 func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutput, error) {
 	inputJSON, err := json.Marshal(input)
@@ -631,12 +680,12 @@ Parameters to tune:
 
 Guidelines:
 1. MEMORY SAFETY FIRST - never exceed available memory. Start conservative, the runtime AI monitor can scale up.
-2. CHUNK SIZE is most important for throughput - larger = faster, but balance with memory
+2. CHUNK SIZE affects throughput significantly, but bigger is not always better due to write overhead and memory pressure.
 3. Workers should scale with CPU cores but leave headroom
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead
-5. Historical context: Runtime adjustments shown above were REACTIVE to specific problems during migrations — do NOT proactively reduce parameters based on those reactive adjustments. If the parameter trajectory shows values decreasing across successive runs, this may be a feedback loop, not a genuine constraint. Optimize for maximum throughput within memory constraints.
+5. Runtime adjustments shown above were REACTIVE to specific runtime conditions — they are context, not starting-point recommendations.
 6. Consider the database types and total data volume when tuning
-7. AVOID PARAMETER REGRESSION: If parameters have been decreasing across runs without clear memory/CPU pressure in the current system, prefer values closer to earlier (larger) values. The runtime AI monitor can scale down if needed during migration.
+7. THROUGHPUT OPTIMIZATION: There is an optimal chunk_size for each workload — too small underutilizes the pipeline, too large causes write overhead and memory pressure. When the trajectory includes throughput results, analyze the relationship between chunk_size and measured throughput to find the optimal point.
 
 Respond with ONLY a JSON object:
 {

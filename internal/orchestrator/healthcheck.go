@@ -372,6 +372,8 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRe
 			EstimatedMemoryMB:    r.EstimatedMemoryMB,
 			AIReasoning:          r.AIReasoning,
 			WasAIUsed:            r.WasAIUsed,
+			FinalThroughput:      r.FinalThroughput,
+			FinalDurationSecs:    r.FinalDurationSecs,
 		}
 	}
 	return result, nil
