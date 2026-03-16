@@ -116,7 +116,7 @@ type WriterPool struct {
 type WriterPoolConfig struct {
 	NumWriters    int
 	BufferSize    int // read-ahead buffer size (used for ack channel scaling)
-	JobBufferSize int // jobChan buffer size — computed by CalculateJobBufferSize. 0 = numWriters * 50.
+	JobBufferSize int // jobChan buffer size — computed by CalculateJobBufferSize. 0 = max(numWriters*50, 100).
 	WriteFunc     WriteFunc
 	Prog          *progress.Tracker
 	EnableAck     bool // Whether to enable ack channel for checkpointing
@@ -162,8 +162,8 @@ func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 		// generously relative to job buffer. Checkpoint saves can temporarily
 		// slow ack processing, but writers use non-blocking sends with fallback.
 		ackBufferSize := jobBufferSize * 4
-		if ackBufferSize < 100 {
-			ackBufferSize = 100
+		if ackBufferSize < 1000 {
+			ackBufferSize = 1000
 		}
 		logging.Debug("WriterPool: creating ackChan with buffer size %d", ackBufferSize)
 		wp.ackChan = make(chan WriteAck, ackBufferSize)

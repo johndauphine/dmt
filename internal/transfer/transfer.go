@@ -676,15 +676,21 @@ func executeKeysetPagination(
 	// This adapts the pipeline to the table being transferred — narrow-row tables
 	// (Votes at 37B) get large buffers for throughput, wide-row tables (Posts at
 	// 2290B) get small buffers to prevent memory balloon.
+	// Use per-table chunk size if set, then global tuner, then config default.
 	chunkSize := cfg.Migration.ChunkSize
 	if tuner != nil {
-		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+		if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+			chunkSize = cs
+		} else if cs := tuner.Snapshot().ChunkSize; cs > 0 {
 			chunkSize = cs
 		}
 	}
+	// Use auto-detected memory limit when user hasn't set max_memory_mb.
 	pipelineMemoryMB := 0 // 0 = use default (2GB) in CalculateJobBufferSize
 	if cfg.Migration.MaxMemoryMB > 0 {
 		pipelineMemoryMB = int(cfg.Migration.MaxMemoryMB / 2)
+	} else if effectiveMem := cfg.AutoConfig().EffectiveMaxMemoryMB; effectiveMem > 0 {
+		pipelineMemoryMB = int(effectiveMem / 2)
 	}
 	jobBufSize := pool.CalculateJobBufferSize(pipelineMemoryMB, chunkSize, job.Table.EstimatedRowSize, numWriters)
 	logging.Debug("Pipeline %s: jobBufferSize=%d (pipelineMB=%d, chunk=%d, rowBytes=%d, writers=%d)",
@@ -1060,13 +1066,17 @@ func executeRowNumberPagination(
 	// Compute job buffer size from memory budget and row size (same as keyset path)
 	rnChunkSize := cfg.Migration.ChunkSize
 	if tuner != nil {
-		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+		if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
+			rnChunkSize = cs
+		} else if cs := tuner.Snapshot().ChunkSize; cs > 0 {
 			rnChunkSize = cs
 		}
 	}
 	rnPipelineMemMB := 0 // 0 = use default (2GB) in CalculateJobBufferSize
 	if cfg.Migration.MaxMemoryMB > 0 {
 		rnPipelineMemMB = int(cfg.Migration.MaxMemoryMB / 2)
+	} else if effectiveMem := cfg.AutoConfig().EffectiveMaxMemoryMB; effectiveMem > 0 {
+		rnPipelineMemMB = int(effectiveMem / 2)
 	}
 	rnJobBufSize := pool.CalculateJobBufferSize(rnPipelineMemMB, rnChunkSize, job.Table.EstimatedRowSize, numWriters)
 

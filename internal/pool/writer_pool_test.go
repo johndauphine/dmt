@@ -173,3 +173,80 @@ func TestScaleUpAndDown(t *testing.T) {
 		t.Errorf("expected %d rows written, got %d (lost %d)", expected, got, expected-got)
 	}
 }
+
+func TestCalculateJobBufferSize(t *testing.T) {
+	tests := []struct {
+		name              string
+		pipelineMemoryMB  int
+		chunkSize         int
+		estimatedRowBytes int64
+		numWriters        int
+		wantMin           int // result must be >= this
+		wantMax           int // result must be <= this (0 = no upper check)
+	}{
+		{
+			name:              "narrow rows get large buffer",
+			pipelineMemoryMB:  2048,
+			chunkSize:         8000,
+			estimatedRowBytes: 37, // Votes table
+			numWriters:        6,
+			wantMin:           1000, // 2GB / (8000*37) = ~7200
+		},
+		{
+			name:              "wide rows get small buffer",
+			pipelineMemoryMB:  2048,
+			chunkSize:         8000,
+			estimatedRowBytes: 2290, // Posts table
+			numWriters:        6,
+			wantMin:           7,   // at least numWriters+1
+			wantMax:           200, // 2GB / (8000*2290) = ~117
+		},
+		{
+			name:              "zero memory uses default 2GB",
+			pipelineMemoryMB:  0,
+			chunkSize:         50000,
+			estimatedRowBytes: 573,
+			numWriters:        6,
+			wantMin:           7, // at least numWriters+1
+		},
+		{
+			name:              "zero row bytes uses 1KB default",
+			pipelineMemoryMB:  1024,
+			chunkSize:         10000,
+			estimatedRowBytes: 0,
+			numWriters:        4,
+			wantMin:           5, // at least numWriters+1
+		},
+		{
+			name:              "minimum is numWriters+1",
+			pipelineMemoryMB:  1, // tiny budget
+			chunkSize:         100000,
+			estimatedRowBytes: 10000, // huge rows
+			numWriters:        8,
+			wantMin:           9, // numWriters+1
+		},
+		{
+			name:              "zero chunk uses default 50000",
+			pipelineMemoryMB:  2048,
+			chunkSize:         0,
+			estimatedRowBytes: 100,
+			numWriters:        4,
+			wantMin:           5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CalculateJobBufferSize(tt.pipelineMemoryMB, tt.chunkSize, tt.estimatedRowBytes, tt.numWriters)
+			if got < tt.wantMin {
+				t.Errorf("CalculateJobBufferSize() = %d, want >= %d", got, tt.wantMin)
+			}
+			if tt.wantMax > 0 && got > tt.wantMax {
+				t.Errorf("CalculateJobBufferSize() = %d, want <= %d", got, tt.wantMax)
+			}
+			if got < tt.numWriters+1 {
+				t.Errorf("CalculateJobBufferSize() = %d, must be >= numWriters+1 (%d)", got, tt.numWriters+1)
+			}
+		})
+	}
+}

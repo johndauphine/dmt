@@ -66,6 +66,8 @@ lint:
 # Data directories persist across container recreations
 MSSQL_DATA_DIR=$(HOME)/docker-data/mssql
 PG_DATA_DIR=$(HOME)/docker-data/postgres
+MSSQL_BENCH_DIR=$(HOME)/docker-data/mssql-bench
+PG_BENCH_DIR=$(HOME)/docker-data/postgres-bench
 
 test-dbs-up:
 	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
@@ -88,17 +90,17 @@ test-dbs-up:
 #   ~3GB headroom for container OS, WAL files, page cache
 # Host retains remaining RAM for DMT pipeline buffers + OS
 bench-dbs-up:
-	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
-	docker run -d --name mssql-test \
+	@mkdir -p $(MSSQL_BENCH_DIR) $(PG_BENCH_DIR)
+	docker run -d --name mssql-bench \
 		-e 'ACCEPT_EULA=Y' \
 		-e 'SA_PASSWORD=TestPass2024' \
 		-e 'MSSQL_MEMORY_LIMIT_MB=4096' \
-		-v $(MSSQL_DATA_DIR):/var/opt/mssql \
+		-v $(MSSQL_BENCH_DIR):/var/opt/mssql \
 		-p 1433:1433 \
 		mcr.microsoft.com/mssql/server:2022-latest
-	docker run -d --name pg-test \
+	docker run -d --name pg-bench \
 		-e 'POSTGRES_PASSWORD=TestPass2024' \
-		-v $(PG_DATA_DIR):/var/lib/postgresql/data \
+		-v $(PG_BENCH_DIR):/var/lib/postgresql/data \
 		--shm-size=2g \
 		-p 5432:5432 \
 		postgres:16-alpine \
@@ -122,6 +124,9 @@ bench-dbs-up:
 
 test-dbs-down:
 	docker rm -f mssql-test pg-test 2>/dev/null || true
+
+bench-dbs-down:
+	docker rm -f mssql-bench pg-bench 2>/dev/null || true
 
 # Pre-commit hooks
 setup-hooks:
