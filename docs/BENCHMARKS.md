@@ -65,6 +65,69 @@ Both implementations achieve similar throughput for bulk loads (~290K rows/sec M
 ### 3. Go Has Lower Memory Usage
 Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent optimizations also reduced MSSQL→PG upsert memory usage by eliminating millions of small allocations per chunk.
 
+## StackOverflow2013 Benchmark (106.5M rows)
+
+### Test Environment
+
+- **Hardware**: Apple M5 Pro, 24GB RAM, 15 CPU cores
+- **OS**: macOS Tahoe (Darwin 25.3.0)
+- **Databases**: SQL Server 2022, PostgreSQL 16 (Docker 8GB)
+- **Dataset**: StackOverflow2013 (~106.5M rows, 9 tables)
+- **Date**: March 2026
+
+### Dataset Details
+
+| Table | Rows | Avg Row Size |
+|-------|------|-------------|
+| Votes | 52,928,720 | 37 bytes |
+| Comments | 24,534,730 | 343 bytes |
+| Posts | 17,142,169 | 2,290 bytes |
+| Badges | 8,042,005 | 50 bytes |
+| Users | 2,465,713 | 298 bytes |
+| PostLinks | 1,421,208 | 44 bytes |
+| VoteTypes | 15 | — |
+| PostTypes | 8 | — |
+| LinkTypes | 2 | — |
+| **Total** | **106,534,570** | **573 bytes avg** |
+
+### MSSQL → PostgreSQL (drop_recreate)
+
+| Configuration | Transfer | Overall | Duration |
+|--------------|----------|---------|----------|
+| Default (no DB tuning) | 528K rows/s | 425K rows/s | 4m11s |
+| DB tuning (fsync=on) | 662K rows/s | 510K rows/s | 3m29s |
+| DB tuning (fsync=off) | 656K rows/s | 518K rows/s | 3m26s |
+
+### Database Tuning Applied
+
+**SQL Server** (source):
+- `max server memory (MB)` = 4096 (prevents consuming all Docker RAM)
+- `max degree of parallelism` = 6
+
+**PostgreSQL** (target):
+- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
+- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
+- `synchronous_commit` = off (safe — biggest single win for write throughput)
+- `wal_level` = minimal, `max_wal_senders` = 0
+
+### Docker RAM vs Throughput
+
+| Docker RAM | Transfer (fsync=on) | Notes |
+|-----------|-------------------|-------|
+| 4GB | Stalled | MSSQL runs out of memory |
+| 6GB | 528K rows/s | Good, but host memory constrained |
+| **8GB** | **662K rows/s** | **Optimal** — best balance of DB cache and host pipeline memory |
+| 12GB | 432K rows/s | Too much to DBs, starves dmt pipeline |
+| 16GB | ~200-290K rows/s | Significantly degraded |
+
+### Key Findings
+
+1. **Database tuning matters more than Docker RAM** — tuning PG write settings on 8GB Docker (662K) outperformed untuned 6GB (528K) by 25%
+2. **synchronous_commit=off is the biggest safe win** — fsync=on vs off makes minimal difference when synchronous_commit is already off
+3. **More Docker RAM is not better** — the host needs memory for dmt's parallel pipeline buffers; 8GB is optimal for 24GB host
+4. **AI startup tuning finds optimal chunk_size** — with throughput feedback, the AI correctly identifies chunk_size=8000 as optimal for this mixed-row-size workload
+5. **Rosetta 2 is the remaining bottleneck** — ~30-40% overhead on MSSQL reads; native Linux would be significantly faster
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
