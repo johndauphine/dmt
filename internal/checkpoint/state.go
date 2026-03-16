@@ -246,6 +246,9 @@ func (s *State) migrate() error {
 	if err := s.ensureProfileColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureTuningResultColumns(); err != nil {
+		return err
+	}
 
 	// One-time migration: sanitize any passwords stored in config column
 	return s.sanitizeStoredConfigs()
@@ -322,6 +325,36 @@ func (s *State) ensureProfileColumns() error {
 
 	if !hasDescription {
 		if _, err := s.db.Exec(`ALTER TABLE profiles ADD COLUMN description TEXT`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *State) ensureTuningResultColumns() error {
+	columns, err := s.tableColumns("ai_tuning_history")
+	if err != nil {
+		return err
+	}
+
+	hasThroughput := false
+	hasDuration := false
+	for _, col := range columns {
+		switch col {
+		case "final_throughput":
+			hasThroughput = true
+		case "final_duration_seconds":
+			hasDuration = true
+		}
+	}
+
+	if !hasThroughput {
+		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN final_throughput REAL`); err != nil {
+			return err
+		}
+	}
+	if !hasDuration {
+		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN final_duration_seconds REAL`); err != nil {
 			return err
 		}
 	}
@@ -1155,6 +1188,21 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 	return err
 }
 
+// UpdateAITuningResult updates the most recent tuning record that hasn't been
+// populated with results yet. This avoids race conditions with concurrent
+// analyze runs by targeting NULL final_throughput rather than MAX(id).
+func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+	_, err := s.db.Exec(`
+		UPDATE ai_tuning_history
+		SET final_throughput = ?, final_duration_seconds = ?
+		WHERE id = (
+			SELECT MAX(id) FROM ai_tuning_history
+			WHERE final_throughput IS NULL
+		)
+	`, throughput, durationSecs)
+	return err
+}
+
 // GetAITuningHistory returns the most recent AI tuning recommendations.
 func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 	rows, err := s.db.Query(`
@@ -1164,7 +1212,8 @@ func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 		       workers, chunk_size, read_ahead_buffers, write_ahead_writers,
 		       parallel_readers, max_partitions, large_table_threshold,
 		       max_source_connections, max_target_connections,
-		       estimated_memory_mb, ai_reasoning, was_ai_used
+		       estimated_memory_mb, ai_reasoning, was_ai_used,
+		       final_throughput, final_duration_seconds
 		FROM ai_tuning_history
 		ORDER BY timestamp DESC
 		LIMIT ?
@@ -1183,6 +1232,7 @@ func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 		var readAhead, writeAhead, parallelReaders, maxPartitions sql.NullInt64
 		var largeTableThreshold, maxSourceConns, maxTargetConns, estimatedMem sql.NullInt64
 		var wasAIUsed int
+		var finalThroughput, finalDurationSecs sql.NullFloat64
 
 		if err := rows.Scan(
 			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
@@ -1192,6 +1242,7 @@ func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 			&parallelReaders, &maxPartitions, &largeTableThreshold,
 			&maxSourceConns, &maxTargetConns,
 			&estimatedMem, &aiReasoning, &wasAIUsed,
+			&finalThroughput, &finalDurationSecs,
 		); err != nil {
 			return nil, err
 		}
@@ -1237,6 +1288,12 @@ func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 		}
 		if estimatedMem.Valid {
 			r.EstimatedMemoryMB = estimatedMem.Int64
+		}
+		if finalThroughput.Valid {
+			r.FinalThroughput = finalThroughput.Float64
+		}
+		if finalDurationSecs.Valid {
+			r.FinalDurationSecs = finalDurationSecs.Float64
 		}
 
 		records = append(records, r)

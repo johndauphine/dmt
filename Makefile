@@ -64,8 +64,8 @@ lint:
 
 # Docker test databases
 test-dbs-up:
-	docker run -d --name mssql-test -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=TestPass123!' -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
-	docker run -d --name pg-test -e 'POSTGRES_PASSWORD=TestPass123!' -p 5432:5432 postgres:16-alpine
+	docker run -d --name mssql-test -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=TestPass2024' -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
+	docker run -d --name pg-test -e 'POSTGRES_PASSWORD=TestPass2024' -p 5432:5432 postgres:16-alpine
 
 test-dbs-down:
 	docker rm -f mssql-test pg-test 2>/dev/null || true

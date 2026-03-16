@@ -372,6 +372,8 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRe
 			EstimatedMemoryMB:    r.EstimatedMemoryMB,
 			AIReasoning:          r.AIReasoning,
 			WasAIUsed:            r.WasAIUsed,
+			FinalThroughput:      r.FinalThroughput,
+			FinalDurationSecs:    r.FinalDurationSecs,
 		}
 	}
 	return result, nil
@@ -401,6 +403,11 @@ func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 		AIReasoning:         record.AIReasoning,
 		WasAIUsed:           record.WasAIUsed,
 	})
+}
+
+// UpdateAITuningResult updates the most recent tuning record with final migration throughput.
+func (a *stateHistoryAdapter) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+	return a.state.UpdateAITuningResult(throughput, durationSecs)
 }
 
 // addDatabaseTuningRecommendations adds source and target database tuning recommendations.

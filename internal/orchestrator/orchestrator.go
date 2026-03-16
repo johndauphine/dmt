@@ -533,6 +533,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			len(tables), totalRows, duration.Round(time.Second), throughput)
 	}
 
+	// Record final throughput in AI tuning history for future learning
+	if err := o.state.UpdateAITuningResult(throughput, duration.Seconds()); err != nil {
+		logging.Debug("Failed to update AI tuning result: %v", err)
+	}
+
 	// Log identifier changes for PostgreSQL targets
 	if o.config.Target.Type == "postgres" {
 		o.logPGIdentifierChanges(tables)
@@ -845,6 +850,10 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 
 		o.state.CompleteRun(run.ID, "success", "")
+		duration := time.Since(startTime)
+		if err := o.state.UpdateAITuningResult(0, duration.Seconds()); err != nil {
+			logging.Debug("Failed to update AI tuning result: %v", err)
+		}
 		logging.Info("Resume complete!")
 		return nil
 	}
@@ -1006,6 +1015,11 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
+	}
+
+	// Record final throughput in AI tuning history for future learning
+	if err := o.state.UpdateAITuningResult(throughput, duration.Seconds()); err != nil {
+		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 
 	// Log identifier changes for PostgreSQL targets

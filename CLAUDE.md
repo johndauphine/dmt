@@ -146,7 +146,7 @@ All AI features share `AITypeMapper.CallAI()` with provider abstraction (Claude,
 **Testing conventions**:
 - Integration tests use `_integration_test.go` suffix and `testing.Short()` skip
 - `make test-short` skips integration tests; `make test` runs everything
-- Docker test DBs: MSSQL on port 1433 (`SA_PASSWORD=TestPass123!`), PostgreSQL on port 5432 (`POSTGRES_PASSWORD=TestPass123!`)
+- Docker test DBs: MSSQL on port 1433 (`SA_PASSWORD=TestPass2024`), PostgreSQL on port 5432 (`POSTGRES_PASSWORD=TestPass2024`)
 
 **Branch strategy**: Feature branches (`feat/`, `fix/`, `refactor/`), never commit directly to `main`.
 

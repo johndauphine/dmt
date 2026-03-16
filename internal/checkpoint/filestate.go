@@ -446,6 +446,11 @@ func (fs *FileState) SaveAITuning(record AITuningRecord) error {
 	return nil
 }
 
+// UpdateAITuningResult is a no-op for file state.
+func (fs *FileState) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+	return nil
+}
+
 // GetAITuningHistory returns empty slice for file state (doesn't persist tuning history).
 func (fs *FileState) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 	return nil, nil

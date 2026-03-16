@@ -48,6 +48,7 @@ type StateBackend interface {
 	// AI tuning history for analyze command (optional - file backend returns empty/no-op)
 	SaveAITuning(record AITuningRecord) error
 	GetAITuningHistory(limit int) ([]AITuningRecord, error)
+	UpdateAITuningResult(throughput float64, durationSecs float64) error
 }
 
 // HistoryBackend extends StateBackend with profile management.
@@ -93,6 +94,10 @@ type AITuningRecord struct {
 	// AI metadata
 	AIReasoning string `json:"ai_reasoning"`
 	WasAIUsed   bool   `json:"was_ai_used"` // Whether AI was used or formula fallback
+
+	// Post-migration results (updated after run completes)
+	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
+	FinalDurationSecs float64 `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment decision.

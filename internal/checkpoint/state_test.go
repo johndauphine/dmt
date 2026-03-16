@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"database/sql"
+	"math"
 	"testing"
 	"time"
 )
@@ -91,6 +92,86 @@ func countRows(t *testing.T, db *sql.DB, query string, args ...any) int {
 		t.Fatalf("count query error: %v", err)
 	}
 	return count
+}
+
+func TestAITuningThroughputFeedback(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	// Verify new columns exist by saving a record
+	record := AITuningRecord{
+		Timestamp:    time.Now(),
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		TotalTables:  5,
+		TotalRows:    1000000,
+		Workers:      6,
+		ChunkSize:    50000,
+		WasAIUsed:    true,
+	}
+	if err := state.SaveAITuning(record); err != nil {
+		t.Fatalf("SaveAITuning() error: %v", err)
+	}
+
+	// Update with throughput result
+	if err := state.UpdateAITuningResult(450000, 240.5); err != nil {
+		t.Fatalf("UpdateAITuningResult() error: %v", err)
+	}
+
+	// Verify throughput is returned by GetAITuningHistory
+	history, err := state.GetAITuningHistory(5)
+	if err != nil {
+		t.Fatalf("GetAITuningHistory() error: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("Expected 1 record, got %d", len(history))
+	}
+	if math.Abs(history[0].FinalThroughput-450000) > 1 {
+		t.Errorf("FinalThroughput = %f, want 450000", history[0].FinalThroughput)
+	}
+	if math.Abs(history[0].FinalDurationSecs-240.5) > 0.1 {
+		t.Errorf("FinalDurationSecs = %f, want 240.5", history[0].FinalDurationSecs)
+	}
+
+	// Test that UpdateAITuningResult only targets records with NULL throughput
+	record2 := AITuningRecord{
+		Timestamp:    time.Now(),
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		TotalTables:  5,
+		TotalRows:    1000000,
+		Workers:      6,
+		ChunkSize:    100000,
+		WasAIUsed:    true,
+	}
+	if err := state.SaveAITuning(record2); err != nil {
+		t.Fatalf("SaveAITuning(record2) error: %v", err)
+	}
+	if err := state.UpdateAITuningResult(300000, 350.0); err != nil {
+		t.Fatalf("UpdateAITuningResult(record2) error: %v", err)
+	}
+
+	history, err = state.GetAITuningHistory(5)
+	if err != nil {
+		t.Fatalf("GetAITuningHistory() error: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("Expected 2 records, got %d", len(history))
+	}
+	// history[0] is newest (chunk_size=100000), history[1] is oldest (chunk_size=50000)
+	if history[0].ChunkSize != 100000 {
+		t.Errorf("Newest record chunk_size = %d, want 100000", history[0].ChunkSize)
+	}
+	if math.Abs(history[0].FinalThroughput-300000) > 1 {
+		t.Errorf("Newest FinalThroughput = %f, want 300000", history[0].FinalThroughput)
+	}
+	// First record should still have its original throughput (not overwritten)
+	if math.Abs(history[1].FinalThroughput-450000) > 1 {
+		t.Errorf("Oldest FinalThroughput = %f, want 450000 (should not be overwritten)", history[1].FinalThroughput)
+	}
 }
 
 func TestSyncTimestamps(t *testing.T) {
