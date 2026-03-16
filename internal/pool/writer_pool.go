@@ -116,7 +116,7 @@ type WriterPool struct {
 type WriterPoolConfig struct {
 	NumWriters    int
 	BufferSize    int // read-ahead buffer size (used for ack channel scaling)
-	JobBufferSize int // jobChan buffer size — computed by CalculateJobBufferSize. 0 = numWriters * 2.
+	JobBufferSize int // jobChan buffer size — computed by CalculateJobBufferSize. 0 = numWriters * 50.
 	WriteFunc     WriteFunc
 	Prog          *progress.Tracker
 	EnableAck     bool // Whether to enable ack channel for checkpointing
@@ -132,7 +132,12 @@ func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 	// to actual data characteristics instead of using magic multipliers.
 	jobBufferSize := cfg.JobBufferSize
 	if jobBufferSize <= 0 {
-		jobBufferSize = cfg.NumWriters * 2 // minimal default
+		// Safe default when no memory-aware sizing is provided.
+		// Needs enough headroom so burst reads don't stall writers.
+		jobBufferSize = cfg.NumWriters * 50
+		if jobBufferSize < 100 {
+			jobBufferSize = 100
+		}
 	}
 	if jobBufferSize < cfg.NumWriters+1 {
 		jobBufferSize = cfg.NumWriters + 1 // prevent deadlock

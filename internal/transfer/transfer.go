@@ -682,7 +682,10 @@ func executeKeysetPagination(
 			chunkSize = cs
 		}
 	}
-	pipelineMemoryMB := int(cfg.Migration.MaxMemoryMB / 2) // half the budget for pipeline buffers
+	pipelineMemoryMB := 0 // 0 = use default (2GB) in CalculateJobBufferSize
+	if cfg.Migration.MaxMemoryMB > 0 {
+		pipelineMemoryMB = int(cfg.Migration.MaxMemoryMB / 2)
+	}
 	jobBufSize := pool.CalculateJobBufferSize(pipelineMemoryMB, chunkSize, job.Table.EstimatedRowSize, numWriters)
 	logging.Debug("Pipeline %s: jobBufferSize=%d (pipelineMB=%d, chunk=%d, rowBytes=%d, writers=%d)",
 		job.Table.Name, jobBufSize, pipelineMemoryMB, chunkSize, job.Table.EstimatedRowSize, numWriters)
@@ -1061,7 +1064,10 @@ func executeRowNumberPagination(
 			rnChunkSize = cs
 		}
 	}
-	rnPipelineMemMB := int(cfg.Migration.MaxMemoryMB / 2)
+	rnPipelineMemMB := 0 // 0 = use default (2GB) in CalculateJobBufferSize
+	if cfg.Migration.MaxMemoryMB > 0 {
+		rnPipelineMemMB = int(cfg.Migration.MaxMemoryMB / 2)
+	}
 	rnJobBufSize := pool.CalculateJobBufferSize(rnPipelineMemMB, rnChunkSize, job.Table.EstimatedRowSize, numWriters)
 
 	wp := newWriterPool(ctx, writerPoolConfig{

@@ -71,33 +71,33 @@ test-dbs-up:
 	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
 	docker run -d --name mssql-test \
 		-e 'ACCEPT_EULA=Y' \
-		-e 'MSSQL_SA_PASSWORD=Str0ngP4ssw0rd' \
+		-e 'SA_PASSWORD=TestPass2024' \
 		-v $(MSSQL_DATA_DIR):/var/opt/mssql \
 		-p 1433:1433 \
 		mcr.microsoft.com/mssql/server:2022-latest
 	docker run -d --name pg-test \
-		-e 'POSTGRES_PASSWORD=TestPass123!' \
+		-e 'POSTGRES_PASSWORD=TestPass2024' \
 		-v $(PG_DATA_DIR):/var/lib/postgresql/data \
 		-p 5432:5432 \
 		postgres:16-alpine
 
-# Performance-tuned containers for benchmarking
+# Performance-tuned containers for benchmarking (NOT production-safe: fsync=off)
 # Tuned for 8GB Docker RAM (proven optimal on M5 Pro/24GB, same principle here):
 #   MSSQL: 4GB buffer pool — matches M5 Pro sweet spot
 #   PostgreSQL: 1GB shared_buffers + aggressive WAL settings
 #   ~3GB headroom for container OS, WAL files, page cache
-# Host retains 28GB for DMT pipeline buffers + macOS
+# Host retains remaining RAM for DMT pipeline buffers + OS
 bench-dbs-up:
 	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
 	docker run -d --name mssql-test \
 		-e 'ACCEPT_EULA=Y' \
-		-e 'MSSQL_SA_PASSWORD=Str0ngP4ssw0rd' \
+		-e 'SA_PASSWORD=TestPass2024' \
 		-e 'MSSQL_MEMORY_LIMIT_MB=4096' \
 		-v $(MSSQL_DATA_DIR):/var/opt/mssql \
 		-p 1433:1433 \
 		mcr.microsoft.com/mssql/server:2022-latest
 	docker run -d --name pg-test \
-		-e 'POSTGRES_PASSWORD=TestPass123!' \
+		-e 'POSTGRES_PASSWORD=TestPass2024' \
 		-v $(PG_DATA_DIR):/var/lib/postgresql/data \
 		--shm-size=2g \
 		-p 5432:5432 \
@@ -114,7 +114,6 @@ bench-dbs-up:
 		-c wal_level=minimal \
 		-c max_wal_senders=0 \
 		-c synchronous_commit=off \
-		-c full_page_writes=off \
 		-c fsync=off \
 		-c max_connections=200 \
 		-c random_page_cost=1.1 \
