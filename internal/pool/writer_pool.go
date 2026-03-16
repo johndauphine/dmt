@@ -12,46 +12,50 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 )
 
-// defaultPipelineMemoryMB is the default memory budget for pipeline buffers (jobChan)
-// when no explicit budget is provided. Each buffered job holds a full chunk of row data,
-// so this budget limits how much data can be queued between readers and writers.
-const defaultPipelineMemoryMB = 2048 // 2GB
+// PipelineBufferConfig contains the parameters needed to compute pipeline buffer sizes.
+// All values come from system detection, user config, or per-table metadata.
+type PipelineBufferConfig struct {
+	MemoryBudgetMB   int64 // Memory available for the pipeline (from EffectiveMaxMemoryMB minus connection overhead)
+	ChunkSize        int   // Rows per batch
+	RowBytes         int64 // Bytes per row for this specific table
+	NumWriters       int   // Writer goroutines (each holds one chunk being written)
+	ReadAheadBuffers int   // Read-ahead buffers (each holds one chunk queued for reading)
+}
 
-// CalculateJobBufferSize computes the jobChan buffer size from a memory budget.
-// This ensures the pipeline adapts to actual row sizes — narrow-row tables (Votes at
-// 37 bytes/row) get large buffers for throughput, while wide-row tables (Posts at
-// 2290 bytes/row) get small buffers to prevent memory balloon.
+// CalculateJobBufferSize derives the jobChan buffer depth from the memory budget
+// and per-table data characteristics.
 //
-// Parameters:
-//   - pipelineMemoryMB: memory budget for buffered jobs (0 = use default 2GB)
-//   - chunkSize: rows per chunk
-//   - estimatedRowBytes: average bytes per row (0 = assume 1KB)
-//   - numWriters: number of writer goroutines (used as minimum)
+// The pipeline memory model:
 //
-// Returns the number of jobs (chunks) that can be buffered.
-func CalculateJobBufferSize(pipelineMemoryMB int, chunkSize int, estimatedRowBytes int64, numWriters int) int {
-	if pipelineMemoryMB <= 0 {
-		pipelineMemoryMB = defaultPipelineMemoryMB
-	}
-	if chunkSize <= 0 {
-		chunkSize = 50000
-	}
-	if estimatedRowBytes <= 0 {
-		estimatedRowBytes = 1024 // conservative default
+//	total_in_flight = readAheadBuffers + jobChanDepth + numWriters  (in chunks)
+//	total_memory    = total_in_flight * chunkSize * rowBytes        (in bytes)
+//
+// We solve for jobChanDepth: how many chunks can be queued between the consumer
+// and writers, given the memory budget and this table's actual row size.
+func CalculateJobBufferSize(cfg PipelineBufferConfig) int {
+	bytesPerChunk := int64(cfg.ChunkSize) * cfg.RowBytes
+	if bytesPerChunk <= 0 || cfg.MemoryBudgetMB <= 0 {
+		return cfg.NumWriters + 1 // can't calculate; use minimum safe value
 	}
 
-	bytesPerJob := int64(chunkSize) * estimatedRowBytes
-	budgetBytes := int64(pipelineMemoryMB) * 1024 * 1024
-	bufferSize := int(budgetBytes / bytesPerJob)
+	budgetBytes := cfg.MemoryBudgetMB * 1024 * 1024
+
+	// Total chunks that fit in the memory budget
+	totalSlots := int(budgetBytes / bytesPerChunk)
+
+	// Subtract slots already consumed by active readers and writers
+	activeSlots := cfg.ReadAheadBuffers + cfg.NumWriters
+
+	// Remaining slots are available for jobChan buffering
+	jobDepth := totalSlots - activeSlots
 
 	// Minimum: numWriters + 1 to prevent deadlock (each writer needs a pending job,
 	// plus one slot for the consumer to submit without blocking).
-	minBuffer := numWriters + 1
-	if bufferSize < minBuffer {
-		bufferSize = minBuffer
+	if jobDepth < cfg.NumWriters+1 {
+		jobDepth = cfg.NumWriters + 1
 	}
 
-	return bufferSize
+	return jobDepth
 }
 
 // WriteJob represents a batch of rows to write.
@@ -115,8 +119,8 @@ type WriterPool struct {
 // WriterPoolConfig holds the configuration for creating a writer pool.
 type WriterPoolConfig struct {
 	NumWriters    int
-	BufferSize    int // read-ahead buffer size (used for ack channel scaling)
-	JobBufferSize int // jobChan buffer size — computed by CalculateJobBufferSize. 0 = max(numWriters*50, 100).
+	BufferSize    int // read-ahead buffer size
+	JobBufferSize int // jobChan buffer size — must be computed by CalculateJobBufferSize
 	WriteFunc     WriteFunc
 	Prog          *progress.Tracker
 	EnableAck     bool // Whether to enable ack channel for checkpointing
@@ -126,21 +130,11 @@ type WriterPoolConfig struct {
 func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 	writerCtx, cancel := context.WithCancel(ctx)
 
-	// Use caller-computed job buffer size, or a safe default.
-	// The caller should use CalculateJobBufferSize() to derive this from memory
-	// budget, chunk size, and estimated row size — ensuring the pipeline adapts
-	// to actual data characteristics instead of using magic multipliers.
+	// JobBufferSize must be computed by the caller via CalculateJobBufferSize.
+	// Enforce the minimum to prevent deadlock.
 	jobBufferSize := cfg.JobBufferSize
-	if jobBufferSize <= 0 {
-		// Safe default when no memory-aware sizing is provided.
-		// Needs enough headroom so burst reads don't stall writers.
-		jobBufferSize = cfg.NumWriters * 50
-		if jobBufferSize < 100 {
-			jobBufferSize = 100
-		}
-	}
 	if jobBufferSize < cfg.NumWriters+1 {
-		jobBufferSize = cfg.NumWriters + 1 // prevent deadlock
+		jobBufferSize = cfg.NumWriters + 1
 	}
 	logging.Debug("WriterPool: creating jobChan with buffer size %d (writers=%d, bufferSize=%d)",
 		jobBufferSize, cfg.NumWriters, cfg.BufferSize)
@@ -158,13 +152,11 @@ func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 	}
 
 	if cfg.EnableAck {
-		// Ack channel: acks are tiny (PK value + sequence number), so size
-		// generously relative to job buffer. Checkpoint saves can temporarily
-		// slow ack processing, but writers use non-blocking sends with fallback.
-		ackBufferSize := jobBufferSize * 4
-		if ackBufferSize < 1000 {
-			ackBufferSize = 1000
-		}
+		// Ack buffer depth = job buffer + writers in flight.
+		// Each writer produces one ack per completed job, and the ack processor
+		// runs continuously. This ensures the buffer can hold all pending acks
+		// even if checkpoint saves temporarily pause processing.
+		ackBufferSize := jobBufferSize + cfg.NumWriters
 		logging.Debug("WriterPool: creating ackChan with buffer size %d", ackBufferSize)
 		wp.ackChan = make(chan WriteAck, ackBufferSize)
 	}
