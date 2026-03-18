@@ -128,6 +128,60 @@ Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent
 4. **AI startup tuning finds optimal chunk_size** — with throughput feedback, the AI correctly identifies chunk_size=8000 as optimal for this mixed-row-size workload
 5. **Rosetta 2 is the remaining bottleneck** — ~30-40% overhead on MSSQL reads; native Linux would be significantly faster
 
+## PostgreSQL → PostgreSQL with AI Tuning (106.5M rows)
+
+### Test Environment
+
+- **Hardware**: Apple M5 Pro, 24GB RAM, 15 CPU cores
+- **OS**: macOS Tahoe (Darwin 25.3.0)
+- **Source/Target**: PostgreSQL 16 (Docker, shared container)
+- **Dataset**: StackOverflow2013 (~106.5M rows, 9 tables)
+- **AI Provider**: Anthropic (`claude-haiku-4-5-20251001`)
+- **Mode**: `drop_recreate`, AI tuning enabled
+- **Date**: March 2026
+
+### Database Configuration
+
+**PostgreSQL** (source and target, same container):
+- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
+- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
+- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
+- `fsync` = on
+
+**Docker**: Default memory (no cap), single container for both source and target databases.
+
+### AI Tuning Convergence (5 Runs)
+
+The AI tuner uses historical throughput data to optimize parameters across runs. Starting from a base config of 4 workers / 50K chunk_size, it explores the parameter space and converges on optimal settings.
+
+| Run | Workers | Chunk Size | Pools | Transfer | Overall | AI Behavior |
+|-----|---------|-----------|-------|----------|---------|-------------|
+| 1 | 10 | 12,000 | 15 | 889K rows/s | 713K rows/s | Initial conservative estimate |
+| 2 | 12 | 14,000 | 16 | **962K rows/s** | **750K rows/s** | Scaled up, hit peak |
+| 3 | 13 | 15,000 | 20 | 894K rows/s | 693K rows/s | Overshot, regression |
+| 4 | 11 | 13,500 | 15 | 930K rows/s | 735K rows/s | Detected regression, backed off |
+| 5 | 12 | 14,000 | 16 | 939K rows/s | 727K rows/s | Converged on run 2's proven config |
+
+### AI Tuning Parameters (All Runs)
+
+| Parameter | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|-----------|-------|-------|-------|-------|-------|
+| Workers | 10 | 12 | 13 | 11 | 12 |
+| Chunk Size | 12,000 | 14,000 | 15,000 | 13,500 | 14,000 |
+| Read Ahead | 2 | 2 | 2 | 2 | 2 |
+| Write Ahead | 2 | 2 | 2 | 2 | 2 |
+| Parallel Readers | 4 | 4 | 4 | 4 | 4 |
+| Connection Pools | 15 | 16 | 20 | 15 | 16 |
+| Large Table Threshold | 5M | 5M | 5M | 5M | 5M |
+
+### Key Findings
+
+1. **AI tuner performs hill-climbing optimization** — it explores upward (runs 1→2→3), detects regression at 13 workers/15K chunks, corrects (run 4), and converges on the optimal config (run 5)
+2. **PG→PG is significantly faster than MSSQL→PG** — peak 962K rows/s vs 662K rows/s (45% faster), no Rosetta 2 overhead on reads
+3. **12 workers / 14K chunk_size is optimal** — for this workload on M5 Pro with 15 cores, leaving 3 cores for OS/Docker overhead
+4. **Read/write ahead buffers stay constant** — AI correctly identifies that 2/2 is stable across all runs, not worth varying
+5. **Connection pool oversizing hurts** — run 3's jump to 20 pools correlated with the throughput regression
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
