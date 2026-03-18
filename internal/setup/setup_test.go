@@ -195,7 +195,7 @@ func TestCloudProviderRequiresKey(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("y")
-	s.Process("claude")
+	s.Process("anthropic")
 
 	// Empty API key
 	if err := s.Process(""); err == "" {
@@ -745,7 +745,7 @@ func TestWriteSecretsFailureGoesBackToProvider(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("y")
-	s.Process("claude")
+	s.Process("anthropic")
 	s.Process("sk-test-key")
 
 	if s.CurrentStep != StepWriteSecrets {

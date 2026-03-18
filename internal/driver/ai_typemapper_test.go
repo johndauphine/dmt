@@ -40,7 +40,7 @@ func testMapperWithTempCache(t *testing.T, providerName string, provider *secret
 }
 
 func TestNewAITypeMapper_MissingProvider(t *testing.T) {
-	_, err := NewAITypeMapper("claude", nil)
+	_, err := NewAITypeMapper("anthropic", nil)
 	if err == nil {
 		t.Error("expected error when provider is nil")
 	}
@@ -50,7 +50,7 @@ func TestNewAITypeMapper_MissingAPIKey(t *testing.T) {
 	provider := &secrets.Provider{
 		Model: "test-model",
 	}
-	_, err := NewAITypeMapper("claude", provider)
+	_, err := NewAITypeMapper("anthropic", provider)
 	if err == nil {
 		t.Error("expected error when API key is missing for cloud provider")
 	}
@@ -72,12 +72,12 @@ func TestNewAITypeMapper_LocalProviderNoAPIKey(t *testing.T) {
 
 func TestNewAITypeMapper_APIKeyProvided(t *testing.T) {
 	provider := testProvider("test-key-123")
-	mapper, err := NewAITypeMapper("claude", provider)
+	mapper, err := NewAITypeMapper("anthropic", provider)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mapper.ProviderName() != "claude" {
-		t.Errorf("expected provider 'claude', got '%s'", mapper.ProviderName())
+	if mapper.ProviderName() != "anthropic" {
+		t.Errorf("expected provider 'anthropic', got '%s'", mapper.ProviderName())
 	}
 }
 
@@ -86,7 +86,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"claude", "claude-sonnet-4-6"},
+		{"anthropic", "claude-haiku-4-5-20251001"},
 		{"openai", "gpt-4o"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},
@@ -151,7 +151,7 @@ func TestTypeMappingCache(t *testing.T) {
 }
 
 func TestAITypeMapper_CacheKey(t *testing.T) {
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	info := TypeInfo{
 		SourceDBType: "mysql",
@@ -170,7 +170,7 @@ func TestAITypeMapper_CacheKey(t *testing.T) {
 }
 
 func TestAITypeMapper_CanMap(t *testing.T) {
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	// AI mapper should always return true for CanMap
 	if !mapper.CanMap("mysql", "postgres") {
@@ -182,7 +182,7 @@ func TestAITypeMapper_CanMap(t *testing.T) {
 }
 
 func TestAITypeMapper_SupportedTargets(t *testing.T) {
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	targets := mapper.SupportedTargets()
 	if len(targets) != 1 || targets[0] != "*" {
@@ -191,7 +191,7 @@ func TestAITypeMapper_SupportedTargets(t *testing.T) {
 }
 
 func TestAITypeMapper_BuildPrompt(t *testing.T) {
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	info := TypeInfo{
 		SourceDBType: "mysql",
@@ -225,7 +225,7 @@ func TestAITypeMapper_BuildPrompt(t *testing.T) {
 func TestAITypeMapper_BuildPromptWithoutSamples(t *testing.T) {
 	// Sample values are no longer included in prompts (privacy improvement).
 	// Type mapping now works purely from DDL metadata.
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	info := TypeInfo{
 		SourceDBType: "mssql",
@@ -256,7 +256,7 @@ func TestAITypeMapper_BuildPromptWithoutSamples(t *testing.T) {
 
 func TestAITypeMapper_BuildPromptMetadataOnly(t *testing.T) {
 	// Since sample values are no longer used, prompts should work from DDL metadata only
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	info := TypeInfo{
 		SourceDBType: "mssql",
@@ -280,7 +280,7 @@ func TestAITypeMapper_BuildPromptMetadataOnly(t *testing.T) {
 }
 
 func TestAITypeMapper_ExportCache(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	mapper.cache.Set("mysql:postgres:mediumblob:0:0:0", "bytea")
 	mapper.cache.Set("mysql:postgres:tinyint:0:0:0", "smallint")
@@ -302,7 +302,7 @@ func TestAITypeMapper_ExportCache(t *testing.T) {
 }
 
 // Mock server for testing API calls
-func TestAITypeMapper_ClaudeAPI(t *testing.T) {
+func TestAITypeMapper_AnthropicAPI(t *testing.T) {
 	// Create mock Claude API server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "test-api-key" {
@@ -310,7 +310,7 @@ func TestAITypeMapper_ClaudeAPI(t *testing.T) {
 			return
 		}
 
-		response := claudeResponse{
+		response := anthropicResponse{
 			Content: []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -418,7 +418,7 @@ func TestAITypeMapper_BuildPromptExcludesSampleValues(t *testing.T) {
 	// Sample values are no longer included in prompts (privacy improvement).
 	// This test verifies that even when SampleValues are provided,
 	// they are not included in the generated prompt.
-	mapper, _ := NewAITypeMapper("claude", testProvider("test-key"))
+	mapper, _ := NewAITypeMapper("anthropic", testProvider("test-key"))
 
 	// Create info with sample values that would previously be included
 	info := TypeInfo{
@@ -489,9 +489,9 @@ func TestIsValidAIProvider_CaseInsensitive(t *testing.T) {
 		provider string
 		valid    bool
 	}{
-		{"claude", true},
-		{"Claude", true},
-		{"CLAUDE", true},
+		{"anthropic", true},
+		{"Anthropic", true},
+		{"ANTHROPIC", true},
 		{"openai", true},
 		{"OpenAI", true},
 		{"OPENAI", true},
@@ -520,9 +520,10 @@ func TestNormalizeAIProvider(t *testing.T) {
 		provider string
 		expected string
 	}{
-		{"claude", "claude"},
-		{"Claude", "claude"},
-		{"CLAUDE", "claude"},
+		{"anthropic", "anthropic"},
+		{"Anthropic", "anthropic"},
+		{"ANTHROPIC", "anthropic"},
+		{"claude", ""},
 		{"openai", "openai"},
 		{"OpenAI", "openai"},
 		{"OPENAI", "openai"},
@@ -555,7 +556,7 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 
 	// Create first mapper with empty cache
 	mapper := &AITypeMapper{
-		providerName:   "claude",
+		providerName:   "anthropic",
 		provider:       provider,
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
@@ -574,7 +575,7 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 
 	// Create new mapper with empty cache and same cache file
 	mapper2 := &AITypeMapper{
-		providerName:   "claude",
+		providerName:   "anthropic",
 		provider:       provider,
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
@@ -682,7 +683,7 @@ func TestRetryableHTTPDo_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 	mapper.client = server.Client()
 
 	ctx := context.Background()
@@ -719,7 +720,7 @@ func TestRetryableHTTPDo_RetryOn500(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 	mapper.client = server.Client()
 
 	ctx := context.Background()
@@ -751,7 +752,7 @@ func TestRetryableHTTPDo_ExhaustedRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 	mapper.client = server.Client()
 
 	ctx := context.Background()
@@ -779,7 +780,7 @@ func TestRetryableHTTPDo_NoRetryOn400(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 	mapper.client = server.Client()
 
 	ctx := context.Background()
@@ -809,7 +810,7 @@ func TestRetryableHTTPDo_ContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 	mapper.client = server.Client()
 
 	// Create a context that will be cancelled during the retry delay
@@ -874,7 +875,7 @@ func TestIsRetryableError_EOF(t *testing.T) {
 // Tests for finalization DDL generation
 
 func TestGenerateFinalizationDDL_Validation(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 	ctx := context.Background()
 
 	tests := []struct {
@@ -945,7 +946,7 @@ func TestGenerateFinalizationDDL_Validation(t *testing.T) {
 }
 
 func TestBuildIndexDDLPrompt(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeIndex,
@@ -993,7 +994,7 @@ func TestBuildIndexDDLPrompt(t *testing.T) {
 }
 
 func TestBuildIndexDDLPrompt_Minimal(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeIndex,
@@ -1040,7 +1041,7 @@ func TestBuildIndexDDLPrompt_Minimal(t *testing.T) {
 }
 
 func TestBuildForeignKeyDDLPrompt(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeForeignKey,
@@ -1095,7 +1096,7 @@ func TestBuildForeignKeyDDLPrompt(t *testing.T) {
 }
 
 func TestBuildForeignKeyDDLPrompt_SameSchema(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeForeignKey,
@@ -1126,7 +1127,7 @@ func TestBuildForeignKeyDDLPrompt_SameSchema(t *testing.T) {
 }
 
 func TestBuildCheckConstraintDDLPrompt(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeCheckConstraint,
@@ -1172,7 +1173,7 @@ func TestBuildCheckConstraintDDLPrompt(t *testing.T) {
 }
 
 func TestBuildCheckConstraintDDLPrompt_NoSourceDB(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := FinalizationDDLRequest{
 		Type:         DDLTypeCheckConstraint,
@@ -1252,7 +1253,7 @@ func TestTargetIdentifier(t *testing.T) {
 }
 
 func TestBuildTableDDLPrompt_IncludesTargetColumnNames(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := TableDDLRequest{
 		SourceDBType: "mssql",
@@ -1294,7 +1295,7 @@ func TestBuildTableDDLPrompt_IncludesTargetColumnNames(t *testing.T) {
 }
 
 func TestBuildTableDDLPrompt_SameEngine_NoAnnotations(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	req := TableDDLRequest{
 		SourceDBType: "mssql",
@@ -1322,7 +1323,7 @@ func TestBuildTableDDLPrompt_SameEngine_NoAnnotations(t *testing.T) {
 }
 
 func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
-	mapper := testMapperWithTempCache(t, "claude", testProvider("test-key"))
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
 
 	tests := []struct {
 		name         string

@@ -43,8 +43,8 @@ func init() {
 type AIProvider string
 
 const (
-	// ProviderClaude uses Anthropic's Claude API.
-	ProviderClaude AIProvider = "claude"
+	// ProviderAnthropic uses Anthropic's Claude API.
+	ProviderAnthropic AIProvider = "anthropic"
 	// ProviderOpenAI uses OpenAI's API.
 	ProviderOpenAI AIProvider = "openai"
 	// ProviderGemini uses Google's Gemini API.
@@ -58,7 +58,7 @@ const (
 // ValidAIProviders returns the list of supported AI provider names.
 func ValidAIProviders() []string {
 	return []string{
-		string(ProviderClaude),
+		string(ProviderAnthropic),
 		string(ProviderOpenAI),
 		string(ProviderGemini),
 		string(ProviderOllama),
@@ -69,7 +69,7 @@ func ValidAIProviders() []string {
 // IsValidAIProvider returns true if the provider name is valid (case-insensitive).
 func IsValidAIProvider(provider string) bool {
 	switch AIProvider(strings.ToLower(provider)) {
-	case ProviderClaude, ProviderOpenAI, ProviderGemini, ProviderOllama, ProviderLMStudio:
+	case ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOllama, ProviderLMStudio:
 		return true
 	}
 	return false
@@ -282,8 +282,8 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 	var err error
 
 	switch AIProvider(m.providerName) {
-	case ProviderClaude:
-		result, err = m.queryClaudeAPI(ctx, prompt)
+	case ProviderAnthropic:
+		result, err = m.queryAnthropicAPI(ctx, prompt)
 	case ProviderOpenAI:
 		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
 	case ProviderGemini:
@@ -423,20 +423,20 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 	return sb.String()
 }
 
-// Claude API types
-type claudeRequest struct {
+// Anthropic API types
+type anthropicRequest struct {
 	Model     string          `json:"model"`
 	MaxTokens int             `json:"max_tokens"`
 	System    string          `json:"system,omitempty"`
-	Messages  []claudeMessage `json:"messages"`
+	Messages  []anthropicMessage `json:"messages"`
 }
 
-type claudeMessage struct {
+type anthropicMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-type claudeResponse struct {
+type anthropicResponse struct {
 	Content []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -656,7 +656,7 @@ func calculateBackoff(attempt int) time.Duration {
 	return delay
 }
 
-func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (string, error) {
+func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
 
 	// Detect if this is a type mapping query (short, simple) vs a complex query.
@@ -678,11 +678,11 @@ func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (strin
 		}
 	}
 
-	reqBody := claudeRequest{
+	reqBody := anthropicRequest{
 		Model:     model,
 		MaxTokens: maxTokens,
 		System:    systemPrompt,
-		Messages: []claudeMessage{
+		Messages: []anthropicMessage{
 			{Role: "user", Content: prompt},
 		},
 	}
@@ -711,20 +711,20 @@ func (m *AITypeMapper) queryClaudeAPI(ctx context.Context, prompt string) (strin
 		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, sanitizeErrorResponse(body, 200))
 	}
 
-	var claudeResp claudeResponse
-	if err := json.Unmarshal(body, &claudeResp); err != nil {
+	var anthropicResp anthropicResponse
+	if err := json.Unmarshal(body, &anthropicResp); err != nil {
 		return "", fmt.Errorf("parsing response: %w", err)
 	}
 
-	if claudeResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", claudeResp.Error.Message)
+	if anthropicResp.Error != nil {
+		return "", fmt.Errorf("API error: %s", anthropicResp.Error.Message)
 	}
 
-	if len(claudeResp.Content) == 0 || claudeResp.Content[0].Text == "" {
+	if len(anthropicResp.Content) == 0 || anthropicResp.Content[0].Text == "" {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return claudeResp.Content[0].Text, nil
+	return anthropicResp.Content[0].Text, nil
 }
 
 // OpenAI API types
@@ -1122,8 +1122,8 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 	var err error
 
 	switch AIProvider(m.providerName) {
-	case ProviderClaude:
-		result, err = m.queryClaudeAPI(ctx, prompt)
+	case ProviderAnthropic:
+		result, err = m.queryAnthropicAPI(ctx, prompt)
 	case ProviderOpenAI:
 		result, err = m.queryOpenAIAPI(ctx, prompt, "https://api.openai.com/v1/chat/completions")
 	case ProviderGemini:

@@ -509,9 +509,9 @@ func TestNewFromSecrets(t *testing.T) {
 		secretsPath := tmpDir + "/secrets.yaml"
 		secretsContent := `
 ai:
-  default_provider: claude
+  default_provider: anthropic
   providers:
-    claude:
+    anthropic:
       api_key: "test-key"
 notifications:
   slack:
@@ -538,9 +538,9 @@ notifications:
 		secretsPath := tmpDir + "/secrets.yaml"
 		secretsContent := `
 ai:
-  default_provider: claude
+  default_provider: anthropic
   providers:
-    claude:
+    anthropic:
       api_key: "test-key"
 notifications:
   slack:

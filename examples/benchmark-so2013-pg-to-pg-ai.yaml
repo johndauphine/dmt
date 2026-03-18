@@ -24,7 +24,7 @@ target:
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}
-  provider: claude
+  provider: anthropic
   model: claude-haiku-4-5-20251001
 
 migration:

@@ -108,7 +108,7 @@ var KnownProviders = map[string]struct {
 	Type       ProviderType
 	DefaultURL string
 }{
-	"claude":   {ProviderTypeCloud, "https://api.anthropic.com"},
+	"anthropic":   {ProviderTypeCloud, "https://api.anthropic.com"},
 	"openai":   {ProviderTypeCloud, "https://api.openai.com"},
 	"gemini":   {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
 	"ollama":   {ProviderTypeLocal, "http://localhost:11434"},
@@ -117,7 +117,7 @@ var KnownProviders = map[string]struct {
 
 // DefaultModels maps providers to their default models
 var DefaultModels = map[string]string{
-	"claude":   "claude-sonnet-4-6",
+	"anthropic":   "claude-haiku-4-5-20251001",
 	"openai":   "gpt-4o",
 	"gemini":   "gemini-2.0-flash",
 	"ollama":   "llama3",
@@ -491,9 +491,9 @@ To create a secrets file, run:
 Or create %s manually with:
 
 ai:
-  default_provider: claude
+  default_provider: anthropic
   providers:
-    claude:
+    anthropic:
       api_key: "your-api-key"
 
 encryption:
@@ -508,13 +508,13 @@ func GenerateTemplate() string {
 # Permissions should be restricted: chmod 600 ~/.secrets/dmt-config.yaml
 
 ai:
-  default_provider: claude  # Which provider to use by default
+  default_provider: anthropic  # Which provider to use by default
 
   providers:
     # Cloud providers (require API key)
-    claude:
+    anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
-      model: "claude-sonnet-4-6"  # optional
+      model: "claude-haiku-4-5-20251001"  # optional
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/
