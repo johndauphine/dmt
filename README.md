@@ -250,7 +250,7 @@ ai:
   api_key: ${ANTHROPIC_API_KEY}   # or OPENAI_API_KEY or GEMINI_API_KEY
 ```
 
-This auto-enables AI type mapping. Provider defaults to Claude (Anthropic).
+This auto-enables AI type mapping. Provider defaults to Anthropic.
 
 ### Supported Providers
 

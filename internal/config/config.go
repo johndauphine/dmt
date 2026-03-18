@@ -181,7 +181,7 @@ type AIConfig struct {
 	APIKey string `yaml:"api_key"`
 
 	// Provider specifies which AI provider to use.
-	// Valid values: "anthropic", "openai", "gemini"
+	// Valid values: "anthropic", "openai", "gemini", "ollama", "lmstudio"
 	// Defaults to "anthropic" if not specified.
 	Provider string `yaml:"provider"`
 
