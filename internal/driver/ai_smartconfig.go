@@ -118,8 +118,9 @@ type AutoTuneOutput struct {
 type TuningHistoryProvider interface {
 	// GetAIAdjustments returns recent runtime AI adjustments from migrations
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
-	// GetAITuningHistory returns recent tuning recommendations from analyze
-	GetAITuningHistory(limit int) ([]AITuningRecord, error)
+	// GetAITuningHistory returns recent tuning recommendations from analyze.
+	// When sourceType and targetType are non-empty, results are filtered by direction.
+	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error
 	// UpdateAITuningResult updates the most recent tuning record with final throughput
@@ -467,8 +468,8 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 	var sb strings.Builder
 
-	// Section 1: Parameter trajectory from past tuning runs
-	tuningHistory, err := s.historyProvider.GetAITuningHistory(5)
+	// Section 1: Parameter trajectory from past tuning runs (filtered by direction)
+	tuningHistory, err := s.historyProvider.GetAITuningHistory(5, s.dbType, s.targetDBType)
 	if err == nil && len(tuningHistory) > 0 {
 		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses, oldest first):\n")
 		for i := len(tuningHistory) - 1; i >= 0; i-- {

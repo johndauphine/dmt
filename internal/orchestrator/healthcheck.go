@@ -342,8 +342,8 @@ func (a *stateHistoryAdapter) GetAIAdjustments(limit int) ([]driver.AIAdjustment
 }
 
 // GetAITuningHistory returns recent tuning recommendations from analyze.
-func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRecord, error) {
-	records, err := a.state.GetAITuningHistory(limit)
+func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetType string) ([]driver.AITuningRecord, error) {
+	records, err := a.state.GetAITuningHistory(limit, sourceType, targetType)
 	if err != nil {
 		return nil, err
 	}

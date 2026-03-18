@@ -452,7 +452,7 @@ func (fs *FileState) UpdateAITuningResult(throughput float64, durationSecs float
 }
 
 // GetAITuningHistory returns empty slice for file state (doesn't persist tuning history).
-func (fs *FileState) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
+func (fs *FileState) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
 	return nil, nil
 }
 
