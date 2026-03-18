@@ -256,7 +256,7 @@ This auto-enables AI type mapping. Provider defaults to Claude (Anthropic).
 
 | Provider | Config Value | Default Model | API Key Variable |
 |----------|--------------|---------------|------------------|
-| **Claude** (default) | `claude` | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
+| **Anthropic** (default) | `anthropic` | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `openai` | `gpt-4o` | `OPENAI_API_KEY` |
 | **Google Gemini** | `gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
 | **Ollama** (local) | `ollama` | - | - |

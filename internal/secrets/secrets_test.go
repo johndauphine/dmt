@@ -17,7 +17,7 @@ ai:
   providers:
     anthropic:
       api_key: "test-key"
-      model: "claude-sonnet-4-6"
+      model: "claude-haiku-4-5-20251001"
     ollama:
       base_url: "http://localhost:11434"
       model: "llama3"
@@ -73,7 +73,7 @@ ai:
   default_provider: anthropic
   providers:
     anthropic:
-      model: "claude-sonnet-4-6"
+      model: "claude-haiku-4-5-20251001"
 
 encryption:
   master_key: "test"

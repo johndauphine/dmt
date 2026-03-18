@@ -302,7 +302,7 @@ func TestAITypeMapper_ExportCache(t *testing.T) {
 }
 
 // Mock server for testing API calls
-func TestAITypeMapper_ClaudeAPI(t *testing.T) {
+func TestAITypeMapper_AnthropicAPI(t *testing.T) {
 	// Create mock Claude API server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "test-api-key" {
@@ -523,6 +523,9 @@ func TestNormalizeAIProvider(t *testing.T) {
 		{"anthropic", "anthropic"},
 		{"Anthropic", "anthropic"},
 		{"ANTHROPIC", "anthropic"},
+		{"claude", "anthropic"},
+		{"Claude", "anthropic"},
+		{"CLAUDE", "anthropic"},
 		{"openai", "openai"},
 		{"OpenAI", "openai"},
 		{"OPENAI", "openai"},

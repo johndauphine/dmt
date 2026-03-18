@@ -76,9 +76,13 @@ func IsValidAIProvider(provider string) bool {
 }
 
 // NormalizeAIProvider returns the canonical lowercase provider name.
+// Supports "claude" as a deprecated alias for "anthropic".
 // Returns empty string if the provider is invalid.
 func NormalizeAIProvider(provider string) string {
 	normalized := strings.ToLower(provider)
+	if normalized == "claude" {
+		return string(ProviderAnthropic)
+	}
 	if IsValidAIProvider(normalized) {
 		return normalized
 	}
