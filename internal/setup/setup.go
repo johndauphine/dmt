@@ -123,7 +123,7 @@ func (s *State) Prompt() PromptInfo {
 		providers := sortedProviderNames()
 		return PromptInfo{
 			Text:    fmt.Sprintf("AI provider (%s)", strings.Join(providers, "/")),
-			Default: "claude",
+			Default: "anthropic",
 			Choices: providers,
 		}
 	case StepAIKey:
@@ -345,7 +345,7 @@ func (s *State) Process(input string) string {
 
 	case StepAIProvider:
 		if input == "" {
-			input = "claude"
+			input = "anthropic"
 		}
 		input = strings.ToLower(input)
 		if _, ok := secrets.KnownProviders[input]; !ok {

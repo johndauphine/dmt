@@ -181,13 +181,13 @@ type AIConfig struct {
 	APIKey string `yaml:"api_key"`
 
 	// Provider specifies which AI provider to use.
-	// Valid values: "claude", "openai", "gemini"
-	// Defaults to "claude" if not specified.
+	// Valid values: "anthropic", "openai", "gemini"
+	// Defaults to "anthropic" if not specified.
 	Provider string `yaml:"provider"`
 
 	// Model specifies which model to use (optional).
 	// Defaults to smart models for accurate inference:
-	//   Claude: claude-sonnet-4-6
+	//   Anthropic: claude-sonnet-4-6
 	//   OpenAI: gpt-4o
 	//   Gemini: gemini-2.0-flash
 	Model string `yaml:"model"`
@@ -719,9 +719,9 @@ func (c *Config) applyDefaults() {
 
 	// AI features: apply defaults when api_key is configured
 	if c.AI != nil && c.AI.APIKey != "" {
-		// Default provider to claude if not specified
+		// Default provider to anthropic if not specified
 		if c.AI.Provider == "" {
-			c.AI.Provider = "claude"
+			c.AI.Provider = "anthropic"
 		}
 		// Normalize provider to lowercase for case-insensitive matching
 		if c.AI.Provider != "" {
@@ -1362,7 +1362,7 @@ func (c *Config) DebugDump() string {
 	b.WriteString("\nAI Features:\n")
 	if secretsErr == nil {
 		provider, providerName, err := secretsCfg.GetDefaultProvider()
-		// Check for valid provider: API-key-based (Claude, OpenAI) or local with BaseURL (Ollama, LMStudio)
+		// Check for valid provider: API-key-based (Anthropic, OpenAI) or local with BaseURL (Ollama, LMStudio)
 		if err == nil && provider != nil && (provider.APIKey != "" || provider.BaseURL != "") {
 			b.WriteString(fmt.Sprintf("  Provider: %s\n", providerName))
 			if provider.APIKey != "" {

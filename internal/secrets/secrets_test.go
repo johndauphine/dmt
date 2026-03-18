@@ -13,9 +13,9 @@ func TestLoadSecretsFile(t *testing.T) {
 
 	content := `
 ai:
-  default_provider: claude
+  default_provider: anthropic
   providers:
-    claude:
+    anthropic:
       api_key: "test-key"
       model: "claude-sonnet-4-6"
     ollama:
@@ -42,16 +42,16 @@ encryption:
 	}
 
 	// Verify AI config
-	if config.AI.DefaultProvider != "claude" {
-		t.Errorf("Expected default_provider 'claude', got %q", config.AI.DefaultProvider)
+	if config.AI.DefaultProvider != "anthropic" {
+		t.Errorf("Expected default_provider 'anthropic', got %q", config.AI.DefaultProvider)
 	}
 
 	provider, name, err := config.GetDefaultProvider()
 	if err != nil {
 		t.Fatalf("Failed to get default provider: %v", err)
 	}
-	if name != "claude" {
-		t.Errorf("Expected provider name 'claude', got %q", name)
+	if name != "anthropic" {
+		t.Errorf("Expected provider name 'anthropic', got %q", name)
 	}
 	if provider.APIKey != "test-key" {
 		t.Errorf("Expected api_key 'test-key', got %q", provider.APIKey)
@@ -70,9 +70,9 @@ func TestValidateCloudProviderRequiresAPIKey(t *testing.T) {
 	// Missing API key for cloud provider
 	content := `
 ai:
-  default_provider: claude
+  default_provider: anthropic
   providers:
-    claude:
+    anthropic:
       model: "claude-sonnet-4-6"
 
 encryption:
@@ -135,14 +135,14 @@ func TestGetEffectiveModel(t *testing.T) {
 	provider := &Provider{}
 
 	// Should return default model when not specified
-	model := provider.GetEffectiveModel("claude")
+	model := provider.GetEffectiveModel("anthropic")
 	if model != "claude-sonnet-4-6" {
-		t.Errorf("Expected default Claude model, got %q", model)
+		t.Errorf("Expected default Anthropic model, got %q", model)
 	}
 
 	// Should return custom model when specified
 	provider.Model = "custom-model"
-	model = provider.GetEffectiveModel("claude")
+	model = provider.GetEffectiveModel("anthropic")
 	if model != "custom-model" {
 		t.Errorf("Expected custom model, got %q", model)
 	}
@@ -194,7 +194,7 @@ func TestIsLocalProvider(t *testing.T) {
 		name     string
 		expected bool
 	}{
-		{"claude", false},
+		{"anthropic", false},
 		{"openai", false},
 		{"gemini", false},
 		{"ollama", true},
@@ -242,7 +242,7 @@ func TestGenerateTemplate(t *testing.T) {
 	// Check for key sections
 	expectedStrings := []string{
 		"default_provider",
-		"claude:",
+		"anthropic:",
 		"openai:",
 		"ollama:",
 		"lmstudio:",
