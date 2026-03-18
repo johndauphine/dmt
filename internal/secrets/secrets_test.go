@@ -136,7 +136,7 @@ func TestGetEffectiveModel(t *testing.T) {
 
 	// Should return default model when not specified
 	model := provider.GetEffectiveModel("anthropic")
-	if model != "claude-sonnet-4-6" {
+	if model != "claude-haiku-4-5-20251001" {
 		t.Errorf("Expected default Anthropic model, got %q", model)
 	}
 

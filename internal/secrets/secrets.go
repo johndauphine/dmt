@@ -117,7 +117,7 @@ var KnownProviders = map[string]struct {
 
 // DefaultModels maps providers to their default models
 var DefaultModels = map[string]string{
-	"anthropic":   "claude-sonnet-4-6",
+	"anthropic":   "claude-haiku-4-5-20251001",
 	"openai":   "gpt-4o",
 	"gemini":   "gemini-2.0-flash",
 	"ollama":   "llama3",
@@ -514,7 +514,7 @@ ai:
     # Cloud providers (require API key)
     anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
-      model: "claude-sonnet-4-6"  # optional
+      model: "claude-haiku-4-5-20251001"  # optional
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/
