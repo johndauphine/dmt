@@ -121,8 +121,8 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		t.Fatalf("UpdateAITuningResult() error: %v", err)
 	}
 
-	// Verify throughput is returned by GetAITuningHistory (filtered by direction)
-	history, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	// Verify throughput is returned by GetAITuningHistory
+	history, err := state.GetAITuningHistory(5)
 	if err != nil {
 		t.Fatalf("GetAITuningHistory() error: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 
 	// Test that UpdateAITuningResult only targets records with NULL throughput
 	record2 := AITuningRecord{
-		Timestamp:    time.Now().Add(time.Second), // Ensure distinct timestamp (stored as seconds)
+		Timestamp:    time.Now(),
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
 		TotalTables:  5,
@@ -154,7 +154,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		t.Fatalf("UpdateAITuningResult(record2) error: %v", err)
 	}
 
-	history, err = state.GetAITuningHistory(5, "mssql", "postgres")
+	history, err = state.GetAITuningHistory(5)
 	if err != nil {
 		t.Fatalf("GetAITuningHistory() error: %v", err)
 	}
@@ -171,84 +171,6 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	// First record should still have its original throughput (not overwritten)
 	if math.Abs(history[1].FinalThroughput-450000) > 1 {
 		t.Errorf("Oldest FinalThroughput = %f, want 450000 (should not be overwritten)", history[1].FinalThroughput)
-	}
-}
-
-func TestAITuningHistoryDirectionFilter(t *testing.T) {
-	state, err := New(t.TempDir())
-	if err != nil {
-		t.Fatalf("New() error: %v", err)
-	}
-	defer state.Close()
-
-	// Save records for two different directions
-	mssqlToPG := AITuningRecord{
-		Timestamp:    time.Now(),
-		SourceDBType: "mssql",
-		TargetDBType: "postgres",
-		TotalTables:  9,
-		TotalRows:    106000000,
-		Workers:      10,
-		ChunkSize:    12000,
-		WasAIUsed:    true,
-	}
-	pgToPG := AITuningRecord{
-		Timestamp:    time.Now(),
-		SourceDBType: "postgres",
-		TargetDBType: "postgres",
-		TotalTables:  9,
-		TotalRows:    106000000,
-		Workers:      12,
-		ChunkSize:    14000,
-		WasAIUsed:    true,
-	}
-	if err := state.SaveAITuning(mssqlToPG); err != nil {
-		t.Fatalf("SaveAITuning(mssql→pg) error: %v", err)
-	}
-	if err := state.SaveAITuning(pgToPG); err != nil {
-		t.Fatalf("SaveAITuning(pg→pg) error: %v", err)
-	}
-
-	// Unfiltered should return both
-	all, err := state.GetAITuningHistory(5, "", "")
-	if err != nil {
-		t.Fatalf("GetAITuningHistory(unfiltered) error: %v", err)
-	}
-	if len(all) != 2 {
-		t.Fatalf("Expected 2 unfiltered records, got %d", len(all))
-	}
-
-	// Filtered by mssql→postgres should return only 1
-	mssqlOnly, err := state.GetAITuningHistory(5, "mssql", "postgres")
-	if err != nil {
-		t.Fatalf("GetAITuningHistory(mssql→pg) error: %v", err)
-	}
-	if len(mssqlOnly) != 1 {
-		t.Fatalf("Expected 1 mssql→pg record, got %d", len(mssqlOnly))
-	}
-	if mssqlOnly[0].Workers != 10 {
-		t.Errorf("Expected workers=10 for mssql→pg, got %d", mssqlOnly[0].Workers)
-	}
-
-	// Filtered by postgres→postgres should return only 1
-	pgOnly, err := state.GetAITuningHistory(5, "postgres", "postgres")
-	if err != nil {
-		t.Fatalf("GetAITuningHistory(pg→pg) error: %v", err)
-	}
-	if len(pgOnly) != 1 {
-		t.Fatalf("Expected 1 pg→pg record, got %d", len(pgOnly))
-	}
-	if pgOnly[0].Workers != 12 {
-		t.Errorf("Expected workers=12 for pg→pg, got %d", pgOnly[0].Workers)
-	}
-
-	// Filtered by nonexistent direction should return empty
-	none, err := state.GetAITuningHistory(5, "mysql", "postgres")
-	if err != nil {
-		t.Fatalf("GetAITuningHistory(mysql→pg) error: %v", err)
-	}
-	if len(none) != 0 {
-		t.Fatalf("Expected 0 mysql→pg records, got %d", len(none))
 	}
 }
 

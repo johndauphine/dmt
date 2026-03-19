@@ -47,7 +47,7 @@ type StateBackend interface {
 
 	// AI tuning history for analyze command (optional - file backend returns empty/no-op)
 	SaveAITuning(record AITuningRecord) error
-	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
+	GetAITuningHistory(limit int) ([]AITuningRecord, error)
 	UpdateAITuningResult(throughput float64, durationSecs float64) error
 }
 

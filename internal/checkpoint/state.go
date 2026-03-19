@@ -1204,10 +1204,8 @@ func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64) e
 }
 
 // GetAITuningHistory returns the most recent AI tuning recommendations.
-// When sourceType and targetType are non-empty, results are filtered to only
-// include history for that specific migration direction (e.g., "mssql"→"postgres").
-func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
-	query := `
+func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
+	rows, err := s.db.Query(`
 		SELECT id, timestamp, source_db_type, target_db_type,
 		       total_tables, total_rows, avg_row_size_bytes,
 		       cpu_cores, memory_gb,
@@ -1216,15 +1214,10 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		       max_source_connections, max_target_connections,
 		       estimated_memory_mb, ai_reasoning, was_ai_used,
 		       final_throughput, final_duration_seconds
-		FROM ai_tuning_history`
-	var args []interface{}
-	if sourceType != "" && targetType != "" {
-		query += ` WHERE source_db_type = ? AND target_db_type = ?`
-		args = append(args, sourceType, targetType)
-	}
-	query += ` ORDER BY timestamp DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.Query(query, args...)
+		FROM ai_tuning_history
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, limit)
 	if err != nil {
 		return nil, err
 	}
