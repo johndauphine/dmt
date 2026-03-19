@@ -739,7 +739,14 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	}
 
 	// Save tuning history with actual params used (after user overrides)
-	analyzer.SaveTuningWithActualParams(o.config.Migration.Workers, o.config.Migration.ChunkSize)
+	analyzer.SaveTuningWithActualParams(driver.ActualParams{
+		Workers:           o.config.Migration.Workers,
+		ChunkSize:         o.config.Migration.ChunkSize,
+		ReadAheadBuffers:  o.config.Migration.ReadAheadBuffers,
+		WriteAheadWriters: o.config.Migration.WriteAheadWriters,
+		ParallelReaders:   o.config.Migration.ParallelReaders,
+		MaxPartitions:     o.config.Migration.MaxPartitions,
+	})
 }
 
 // Resume continues an interrupted migration

@@ -212,7 +212,14 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	}
 
 	// Save tuning history with AI's recommended values (no user overrides for analyze)
-	analyzer.SaveTuningWithActualParams(suggestions.Workers, suggestions.ChunkSizeRecommendation)
+	analyzer.SaveTuningWithActualParams(driver.ActualParams{
+		Workers:           suggestions.Workers,
+		ChunkSize:         suggestions.ChunkSizeRecommendation,
+		ReadAheadBuffers:  suggestions.ReadAheadBuffers,
+		WriteAheadWriters: suggestions.WriteAheadWriters,
+		ParallelReaders:   suggestions.ParallelReaders,
+		MaxPartitions:     suggestions.MaxPartitions,
+	})
 
 	// Add database tuning recommendations using the same AI mapper
 	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)

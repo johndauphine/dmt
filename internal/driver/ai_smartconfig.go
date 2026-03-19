@@ -306,18 +306,32 @@ type pendingTuningSave struct {
 	aiReasoning string
 }
 
+// ActualParams holds the actual migration parameters used after user overrides.
+type ActualParams struct {
+	Workers           int
+	ChunkSize         int
+	ReadAheadBuffers  int
+	WriteAheadWriters int
+	ParallelReaders   int
+	MaxPartitions     int
+}
+
 // SaveTuningWithActualParams saves tuning history with the actual params used
 // (after user overrides), not the AI recommendations.
-func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actualWorkers, actualChunkSize int) {
+func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
 	if s.pendingSave == nil {
 		return
 	}
 	ps := s.pendingSave
 	s.pendingSave = nil
 
-	// Override with actual values
-	s.suggestions.Workers = actualWorkers
-	s.suggestions.ChunkSizeRecommendation = actualChunkSize
+	// Override with actual values used
+	s.suggestions.Workers = actual.Workers
+	s.suggestions.ChunkSizeRecommendation = actual.ChunkSize
+	s.suggestions.ReadAheadBuffers = actual.ReadAheadBuffers
+	s.suggestions.WriteAheadWriters = actual.WriteAheadWriters
+	s.suggestions.ParallelReaders = actual.ParallelReaders
+	s.suggestions.MaxPartitions = actual.MaxPartitions
 
 	s.saveTuningResult(ps.input, ps.wasAIUsed, ps.aiReasoning)
 }
