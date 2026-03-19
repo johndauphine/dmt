@@ -182,6 +182,60 @@ The AI tuner uses historical throughput data to optimize parameters across runs.
 4. **Read/write ahead buffers stay constant** — AI correctly identifies that 2/2 is stable across all runs, not worth varying
 5. **Connection pool oversizing hurts** — run 3's jump to 20 pools correlated with the throughput regression
 
+## Separate Container Benchmarks (106.5M rows)
+
+### Test Environment
+
+- **Hardware**: Apple M5 Pro, 24GB RAM, 15 CPU cores
+- **OS**: macOS Tahoe (Darwin 25.3.0)
+- **Source**: PostgreSQL 16 (Docker, port 5432) or SQL Server 2022 (Docker, port 1433)
+- **Target**: PostgreSQL 16 (Docker, port 5433, separate container)
+- **Dataset**: StackOverflow2013 (~106.5M rows, 9 tables)
+- **Config**: `workers=4, chunk_size=50000, target_mode=drop_recreate`, AI tuning enabled
+- **Date**: March 2026
+
+### Database Configuration
+
+Both PostgreSQL containers tuned identically:
+- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
+- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
+- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
+- `autovacuum` = off (benchmark only)
+
+SQL Server tuned with `max server memory (MB)` = 4096, `max degree of parallelism` = 6.
+
+Target DB dropped and recreated between each run to eliminate autovacuum interference.
+
+### PostgreSQL → PostgreSQL (5 Runs)
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 | 478K rows/s | 425K rows/s | 4m11s |
+| 2 | **649K rows/s** | **560K rows/s** | 3m10s |
+| 3 | 640K rows/s | 552K rows/s | 3m13s |
+| 4 | 591K rows/s | 504K rows/s | 3m31s |
+| 5 | 570K rows/s | 489K rows/s | 3m38s |
+| **Avg (2-5)** | **613K rows/s** | **526K rows/s** | **3m23s** |
+
+### MSSQL → PostgreSQL (5 Runs)
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 | **619K rows/s** | **491K rows/s** | 3m37s |
+| 2 | 604K rows/s | 481K rows/s | 3m42s |
+| 3 | 614K rows/s | 489K rows/s | 3m38s |
+| 4 | 601K rows/s | 480K rows/s | 3m42s |
+| 5 | 604K rows/s | 480K rows/s | 3m42s |
+| **Avg** | **608K rows/s** | **484K rows/s** | **3m40s** |
+
+### Key Findings
+
+1. **Separate containers eliminate resource contention** — PG source and target no longer compete for shared_buffers, WAL, and connection slots
+2. **MSSQL→PG nearly matches PG→PG** — 608K vs 613K transfer (within 1%), suggesting the bottleneck is target write speed, not source read speed
+3. **Run 1 cold cache penalty** — PG→PG run 1 (478K) is 26% slower than warm runs due to cold PG caches; MSSQL→PG shows no cold penalty since source data is already cached
+4. **Consistent MSSQL→PG performance** — 600-619K across all 5 runs (3% variance), very stable
+5. **Single-container PG→PG is faster** — the AI-tuned single-container results (962K peak) outperform separate containers (649K peak) because localhost loopback is faster than Docker bridge networking
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
