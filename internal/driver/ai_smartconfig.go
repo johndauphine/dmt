@@ -295,7 +295,7 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 		aiReasoning = "AI not configured - using sensible defaults based on system resources"
 	}
 
-	// Save tuning result for future reference (deferred until SetActualParams is called)
+	// Save tuning result for future reference (deferred until SaveTuningWithActualParams is called)
 	s.pendingSave = &pendingTuningSave{input: input, wasAIUsed: wasAIUsed, aiReasoning: aiReasoning}
 }
 

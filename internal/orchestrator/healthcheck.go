@@ -211,6 +211,9 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		return nil, fmt.Errorf("analyzing config: %w", err)
 	}
 
+	// Save tuning history with AI's recommended values (no user overrides for analyze)
+	analyzer.SaveTuningWithActualParams(suggestions.Workers, suggestions.ChunkSizeRecommendation)
+
 	// Add database tuning recommendations using the same AI mapper
 	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
 
