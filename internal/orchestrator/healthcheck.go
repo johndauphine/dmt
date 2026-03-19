@@ -211,6 +211,16 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		return nil, fmt.Errorf("analyzing config: %w", err)
 	}
 
+	// Save tuning history with AI's recommended values (no user overrides for analyze)
+	analyzer.SaveTuningWithActualParams(driver.ActualParams{
+		Workers:           suggestions.Workers,
+		ChunkSize:         suggestions.ChunkSizeRecommendation,
+		ReadAheadBuffers:  suggestions.ReadAheadBuffers,
+		WriteAheadWriters: suggestions.WriteAheadWriters,
+		ParallelReaders:   suggestions.ParallelReaders,
+		MaxPartitions:     suggestions.MaxPartitions,
+	})
+
 	// Add database tuning recommendations using the same AI mapper
 	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
 
@@ -342,8 +352,8 @@ func (a *stateHistoryAdapter) GetAIAdjustments(limit int) ([]driver.AIAdjustment
 }
 
 // GetAITuningHistory returns recent tuning recommendations from analyze.
-func (a *stateHistoryAdapter) GetAITuningHistory(limit int) ([]driver.AITuningRecord, error) {
-	records, err := a.state.GetAITuningHistory(limit)
+func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetType string) ([]driver.AITuningRecord, error) {
+	records, err := a.state.GetAITuningHistory(limit, sourceType, targetType)
 	if err != nil {
 		return nil, err
 	}

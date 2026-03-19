@@ -1203,8 +1203,9 @@ func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64) e
 	return err
 }
 
-// GetAITuningHistory returns the most recent AI tuning recommendations.
-func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
+// GetAITuningHistory returns the most recent AI tuning recommendations
+// filtered by migration direction (e.g., "mssql"→"postgres").
+func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
 	rows, err := s.db.Query(`
 		SELECT id, timestamp, source_db_type, target_db_type,
 		       total_tables, total_rows, avg_row_size_bytes,
@@ -1215,9 +1216,10 @@ func (s *State) GetAITuningHistory(limit int) ([]AITuningRecord, error) {
 		       estimated_memory_mb, ai_reasoning, was_ai_used,
 		       final_throughput, final_duration_seconds
 		FROM ai_tuning_history
+		WHERE source_db_type = ? AND target_db_type = ?
 		ORDER BY timestamp DESC
 		LIMIT ?
-	`, limit)
+	`, sourceType, targetType, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -118,8 +118,8 @@ type AutoTuneOutput struct {
 type TuningHistoryProvider interface {
 	// GetAIAdjustments returns recent runtime AI adjustments from migrations
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
-	// GetAITuningHistory returns recent tuning recommendations from analyze
-	GetAITuningHistory(limit int) ([]AITuningRecord, error)
+	// GetAITuningHistory returns recent tuning recommendations filtered by migration direction.
+	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error
 	// UpdateAITuningResult updates the most recent tuning record with final throughput
@@ -173,6 +173,7 @@ type SmartConfigAnalyzer struct {
 	suggestions     *SmartConfigSuggestions
 	historyProvider TuningHistoryProvider
 	maxMemoryMB     int64 // user-configured memory cap (passed to AI)
+	pendingSave     *pendingTuningSave
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -294,8 +295,45 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 		aiReasoning = "AI not configured - using sensible defaults based on system resources"
 	}
 
-	// Save tuning result for future reference
-	s.saveTuningResult(input, wasAIUsed, aiReasoning)
+	// Save tuning result for future reference (deferred until SaveTuningWithActualParams is called)
+	s.pendingSave = &pendingTuningSave{input: input, wasAIUsed: wasAIUsed, aiReasoning: aiReasoning}
+}
+
+// pendingTuningSave holds data for deferred tuning history save.
+type pendingTuningSave struct {
+	input       AutoTuneInput
+	wasAIUsed   bool
+	aiReasoning string
+}
+
+// ActualParams holds the actual migration parameters used after user overrides.
+type ActualParams struct {
+	Workers           int
+	ChunkSize         int
+	ReadAheadBuffers  int
+	WriteAheadWriters int
+	ParallelReaders   int
+	MaxPartitions     int
+}
+
+// SaveTuningWithActualParams saves tuning history with the actual params used
+// (after user overrides), not the AI recommendations.
+func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
+	if s.pendingSave == nil {
+		return
+	}
+	ps := s.pendingSave
+	s.pendingSave = nil
+
+	// Override with actual values used
+	s.suggestions.Workers = actual.Workers
+	s.suggestions.ChunkSizeRecommendation = actual.ChunkSize
+	s.suggestions.ReadAheadBuffers = actual.ReadAheadBuffers
+	s.suggestions.WriteAheadWriters = actual.WriteAheadWriters
+	s.suggestions.ParallelReaders = actual.ParallelReaders
+	s.suggestions.MaxPartitions = actual.MaxPartitions
+
+	s.saveTuningResult(ps.input, ps.wasAIUsed, ps.aiReasoning)
 }
 
 // saveTuningResult saves the tuning recommendation to history for future analyses.
@@ -467,8 +505,8 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 	var sb strings.Builder
 
-	// Section 1: Parameter trajectory from past tuning runs
-	tuningHistory, err := s.historyProvider.GetAITuningHistory(5)
+	// Section 1: Parameter trajectory from past tuning runs (filtered by direction)
+	tuningHistory, err := s.historyProvider.GetAITuningHistory(5, s.dbType, s.targetDBType)
 	if err == nil && len(tuningHistory) > 0 {
 		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses, oldest first):\n")
 		for i := len(tuningHistory) - 1; i >= 0; i-- {
