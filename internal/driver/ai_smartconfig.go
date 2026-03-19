@@ -173,6 +173,7 @@ type SmartConfigAnalyzer struct {
 	suggestions     *SmartConfigSuggestions
 	historyProvider TuningHistoryProvider
 	maxMemoryMB     int64 // user-configured memory cap (passed to AI)
+	pendingSave     *pendingTuningSave
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -294,8 +295,31 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 		aiReasoning = "AI not configured - using sensible defaults based on system resources"
 	}
 
-	// Save tuning result for future reference
-	s.saveTuningResult(input, wasAIUsed, aiReasoning)
+	// Save tuning result for future reference (deferred until SetActualParams is called)
+	s.pendingSave = &pendingTuningSave{input: input, wasAIUsed: wasAIUsed, aiReasoning: aiReasoning}
+}
+
+// pendingTuningSave holds data for deferred tuning history save.
+type pendingTuningSave struct {
+	input       AutoTuneInput
+	wasAIUsed   bool
+	aiReasoning string
+}
+
+// SaveTuningWithActualParams saves tuning history with the actual params used
+// (after user overrides), not the AI recommendations.
+func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actualWorkers, actualChunkSize int) {
+	if s.pendingSave == nil {
+		return
+	}
+	ps := s.pendingSave
+	s.pendingSave = nil
+
+	// Override with actual values
+	s.suggestions.Workers = actualWorkers
+	s.suggestions.ChunkSizeRecommendation = actualChunkSize
+
+	s.saveTuningResult(ps.input, ps.wasAIUsed, ps.aiReasoning)
 }
 
 // saveTuningResult saves the tuning recommendation to history for future analyses.
