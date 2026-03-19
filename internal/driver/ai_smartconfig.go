@@ -118,7 +118,8 @@ type AutoTuneOutput struct {
 type TuningHistoryProvider interface {
 	// GetAIAdjustments returns recent runtime AI adjustments from migrations
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
-	// GetAITuningHistory returns recent tuning recommendations filtered by migration direction.
+	// GetAITuningHistory returns recent tuning recommendations from analyze.
+	// When sourceType and targetType are non-empty, results are filtered by direction.
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error

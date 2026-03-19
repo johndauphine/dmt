@@ -209,6 +209,15 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 		t.Fatalf("SaveAITuning(pg→pg) error: %v", err)
 	}
 
+	// Unfiltered should return both
+	all, err := state.GetAITuningHistory(5, "", "")
+	if err != nil {
+		t.Fatalf("GetAITuningHistory(unfiltered) error: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("Expected 2 unfiltered records, got %d", len(all))
+	}
+
 	// Filtered by mssql→postgres should return only 1
 	mssqlOnly, err := state.GetAITuningHistory(5, "mssql", "postgres")
 	if err != nil {
