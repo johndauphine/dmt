@@ -737,6 +737,9 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	} else {
 		logging.Debug("AI tuning: no changes needed")
 	}
+
+	// Save tuning history with actual params used (after user overrides)
+	analyzer.SaveTuningWithActualParams(o.config.Migration.Workers, o.config.Migration.ChunkSize)
 }
 
 // Resume continues an interrupted migration
