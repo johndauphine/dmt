@@ -269,12 +269,12 @@ func TestGoValueBytes(t *testing.T) {
 		t.Errorf("GoValueBytes() for varchar(100) = %d, want 116", got)
 	}
 
-	// Unbounded text defaults to 256
+	// Unbounded text defaults to 4096
 	col2 := Column{Name: "body", DataType: "text"}
 	got2 := col2.GoValueBytes()
-	// string header (16) + 256 default = 272
-	if got2 != 272 {
-		t.Errorf("GoValueBytes() for text = %d, want 272", got2)
+	// string header (16) + 4096 default = 4112
+	if got2 != 4112 {
+		t.Errorf("GoValueBytes() for text = %d, want 4112", got2)
 	}
 
 	// Int column

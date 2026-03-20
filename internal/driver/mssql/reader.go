@@ -139,13 +139,61 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 			return nil, fmt.Errorf("loading row count for %s: %w", t.FullName(), err)
 		}
 
-		// Compute Go heap cost per row from column metadata
+		// Compute Go heap cost per row from column metadata (static baseline)
 		t.EstimatedRowSize = t.GoHeapBytesPerRow()
 
 		tables = append(tables, t)
 	}
 
+	// Override with actual avg row sizes from database statistics when available.
+	r.applyActualRowSizes(ctx, schema, tables)
+
 	return tables, nil
+}
+
+// applyActualRowSizes queries sys.dm_db_partition_stats for actual average row
+// sizes and overrides the static estimate when the DB reports a larger value.
+func (r *Reader) applyActualRowSizes(ctx context.Context, schema string, tables []driver.Table) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT
+			t.name AS table_name,
+			CASE WHEN SUM(p.rows) > 0
+				THEN SUM(a.total_pages) * 8 * 1024 / SUM(p.rows)
+				ELSE 0
+			END AS avg_row_size
+		FROM sys.tables t
+		INNER JOIN sys.indexes i ON t.object_id = i.object_id
+		INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+		INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+		INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+		WHERE s.name = @schema AND i.index_id <= 1
+		GROUP BY t.name
+	`, sql.Named("schema", schema))
+	if err != nil {
+		logging.Debug("Failed to query actual row sizes: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	sizeMap := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var avgSize int64
+		if err := rows.Scan(&name, &avgSize); err != nil {
+			continue
+		}
+		if avgSize > 0 {
+			sizeMap[name] = avgSize
+		}
+	}
+
+	for i := range tables {
+		if dbSize, ok := sizeMap[tables[i].Name]; ok && dbSize > tables[i].EstimatedRowSize {
+			logging.Debug("Table %s: using DB avg row size %d bytes (static estimate was %d)",
+				tables[i].Name, dbSize, tables[i].EstimatedRowSize)
+			tables[i].EstimatedRowSize = dbSize
+		}
+	}
 }
 
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
