@@ -143,6 +143,9 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 		}
 		t.RowCount = count
 
+		// Compute Go heap cost per row from column metadata
+		t.EstimatedRowSize = t.GoHeapBytesPerRow()
+
 		tables = append(tables, t)
 	}
 

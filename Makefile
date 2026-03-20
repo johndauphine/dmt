@@ -68,6 +68,8 @@ MSSQL_DATA_DIR=$(HOME)/docker-data/mssql
 PG_DATA_DIR=$(HOME)/docker-data/postgres
 MSSQL_BENCH_DIR=$(HOME)/docker-data/mssql-bench
 PG_BENCH_DIR=$(HOME)/docker-data/postgres-bench
+MSSQL_TARGET_DIR=$(HOME)/docker-data/mssql-target
+MYSQL_BENCH_DIR=$(HOME)/docker-data/mysql-bench
 
 test-dbs-up:
 	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
@@ -124,6 +126,44 @@ bench-dbs-up:
 
 test-dbs-down:
 	docker rm -f mssql-test pg-test 2>/dev/null || true
+
+# Second MSSQL instance for MSSQL→MSSQL testing (port 1434)
+mssql-target-up:
+	@mkdir -p $(MSSQL_TARGET_DIR)
+	docker run -d --name mssql-target \
+		-e 'ACCEPT_EULA=Y' \
+		-e 'SA_PASSWORD=TestPass2024' \
+		-e 'MSSQL_MEMORY_LIMIT_MB=4096' \
+		-v $(MSSQL_TARGET_DIR):/var/opt/mssql \
+		-p 1434:1433 \
+		mcr.microsoft.com/mssql/server:2022-latest
+
+mssql-target-down:
+	docker rm -f mssql-target 2>/dev/null || true
+
+# MySQL instance for cross-engine testing (port 3306)
+mysql-bench-up:
+	@mkdir -p $(MYSQL_BENCH_DIR)
+	docker run -d --name mysql-bench \
+		-e 'MYSQL_ROOT_PASSWORD=TestPass2024' \
+		-v $(MYSQL_BENCH_DIR):/var/lib/mysql \
+		--shm-size=1g \
+		-p 3306:3306 \
+		mysql:8.0 \
+		--innodb-buffer-pool-size=256M \
+		--innodb-redo-log-capacity=256M \
+		--innodb-flush-log-at-trx-commit=0 \
+		--innodb-flush-method=O_DIRECT \
+		--innodb-doublewrite=0 \
+		--max-connections=200 \
+		--skip-log-bin
+
+mysql-bench-down:
+	docker rm -f mysql-bench 2>/dev/null || true
+
+# All bench containers (MSSQL source + PG + MSSQL target + MySQL)
+bench-all-up: bench-dbs-up mssql-target-up mysql-bench-up
+bench-all-down: bench-dbs-down mssql-target-down mysql-bench-down
 
 bench-dbs-down:
 	docker rm -f mssql-bench pg-bench 2>/dev/null || true

@@ -22,18 +22,8 @@ import (
 	"github.com/johndauphine/dmt/internal/target"
 )
 
-// Buffer sizing constants for parallel reader coordination.
-// These values prevent cascading deadlocks when multiple readers produce faster than the consumer can process.
-const (
-	// chunkChanBufferMultiplier scales the chunk channel buffer with the number of readers.
-	// A multiplier of 50 provides enough headroom for burst production while keeping
-	// memory usage reasonable (each chunk holds rows from a database query).
-	chunkChanBufferMultiplier = 50
-
-	// chunkChanMinBuffer is the minimum chunk channel buffer size for parallel readers.
-	// This ensures adequate buffering even with small configured buffer sizes.
-	chunkChanMinBuffer = 500
-)
+// No buffer sizing constants — all pipeline buffer depths are derived from
+// the memory budget via pool.CalculatePipelineBuffers.
 
 // ProgressSaver is an interface for saving transfer progress
 type ProgressSaver interface {
@@ -454,10 +444,11 @@ func parseNumericPK(value any) (int64, bool) {
 	return 0, false
 }
 
-// calculatePipelineBufferSize derives the jobChan buffer depth for a specific table
-// from the system's memory budget and the table's actual row size. No magic numbers —
-// all values come from system detection, user config, or per-table metadata.
-func calculatePipelineBufferSize(cfg *config.Config, job Job, tableName string, tuner RuntimeTuner, numWriters int, readAheadBuffers int) int {
+// calculatePipelineBuffers derives both chunkChan and jobChan buffer depths
+// for a specific table from the system's memory budget and the table's actual
+// Go heap cost per row. No magic numbers — all values come from system detection,
+// user config, or per-table column metadata.
+func calculatePipelineBuffers(cfg *config.Config, job Job, tableName string, tuner RuntimeTuner, numWriters int, numReaders int, readAheadBuffers int) pool.PipelineBufferSizes {
 	// Resolve chunk size: per-table override → global tuner → config default
 	chunkSize := cfg.Migration.ChunkSize
 	if tuner != nil {
@@ -487,11 +478,12 @@ func calculatePipelineBufferSize(cfg *config.Config, job Job, tableName string, 
 		pipelineBudgetMB = effectiveMemMB / 2 // fallback: half of effective memory
 	}
 
-	return pool.CalculateJobBufferSize(pool.PipelineBufferConfig{
+	return pool.CalculatePipelineBuffers(pool.PipelineBufferConfig{
 		MemoryBudgetMB:   pipelineBudgetMB,
 		ChunkSize:        chunkSize,
 		RowBytes:         job.Table.EstimatedRowSize,
 		NumWriters:       numWriters,
+		NumReaders:       numReaders,
 		ReadAheadBuffers: readAheadBuffers,
 	})
 }
@@ -573,31 +565,26 @@ func executeKeysetPagination(
 		}
 	}
 
-	// Determine number of parallel readers.
-	// Note: numReaders and bufferSize are intentionally NOT made dynamic via the tuner
-	// (unlike chunkSizeFn above). Changing numReaders mid-transfer would require
-	// spawning/cancelling goroutines with PK range re-splitting; changing bufferSize
-	// would require recreating the channel. WriteAheadWriters scaling is handled
-	// separately via wp.ScaleWorkers() at chunk boundaries.
+	// Determine number of parallel readers and writers upfront — both are needed
+	// to compute pipeline buffer depths from the memory budget.
 	numReaders := cfg.Migration.ParallelReaders
 	if numReaders < 1 {
 		numReaders = 1
 	}
-
-	// Create buffered channel for read-ahead pipeline
-	// With parallel readers, use a larger buffer to prevent readers from blocking
-	// when the consumer is temporarily slow (e.g., waiting for writers).
-	bufferSize := cfg.Migration.ReadAheadBuffers
-	if bufferSize < 0 {
-		bufferSize = 0
-	}
-	if numReaders > 1 {
-		// Scale buffer with number of readers to prevent deadlock
-		bufferSize = bufferSize * numReaders * chunkChanBufferMultiplier
-		if bufferSize < chunkChanMinBuffer {
-			bufferSize = chunkChanMinBuffer
+	numWriters := cfg.Migration.WriteAheadWriters
+	if tuner != nil {
+		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
+			numWriters = tw
 		}
 	}
+	if numWriters < 1 {
+		numWriters = 1
+	}
+
+	// Compute both pipeline buffer depths from the shared memory budget.
+	// This replaces the old magic-number multipliers with a proper memory model.
+	pipelineBufs := calculatePipelineBuffers(cfg, job, tableName, tuner, numWriters, numReaders, cfg.Migration.ReadAheadBuffers)
+	bufferSize := pipelineBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
 	// Split PK range for parallel readers
@@ -684,17 +671,6 @@ func executeKeysetPagination(
 		partitionID = &job.Partition.PartitionID
 	}
 
-	// Create writer pool — prefer tuner snapshot for initial writer count
-	numWriters := cfg.Migration.WriteAheadWriters
-	if tuner != nil {
-		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
-			numWriters = tw
-		}
-	}
-	if numWriters < 1 {
-		numWriters = 1
-	}
-
 	// Build callbacks: if tuner is present, read dynamically; otherwise use static config values
 	upsertChunkFn := func() int { return cfg.Migration.UpsertMergeChunkSize }
 	checkpointFreqFn := func() int { return cfg.Migration.CheckpointFrequency }
@@ -715,12 +691,10 @@ func executeKeysetPagination(
 	}
 
 	// Compute job buffer size from memory budget and actual row size.
-	// This adapts the pipeline to the table being transferred — narrow-row tables
-	// (Votes at 37B) get large buffers for throughput, wide-row tables (Posts at
-	// 2290B) get small buffers to prevent memory balloon.
-	jobBufSize := calculatePipelineBufferSize(cfg, job, tableName, tuner, numWriters, bufferSize)
-	logging.Debug("Pipeline %s: jobBufferSize=%d (chunk=%d, rowBytes=%d, writers=%d, readAhead=%d)",
-		job.Table.Name, jobBufSize, cfg.Migration.ChunkSize, job.Table.EstimatedRowSize, numWriters, bufferSize)
+	// Use the jobChan depth from the same memory-budget calculation that sized chunkChan.
+	jobBufSize := pipelineBufs.JobChanDepth
+	logging.Debug("Pipeline %s: chunkChan=%d, jobChan=%d (chunk=%d, rowBytes=%d, writers=%d, readers=%d)",
+		job.Table.Name, bufferSize, jobBufSize, cfg.Migration.ChunkSize, job.Table.EstimatedRowSize, numWriters, numReaders)
 
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
@@ -940,6 +914,17 @@ func executeRowNumberPagination(
 		endRow = job.Table.RowCount
 	}
 
+	// Determine writer count upfront — needed for pipeline buffer sizing.
+	numWriters := cfg.Migration.WriteAheadWriters
+	if tuner != nil {
+		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
+			numWriters = tw
+		}
+	}
+	if numWriters < 1 {
+		numWriters = 1
+	}
+
 	// Resume from saved progress if available
 	initialRowNum := startRow
 	if resumeRowNum, ok := parseResumeRowNum(resumeLastPK); ok {
@@ -952,12 +937,9 @@ func executeRowNumberPagination(
 		initialRowNum = endRow
 	}
 
-	// Create buffered channel for read-ahead pipeline.
-	// bufferSize is intentionally static — see comment in executeKeysetPagination.
-	bufferSize := cfg.Migration.ReadAheadBuffers
-	if bufferSize < 0 {
-		bufferSize = 0
-	}
+	// Compute pipeline buffer depths from memory budget (single reader for ROW_NUMBER).
+	rnBufs := calculatePipelineBuffers(cfg, job, tableName, tuner, numWriters, 1, cfg.Migration.ReadAheadBuffers)
+	bufferSize := rnBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
 	// Start reader goroutine
@@ -1045,17 +1027,6 @@ func executeRowNumberPagination(
 		partitionRows = job.Table.RowCount
 	}
 
-	// Create writer pool — prefer tuner snapshot for initial writer count
-	numWriters := cfg.Migration.WriteAheadWriters
-	if tuner != nil {
-		if tw := tuner.Snapshot().WriteAheadWriters; tw > 0 {
-			numWriters = tw
-		}
-	}
-	if numWriters < 1 {
-		numWriters = 1
-	}
-
 	// Build callbacks: if tuner is present, read dynamically; otherwise use static config values
 	upsertChunkFn := func() int { return cfg.Migration.UpsertMergeChunkSize }
 	checkpointFreqFn := func() int {
@@ -1089,8 +1060,7 @@ func executeRowNumberPagination(
 
 	enableAck := job.Saver != nil && job.TaskID > 0
 
-	// Compute job buffer size from memory budget and row size (same as keyset path)
-	rnJobBufSize := calculatePipelineBufferSize(cfg, job, tableName, tuner, numWriters, bufferSize)
+	rnJobBufSize := rnBufs.JobChanDepth
 
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,

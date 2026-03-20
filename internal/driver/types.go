@@ -3,6 +3,7 @@ package driver
 import (
 	"fmt"
 	"strings"
+	"unsafe"
 )
 
 // Table represents a database table with its metadata.
@@ -125,6 +126,117 @@ func (c *Column) IsIntegerType() bool {
 		return true
 	}
 	return false
+}
+
+// GoValueBytes returns the estimated heap cost of the Go value stored inside
+// the interface{} for this column type. This does NOT include the 16-byte
+// interface header — that is accounted for in GoHeapBytesPerRow as part of
+// the []any slice layout. All sizes derive from Go's type system and the
+// column's declared MaxLength.
+func (c *Column) GoValueBytes() int64 {
+	dt := strings.ToLower(c.DataType)
+
+	// sizeof constants derived from Go's type system (not magic numbers)
+	const (
+		sizeofStringHeader = int64(unsafe.Sizeof(""))       // 16: pointer + length
+		sizeofSliceHeader  = int64(unsafe.Sizeof([]byte{})) // 24: pointer + length + cap
+		sizeofTimeStruct   = 24                             // time.Time: wall(8) + ext(8) + loc(8)
+		sizeofScalar       = 8                              // int64, float64, etc.
+	)
+
+	switch {
+	// Fixed-size integer types → int64 (8 bytes)
+	case dt == "int" || dt == "integer" || dt == "bigint" || dt == "smallint" ||
+		dt == "tinyint" || dt == "int2" || dt == "int4" || dt == "int8" ||
+		dt == "serial" || dt == "bigserial" || dt == "smallserial" ||
+		dt == "mediumint":
+		return sizeofScalar
+
+	// Fixed-size float types → float64 (8 bytes)
+	case dt == "float" || dt == "real" || dt == "double" || dt == "float4" ||
+		dt == "float8" || dt == "double precision" || dt == "money" ||
+		dt == "smallmoney":
+		return sizeofScalar
+
+	// Boolean → bool (aligned to word boundary)
+	case dt == "bit" || dt == "bool" || dt == "boolean":
+		return sizeofScalar
+
+	// Decimal/numeric → Go string from database/sql
+	case dt == "decimal" || dt == "numeric" || dt == "number":
+		digits := int64(c.Precision) + 2 // precision + sign + decimal point
+		if digits < 20 {
+			digits = 20
+		}
+		return sizeofStringHeader + digits
+
+	// Time types → time.Time struct
+	case dt == "date" || dt == "time" || dt == "datetime" || dt == "datetime2" ||
+		dt == "datetimeoffset" || dt == "smalldatetime" || dt == "timestamp" ||
+		dt == "timestamptz" || dt == "timestamp without time zone" ||
+		dt == "timestamp with time zone" || dt == "timetz":
+		return sizeofTimeStruct
+
+	// UUID → string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+	case dt == "uniqueidentifier" || dt == "uuid":
+		return sizeofStringHeader + 36
+
+	// Binary types → []byte header + data
+	case dt == "varbinary" || dt == "binary" || dt == "image" ||
+		dt == "bytea" || dt == "blob" || dt == "mediumblob" ||
+		dt == "longblob" || dt == "tinyblob":
+		dataLen := int64(c.MaxLength)
+		if dataLen <= 0 || dataLen > 8000 {
+			dataLen = 256 // unbounded: conservative baseline
+		}
+		return sizeofSliceHeader + dataLen
+
+	// String types → string header + character data
+	case dt == "varchar" || dt == "nvarchar" || dt == "char" || dt == "nchar" ||
+		dt == "text" || dt == "ntext" || dt == "xml" || dt == "json" || dt == "jsonb" ||
+		dt == "mediumtext" || dt == "longtext" || dt == "tinytext" ||
+		dt == "character varying" || dt == "character":
+		dataLen := int64(c.MaxLength)
+		if dataLen <= 0 || dataLen > 8000 {
+			dataLen = 256 // unbounded: conservative baseline
+		}
+		return sizeofStringHeader + dataLen
+
+	// Spatial types → string serialization
+	case dt == "geography" || dt == "geometry":
+		return sizeofStringHeader + 512
+
+	default:
+		return sizeofScalar
+	}
+}
+
+// GoHeapBytesPerRow returns the estimated Go heap cost for one row of this table
+// stored as []any. The layout is:
+//
+//	[]any slice header (24 bytes)
+//	+ N interface{} slots (N × 16 bytes: type pointer + data pointer each)
+//	+ N heap-allocated values (varies by column type)
+//
+// All sizes are derived from Go's type system and column metadata.
+func (t *Table) GoHeapBytesPerRow() int64 {
+	if len(t.Columns) == 0 {
+		return 0
+	}
+
+	n := int64(len(t.Columns))
+
+	// []any slice: header + backing array of interface{} values
+	sliceHeader := int64(unsafe.Sizeof([]any{}))                   // 24 bytes
+	ifaceSlots := n * int64(2*unsafe.Sizeof(uintptr(0)))           // N × 16 bytes
+
+	// Sum of heap-allocated values pointed to by each interface
+	var valueBytes int64
+	for i := range t.Columns {
+		valueBytes += t.Columns[i].GoValueBytes()
+	}
+
+	return sliceHeader + ifaceSlots + valueBytes
 }
 
 // IsSpatialType returns true if the column is a spatial type.
