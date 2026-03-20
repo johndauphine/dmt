@@ -182,13 +182,20 @@ func (c *Column) GoValueBytes() int64 {
 	case dt == "uniqueidentifier" || dt == "uuid":
 		return sizeofStringHeader + 36
 
-	// Binary types → []byte header + data
-	case dt == "varbinary" || dt == "binary" || dt == "image" ||
-		dt == "bytea" || dt == "blob" || dt == "mediumblob" ||
-		dt == "longblob" || dt == "tinyblob":
+	// Large binary types → []byte header + larger estimate for unbounded content
+	case dt == "image" || dt == "bytea" || dt == "blob" ||
+		dt == "mediumblob" || dt == "longblob":
 		dataLen := int64(c.MaxLength)
 		if dataLen <= 0 || dataLen > 8000 {
-			dataLen = 256 // unbounded: conservative baseline
+			dataLen = 4096 // 4KB: realistic average for binary content columns
+		}
+		return sizeofSliceHeader + dataLen
+
+	// Fixed/small binary types → []byte header + data
+	case dt == "varbinary" || dt == "binary" || dt == "tinyblob":
+		dataLen := int64(c.MaxLength)
+		if dataLen <= 0 || dataLen > 8000 {
+			dataLen = 256 // unbounded varbinary: conservative baseline
 		}
 		return sizeofSliceHeader + dataLen
 
@@ -196,16 +203,16 @@ func (c *Column) GoValueBytes() int64 {
 	// These types commonly hold large content (HTML, JSON documents, etc.) so
 	// the estimate must be high enough to prevent pipeline buffer undersizing
 	// that causes memory ballooning.
-	case dt == "text" || dt == "ntext" || dt == "mediumtext" || dt == "longtext":
+	case dt == "text" || dt == "ntext" || dt == "mediumtext" || dt == "longtext" ||
+		dt == "json" || dt == "jsonb" || dt == "xml":
 		dataLen := int64(c.MaxLength)
 		if dataLen <= 0 || dataLen > 8000 {
-			dataLen = 4096 // 4KB: realistic average for text content columns
+			dataLen = 4096 // 4KB: realistic average for text/JSON/XML content columns
 		}
 		return sizeofStringHeader + dataLen
 
 	// String types → string header + character data
 	case dt == "varchar" || dt == "nvarchar" || dt == "char" || dt == "nchar" ||
-		dt == "xml" || dt == "json" || dt == "jsonb" ||
 		dt == "tinytext" ||
 		dt == "character varying" || dt == "character":
 		dataLen := int64(c.MaxLength)

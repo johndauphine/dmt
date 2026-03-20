@@ -56,19 +56,20 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 	}
 	defer mg.paused.Add(-1)
 
-	// Force GC and wait for memory to drop
-	runtime.GC()
+	// Force GC and wait for memory to drop.
+	// Use FreeOSMemory (which includes GC) on a 500ms interval to avoid
+	// excessive overhead while waiting for writers to drain pipeline buffers.
+	debug.FreeOSMemory()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(500 * time.Millisecond):
 			runtime.ReadMemStats(&ms)
 			if ms.HeapAlloc < mg.threshold {
 				return true
 			}
-			// Still over threshold — try GC again
 			debug.FreeOSMemory()
 		}
 	}
