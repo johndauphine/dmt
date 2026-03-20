@@ -4,6 +4,7 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -13,10 +14,10 @@ import (
 // Uses MemAvailable from /proc/meminfo, which accounts for free memory,
 // reclaimable caches, and buffers. Falls back to MemTotal if MemAvailable
 // is not present (kernels < 3.14).
-func getAvailableMemoryMB() int64 {
+func getAvailableMemoryMB() (int64, error) {
 	file, err := os.Open("/proc/meminfo")
 	if err != nil {
-		return 4096
+		return 0, fmt.Errorf("failed to read /proc/meminfo: %w", err)
 	}
 	defer file.Close()
 
@@ -43,10 +44,10 @@ func getAvailableMemoryMB() int64 {
 	}
 
 	if memAvailable > 0 {
-		return memAvailable
+		return memAvailable, nil
 	}
 	if memTotal > 0 {
-		return memTotal
+		return memTotal, nil
 	}
-	return 4096
+	return 0, fmt.Errorf("failed to parse MemAvailable or MemTotal from /proc/meminfo")
 }
