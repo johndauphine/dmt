@@ -72,6 +72,16 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		params.Set("loc", "UTC")
 	}
 
+	// Set read/write timeouts to prevent indefinite hangs on large batch inserts.
+	// These are go-sql-driver/mysql DSN parameters that set deadlines on the
+	// underlying TCP connection. 5 minutes is generous for bulk operations.
+	if _, ok := opts["writeTimeout"]; !ok {
+		params.Set("writeTimeout", "5m")
+	}
+	if _, ok := opts["readTimeout"]; !ok {
+		params.Set("readTimeout", "5m")
+	}
+
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s",
 		encodedUser, encodedPassword, host, port, database, params.Encode())
 

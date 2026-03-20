@@ -344,6 +344,11 @@ func (fs *FileState) ClearTransferProgress(taskID int64) error {
 	return nil
 }
 
+// CountPartitionTasks returns 0 for file state (no partition tracking).
+func (fs *FileState) CountPartitionTasks(runID, taskKeyPrefix string) (int, error) {
+	return 0, nil
+}
+
 // GetAllRuns returns empty slice (file state doesn't track history).
 func (fs *FileState) GetAllRuns() ([]Run, error) {
 	fs.mu.RLock()

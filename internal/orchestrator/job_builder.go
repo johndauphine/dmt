@@ -182,6 +182,25 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 		b.config.Migration.MaxPartitions,
 	)
 
+	// Check if a previous run had a different partition count.
+	// Partition boundaries are derived from PK ranges, so changing the count
+	// changes boundaries. If we resume with stale checkpoints from different
+	// boundaries, parallel readers will produce overlapping data.
+	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+	existingPartitions, _ := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	if existingPartitions > 0 && existingPartitions != numPartitions {
+		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
+			t.Name, existingPartitions, numPartitions)
+		// Clear progress for all old partition tasks so they restart cleanly
+		for i := 1; i <= existingPartitions; i++ {
+			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
+			oldTaskID, err := b.state.CreateTask(runID, "transfer", oldKey)
+			if err == nil {
+				b.state.ClearTransferProgress(oldTaskID)
+			}
+		}
+	}
+
 	tableStart := time.Now()
 	partitions, err := b.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
 	tableElapsed := time.Since(tableStart)

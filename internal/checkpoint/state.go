@@ -676,6 +676,17 @@ func (s *State) ClearTransferProgress(taskID int64) error {
 	return err
 }
 
+// CountPartitionTasks returns the number of existing partition tasks for a table in a run.
+// It counts tasks matching the pattern "transfer:schema.table:p*".
+func (s *State) CountPartitionTasks(runID, taskKeyPrefix string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE run_id = ? AND task_key LIKE ?
+	`, runID, taskKeyPrefix+":p%").Scan(&count)
+	return count, err
+}
+
 // GetRunStats returns summary stats for a run
 func (s *State) GetRunStats(runID string) (total, pending, running, success, failed int, err error) {
 	err = s.db.QueryRow(`
