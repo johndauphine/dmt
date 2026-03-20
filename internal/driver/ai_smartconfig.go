@@ -983,7 +983,7 @@ func (s *SmartConfigAnalyzer) getTables(ctx context.Context, schema string) ([]t
 		query = `
 			SELECT
 				TABLE_NAME AS table_name,
-				TABLE_ROWS AS row_count,
+				IFNULL(TABLE_ROWS, 0) AS row_count,
 				IFNULL(AVG_ROW_LENGTH, 0) AS avg_row_size
 			FROM information_schema.TABLES
 			WHERE TABLE_SCHEMA = ?
