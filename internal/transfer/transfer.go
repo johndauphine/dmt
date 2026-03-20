@@ -589,6 +589,12 @@ func executeKeysetPagination(
 
 	// Split PK range for parallel readers
 	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
+
+	// Memory guardrail: pause readers when heap exceeds 80% of memory limit.
+	// This prevents memory ballooning when actual row sizes exceed static estimates
+	// (e.g., TEXT columns with large content vs. the default 256-byte estimate).
+	memGuard := newMemoryGuard(cfg.AutoConfig().EffectiveMaxMemoryMB)
+
 	// Start parallel reader goroutines
 	var readerWg sync.WaitGroup
 	for readerID, pkr := range pkRanges {
@@ -605,6 +611,12 @@ func executeKeysetPagination(
 					chunkChan <- chunkResult{err: ctx.Err()}
 					return
 				default:
+				}
+
+				// Memory pressure check — pause if heap is above threshold
+				if !memGuard.waitIfNeeded(ctx) {
+					chunkChan <- chunkResult{err: ctx.Err()}
+					return
 				}
 
 				// Read chunk_size dynamically so guardrail reductions take effect immediately
@@ -942,6 +954,9 @@ func executeRowNumberPagination(
 	bufferSize := rnBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
+	// Memory guardrail for ROW_NUMBER reader
+	memGuard := newMemoryGuard(cfg.AutoConfig().EffectiveMaxMemoryMB)
+
 	// Start reader goroutine
 	go func() {
 		defer close(chunkChan)
@@ -954,6 +969,12 @@ func executeRowNumberPagination(
 				chunkChan <- chunkResult{err: ctx.Err()}
 				return
 			default:
+			}
+
+			// Memory pressure check — pause if heap is above threshold
+			if !memGuard.waitIfNeeded(ctx) {
+				chunkChan <- chunkResult{err: ctx.Err()}
+				return
 			}
 
 			// Read chunk_size dynamically so guardrail reductions take effect immediately

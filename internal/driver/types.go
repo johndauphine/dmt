@@ -192,14 +192,25 @@ func (c *Column) GoValueBytes() int64 {
 		}
 		return sizeofSliceHeader + dataLen
 
+	// Unbounded text types → string header + larger estimate for TEXT/NTEXT content.
+	// These types commonly hold large content (HTML, JSON documents, etc.) so
+	// the estimate must be high enough to prevent pipeline buffer undersizing
+	// that causes memory ballooning.
+	case dt == "text" || dt == "ntext" || dt == "mediumtext" || dt == "longtext":
+		dataLen := int64(c.MaxLength)
+		if dataLen <= 0 || dataLen > 8000 {
+			dataLen = 4096 // 4KB: realistic average for text content columns
+		}
+		return sizeofStringHeader + dataLen
+
 	// String types → string header + character data
 	case dt == "varchar" || dt == "nvarchar" || dt == "char" || dt == "nchar" ||
-		dt == "text" || dt == "ntext" || dt == "xml" || dt == "json" || dt == "jsonb" ||
-		dt == "mediumtext" || dt == "longtext" || dt == "tinytext" ||
+		dt == "xml" || dt == "json" || dt == "jsonb" ||
+		dt == "tinytext" ||
 		dt == "character varying" || dt == "character":
 		dataLen := int64(c.MaxLength)
 		if dataLen <= 0 || dataLen > 8000 {
-			dataLen = 256 // unbounded: conservative baseline
+			dataLen = 256 // unbounded varchar: conservative baseline
 		}
 		return sizeofStringHeader + dataLen
 
