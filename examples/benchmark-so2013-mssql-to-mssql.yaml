@@ -1,0 +1,33 @@
+# StackOverflow2013 MSSQL→MSSQL benchmark (separate containers)
+# Source: mssql-bench (port 1433)
+# Target: mssql-target (port 1434)
+# Setup: make bench-dbs-up mssql-target-up
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2013
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: mssql
+  host: localhost
+  port: 1434
+  database: StackOverflow2013
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+migration:
+  target_mode: drop_recreate
+  workers: 6
+  chunk_size: 100000
+  create_indexes: false
+  create_foreign_keys: false

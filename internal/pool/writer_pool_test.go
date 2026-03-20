@@ -271,3 +271,90 @@ func TestCalculateJobBufferSize(t *testing.T) {
 		})
 	}
 }
+
+func TestCalculatePipelineBuffers(t *testing.T) {
+	tests := []struct {
+		name         string
+		cfg          PipelineBufferConfig
+		wantMinChunk int
+		wantMinJob   int
+	}{
+		{
+			name: "shared budget splits between chunkChan and jobChan",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   512,
+				ChunkSize:        50000,
+				RowBytes:         200,
+				NumWriters:       4,
+				NumReaders:       4,
+				ReadAheadBuffers: 2,
+			},
+			wantMinChunk: 4, // at least numReaders
+			wantMinJob:   5, // at least numWriters+1
+		},
+		{
+			name: "zero row bytes returns safe minimums",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   1024,
+				ChunkSize:        10000,
+				RowBytes:         0,
+				NumWriters:       4,
+				NumReaders:       2,
+				ReadAheadBuffers: 3,
+			},
+			wantMinChunk: 2, // numReaders
+			wantMinJob:   5, // numWriters+1
+		},
+		{
+			name: "single reader gets minimum chunk depth",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   512,
+				ChunkSize:        50000,
+				RowBytes:         500,
+				NumWriters:       4,
+				NumReaders:       1,
+				ReadAheadBuffers: 2,
+			},
+			wantMinChunk: 1, // at least numReaders=1
+			wantMinJob:   5, // at least numWriters+1
+		},
+		{
+			name: "wide rows constrain total slots",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   256,
+				ChunkSize:        50000,
+				RowBytes:         2000, // wide rows
+				NumWriters:       4,
+				NumReaders:       4,
+				ReadAheadBuffers: 2,
+			},
+			// 256MB / (50000*2000) = ~2.6 total slots — very tight
+			wantMinChunk: 4, // numReaders minimum
+			wantMinJob:   5, // numWriters+1 minimum
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CalculatePipelineBuffers(tt.cfg)
+			if got.ChunkChanDepth < tt.wantMinChunk {
+				t.Errorf("ChunkChanDepth = %d, want >= %d", got.ChunkChanDepth, tt.wantMinChunk)
+			}
+			if got.JobChanDepth < tt.wantMinJob {
+				t.Errorf("JobChanDepth = %d, want >= %d", got.JobChanDepth, tt.wantMinJob)
+			}
+			// Total should not exceed what fits in memory (unless at minimums)
+			if tt.cfg.RowBytes > 0 && tt.cfg.MemoryBudgetMB > 0 {
+				bytesPerChunk := int64(tt.cfg.ChunkSize) * tt.cfg.RowBytes
+				maxSlots := int(tt.cfg.MemoryBudgetMB * 1024 * 1024 / bytesPerChunk)
+				totalUsed := got.ChunkChanDepth + got.JobChanDepth + tt.cfg.NumWriters
+				if totalUsed > maxSlots+tt.cfg.NumReaders+tt.cfg.NumWriters+1 {
+					// Allow overshoot only when at minimums
+					if got.ChunkChanDepth > tt.cfg.NumReaders && got.JobChanDepth > tt.cfg.NumWriters+1 {
+						t.Errorf("total slots %d exceeds budget max %d", totalUsed, maxSlots)
+					}
+				}
+			}
+		})
+	}
+}

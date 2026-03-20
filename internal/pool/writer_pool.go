@@ -17,45 +17,91 @@ import (
 type PipelineBufferConfig struct {
 	MemoryBudgetMB   int64 // Memory available for the pipeline (from EffectiveMaxMemoryMB minus connection overhead)
 	ChunkSize        int   // Rows per batch
-	RowBytes         int64 // Bytes per row for this specific table
+	RowBytes         int64 // Bytes per row for this specific table (from Table.GoHeapBytesPerRow)
 	NumWriters       int   // Writer goroutines (each holds one chunk being written)
-	ReadAheadBuffers int   // Read-ahead buffers (each holds one chunk queued for reading)
+	NumReaders       int   // Parallel reader goroutines
+	ReadAheadBuffers int   // Configured read-ahead buffers
 }
 
-// CalculateJobBufferSize derives the jobChan buffer depth from the memory budget
-// and per-table data characteristics.
+// PipelineBufferSizes holds the computed buffer depths for both pipeline channels.
+type PipelineBufferSizes struct {
+	ChunkChanDepth int // Buffer depth for the reader→consumer channel
+	JobChanDepth   int // Buffer depth for the consumer→writer channel
+}
+
+// CalculatePipelineBuffers derives buffer depths for both chunkChan and jobChan
+// from a shared memory budget.
 //
-// The pipeline memory model:
+// The full pipeline memory model:
 //
-//	total_in_flight = readAheadBuffers + jobChanDepth + numWriters  (in chunks)
-//	total_memory    = total_in_flight * chunkSize * rowBytes        (in bytes)
+//	total_in_flight = chunkChanDepth + jobChanDepth + numWriters  (in chunks)
+//	total_memory    = total_in_flight * chunkSize * rowBytes      (in bytes)
 //
-// We solve for jobChanDepth: how many chunks can be queued between the consumer
-// and writers, given the memory budget and this table's actual row size.
-func CalculateJobBufferSize(cfg PipelineBufferConfig) int {
+// Writers always hold one chunk each (non-negotiable). The remaining budget is
+// split between chunkChan (reader side) and jobChan (writer side).
+func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 	bytesPerChunk := int64(cfg.ChunkSize) * cfg.RowBytes
+	numReaders := cfg.NumReaders
+	if numReaders < 1 {
+		numReaders = 1
+	}
+
+	// Minimum safe values to prevent deadlock
+	minJobDepth := cfg.NumWriters + 1 // each writer + 1 for consumer to submit
+	minChunkDepth := numReaders       // default: each reader can produce 1 chunk without blocking
+	// Allow a completely unbuffered reader→consumer channel when there is
+	// exactly one reader and read-ahead buffering is explicitly disabled.
+	if numReaders == 1 && cfg.ReadAheadBuffers == 0 {
+		minChunkDepth = 0
+	}
+
 	if bytesPerChunk <= 0 || cfg.MemoryBudgetMB <= 0 {
-		return cfg.NumWriters + 1 // can't calculate; use minimum safe value
+		return PipelineBufferSizes{
+			ChunkChanDepth: minChunkDepth,
+			JobChanDepth:   minJobDepth,
+		}
 	}
 
 	budgetBytes := cfg.MemoryBudgetMB * 1024 * 1024
 
-	// Total chunks that fit in the memory budget
+	// Total chunk slots that fit in memory
 	totalSlots := int(budgetBytes / bytesPerChunk)
 
-	// Subtract slots already consumed by active readers and writers
-	activeSlots := cfg.ReadAheadBuffers + cfg.NumWriters
-
-	// Remaining slots are available for jobChan buffering
-	jobDepth := totalSlots - activeSlots
-
-	// Minimum: numWriters + 1 to prevent deadlock (each writer needs a pending job,
-	// plus one slot for the consumer to submit without blocking).
-	if jobDepth < cfg.NumWriters+1 {
-		jobDepth = cfg.NumWriters + 1
+	// Writers always hold one chunk each — subtract those first
+	available := totalSlots - cfg.NumWriters
+	if available < minChunkDepth+minJobDepth {
+		return PipelineBufferSizes{
+			ChunkChanDepth: minChunkDepth,
+			JobChanDepth:   minJobDepth,
+		}
 	}
 
-	return jobDepth
+	// Split remaining slots: give readers enough to stay busy, rest goes to job queue.
+	// Readers need at least numReaders × readAheadBuffers slots to pipeline reads,
+	// but cap at half the available budget so the job queue gets its share.
+	chunkDepth := numReaders * cfg.ReadAheadBuffers
+	if chunkDepth > available/2 {
+		chunkDepth = available / 2
+	}
+	if chunkDepth < minChunkDepth {
+		chunkDepth = minChunkDepth
+	}
+
+	jobDepth := available - chunkDepth
+	if jobDepth < minJobDepth {
+		jobDepth = minJobDepth
+	}
+
+	return PipelineBufferSizes{
+		ChunkChanDepth: chunkDepth,
+		JobChanDepth:   jobDepth,
+	}
+}
+
+// CalculateJobBufferSize is a convenience wrapper for callers that only need jobChan depth.
+// Prefer CalculatePipelineBuffers for new code.
+func CalculateJobBufferSize(cfg PipelineBufferConfig) int {
+	return CalculatePipelineBuffers(cfg).JobChanDepth
 }
 
 // WriteJob represents a batch of rows to write.

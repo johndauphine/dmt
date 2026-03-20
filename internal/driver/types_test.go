@@ -185,6 +185,106 @@ func TestGetPKColumn(t *testing.T) {
 	}
 }
 
+func TestGoHeapBytesPerRow(t *testing.T) {
+	tests := []struct {
+		name    string
+		columns []Column
+		wantMin int64
+		wantMax int64
+	}{
+		{
+			name: "empty table",
+			columns: nil,
+			wantMin: 0,
+			wantMax: 0,
+		},
+		{
+			name: "single int column",
+			columns: []Column{{Name: "id", DataType: "int"}},
+			// slice header (24) + 1 iface slot (16) + int64 value (8) = 48
+			wantMin: 40,
+			wantMax: 56,
+		},
+		{
+			name: "SO2013 Votes-like table (narrow rows)",
+			columns: []Column{
+				{Name: "Id", DataType: "int"},
+				{Name: "PostId", DataType: "int"},
+				{Name: "UserId", DataType: "int"},
+				{Name: "BountyAmount", DataType: "int"},
+				{Name: "VoteTypeId", DataType: "int"},
+				{Name: "CreationDate", DataType: "datetime"},
+			},
+			// 6 columns: slice(24) + 6×iface(96) + 5×int(40) + 1×time(24) = 184
+			wantMin: 150,
+			wantMax: 250,
+		},
+		{
+			name: "SO2013 Posts-like table (wide rows with text)",
+			columns: []Column{
+				{Name: "Id", DataType: "int"},
+				{Name: "Body", DataType: "nvarchar", MaxLength: -1},       // MAX → 256 default
+				{Name: "Title", DataType: "nvarchar", MaxLength: 250},
+				{Name: "Tags", DataType: "nvarchar", MaxLength: 250},
+				{Name: "OwnerUserId", DataType: "int"},
+				{Name: "Score", DataType: "int"},
+				{Name: "ViewCount", DataType: "int"},
+				{Name: "CreationDate", DataType: "datetime"},
+			},
+			// Much larger than Votes due to string columns
+			wantMin: 600,
+			wantMax: 1200,
+		},
+		{
+			name: "all scalar types",
+			columns: []Column{
+				{Name: "a", DataType: "bigint"},
+				{Name: "b", DataType: "float8"},
+				{Name: "c", DataType: "bool"},
+				{Name: "d", DataType: "uuid"},
+				{Name: "e", DataType: "timestamptz"},
+			},
+			wantMin: 100,
+			wantMax: 250,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			table := Table{Columns: tt.columns}
+			got := table.GoHeapBytesPerRow()
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Errorf("GoHeapBytesPerRow() = %d, want [%d, %d]", got, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestGoValueBytes(t *testing.T) {
+	// Verify that text columns with known MaxLength produce predictable sizes
+	col := Column{Name: "name", DataType: "varchar", MaxLength: 100}
+	got := col.GoValueBytes()
+	// string header (16) + 100 bytes of data = 116
+	if got != 116 {
+		t.Errorf("GoValueBytes() for varchar(100) = %d, want 116", got)
+	}
+
+	// Unbounded text defaults to 256
+	col2 := Column{Name: "body", DataType: "text"}
+	got2 := col2.GoValueBytes()
+	// string header (16) + 256 default = 272
+	if got2 != 272 {
+		t.Errorf("GoValueBytes() for text = %d, want 272", got2)
+	}
+
+	// Int column
+	col3 := Column{Name: "id", DataType: "int"}
+	got3 := col3.GoValueBytes()
+	if got3 != 8 {
+		t.Errorf("GoValueBytes() for int = %d, want 8", got3)
+	}
+}
+
 func TestIsIntegerType(t *testing.T) {
 	tests := []struct {
 		dataType string

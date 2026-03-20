@@ -1,0 +1,30 @@
+# StackOverflow2013 PG→MySQL benchmark (load SO2013 into MySQL)
+# Source: pg-bench (port 5432) — assumes SO2013 already migrated to PG
+# Target: mysql-bench (port 3306)
+# Setup: make bench-dbs-up mysql-bench-up
+
+source:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2013
+  user: postgres
+  password: ${POSTGRES_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+target:
+  type: mysql
+  host: localhost
+  port: 3306
+  database: so2013
+  user: root
+  password: ${MYSQL_PASSWORD}
+
+migration:
+  target_mode: drop_recreate
+  workers: 4
+  chunk_size: 25000
+  max_memory_mb: 4096
+  create_indexes: false
+  create_foreign_keys: false
