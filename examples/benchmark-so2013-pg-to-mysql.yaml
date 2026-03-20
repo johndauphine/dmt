@@ -25,6 +25,5 @@ migration:
   target_mode: drop_recreate
   workers: 4
   chunk_size: 25000
-  max_memory_mb: 4096
   create_indexes: false
   create_foreign_keys: false
