@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -344,9 +345,19 @@ func (fs *FileState) ClearTransferProgress(taskID int64) error {
 	return nil
 }
 
-// CountPartitionTasks returns 0 for file state (no partition tracking).
+// CountPartitionTasks counts partition tasks for a table by scanning stored task keys.
 func (fs *FileState) CountPartitionTasks(runID, taskKeyPrefix string) (int, error) {
-	return 0, nil
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	prefix := taskKeyPrefix + ":p"
+	count := 0
+	for key := range fs.state.Tables {
+		if strings.HasPrefix(key, prefix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // GetAllRuns returns empty slice (file state doesn't track history).

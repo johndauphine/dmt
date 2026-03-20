@@ -187,16 +187,23 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 	// changes boundaries. If we resume with stale checkpoints from different
 	// boundaries, parallel readers will produce overlapping data.
 	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-	existingPartitions, _ := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	existingPartitions, err := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	if err != nil {
+		return fmt.Errorf("counting partition tasks for %s: %w", t.FullName(), err)
+	}
 	if existingPartitions > 0 && existingPartitions != numPartitions {
 		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
 			t.Name, existingPartitions, numPartitions)
 		// Clear progress for all old partition tasks so they restart cleanly
 		for i := 1; i <= existingPartitions; i++ {
 			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
-			oldTaskID, err := b.state.CreateTask(runID, "transfer", oldKey)
-			if err == nil {
-				b.state.ClearTransferProgress(oldTaskID)
+			oldTaskID, taskErr := b.state.CreateTask(runID, "transfer", oldKey)
+			if taskErr != nil {
+				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
+				continue
+			}
+			if clearErr := b.state.ClearTransferProgress(oldTaskID); clearErr != nil {
+				logging.Warn("Failed to clear progress for %s (task %d): %v", oldKey, oldTaskID, clearErr)
 			}
 		}
 	}
@@ -249,15 +256,22 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 
 	// Detect partition count changes (same logic as keyset partitions)
 	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-	existingPartitions, _ := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	existingPartitions, err := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	if err != nil {
+		return fmt.Errorf("counting partition tasks for %s: %w", t.FullName(), err)
+	}
 	if existingPartitions > 0 && existingPartitions != numPartitions {
 		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
 			t.Name, existingPartitions, numPartitions)
 		for i := 1; i <= existingPartitions; i++ {
 			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
-			oldTaskID, err := b.state.CreateTask(runID, "transfer", oldKey)
-			if err == nil {
-				b.state.ClearTransferProgress(oldTaskID)
+			oldTaskID, taskErr := b.state.CreateTask(runID, "transfer", oldKey)
+			if taskErr != nil {
+				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
+				continue
+			}
+			if clearErr := b.state.ClearTransferProgress(oldTaskID); clearErr != nil {
+				logging.Warn("Failed to clear progress for %s (task %d): %v", oldKey, oldTaskID, clearErr)
 			}
 		}
 	}

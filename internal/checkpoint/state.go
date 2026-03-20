@@ -679,11 +679,18 @@ func (s *State) ClearTransferProgress(taskID int64) error {
 // CountPartitionTasks returns the number of existing partition tasks for a table in a run.
 // It counts tasks matching the pattern "transfer:schema.table:p*".
 func (s *State) CountPartitionTasks(runID, taskKeyPrefix string) (int, error) {
+	// Escape LIKE wildcards in the prefix so underscores and percent signs
+	// in table names (e.g., order_items) are treated literally.
+	escaped := strings.ReplaceAll(taskKeyPrefix, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `_`, `\_`)
+	escaped = strings.ReplaceAll(escaped, `%`, `\%`)
+	pattern := escaped + ":p%"
+
 	var count int
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM tasks
-		WHERE run_id = ? AND task_key LIKE ?
-	`, runID, taskKeyPrefix+":p%").Scan(&count)
+		WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
+	`, runID, pattern).Scan(&count)
 	return count, err
 }
 

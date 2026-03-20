@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"database/sql"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -311,5 +312,81 @@ func TestSyncTimestamps(t *testing.T) {
 	}
 	if ts != nil {
 		t.Errorf("Expected nil timestamp for different target schema, got %v", ts)
+	}
+}
+
+func TestCountPartitionTasks(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	runID := "test-run"
+	if err := state.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun() error: %v", err)
+	}
+
+	// Create partition tasks for a table
+	for i := 1; i <= 6; i++ {
+		key := fmt.Sprintf("transfer:public.votes:p%d", i)
+		if _, err := state.CreateTask(runID, "transfer", key); err != nil {
+			t.Fatalf("CreateTask(%s) error: %v", key, err)
+		}
+	}
+
+	// Create a non-partition task for the same table (should not be counted)
+	if _, err := state.CreateTask(runID, "transfer", "transfer:public.votes"); err != nil {
+		t.Fatalf("CreateTask() error: %v", err)
+	}
+
+	// Create partition tasks for a different table
+	for i := 1; i <= 3; i++ {
+		key := fmt.Sprintf("transfer:public.posts:p%d", i)
+		if _, err := state.CreateTask(runID, "transfer", key); err != nil {
+			t.Fatalf("CreateTask(%s) error: %v", key, err)
+		}
+	}
+
+	// Count votes partitions
+	count, err := state.CountPartitionTasks(runID, "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("CountPartitionTasks() error: %v", err)
+	}
+	if count != 6 {
+		t.Errorf("expected 6 partition tasks for votes, got %d", count)
+	}
+
+	// Count posts partitions
+	count, err = state.CountPartitionTasks(runID, "transfer:public.posts")
+	if err != nil {
+		t.Fatalf("CountPartitionTasks() error: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 partition tasks for posts, got %d", count)
+	}
+
+	// Table with underscores — underscore must not act as wildcard
+	for i := 1; i <= 2; i++ {
+		key := fmt.Sprintf("transfer:public.order_items:p%d", i)
+		if _, err := state.CreateTask(runID, "transfer", key); err != nil {
+			t.Fatalf("CreateTask(%s) error: %v", key, err)
+		}
+	}
+	count, err = state.CountPartitionTasks(runID, "transfer:public.order_items")
+	if err != nil {
+		t.Fatalf("CountPartitionTasks() error: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 partition tasks for order_items, got %d", count)
+	}
+
+	// Non-existent table
+	count, err = state.CountPartitionTasks(runID, "transfer:public.nonexistent")
+	if err != nil {
+		t.Fatalf("CountPartitionTasks() error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 partition tasks for nonexistent table, got %d", count)
 	}
 }
