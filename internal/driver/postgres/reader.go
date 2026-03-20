@@ -176,12 +176,14 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 // larger value. This is critical for tables with TEXT/JSONB columns where the
 // static estimate (based on column type metadata) severely undercounts.
 func (r *Reader) applyActualRowSizes(ctx context.Context, schema string, tables []driver.Table) {
-	// Use pg_table_size (not pg_relation_size) to include TOAST storage,
-	// which is where TEXT, JSONB, and large bytea values actually live.
+	// Use pg_relation_size (main fork only, excludes TOAST/FSM/VM overhead).
+	// TOAST metadata inflates estimates beyond actual in-memory row cost since
+	// the driver streams TOAST data lazily. The runtime memory guardrail catches
+	// any remaining underestimates.
 	rows, err := r.sqlDB.QueryContext(ctx, `
 		SELECT relname,
 			CASE WHEN n_live_tup > 0
-				THEN pg_table_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
+				THEN pg_relation_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
 				ELSE 0
 			END AS avg_row_size
 		FROM pg_stat_user_tables
