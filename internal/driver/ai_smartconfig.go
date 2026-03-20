@@ -979,6 +979,16 @@ func (s *SmartConfigAnalyzer) getTables(ctx context.Context, schema string) ([]t
 			FROM pg_stat_user_tables
 			WHERE schemaname = $1
 			ORDER BY n_live_tup DESC`
+	case "mysql":
+		query = `
+			SELECT
+				TABLE_NAME AS table_name,
+				TABLE_ROWS AS row_count,
+				IFNULL(AVG_ROW_LENGTH, 0) AS avg_row_size
+			FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = ?
+			  AND TABLE_TYPE = 'BASE TABLE'
+			ORDER BY TABLE_ROWS DESC`
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
 	}
@@ -1022,6 +1032,13 @@ func (s *SmartConfigAnalyzer) detectDateColumns(ctx context.Context, schema, tab
 			WHERE table_schema = $1 AND table_name = $2
 			  AND data_type IN ('timestamp without time zone', 'timestamp with time zone', 'date')
 			ORDER BY ordinal_position`
+	case "mysql":
+		query = `
+			SELECT COLUMN_NAME
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+			  AND DATA_TYPE IN ('datetime', 'timestamp', 'date')
+			ORDER BY ORDINAL_POSITION`
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
 	}
