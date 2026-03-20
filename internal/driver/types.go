@@ -3,6 +3,7 @@ package driver
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -140,7 +141,7 @@ func (c *Column) GoValueBytes() int64 {
 	const (
 		sizeofStringHeader = int64(unsafe.Sizeof(""))       // 16: pointer + length
 		sizeofSliceHeader  = int64(unsafe.Sizeof([]byte{})) // 24: pointer + length + cap
-		sizeofTimeStruct   = 24                             // time.Time: wall(8) + ext(8) + loc(8)
+		sizeofTimeStruct   = int64(unsafe.Sizeof(time.Time{})) // time.Time: wall + ext + loc
 		sizeofScalar       = 8                              // int64, float64, etc.
 	)
 

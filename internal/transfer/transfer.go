@@ -693,7 +693,7 @@ func executeKeysetPagination(
 	// Compute job buffer size from memory budget and actual row size.
 	// Use the jobChan depth from the same memory-budget calculation that sized chunkChan.
 	jobBufSize := pipelineBufs.JobChanDepth
-	logging.Debug("Pipeline %s: chunkChan=%d, jobChan=%d (chunk=%d, rowBytes=%d, writers=%d, readers=%d)",
+	logging.Debug("Pipeline %s: chunkChan=%d, jobChan=%d (configChunk=%d, rowBytes=%d, writers=%d, readers=%d)",
 		job.Table.Name, bufferSize, jobBufSize, cfg.Migration.ChunkSize, job.Table.EstimatedRowSize, numWriters, numReaders)
 
 	wp := newWriterPool(ctx, writerPoolConfig{

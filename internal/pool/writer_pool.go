@@ -47,8 +47,13 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 	}
 
 	// Minimum safe values to prevent deadlock
-	minJobDepth := cfg.NumWriters + 1    // each writer + 1 for consumer to submit
-	minChunkDepth := numReaders          // each reader can produce 1 chunk without blocking
+	minJobDepth := cfg.NumWriters + 1 // each writer + 1 for consumer to submit
+	minChunkDepth := numReaders       // default: each reader can produce 1 chunk without blocking
+	// Allow a completely unbuffered reader→consumer channel when there is
+	// exactly one reader and read-ahead buffering is explicitly disabled.
+	if numReaders == 1 && cfg.ReadAheadBuffers == 0 {
+		minChunkDepth = 0
+	}
 
 	if bytesPerChunk <= 0 || cfg.MemoryBudgetMB <= 0 {
 		return PipelineBufferSizes{
