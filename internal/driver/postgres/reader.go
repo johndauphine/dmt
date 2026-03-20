@@ -155,13 +155,61 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 		}
 		t.RowCount = count
 
-		// Compute Go heap cost per row from column metadata
+		// Compute Go heap cost per row from column metadata (static baseline)
 		t.EstimatedRowSize = t.GoHeapBytesPerRow()
 
 		tables = append(tables, t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return tables, rows.Err()
+	// Override with actual avg row sizes from database statistics when available.
+	// The static GoHeapBytesPerRow estimate can severely undercount TEXT/BLOB columns.
+	r.applyActualRowSizes(ctx, schema, tables)
+
+	return tables, nil
+}
+
+// applyActualRowSizes queries pg_stat_user_tables for actual average row sizes
+// and overrides the static GoHeapBytesPerRow estimate when the DB reports a
+// larger value. This is critical for tables with TEXT/JSONB columns where the
+// static estimate (based on column type metadata) severely undercounts.
+func (r *Reader) applyActualRowSizes(ctx context.Context, schema string, tables []driver.Table) {
+	rows, err := r.sqlDB.QueryContext(ctx, `
+		SELECT relname,
+			CASE WHEN n_live_tup > 0
+				THEN pg_relation_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
+				ELSE 0
+			END AS avg_row_size
+		FROM pg_stat_user_tables
+		WHERE schemaname = $1
+	`, schema)
+	if err != nil {
+		logging.Debug("Failed to query actual row sizes: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	sizeMap := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var avgSize int64
+		if err := rows.Scan(&name, &avgSize); err != nil {
+			continue
+		}
+		if avgSize > 0 {
+			sizeMap[name] = avgSize
+		}
+	}
+
+	for i := range tables {
+		if dbSize, ok := sizeMap[tables[i].Name]; ok && dbSize > tables[i].EstimatedRowSize {
+			logging.Debug("Table %s: using DB avg row size %d bytes (static estimate was %d)",
+				tables[i].Name, dbSize, tables[i].EstimatedRowSize)
+			tables[i].EstimatedRowSize = dbSize
+		}
+	}
 }
 
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {

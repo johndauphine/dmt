@@ -143,13 +143,54 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 		}
 		t.RowCount = count
 
-		// Compute Go heap cost per row from column metadata
+		// Compute Go heap cost per row from column metadata (static baseline)
 		t.EstimatedRowSize = t.GoHeapBytesPerRow()
 
 		tables = append(tables, t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return tables, rows.Err()
+	// Override with actual avg row sizes from database statistics when available.
+	r.applyActualRowSizes(ctx, dbName, tables)
+
+	return tables, nil
+}
+
+// applyActualRowSizes queries information_schema.TABLES for actual average row
+// sizes and overrides the static estimate when the DB reports a larger value.
+func (r *Reader) applyActualRowSizes(ctx context.Context, dbName string, tables []driver.Table) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT TABLE_NAME, IFNULL(AVG_ROW_LENGTH, 0)
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+	`, dbName)
+	if err != nil {
+		logging.Debug("Failed to query actual row sizes: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	sizeMap := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var avgSize int64
+		if err := rows.Scan(&name, &avgSize); err != nil {
+			continue
+		}
+		if avgSize > 0 {
+			sizeMap[name] = avgSize
+		}
+	}
+
+	for i := range tables {
+		if dbSize, ok := sizeMap[tables[i].Name]; ok && dbSize > tables[i].EstimatedRowSize {
+			logging.Debug("Table %s: using DB avg row size %d bytes (static estimate was %d)",
+				tables[i].Name, dbSize, tables[i].EstimatedRowSize)
+			tables[i].EstimatedRowSize = dbSize
+		}
+	}
 }
 
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
