@@ -317,9 +317,7 @@ func LoadBytes(data []byte) (*Config, error) {
 	}
 
 	// Apply defaults
-	if err := cfg.applyDefaults(); err != nil {
-		return nil, fmt.Errorf("applying defaults: %w", err)
-	}
+	cfg.applyDefaults()
 
 	// Validate
 	if err := cfg.validate(); err != nil {
@@ -430,7 +428,7 @@ func (c *Config) applyGlobalDefaults() {
 	}
 }
 
-func (c *Config) applyDefaults() error {
+func (c *Config) applyDefaults() {
 	// Apply global defaults from secrets file first
 	c.applyGlobalDefaults()
 
@@ -455,16 +453,7 @@ func (c *Config) applyDefaults() error {
 	if c.autoConfig.CPUCores == 0 {
 		c.autoConfig.CPUCores = runtime.NumCPU()
 	}
-	availMem, err := getAvailableMemoryMB()
-	if err != nil {
-		// If user set max_memory_mb, we don't need system detection
-		if c.Migration.MaxMemoryMB > 0 {
-			availMem = c.Migration.MaxMemoryMB
-		} else {
-			return fmt.Errorf("detecting available memory: %w (set max_memory_mb in config to override)", err)
-		}
-	}
-	c.autoConfig.AvailableMemoryMB = availMem
+	c.autoConfig.AvailableMemoryMB = getAvailableMemoryMB()
 
 	// Calculate target memory for auto-tuning (50% of limit)
 	// If user specified max_memory_mb, use that as the base
@@ -777,8 +766,6 @@ func (c *Config) applyDefaults() error {
 	if c.Slack != nil && c.Slack.WebhookURL != "" && !c.Slack.Enabled {
 		c.Slack.Enabled = true
 	}
-
-	return nil
 }
 
 // TableRowSize holds row size info for a table
