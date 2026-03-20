@@ -247,6 +247,21 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 		numPartitions = 1
 	}
 
+	// Detect partition count changes (same logic as keyset partitions)
+	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+	existingPartitions, _ := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	if existingPartitions > 0 && existingPartitions != numPartitions {
+		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
+			t.Name, existingPartitions, numPartitions)
+		for i := 1; i <= existingPartitions; i++ {
+			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
+			oldTaskID, err := b.state.CreateTask(runID, "transfer", oldKey)
+			if err == nil {
+				b.state.ClearTransferProgress(oldTaskID)
+			}
+		}
+	}
+
 	logging.Debug("  Partitioning %s (%d rows, %d partitions, row-number)...", t.Name, t.RowCount, numPartitions)
 	rowsPerPartition := t.RowCount / int64(numPartitions)
 	result.TableJobCounts[t.Name] = numPartitions
