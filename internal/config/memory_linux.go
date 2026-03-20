@@ -43,6 +43,10 @@ func getAvailableMemoryMB() (int64, error) {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("failed to scan /proc/meminfo: %w", err)
+	}
+
 	if memAvailable > 0 {
 		return memAvailable, nil
 	}
