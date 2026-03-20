@@ -15,9 +15,9 @@ import (
 // estimates used for pipeline buffer sizing (e.g., TEXT columns with large
 // content vs. the default 256-byte estimate).
 type memoryGuard struct {
-	limitBytes uint64 // memory limit from config (EffectiveMaxMemoryMB)
+	limitBytes uint64 // memory limit from config
 	threshold  uint64 // pause readers when HeapAlloc exceeds this (80% of limit)
-	paused     atomic.Int64
+	gcActive   atomic.Bool
 }
 
 // newMemoryGuard creates a guard that pauses readers when heap usage exceeds
@@ -48,29 +48,38 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 		return true
 	}
 
-	// Memory pressure — pause and let GC + writers catch up
-	if mg.paused.Add(1) == 1 {
-		// First reader to hit the threshold logs the warning
+	// Memory pressure — pause and let GC + writers catch up.
+	// Only the first goroutine to enter triggers GC; others just wait and
+	// recheck, avoiding repeated stop-the-world collections.
+	isGCLeader := mg.gcActive.CompareAndSwap(false, true)
+	if isGCLeader {
 		logging.Debug("Memory pressure: HeapAlloc=%dMB threshold=%dMB, pausing readers",
 			ms.HeapAlloc/(1024*1024), mg.threshold/(1024*1024))
+		debug.FreeOSMemory()
 	}
-	defer mg.paused.Add(-1)
 
-	// Force GC and wait for memory to drop.
-	// Use FreeOSMemory (which includes GC) on a 500ms interval to avoid
-	// excessive overhead while waiting for writers to drain pipeline buffers.
-	debug.FreeOSMemory()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			if isGCLeader {
+				mg.gcActive.Store(false)
+			}
 			return false
-		case <-time.After(500 * time.Millisecond):
+		case <-ticker.C:
 			runtime.ReadMemStats(&ms)
 			if ms.HeapAlloc < mg.threshold {
+				if isGCLeader {
+					mg.gcActive.Store(false)
+				}
 				return true
 			}
-			debug.FreeOSMemory()
+			// Only the GC leader triggers collection
+			if isGCLeader {
+				debug.FreeOSMemory()
+			}
 		}
 	}
 }

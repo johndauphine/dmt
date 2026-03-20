@@ -593,7 +593,12 @@ func executeKeysetPagination(
 	// Memory guardrail: pause readers when heap exceeds 80% of memory limit.
 	// This prevents memory ballooning when actual row sizes exceed static estimates
 	// (e.g., TEXT columns with large content vs. the default 256-byte estimate).
-	memGuard := newMemoryGuard(cfg.AutoConfig().EffectiveMaxMemoryMB)
+	// Apply the same user cap as pipeline buffer sizing.
+	guardMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
+	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < guardMemMB {
+		guardMemMB = cfg.Migration.MaxMemoryMB
+	}
+	memGuard := newMemoryGuard(guardMemMB)
 
 	// Start parallel reader goroutines
 	var readerWg sync.WaitGroup
@@ -954,8 +959,12 @@ func executeRowNumberPagination(
 	bufferSize := rnBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
-	// Memory guardrail for ROW_NUMBER reader
-	memGuard := newMemoryGuard(cfg.AutoConfig().EffectiveMaxMemoryMB)
+	// Memory guardrail for ROW_NUMBER reader (same cap logic as keyset path)
+	guardMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
+	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < guardMemMB {
+		guardMemMB = cfg.Migration.MaxMemoryMB
+	}
+	memGuard := newMemoryGuard(guardMemMB)
 
 	// Start reader goroutine
 	go func() {
