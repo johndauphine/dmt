@@ -182,6 +182,32 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 		b.config.Migration.MaxPartitions,
 	)
 
+	// Check if a previous run had a different partition count.
+	// Partition boundaries are derived from PK ranges, so changing the count
+	// changes boundaries. If we resume with stale checkpoints from different
+	// boundaries, parallel readers will produce overlapping data.
+	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+	existingPartitions, err := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	if err != nil {
+		return fmt.Errorf("counting partition tasks for %s: %w", t.FullName(), err)
+	}
+	if existingPartitions > 0 && existingPartitions != numPartitions {
+		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
+			t.Name, existingPartitions, numPartitions)
+		// Clear progress for all old partition tasks so they restart cleanly
+		for i := 1; i <= existingPartitions; i++ {
+			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
+			oldTaskID, taskErr := b.state.CreateTask(runID, "transfer", oldKey)
+			if taskErr != nil {
+				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
+				continue
+			}
+			if clearErr := b.state.ClearTransferProgress(oldTaskID); clearErr != nil {
+				logging.Warn("Failed to clear progress for %s (task %d): %v", oldKey, oldTaskID, clearErr)
+			}
+		}
+	}
+
 	tableStart := time.Now()
 	partitions, err := b.sourcePool.GetPartitionBoundaries(ctx, &t, numPartitions)
 	tableElapsed := time.Since(tableStart)
@@ -226,6 +252,28 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 	)
 	if numPartitions < 1 {
 		numPartitions = 1
+	}
+
+	// Detect partition count changes (same logic as keyset partitions)
+	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+	existingPartitions, err := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	if err != nil {
+		return fmt.Errorf("counting partition tasks for %s: %w", t.FullName(), err)
+	}
+	if existingPartitions > 0 && existingPartitions != numPartitions {
+		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
+			t.Name, existingPartitions, numPartitions)
+		for i := 1; i <= existingPartitions; i++ {
+			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
+			oldTaskID, taskErr := b.state.CreateTask(runID, "transfer", oldKey)
+			if taskErr != nil {
+				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
+				continue
+			}
+			if clearErr := b.state.ClearTransferProgress(oldTaskID); clearErr != nil {
+				logging.Warn("Failed to clear progress for %s (task %d): %v", oldKey, oldTaskID, clearErr)
+			}
+		}
 	}
 
 	logging.Debug("  Partitioning %s (%d rows, %d partitions, row-number)...", t.Name, t.RowCount, numPartitions)
