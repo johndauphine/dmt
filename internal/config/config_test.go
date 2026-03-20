@@ -407,7 +407,9 @@ func TestAutoTuneWriteAheadWriters(t *testing.T) {
 			Password: "pass",
 		},
 	}
-	cfg.applyDefaults()
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
 
 	// Should have a reasonable value (at least 2)
 	if cfg.Migration.WriteAheadWriters < 2 {
@@ -436,7 +438,9 @@ func TestAutoTuneParallelReaders(t *testing.T) {
 			Password: "pass",
 		},
 	}
-	cfg.applyDefaults()
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
 
 	// Should have a reasonable value (at least 2)
 	if cfg.Migration.ParallelReaders < 2 {
@@ -558,7 +562,9 @@ func TestAutoTuneUserOverride(t *testing.T) {
 		},
 	}
 	cfg.autoConfig.CPUCores = 16
-	cfg.applyDefaults()
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
 
 	// User values should be preserved
 	if cfg.Migration.WriteAheadWriters != 8 {
@@ -589,7 +595,9 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 			Password: "pass",
 		},
 	}
-	cfg.applyDefaults()
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
 
 	// With 8 cores: readers=2, writers=2
 	// Source connections: workers * readers + 4 = 4 * 2 + 4 = 12
@@ -604,6 +612,53 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	if cfg.Migration.MaxTargetConnections < expectedTargetConns {
 		t.Errorf("insufficient target connections: got %d, need at least %d",
 			cfg.Migration.MaxTargetConnections, expectedTargetConns)
+	}
+}
+
+func TestApplyDefaultsMemoryDetectionFallback(t *testing.T) {
+	// Test that applyDefaults succeeds when max_memory_mb is set,
+	// even on platforms where memory detection might fail.
+	// The 70% hard cap is always applied to EffectiveMaxMemoryMB.
+	cfg := &Config{
+		Source: SourceConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Port:     5432,
+			Database: "source",
+			User:     "user",
+			Password: "pass",
+		},
+		Target: TargetConfig{
+			Type:     "postgres",
+			Host:     "localhost",
+			Port:     5432,
+			Database: "target",
+			User:     "user",
+			Password: "pass",
+		},
+		Migration: MigrationConfig{
+			MaxMemoryMB: 8192,
+		},
+	}
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() should succeed with max_memory_mb set: %v", err)
+	}
+
+	if cfg.autoConfig.AvailableMemoryMB == 0 {
+		t.Error("AvailableMemoryMB should not be 0")
+	}
+
+	// EffectiveMaxMemoryMB should never exceed 70% of available memory
+	hardCap := cfg.autoConfig.AvailableMemoryMB * 70 / 100
+	if cfg.autoConfig.EffectiveMaxMemoryMB > hardCap {
+		t.Errorf("EffectiveMaxMemoryMB %d exceeds 70%% hard cap %d",
+			cfg.autoConfig.EffectiveMaxMemoryMB, hardCap)
+	}
+
+	// When max_memory_mb < hard cap, it should be used directly
+	if cfg.Migration.MaxMemoryMB < hardCap && cfg.autoConfig.EffectiveMaxMemoryMB != cfg.Migration.MaxMemoryMB {
+		t.Errorf("EffectiveMaxMemoryMB should equal MaxMemoryMB (%d) when below hard cap, got %d",
+			cfg.Migration.MaxMemoryMB, cfg.autoConfig.EffectiveMaxMemoryMB)
 	}
 }
 

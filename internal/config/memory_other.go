@@ -1,8 +1,11 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package config
 
-// getAvailableMemoryMB returns a default value on unsupported platforms
-func getAvailableMemoryMB() int64 {
-	return 4096 // Default 4GB
+import "fmt"
+
+// getAvailableMemoryMB is not implemented on this platform.
+// Use max_memory_mb in the config file to set the memory budget explicitly.
+func getAvailableMemoryMB() (int64, error) {
+	return 0, fmt.Errorf("memory detection not supported on this platform; set max_memory_mb in config")
 }
