@@ -74,6 +74,10 @@ type DatabaseContext struct {
 	// MaxVarcharLength is the maximum varchar length in characters or bytes.
 	MaxVarcharLength int
 
+	// MaxNVarcharLength is the max NVARCHAR length in characters (MSSQL: 4000).
+	// Set only for databases that have a separate national character type.
+	MaxNVarcharLength int
+
 	// VarcharSemantics indicates if varchar uses "byte" or "char" semantics.
 	VarcharSemantics string
 
