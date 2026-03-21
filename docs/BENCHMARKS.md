@@ -65,6 +65,36 @@ Both implementations achieve similar throughput for bulk loads (~290K rows/sec M
 ### 3. Go Has Lower Memory Usage
 Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent optimizations also reduced MSSQL→PG upsert memory usage by eliminating millions of small allocations per chunk.
 
+## M5 Pro vs M3 Max Comparison (StackOverflow2010, drop_recreate)
+
+### Test Environment
+
+- **M3 Max**: 36GB RAM, 14 CPU cores, macOS Darwin 25.2.0, January 2026
+- **M5 Pro**: 24GB RAM, 15 CPU cores, macOS Tahoe Darwin 25.3.0, March 2026
+
+Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
+
+### Results
+
+| Direction | M3 Max 36GB | M5 Pro 24GB | Delta |
+|-----------|-------------|-------------|-------|
+| MSSQL→PG | 287K rows/s (75s) | **391K rows/s** (49s) | **+36%** |
+| PG→MSSQL | 140K rows/s (137s) | **197K rows/s** (98s) | **+40%** |
+
+### Memory Usage
+
+| Direction | M3 Max 36GB | M5 Pro 24GB |
+|-----------|-------------|-------------|
+| MSSQL→PG | 5.3 GB | 4.0 GB |
+| PG→MSSQL | 1.8 GB | 5.2 GB |
+
+### Key Findings
+
+1. **M5 Pro is 36-40% faster** despite having 12GB less RAM — the CPU and memory bandwidth improvements outweigh the RAM difference for this dataset size
+2. **Memory guardrail** (added March 2026) keeps peak RSS under control on the 24GB machine
+3. **Data-driven row size estimates** from database statistics improve pipeline buffer sizing accuracy
+4. PG→MSSQL uses more memory on M5 Pro due to larger pipeline buffers from the memory guardrail allowing more headroom
+
 ## StackOverflow2013 Benchmark (106.5M rows)
 
 ### Test Environment
