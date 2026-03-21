@@ -1182,8 +1182,8 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 	// Build the prompt with full table context
 	prompt := m.buildTableDDLPrompt(req)
 
-	logging.Debug("AI table DDL generation: %s.%s (%s -> %s)",
-		req.SourceTable.Schema, req.SourceTable.Name, req.SourceDBType, req.TargetDBType)
+	logging.Debug("AI table DDL generation: %s.%s (%s -> %s)\n--- PROMPT ---\n%s\n--- END PROMPT ---",
+		req.SourceTable.Schema, req.SourceTable.Name, req.SourceDBType, req.TargetDBType, prompt)
 
 	// Call AI API
 	result, err := m.CallAI(ctx, prompt)
