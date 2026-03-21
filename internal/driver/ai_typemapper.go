@@ -726,11 +726,12 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 
 // OpenAI API types
 type openAIRequest struct {
-	Model       string                 `json:"model"`
-	Messages    []openAIMessage        `json:"messages"`
-	MaxTokens   int                    `json:"max_tokens"`
-	Temperature float64                `json:"temperature"`
-	Options     map[string]interface{} `json:"options,omitempty"` // Provider-specific options (e.g., Ollama's num_ctx for context window size)
+	Model               string                 `json:"model"`
+	Messages            []openAIMessage        `json:"messages"`
+	MaxCompletionTokens int                    `json:"max_completion_tokens,omitempty"`
+	MaxTokens           int                    `json:"max_tokens,omitempty"`
+	Temperature         float64                `json:"temperature"`
+	Options             map[string]interface{} `json:"options,omitempty"` // Provider-specific options (e.g., Ollama's num_ctx for context window size)
 }
 
 type openAIMessage struct {
@@ -775,8 +776,8 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens:   maxTokens,
-		Temperature: 0,
+		MaxCompletionTokens: maxTokens,
+		Temperature:         0,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -845,11 +846,15 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 			{Role: "system", Content: systemMsg},
 			{Role: "user", Content: prompt},
 		},
-		MaxTokens:   maxTokens,
-		Temperature: 0,
+		MaxCompletionTokens: maxTokens,
+		Temperature:         0,
 	}
 
-	// For Ollama, set context window from configuration (or use conservative default)
+	// For local providers (Ollama/LMStudio), use max_tokens (older OpenAI-compatible API)
+	if AIProvider(m.providerName) == ProviderOllama || AIProvider(m.providerName) == ProviderLMStudio {
+		reqBody.MaxTokens = reqBody.MaxCompletionTokens
+		reqBody.MaxCompletionTokens = 0
+	}
 	if AIProvider(m.providerName) == ProviderOllama {
 		contextWindow := m.provider.GetEffectiveContextWindow()
 		reqBody.Options = map[string]interface{}{
@@ -1197,16 +1202,17 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 	}
 
 	// Post-process: enforce nvarchar when migrating from character-semantics
-	// databases (PostgreSQL, MySQL) to MSSQL. AI models inconsistently follow
-	// varchar→nvarchar instructions despite explicit prompting, causing BCP
-	// "invalid column length" errors on multi-byte data.
+	// databases (PostgreSQL, MySQL) to MSSQL. All tested models (Claude Haiku/
+	// Sonnet/Opus, GPT-5.4) inconsistently use varchar instead of nvarchar
+	// despite context showing source uses character lengths and target VARCHAR
+	// uses byte lengths.
 	srcType := Canonicalize(req.SourceDBType)
 	tgtType := Canonicalize(req.TargetDBType)
 	if (srcType == "postgres" || srcType == "mysql") && tgtType == "mssql" {
 		response.CreateTableDDL = enforceNvarchar(response.CreateTableDDL)
 	}
 
-	// Cache the raw DDL result
+	// Cache the post-processed DDL result
 	m.cacheMu.Lock()
 	m.cache.Set(cacheKey, response.CreateTableDDL)
 	m.cacheMu.Unlock()
