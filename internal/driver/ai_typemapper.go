@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -405,11 +407,6 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 		sb.WriteString("\nTarget: Standard PostgreSQL (no extensions installed).\n")
 	case "mssql":
 		sb.WriteString("\nTarget: SQL Server with full native type support.\n")
-		if info.SourceDBType == "postgres" && (strings.HasPrefix(strings.ToLower(info.DataType), "varchar") ||
-			strings.HasPrefix(strings.ToLower(info.DataType), "char") ||
-			strings.ToLower(info.DataType) == "text") {
-			sb.WriteString("Note: PostgreSQL string types store characters. SQL Server varchar stores bytes, nvarchar stores characters.\n")
-		}
 	case "mysql":
 		sb.WriteString("\nTarget: MySQL 8.0+ or MariaDB 10.5+ with InnoDB engine.\n")
 		sb.WriteString("Note: MySQL varchar has 65535 byte max (use TEXT for longer). Use utf8mb4 charset.\n")
@@ -1199,6 +1196,16 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 			req.SourceTable.Schema, req.SourceTable.Name, err)
 	}
 
+	// Post-process: enforce nvarchar when migrating from character-semantics
+	// databases (PostgreSQL, MySQL) to MSSQL. AI models inconsistently follow
+	// varchar→nvarchar instructions despite explicit prompting, causing BCP
+	// "invalid column length" errors on multi-byte data.
+	srcType := Canonicalize(req.SourceDBType)
+	tgtType := Canonicalize(req.TargetDBType)
+	if (srcType == "postgres" || srcType == "mysql") && tgtType == "mssql" {
+		response.CreateTableDDL = enforceNvarchar(response.CreateTableDDL)
+	}
+
 	// Cache the raw DDL result
 	m.cacheMu.Lock()
 	m.cache.Set(cacheKey, response.CreateTableDDL)
@@ -1235,6 +1242,47 @@ func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 	}
 
 	return sb.String()
+}
+
+// enforceNvarchar replaces VARCHAR/CHAR with NVARCHAR/NCHAR in a CREATE TABLE
+// DDL string. This is a deterministic post-processing step because AI models
+// inconsistently follow prompts about varchar-to-nvarchar conversion when
+// migrating from character-semantics databases (PostgreSQL, MySQL) to
+// byte-semantics databases (SQL Server).
+func enforceNvarchar(ddl string) string {
+	// Match VARCHAR(...) or CHAR(...) but not NVARCHAR/NCHAR (already correct).
+	re := regexp.MustCompile(`(?i)\b(VARCHAR|CHAR)\b(\s*\([^)]+\))`)
+	result := re.ReplaceAllStringFunc(ddl, func(match string) string {
+		upper := strings.ToUpper(match)
+		if strings.HasPrefix(upper, "NVARCHAR") || strings.HasPrefix(upper, "NCHAR") {
+			return match
+		}
+
+		// Determine replacement type and extract the length portion
+		var prefix string
+		var lengthPart string
+		if strings.HasPrefix(upper, "VARCHAR") {
+			prefix = "NVARCHAR"
+			lengthPart = match[len("VARCHAR"):]
+		} else {
+			prefix = "NCHAR"
+			lengthPart = match[len("CHAR"):]
+		}
+
+		// Clamp lengths > 4000 to MAX (NVARCHAR max is 4000 characters)
+		parenStart := strings.Index(lengthPart, "(")
+		if parenStart >= 0 {
+			inner := strings.TrimSpace(lengthPart[parenStart+1 : len(lengthPart)-1])
+			if !strings.EqualFold(inner, "MAX") {
+				if n, err := strconv.Atoi(inner); err == nil && n > 4000 {
+					return prefix + "(MAX)"
+				}
+			}
+		}
+
+		return prefix + lengthPart
+	})
+	return result
 }
 
 // buildTableDDLPrompt creates the AI prompt for table-level DDL generation.
@@ -1294,6 +1342,16 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	}
 	sb.WriteString("- Use the EXACT column names from the REQUIRED TARGET COLUMN NAMES section above\n")
 	sb.WriteString("- Include all columns with appropriate target types\n")
+
+	// Inject varchar→nvarchar constraint directly in output requirements
+	// where models are most likely to follow it. This fires only when
+	// source uses character-length semantics and target has NVARCHAR.
+	if req.SourceContext != nil && req.TargetContext != nil &&
+		req.SourceContext.VarcharSemantics == "char" && req.TargetContext.VarcharSemantics == "byte" &&
+		req.TargetContext.MaxNVarcharLength > 0 {
+		sb.WriteString("- MANDATORY: Every VARCHAR column MUST be NVARCHAR, every CHAR column MUST be NCHAR (source uses character lengths, target VARCHAR uses byte lengths — using VARCHAR will corrupt multi-byte data)\n")
+	}
+
 	sb.WriteString("- Make ALL non-primary-key columns nullable (omit NOT NULL) to allow data migration flexibility\n")
 	sb.WriteString("- Primary key columns must be NOT NULL\n")
 	sb.WriteString("- Include PRIMARY KEY constraint\n")
@@ -1383,6 +1441,9 @@ func (m *AITypeMapper) writeContextDetails(sb *strings.Builder, ctx *DatabaseCon
 	}
 	if ctx.MaxVarcharLength > 0 {
 		sb.WriteString(fmt.Sprintf("  Max VARCHAR Length: %d\n", ctx.MaxVarcharLength))
+	}
+	if ctx.MaxNVarcharLength > 0 {
+		sb.WriteString(fmt.Sprintf("  Max NVARCHAR Length: %d characters\n", ctx.MaxNVarcharLength))
 	}
 	if ctx.VarcharSemantics != "" {
 		sb.WriteString(fmt.Sprintf("  VARCHAR Semantics: %s (lengths are in %ss)\n", ctx.VarcharSemantics, ctx.VarcharSemantics))
@@ -1523,11 +1584,11 @@ func (m *AITypeMapper) writeConversionGuidance(sb *strings.Builder, srcCtx, tgtC
 
 	// VARCHAR semantics conversion
 	if srcCtx.VarcharSemantics == "char" && tgtCtx.VarcharSemantics == "byte" {
-		sb.WriteString("- CRITICAL: Source uses CHARACTER lengths, target uses BYTE lengths\n")
-		if tgtCtx.BytesPerChar > 1 {
-			sb.WriteString(fmt.Sprintf("- Multiply source VARCHAR lengths by %d for target, or use CHAR semantics if available\n", tgtCtx.BytesPerChar))
+		sb.WriteString("- Source VARCHAR/CHAR lengths are in CHARACTERS\n")
+		sb.WriteString("- Target VARCHAR lengths are in BYTES (not characters)\n")
+		if tgtCtx.MaxNVarcharLength > 0 {
+			sb.WriteString("- IMPORTANT: Use NVARCHAR/NCHAR (not VARCHAR/CHAR) for ALL string columns to preserve character-length semantics\n")
 		}
-		sb.WriteString("- If target supports CHAR semantics (e.g., VARCHAR2(n CHAR)), prefer that over byte multiplication\n")
 	} else if srcCtx.VarcharSemantics == "byte" && tgtCtx.VarcharSemantics == "char" {
 		sb.WriteString("- Source uses BYTE lengths, target uses CHARACTER lengths\n")
 		if srcCtx.BytesPerChar > 1 {

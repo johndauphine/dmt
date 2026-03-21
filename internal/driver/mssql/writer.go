@@ -120,6 +120,7 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 		MaxIdentifierLength:      128,
 		VarcharSemantics:         "byte", // VARCHAR = bytes, NVARCHAR = chars
 		BytesPerChar:             2,      // NVARCHAR uses 2 bytes per char
+		MaxNVarcharLength:        4000,   // NVARCHAR(n) max is 4000 chars; beyond that use NVARCHAR(MAX)
 	}
 
 	// Query server version
