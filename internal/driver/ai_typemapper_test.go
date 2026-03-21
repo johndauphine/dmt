@@ -1430,6 +1430,16 @@ func TestEnforceNvarchar(t *testing.T) {
 			expected: "CREATE TABLE t (\n  id INT NOT NULL,\n  displayname NVARCHAR(40),\n  email NVARCHAR(200),\n  aboutme NVARCHAR(MAX)\n);",
 		},
 		{
+			name:     "varchar over 4000 becomes nvarchar max",
+			input:    "CREATE TABLE t (body VARCHAR(8000));",
+			expected: "CREATE TABLE t (body NVARCHAR(MAX));",
+		},
+		{
+			name:     "varchar 4000 stays as is",
+			input:    "CREATE TABLE t (body VARCHAR(4000));",
+			expected: "CREATE TABLE t (body NVARCHAR(4000));",
+		},
+		{
 			name:     "no string columns",
 			input:    "CREATE TABLE t (id INT, score BIGINT);",
 			expected: "CREATE TABLE t (id INT, score BIGINT);",

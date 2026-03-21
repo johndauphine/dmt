@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1249,21 +1250,37 @@ func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 // migrating from character-semantics databases (PostgreSQL, MySQL) to
 // byte-semantics databases (SQL Server).
 func enforceNvarchar(ddl string) string {
-	// Use a regex to replace type declarations in column definitions.
 	// Match VARCHAR(...) or CHAR(...) but not NVARCHAR/NCHAR (already correct).
-	// Also handle VARCHAR(MAX).
 	re := regexp.MustCompile(`(?i)\b(VARCHAR|CHAR)\b(\s*\([^)]+\))`)
 	result := re.ReplaceAllStringFunc(ddl, func(match string) string {
 		upper := strings.ToUpper(match)
-		// Skip if already NVARCHAR or NCHAR
 		if strings.HasPrefix(upper, "NVARCHAR") || strings.HasPrefix(upper, "NCHAR") {
 			return match
 		}
-		// Preserve original case style
+
+		// Determine replacement type and extract the length portion
+		var prefix string
+		var lengthPart string
 		if strings.HasPrefix(upper, "VARCHAR") {
-			return "NVARCHAR" + match[len("VARCHAR"):]
+			prefix = "NVARCHAR"
+			lengthPart = match[len("VARCHAR"):]
+		} else {
+			prefix = "NCHAR"
+			lengthPart = match[len("CHAR"):]
 		}
-		return "NCHAR" + match[len("CHAR"):]
+
+		// Clamp lengths > 4000 to MAX (NVARCHAR max is 4000 characters)
+		parenStart := strings.Index(lengthPart, "(")
+		if parenStart >= 0 {
+			inner := strings.TrimSpace(lengthPart[parenStart+1 : len(lengthPart)-1])
+			if !strings.EqualFold(inner, "MAX") {
+				if n, err := strconv.Atoi(inner); err == nil && n > 4000 {
+					return prefix + "(MAX)"
+				}
+			}
+		}
+
+		return prefix + lengthPart
 	})
 	return result
 }
