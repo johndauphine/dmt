@@ -82,4 +82,8 @@ type WriterOptions struct {
 	// TypeMapper is the AI-powered type mapper for database type conversions.
 	// This is required for all migrations.
 	TypeMapper TypeMapper
+
+	// MaxCopyWriters limits concurrent COPY streams for PostgreSQL targets.
+	// 0 = use default (CPU cores / 2).
+	MaxCopyWriters int
 }

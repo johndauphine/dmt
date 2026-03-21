@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
@@ -116,11 +117,23 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
-	// Limit concurrent COPY operations as a safety net. With adaptive
-	// sub-batch sizing (each COPY targets ~5MB), I/O pressure is
-	// self-regulating, so we allow maxConns-1 (leaving one connection
-	// free for non-COPY operations like DDL or sequence resets).
-	copyConcurrency := maxConns - 1
+	// Limit concurrent COPY operations to prevent I/O saturation on the PG
+	// server. Each COPY stream is single-threaded on the PG side, so too many
+	// simultaneous streams cause the server to thrash — responses slow down,
+	// pgx connections block in peekMessage waiting for responses, and the
+	// entire pipeline stalls.
+	//
+	// Configurable via max_copy_writers. Default: NumCPU-1 (reserve one
+	// core for PG background work). Each COPY stream is single-threaded on
+	// the PG side, so more streams than cores causes I/O thrashing.
+	// Capped at maxConns-1 to leave a connection free for DDL/sequence ops.
+	copyConcurrency := opts.MaxCopyWriters
+	if copyConcurrency <= 0 {
+		copyConcurrency = runtime.NumCPU() - 1
+	}
+	if copyConcurrency > maxConns-1 {
+		copyConcurrency = maxConns - 1
+	}
 	if copyConcurrency < 1 {
 		copyConcurrency = 1
 	}
