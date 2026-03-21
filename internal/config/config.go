@@ -240,6 +240,7 @@ type MigrationConfig struct {
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
 	// AI-driven real-time parameter adjustment
+	MaxCopyWriters   int    `yaml:"max_copy_writers"`   // Max concurrent PG COPY streams (default: CPU cores - 1)
 	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
 	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
 }
