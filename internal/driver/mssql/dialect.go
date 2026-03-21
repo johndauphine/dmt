@@ -46,6 +46,17 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 		dsn += fmt.Sprintf("&packet%%20size=%d", packetSize)
 	}
 
+	// Set connection timeout to prevent indefinite hangs during login/connect.
+	// go-mssqldb parameter: "connection timeout" in seconds.
+	if _, ok := opts["connection timeout"]; !ok {
+		dsn += "&connection+timeout=30"
+	}
+
+	// Set dial timeout for TCP connection establishment.
+	if _, ok := opts["dial timeout"]; !ok {
+		dsn += "&dial+timeout=15"
+	}
+
 	return dsn
 }
 
