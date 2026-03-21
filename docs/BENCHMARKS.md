@@ -74,26 +74,44 @@ Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent
 
 Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 
-### Results
+### Results (default DB settings)
 
 | Direction | M3 Max 36GB | M5 Pro 24GB | Delta |
 |-----------|-------------|-------------|-------|
 | MSSQL→PG | 287K rows/s (75s) | **391K rows/s** (49s) | **+36%** |
 | PG→MSSQL | 140K rows/s (137s) | **197K rows/s** (98s) | **+40%** |
 
+### Results (with DB tuning)
+
+| Direction | M5 Pro (untuned) | M5 Pro (tuned) | vs M3 Max |
+|-----------|-----------------|----------------|-----------|
+| MSSQL→PG | 391K rows/s (49s) | **482K rows/s** (40s) | **+68%** |
+| PG→MSSQL | 197K rows/s (98s) | **207K rows/s** (93s) | **+48%** |
+
+### Database Tuning Applied
+
+**SQL Server** (source/target):
+- `max server memory (MB)` = 4096
+- `max degree of parallelism` = 6
+
+**PostgreSQL** (source/target):
+- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
+- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
+- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
+
 ### Memory Usage
 
-| Direction | M3 Max 36GB | M5 Pro 24GB |
-|-----------|-------------|-------------|
-| MSSQL→PG | 5.3 GB | 4.0 GB |
-| PG→MSSQL | 1.8 GB | 5.2 GB |
+| Direction | M3 Max 36GB | M5 Pro (tuned) |
+|-----------|-------------|----------------|
+| MSSQL→PG | 5.3 GB | 2.3 GB |
+| PG→MSSQL | 1.8 GB | 4.9 GB |
 
 ### Key Findings
 
-1. **M5 Pro is 36-40% faster** despite having 12GB less RAM — the CPU and memory bandwidth improvements outweigh the RAM difference for this dataset size
-2. **Memory guardrail** (added March 2026) keeps peak RSS under control on the 24GB machine
-3. **Data-driven row size estimates** from database statistics improve pipeline buffer sizing accuracy
-4. PG→MSSQL uses more memory on M5 Pro due to larger pipeline buffers from the memory guardrail allowing more headroom
+1. **M5 Pro is 48-68% faster** than M3 Max with DB tuning, despite 12GB less RAM
+2. **DB tuning adds 5-23%** — `synchronous_commit=off` is the biggest win for PG writes; MSSQL TABLOCK serialization limits PG→MSSQL gains
+3. **Memory guardrail** keeps peak RSS under control on the 24GB machine
+4. **Data-driven row size estimates** from database statistics improve pipeline buffer sizing accuracy
 
 ## StackOverflow2013 Benchmark (106.5M rows)
 
