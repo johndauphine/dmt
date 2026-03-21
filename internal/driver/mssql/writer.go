@@ -46,6 +46,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns / 4)
 	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	// Test connection
 	if err := db.Ping(); err != nil {
@@ -600,6 +601,14 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		return fmt.Errorf("getting connection: %w", err)
 	}
 	defer conn.Close()
+
+	// Set lock timeout to prevent indefinite waits when another session holds
+	// a TABLOCK exclusive lock. 5 minutes is generous for bulk operations.
+	// Without this, a sleeping session with an uncommitted transaction can
+	// block all other writers on the same table forever.
+	if _, err := conn.ExecContext(ctx, "SET LOCK_TIMEOUT 300000"); err != nil {
+		return fmt.Errorf("setting lock timeout: %w", err)
+	}
 
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
