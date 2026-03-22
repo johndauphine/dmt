@@ -81,31 +81,44 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 | MSSQL→PG | 287K rows/s (75s) | **391K rows/s** (49s) | **+36%** |
 | PG→MSSQL | 140K rows/s (137s) | **197K rows/s** (98s) | **+40%** |
 
-### Results (with DB tuning)
+### Results (with DB tuning, 8GB Docker)
 
 | Direction | M3 Max (tuned) | M5 Pro (tuned) | Delta |
 |-----------|---------------|----------------|-------|
 | MSSQL→PG | 342K rows/s (56s) | **482K rows/s** (40s) | **M5 Pro +41%** |
 | PG→MSSQL | 197K rows/s (98s) | **207K rows/s** (93s) | **M5 Pro +5%** |
 
+### M3 Max Docker RAM vs Throughput (MSSQL→PG)
+
+| Docker RAM | MSSQL mem | PG shared_buffers | Transfer | vs M5 Pro (8GB Docker) |
+|-----------|-----------|-------------------|----------|------------------------|
+| 8GB | 4GB | 1GB | 342K rows/s (56s) | -29% |
+| 16GB | 8GB | 4GB | 438K rows/s (44s) | -9% |
+| **24GB** | **12GB** | **6GB** | **467K rows/s (41s)** | **-3%** |
+
 ### Database Tuning Applied
 
-**SQL Server** (source/target):
-- `max server memory (MB)` = 4096
-- `max degree of parallelism` = 6
+**8GB Docker** (matching M5 Pro config):
+- MSSQL: `max server memory` = 4096MB, `max degree of parallelism` = 6
+- PG: `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
 
-**PostgreSQL** (source/target):
-- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
-- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
-- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
+**16GB Docker**:
+- MSSQL: `max server memory` = 8192MB, `max degree of parallelism` = 6
+- PG: `shared_buffers` = 4GB, `work_mem` = 512MB, `maintenance_work_mem` = 1GB
+
+**24GB Docker**:
+- MSSQL: `max server memory` = 12288MB, `max degree of parallelism` = 6
+- PG: `shared_buffers` = 6GB, `work_mem` = 1GB, `maintenance_work_mem` = 2GB
+
+All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, `fsync` = off
 
 ### Key Findings
 
-1. **M5 Pro is 5-41% faster** than M3 Max with identical DB tuning, despite 12GB less RAM
-2. **MSSQL→PG gap (+41%)** driven by M5 Pro's faster multi-core performance (Rosetta emulation) and disk I/O
-3. **PG→MSSQL gap is minimal (+5%)** because MSSQL TABLOCK serializes bulk inserts to one writer, limiting parallelism gains
-4. **DB tuning benefits both machines** — M3 Max improved from 287K to 342K rows/s (+19%) on MSSQL→PG with tuning
-5. **Extra RAM (36GB vs 24GB) does not compensate** for slower CPU/disk — performance is I/O and CPU bound, not memory bound
+1. **RAM matters when you give it to the databases** — M3 Max closed the gap from -41% to -3% vs M5 Pro by increasing Docker RAM from 8GB to 24GB
+2. **M5 Pro's 8GB Docker sweet spot was a RAM constraint**, not an inherent optimum — with more total RAM, larger DB caches improve throughput significantly
+3. **Diminishing returns**: 8→16GB Docker = +28% throughput, 16→24GB = +7% — most of the gain comes from the first doubling
+4. **PG→MSSQL gap remains small (+5%)** regardless of RAM — MSSQL TABLOCK serialization is the bottleneck, not memory
+5. **DB tuning + RAM allocation together** deliver the biggest gains: M3 Max untuned (287K) → tuned 24GB Docker (467K) = **+63%**
 
 ## StackOverflow2013 Benchmark (106.5M rows)
 
