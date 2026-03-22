@@ -934,6 +934,9 @@ type geminiResponse struct {
 }
 
 func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (string, error) {
+	// Use a generous token limit — type mapping needs ~100 tokens but
+	// smart config and AI adjustments produce JSON with 15+ parameters
+	// plus reasoning text, easily requiring 2000+ tokens.
 	reqBody := geminiRequest{
 		Contents: []geminiContent{
 			{
@@ -943,7 +946,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 			},
 		},
 		GenerationConfig: geminiGenConfig{
-			MaxOutputTokens: 100,
+			MaxOutputTokens: 4096,
 			Temperature:     0,
 		},
 	}
