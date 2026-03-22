@@ -86,9 +86,10 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 | Direction | M3 Max (tuned) | M5 Pro (tuned) | Delta |
 |-----------|---------------|----------------|-------|
 | MSSQL→PG | 299K rows/s (1m5s) | **489K rows/s** (39s) | **M5 Pro +64%** |
-| PG→MSSQL | **309K rows/s** (1m3s) | 298K rows/s (65s) | **M3 Max +4%** |
+| PG→MSSQL | **370K rows/s** (52s) | 298K rows/s (65s) | **M3 Max +24%** |
 
 > Both machines use parallel BCP without TABLOCK (PR #98, March 2026).
+> PG→MSSQL is average of 3 warm-cache runs to reduce variance.
 
 ### M3 Max Docker RAM vs Throughput (MSSQL→PG)
 
@@ -116,7 +117,7 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 
 ### Key Findings
 
-1. **M3 Max beats M5 Pro on PG→MSSQL (+4%)** — parallel BCP (PR #98) removed the TABLOCK bottleneck, letting the M3 Max's extra cores and RAM contribute
+1. **M3 Max beats M5 Pro on PG→MSSQL (+24%)** — parallel BCP (PR #98) removed the TABLOCK bottleneck, letting the M3 Max's extra RAM contribute to write buffering
 2. **M5 Pro still dominates MSSQL→PG (+64%)** — faster disk I/O and single-core performance (Rosetta emulation) are the bottleneck for reads
 3. **RAM matters when you give it to the databases** — M3 Max closed the MSSQL→PG gap from -64% to -3% by increasing Docker RAM from 8GB to 24GB
 4. **Diminishing returns**: 8→16GB Docker = +28% throughput, 16→24GB = +7% — most of the gain comes from the first doubling
