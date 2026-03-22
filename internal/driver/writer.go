@@ -92,6 +92,11 @@ type WriteBatchOptions struct {
 	// BatchSize overrides the writer's default batch size for this call.
 	// If 0, the writer uses its configured default.
 	BatchSize int
+
+	// OrderColumns hints that rows arrive sorted by these columns (ascending).
+	// Drivers that support ordered bulk inserts (e.g., MSSQL BCP ORDER hint)
+	// can use this to skip sorting, improving insert performance.
+	OrderColumns []string
 }
 
 // UpsertBatchOptions configures an upsert operation.

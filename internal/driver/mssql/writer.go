@@ -583,10 +583,9 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 
 // maxBulkBatchRows limits how many rows are sent per TDS bulk copy context.
 // The go-mssqldb driver accumulates all AddRow data in an in-memory session
-// buffer before flushing on Done(). For wide-row tables (e.g. nvarchar columns),
-// large batches can exhaust the server's network/memory buffers and cause EOF.
-// Sub-batching keeps each flush under ~4MB for typical row widths.
-const maxBulkBatchRows = 10000
+// buffer before flushing on Done(). Larger batches reduce round-trips but
+// increase memory per flush. 50K balances throughput with memory safety.
+const maxBulkBatchRows = 50000
 
 // WriteBatch writes a batch of rows using TDS bulk copy.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -637,6 +636,13 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			// Without it, writes are fully logged but parallelizable.
 			bulk.Options.Tablock = false
 			bulk.Options.RowsPerBatch = len(subBatch)
+			if len(opts.OrderColumns) > 0 {
+				orderHints := make([]string, len(opts.OrderColumns))
+				for i, col := range opts.OrderColumns {
+					orderHints[i] = fmt.Sprintf("[%s] ASC", col)
+				}
+				bulk.Options.Order = orderHints
+			}
 
 			for _, row := range subBatch {
 				if err := bulk.AddRow(convertRowForBulkCopy(row)); err != nil {

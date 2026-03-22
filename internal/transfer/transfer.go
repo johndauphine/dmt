@@ -1418,13 +1418,14 @@ func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string,
 }
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool
-func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any, batchSize int) error {
+func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any, batchSize int, orderCols ...string) error {
 	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
-		Schema:    schema,
-		Table:     table,
-		Columns:   cols,
-		Rows:      rows,
-		BatchSize: batchSize,
+		Schema:       schema,
+		Table:        table,
+		Columns:      cols,
+		Rows:         rows,
+		BatchSize:    batchSize,
+		OrderColumns: orderCols,
 	})
 }
 
