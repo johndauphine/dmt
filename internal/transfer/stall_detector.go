@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -14,13 +15,14 @@ import (
 // (frozen TCP connections, driver hangs, lock contention) without needing
 // driver-level timeout support.
 type StallDetector struct {
-	getProgress func() int64 // returns current row count
+	getProgress func() int64  // returns current row count
 	interval    time.Duration // how often to check
 	threshold   time.Duration // warn after this much inactivity
 	lastRows    int64
 	stalled     atomic.Bool
 	state       checkpoint.StateBackend // optional: log stalls to SQLite for AI learning
 	runID       string
+	eventSeq    int // unique sequence for AI adjustment records
 }
 
 // NewStallDetector creates a detector that checks progress every interval
@@ -45,17 +47,17 @@ func (d *StallDetector) IsStalled() bool {
 }
 
 // logStall records a stall event to SQLite for AI tuning history.
-func (d *StallDetector) logStall(rowsAtStall int64, stallDuration time.Duration) {
+func (d *StallDetector) logStall(rows int64, stallDuration time.Duration) {
 	if d.state == nil || d.runID == "" {
 		return
 	}
+	d.eventSeq++
 	record := checkpoint.AIAdjustmentRecord{
 		RunID:            d.runID,
+		AdjustmentNumber: 1000 + d.eventSeq, // offset to avoid collisions with AI adjustments
 		Timestamp:        time.Now(),
 		Action:           "stall_detected",
-		ThroughputBefore: 0,
-		ThroughputAfter:  0,
-		Reasoning:        "No rows written for " + stallDuration.Round(time.Second).String(),
+		Reasoning:        fmt.Sprintf("No rows written for %s (rows at stall: %d)", stallDuration.Round(time.Second), rows),
 	}
 	if err := d.state.SaveAIAdjustment(d.runID, record); err != nil {
 		logging.Debug("Failed to log stall to state: %v", err)
@@ -63,15 +65,17 @@ func (d *StallDetector) logStall(rowsAtStall int64, stallDuration time.Duration)
 }
 
 // logStallResolved records a stall resolution to SQLite.
-func (d *StallDetector) logStallResolved(rowsAtResume int64, stallDuration time.Duration) {
+func (d *StallDetector) logStallResolved(rows int64, stallDuration time.Duration) {
 	if d.state == nil || d.runID == "" {
 		return
 	}
+	d.eventSeq++
 	record := checkpoint.AIAdjustmentRecord{
-		RunID:     d.runID,
-		Timestamp: time.Now(),
-		Action:    "stall_resolved",
-		Reasoning: "Transfer resumed after " + stallDuration.String() + " stall",
+		RunID:            d.runID,
+		AdjustmentNumber: 1000 + d.eventSeq,
+		Timestamp:        time.Now(),
+		Action:           "stall_resolved",
+		Reasoning:        fmt.Sprintf("Transfer resumed after %s stall (rows at resume: %d)", stallDuration.Round(time.Second), rows),
 	}
 	if err := d.state.SaveAIAdjustment(d.runID, record); err != nil {
 		logging.Debug("Failed to log stall resolution to state: %v", err)
@@ -86,8 +90,7 @@ func (d *StallDetector) Run(ctx context.Context) {
 	d.lastRows = d.getProgress()
 	lastProgressTime := time.Now()
 	warned := false
-	stallStart := time.Now()
-	lastWarnDuration := time.Duration(0)
+	nextWarnAt := time.Time{}
 
 	for {
 		select {
@@ -99,13 +102,14 @@ func (d *StallDetector) Run(ctx context.Context) {
 			if current > d.lastRows {
 				// Progress made — reset
 				d.lastRows = current
-				lastProgressTime = time.Now()
 				if warned {
-					resolvedDuration := time.Since(stallStart).Round(time.Second)
-					logging.Info("Transfer resumed — stall resolved after %s", resolvedDuration)
-					d.logStallResolved(current, resolvedDuration)
+					stallDuration := time.Since(lastProgressTime).Round(time.Second)
+					logging.Info("Transfer resumed — stall resolved after %s", stallDuration)
+					d.logStallResolved(current, stallDuration)
 					warned = false
+					nextWarnAt = time.Time{}
 				}
+				lastProgressTime = time.Now()
 				d.stalled.Store(false)
 			} else {
 				// No progress
@@ -113,18 +117,15 @@ func (d *StallDetector) Run(ctx context.Context) {
 				if stallDuration >= d.threshold {
 					d.stalled.Store(true)
 					if !warned {
-						stallStart = time.Now()
 						logging.Warn("Transfer stalled: no rows written for %s — possible connection hang or lock contention",
 							stallDuration.Round(time.Second))
 						warned = true
-
-						// Log to SQLite for AI tuning history
+						nextWarnAt = time.Now().Add(time.Minute)
 						d.logStall(current, stallDuration)
-					} else if stallDuration.Truncate(time.Minute) > lastWarnDuration {
-						// Log every additional minute
-						lastWarnDuration = stallDuration.Truncate(time.Minute)
+					} else if time.Now().After(nextWarnAt) {
 						logging.Warn("Transfer still stalled (%s) — consider killing and resuming the migration",
 							stallDuration.Round(time.Second))
+						nextWarnAt = time.Now().Add(time.Minute)
 					}
 				}
 			}

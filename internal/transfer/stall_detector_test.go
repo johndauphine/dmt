@@ -7,6 +7,19 @@ import (
 	"time"
 )
 
+// waitFor polls a condition until it returns true or timeout expires.
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for: %s", msg)
+}
+
 func TestStallDetector_NoStallWhenProgressing(t *testing.T) {
 	var rows atomic.Int64
 	rows.Store(100)
@@ -17,7 +30,7 @@ func TestStallDetector_NoStallWhenProgressing(t *testing.T) {
 
 	go d.Run(ctx)
 
-	// Simulate progress
+	// Simulate steady progress
 	for i := 0; i < 5; i++ {
 		time.Sleep(60 * time.Millisecond)
 		rows.Add(100)
@@ -41,12 +54,8 @@ func TestStallDetector_DetectsStall(t *testing.T) {
 
 	go d.Run(ctx)
 
-	// Don't make any progress — wait for stall detection
-	time.Sleep(300 * time.Millisecond)
-
-	if !d.IsStalled() {
-		t.Error("should detect stall when no progress is made")
-	}
+	// Don't make progress — poll until stall detected
+	waitFor(t, 2*time.Second, func() bool { return d.IsStalled() }, "stall detection")
 }
 
 func TestStallDetector_ResolvesAfterProgress(t *testing.T) {
@@ -61,16 +70,11 @@ func TestStallDetector_ResolvesAfterProgress(t *testing.T) {
 	go d.Run(ctx)
 
 	// Wait for stall
-	time.Sleep(300 * time.Millisecond)
-	if !d.IsStalled() {
-		t.Fatal("should be stalled")
-	}
+	waitFor(t, 2*time.Second, func() bool { return d.IsStalled() }, "stall detection")
 
 	// Resume progress
 	rows.Add(500)
-	time.Sleep(100 * time.Millisecond)
 
-	if d.IsStalled() {
-		t.Error("should resolve after progress resumes")
-	}
+	// Wait for resolution
+	waitFor(t, 2*time.Second, func() bool { return !d.IsStalled() }, "stall resolution")
 }
