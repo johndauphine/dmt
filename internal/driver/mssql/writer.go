@@ -596,10 +596,10 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	}
 	defer conn.Close()
 
-	// Set lock timeout to prevent indefinite waits when another session holds
-	// a TABLOCK exclusive lock. 5 minutes is generous for bulk operations.
-	// Without this, a sleeping session with an uncommitted transaction can
-	// block all other writers on the same table forever.
+	// Set lock timeout to prevent indefinite waits on row/page locks during
+	// parallel bulk inserts. 5 minutes is generous for bulk operations.
+	// Without this, concurrent writers or uncommitted transactions can
+	// block each other indefinitely.
 	if _, err := conn.ExecContext(ctx, "SET LOCK_TIMEOUT 300000"); err != nil {
 		return fmt.Errorf("setting lock timeout: %w", err)
 	}
