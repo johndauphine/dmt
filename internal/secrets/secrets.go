@@ -78,6 +78,7 @@ type Provider struct {
 	BaseURL        string `yaml:"base_url,omitempty"`        // Required for local providers, optional for cloud
 	Model          string `yaml:"model,omitempty"`           // Optional, uses smart defaults
 	ContextWindow  int    `yaml:"context_window,omitempty"`  // Optional, context window size in tokens (for Ollama/local providers)
+	MaxTokens      int    `yaml:"max_tokens,omitempty"`      // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
 	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty"` // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 }
 
@@ -470,6 +471,22 @@ func (p *Provider) GetEffectiveContextWindow() int {
 	return 8192
 }
 
+// GetEffectiveMaxTokens returns the max output tokens for a provider.
+// Returns the configured value if set, otherwise returns a default based on provider type.
+// Local providers default to 16000 (reasoning models need headroom for thinking + output).
+// Cloud providers default to 4000.
+func (p *Provider) GetEffectiveMaxTokens(providerName string) int {
+	if p.MaxTokens > 0 {
+		return p.MaxTokens
+	}
+	// Treat as local if it's a known local provider OR has a base_url without an API key
+	// (custom OpenAI-compatible local providers)
+	if IsLocalProvider(providerName) || (p.BaseURL != "" && p.APIKey == "") {
+		return 16000
+	}
+	return 4000
+}
+
 // IsLocalProvider returns true if the provider is a local provider (no API key needed)
 func IsLocalProvider(name string) bool {
 	if known, ok := KnownProviders[name]; ok {
@@ -530,7 +547,8 @@ ai:
       base_url: "http://localhost:11434"
       model: "llama3"
       # context_window: 8192  # optional, defaults to 8192 (conservative)
-      # Common values:
+      # max_tokens: 16000     # optional, max output tokens (default: 16000 for local, 4000 for cloud)
+      # Common context_window values:
       # - llama3:8b, llama3.2: 8192
       # - llama3:70b, llama3.1: 131072 (128K)
       # - qwen2.5, deepseek: 32768 (32K)
@@ -540,6 +558,7 @@ ai:
       base_url: "http://localhost:1234/v1"
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
+      # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32
