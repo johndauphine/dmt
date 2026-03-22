@@ -581,12 +581,6 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 	return err
 }
 
-// maxBulkBatchRows limits how many rows are sent per TDS bulk copy context.
-// The go-mssqldb driver accumulates all AddRow data in an in-memory session
-// buffer before flushing on Done(). For wide-row tables (e.g. nvarchar columns),
-// large batches can exhaust the server's network/memory buffers and cause EOF.
-// Sub-batching keeps each flush under ~4MB for typical row widths.
-const maxBulkBatchRows = 10000
 
 // WriteBatch writes a batch of rows using TDS bulk copy.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -602,10 +596,10 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	}
 	defer conn.Close()
 
-	// Set lock timeout to prevent indefinite waits when another session holds
-	// a TABLOCK exclusive lock. 5 minutes is generous for bulk operations.
-	// Without this, a sleeping session with an uncommitted transaction can
-	// block all other writers on the same table forever.
+	// Set lock timeout to prevent indefinite waits on row/page locks during
+	// parallel bulk inserts. 5 minutes is generous for bulk operations.
+	// Without this, concurrent writers or uncommitted transactions can
+	// block each other indefinitely.
 	if _, err := conn.ExecContext(ctx, "SET LOCK_TIMEOUT 300000"); err != nil {
 		return fmt.Errorf("setting lock timeout: %w", err)
 	}
@@ -624,16 +618,35 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 		// Sub-batch rows to avoid accumulating too much data in the TDS
 		// session buffer between CreateBulkContext and Done().
-		for start := 0; start < len(opts.Rows); start += maxBulkBatchRows {
-			end := start + maxBulkBatchRows
+		// Use per-call BatchSize, then writer default, then fallback.
+		// Per-call BatchSize overrides writer default (from target.chunk_size config).
+		batchRows := opts.BatchSize
+		if batchRows <= 0 {
+			batchRows = w.defaultBatchSize
+		}
+		if batchRows <= 0 {
+			return fmt.Errorf("batch size not configured: set chunk_size in config or enable AI tuning")
+		}
+		for start := 0; start < len(opts.Rows); start += batchRows {
+			end := start + batchRows
 			if end > len(opts.Rows) {
 				end = len(opts.Rows)
 			}
 			subBatch := opts.Rows[start:end]
 
 			bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, opts.Columns)
-			bulk.Options.Tablock = true
+			// No TABLOCK — enables parallel BCP writers per table.
+			// TABLOCK serializes writes but enables minimal logging.
+			// Without it, writes are fully logged but parallelizable.
+			bulk.Options.Tablock = false
 			bulk.Options.RowsPerBatch = len(subBatch)
+			if len(opts.OrderColumns) > 0 {
+				orderHints := make([]string, len(opts.OrderColumns))
+				for i, col := range opts.OrderColumns {
+					orderHints[i] = fmt.Sprintf("[%s] ASC", col)
+				}
+				bulk.Options.Order = orderHints
+			}
 
 			for _, row := range subBatch {
 				if err := bulk.AddRow(convertRowForBulkCopy(row)); err != nil {

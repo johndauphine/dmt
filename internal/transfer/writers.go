@@ -108,7 +108,7 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 	if wp.useUpsert {
 		err = wp.executeUpsertWithChunking(ctx, writerID, rows, batchSize)
 	} else {
-		err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows, batchSize)
+		err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows, batchSize, wp.targetPKCols...)
 	}
 
 	if err == nil {
@@ -167,7 +167,7 @@ func (wp *writerPool) retryWithChunkSize(ctx context.Context, writerID int, rows
 			err = writeChunkUpsertWithWriter(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
 				wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, chunk, writerID, wp.partitionID, batchSize)
 		} else {
-			err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, chunk, batchSize)
+			err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, chunk, batchSize, wp.targetPKCols...)
 		}
 
 		if err != nil {

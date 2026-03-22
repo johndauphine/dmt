@@ -29,8 +29,8 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		Schema:                "dbo",
 		Encrypt:               true,  // Secure default
 		PacketSize:            32767, // 32KB max - significantly improves read/write throughput
-		WriteAheadWriters:     2,     // Conservative due to TABLOCK bulk insert serialization
-		ScaleWritersWithCores: false, // More writers = more contention with TABLOCK
+		WriteAheadWriters:     2,     // Base value, scales with cores when ScaleWritersWithCores=true
+		ScaleWritersWithCores: true,  // Parallel BCP without TABLOCK
 	}
 }
 
