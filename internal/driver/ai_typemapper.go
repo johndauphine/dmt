@@ -127,15 +127,25 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 	homeDir, _ := os.UserHomeDir()
 	cacheFile := filepath.Join(homeDir, ".dmt", "type-cache.json")
 
+	// Determine API timeout: user-configured > local provider default > cloud default.
+	// Local providers (Ollama/LMStudio) need more time for inference.
+	timeoutSec := 30
+	if IsLocalProvider(providerName) {
+		timeoutSec = 120
+	}
+	if provider.TimeoutSeconds > 0 {
+		timeoutSec = provider.TimeoutSeconds
+	}
+
 	mapper := &AITypeMapper{
 		providerName: providerName,
 		provider:     provider,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: time.Duration(timeoutSec) * time.Second,
 		},
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
-		timeoutSeconds: 30,
+		timeoutSeconds: timeoutSec,
 	}
 
 	// Load existing cache
@@ -1157,6 +1167,17 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 // ProviderName returns the name of the configured provider.
 func (m *AITypeMapper) ProviderName() string {
 	return m.providerName
+}
+
+// TimeoutSeconds returns the configured API timeout.
+func (m *AITypeMapper) TimeoutSeconds() int {
+	return m.timeoutSeconds
+}
+
+// IsLocalProvider returns true if the provider runs inference locally
+// (Ollama or LMStudio) rather than calling a cloud API.
+func IsLocalProvider(providerName string) bool {
+	return providerName == string(ProviderOllama) || providerName == string(ProviderLMStudio)
 }
 
 // Model returns the model being used.

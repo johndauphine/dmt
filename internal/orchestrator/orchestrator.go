@@ -714,8 +714,11 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		analyzer.SetMaxMemoryMB(o.config.Migration.MaxMemoryMB)
 	}
 
-	// Run analysis with timeout to avoid delaying migration start
-	analyzeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Run analysis with timeout to avoid delaying migration start.
+	// Use the AI mapper's configured timeout (respects provider config,
+	// local provider defaults, and user overrides).
+	aiTimeout := time.Duration(aiMapper.TimeoutSeconds()) * time.Second
+	analyzeCtx, cancel := context.WithTimeout(ctx, aiTimeout)
 	defer cancel()
 
 	suggestions, err := analyzer.Analyze(analyzeCtx, o.config.Source.Schema)

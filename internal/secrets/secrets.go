@@ -74,10 +74,11 @@ type AIConfig struct {
 
 // Provider represents an AI provider configuration
 type Provider struct {
-	APIKey        string `yaml:"api_key,omitempty"`        // Required for cloud providers
-	BaseURL       string `yaml:"base_url,omitempty"`       // Required for local providers, optional for cloud
-	Model         string `yaml:"model,omitempty"`          // Optional, uses smart defaults
-	ContextWindow int    `yaml:"context_window,omitempty"` // Optional, context window size in tokens (for Ollama/local providers)
+	APIKey         string `yaml:"api_key,omitempty"`         // Required for cloud providers
+	BaseURL        string `yaml:"base_url,omitempty"`        // Required for local providers, optional for cloud
+	Model          string `yaml:"model,omitempty"`           // Optional, uses smart defaults
+	ContextWindow  int    `yaml:"context_window,omitempty"`  // Optional, context window size in tokens (for Ollama/local providers)
+	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty"` // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 }
 
 // EncryptionConfig holds encryption-related secrets

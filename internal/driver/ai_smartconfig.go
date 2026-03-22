@@ -17,6 +17,54 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
+// extractJSON finds the first JSON object in a string, handling cases where
+// models wrap JSON in conversational text or markdown code blocks.
+func extractJSON(s string) (string, error) {
+	s = strings.TrimSpace(s)
+
+	// Strip markdown ```json ... ``` blocks
+	if idx := strings.Index(s, "```json"); idx >= 0 {
+		inner := s[idx+7:]
+		if end := strings.Index(inner, "```"); end >= 0 {
+			return strings.TrimSpace(inner[:end]), nil
+		}
+	}
+	// Strip generic ``` ... ``` blocks containing JSON
+	if idx := strings.Index(s, "```"); idx >= 0 {
+		inner := s[idx+3:]
+		if end := strings.Index(inner, "```"); end >= 0 {
+			candidate := strings.TrimSpace(inner[:end])
+			if strings.HasPrefix(candidate, "{") {
+				return candidate, nil
+			}
+		}
+	}
+
+	// Fallback: find first { and use json.Decoder to extract a valid
+	// JSON object. This is robust against braces inside string values
+	// and handles all edge cases a regex/depth counter would miss.
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return "", fmt.Errorf("no JSON object found in response")
+	}
+
+	dec := json.NewDecoder(strings.NewReader(s[start:]))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return "", fmt.Errorf("no valid JSON object found in response")
+	}
+
+	return string(raw), nil
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
+}
+
 // SmartConfigSuggestions contains AI-detected configuration suggestions.
 type SmartConfigSuggestions struct {
 	// DateColumns maps table names to suggested date_updated_columns
@@ -748,17 +796,16 @@ Respond with ONLY a JSON object:
 		return nil, fmt.Errorf("calling AI: %w", err)
 	}
 
-	// Parse JSON response
-	response = strings.TrimSpace(response)
-	// Remove markdown code blocks if present
-	response = strings.TrimPrefix(response, "```json")
-	response = strings.TrimPrefix(response, "```")
-	response = strings.TrimSuffix(response, "```")
-	response = strings.TrimSpace(response)
+	// Extract JSON from response — handles markdown blocks and conversational text
+	jsonStr, err := extractJSON(response)
+	if err != nil {
+		return nil, fmt.Errorf("parsing AI response: %w", err)
+	}
 
 	var output AutoTuneOutput
-	if err := json.Unmarshal([]byte(response), &output); err != nil {
-		return nil, fmt.Errorf("parsing AI response: %w (response: %s)", err, response)
+	if err := json.Unmarshal([]byte(jsonStr), &output); err != nil {
+		logging.Debug("AI response JSON parse error: %s", truncate(jsonStr, 200))
+		return nil, fmt.Errorf("parsing AI response JSON: %w", err)
 	}
 
 	// Trust AI recommendations - only apply minimal sanity checks for obviously invalid values
@@ -881,16 +928,16 @@ Respond with ONLY a JSON object:
 		return nil, fmt.Errorf("calling AI: %w", err)
 	}
 
-	// Parse JSON response
-	response = strings.TrimSpace(response)
-	response = strings.TrimPrefix(response, "```json")
-	response = strings.TrimPrefix(response, "```")
-	response = strings.TrimSuffix(response, "```")
-	response = strings.TrimSpace(response)
+	// Extract JSON from response — handles markdown blocks and conversational text
+	jsonStr, err := extractJSON(response)
+	if err != nil {
+		return nil, fmt.Errorf("parsing AI response: %w", err)
+	}
 
 	var output AutoTuneOutput
-	if err := json.Unmarshal([]byte(response), &output); err != nil {
-		return nil, fmt.Errorf("parsing AI response: %w (response: %s)", err, response)
+	if err := json.Unmarshal([]byte(jsonStr), &output); err != nil {
+		logging.Debug("AI response JSON parse error: %s", truncate(jsonStr, 200))
+		return nil, fmt.Errorf("parsing AI response JSON: %w", err)
 	}
 
 	// Minimal sanity checks
