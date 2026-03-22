@@ -317,11 +317,14 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) error {
 	sem := make(chan struct{}, r.config.Migration.Workers)
 	var wg sync.WaitGroup
+	var ctxErr error
 
+loop:
 	for _, job := range jobs {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			ctxErr = ctx.Err()
+			break loop
 		case sem <- struct{}{}:
 		}
 
@@ -334,8 +337,11 @@ func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs
 		}(job)
 	}
 
+	// Always wait for in-flight goroutines to finish before returning.
+	// Returning early would let the caller close errCh while goroutines
+	// still send to it, causing "send on closed channel" panic.
 	wg.Wait()
-	return nil
+	return ctxErr
 }
 
 // executeJob runs a single job with retry logic.
