@@ -203,11 +203,11 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	)
 	stallDetector.SetStateBackend(r.state, runID)
 	stallCtx, stopStall := context.WithCancel(ctx)
+	defer stopStall()
 	go stallDetector.Run(stallCtx)
 
 	// Execute jobs with worker pool
 	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, aiMonitor, tuner)
-	stopStall()
 	if err != nil {
 		return nil, err
 	}
