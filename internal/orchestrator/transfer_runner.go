@@ -195,8 +195,19 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		}
 	}
 
+	// Start stall detector to warn if no progress for 2 minutes
+	stallDetector := transfer.NewStallDetector(
+		func() int64 { return r.progress.Current() },
+		10*time.Second, // check every 10s
+		2*time.Minute,  // warn after 2 min of no progress
+	)
+	stallDetector.SetStateBackend(r.state, runID)
+	stallCtx, stopStall := context.WithCancel(ctx)
+	go stallDetector.Run(stallCtx)
+
 	// Execute jobs with worker pool
 	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, aiMonitor, tuner)
+	stopStall()
 	if err != nil {
 		return nil, err
 	}
