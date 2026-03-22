@@ -319,11 +319,12 @@ func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs
 	var wg sync.WaitGroup
 	var ctxErr error
 
+loop:
 	for _, job := range jobs {
 		select {
 		case <-ctx.Done():
 			ctxErr = ctx.Err()
-			goto wait
+			break loop
 		case sem <- struct{}{}:
 		}
 
@@ -336,7 +337,6 @@ func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs
 		}(job)
 	}
 
-wait:
 	// Always wait for in-flight goroutines to finish before returning.
 	// Returning early would let the caller close errCh while goroutines
 	// still send to it, causing "send on closed channel" panic.
