@@ -620,13 +620,12 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		// session buffer between CreateBulkContext and Done().
 		// Use per-call BatchSize, then writer default, then fallback.
 		// Per-call BatchSize overrides writer default (from target.chunk_size config).
-		// If neither is set, send all rows in one flush.
 		batchRows := opts.BatchSize
 		if batchRows <= 0 {
 			batchRows = w.defaultBatchSize
 		}
 		if batchRows <= 0 {
-			batchRows = len(opts.Rows)
+			return fmt.Errorf("batch size not configured: set chunk_size in config or enable AI tuning")
 		}
 		for start := 0; start < len(opts.Rows); start += batchRows {
 			end := start + batchRows
