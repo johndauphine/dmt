@@ -934,6 +934,15 @@ type geminiResponse struct {
 }
 
 func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (string, error) {
+	// Scale token limit with prompt complexity, matching the Anthropic/OpenAI
+	// heuristic. Short prompts (type mapping) need ~100 tokens; long prompts
+	// (smart config, AI adjustments) produce JSON with 15+ parameters plus
+	// reasoning text, requiring 2000+ tokens.
+	maxTokens := 100
+	if len(prompt) > 500 {
+		maxTokens = 4096
+	}
+
 	reqBody := geminiRequest{
 		Contents: []geminiContent{
 			{
@@ -943,7 +952,7 @@ func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (strin
 			},
 		},
 		GenerationConfig: geminiGenConfig{
-			MaxOutputTokens: 100,
+			MaxOutputTokens: maxTokens,
 			Temperature:     0,
 		},
 	}
