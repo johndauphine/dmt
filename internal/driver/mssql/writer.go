@@ -632,7 +632,10 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			subBatch := opts.Rows[start:end]
 
 			bulk := mssqlConn.CreateBulkContext(ctx, fullTableName, opts.Columns)
-			bulk.Options.Tablock = true
+			// No TABLOCK — enables parallel BCP writers per table.
+			// TABLOCK serializes writes but enables minimal logging.
+			// Without it, writes are fully logged but parallelizable.
+			bulk.Options.Tablock = false
 			bulk.Options.RowsPerBatch = len(subBatch)
 
 			for _, row := range subBatch {
