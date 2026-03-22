@@ -83,10 +83,10 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 
 ### Results (with DB tuning)
 
-| Direction | M5 Pro (untuned) | M5 Pro (tuned) | vs M3 Max |
-|-----------|-----------------|----------------|-----------|
-| MSSQL→PG | 391K rows/s (49s) | **482K rows/s** (40s) | **+68%** |
-| PG→MSSQL | 197K rows/s (98s) | **207K rows/s** (93s) | **+48%** |
+| Direction | M3 Max (tuned) | M5 Pro (tuned) | Delta |
+|-----------|---------------|----------------|-------|
+| MSSQL→PG | 342K rows/s (56s) | **482K rows/s** (40s) | **M5 Pro +41%** |
+| PG→MSSQL | 197K rows/s (98s) | **207K rows/s** (93s) | **M5 Pro +5%** |
 
 ### Database Tuning Applied
 
@@ -99,19 +99,13 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 - `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
 - `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
 
-### Memory Usage
-
-| Direction | M3 Max 36GB | M5 Pro (tuned) |
-|-----------|-------------|----------------|
-| MSSQL→PG | 5.3 GB | 2.3 GB |
-| PG→MSSQL | 1.8 GB | 4.9 GB |
-
 ### Key Findings
 
-1. **M5 Pro is 48-68% faster** than M3 Max with DB tuning, despite 12GB less RAM
-2. **DB tuning adds 5-23%** — `synchronous_commit=off` is the biggest win for PG writes; MSSQL TABLOCK serialization limits PG→MSSQL gains
-3. **Memory guardrail** keeps peak RSS under control on the 24GB machine
-4. **Data-driven row size estimates** from database statistics improve pipeline buffer sizing accuracy
+1. **M5 Pro is 5-41% faster** than M3 Max with identical DB tuning, despite 12GB less RAM
+2. **MSSQL→PG gap (+41%)** driven by M5 Pro's faster multi-core performance (Rosetta emulation) and disk I/O
+3. **PG→MSSQL gap is minimal (+5%)** because MSSQL TABLOCK serializes bulk inserts to one writer, limiting parallelism gains
+4. **DB tuning benefits both machines** — M3 Max improved from 287K to 342K rows/s (+19%) on MSSQL→PG with tuning
+5. **Extra RAM (36GB vs 24GB) does not compensate** for slower CPU/disk — performance is I/O and CPU bound, not memory bound
 
 ## StackOverflow2013 Benchmark (106.5M rows)
 
