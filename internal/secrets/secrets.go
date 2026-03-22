@@ -479,7 +479,9 @@ func (p *Provider) GetEffectiveMaxTokens(providerName string) int {
 	if p.MaxTokens > 0 {
 		return p.MaxTokens
 	}
-	if IsLocalProvider(providerName) {
+	// Treat as local if it's a known local provider OR has a base_url without an API key
+	// (custom OpenAI-compatible local providers)
+	if IsLocalProvider(providerName) || (p.BaseURL != "" && p.APIKey == "") {
 		return 16000
 	}
 	return 4000
@@ -545,7 +547,8 @@ ai:
       base_url: "http://localhost:11434"
       model: "llama3"
       # context_window: 8192  # optional, defaults to 8192 (conservative)
-      # Common values:
+      # max_tokens: 16000     # optional, max output tokens (default: 16000 for local, 4000 for cloud)
+      # Common context_window values:
       # - llama3:8b, llama3.2: 8192
       # - llama3:70b, llama3.1: 131072 (128K)
       # - qwen2.5, deepseek: 32768 (32K)
@@ -555,6 +558,7 @@ ai:
       base_url: "http://localhost:1234/v1"
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
+      # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
 
 encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32

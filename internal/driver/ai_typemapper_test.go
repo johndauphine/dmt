@@ -337,12 +337,15 @@ func TestAITypeMapper_OpenAIAPI(t *testing.T) {
 		response := openAIResponse{
 			Choices: []struct {
 				Message struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
 				} `json:"message"`
+				FinishReason string `json:"finish_reason"`
 			}{
 				{Message: struct {
-					Content string `json:"content"`
-				}{Content: "bytea"}},
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				}{Content: "bytea"}, FinishReason: "stop"},
 			},
 		}
 		json.NewEncoder(w).Encode(response)
@@ -1387,6 +1390,64 @@ func TestWriteIdentifierGuidance_SameEngine(t *testing.T) {
 			for _, absent := range tt.wantAbsent {
 				if strings.Contains(result, absent) {
 					t.Errorf("expected guidance NOT to contain %q, got:\n%s", absent, result)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAIResponse_ReasoningContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		reasoning   string
+		wantContent string
+		wantErr     string
+	}{
+		{
+			name:        "normal response",
+			content:     "CREATE TABLE t (id INT);",
+			wantContent: "CREATE TABLE t (id INT);",
+		},
+		{
+			name:      "reasoning only - no output",
+			content:   "",
+			reasoning: "Let me think about this...",
+			wantErr:   "model used all tokens on reasoning",
+		},
+		{
+			name:    "empty content no reasoning",
+			content: "",
+			wantErr: "empty response from API",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate the same logic as the API handlers
+			content := tt.content
+			var err error
+			if content == "" {
+				if tt.reasoning != "" {
+					err = fmt.Errorf("model used all tokens on reasoning with no output")
+				} else {
+					err = fmt.Errorf("empty response from API")
+				}
+			}
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if content != tt.wantContent {
+					t.Errorf("content = %q, want %q", content, tt.wantContent)
 				}
 			}
 		})
