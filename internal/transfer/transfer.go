@@ -696,14 +696,20 @@ func executeKeysetPagination(
 		checkpointFreqFn = func() int { return tuner.Snapshot().CheckpointFrequency }
 	}
 
-	// Build batch size callback: per-table override from tuner, or 0 (let writer use its default)
-	batchSizeFn := func() int { return 0 }
+	// Build batch size callback: per-table override from tuner, then global
+	// tuner chunk_size, then config chunk_size. This ensures AI-tuned values
+	// reach the writer even though target.chunk_size is set before AI tuning.
+	baseChunkSizeForBatch := cfg.Migration.ChunkSize
+	batchSizeFn := func() int { return baseChunkSizeForBatch }
 	if tuner != nil {
 		batchSizeFn = func() int {
 			if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
 				return bs
 			}
-			return 0
+			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+				return cs
+			}
+			return baseChunkSizeForBatch
 		}
 	}
 
@@ -1077,14 +1083,20 @@ func executeRowNumberPagination(
 		}
 	}
 
-	// Build batch size callback: per-table override from tuner, or 0 (let writer use its default)
-	batchSizeFn := func() int { return 0 }
+	// Build batch size callback: per-table override from tuner, then global
+	// tuner chunk_size, then config chunk_size. This ensures AI-tuned values
+	// reach the writer even though target.chunk_size is set before AI tuning.
+	baseChunkSizeForBatch := cfg.Migration.ChunkSize
+	batchSizeFn := func() int { return baseChunkSizeForBatch }
 	if tuner != nil {
 		batchSizeFn = func() int {
 			if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
 				return bs
 			}
-			return 0
+			if cs := tuner.Snapshot().ChunkSize; cs > 0 {
+				return cs
+			}
+			return baseChunkSizeForBatch
 		}
 	}
 
