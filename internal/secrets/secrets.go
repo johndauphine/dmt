@@ -78,6 +78,7 @@ type Provider struct {
 	BaseURL        string `yaml:"base_url,omitempty"`        // Required for local providers, optional for cloud
 	Model          string `yaml:"model,omitempty"`           // Optional, uses smart defaults
 	ContextWindow  int    `yaml:"context_window,omitempty"`  // Optional, context window size in tokens (for Ollama/local providers)
+	MaxTokens      int    `yaml:"max_tokens,omitempty"`      // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
 	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty"` // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 }
 
@@ -468,6 +469,20 @@ func (p *Provider) GetEffectiveContextWindow() int {
 	}
 	// Conservative default that works with most models
 	return 8192
+}
+
+// GetEffectiveMaxTokens returns the max output tokens for a provider.
+// Returns the configured value if set, otherwise returns a default based on provider type.
+// Local providers default to 16000 (reasoning models need headroom for thinking + output).
+// Cloud providers default to 4000.
+func (p *Provider) GetEffectiveMaxTokens(providerName string) int {
+	if p.MaxTokens > 0 {
+		return p.MaxTokens
+	}
+	if IsLocalProvider(providerName) {
+		return 16000
+	}
+	return 4000
 }
 
 // IsLocalProvider returns true if the provider is a local provider (no API key needed)

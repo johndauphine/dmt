@@ -750,8 +750,10 @@ type openAIMessage struct {
 type openAIResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"` // Reasoning/thinking models (e.g., Qwen3)
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -772,10 +774,8 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 	if isTypeMapping {
 		systemMsg = "You are a database type mapping expert. Respond with only the target type, no explanation."
 	} else {
-		// For complex queries with OpenAI, use more tokens (costs more but necessary)
-		if maxTokens <= 100 {
-			maxTokens = 4000 // Reasonable default for analysis tasks
-		}
+		// For complex queries, use the provider's configured max tokens
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
 	}
 
 	reqBody := openAIRequest{
@@ -820,11 +820,19 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
 	}
 
-	if len(openAIResp.Choices) == 0 || openAIResp.Choices[0].Message.Content == "" {
+	if len(openAIResp.Choices) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return openAIResp.Choices[0].Message.Content, nil
+	content := openAIResp.Choices[0].Message.Content
+	if content == "" {
+		if openAIResp.Choices[0].Message.ReasoningContent != "" {
+			return "", fmt.Errorf("model used all tokens on reasoning with no output — try increasing max_tokens or using a non-reasoning model")
+		}
+		return "", fmt.Errorf("empty response from API")
+	}
+
+	return content, nil
 }
 
 // queryOpenAICompatAPI queries local providers using OpenAI-compatible API (no auth required).
@@ -843,9 +851,11 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 		systemMsg = "You are a database type mapping expert. Respond with only the target type, no explanation."
 	}
 
-	// For Ollama (local, free), use larger token budget for complex queries
-	if AIProvider(m.providerName) == ProviderOllama && !isTypeMapping {
-		maxTokens = 16000 // Allow longer responses for detailed analysis/recommendations
+	// For complex queries, use the provider's configured max tokens.
+	// Reasoning models (e.g., Qwen3) consume tokens on thinking before generating,
+	// so they need significantly more headroom.
+	if !isTypeMapping {
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
 	}
 
 	reqBody := openAIRequest{
@@ -904,11 +914,21 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
 	}
 
-	if len(openAIResp.Choices) == 0 || openAIResp.Choices[0].Message.Content == "" {
+	if len(openAIResp.Choices) == 0 {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return openAIResp.Choices[0].Message.Content, nil
+	content := openAIResp.Choices[0].Message.Content
+	if content == "" {
+		// Reasoning models (e.g., Qwen3) may put all output in reasoning_content
+		// and leave content empty when max_tokens is too low for both thinking + output.
+		if openAIResp.Choices[0].Message.ReasoningContent != "" {
+			return "", fmt.Errorf("model used all tokens on reasoning with no output — try increasing max_tokens or using a non-reasoning model")
+		}
+		return "", fmt.Errorf("empty response from API")
+	}
+
+	return content, nil
 }
 
 // Gemini API types
