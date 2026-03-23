@@ -78,12 +78,12 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 
 | Metric | M3 Max | M5 Pro |
 |--------|--------|--------|
-| Sequential Write | 2.6 GB/s | *needs testing* |
-| Sequential Read | 8.6 GB/s | *needs testing* |
+| Sequential Write | 2.7 GB/s | *needs testing* |
+| Sequential Read | 7.5 GB/s | *needs testing* |
 
-> Measured with `dd bs=1M count=1024` inside Docker container.
-> Native macOS disk is much faster (M3 Max: 7.1 GB/s write, 17.6 GB/s read)
-> but Docker's VM I/O virtualization is the actual bottleneck.
+> Average of 3 runs, `dd bs=1M count=1024` inside Docker container.
+> Native macOS disk is much faster but Docker's VM I/O virtualization
+> is the actual bottleneck for database migrations.
 
 ### Results (default DB settings)
 
