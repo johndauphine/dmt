@@ -160,43 +160,33 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 | LinkTypes | 2 | — |
 | **Total** | **106,534,570** | **573 bytes avg** |
 
-### MSSQL → PostgreSQL (drop_recreate)
+### Results (transfer-only metric, tuned DBs, 8GB Docker)
 
-| Configuration | Transfer | Overall | Duration |
-|--------------|----------|---------|----------|
-| Default (no DB tuning) | 528K rows/s | 425K rows/s | 4m11s |
-| DB tuning (fsync=on) | 662K rows/s | 510K rows/s | 3m29s |
-| DB tuning (fsync=off) | 656K rows/s | 518K rows/s | 3m26s |
+| Direction | Transfer | Duration | Notes |
+|-----------|----------|----------|-------|
+| PG→MSSQL | **351K rows/s** | 5m04s | workers=8, chunk=8192, parallel BCP |
+| MSSQL→PG | **stalls** | — | Last partition hangs on Rosetta 2 MSSQL read |
+
+> Transfer-only throughput (PR #102). PG→MSSQL uses parallel BCP without TABLOCK (PR #98).
+> MSSQL→PG consistently stalls on the last partition of large tables (votes 52.9M rows) due to
+> Rosetta 2 emulation hanging on long-running SELECT operations. Not reproducible on native Linux.
 
 ### Database Tuning Applied
 
-**SQL Server** (source):
-- `max server memory (MB)` = 4096 (prevents consuming all Docker RAM)
-- `max degree of parallelism` = 6
+**SQL Server**:
+- `max server memory (MB)` = 4096, `max degree of parallelism` = 6
 
-**PostgreSQL** (target):
+**PostgreSQL**:
 - `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
 - `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
-- `synchronous_commit` = off (safe — biggest single win for write throughput)
-- `wal_level` = minimal, `max_wal_senders` = 0
-
-### Docker RAM vs Throughput
-
-| Docker RAM | Transfer (fsync=on) | Notes |
-|-----------|-------------------|-------|
-| 4GB | Stalled | MSSQL runs out of memory |
-| 6GB | 528K rows/s | Good, but host memory constrained |
-| **8GB** | **662K rows/s** | **Optimal** — best balance of DB cache and host pipeline memory |
-| 12GB | 432K rows/s | Too much to DBs, starves dmt pipeline |
-| 16GB | ~200-290K rows/s | Significantly degraded |
+- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
 
 ### Key Findings
 
-1. **Database tuning matters more than Docker RAM** — tuning PG write settings on 8GB Docker (662K) outperformed untuned 6GB (528K) by 25%
-2. **synchronous_commit=off is the biggest safe win** — fsync=on vs off makes minimal difference when synchronous_commit is already off
-3. **More Docker RAM is not better** — the host needs memory for dmt's parallel pipeline buffers; 8GB is optimal for 24GB host
-4. **AI startup tuning finds optimal chunk_size** — with throughput feedback, the AI correctly identifies chunk_size=8000 as optimal for this mixed-row-size workload
-5. **Rosetta 2 is the remaining bottleneck** — ~30-40% overhead on MSSQL reads; native Linux would be significantly faster
+1. **PG→MSSQL 351K rows/s** — 2.5x faster than original baseline (140K) due to parallel BCP
+2. **MSSQL→PG stalls on SO2013** — Rosetta 2 emulation causes last-partition read hangs on 50M+ row tables. SO2010 (19.3M rows) works fine at 1.36M rows/s
+3. **Rosetta 2 is the remaining bottleneck** — native Linux deployments would not have this issue
+4. **AI tuning with transfer-only metric** converges on optimal parameters within 3 runs
 
 ## PostgreSQL → PostgreSQL with AI Tuning (106.5M rows)
 
