@@ -150,9 +150,9 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 
 ### Test Environment
 
-- **Hardware**: Apple M5 Pro, 24GB RAM, 15 CPU cores
-- **OS**: macOS Tahoe (Darwin 25.3.0)
-- **Databases**: SQL Server 2022, PostgreSQL 16 (Docker 8GB)
+- **M3 Max**: 36GB RAM, 14 CPU cores, Docker 16GB, macOS Darwin 25.3.0
+- **M5 Pro**: 24GB RAM, 15 CPU cores, Docker 8GB, macOS Tahoe Darwin 25.3.0
+- **Databases**: SQL Server 2022 (Rosetta 2), PostgreSQL 16
 - **Dataset**: StackOverflow2013 (~106.5M rows, 9 tables)
 - **Date**: March 2026
 
@@ -171,33 +171,37 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 | LinkTypes | 2 | — |
 | **Total** | **106,534,570** | **573 bytes avg** |
 
-### Results (transfer-only metric, tuned DBs, 8GB Docker)
+### Results (transfer-only metric, tuned DBs)
 
-| Direction | Transfer | Duration | Notes |
-|-----------|----------|----------|-------|
-| MSSQL→PG | **795K rows/s** | 2m14s | workers=8, chunk=8192 |
-| PG→MSSQL | **351K rows/s** | 5m04s | workers=8, chunk=8192, parallel BCP |
+| Direction | M3 Max (16GB Docker) | M5 Pro (8GB Docker) | Delta |
+|-----------|---------------------|---------------------|-------|
+| MSSQL→PG | 287K rows/s (6m12s) | **795K rows/s** (2m14s) | **M5 Pro +177%** |
+| PG→MSSQL | 222K rows/s (8m5s) | **351K rows/s** (5m4s) | **M5 Pro +58%** |
 
 > Transfer-only throughput (PR #102). PG→MSSQL uses parallel BCP without TABLOCK (PR #98).
+> M3 Max uses max_copy_writers=4 to prevent PG COPY I/O stalls on slower disk.
 > MSSQL→PG may intermittently stall on large partitions under Rosetta 2 emulation.
 > Not reproducible on native Linux.
 
 ### Database Tuning Applied
 
-**SQL Server**:
-- `max server memory (MB)` = 4096, `max degree of parallelism` = 6
+**M5 Pro (8GB Docker):**
+- MSSQL: `max server memory` = 4096MB, `max degree of parallelism` = 6
+- PG: `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
 
-**PostgreSQL**:
-- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
-- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
-- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0
+**M3 Max (16GB Docker):**
+- MSSQL: `max server memory` = 8192MB, `max degree of parallelism` = 6
+- PG: `shared_buffers` = 3GB, `work_mem` = 512MB, `maintenance_work_mem` = 1GB
+
+Both: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, `fsync` = off
 
 ### Key Findings
 
-1. **795K rows/s MSSQL→PG** — 2.8x faster than original baseline (287K) due to memory guardrail and AI tuning improvements
-2. **351K rows/s PG→MSSQL** — 2.5x faster than original baseline (140K) due to parallel BCP
-3. **Rosetta 2 intermittent stalls** — MSSQL reads on large partitions (50M+ rows) may hang under emulation; not an issue on native Linux
-4. **AI tuning with transfer-only metric** converges on optimal parameters within 3 runs
+1. **M5 Pro is 58-177% faster on SO2013** — the 52GB dataset exceeds any cache, making disk I/O and CPU speed the bottleneck
+2. **Extra Docker RAM barely helps on large datasets** — M3 Max with 16GB Docker (287K) vs 8GB Docker (262K) = only +10% on MSSQL→PG, because the dataset doesn't fit in cache
+3. **PG→MSSQL gap (+58%) is larger than SO2010 (+29%)** — longer-running transfers amplify the M5 Pro's disk I/O advantage
+4. **M3 Max requires max_copy_writers=4** to prevent PG COPY I/O stalls on the larger dataset; M5 Pro runs stable at default
+5. **Rosetta 2 intermittent stalls** — MSSQL reads on large partitions (50M+ rows) may hang under emulation; not an issue on native Linux
 
 ## PostgreSQL → PostgreSQL with AI Tuning (106.5M rows)
 
