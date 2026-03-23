@@ -128,8 +128,8 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 	cacheFile := filepath.Join(homeDir, ".dmt", "type-cache.json")
 
 	// Determine API timeout: user-configured > local provider default > cloud default.
-	// Local providers (Ollama/LMStudio) need more time for inference.
-	timeoutSec := 30
+	// Local providers and thinking models need more time for inference.
+	timeoutSec := 60
 	if IsLocalProvider(providerName) {
 		timeoutSec = 120
 	}
@@ -964,13 +964,15 @@ type geminiResponse struct {
 }
 
 func (m *AITypeMapper) queryGeminiAPI(ctx context.Context, prompt string) (string, error) {
-	// Scale token limit with prompt complexity, matching the Anthropic/OpenAI
-	// heuristic. Short prompts (type mapping) need ~100 tokens; long prompts
-	// (smart config, AI adjustments) produce JSON with 15+ parameters plus
-	// reasoning text, requiring 2000+ tokens.
+	// Short prompts (type mapping) need ~100 tokens; complex prompts
+	// (DDL generation, smart config) need the provider's configured max.
+	// Gemini 3+ models use thinking tokens, so they need more headroom.
 	maxTokens := 100
 	if len(prompt) > 500 {
-		maxTokens = 4096
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
+		if maxTokens < 8192 {
+			maxTokens = 8192 // Gemini thinking models need headroom
+		}
 	}
 
 	reqBody := geminiRequest{
