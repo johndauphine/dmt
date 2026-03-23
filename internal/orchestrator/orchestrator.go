@@ -538,11 +538,13 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// Record transfer-only throughput in AI tuning history for future learning
 	// transferDuration captured right after transferAll returns (excludes schema
 	// extraction, DDL creation, finalization, and validation)
-	if transferDuration.Seconds() > 0 {
-		transferThroughput := float64(totalRows) / transferDuration.Seconds()
-		if err := o.state.UpdateAITuningResult(transferThroughput, transferDuration.Seconds()); err != nil {
-			logging.Debug("Failed to update AI tuning result: %v", err)
-		}
+	transferDurationSecs := transferDuration.Seconds()
+	var transferThroughput float64
+	if transferDurationSecs > 0 {
+		transferThroughput = float64(totalRows) / transferDurationSecs
+	}
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs); err != nil {
+		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 
 	// Log identifier changes for PostgreSQL targets
@@ -1042,11 +1044,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Record transfer-only throughput in AI tuning history for future learning
 	// transferDuration captured right after transferAll returns
-	if transferDuration.Seconds() > 0 {
-		transferThroughput := float64(totalRows) / transferDuration.Seconds()
-		if err := o.state.UpdateAITuningResult(transferThroughput, transferDuration.Seconds()); err != nil {
-			logging.Debug("Failed to update AI tuning result: %v", err)
-		}
+	transferDurationSecs := transferDuration.Seconds()
+	var transferThroughput float64
+	if transferDurationSecs > 0 {
+		transferThroughput = float64(totalRows) / transferDurationSecs
+	}
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs); err != nil {
+		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 
 	// Log identifier changes for PostgreSQL targets
