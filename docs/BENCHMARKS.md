@@ -164,12 +164,12 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 
 | Direction | Transfer | Duration | Notes |
 |-----------|----------|----------|-------|
+| MSSQL→PG | **795K rows/s** | 2m14s | workers=8, chunk=8192 |
 | PG→MSSQL | **351K rows/s** | 5m04s | workers=8, chunk=8192, parallel BCP |
-| MSSQL→PG | **stalls** | — | Last partition hangs on Rosetta 2 MSSQL read |
 
 > Transfer-only throughput (PR #102). PG→MSSQL uses parallel BCP without TABLOCK (PR #98).
-> MSSQL→PG consistently stalls on the last partition of large tables (votes 52.9M rows) due to
-> Rosetta 2 emulation hanging on long-running SELECT operations. Not reproducible on native Linux.
+> MSSQL→PG may intermittently stall on large partitions under Rosetta 2 emulation.
+> Not reproducible on native Linux.
 
 ### Database Tuning Applied
 
@@ -183,9 +183,9 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 
 ### Key Findings
 
-1. **PG→MSSQL 351K rows/s** — 2.5x faster than original baseline (140K) due to parallel BCP
-2. **MSSQL→PG stalls on SO2013** — Rosetta 2 emulation causes last-partition read hangs on 50M+ row tables. SO2010 (19.3M rows) works fine at 1.36M rows/s
-3. **Rosetta 2 is the remaining bottleneck** — native Linux deployments would not have this issue
+1. **795K rows/s MSSQL→PG** — 2.8x faster than original baseline (287K) due to memory guardrail and AI tuning improvements
+2. **351K rows/s PG→MSSQL** — 2.5x faster than original baseline (140K) due to parallel BCP
+3. **Rosetta 2 intermittent stalls** — MSSQL reads on large partitions (50M+ rows) may hang under emulation; not an issue on native Linux
 4. **AI tuning with transfer-only metric** converges on optimal parameters within 3 runs
 
 ## PostgreSQL → PostgreSQL with AI Tuning (106.5M rows)
