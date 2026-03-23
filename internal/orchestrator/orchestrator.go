@@ -442,7 +442,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.progress.SetPhase("transfer")
 	logging.Debug("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
+	transferStart := time.Now()
 	tableFailures, err := o.transferAll(ctx, runID, tables, false)
+	transferDuration := time.Since(transferStart)
 	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
@@ -533,8 +535,15 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			len(tables), totalRows, duration.Round(time.Second), throughput)
 	}
 
-	// Record final throughput in AI tuning history for future learning
-	if err := o.state.UpdateAITuningResult(throughput, duration.Seconds()); err != nil {
+	// Record transfer-only throughput in AI tuning history for future learning
+	// transferDuration captured right after transferAll returns (excludes schema
+	// extraction, DDL creation, finalization, and validation)
+	transferDurationSecs := transferDuration.Seconds()
+	var transferThroughput float64
+	if transferDurationSecs > 0 {
+		transferThroughput = float64(totalRows) / transferDurationSecs
+	}
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 
@@ -931,8 +940,11 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Transfer only the incomplete tables
+	o.progress.SetPhase("transfer")
 	logging.Debug("Transferring data...")
+	transferStart := time.Now()
 	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer, true)
+	transferDuration := time.Since(transferStart)
 	if err != nil {
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
@@ -1030,8 +1042,14 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
 	}
 
-	// Record final throughput in AI tuning history for future learning
-	if err := o.state.UpdateAITuningResult(throughput, duration.Seconds()); err != nil {
+	// Record transfer-only throughput in AI tuning history for future learning
+	// transferDuration captured right after transferAll returns
+	transferDurationSecs := transferDuration.Seconds()
+	var transferThroughput float64
+	if transferDurationSecs > 0 {
+		transferThroughput = float64(totalRows) / transferDurationSecs
+	}
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 
