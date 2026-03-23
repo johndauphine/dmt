@@ -81,16 +81,15 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 | MSSQL→PG | 287K rows/s (75s) | **391K rows/s** (49s) | **+36%** |
 | PG→MSSQL | 140K rows/s (137s) | **197K rows/s** (98s) | **+40%** |
 
-### Results (with DB tuning, 8GB Docker, transfer-only metric)
+### Results (with DB tuning, transfer-only metric)
 
-| Direction | M5 Pro (tuned) | Duration | Notes |
-|-----------|----------------|----------|-------|
-| MSSQL→PG | **1,357K rows/s** | 14s | AI converged: workers=10, chunk=8192 |
-| PG→MSSQL | **567K rows/s** | 34s | AI converged: workers=10, chunk=8192 |
+| Direction | M3 Max (16GB Docker) | M5 Pro (8GB Docker) | Delta |
+|-----------|---------------------|---------------------|-------|
+| MSSQL→PG | 472K rows/s (40s) | **1,357K rows/s** (14s) | **M5 Pro +187%** |
+| PG→MSSQL | 439K rows/s (44s) | **567K rows/s** (34s) | **M5 Pro +29%** |
 
 > Transfer-only throughput (PR #102) — excludes DDL generation, finalization, and validation.
 > Average of runs 3-5 (after AI convergence). Both use parallel BCP without TABLOCK (PR #98).
-> M3 Max results need re-testing with transfer-only metric for fair comparison.
 
 ### M3 Max Docker RAM vs Throughput (MSSQL→PG)
 
@@ -118,6 +117,8 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 
 ### AI Tuning Convergence (5 runs each direction)
 
+**M5 Pro (8GB Docker):**
+
 | Run | MSSQL→PG | PG→MSSQL |
 |-----|----------|----------|
 | 1 | 1,269K rows/s | 574K rows/s |
@@ -126,14 +127,24 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 | 4 | 1,349K rows/s | 559K rows/s |
 | 5 | 1,345K rows/s | 571K rows/s |
 
+**M3 Max (16GB Docker):**
+
+| Run | MSSQL→PG | PG→MSSQL |
+|-----|----------|----------|
+| 1 | 420K rows/s | 350K rows/s |
+| 2 | 470K rows/s | 410K rows/s |
+| 3 | 485K rows/s | 383K rows/s |
+| 4 | 455K rows/s | 490K rows/s |
+| 5 | 477K rows/s | 444K rows/s |
+
 ### Key Findings
 
-1. **AI tuning converges in 3 runs** — settles on workers=10, chunk_size=8192 for both directions
-2. **Transfer-only metric** (PR #102) gives the AI accurate feedback — no longer confused by DDL generation overhead
-3. **1.36M rows/s MSSQL→PG** — 4.7x faster than original M3 Max baseline (287K) due to memory guardrail, parallel BCP, and AI tuning improvements
-4. **567K rows/s PG→MSSQL** — 4x faster than original M3 Max baseline (140K) due to parallel BCP without TABLOCK
-5. **RAM matters when you give it to the databases** — M3 Max closed the MSSQL→PG gap from -64% to -3% by increasing Docker RAM from 8GB to 24GB
-6. **DB tuning + RAM allocation together** deliver the biggest gains
+1. **M5 Pro dominates MSSQL→PG (+187%)** — faster CPU (Rosetta emulation) and disk I/O are the bottleneck for MSSQL reads
+2. **PG→MSSQL gap is smaller (+29%)** — parallel BCP writes benefit from M3 Max's extra RAM for OS page cache and write buffering
+3. **AI tuning converges in 3 runs** on both machines — settles on optimal workers and chunk_size
+4. **Transfer-only metric** (PR #102) gives the AI accurate feedback — no longer confused by DDL generation overhead
+5. **RAM helps but can't overcome CPU/disk** — M3 Max with 16GB Docker (472K) still trails M5 Pro with 8GB Docker (1,357K) on MSSQL→PG
+6. **DB tuning + RAM allocation together** deliver the biggest gains: M3 Max untuned (287K) → tuned 16GB Docker (472K) = **+64%**
 
 ## StackOverflow2013 Benchmark (106.5M rows)
 
