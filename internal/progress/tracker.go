@@ -82,6 +82,7 @@ func (t *Tracker) emitProgress() {
 	t.reporterMu.Lock()
 	reporter := t.reporter
 	phase := t.phase
+	startTime := t.startTime
 	t.reporterMu.Unlock()
 
 	if reporter == nil {
@@ -103,7 +104,7 @@ func (t *Tracker) emitProgress() {
 	}
 
 	var rowsPerSec int64
-	elapsed := time.Since(t.startTime).Seconds()
+	elapsed := time.Since(startTime).Seconds()
 	if elapsed > 0 {
 		rowsPerSec = int64(float64(current) / elapsed)
 	}
@@ -124,9 +125,15 @@ func (t *Tracker) emitProgress() {
 	reporter.Report(update)
 }
 
-// SetPhase updates the current phase and emits an immediate progress update
+// SetPhase updates the current phase and emits an immediate progress update.
+// When entering the "transfer" phase, the start time is reset so that
+// "Transfer complete" reports transfer-only duration (excluding schema
+// extraction, DDL creation, and AI tuning overhead).
 func (t *Tracker) SetPhase(phase string) {
 	t.reporterMu.Lock()
+	if phase == "transfer" {
+		t.startTime = time.Now()
+	}
 	t.phase = phase
 	t.reporterMu.Unlock()
 	t.emitProgressImmediate()
@@ -137,6 +144,7 @@ func (t *Tracker) emitProgressImmediate() {
 	t.reporterMu.Lock()
 	reporter := t.reporter
 	phase := t.phase
+	startTime := t.startTime
 	t.reporterMu.Unlock()
 
 	if reporter == nil {
@@ -158,7 +166,7 @@ func (t *Tracker) emitProgressImmediate() {
 	}
 
 	var rowsPerSec int64
-	elapsed := time.Since(t.startTime).Seconds()
+	elapsed := time.Since(startTime).Seconds()
 	if elapsed > 0 {
 		rowsPerSec = int64(float64(current) / elapsed)
 	}
@@ -302,14 +310,17 @@ func (t *Tracker) Finish() {
 		t.bar.Finish()
 	}
 
-	elapsed := time.Since(t.startTime)
-	rowsPerSec := float64(t.current.Load()) / elapsed.Seconds()
-
-	// Emit final progress update
 	t.reporterMu.Lock()
+	startTime := t.startTime
 	t.phase = "completed"
 	jsonMode := t.jsonMode
 	t.reporterMu.Unlock()
+
+	elapsed := time.Since(startTime)
+	var rowsPerSec float64
+	if elapsed.Seconds() > 0 {
+		rowsPerSec = float64(t.current.Load()) / elapsed.Seconds()
+	}
 	t.emitProgressImmediate()
 
 	if !jsonMode {
