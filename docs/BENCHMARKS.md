@@ -69,10 +69,21 @@ Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent
 
 ### Test Environment
 
-- **M3 Max**: 36GB RAM, 14 CPU cores, macOS Darwin 25.2.0, January 2026
-- **M5 Pro**: 24GB RAM, 15 CPU cores, macOS Tahoe Darwin 25.3.0, March 2026
+- **M3 Max**: 36GB RAM, 14 CPU cores, macOS Darwin 25.2.0
+- **M5 Pro**: 24GB RAM, 15 CPU cores, macOS Tahoe Darwin 25.3.0
 
 Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
+
+### Disk I/O (Docker VM)
+
+| Metric | M3 Max | M5 Pro |
+|--------|--------|--------|
+| Sequential Write | 2.6 GB/s | *needs testing* |
+| Sequential Read | 8.6 GB/s | *needs testing* |
+
+> Measured with `dd bs=1M count=1024` inside Docker container.
+> Native macOS disk is much faster (M3 Max: 7.1 GB/s write, 17.6 GB/s read)
+> but Docker's VM I/O virtualization is the actual bottleneck.
 
 ### Results (default DB settings)
 
