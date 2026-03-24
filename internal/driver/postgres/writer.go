@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
@@ -688,10 +689,15 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 // narrow-row tables (e.g. Votes at ~6 bytes/row) use large batches while
 // wide-row tables (e.g. Posts at ~10KB/row) use small ones, keeping I/O
 // consistent without unnecessarily throttling throughput.
+//
+// targetCopyBytes is capped at 1MB to avoid pgx CopyFrom TCP buffer deadlocks.
+// pgx sends COPY data directly to the TCP socket without the bgReader deadlock-
+// prevention mechanism. When total data exceeds the combined TCP send/receive
+// buffer capacity, the client and server can deadlock waiting for each other.
 const (
-	targetCopyBytes  = 5 << 20 // 5 MB per COPY operation
+	targetCopyBytes  = 1 << 20 // 1 MB per COPY operation (avoids pgx TCP buffer deadlock)
 	minCopyBatchRows = 100
-	maxCopyBatchRows = 50_000
+	maxCopyBatchRows = 10_000
 )
 
 // estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
@@ -740,6 +746,15 @@ func copyBatchSize(rows [][]any) int {
 	return n
 }
 
+// copyTimeout is the maximum time a single CopyFrom call may block.
+// Acts as a safety net for pgx CopyFrom TCP buffer deadlocks that may still
+// occur despite the reduced targetCopyBytes. The timeout triggers pgx's
+// ContextWatcher to close the connection, breaking the deadlock.
+const copyTimeout = 2 * time.Minute
+
+// copyMaxRetries is the number of times to retry a CopyFrom after a timeout.
+const copyMaxRetries = 2
+
 // WriteBatch writes a batch of rows using COPY protocol.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
 	if len(opts.Rows) == 0 {
@@ -753,12 +768,6 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-
-	conn, err := w.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquiring connection: %w", err)
-	}
-	defer conn.Release()
 
 	// Sanitize table and column names to match how they were created (lowercase)
 	sanitizedTable := sanitizePGTableName(opts.Table)
@@ -777,17 +786,62 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			end = len(opts.Rows)
 		}
 
-		_, err = conn.Conn().CopyFrom(
-			ctx,
-			ident,
-			sanitizedCols,
-			pgx.CopyFromRows(opts.Rows[start:end]),
-		)
-		if err != nil {
+		if err := w.copyFromWithRetry(ctx, ident, sanitizedCols, opts.Rows[start:end]); err != nil {
 			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
 		}
 	}
 	return nil
+}
+
+// copyFromWithRetry acquires a connection, runs CopyFrom with a timeout, and
+// retries on a fresh connection if the call times out (pgx TCP buffer deadlock).
+// Non-timeout errors are returned immediately.
+func (w *Writer) copyFromWithRetry(ctx context.Context, ident pgx.Identifier, cols []string, rows [][]any) error {
+	var lastErr error
+	for attempt := 0; attempt <= copyMaxRetries; attempt++ {
+		if attempt > 0 {
+			logging.Warn("COPY retry %d/%d after timeout (%d rows to %s)", attempt, copyMaxRetries, len(rows), ident)
+		}
+
+		conn, err := w.pool.Acquire(ctx)
+		if err != nil {
+			return fmt.Errorf("acquiring connection: %w", err)
+		}
+
+		copyCtx, cancel := context.WithTimeout(ctx, copyTimeout)
+		_, err = conn.Conn().CopyFrom(
+			copyCtx,
+			ident,
+			cols,
+			pgx.CopyFromRows(rows),
+		)
+		cancel()
+
+		if err == nil {
+			conn.Release()
+			return nil
+		}
+
+		// Parent context cancelled — don't retry.
+		if ctx.Err() != nil {
+			conn.Release()
+			return ctx.Err()
+		}
+
+		// On timeout, destroy the connection (it's in a broken state) and retry.
+		if copyCtx.Err() == context.DeadlineExceeded {
+			logging.Warn("COPY to %s timed out after %v (%d rows) — destroying connection and retrying", ident, copyTimeout, len(rows))
+			conn.Conn().Close(context.Background())
+			conn.Release()
+			lastErr = err
+			continue
+		}
+
+		// Non-timeout error — return immediately.
+		conn.Release()
+		return err
+	}
+	return fmt.Errorf("COPY failed after %d retries: %w", copyMaxRetries, lastErr)
 }
 
 // UpsertBatch performs an upsert using staging table + INSERT ON CONFLICT.
@@ -829,12 +883,14 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
+		copyCtx, cancel := context.WithTimeout(ctx, copyTimeout)
 		_, err = conn.Conn().CopyFrom(
-			ctx,
+			copyCtx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
 			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
 		}
