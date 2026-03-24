@@ -892,6 +892,12 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		)
 		cancel()
 		if err != nil {
+			// On timeout, destroy the connection to prevent returning a
+			// deadlocked connection to the pool.
+			if copyCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+				logging.Warn("COPY to staging %s timed out after %v — destroying connection", stagingTable, copyTimeout)
+				conn.Conn().Close(context.Background())
+			}
 			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
 		}
 	}
