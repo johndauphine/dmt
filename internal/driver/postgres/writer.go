@@ -685,15 +685,15 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
-// Adaptive COPY sub-batch sizing. Each CopyFrom targets ~5MB of data so that
+// Adaptive COPY sub-batch sizing. Each CopyFrom targets ~1MB of data so that
 // narrow-row tables (e.g. Votes at ~6 bytes/row) use large batches while
 // wide-row tables (e.g. Posts at ~10KB/row) use small ones, keeping I/O
 // consistent without unnecessarily throttling throughput.
 //
-// targetCopyBytes is capped at 1MB to avoid pgx CopyFrom TCP buffer deadlocks.
-// pgx sends COPY data directly to the TCP socket without the bgReader deadlock-
-// prevention mechanism. When total data exceeds the combined TCP send/receive
-// buffer capacity, the client and server can deadlock waiting for each other.
+// The 1MB target avoids pgx CopyFrom TCP buffer deadlocks. pgx sends COPY data
+// directly to the TCP socket without the bgReader deadlock-prevention mechanism.
+// When total data exceeds the combined TCP send/receive buffer capacity, the
+// client and server can deadlock waiting for each other.
 const (
 	targetCopyBytes  = 1 << 20 // 1 MB per COPY operation (avoids pgx TCP buffer deadlock)
 	minCopyBatchRows = 100

@@ -107,7 +107,7 @@ func TestCopyBatchSize(t *testing.T) {
 		t.Errorf("narrow rows: copyBatchSize() = %d, want %d", got, maxCopyBatchRows)
 	}
 
-	// Wide rows (~10KB each): 1MB/10240 = 102
+	// Wide rows (~10KB each): 1MB / ~10008 bytes ≈ 104
 	wide := make([][]any, 100)
 	for i := range wide {
 		wide[i] = []any{string(make([]byte, 10000)), i}
@@ -117,7 +117,7 @@ func TestCopyBatchSize(t *testing.T) {
 		t.Errorf("wide rows: copyBatchSize() = %d, want in [%d, 200]", got, minCopyBatchRows)
 	}
 
-	// Very wide rows (~100KB each): 1MB/102408 = ~10, clamped to minCopyBatchRows (100)
+	// Very wide rows (~100KB each): 1MB / 102400 = ~10, clamped to minCopyBatchRows (100)
 	veryWide := make([][]any, 10)
 	for i := range veryWide {
 		veryWide[i] = []any{string(make([]byte, 100000)), string(make([]byte, 2400))}
