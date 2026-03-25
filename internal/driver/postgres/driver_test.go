@@ -99,14 +99,14 @@ func TestEstimateAvgRowBytes(t *testing.T) {
 func TestCopyBatchSize(t *testing.T) {
 	targetBytes := fallbackCopyBytes // 1 MB
 
-	// Narrow rows (~64 bytes): 1MB/64 = 16384, clamped to maxCopyBatchRows (10000)
+	// Narrow rows (~64 bytes): 1MB / 64 = 16384 rows
 	narrow := make([][]any, 100)
 	for i := range narrow {
 		narrow[i] = []any{i, i + 1}
 	}
 	got := copyBatchSize(narrow, targetBytes)
-	if got != maxCopyBatchRows {
-		t.Errorf("narrow rows: copyBatchSize() = %d, want %d", got, maxCopyBatchRows)
+	if got < 10000 || got > maxCopyBatchRows {
+		t.Errorf("narrow rows: copyBatchSize() = %d, want in [10000, %d]", got, maxCopyBatchRows)
 	}
 
 	// Wide rows (~10KB each): 1MB / ~10008 bytes ≈ 104

@@ -698,7 +698,7 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 const (
 	fallbackCopyBytes = 1 << 20 // 1 MB fallback when TCP probe fails
 	minCopyBatchRows  = 100
-	maxCopyBatchRows  = 10_000
+	maxCopyBatchRows  = 50_000 // row cap; the byte limit (from TCP probe) prevents deadlocks
 )
 
 // probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
