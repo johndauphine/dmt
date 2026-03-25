@@ -781,32 +781,17 @@ func copyBatchSize(rows [][]any, targetBytes int) int {
 	return n
 }
 
-// copyTimeoutPerMB is the timeout budget per megabyte of COPY data. The total
-// timeout for a CopyFrom call is: copyMinTimeout + (dataSize / 1MB) * copyTimeoutPerMB.
-// This scales with batch size so large batches on slow links aren't killed
-// prematurely, while small batches (the common case) time out quickly if
-// deadlocked. A normal 1MB COPY completes in well under 1 second locally.
-const copyTimeoutPerMB = 30 * time.Second
-
-// copyMinTimeout is the minimum timeout for any CopyFrom call, regardless of
-// batch size. Provides a generous floor for connection setup overhead.
-const copyMinTimeout = 30 * time.Second
+// copyTimeout is the maximum time a single CopyFrom call may block. Batches
+// are capped at ~1MB by the TCP buffer probe, so a normal COPY completes in
+// well under 1 second. Two minutes is generous enough for any network while
+// catching pgx TCP buffer deadlocks before the migration appears stalled.
+const copyTimeout = 2 * time.Minute
 
 // copyMaxRetries is the number of times to retry a CopyFrom after a timeout.
 // Retries are only safe when the target table has no unique constraints
 // (drop_recreate mode with deferred PKs), which is the normal path.
 // In upsert mode, ON CONFLICT handles any duplicate rows from a retry.
 const copyMaxRetries = 2
-
-// copyDeadline returns the timeout for a CopyFrom call based on data size.
-func copyDeadline(dataBytes int) time.Duration {
-	mb := dataBytes / (1 << 20)
-	if mb < 1 {
-		mb = 1
-	}
-	d := copyMinTimeout + time.Duration(mb)*copyTimeoutPerMB
-	return d
-}
 
 // WriteBatch writes a batch of rows using COPY protocol.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -850,9 +835,6 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 // retries on a fresh connection if the call times out (pgx TCP buffer deadlock).
 // Non-timeout errors are returned immediately.
 func (w *Writer) copyFromWithRetry(ctx context.Context, ident pgx.Identifier, cols []string, rows [][]any) error {
-	dataBytes := estimateAvgRowBytes(rows, 10) * len(rows)
-	timeout := copyDeadline(dataBytes)
-
 	var lastErr error
 	for attempt := 0; attempt <= copyMaxRetries; attempt++ {
 		if attempt > 0 {
@@ -864,7 +846,7 @@ func (w *Writer) copyFromWithRetry(ctx context.Context, ident pgx.Identifier, co
 			return fmt.Errorf("acquiring connection: %w", err)
 		}
 
-		copyCtx, cancel := context.WithTimeout(ctx, timeout)
+		copyCtx, cancel := context.WithTimeout(ctx, copyTimeout)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			ident,
@@ -886,7 +868,7 @@ func (w *Writer) copyFromWithRetry(ctx context.Context, ident pgx.Identifier, co
 
 		// On timeout, destroy the connection (it's in a broken state) and retry.
 		if copyCtx.Err() == context.DeadlineExceeded {
-			logging.Warn("COPY to %s timed out after %v (%d rows) — destroying connection and retrying", ident, timeout, len(rows))
+			logging.Warn("COPY to %s timed out after %v (%d rows) — destroying connection and retrying", ident, copyTimeout, len(rows))
 			conn.Conn().Close(context.Background())
 			conn.Release()
 			lastErr = err
@@ -939,8 +921,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
-		subBytes := estimateAvgRowBytes(opts.Rows[start:end], 10) * (end - start)
-		copyCtx, cancel := context.WithTimeout(ctx, copyDeadline(subBytes))
+		copyCtx, cancel := context.WithTimeout(ctx, copyTimeout)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			pgx.Identifier{stagingTable},
