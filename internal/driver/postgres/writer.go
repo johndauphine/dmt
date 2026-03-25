@@ -697,8 +697,7 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 // wide-row tables (e.g. Posts at ~10KB/row) get small ones.
 const (
 	fallbackCopyBytes = 1 << 20 // 1 MB fallback when TCP probe fails
-	minCopyBatchRows  = 100
-	maxCopyBatchRows  = 50_000 // row cap; the byte limit (from TCP probe) prevents deadlocks
+	minCopyBatchRows  = 100     // floor to avoid degenerate single-row COPY calls
 )
 
 // probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
@@ -768,15 +767,17 @@ func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
 }
 
 // copyBatchSize returns the number of rows to send in a single CopyFrom call,
-// targeting targetBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
+// targeting targetBytes per operation. The byte limit (derived from the TCP
+// buffer at init) is the sole control — incoming rows are already bounded by
+// chunk_size from config, so no separate row cap is needed.
 func copyBatchSize(rows [][]any, targetBytes int) int {
 	avg := estimateAvgRowBytes(rows, 10)
 	n := targetBytes / avg
 	if n < minCopyBatchRows {
 		return minCopyBatchRows
 	}
-	if n > maxCopyBatchRows {
-		return maxCopyBatchRows
+	if n > len(rows) {
+		return len(rows)
 	}
 	return n
 }
