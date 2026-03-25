@@ -97,12 +97,14 @@ func TestEstimateAvgRowBytes(t *testing.T) {
 }
 
 func TestCopyBatchSize(t *testing.T) {
+	targetBytes := fallbackCopyBytes // 1 MB
+
 	// Narrow rows (~64 bytes): 1MB/64 = 16384, clamped to maxCopyBatchRows (10000)
 	narrow := make([][]any, 100)
 	for i := range narrow {
 		narrow[i] = []any{i, i + 1}
 	}
-	got := copyBatchSize(narrow)
+	got := copyBatchSize(narrow, targetBytes)
 	if got != maxCopyBatchRows {
 		t.Errorf("narrow rows: copyBatchSize() = %d, want %d", got, maxCopyBatchRows)
 	}
@@ -112,7 +114,7 @@ func TestCopyBatchSize(t *testing.T) {
 	for i := range wide {
 		wide[i] = []any{string(make([]byte, 10000)), i}
 	}
-	got = copyBatchSize(wide)
+	got = copyBatchSize(wide, targetBytes)
 	if got < minCopyBatchRows || got > 200 {
 		t.Errorf("wide rows: copyBatchSize() = %d, want in [%d, 200]", got, minCopyBatchRows)
 	}
@@ -122,9 +124,19 @@ func TestCopyBatchSize(t *testing.T) {
 	for i := range veryWide {
 		veryWide[i] = []any{string(make([]byte, 100000)), string(make([]byte, 2400))}
 	}
-	got = copyBatchSize(veryWide)
+	got = copyBatchSize(veryWide, targetBytes)
 	if got != minCopyBatchRows {
 		t.Errorf("very wide rows: copyBatchSize() = %d, want %d", got, minCopyBatchRows)
+	}
+
+	// Larger TCP buffer should allow bigger batches
+	got = copyBatchSize(narrow, 5<<20) // 5 MB
+	if got != maxCopyBatchRows {
+		t.Errorf("5MB budget narrow rows: copyBatchSize() = %d, want %d", got, maxCopyBatchRows)
+	}
+	got = copyBatchSize(wide, 5<<20) // 5 MB — ~10008 bytes/row → ~523 rows
+	if got < 400 || got > 600 {
+		t.Errorf("5MB budget wide rows: copyBatchSize() = %d, want in [400, 600]", got)
 	}
 }
 
