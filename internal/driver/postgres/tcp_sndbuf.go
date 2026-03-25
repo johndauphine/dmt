@@ -1,3 +1,5 @@
+//go:build !windows
+
 package postgres
 
 import (
@@ -7,8 +9,20 @@ import (
 )
 
 // tcpSendBufSize returns the SO_SNDBUF size for the underlying TCP connection.
-// Works on Linux, macOS, and other Unix-like systems.
+// Unwraps TLS connections via the NetConn() interface to reach the raw socket.
 func tcpSendBufSize(c net.Conn) (int, error) {
+	// Unwrap TLS or other connection wrappers that implement NetConn().
+	type netConner interface {
+		NetConn() net.Conn
+	}
+	for {
+		if u, ok := c.(netConner); ok {
+			c = u.NetConn()
+		} else {
+			break
+		}
+	}
+
 	tc, ok := c.(*net.TCPConn)
 	if !ok {
 		return 0, fmt.Errorf("not a TCP connection: %T", c)
