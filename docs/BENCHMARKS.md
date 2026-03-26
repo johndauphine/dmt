@@ -190,7 +190,6 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 | PG→MSSQL | 222K rows/s (8m5s) | **351K rows/s** (5m4s) | **M5 Pro +58%** |
 
 > Transfer-only throughput (PR #102). PG→MSSQL uses parallel BCP without TABLOCK (PR #98).
-> M3 Max uses max_copy_writers=4 to prevent PG COPY I/O stalls on slower disk.
 > MSSQL→PG may intermittently stall on large partitions under Rosetta 2 emulation.
 > Not reproducible on native Linux.
 
@@ -211,8 +210,7 @@ Both: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, 
 1. **M5 Pro is 58-177% faster on SO2013** — the 52GB dataset exceeds any cache, making disk I/O and CPU speed the bottleneck
 2. **Extra Docker RAM barely helps on large datasets** — M3 Max with 16GB Docker (287K) vs 8GB Docker (262K) = only +10% on MSSQL→PG, because the dataset doesn't fit in cache
 3. **PG→MSSQL gap (+58%) is larger than SO2010 (+29%)** — longer-running transfers amplify the M5 Pro's disk I/O advantage
-4. **M3 Max requires max_copy_writers=4** to prevent PG COPY I/O stalls on the larger dataset; M5 Pro runs stable at default
-5. **Rosetta 2 intermittent stalls** — MSSQL reads on large partitions (50M+ rows) may hang under emulation; not an issue on native Linux
+4. **Rosetta 2 intermittent stalls** — MSSQL reads on large partitions (50M+ rows) may hang under emulation; not an issue on native Linux
 
 ## PostgreSQL → PostgreSQL with AI Tuning (106.5M rows)
 
