@@ -63,12 +63,15 @@ lint:
 	golangci-lint run
 
 # Docker test/bench databases
-# IMPORTANT: Use named volumes (not bind mounts) for performance.
-# Docker named volumes use VM-internal ext4 (~4.5 GB/s writes).
+# IMPORTANT (Docker Desktop on macOS/Windows): Use named volumes, not bind mounts.
+# Named volumes use VM-internal ext4 (~4.5 GB/s writes).
 # Bind mounts go through VirtioFS (~1.5 GB/s) — 3x slower, kills throughput.
+# On native Linux, bind mounts use host ext4/xfs directly and don't have this penalty.
+# To remove named volumes: docker volume rm mssql-test-data pg-test-data mssql-bench-data pg-bench-data
 
 test-dbs-up:
 	docker run -d --name mssql-test \
+		--user root \
 		-e 'ACCEPT_EULA=Y' \
 		-e 'SA_PASSWORD=TestPass2024' \
 		-v mssql-test-data:/var/opt/mssql \
