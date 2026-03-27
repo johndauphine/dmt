@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
@@ -780,10 +779,9 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
 	// Adaptive sub-batching: each CopyFrom is capped at copyBatchBytes (derived
-	// from TCP send buffer) so pgx never saturates the TCP buffers and deadlocks.
-	// The 2-minute timeout catches unresponsive servers (network issues, Docker
-	// I/O stalls) without masking the TCP buffer deadlock which is prevented by
-	// the byte-based sub-batching.
+	// from TCP send buffer) so pgx never saturates the TCP buffers. This is the
+	// sole mechanism preventing the pgx CopyFrom deadlock — no timeout/retry or
+	// concurrency limiting needed.
 	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
 	for start := 0; start < len(opts.Rows); start += batchSize {
 		end := start + batchSize
@@ -791,14 +789,12 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			end = len(opts.Rows)
 		}
 
-		copyCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		_, err = conn.Conn().CopyFrom(
-			copyCtx,
+			ctx,
 			ident,
 			sanitizedCols,
 			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
-		cancel()
 		if err != nil {
 			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
 		}
@@ -837,14 +833,12 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
-		copyCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		_, err = conn.Conn().CopyFrom(
-			copyCtx,
+			ctx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
 			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
-		cancel()
 		if err != nil {
 			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
 		}
