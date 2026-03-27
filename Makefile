@@ -62,26 +62,21 @@ fmt:
 lint:
 	golangci-lint run
 
-# Docker test databases
-# Data directories persist across container recreations
-MSSQL_DATA_DIR=$(HOME)/docker-data/mssql
-PG_DATA_DIR=$(HOME)/docker-data/postgres
-MSSQL_BENCH_DIR=$(HOME)/docker-data/mssql-bench
-PG_BENCH_DIR=$(HOME)/docker-data/postgres-bench
-MSSQL_TARGET_DIR=$(HOME)/docker-data/mssql-target
-MYSQL_BENCH_DIR=$(HOME)/docker-data/mysql-bench
+# Docker test/bench databases
+# IMPORTANT: Use named volumes (not bind mounts) for performance.
+# Docker named volumes use VM-internal ext4 (~4.5 GB/s writes).
+# Bind mounts go through VirtioFS (~1.5 GB/s) — 3x slower, kills throughput.
 
 test-dbs-up:
-	@mkdir -p $(MSSQL_DATA_DIR) $(PG_DATA_DIR)
 	docker run -d --name mssql-test \
 		-e 'ACCEPT_EULA=Y' \
 		-e 'SA_PASSWORD=TestPass2024' \
-		-v $(MSSQL_DATA_DIR):/var/opt/mssql \
+		-v mssql-test-data:/var/opt/mssql \
 		-p 1433:1433 \
 		mcr.microsoft.com/mssql/server:2022-latest
 	docker run -d --name pg-test \
 		-e 'POSTGRES_PASSWORD=TestPass2024' \
-		-v $(PG_DATA_DIR):/var/lib/postgresql/data \
+		-v pg-test-data:/var/lib/postgresql/data \
 		-p 5432:5432 \
 		postgres:16-alpine
 
@@ -92,17 +87,17 @@ test-dbs-up:
 #   ~3GB headroom for container OS, WAL files, page cache
 # Host retains remaining RAM for DMT pipeline buffers + OS
 bench-dbs-up:
-	@mkdir -p $(MSSQL_BENCH_DIR) $(PG_BENCH_DIR)
 	docker run -d --name mssql-bench \
+		--user root \
 		-e 'ACCEPT_EULA=Y' \
 		-e 'SA_PASSWORD=TestPass2024' \
 		-e 'MSSQL_MEMORY_LIMIT_MB=4096' \
-		-v $(MSSQL_BENCH_DIR):/var/opt/mssql \
+		-v mssql-bench-data:/var/opt/mssql \
 		-p 1433:1433 \
 		mcr.microsoft.com/mssql/server:2022-latest
 	docker run -d --name pg-bench \
 		-e 'POSTGRES_PASSWORD=TestPass2024' \
-		-v $(PG_BENCH_DIR):/var/lib/postgresql/data \
+		-v pg-bench-data:/var/lib/postgresql/data \
 		--shm-size=2g \
 		-p 5432:5432 \
 		postgres:16-alpine \
@@ -129,12 +124,12 @@ test-dbs-down:
 
 # Second MSSQL instance for MSSQL→MSSQL testing (port 1434)
 mssql-target-up:
-	@mkdir -p $(MSSQL_TARGET_DIR)
 	docker run -d --name mssql-target \
+		--user root \
 		-e 'ACCEPT_EULA=Y' \
 		-e 'SA_PASSWORD=TestPass2024' \
 		-e 'MSSQL_MEMORY_LIMIT_MB=4096' \
-		-v $(MSSQL_TARGET_DIR):/var/opt/mssql \
+		-v mssql-target-data:/var/opt/mssql \
 		-p 1434:1433 \
 		mcr.microsoft.com/mssql/server:2022-latest
 
@@ -143,10 +138,9 @@ mssql-target-down:
 
 # MySQL instance for cross-engine testing (port 3306)
 mysql-bench-up:
-	@mkdir -p $(MYSQL_BENCH_DIR)
 	docker run -d --name mysql-bench \
 		-e 'MYSQL_ROOT_PASSWORD=TestPass2024' \
-		-v $(MYSQL_BENCH_DIR):/var/lib/mysql \
+		-v mysql-bench-data:/var/lib/mysql \
 		--shm-size=1g \
 		-p 3306:3306 \
 		mysql:8.0 \
