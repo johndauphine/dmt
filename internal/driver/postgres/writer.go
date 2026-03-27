@@ -776,25 +776,53 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
 	// Adaptive sub-batching: each CopyFrom is capped at copyBatchBytes (derived
-	// from TCP send buffer) to prevent pgx TCP buffer deadlocks. Timeout catches
-	// unresponsive servers (Docker I/O stalls, network issues).
+	// from TCP send buffer) to prevent pgx TCP buffer deadlocks. When the batch
+	// is split into multiple sub-batches, they run inside a transaction so that
+	// a mid-batch failure rolls back cleanly, making retry safe (no duplicate key
+	// errors from partially committed data).
 	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
+	needsTx := batchSize < len(opts.Rows)
+
+	if needsTx {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin transaction: %w", err)
+		}
+		defer tx.Rollback(context.Background())
+
+		for start := 0; start < len(opts.Rows); start += batchSize {
+			end := start + batchSize
+			if end > len(opts.Rows) {
+				end = len(opts.Rows)
+			}
+
+			copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			_, err = tx.CopyFrom(
+				copyCtx,
+				ident,
+				sanitizedCols,
+				pgx.CopyFromRows(opts.Rows[start:end]),
+			)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
+			}
 		}
 
+		if err = tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+	} else {
 		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			ident,
 			sanitizedCols,
-			pgx.CopyFromRows(opts.Rows[start:end]),
+			pgx.CopyFromRows(opts.Rows),
 		)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
+			return fmt.Errorf("copy batch: %w", err)
 		}
 	}
 	return nil
