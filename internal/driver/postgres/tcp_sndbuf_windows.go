@@ -7,8 +7,8 @@ import (
 	"net"
 )
 
-// tcpSendBufSize is not supported on Windows — returns an error so the caller
-// falls back to fallbackCopyBytes.
-func tcpSendBufSize(_ net.Conn) (int, error) {
-	return 0, fmt.Errorf("SO_SNDBUF probe not supported on Windows")
+// tcpSendBufSize is not supported on Windows — the syscall probe requires Unix,
+// so the caller falls back to fallbackCopyBytes.
+func tcpSendBufSize(c net.Conn) (int, error) {
+	return 0, fmt.Errorf("TCP send buffer probe not supported on Windows")
 }

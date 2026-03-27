@@ -664,51 +664,18 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 }
 
 // Adaptive COPY sub-batch sizing. Each CopyFrom call is capped at
-// copyBatchBytes (derived from the TCP send buffer at writer init) so that
-// pgx CopyFrom never saturates the TCP buffers and deadlocks. pgx sends
-// COPY data directly to the socket without its bgReader deadlock-prevention
-// mechanism, so we must keep per-call data within the TCP buffer capacity.
+// copyBatchBytes so that pgx CopyFrom never saturates the TCP buffers and
+// deadlocks. pgx sends COPY data directly to the socket without its bgReader
+// deadlock-prevention mechanism, so we must keep per-call data within safe
+// limits.
 //
 // Narrow-row tables (e.g. Votes at ~6 bytes/row) get large batches while
 // wide-row tables (e.g. Posts at ~10KB/row) get small ones.
 const (
-	fallbackCopyBytes = 1 << 20 // 1 MB fallback when TCP probe fails
+	fallbackCopyBytes = 3 << 20 // 3 MB floor — balances throughput vs TCP deadlock safety
 	minCopyBatchRows  = 100     // floor to avoid degenerate single-row COPY calls
+	maxCopyBatchRows  = 50_000  // cap to prevent oversized batches
 )
-
-// probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
-// from the underlying socket, and returns a safe per-CopyFrom byte limit.
-// We use half the send buffer to leave headroom for pgx framing overhead
-// and PG-side response buffering. Falls back to fallbackCopyBytes on error.
-func probeCopyBatchBytes(pool *pgxpool.Pool) int {
-	conn, err := pool.Acquire(context.Background())
-	if err != nil {
-		logging.Debug("COPY batch probe: acquire failed: %v, using fallback %d bytes", err, fallbackCopyBytes)
-		return fallbackCopyBytes
-	}
-	defer conn.Release()
-
-	netConn := conn.Conn().PgConn().Conn()
-	sndbuf, err := tcpSendBufSize(netConn)
-	if err != nil || sndbuf <= 0 {
-		logging.Debug("COPY batch probe: could not read SO_SNDBUF: %v, using fallback %d bytes", err, fallbackCopyBytes)
-		return fallbackCopyBytes
-	}
-
-	// Scale batch size relative to the TCP buffer. The send buffer reported
-	// by SO_SNDBUF reflects only kernel socket buffering; the actual TCP
-	// window (with autotuning) can be larger. A 4× multiplier works well
-	// empirically: enough data per CopyFrom to amortize round-trip overhead
-	// while staying far below the threshold that triggers pgx's TCP buffer
-	// deadlock (which required ~5MB+ batches in testing).
-	batchBytes := sndbuf * 4
-	if batchBytes < fallbackCopyBytes {
-		batchBytes = fallbackCopyBytes
-	}
-
-	logging.Debug("COPY batch probe: SO_SNDBUF=%d bytes, using %d bytes per CopyFrom (4x buffer)", sndbuf, batchBytes)
-	return batchBytes
-}
 
 // estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
 // the average serialized row size in bytes. Fixed-width types (numbers, bools)
@@ -742,18 +709,47 @@ func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
 	return avg
 }
 
+// probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
+// from the underlying socket, and returns a safe per-CopyFrom byte limit.
+// Falls back to fallbackCopyBytes on error.
+func probeCopyBatchBytes(pool *pgxpool.Pool) int {
+	conn, err := pool.Acquire(context.Background())
+	if err != nil {
+		logging.Debug("COPY batch probe: acquire failed: %v, using fallback %d bytes", err, fallbackCopyBytes)
+		return fallbackCopyBytes
+	}
+	defer conn.Release()
+
+	netConn := conn.Conn().PgConn().Conn()
+	sndbuf, err := tcpSendBufSize(netConn)
+	if err != nil || sndbuf <= 0 {
+		logging.Debug("COPY batch probe: could not read SO_SNDBUF: %v, using fallback %d bytes", err, fallbackCopyBytes)
+		return fallbackCopyBytes
+	}
+
+	// Scale batch size relative to TCP buffer. The actual TCP window (with
+	// autotuning) is larger than SO_SNDBUF. Use 4× as a safe multiplier,
+	// with a 3MB floor to maintain throughput on systems with small buffers
+	// (macOS SO_SNDBUF ~146KB → 4× = 584KB would be too small).
+	batchBytes := sndbuf * 4
+	if batchBytes < fallbackCopyBytes {
+		batchBytes = fallbackCopyBytes
+	}
+
+	logging.Debug("COPY batch probe: SO_SNDBUF=%d bytes, using %d bytes per CopyFrom", sndbuf, batchBytes)
+	return batchBytes
+}
+
 // copyBatchSize returns the number of rows to send in a single CopyFrom call,
-// targeting targetBytes per operation. The byte limit (derived from the TCP
-// buffer at init) is the sole control — incoming rows are already bounded by
-// chunk_size from config, so no separate row cap is needed.
+// targeting targetBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
 func copyBatchSize(rows [][]any, targetBytes int) int {
 	avg := estimateAvgRowBytes(rows, 10)
 	n := targetBytes / avg
 	if n < minCopyBatchRows {
 		return minCopyBatchRows
 	}
-	if n > len(rows) {
-		return len(rows)
+	if n > maxCopyBatchRows {
+		return maxCopyBatchRows
 	}
 	return n
 }
@@ -780,10 +776,8 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
 	// Adaptive sub-batching: each CopyFrom is capped at copyBatchBytes (derived
-	// from TCP send buffer) so pgx never saturates the TCP buffers and deadlocks.
-	// The 2-minute timeout catches unresponsive servers (network issues, Docker
-	// I/O stalls) without masking the TCP buffer deadlock which is prevented by
-	// the byte-based sub-batching.
+	// from TCP send buffer) to prevent pgx TCP buffer deadlocks. Timeout catches
+	// unresponsive servers (Docker I/O stalls, network issues).
 	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
 	for start := 0; start < len(opts.Rows); start += batchSize {
 		end := start + batchSize
@@ -791,7 +785,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			end = len(opts.Rows)
 		}
 
-		copyCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			ident,
@@ -837,7 +831,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
-		copyCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			pgx.Identifier{stagingTable},

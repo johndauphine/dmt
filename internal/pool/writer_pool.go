@@ -29,6 +29,13 @@ type PipelineBufferSizes struct {
 	JobChanDepth   int // Buffer depth for the consumer→writer channel
 }
 
+// maxBufferDepth caps the total number of chunks buffered across both channels.
+// Unbounded depth wastes memory on narrow-row tables (e.g., 40 bytes/row ×
+// 50K chunk = 2MB/chunk → thousands of slots in a large budget). Beyond ~200
+// chunks the pipeline is always I/O-bound, and extra buffering only increases
+// memory footprint without improving throughput.
+const maxBufferDepth = 200
+
 // CalculatePipelineBuffers derives buffer depths for both chunkChan and jobChan
 // from a shared memory budget.
 //
@@ -64,8 +71,12 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 
 	budgetBytes := cfg.MemoryBudgetMB * 1024 * 1024
 
-	// Total chunk slots that fit in memory
+	// Total chunk slots that fit in memory, capped to prevent excessive buffering
+	// on narrow-row tables where thousands of tiny chunks would fit in budget.
 	totalSlots := int(budgetBytes / bytesPerChunk)
+	if totalSlots > maxBufferDepth+cfg.NumWriters {
+		totalSlots = maxBufferDepth + cfg.NumWriters
+	}
 
 	// Writers always hold one chunk each — subtract those first
 	available := totalSlots - cfg.NumWriters

@@ -182,7 +182,7 @@ func TestCalculateJobBufferSize(t *testing.T) {
 		wantMax int // result must be <= this (0 = no upper check)
 	}{
 		{
-			name: "narrow rows get large buffer",
+			name: "narrow rows capped at maxBufferDepth",
 			cfg: PipelineBufferConfig{
 				MemoryBudgetMB:   2048,
 				ChunkSize:        8000,
@@ -190,8 +190,9 @@ func TestCalculateJobBufferSize(t *testing.T) {
 				NumWriters:       6,
 				ReadAheadBuffers: 3,
 			},
-			// 2GB / (8000*37) = ~7282 total slots, minus 6+3 active = ~7273
-			wantMin: 5000,
+			// 2GB / (8000*37) = ~7282 total slots, but capped at maxBufferDepth (200)
+			wantMin: 7,   // at least numWriters+1
+			wantMax: 200, // must not exceed maxBufferDepth
 		},
 		{
 			name: "wide rows get small buffer",
@@ -242,7 +243,7 @@ func TestCalculateJobBufferSize(t *testing.T) {
 			wantMin: 9, // numWriters+1
 		},
 		{
-			name: "active slots subtracted from total",
+			name: "active slots subtracted from total with cap",
 			cfg: PipelineBufferConfig{
 				MemoryBudgetMB:   100,
 				ChunkSize:        1000,
@@ -250,9 +251,10 @@ func TestCalculateJobBufferSize(t *testing.T) {
 				NumWriters:       4,
 				ReadAheadBuffers: 3,
 			},
-			// 100MB / (1000*100) = 1048 total slots, minus 4+3 = 1041
-			wantMin: 1000,
-			wantMax: 1100,
+			// 100MB / (1000*100) = 1048 total slots, but capped at 200+4=204
+			// available = 200, chunkDepth=3, jobDepth=197
+			wantMin: 150,
+			wantMax: 200,
 		},
 	}
 
@@ -331,6 +333,21 @@ func TestCalculatePipelineBuffers(t *testing.T) {
 			// 256MB / (50000*2000) = ~2.6 total slots — very tight
 			wantMinChunk: 4, // numReaders minimum
 			wantMinJob:   5, // numWriters+1 minimum
+		},
+		{
+			name: "narrow rows capped by maxBufferDepth",
+			cfg: PipelineBufferConfig{
+				MemoryBudgetMB:   4096,
+				ChunkSize:        50000,
+				RowBytes:         40, // Votes table — tiny rows
+				NumWriters:       6,
+				NumReaders:       8,
+				ReadAheadBuffers: 2,
+			},
+			// 4GB / (50000*40) = 2097 slots, but capped at maxBufferDepth(200)+6 = 206
+			// available = 200, chunkDepth = min(16, 100) = 16, jobDepth = 184
+			wantMinChunk: 8, // at least numReaders
+			wantMinJob:   7, // at least numWriters+1
 		},
 	}
 

@@ -97,29 +97,29 @@ func TestEstimateAvgRowBytes(t *testing.T) {
 }
 
 func TestCopyBatchSize(t *testing.T) {
-	targetBytes := fallbackCopyBytes // 1 MB
+	targetBytes := fallbackCopyBytes // 3 MB
 
-	// Narrow rows (~64 bytes): 1MB / 64 = 16384, but capped at len(rows)=100
-	narrow := make([][]any, 100)
+	// Narrow rows (~64 bytes): 3MB/64 = 49152, under maxCopyBatchRows (50000)
+	narrow := make([][]any, 100000)
 	for i := range narrow {
 		narrow[i] = []any{i, i + 1}
 	}
 	got := copyBatchSize(narrow, targetBytes)
-	if got != 100 { // capped at len(rows)
-		t.Errorf("narrow rows: copyBatchSize() = %d, want 100 (len cap)", got)
+	if got < 40000 || got > 50000 {
+		t.Errorf("narrow rows: copyBatchSize() = %d, want in [40000, 50000]", got)
 	}
 
-	// Wide rows (~10KB each): 1MB / ~10008 bytes ≈ 104
-	wide := make([][]any, 100)
+	// Wide rows (~10KB each): 3MB / ~10008 bytes ≈ 314
+	wide := make([][]any, 1000)
 	for i := range wide {
 		wide[i] = []any{string(make([]byte, 10000)), i}
 	}
 	got = copyBatchSize(wide, targetBytes)
-	if got < minCopyBatchRows || got > 200 {
-		t.Errorf("wide rows: copyBatchSize() = %d, want in [%d, 200]", got, minCopyBatchRows)
+	if got < 200 || got > 400 {
+		t.Errorf("wide rows: copyBatchSize() = %d, want in [200, 400]", got)
 	}
 
-	// Very wide rows (~100KB each): 1MB / 102400 = ~10, clamped to minCopyBatchRows (100)
+	// Very wide rows (~100KB each): 3MB / 102400 = ~30, clamped to minCopyBatchRows (100)
 	veryWide := make([][]any, 10)
 	for i := range veryWide {
 		veryWide[i] = []any{string(make([]byte, 100000)), string(make([]byte, 2400))}
@@ -127,27 +127,6 @@ func TestCopyBatchSize(t *testing.T) {
 	got = copyBatchSize(veryWide, targetBytes)
 	if got != minCopyBatchRows {
 		t.Errorf("very wide rows: copyBatchSize() = %d, want %d", got, minCopyBatchRows)
-	}
-
-	// Larger TCP buffer should allow bigger batches (still capped at len)
-	got = copyBatchSize(narrow, 5<<20) // 5 MB
-	if got != 100 { // capped at len(rows)
-		t.Errorf("5MB budget narrow rows: copyBatchSize() = %d, want 100 (len cap)", got)
-	}
-	// With large budget, wide rows are capped at len(rows)
-	got = copyBatchSize(wide, 5<<20) // 5 MB — ~10008 bytes/row → ~523, but only 100 rows
-	if got != 100 {
-		t.Errorf("5MB budget wide rows: copyBatchSize() = %d, want 100 (len cap)", got)
-	}
-
-	// Verify byte limit works with enough rows
-	manyWide := make([][]any, 1000)
-	for i := range manyWide {
-		manyWide[i] = []any{string(make([]byte, 10000)), i}
-	}
-	got = copyBatchSize(manyWide, 5<<20) // 5 MB / ~10008 bytes ≈ 523 rows
-	if got < 400 || got > 600 {
-		t.Errorf("5MB budget 1000 wide rows: copyBatchSize() = %d, want in [400, 600]", got)
 	}
 }
 
