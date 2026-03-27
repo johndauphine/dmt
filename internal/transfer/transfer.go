@@ -478,6 +478,15 @@ func calculatePipelineBuffers(cfg *config.Config, job Job, tableName string, tun
 		pipelineBudgetMB = effectiveMemMB / 2 // fallback: half of effective memory
 	}
 
+	// Divide budget among concurrent table pipelines. Workers controls how many
+	// tables transfer simultaneously, and each gets its own channels and buffers.
+	// Without this division, each table independently claims the full budget,
+	// causing total memory to be Workers × budget.
+	concurrentTables := int64(cfg.Migration.Workers)
+	if concurrentTables > 1 {
+		pipelineBudgetMB = pipelineBudgetMB / concurrentTables
+	}
+
 	return pool.CalculatePipelineBuffers(pool.PipelineBufferConfig{
 		MemoryBudgetMB:   pipelineBudgetMB,
 		ChunkSize:        chunkSize,

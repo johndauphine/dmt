@@ -6,9 +6,9 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
@@ -64,7 +64,7 @@ type Writer struct {
 	finalizationMapper driver.FinalizationDDLMapper // AI-driven finalization DDL
 	dbContext          *driver.DatabaseContext      // Cached database context for AI
 	cachedDB           *sql.DB                      // Cached database/sql wrapper for tuning analysis
-	copySem            chan struct{}                 // Limits concurrent COPY operations to prevent I/O saturation
+	copyBatchBytes     int                          // Max bytes per CopyFrom call (derived from TCP buffer size)
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -117,27 +117,6 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
-	// Limit concurrent COPY operations to prevent I/O saturation on the PG
-	// server. Each COPY stream is single-threaded on the PG side, so too many
-	// simultaneous streams cause the server to thrash — responses slow down,
-	// pgx connections block in peekMessage waiting for responses, and the
-	// entire pipeline stalls.
-	//
-	// Configurable via max_copy_writers. Default: NumCPU-1 (reserve one
-	// core for PG background work). Each COPY stream is single-threaded on
-	// the PG side, so more streams than cores causes I/O thrashing.
-	// Capped at maxConns-1 to leave a connection free for DDL/sequence ops.
-	copyConcurrency := opts.MaxCopyWriters
-	if copyConcurrency <= 0 {
-		copyConcurrency = runtime.NumCPU() - 1
-	}
-	if copyConcurrency > maxConns-1 {
-		copyConcurrency = maxConns - 1
-	}
-	if copyConcurrency < 1 {
-		copyConcurrency = 1
-	}
-
 	w := &Writer{
 		pool:               pool,
 		config:             cfg,
@@ -147,7 +126,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		typeMapper:         opts.TypeMapper,
 		tableMapper:        tableMapper,
 		finalizationMapper: finalizationMapper,
-		copySem:            make(chan struct{}, copyConcurrency),
+		copyBatchBytes:     probeCopyBatchBytes(pool),
 	}
 
 	// Gather database context for AI
@@ -684,14 +663,18 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
-// Adaptive COPY sub-batch sizing. Each CopyFrom targets ~5MB of data so that
-// narrow-row tables (e.g. Votes at ~6 bytes/row) use large batches while
-// wide-row tables (e.g. Posts at ~10KB/row) use small ones, keeping I/O
-// consistent without unnecessarily throttling throughput.
+// Adaptive COPY sub-batch sizing. Each CopyFrom call is capped at
+// copyBatchBytes so that pgx CopyFrom never saturates the TCP buffers and
+// deadlocks. pgx sends COPY data directly to the socket without its bgReader
+// deadlock-prevention mechanism, so we must keep per-call data within safe
+// limits.
+//
+// Narrow-row tables (e.g. Votes at ~6 bytes/row) get large batches while
+// wide-row tables (e.g. Posts at ~10KB/row) get small ones.
 const (
-	targetCopyBytes  = 5 << 20 // 5 MB per COPY operation
-	minCopyBatchRows = 100
-	maxCopyBatchRows = 50_000
+	fallbackCopyBytes = 3 << 20 // 3 MB floor — balances throughput vs TCP deadlock safety
+	minCopyBatchRows  = 100     // floor to avoid degenerate single-row COPY calls
+	maxCopyBatchRows  = 50_000  // cap to prevent oversized batches
 )
 
 // estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
@@ -726,11 +709,42 @@ func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
 	return avg
 }
 
+// probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
+// from the underlying socket, and returns a safe per-CopyFrom byte limit.
+// Falls back to fallbackCopyBytes on error.
+func probeCopyBatchBytes(pool *pgxpool.Pool) int {
+	conn, err := pool.Acquire(context.Background())
+	if err != nil {
+		logging.Debug("COPY batch probe: acquire failed: %v, using fallback %d bytes", err, fallbackCopyBytes)
+		return fallbackCopyBytes
+	}
+	defer conn.Release()
+
+	netConn := conn.Conn().PgConn().Conn()
+	sndbuf, err := tcpSendBufSize(netConn)
+	if err != nil || sndbuf <= 0 {
+		logging.Debug("COPY batch probe: could not read SO_SNDBUF: %v, using fallback %d bytes", err, fallbackCopyBytes)
+		return fallbackCopyBytes
+	}
+
+	// Scale batch size relative to TCP buffer. The actual TCP window (with
+	// autotuning) is larger than SO_SNDBUF. Use 4× as a safe multiplier,
+	// with a 3MB floor to maintain throughput on systems with small buffers
+	// (macOS SO_SNDBUF ~146KB → 4× = 584KB would be too small).
+	batchBytes := sndbuf * 4
+	if batchBytes < fallbackCopyBytes {
+		batchBytes = fallbackCopyBytes
+	}
+
+	logging.Debug("COPY batch probe: SO_SNDBUF=%d bytes, using %d bytes per CopyFrom", sndbuf, batchBytes)
+	return batchBytes
+}
+
 // copyBatchSize returns the number of rows to send in a single CopyFrom call,
-// targeting targetCopyBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
-func copyBatchSize(rows [][]any) int {
+// targeting targetBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
+func copyBatchSize(rows [][]any, targetBytes int) int {
 	avg := estimateAvgRowBytes(rows, 10)
-	n := targetCopyBytes / avg
+	n := targetBytes / avg
 	if n < minCopyBatchRows {
 		return minCopyBatchRows
 	}
@@ -744,14 +758,6 @@ func copyBatchSize(rows [][]any) int {
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
 	if len(opts.Rows) == 0 {
 		return nil
-	}
-
-	// Limit concurrent COPY operations to prevent I/O saturation
-	select {
-	case w.copySem <- struct{}{}:
-		defer func() { <-w.copySem }()
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 
 	conn, err := w.pool.Acquire(ctx)
@@ -769,20 +775,24 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
-	// Adaptive sub-batching: narrow rows get large batches, wide rows get small ones.
-	batchSize := copyBatchSize(opts.Rows)
+	// Adaptive sub-batching: each CopyFrom is capped at copyBatchBytes (derived
+	// from TCP send buffer) to prevent pgx TCP buffer deadlocks. Timeout catches
+	// unresponsive servers (Docker I/O stalls, network issues).
+	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
 	for start := 0; start < len(opts.Rows); start += batchSize {
 		end := start + batchSize
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
 
+		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		_, err = conn.Conn().CopyFrom(
-			ctx,
+			copyCtx,
 			ident,
 			sanitizedCols,
 			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
 		}
@@ -794,14 +804,6 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
 	if len(opts.Rows) == 0 {
 		return nil
-	}
-
-	// Limit concurrent COPY operations to prevent I/O saturation
-	select {
-	case w.copySem <- struct{}{}:
-		defer func() { <-w.copySem }()
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 
 	conn, err := w.pool.Acquire(ctx)
@@ -823,18 +825,20 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Adaptive sub-batching for staging COPY
-	batchSize := copyBatchSize(opts.Rows)
+	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
 	for start := 0; start < len(opts.Rows); start += batchSize {
 		end := start + batchSize
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
+		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		_, err = conn.Conn().CopyFrom(
-			ctx,
+			copyCtx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
 			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
 		}
