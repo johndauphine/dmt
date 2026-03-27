@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
@@ -66,7 +65,6 @@ type Writer struct {
 	dbContext          *driver.DatabaseContext      // Cached database context for AI
 	cachedDB           *sql.DB                      // Cached database/sql wrapper for tuning analysis
 	copySem            chan struct{}                 // Limits concurrent COPY operations to prevent I/O saturation
-	copyBatchBytes     int                          // Max bytes per CopyFrom call (derived from TCP buffer size)
 }
 
 // NewWriter creates a new PostgreSQL writer.
@@ -150,7 +148,6 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		tableMapper:        tableMapper,
 		finalizationMapper: finalizationMapper,
 		copySem:            make(chan struct{}, copyConcurrency),
-		copyBatchBytes:     probeCopyBatchBytes(pool),
 	}
 
 	// Gather database context for AI
@@ -687,52 +684,15 @@ func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Tab
 	return nil
 }
 
-// Adaptive COPY sub-batch sizing. Each CopyFrom call is capped at
-// copyBatchBytes (derived from the TCP send buffer at writer init) so that
-// pgx CopyFrom never saturates the TCP buffers and deadlocks. pgx sends
-// COPY data directly to the socket without its bgReader deadlock-prevention
-// mechanism, so we must keep per-call data within the TCP buffer capacity.
-//
-// Narrow-row tables (e.g. Votes at ~6 bytes/row) get large batches while
-// wide-row tables (e.g. Posts at ~10KB/row) get small ones.
+// Adaptive COPY sub-batch sizing. Each CopyFrom targets ~5MB of data so that
+// narrow-row tables (e.g. Votes at ~6 bytes/row) use large batches while
+// wide-row tables (e.g. Posts at ~10KB/row) use small ones, keeping I/O
+// consistent without unnecessarily throttling throughput.
 const (
-	fallbackCopyBytes = 1 << 20 // 1 MB fallback when TCP probe fails
-	minCopyBatchRows  = 100     // floor to avoid degenerate single-row COPY calls
+	targetCopyBytes  = 5 << 20 // 5 MB per COPY operation
+	minCopyBatchRows = 100
+	maxCopyBatchRows = 50_000
 )
-
-// probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
-// from the underlying socket, and returns a safe per-CopyFrom byte limit.
-// We use half the send buffer to leave headroom for pgx framing overhead
-// and PG-side response buffering. Falls back to fallbackCopyBytes on error.
-func probeCopyBatchBytes(pool *pgxpool.Pool) int {
-	conn, err := pool.Acquire(context.Background())
-	if err != nil {
-		logging.Debug("COPY batch probe: acquire failed: %v, using fallback %d bytes", err, fallbackCopyBytes)
-		return fallbackCopyBytes
-	}
-	defer conn.Release()
-
-	netConn := conn.Conn().PgConn().Conn()
-	sndbuf, err := tcpSendBufSize(netConn)
-	if err != nil || sndbuf <= 0 {
-		logging.Debug("COPY batch probe: could not read SO_SNDBUF: %v, using fallback %d bytes", err, fallbackCopyBytes)
-		return fallbackCopyBytes
-	}
-
-	// Scale batch size relative to the TCP buffer. The send buffer reported
-	// by SO_SNDBUF reflects only kernel socket buffering; the actual TCP
-	// window (with autotuning) can be larger. A 4× multiplier works well
-	// empirically: enough data per CopyFrom to amortize round-trip overhead
-	// while staying far below the threshold that triggers pgx's TCP buffer
-	// deadlock (which required ~5MB+ batches in testing).
-	batchBytes := sndbuf * 4
-	if batchBytes < fallbackCopyBytes {
-		batchBytes = fallbackCopyBytes
-	}
-
-	logging.Debug("COPY batch probe: SO_SNDBUF=%d bytes, using %d bytes per CopyFrom (4x buffer)", sndbuf, batchBytes)
-	return batchBytes
-}
 
 // estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
 // the average serialized row size in bytes. Fixed-width types (numbers, bools)
@@ -767,32 +727,18 @@ func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
 }
 
 // copyBatchSize returns the number of rows to send in a single CopyFrom call,
-// targeting targetBytes per operation. The byte limit (derived from the TCP
-// buffer at init) is the sole control — incoming rows are already bounded by
-// chunk_size from config, so no separate row cap is needed.
-func copyBatchSize(rows [][]any, targetBytes int) int {
+// targeting targetCopyBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
+func copyBatchSize(rows [][]any) int {
 	avg := estimateAvgRowBytes(rows, 10)
-	n := targetBytes / avg
+	n := targetCopyBytes / avg
 	if n < minCopyBatchRows {
 		return minCopyBatchRows
 	}
-	if n > len(rows) {
-		return len(rows)
+	if n > maxCopyBatchRows {
+		return maxCopyBatchRows
 	}
 	return n
 }
-
-// copyTimeout is the maximum time a single CopyFrom call may block. Batches
-// are capped at ~1MB by the TCP buffer probe, so a normal COPY completes in
-// well under 1 second. Two minutes is generous enough for any network while
-// catching pgx TCP buffer deadlocks before the migration appears stalled.
-const copyTimeout = 2 * time.Minute
-
-// copyMaxRetries is the number of times to retry a CopyFrom after a timeout.
-// Retries are only safe when the target table has no unique constraints
-// (drop_recreate mode with deferred PKs), which is the normal path.
-// In upsert mode, ON CONFLICT handles any duplicate rows from a retry.
-const copyMaxRetries = 2
 
 // WriteBatch writes a batch of rows using COPY protocol.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -808,6 +754,12 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		return ctx.Err()
 	}
 
+	conn, err := w.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Release()
+
 	// Sanitize table and column names to match how they were created (lowercase)
 	sanitizedTable := sanitizePGTableName(opts.Table)
 	sanitizedCols := make([]string, len(opts.Columns))
@@ -818,69 +770,24 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
 	// Adaptive sub-batching: narrow rows get large batches, wide rows get small ones.
-	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
+	batchSize := copyBatchSize(opts.Rows)
 	for start := 0; start < len(opts.Rows); start += batchSize {
 		end := start + batchSize
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
 
-		if err := w.copyFromWithRetry(ctx, ident, sanitizedCols, opts.Rows[start:end]); err != nil {
+		_, err = conn.Conn().CopyFrom(
+			ctx,
+			ident,
+			sanitizedCols,
+			pgx.CopyFromRows(opts.Rows[start:end]),
+		)
+		if err != nil {
 			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
 		}
 	}
 	return nil
-}
-
-// copyFromWithRetry acquires a connection, runs CopyFrom with a timeout, and
-// retries on a fresh connection if the call times out (pgx TCP buffer deadlock).
-// Non-timeout errors are returned immediately.
-func (w *Writer) copyFromWithRetry(ctx context.Context, ident pgx.Identifier, cols []string, rows [][]any) error {
-	var lastErr error
-	for attempt := 0; attempt <= copyMaxRetries; attempt++ {
-		if attempt > 0 {
-			logging.Warn("COPY retry %d/%d after timeout (%d rows to %s)", attempt, copyMaxRetries, len(rows), ident)
-		}
-
-		conn, err := w.pool.Acquire(ctx)
-		if err != nil {
-			return fmt.Errorf("acquiring connection: %w", err)
-		}
-
-		copyCtx, cancel := context.WithTimeout(ctx, copyTimeout)
-		_, err = conn.Conn().CopyFrom(
-			copyCtx,
-			ident,
-			cols,
-			pgx.CopyFromRows(rows),
-		)
-		cancel()
-
-		if err == nil {
-			conn.Release()
-			return nil
-		}
-
-		// Parent context cancelled — don't retry.
-		if ctx.Err() != nil {
-			conn.Release()
-			return ctx.Err()
-		}
-
-		// On timeout, destroy the connection (it's in a broken state) and retry.
-		if copyCtx.Err() == context.DeadlineExceeded {
-			logging.Warn("COPY to %s timed out after %v (%d rows) — destroying connection and retrying", ident, copyTimeout, len(rows))
-			conn.Conn().Close(context.Background())
-			conn.Release()
-			lastErr = err
-			continue
-		}
-
-		// Non-timeout error — return immediately.
-		conn.Release()
-		return err
-	}
-	return fmt.Errorf("COPY failed after %d retries: %w", copyMaxRetries, lastErr)
 }
 
 // UpsertBatch performs an upsert using staging table + INSERT ON CONFLICT.
@@ -916,27 +823,19 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Adaptive sub-batching for staging COPY
-	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
+	batchSize := copyBatchSize(opts.Rows)
 	for start := 0; start < len(opts.Rows); start += batchSize {
 		end := start + batchSize
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
-		copyCtx, cancel := context.WithTimeout(ctx, copyTimeout)
 		_, err = conn.Conn().CopyFrom(
-			copyCtx,
+			ctx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
 			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
-		cancel()
 		if err != nil {
-			// On timeout, destroy the connection to prevent returning a
-			// deadlocked connection to the pool.
-			if copyCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
-				logging.Warn("COPY to staging %s timed out — destroying connection", stagingTable)
-				conn.Conn().Close(context.Background())
-			}
 			return fmt.Errorf("copying to staging [%d:%d]: %w", start, end, err)
 		}
 	}
