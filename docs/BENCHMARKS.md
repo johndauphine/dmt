@@ -443,7 +443,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 - **OS**: Linux 6.6.87.2 (WSL2 on Windows)
 - **Source**: Azure SQL Edge (native ARM64, Docker, 8GB container, 3GB internal limit)
 - **Target**: PostgreSQL 16 (Docker, 4GB container, tuned)
-- **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 5GB)
+- **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 10GB)
 - **Code**: afda4e0 (current, includes PRs #107–#112 CopyFrom safety)
 - **Date**: March 2026
 
@@ -548,7 +548,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 - **OS**: macOS Tahoe (Darwin 25.4.0)
 - **Source**: Azure SQL Edge (native ARM64, Docker, named volume, 4GB memory limit)
 - **Target**: PostgreSQL 16 (Docker, named volume, tuned)
-- **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 5GB)
+- **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 10GB)
 - **AI Provider**: Anthropic (`claude-haiku-4-5-20251001`)
 - **Code**: 98b94a6 (current, includes PRs #107–#113)
 - **Date**: March 2026
@@ -597,7 +597,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 | M5 Pro (24GB, 15 cores) | 918K rows/s | 651K rows/s |
 | Delta | M3 Max +27% | M3 Max +28% |
 
-> M3 Max's extra 12GB RAM provides more OS page cache for the 5GB dataset,
+> M3 Max's extra 12GB RAM provides more OS page cache for the 10GB dataset,
 > giving it an edge despite slower disk I/O. The gap narrows on SO2013 (52GB)
 > where the dataset exceeds all caches.
 
@@ -611,10 +611,10 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 ### Key Findings
 
-1. **M3 Max is 27% faster than M5 Pro on SO2010** — 1,168K vs 918K transfer; M3 Max's extra 12GB RAM provides more OS page cache for the 5GB dataset, outweighing M5 Pro's faster disk
+1. **M3 Max is 27% faster than M5 Pro on SO2010** — 1,168K vs 918K transfer; M3 Max's extra 12GB RAM provides more OS page cache for the 10GB dataset, outweighing M5 Pro's faster disk
 2. **AI converges on 4 workers / 45K chunk_size** — Azure SQL Edge caps at 4 logical processors, so fewer workers with less contention outperforms 6 workers (918K vs 871K)
 3. **M5 Pro is 88% faster than WSL2 ARM64** — 918K vs 487K transfer, driven by 3.4x faster Docker disk I/O (4.4 vs 1.3 GB/s)
-4. **No cold-cache penalty** — run 1 (947K) matches warm runs, as the 5GB dataset fits within the 4GB MSSQL buffer pool + OS page cache
+4. **No cold-cache penalty** — run 1 (947K) matches warm runs, as the 10GB dataset fits within the 4GB MSSQL buffer pool + OS page cache
 5. **Unconstrained containers improve throughput 4%** — removing `--memory` flags bumped from 886K to 918K avg vs prior memory-limited runs
 
 ### StackOverflow2013 (106.5M rows, MSSQL→PG)
