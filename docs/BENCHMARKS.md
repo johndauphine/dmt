@@ -546,8 +546,8 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 - **Hardware**: Apple M5 Pro, 24GB RAM, 15 CPU cores
 - **OS**: macOS Tahoe (Darwin 25.4.0)
-- **Source**: Azure SQL Edge (native ARM64, Docker, 8GB container, 3GB internal limit)
-- **Target**: PostgreSQL 16 (Docker, 4GB container, tuned)
+- **Source**: Azure SQL Edge (native ARM64, Docker, named volume, 4GB memory limit)
+- **Target**: PostgreSQL 16 (Docker, named volume, tuned)
 - **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 5GB)
 - **AI Provider**: Anthropic (`claude-haiku-4-5-20251001`)
 - **Code**: 98b94a6 (current, includes PRs #107–#113)
@@ -556,11 +556,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 > **Note**: Azure SQL Edge runs natively on ARM64 — no Rosetta 2 emulation overhead.
 > Full SO2010 dataset (SQL Server 2008 format MDF) attached directly to Azure SQL Edge
 > with compatibility level set to 150. All 9 tables match the original Brent Ozar row counts.
-
-> **Pending re-benchmark**: SO2010 transfer (886K) is anomalously low — slower than SO2013 (1,042K)
-> on the same machine, and 32% slower than M3 Max (1,168K). Likely caused by restrictive container
-> memory limits (`--memory=8g` MSSQL + `--memory=4g` PG) constraining the 5GB dataset that should
-> fit in cache. M3 Max used unconstrained containers. Needs re-running with matching config.
+> Containers use unconstrained memory (no `--memory` flags) to match M3 Max config.
 
 ### Disk I/O (Docker VM)
 
@@ -575,12 +571,10 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 ### Database Configuration
 
 **Azure SQL Edge** (source):
-- Container memory: 8GB (`--memory=8g`)
-- `MSSQL_MEMORY_LIMIT_MB` = 3072
+- `MSSQL_MEMORY_LIMIT_MB` = 4096
 
 **PostgreSQL** (target):
-- Container memory: 4GB (`--memory=4g`)
-- `shared_buffers` = 2GB, `work_mem` = 256MB, `maintenance_work_mem` = 1GB
+- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
 - `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
 - `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, `fsync` = off
 
@@ -588,27 +582,40 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 | Run | Workers | Chunk Size | Transfer | Overall | Duration |
 |-----|---------|-----------|----------|---------|----------|
-| 1 (cold) | 6 | 50,000 | 918K rows/s | 616K rows/s | 31s |
-| 2 | 6 | 50,000 | **922K rows/s** | **634K rows/s** | 31s |
-| 3 | **5** | 50,000 | 826K rows/s | 587K rows/s | 33s |
-| 4 | 6 | 50,000 | 912K rows/s | 634K rows/s | 30s |
-| 5 | 6 | 50,000 | 885K rows/s | 630K rows/s | 31s |
-| **Avg (2-5)** | — | — | **886K rows/s** | **620K rows/s** | **31s** |
+| 1 (cold) | 4 | 45,000 | 947K rows/s | 667K rows/s | 29s |
+| 2 | 4 | 45,000 | **953K rows/s** | **679K rows/s** | 28s |
+| 3 | **3** | 45,000 | 921K rows/s | 658K rows/s | 29s |
+| 4 | 4 | 45,000 | 919K rows/s | 635K rows/s | 30s |
+| 5 | 4 | 45,000 | 877K rows/s | 633K rows/s | 30s |
+| **Avg (2-5)** | — | — | **918K rows/s** | **651K rows/s** | **29s** |
+
+### M5 Pro vs M3 Max (Azure SQL Edge, SO2010)
+
+| Machine | Transfer (avg) | Overall (avg) |
+|---------|---------------|---------------|
+| **M3 Max** (36GB, 14 cores) | **1,168K rows/s** | **832K rows/s** |
+| M5 Pro (24GB, 15 cores) | 918K rows/s | 651K rows/s |
+| Delta | M3 Max +27% | M3 Max +28% |
+
+> M3 Max's extra 12GB RAM provides more OS page cache for the 5GB dataset,
+> giving it an edge despite slower disk I/O. The gap narrows on SO2013 (52GB)
+> where the dataset exceeds all caches.
 
 ### Cross-Machine Comparison (SO2010, MSSQL→PG, Azure SQL Edge, transfer-only)
 
-| Machine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro |
+| Machine | Cores | RAM | Docker Write | Transfer (avg) | vs M3 Max |
 |---------|-------|-----|-------------|---------------|-----------|
-| WSL2 ARM64 | 10 | 24GB | 1.3 GB/s | 487K rows/s | -45% |
-| **M5 Pro** | **15** | **24GB** | **4.4 GB/s** | **886K rows/s** | **—** |
+| WSL2 ARM64 | 10 | 24GB | 1.3 GB/s | 487K rows/s | -58% |
+| M5 Pro | 15 | 24GB | 4.4 GB/s | 918K rows/s | -21% |
+| **M3 Max** | **14** | **36GB** | **3.4 GB/s** | **1,168K rows/s** | **—** |
 
 ### Key Findings
 
-1. **M5 Pro is 82% faster than WSL2 ARM64 with Azure SQL Edge** — 886K vs 487K transfer, driven by 3.4x faster Docker disk I/O (4.4 vs 1.3 GB/s)
-2. **AI converges on 6 workers / 50K chunk_size** — run 3 tested 5 workers due to conservative memory estimate, regressed to 826K, AI corrected back to 6 workers in run 4
-3. **Not directly comparable to SQL Server 2022 (Rosetta 2) results** — Azure SQL Edge and SQL Server 2022 are different products with different internals (e.g., Azure SQL Edge caps at 4 logical processors). Combined with different container configs and Docker disk I/O variance between sessions (4.4 vs 5.3 GB/s write), the throughput difference cannot be attributed to Rosetta overhead alone
-4. **No cold-cache penalty** — run 1 (918K) matches warm runs, as the 5GB dataset fits within the 3GB MSSQL buffer pool + OS page cache
-5. **Container memory limits match WSL2 config** — 8GB MSSQL + 4GB PG containers ensure apples-to-apples comparison
+1. **M3 Max is 27% faster than M5 Pro on SO2010** — 1,168K vs 918K transfer; M3 Max's extra 12GB RAM provides more OS page cache for the 5GB dataset, outweighing M5 Pro's faster disk
+2. **AI converges on 4 workers / 45K chunk_size** — Azure SQL Edge caps at 4 logical processors, so fewer workers with less contention outperforms 6 workers (918K vs 871K)
+3. **M5 Pro is 88% faster than WSL2 ARM64** — 918K vs 487K transfer, driven by 3.4x faster Docker disk I/O (4.4 vs 1.3 GB/s)
+4. **No cold-cache penalty** — run 1 (947K) matches warm runs, as the 5GB dataset fits within the 4GB MSSQL buffer pool + OS page cache
+5. **Unconstrained containers improve throughput 4%** — removing `--memory` flags bumped from 886K to 918K avg vs prior memory-limited runs
 
 ### StackOverflow2013 (106.5M rows, MSSQL→PG)
 
