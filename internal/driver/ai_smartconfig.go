@@ -562,8 +562,10 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
 				len(tuningHistory)-i, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
 				h.TotalTables, formatRowCount(h.TotalRows)))
-			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead=%d, write_ahead=%d",
-				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters))
+			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead_buffers=%d, write_ahead_writers=%d, parallel_readers=%d, max_partitions=%d, large_table_threshold=%d, max_source_connections=%d, max_target_connections=%d",
+				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters,
+				h.ParallelReaders, h.MaxPartitions, h.LargeTableThreshold,
+				h.MaxSourceConnections, h.MaxTargetConnections))
 			if h.FinalThroughput > 0 {
 				sb.WriteString(fmt.Sprintf(" → result: %.0f rows/sec (%.0fs)", h.FinalThroughput, h.FinalDurationSecs))
 			}
