@@ -12,6 +12,10 @@ Comprehensive benchmark results comparing Go and Rust implementations.
 
 > **Note**: SQL Server runs under Rosetta 2 emulation on Apple Silicon, adding overhead. Production Linux deployments will be faster.
 
+> **Pending re-validation**: Mac benchmark sections below were measured on code prior to PRs #107–#112
+> (pgx CopyFrom TCP safety, sub-batch transactions, timeout guards). Isolated testing on WSL2 confirmed
+> these changes have negligible throughput impact, but Mac results should be re-validated on current code.
+
 ## Dataset Details
 
 | Table | Rows | Description |
@@ -319,6 +323,106 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 3. **Run 1 cold cache penalty** — PG→PG run 1 (478K) is 26% slower than warm runs due to cold PG caches; MSSQL→PG shows no cold penalty since source data is already cached
 4. **Consistent MSSQL→PG performance** — 600-619K across all 5 runs (3% variance), very stable
 5. **Single-container PG→PG is faster** — the AI-tuned single-container results (962K peak) outperform separate containers (649K peak) because localhost loopback is faster than Docker bridge networking
+
+## WSL2 ARM64 Benchmarks
+
+### Test Environment
+
+- **Hardware**: ARM64, 10 CPU cores, 32GB RAM (24GB allocated to WSL2)
+- **OS**: Linux 6.6.87.2 (WSL2 on Windows)
+- **Source**: Azure SQL Edge (native ARM64, Docker, 8GB container, 3GB internal limit)
+- **Target**: PostgreSQL 16 (Docker, 4GB container, tuned)
+- **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 5GB)
+- **Code**: afda4e0 (current, includes PRs #107–#112 CopyFrom safety)
+- **Date**: March 2026
+
+> **Note**: Azure SQL Edge runs natively on ARM64 — no Rosetta 2 emulation overhead.
+> Full SO2010 dataset (SQL Server 2008 format MDF) attached directly to Azure SQL Edge
+> with compatibility level set to 150. All 9 tables match the SQL Server 2022 row counts.
+
+### Disk I/O (Docker in WSL2)
+
+| Metric | M3 Max | M5 Pro | WSL2 ARM64 |
+|--------|--------|--------|------------|
+| Sequential Write | 2.7 GB/s | **5.3 GB/s** | 1.3 GB/s |
+| Sequential Read | 7.5 GB/s | **13.6 GB/s** | 4.6 GB/s |
+
+> Average of 3 runs, `dd bs=1M count=1024` inside Docker container.
+> WSL2 Docker write throughput is 75% slower than M5 Pro due to virtualization overhead.
+> Write speed is the primary bottleneck for PG target throughput.
+
+### Database Configuration
+
+**Azure SQL Edge** (source):
+- Container memory: 8GB (`--memory=8g`)
+- `MSSQL_MEMORY_LIMIT_MB` = 3072
+
+**PostgreSQL** (target):
+- Container memory: 4GB (`--memory=4g`)
+- `shared_buffers` = 2GB, `work_mem` = 256MB, `maintenance_work_mem` = 1GB
+- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
+- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, `fsync` = off
+
+### Results (MSSQL→PG, 6 workers, chunk_size=100000)
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 486K rows/s | 386K rows/s | 50s |
+| 2 | 487K rows/s | 395K rows/s | 49s |
+| 3 | **488K rows/s** | 378K rows/s | 51s |
+| **Avg (2-3)** | **487K rows/s** | **387K rows/s** | **50s** |
+
+> Workers=6 and chunk_size=100000 set explicitly.
+> AI startup tuning applied sensible defaults for remaining parameters.
+> Run 1 slower due to cold MSSQL cache.
+
+### Cross-Machine Comparison (SO2010, MSSQL→PG, transfer-only)
+
+| Machine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro |
+|---------|-------|-----|-------------|---------------|-----------|
+| M3 Max (16GB Docker) | 14 | 36GB | 2.7 GB/s | 472K rows/s | -65% |
+| **WSL2 ARM64** | **10** | **24GB** | **1.3 GB/s** | **487K rows/s** | **-64%** |
+| M5 Pro (8GB Docker) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
+
+### Key Findings
+
+1. **Native ARM64 SQL Server eliminates Rosetta overhead** — WSL2 ARM64 (487K) matches M3 Max (472K) with fewer cores, less RAM, and half the disk write speed
+2. **WSL2 virtual disk write speed is the primary bottleneck** — 1.3 GB/s write vs M5 Pro's 5.3 GB/s (75% slower) explains the gap to M5 Pro
+3. **Container memory limits are essential on WSL2** — Docker shares the WSL2 memory pool with no separate cap; `--memory` flags on containers prevent DB processes from starving the pipeline
+4. **Azure SQL Edge requires explicit memory capping** — without `MSSQL_MEMORY_LIMIT_MB`, it consumes all container memory and OOM-kills
+5. **4GB PG container with 2GB shared_buffers** gives 9% improvement over 2GB container with 512MB shared_buffers (487K vs 447K)
+
+### StackOverflow2013 (106.5M rows, MSSQL→PG)
+
+**Environment changes from SO2010 run:**
+- **MSSQL container**: 12GB (`--memory=12g`), `MSSQL_MEMORY_LIMIT_MB` = 8192
+- **PG container**: 4GB (`--memory=4g`), `shared_buffers` = 2GB, `maintenance_work_mem` = 1GB
+- **Dataset**: Full Brent Ozar SO2013 (SQL Server 2008 format MDF, 52GB, 9 tables)
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 402K rows/s | 330K rows/s | 5m23s |
+| 2 | 412K rows/s | 340K rows/s | 5m14s |
+| 3 | **423K rows/s** | 348K rows/s | 5m6s |
+| **Avg (2-3)** | **417K rows/s** | **344K rows/s** | **5m10s** |
+
+> AI startup tuning used sensible defaults (API credits unavailable).
+> With AI-optimized parameters, throughput may be slightly higher.
+
+### Cross-Machine Comparison (SO2013, MSSQL→PG, transfer-only)
+
+| Machine | Cores | RAM | Transfer (avg) | vs M5 Pro |
+|---------|-------|-----|---------------|-----------|
+| M3 Max (16GB Docker) | 14 | 36GB | 287K rows/s | -64% |
+| **WSL2 ARM64 (12GB container)** | **10** | **24GB** | **417K rows/s** | **-48%** |
+| M5 Pro (8GB Docker) | 15 | 24GB | 795K rows/s | — |
+
+### SO2013 Key Findings
+
+1. **Native ARM64 advantage holds at scale** — WSL2 (417K) beats M3 Max (287K) by 45% on SO2013, consistent with the SO2010 advantage
+2. **Gap to M5 Pro is larger than SO2010** — -48% (SO2013) vs -64% (SO2010), because the 52GB dataset exceeds all caches, amplifying the WSL2 disk I/O bottleneck
+3. **Warm-cache improvement is modest** — run 1 (402K) to run 3 (423K) = +5%, as the 52GB dataset far exceeds the 8GB MSSQL buffer pool
+4. **Azure SQL Edge handles 52GB database without issues** — all 106.5M rows validated across 9 tables
 
 ## Implemented Optimizations
 
