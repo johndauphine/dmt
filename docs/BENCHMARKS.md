@@ -417,12 +417,15 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 | M3 Max (16GB Docker) | SQL Server 2022 (Rosetta) | 14 | 36GB | 287K rows/s | -64% |
 | **WSL2 ARM64 (12GB container)** | **Azure SQL Edge** | **10** | **24GB** | **417K rows/s** | **-48%** |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 795K rows/s | — |
-| M5 Pro (12GB container) | Azure SQL Edge | 15 | 24GB | 1,042K rows/s | +31% |
+| M5 Pro (12GB container) | Azure SQL Edge | 15 | 24GB | 1,042K rows/s | * |
+
+> *Azure SQL Edge and SQL Server 2022 are different products with different configs —
+> cross-engine throughput comparisons are not apples-to-apples.
 
 ### SO2013 Key Findings
 
 1. **Native ARM64 advantage holds at scale** — WSL2 (417K) beats M3 Max (287K) by 45% on SO2013, consistent with the SO2010 advantage
-2. **Azure SQL Edge on M5 Pro is fastest** — 1,042K rows/s, 31% faster than SQL Server 2022/Rosetta (795K) on the same hardware, confirming native ARM64 advantage
+2. **Gap to M5 Pro is larger than SO2010** — -48% (SO2013) vs -64% (SO2010), because the 52GB dataset exceeds all caches, amplifying the WSL2 disk I/O bottleneck
 3. **Warm-cache improvement is modest** — run 1 (402K) to run 3 (423K) = +5%, as the 52GB dataset far exceeds the 8GB MSSQL buffer pool
 4. **Azure SQL Edge handles 52GB database without issues** — all 106.5M rows validated across 9 tables
 
@@ -487,7 +490,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 1. **M5 Pro is 82% faster than WSL2 ARM64 with Azure SQL Edge** — 886K vs 487K transfer, driven by 3.4x faster Docker disk I/O (4.4 vs 1.3 GB/s)
 2. **AI converges on 6 workers / 50K chunk_size** — run 3 tested 5 workers due to conservative memory estimate, regressed to 826K, AI corrected back to 6 workers in run 4
-3. **Azure SQL Edge vs SQL Server 2022 (Rosetta 2)** — Azure SQL Edge (886K avg) is 35% slower than SQL Server 2022 under Rosetta 2 (1,357K peak), but Docker disk I/O dropped 17% between measurement periods (4.4 vs 5.3 GB/s write), likely due to Docker Desktop updates — disk speed variance likely accounts for most of the throughput gap
+3. **Not directly comparable to SQL Server 2022 (Rosetta 2) results** — Azure SQL Edge and SQL Server 2022 are different products with different internals (e.g., Azure SQL Edge caps at 4 logical processors). Combined with different container configs and Docker disk I/O variance between sessions (4.4 vs 5.3 GB/s write), the throughput difference cannot be attributed to Rosetta overhead alone
 4. **No cold-cache penalty** — run 1 (918K) matches warm runs, as the 5GB dataset fits within the 3GB MSSQL buffer pool + OS page cache
 5. **Container memory limits match WSL2 config** — 8GB MSSQL + 4GB PG containers ensure apples-to-apples comparison
 
@@ -524,7 +527,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 1. **M5 Pro is 150% faster than WSL2 ARM64 on SO2013** — 1,042K vs 417K transfer, driven by faster disk I/O and 50% more CPU cores
 2. **Azure SQL Edge buffer pool thrashing** — alternating fast/slow runs when the 52GB dataset exceeds the 8GB buffer pool; OS page cache takes 1 run to stabilize
 3. **AI converges on 4 workers for SO2013** — reduced from 6 (SO2010) due to larger dataset memory pressure; 4 workers / 45-50K chunks is the sweet spot
-4. **Azure SQL Edge matches SQL Server 2022 (Rosetta) at scale** — M5 Pro Azure SQL Edge (1,042K) vs SQL Server 2022/Rosetta (795K) on SO2013, a 31% advantage for native ARM64 on the larger dataset
+4. **Not directly comparable to SQL Server 2022 (Rosetta) results** — different engine, container configs, and measurement sessions; see SO2010 findings for details
 5. **No cold-cache penalty on first run** — run 1 (1,089K) is the fastest, suggesting Azure SQL Edge benefits from a clean buffer pool on initial sequential scan
 
 ## Implemented Optimizations
