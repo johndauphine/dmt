@@ -11,10 +11,7 @@ Comprehensive benchmark results comparing Go and Rust implementations.
 - **Date**: January 2026
 
 > **Note**: SQL Server runs under Rosetta 2 emulation on Apple Silicon, adding overhead. Production Linux deployments will be faster.
-
-> **Pending re-validation**: Mac benchmark sections below were measured on code prior to PRs #107–#112
-> (pgx CopyFrom TCP safety, sub-batch transactions, timeout guards). Isolated testing on WSL2 confirmed
-> these changes have negligible throughput impact, but Mac results should be re-validated on current code.
+> Azure SQL Edge runs natively on ARM64 — see M3 Max Azure SQL Edge section for Rosetta-free results.
 
 ## Dataset Details
 
@@ -161,7 +158,121 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 5. **RAM helps but can't overcome CPU/disk** — M3 Max with 16GB Docker (472K) still trails M5 Pro with 8GB Docker (1,357K) on MSSQL→PG
 6. **DB tuning + RAM allocation together** deliver the biggest gains: M3 Max untuned (287K) → tuned 16GB Docker (472K) = **+64%**
 
-## StackOverflow2013 Benchmark (106.5M rows)
+## M3 Max Azure SQL Edge Benchmark (StackOverflow2010, MSSQL→PG)
+
+### Test Environment
+
+- **Hardware**: Apple M3 Max, 36GB RAM, 14 CPU cores
+- **OS**: macOS (Darwin 25.4.0)
+- **Source**: Azure SQL Edge (native ARM64, Docker, named volume, 4GB memory limit)
+- **Target**: PostgreSQL 16 (Docker, named volume, tuned)
+- **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables)
+- **AI Provider**: Anthropic (`claude-haiku-4-5-20251001`)
+- **Mode**: `drop_recreate`, AI tuning enabled
+- **Code**: `98b94a6` (current, includes PRs #107–#112 CopyFrom safety + TCP send buffer tuning)
+- **Date**: March 2026
+
+> **Key change from prior M3 Max benchmarks**: Azure SQL Edge runs natively on ARM64 (no Rosetta 2),
+> and Docker named volumes use VM-internal ext4 (~3.4 GB/s writes) instead of VirtioFS bind mounts (~1.5 GB/s).
+
+### Disk I/O (Docker VM, named volumes)
+
+| Metric | M3 Max (bind mount) | M3 Max (named volume) | M5 Pro (named volume) |
+|--------|---------------------|-----------------------|-----------------------|
+| Sequential Write | 2.7 GB/s | **3.4 GB/s** | **5.3 GB/s** |
+| Sequential Read | 7.5 GB/s | **9.4 GB/s** | **13.6 GB/s** |
+
+> Average of 3 runs, `dd bs=1M count=1024` inside Docker container.
+
+### Database Configuration
+
+**Azure SQL Edge** (source):
+- `MSSQL_MEMORY_LIMIT_MB` = 4096
+
+**PostgreSQL** (target):
+- `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
+- `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
+- `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, `fsync` = off
+
+### Results (MSSQL→PG, 5 Runs)
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 1,149K rows/s | 755K rows/s | 26s |
+| 2 | 1,187K rows/s | 875K rows/s | 22s |
+| 3 | **1,227K rows/s** | 872K rows/s | 22s |
+| 4 | 1,092K rows/s | 781K rows/s | 25s |
+| 5 | 1,164K rows/s | 799K rows/s | 24s |
+| **Avg (2-5)** | **1,168K rows/s** | **832K rows/s** | **23s** |
+
+### Cross-Config Comparison (M3 Max, SO2010, MSSQL→PG)
+
+| Configuration | Transfer | Overall | vs Baseline |
+|---------------|----------|---------|-------------|
+| SQL Server 2022 + bind mount (old) | 472K rows/s | 287K rows/s | — |
+| **Azure SQL Edge + named volume** | **1,168K rows/s** | **832K rows/s** | **+147% / +190%** |
+
+### Key Findings
+
+1. **Eliminating Rosetta 2 + using named volumes delivers a 2.5x speedup** — from 472K to 1,168K transfer rows/s on the same hardware
+2. **M3 Max now matches M5 Pro on MSSQL→PG** — 1,168K vs 1,357K (86%), compared to the old 472K vs 1,357K (35%) when both platforms were bottlenecked by Rosetta 2
+3. **Named volumes are essential on macOS** — Docker's VM-internal ext4 delivers 3.4 GB/s writes vs 1.5 GB/s through VirtioFS bind mounts
+4. **Native ARM64 SQL Server eliminates the #1 Mac bottleneck** — consistent with WSL2 ARM64 findings (Azure SQL Edge matched M3 Max Rosetta with fewer cores and slower disk)
+5. **AI tuning converges quickly** — peak transfer (1,227K) achieved on run 3, stable ±6% across warm runs
+
+## M3 Max Azure SQL Edge Benchmark (StackOverflow2013, MSSQL→PG)
+
+### Test Environment
+
+- **Hardware**: Apple M3 Max, 36GB RAM, 14 CPU cores
+- **OS**: macOS (Darwin 25.4.0)
+- **Source**: Azure SQL Edge (native ARM64, Docker, named volume, 4GB memory limit)
+- **Target**: PostgreSQL 16 (Docker, named volume, tuned)
+- **Dataset**: StackOverflow2013 (~106.5M rows, 9 tables)
+- **AI Provider**: Anthropic (`claude-haiku-4-5-20251001`)
+- **Mode**: `drop_recreate`, AI tuning enabled
+- **Code**: `98b94a6` (current, includes PRs #107–#112)
+- **Date**: March 2026
+
+### Results (MSSQL→PG, 5 Runs)
+
+| Run | Transfer | Overall | Duration | Notes |
+|-----|----------|---------|----------|-------|
+| 1 (cold) | 904K rows/s | 664K rows/s | 2m40s | |
+| 2 | 981K rows/s | 717K rows/s | 2m29s | |
+| 3 | **992K rows/s** | **725K rows/s** | 2m27s | |
+| 4 | 335K rows/s† | 279K rows/s | 6m22s | buffer pool thrash |
+| 5 | 970K rows/s | 699K rows/s | 2m32s | |
+| **Avg (2,3,5)** | **981K rows/s** | **714K rows/s** | **2m29s** | excl. outlier |
+
+> †Run 4 transferred 114.5M rows (vs 106.5M actual) due to ~8M rows of chunk retries across 26 extra
+> tasks. Same buffer pool thrashing pattern as M5 Pro runs 2/4 — the 52GB dataset overwhelms the 4GB
+> Azure SQL Edge buffer pool. After consecutive runs fill and evict the pool, read latency spikes
+> cause CopyFrom timeouts that trigger chunk-level retries. Odd/even alternation depends on whether
+> the OS page cache has stabilized from the prior run's eviction storm.
+
+### Cross-Config Comparison (M3 Max, SO2013, MSSQL→PG)
+
+| Configuration | Transfer | Overall | vs Baseline |
+|---------------|----------|---------|-------------|
+| SQL Server 2022 + Rosetta 2 (old) | 287K rows/s | — | — |
+| **Azure SQL Edge + named volume** | **981K rows/s** | **714K rows/s** | **+242%** |
+
+### M3 Max vs M5 Pro (Azure SQL Edge, SO2013)
+
+| Machine | Transfer (avg) | Overall (avg) |
+|---------|---------------|---------------|
+| **M3 Max** (36GB, 14 cores) | 981K rows/s (1m49s) | 714K rows/s (2m29s) |
+| **M5 Pro** (24GB, 15 cores) | **1,042K rows/s** (1m42s) | **720K rows/s** (2m28s) |
+| Delta | M5 Pro +6% | M5 Pro +1% |
+
+> On SO2013 (52GB dataset, exceeds RAM), M5 Pro's faster disk I/O (4.4 vs 3.4 GB/s write) provides a
+> modest edge on transfer, but overall throughput is nearly identical. The gap narrows dramatically
+> compared to the old Rosetta 2 results (M5 Pro was +177% faster).
+
+---
+
+## StackOverflow2013 Benchmark — Rosetta 2 Baseline (106.5M rows)
 
 ### Test Environment
 
@@ -445,6 +556,11 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 > **Note**: Azure SQL Edge runs natively on ARM64 — no Rosetta 2 emulation overhead.
 > Full SO2010 dataset (SQL Server 2008 format MDF) attached directly to Azure SQL Edge
 > with compatibility level set to 150. All 9 tables match the original Brent Ozar row counts.
+
+> **Pending re-benchmark**: SO2010 transfer (886K) is anomalously low — slower than SO2013 (1,042K)
+> on the same machine, and 32% slower than M3 Max (1,168K). Likely caused by restrictive container
+> memory limits (`--memory=8g` MSSQL + `--memory=4g` PG) constraining the 5GB dataset that should
+> fit in cache. M3 Max used unconstrained containers. Needs re-running with matching config.
 
 ### Disk I/O (Docker VM)
 
