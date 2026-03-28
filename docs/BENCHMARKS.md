@@ -85,6 +85,10 @@ Both use Docker containers with SQL Server 2022 (Rosetta 2) and PostgreSQL 16.
 > Average of 3 runs, `dd bs=1M count=1024` inside Docker container.
 > Native macOS disk is much faster but Docker's VM I/O virtualization
 > is the actual bottleneck for database migrations.
+>
+> **Update**: M5 Pro write speed has since regressed to 2.8 GB/s on Docker 29.3.0.
+> See M5 Pro Azure SQL Edge section for current numbers. M3 Max with named volumes
+> measures 3.4 GB/s writes. These Rosetta 2 results predate the regression.
 
 ### Results (default DB settings)
 
@@ -453,13 +457,13 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 ### Disk I/O (Docker in WSL2)
 
-| Metric | M3 Max | M5 Pro | WSL2 ARM64 |
-|--------|--------|--------|------------|
-| Sequential Write | 2.7 GB/s | **5.3 GB/s** | 1.3 GB/s |
-| Sequential Read | 7.5 GB/s | **13.6 GB/s** | 4.6 GB/s |
+| Metric | M3 Max (named vol) | M5 Pro† | WSL2 ARM64 |
+|--------|---------------------|---------|------------|
+| Sequential Write | 3.4 GB/s | **2.8 GB/s** | 1.3 GB/s |
+| Sequential Read | 9.4 GB/s | **11.8 GB/s** | 4.6 GB/s |
 
-> Average of 3 runs, `dd bs=1M count=1024` inside Docker container.
-> WSL2 Docker write throughput is 75% slower than M5 Pro due to virtualization overhead.
+> Average of 3-5 runs, `dd bs=1M count=1024` inside Docker container.
+> †M5 Pro write speed regressed from 5.3 to 2.8 GB/s after Docker Desktop update (29.3.0).
 > Write speed is the primary bottleneck for PG target throughput.
 
 ### Database Configuration
@@ -562,11 +566,16 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 | Metric | M3 Max | WSL2 ARM64 | M5 Pro |
 |--------|--------|------------|--------|
-| Sequential Write | 2.7 GB/s | 1.3 GB/s | **4.4 GB/s** |
+| Sequential Write | 2.7 GB/s | 1.3 GB/s | **2.8 GB/s**† |
 | Sequential Read | 7.5 GB/s | 4.6 GB/s | **11.8 GB/s** |
 
-> Average of 3 runs, `dd bs=1M count=1024` inside unconstrained Docker container.
-> M5 Pro Docker write throughput is 3.4x faster than WSL2 ARM64.
+> Average of 5 runs, `dd bs=1M count=1024` inside unconstrained Docker container.
+>
+> †**Docker Desktop write regression**: M5 Pro write speed dropped from 5.3 GB/s (Docker ~28.x)
+> to 2.8 GB/s (Docker 29.3.0, kernel 6.12.76-linuxkit) — a 47% decline. This is now slower
+> than M3 Max (3.4 GB/s) and directly explains why M3 Max leads on SO2010 throughput despite
+> having slower native SSD. Read speeds are unaffected. Results should be re-validated after
+> a Docker Desktop update.
 
 ### Database Configuration
 
