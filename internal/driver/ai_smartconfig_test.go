@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -134,14 +135,15 @@ func TestDetectParameterTrend(t *testing.T) {
 
 // mockHistoryProvider implements TuningHistoryProvider for testing.
 type mockHistoryProvider struct {
-	saved *AITuningRecord
+	saved   *AITuningRecord
+	history []AITuningRecord
 }
 
 func (m *mockHistoryProvider) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
 	return nil, nil
 }
 func (m *mockHistoryProvider) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
-	return nil, nil
+	return m.history, nil
 }
 func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
 	m.saved = &record
@@ -229,5 +231,48 @@ func TestSaveTuningWithActualParams_NoPending(t *testing.T) {
 
 	if mock.saved != nil {
 		t.Error("should not save when no pending save exists")
+	}
+}
+
+func TestTrajectoryIncludesAllTunableParams(t *testing.T) {
+	mock := &mockHistoryProvider{
+		history: []AITuningRecord{
+			{
+				SourceDBType:         "mssql",
+				TotalTables:          9,
+				TotalRows:            19310703,
+				Workers:              6,
+				ChunkSize:            50000,
+				ReadAheadBuffers:     2,
+				WriteAheadWriters:    1,
+				ParallelReaders:      5,
+				MaxPartitions:        4,
+				LargeTableThreshold:  500000,
+				MaxSourceConnections: 12,
+				MaxTargetConnections: 12,
+				FinalThroughput:      800000,
+				FinalDurationSecs:    24,
+			},
+		},
+	}
+
+	analyzer := &SmartConfigAnalyzer{historyProvider: mock}
+	ctx := analyzer.formatHistoricalContext()
+
+	params := []string{
+		"workers=6",
+		"chunk_size=50000",
+		"read_ahead_buffers=2",
+		"write_ahead_writers=1",
+		"parallel_readers=5",
+		"max_partitions=4",
+		"large_table_threshold=500000",
+		"max_source_connections=12",
+		"max_target_connections=12",
+	}
+	for _, p := range params {
+		if !strings.Contains(ctx, p) {
+			t.Errorf("trajectory missing %q", p)
+		}
 	}
 }
