@@ -636,39 +636,47 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 ### StackOverflow2013 (106.5M rows, MSSQL→PG)
 
-**Environment changes from SO2010 run:**
-- **MSSQL container**: 12GB (`--memory=12g`), `MSSQL_MEMORY_LIMIT_MB` = 8192
-- **PG container**: 4GB (`--memory=4g`), `shared_buffers` = 2GB, `maintenance_work_mem` = 1GB
-- **Dataset**: Full Brent Ozar SO2013 (SQL Server 2008 format MDF, 52GB, 9 tables)
+**Environment**: Same as SO2010, Docker 29.3.1, unconstrained containers.
 
 | Run | Workers | Chunk Size | Transfer | Overall | Duration |
 |-----|---------|-----------|----------|---------|----------|
-| 1 (cold) | 4 | 45,000 | **1,089K rows/s** | 806K rows/s | 2m12s |
-| 2 | 5 | 45,000 | 260K rows/s† | 236K rows/s | 7m31s |
-| 3 | 4 | 50,000 | 1,019K rows/s | 730K rows/s | 2m26s |
-| 4 | 4 | 50,000 | 283K rows/s† | 259K rows/s | 6m51s |
-| 5 | 4 | 45,000 | 1,018K rows/s | 750K rows/s | 2m22s |
-| **Avg (1,3,5)** | — | — | **1,042K rows/s** | **762K rows/s** | **2m20s** |
+| 1 (cold) | 5 | 50,000 | **1,087K rows/s** | 801K rows/s | 2m13s |
+| 2 | 4 | 50,000 | 1,019K rows/s | 747K rows/s | 2m22s |
+| 3 | 5 | 50,000 | 908K rows/s | 681K rows/s | 2m36s |
+| 4 | 5 | 50,000 | 941K rows/s | 696K rows/s | 2m33s |
+| 5 | 5 | 50,000 | 988K rows/s | 716K rows/s | 2m29s |
+| **Avg (2-5)** | — | — | **964K rows/s** | **710K rows/s** | **2m30s** |
 
-> †Runs 2 and 4 show Azure SQL Edge buffer pool thrashing — the 52GB dataset
-> overwhelms the 8GB buffer pool. After a fast sequential scan fills the pool,
-> the next run battles eviction pressure. Odd-numbered runs represent steady-state
-> performance after the OS page cache stabilizes.
+> All 5 runs completed without buffer pool thrashing (previously seen on Docker 29.3.0
+> with memory-limited containers). Docker 29.3.1 + unconstrained containers resolved
+> the alternating fast/slow pattern.
+
+### M5 Pro vs M3 Max (Azure SQL Edge, SO2013)
+
+| Machine | Transfer (avg) | Overall (avg) |
+|---------|---------------|---------------|
+| M3 Max (36GB, 14 cores) | 981K rows/s | 714K rows/s |
+| **M5 Pro** (24GB, 15 cores) | 964K rows/s | 710K rows/s |
+| Delta | **M3 Max +2%** | **M3 Max +1%** |
+
+> Essentially tied on SO2013. The 52GB dataset exceeds both machines' RAM,
+> neutralizing M3 Max's page cache advantage. M5 Pro's faster disk I/O (6.2 vs 3.4 GB/s)
+> is offset by Azure SQL Edge's 4-core CPU cap being the bottleneck at this scale.
 
 ### Cross-Machine Comparison (SO2013, MSSQL→PG, Azure SQL Edge, transfer-only)
 
-| Machine | Source Engine | Cores | RAM | Transfer (avg) | vs M5 Pro |
-|---------|-------------|-------|-----|---------------|-----------|
-| WSL2 ARM64 (12GB container) | Azure SQL Edge | 10 | 24GB | 417K rows/s | -60% |
-| **M5 Pro (12GB container)** | **Azure SQL Edge** | **15** | **24GB** | **1,042K rows/s** | **—** |
+| Machine | Cores | RAM | Transfer (avg) | vs M5 Pro |
+|---------|-------|-----|---------------|-----------|
+| WSL2 ARM64 | 10 | 24GB | 417K rows/s | -57% |
+| M5 Pro | 15 | 24GB | 964K rows/s | — |
+| M3 Max | 14 | 36GB | 981K rows/s | +2% |
 
 ### SO2013 Key Findings
 
-1. **M5 Pro is 150% faster than WSL2 ARM64 on SO2013** — 1,042K vs 417K transfer, driven by faster disk I/O and 50% more CPU cores
-2. **Azure SQL Edge buffer pool thrashing** — alternating fast/slow runs when the 52GB dataset exceeds the 8GB buffer pool; OS page cache takes 1 run to stabilize
-3. **AI converges on 4 workers for SO2013** — reduced from 6 (SO2010) due to larger dataset memory pressure; 4 workers / 45-50K chunks is the sweet spot
-4. **Not directly comparable to SQL Server 2022 (Rosetta) results** — different engine, container configs, and measurement sessions; see SO2010 findings for details
-5. **No cold-cache penalty on first run** — run 1 (1,089K) is the fastest, suggesting Azure SQL Edge benefits from a clean buffer pool on initial sequential scan
+1. **M3 Max and M5 Pro are essentially tied** — 981K vs 964K (2% gap), because the 52GB dataset exceeds all caches and Azure SQL Edge's 4-core cap is the bottleneck
+2. **Both are ~130% faster than WSL2 ARM64** — driven by faster disk I/O and more CPU cores
+3. **Docker 29.3.1 eliminates buffer pool thrashing** — all 5 runs stable, no alternating fast/slow pattern seen on Docker 29.3.0
+4. **AI settles on 4-5 workers / 50K chunks** — consistent with SO2010 findings under Azure SQL Edge's 4-core limit
 
 ## Implemented Optimizations
 
