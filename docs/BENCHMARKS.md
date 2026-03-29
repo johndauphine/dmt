@@ -613,13 +613,26 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 | M5 Pro | 15 | 24GB | 4.4 GB/s | 918K rows/s | -21% |
 | **M3 Max** | **14** | **36GB** | **3.4 GB/s** | **1,168K rows/s** | **—** |
 
+### SQL Server 2022 (Rosetta 2) vs Azure SQL Edge (M5 Pro, SO2010)
+
+| Engine | Workers | Avg Transfer (runs 2-5) |
+|--------|---------|------------------------|
+| **Azure SQL Edge (native ARM64)** | **4** | **918K rows/s** |
+| SQL Server 2022 (Rosetta 2) | 4 | 845K rows/s |
+| SQL Server 2022 (Rosetta 2) | 6 | 897K rows/s |
+| SQL Server 2022 (Rosetta 2) | 8 | 904K rows/s |
+
+> SQL Server 2022 has access to all 15 cores but Rosetta 2 overhead (~8%) cancels
+> out the extra parallelism. Azure SQL Edge at 4 workers still wins despite its
+> 4 logical processor cap, because native ARM64 execution is more efficient per core.
+
 ### Key Findings
 
-1. **M3 Max is 27% faster than M5 Pro on SO2010** — 1,168K vs 918K transfer; M3 Max's extra 12GB RAM keeps more of the 10GB dataset in OS page cache, and SO2010 is memory/CPU-bound (not disk-bound) under Azure SQL Edge's 4-core limit
-2. **AI converges on 4 workers / 45K chunk_size** — Azure SQL Edge caps at 4 logical processors, so fewer workers with less contention outperforms 6 workers (918K vs 871K)
-3. **M5 Pro is 88% faster than WSL2 ARM64** — 918K vs 487K transfer, driven by 3.4x faster Docker disk I/O (4.4 vs 1.3 GB/s)
-4. **No cold-cache penalty** — run 1 (947K) matches warm runs, as the 10GB dataset fits within the 4GB MSSQL buffer pool + OS page cache
-5. **Unconstrained containers improve throughput 4%** — removing `--memory` flags bumped from 886K to 918K avg vs prior memory-limited runs
+1. **M3 Max is 27% faster than M5 Pro on SO2010** — 1,168K vs 918K transfer; M3 Max's extra 12GB RAM keeps more of the 10GB dataset in OS page cache, and SO2010 is memory/CPU-bound (not disk-bound)
+2. **Azure SQL Edge beats SQL Server 2022 on Apple Silicon** — native ARM64 (918K) outperforms Rosetta 2 (904K best) even with fewer cores; Rosetta overhead negates the parallelism advantage
+3. **AI converges on 4 workers / 45K chunk_size** — fewer workers with less contention outperforms 6 workers on Azure SQL Edge (918K vs 871K)
+4. **M5 Pro is 88% faster than WSL2 ARM64** — 918K vs 487K transfer, driven by faster Docker disk I/O
+5. **No cold-cache penalty** — run 1 (947K) matches warm runs, as the 10GB dataset fits within the 4GB MSSQL buffer pool + OS page cache
 
 ### StackOverflow2013 (106.5M rows, MSSQL→PG)
 
