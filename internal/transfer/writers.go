@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -9,6 +10,19 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/target"
 )
+
+// isTimeoutError returns true if the error is a context deadline or timeout.
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == context.DeadlineExceeded {
+		return true
+	}
+	// Check wrapped errors — CopyFrom wraps the timeout in "copy batch [x:y]: timeout: context deadline exceeded"
+	return strings.Contains(err.Error(), "context deadline exceeded") ||
+		strings.Contains(err.Error(), "i/o timeout")
+}
 
 // writerPool wraps pool.WriterPool with transfer-specific functionality.
 type writerPool struct {
@@ -115,7 +129,14 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 		return nil
 	}
 
-	// Try AI-driven chunk size adjustment for error recovery
+	// Timeout errors are transient — don't ask AI to reduce batch size.
+	// CopyFrom uses the COPY protocol (no SQL parameters), so parameter-limit
+	// advice is wrong and permanently degrades throughput for this table.
+	if isTimeoutError(err) {
+		return err
+	}
+
+	// Try AI-driven chunk size adjustment for non-timeout error recovery
 	newChunkSize := wp.evaluateAndAdjust(ctx, rows, err)
 	if newChunkSize <= 0 || newChunkSize >= len(rows) {
 		return err // AI says not a chunk_size issue, or can't help
