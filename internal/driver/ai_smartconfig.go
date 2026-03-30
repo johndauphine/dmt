@@ -772,7 +772,7 @@ Guidelines:
 3. Workers should scale with CPU cores but leave headroom
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead
 5. Runtime adjustments shown above were REACTIVE to specific runtime conditions — they are context, not starting-point recommendations.
-6. Consider the database types and total data volume when tuning
+6. Total row count affects migration DURATION only. The core pipeline parameters (workers, chunk_size, read_ahead_buffers, write_ahead_writers) are optimal regardless of dataset size because each worker processes one chunk at a time. However, large individual tables benefit from higher parallel_readers and max_partitions for intra-table parallelism.
 7. THROUGHPUT OPTIMIZATION: There is an optimal chunk_size for each workload — too small underutilizes the pipeline, too large causes write overhead and memory pressure. When the trajectory includes throughput results, analyze the relationship between chunk_size and measured throughput to find the optimal point.
 
 Respond with ONLY a JSON object:
