@@ -775,55 +775,40 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 	ident := pgx.Identifier{opts.Schema, sanitizedTable}
 
-	// Adaptive sub-batching: each CopyFrom is capped at copyBatchBytes (derived
-	// from TCP send buffer) to prevent pgx TCP buffer deadlocks. When the batch
-	// is split into multiple sub-batches, they run inside a transaction so that
-	// a mid-batch failure rolls back cleanly, making retry safe (no duplicate key
-	// errors from partially committed data).
+	// All CopyFrom calls run inside a transaction so that a timeout or
+	// mid-batch failure rolls back cleanly. This prevents duplicate rows
+	// when the caller retries the same chunk after a context deadline.
+	// Adaptive sub-batching caps each CopyFrom at copyBatchBytes (derived
+	// from TCP send buffer) to prevent pgx TCP buffer deadlocks.
 	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
-	needsTx := batchSize < len(opts.Rows)
 
-	if needsTx {
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("begin transaction: %w", err)
-		}
-		defer tx.Rollback(context.Background())
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(context.Background())
 
-		for start := 0; start < len(opts.Rows); start += batchSize {
-			end := start + batchSize
-			if end > len(opts.Rows) {
-				end = len(opts.Rows)
-			}
-
-			copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			_, err = tx.CopyFrom(
-				copyCtx,
-				ident,
-				sanitizedCols,
-				pgx.CopyFromRows(opts.Rows[start:end]),
-			)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
-			}
+	for start := 0; start < len(opts.Rows); start += batchSize {
+		end := start + batchSize
+		if end > len(opts.Rows) {
+			end = len(opts.Rows)
 		}
 
-		if err = tx.Commit(ctx); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
-		}
-	} else {
 		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		_, err = conn.Conn().CopyFrom(
+		_, err = tx.CopyFrom(
 			copyCtx,
 			ident,
 			sanitizedCols,
-			pgx.CopyFromRows(opts.Rows),
+			pgx.CopyFromRows(opts.Rows[start:end]),
 		)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("copy batch: %w", err)
+			return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
 		}
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
 }
