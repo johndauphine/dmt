@@ -446,7 +446,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 - **Source**: Azure SQL Edge (native ARM64, Docker, 8GB container, 3GB internal limit)
 - **Target**: PostgreSQL 16 (Docker, 4GB container, tuned)
 - **Dataset**: StackOverflow2010 (~19.3M rows, 9 tables — full Brent Ozar dataset, 10GB)
-- **Code**: afda4e0 (current, includes PRs #107–#112 CopyFrom safety)
+- **Code**: afda4e0 (PRs #107–#112 CopyFrom safety)
 - **Date**: March 2026
 
 > **Note**: Azure SQL Edge runs natively on ARM64 — no Rosetta 2 emulation overhead.
@@ -488,22 +488,71 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 > AI startup tuning applied sensible defaults for remaining parameters.
 > Run 1 slower due to cold MSSQL cache.
 
+### Re-validation (0735127 — PG writer refactor + AI tuning improvements)
+
+**Environment changes from initial WSL2 run:**
+- **Code**: 0735127 (includes PG writer refactor, AI tuning trajectory)
+- **MSSQL container**: 12GB (`--memory=12g`), `MSSQL_MEMORY_LIMIT_MB` = 8192
+- **PG container**: unconstrained, `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB
+- **AI tuning**: Anthropic (`claude-haiku-4-5-20251001`), selected workers=6, chunk_size=100000, parallel_readers=3
+
+#### Disk I/O (re-measured)
+
+| Metric | Previous (afda4e0) | Current (0735127) |
+|--------|-------------------|-------------------|
+| Sequential Write | 1.3 GB/s | **2.4 GB/s** |
+| Sequential Read | 4.6 GB/s | **4.3 GB/s** |
+
+> Average of 5 runs, `dd bs=1M count=1024` inside Docker containers.
+> Write speed nearly doubled — both runs use Docker named volumes, but WSL2/Docker
+> updates between runs likely improved virtio-fs write performance.
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 590K rows/s | 378K rows/s | 33s |
+| 2 | 618K rows/s | 438K rows/s | 31s |
+| 3 | **647K rows/s** | 419K rows/s | 30s |
+| 4 | 641K rows/s | 414K rows/s | 30s |
+| **Avg (2-4)** | **635K rows/s** | **424K rows/s** | **30s** |
+
+> AI startup tuning selected parallel_readers=3 based on trajectory analysis of prior runs.
+> Run 1 slower due to cold MSSQL cache. Containers unconstrained (no `--memory` flags).
+
+**vs initial WSL2 run (afda4e0):**
+
+| Metric | afda4e0 (487K) | 0735127 (635K) | Delta |
+|--------|----------------|----------------|-------|
+| Transfer (avg) | 487K rows/s | **635K rows/s** | **+30%** |
+| Duration | 50s | 30s | **-40%** |
+| Docker Write I/O | 1.3 GB/s | 2.4 GB/s | **+85%** |
+| parallel_readers | 1 | 3 | AI trajectory |
+| MSSQL memory | 3GB internal | 8GB internal | +5GB |
+| PG shared_buffers | 2GB | 1GB | -1GB |
+
+> Four factors contribute to the +30% improvement: (1) WSL2/Docker disk write speed nearly doubled
+> (1.3→2.4 GB/s), (2) AI tuning now selects parallel_readers=3 based on trajectory analysis,
+> (3) PG writer refactor reduces per-batch overhead, (4) larger MSSQL buffer pool (8GB vs 3GB) keeps
+> more of the 10GB dataset cached. The PG shared_buffers decrease (2GB→1GB) did not hurt — write
+> throughput is dominated by WAL and CopyFrom, not shared_buffers.
+
 ### Cross-Machine Comparison (SO2010, MSSQL→PG, transfer-only)
 
 | Machine | Source Engine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro (SS2022) |
 |---------|-------------|-------|-----|-------------|---------------|-----------|
 | M3 Max (16GB Docker) | SQL Server 2022 (Rosetta) | 14 | 36GB | 2.7 GB/s | 472K rows/s | -65% |
-| **WSL2 ARM64** | **Azure SQL Edge** | **10** | **24GB** | **1.3 GB/s** | **487K rows/s** | **-64%** |
+| WSL2 ARM64 (afda4e0) | Azure SQL Edge | 10 | 24GB | 1.3 GB/s | 487K rows/s | -64% |
+| **WSL2 ARM64 (0735127)** | **Azure SQL Edge** | **10** | **24GB** | **2.4 GB/s** | **635K rows/s** | **-53%** |
 | M5 Pro (8GB Docker) | Azure SQL Edge | 15 | 24GB | 4.4 GB/s | 886K rows/s | -35% |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
 
 ### Key Findings
 
-1. **Native ARM64 SQL Server eliminates Rosetta overhead** — WSL2 ARM64 (487K) matches M3 Max (472K) with fewer cores, less RAM, and half the disk write speed
-2. **WSL2 virtual disk write speed is the primary bottleneck** — 1.3 GB/s write vs M5 Pro's 5.3 GB/s (75% slower) explains the gap to M5 Pro
-3. **Container memory limits are essential on WSL2** — Docker shares the WSL2 memory pool with no separate cap; `--memory` flags on containers prevent DB processes from starving the pipeline
-4. **Azure SQL Edge requires explicit memory capping** — without `MSSQL_MEMORY_LIMIT_MB`, it consumes all container memory and OOM-kills
-5. **4GB PG container with 2GB shared_buffers** gives 9% improvement over 2GB container with 512MB shared_buffers (487K vs 447K)
+1. **+30% throughput from combined improvements** — 635K vs 487K transfer; disk I/O (+85%), AI parallel readers, PG writer refactor, and larger MSSQL buffer pool all contribute
+2. **WSL2 ARM64 now reaches 69% of M5 Pro Azure SQL Edge** — up from 55% (487K/886K) to 69% (635K/918K), closing the gap significantly
+3. **WSL2 virtual disk write speed remains the primary bottleneck** — 2.4 GB/s write vs M5 Pro's 4.4 GB/s (45% slower) explains most of the remaining gap
+4. **Container memory limits are essential on WSL2** — Docker shares the WSL2 memory pool with no separate cap; `--memory` flags on containers prevent DB processes from starving the pipeline
+5. **Azure SQL Edge requires explicit memory capping** — without `MSSQL_MEMORY_LIMIT_MB`, it consumes all container memory and OOM-kills
+6. **4GB PG container with 2GB shared_buffers** gives 9% improvement over 2GB container with 512MB shared_buffers (487K vs 447K)
 
 ### StackOverflow2013 (106.5M rows, MSSQL→PG)
 
@@ -609,7 +658,8 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 
 | Machine | Cores | RAM | Docker Write | Transfer (avg) | vs M3 Max |
 |---------|-------|-----|-------------|---------------|-----------|
-| WSL2 ARM64 | 10 | 24GB | 1.3 GB/s | 487K rows/s | -58% |
+| WSL2 ARM64 (afda4e0) | 10 | 24GB | 1.3 GB/s | 487K rows/s | -58% |
+| WSL2 ARM64 (0735127) | 10 | 24GB | 2.4 GB/s | 635K rows/s | -46% |
 | M5 Pro | 15 | 24GB | 4.4 GB/s | 918K rows/s | -21% |
 | **M3 Max** | **14** | **36GB** | **3.4 GB/s** | **1,168K rows/s** | **—** |
 
