@@ -663,9 +663,16 @@ func executeKeysetPagination(
 					return // This reader is done
 				}
 
+				if logging.IsDebug() {
+					logging.Debug("Reader[%d]: chunk #%d read %d rows (query=%v, scan=%v)", readerID, seq, len(chunk), queryTime, scanTime)
+				}
 				// Update lastPK for next iteration
 				lastPK = chunk[len(chunk)-1][pkIdx]
 
+				var sendStart time.Time
+				if logging.IsDebug() {
+					sendStart = time.Now()
+				}
 				chunkChan <- chunkResult{
 					rows:      chunk,
 					lastPK:    lastPK,
@@ -674,6 +681,12 @@ func executeKeysetPagination(
 					queryTime: queryTime,
 					scanTime:  scanTime,
 					readEnd:   time.Now(),
+				}
+				if logging.IsDebug() {
+					if sendWait := time.Since(sendStart); sendWait > 500*time.Millisecond {
+						logging.Debug("Reader[%d]: blocked %v sending chunk #%d to chunkChan (len=%d, cap=%d)",
+							readerID, sendWait, seq, len(chunkChan), cap(chunkChan))
+					}
 				}
 				seq++
 
@@ -768,8 +781,25 @@ func executeKeysetPagination(
 	var lastReportedQueueDepth int // for delta-based queue depth reporting
 
 	// Process chunks and dispatch writes
+	debugEnabled := logging.IsDebug()
+	var chunkWaitStart time.Time
+	var totalChunkWait time.Duration  // total time consumer spent waiting for readers
+	var totalSubmitWait time.Duration // total time consumer spent blocked on submit (writers full)
+	if debugEnabled {
+		chunkWaitStart = time.Now()
+	}
+
 chunkLoop:
 	for result := range chunkChan {
+		if debugEnabled {
+			chunkWait := time.Since(chunkWaitStart)
+			totalChunkWait += chunkWait
+			if chunkCount > 0 && chunkWait > 500*time.Millisecond {
+				logging.Debug("Pipeline %s: consumer waited %v for chunk #%d from readers (chunkChan len=%d)",
+					job.Table.Name, chunkWait, chunkCount, len(chunkChan))
+			}
+		}
+
 		if result.err != nil {
 			loopErr = result.err
 			wp.Cancel()
@@ -798,7 +828,11 @@ chunkLoop:
 		}
 		lastWriteEnd = time.Now()
 
-		// Dispatch to write pool
+		// Dispatch to write pool (may block if jobChan is full)
+		var submitStart time.Time
+		if debugEnabled {
+			submitStart = time.Now()
+		}
 		if !wp.submit(writeJob{
 			rows:     result.rows,
 			lastPK:   result.lastPK,
@@ -811,6 +845,9 @@ chunkLoop:
 				loopErr = ctx.Err()
 			}
 			break chunkLoop
+		}
+		if debugEnabled {
+			totalSubmitWait += time.Since(submitStart)
 		}
 
 		// Check for tuner-driven writer scaling at chunk boundaries
@@ -825,14 +862,17 @@ chunkLoop:
 			}
 		}
 
-		// Log overlap stats periodically
-		if chunkCount > 0 && chunkCount%50 == 0 {
+		// Log pipeline stats periodically
+		if debugEnabled && chunkCount > 0 && chunkCount%50 == 0 {
 			waitTime := time.Since(receiveTime)
-			logging.Debug("Pipeline %s: %d chunks, overlap=%v, wait=%v, buffers=%d, writers=%d",
-				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters)
+			logging.Debug("Pipeline %s: %d chunks, overlap=%v, dispatch=%v, buffers=%d, writers=%d, chunkWait=%v, submitWait=%v",
+				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters, totalChunkWait, totalSubmitWait)
 		}
 
 		chunkCount++
+		if debugEnabled {
+			chunkWaitStart = time.Now()
+		}
 	}
 
 	// Clean up queue depth reporting
@@ -840,11 +880,13 @@ chunkLoop:
 		tuner.ReportQueueDepth(-lastReportedQueueDepth)
 	}
 
-	logging.Debug("Consumer loop finished, calling wp.wait()")
+	logging.Debug("Consumer loop finished for %s: %d chunks, chunkWait=%v, submitWait=%v, overlap=%v",
+		job.Table.Name, chunkCount, totalChunkWait, totalSubmitWait, totalOverlap)
 
 	// Wait for writers to finish
+	waitStart := time.Now()
 	wp.wait()
-	logging.Debug("wp.wait() completed")
+	logging.Debug("wp.wait() completed in %v for %s", time.Since(waitStart), job.Table.Name)
 
 	if loopErr != nil {
 		return stats, loopErr
@@ -1041,6 +1083,10 @@ func executeRowNumberPagination(
 			// Update rowNum for progress tracking
 			newRowNum := rowNum + int64(len(chunk))
 
+			var sendStart time.Time
+			if logging.IsDebug() {
+				sendStart = time.Now()
+			}
 			chunkChan <- chunkResult{
 				rows:      chunk,
 				rowNum:    newRowNum,
@@ -1049,6 +1095,12 @@ func executeRowNumberPagination(
 				queryTime: queryTime,
 				scanTime:  scanTime,
 				readEnd:   time.Now(),
+			}
+			if logging.IsDebug() {
+				if sendWait := time.Since(sendStart); sendWait > 500*time.Millisecond {
+					logging.Debug("Reader[0]: blocked %v sending chunk #%d to chunkChan (ROW_NUMBER, len=%d, cap=%d)",
+						sendWait, seq, len(chunkChan), cap(chunkChan))
+				}
 			}
 			seq++
 
@@ -1181,8 +1233,25 @@ func executeRowNumberPagination(
 	var lastReportedQueueDepth int // for delta-based queue depth reporting
 
 	// Process chunks and dispatch writes
+	debugEnabled := logging.IsDebug()
+	var chunkWaitStart time.Time
+	var totalChunkWait time.Duration
+	var totalSubmitWait time.Duration
+	if debugEnabled {
+		chunkWaitStart = time.Now()
+	}
+
 chunkLoop:
 	for result := range chunkChan {
+		if debugEnabled {
+			chunkWait := time.Since(chunkWaitStart)
+			totalChunkWait += chunkWait
+			if chunkCount > 0 && chunkWait > 500*time.Millisecond {
+				logging.Debug("Pipeline %s: consumer waited %v for chunk #%d from reader (ROW_NUMBER, chunkChan len=%d)",
+					job.Table.Name, chunkWait, chunkCount, len(chunkChan))
+			}
+		}
+
 		if result.err != nil {
 			loopErr = result.err
 			wp.Cancel()
@@ -1211,7 +1280,11 @@ chunkLoop:
 		}
 		lastWriteEnd = time.Now()
 
-		// Dispatch to write pool
+		// Dispatch to write pool (may block if jobChan is full)
+		var submitStart time.Time
+		if debugEnabled {
+			submitStart = time.Now()
+		}
 		if !wp.submit(writeJob{
 			rows:     result.rows,
 			rowNum:   result.rowNum,
@@ -1224,6 +1297,9 @@ chunkLoop:
 				loopErr = ctx.Err()
 			}
 			break chunkLoop
+		}
+		if debugEnabled {
+			totalSubmitWait += time.Since(submitStart)
 		}
 
 		// Check for tuner-driven writer scaling at chunk boundaries
@@ -1238,14 +1314,17 @@ chunkLoop:
 			}
 		}
 
-		// Log overlap stats periodically
-		if chunkCount > 0 && chunkCount%50 == 0 {
+		// Log pipeline stats periodically
+		if debugEnabled && chunkCount > 0 && chunkCount%50 == 0 {
 			waitTime := time.Since(receiveTime)
-			logging.Debug("Pipeline %s: %d chunks, overlap=%v, wait=%v, buffers=%d, writers=%d",
-				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters)
+			logging.Debug("Pipeline %s: %d chunks, overlap=%v, dispatch=%v, buffers=%d, writers=%d, chunkWait=%v, submitWait=%v",
+				job.Table.Name, chunkCount, totalOverlap, waitTime, bufferSize, numWriters, totalChunkWait, totalSubmitWait)
 		}
 
 		chunkCount++
+		if debugEnabled {
+			chunkWaitStart = time.Now()
+		}
 	}
 
 	// Clean up queue depth reporting
@@ -1253,11 +1332,13 @@ chunkLoop:
 		tuner.ReportQueueDepth(-lastReportedQueueDepth)
 	}
 
-	logging.Debug("Consumer loop finished, calling wp.wait()")
+	logging.Debug("Consumer loop finished for %s: %d chunks, chunkWait=%v, submitWait=%v, overlap=%v",
+		job.Table.Name, chunkCount, totalChunkWait, totalSubmitWait, totalOverlap)
 
 	// Wait for writers to finish
+	waitStart := time.Now()
 	wp.wait()
-	logging.Debug("wp.wait() completed")
+	logging.Debug("wp.wait() completed in %v for %s", time.Since(waitStart), job.Table.Name)
 
 	if loopErr != nil {
 		return stats, loopErr

@@ -51,6 +51,7 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 	// Memory pressure — pause and let GC + writers catch up.
 	// Only the first goroutine to enter triggers GC; others just wait and
 	// recheck, avoiding repeated stop-the-world collections.
+	pauseStart := time.Now()
 	isGCLeader := mg.gcActive.CompareAndSwap(false, true)
 	if isGCLeader {
 		logging.Debug("Memory pressure: HeapAlloc=%dMB threshold=%dMB, pausing readers",
@@ -67,6 +68,7 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 			if isGCLeader {
 				mg.gcActive.Store(false)
 			}
+			logging.Debug("Memory pressure: reader cancelled after %v pause", time.Since(pauseStart))
 			return false
 		case <-ticker.C:
 			runtime.ReadMemStats(&ms)
@@ -74,6 +76,8 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 				if isGCLeader {
 					mg.gcActive.Store(false)
 				}
+				logging.Debug("Memory pressure cleared: HeapAlloc=%dMB, readers paused for %v",
+					ms.HeapAlloc/(1024*1024), time.Since(pauseStart))
 				return true
 			}
 			// Only the GC leader triggers collection
