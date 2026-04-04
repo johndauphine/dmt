@@ -265,6 +265,12 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 		writeDuration := time.Since(writeStart)
 		atomic.AddInt64(&wp.totalWriteTime, int64(writeDuration))
 
+		if logging.IsDebug() && writeDuration > 0 {
+			logging.Debug("Writer[%d]: wrote %d rows in %v (%.0f rows/sec)",
+				writerID, len(job.Rows), writeDuration,
+				float64(len(job.Rows))/writeDuration.Seconds())
+		}
+
 		rowCount := int64(len(job.Rows))
 		atomic.AddInt64(&wp.totalWritten, rowCount)
 		if wp.prog != nil {
@@ -308,11 +314,31 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 
 // Submit sends a write job to the pool. Returns false if context is cancelled.
 func (wp *WriterPool) Submit(job WriteJob) bool {
+	// Try non-blocking send first to detect when jobChan is full.
 	select {
 	case wp.jobChan <- job:
 		return true
 	case <-wp.ctx.Done():
 		return false
+	default:
+		// jobChan is full — consumer will block until a writer finishes.
+		if logging.IsDebug() {
+			stallStart := time.Now()
+			select {
+			case wp.jobChan <- job:
+				logging.Debug("WriterPool.Submit: jobChan stall %v (cap=%d)", time.Since(stallStart), cap(wp.jobChan))
+				return true
+			case <-wp.ctx.Done():
+				return false
+			}
+		}
+		// Non-debug: just block.
+		select {
+		case wp.jobChan <- job:
+			return true
+		case <-wp.ctx.Done():
+			return false
+		}
 	}
 }
 
