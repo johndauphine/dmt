@@ -735,45 +735,60 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 		memConstraint += " (WSL2 - shared memory with Windows host, OOM kills crash the VM)"
 	}
 
-	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system environment and historical data.
+	// Calculate baseline defaults so the AI knows what "good" looks like
+	baselineWorkers := input.CPUCores - 2
+	if baselineWorkers < 2 {
+		baselineWorkers = 2
+	}
+
+	prompt := fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
 System and Database Info:
 %s
 %s
 Host Environment:
 - Platform: %s
-- CPU cores: %d (reserve 1-2 for OS and other processes)
+- CPU cores: %d
 - Memory: %s
 - Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+  NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
 
-CRITICAL MEMORY CONSTRAINT:
-- estimated_memory_mb MUST NOT exceed available_memory_mb minus 2GB headroom
-- The host may be running database containers (Docker), IDEs, and other processes
-- On WSL2, exceeding available memory crashes the entire VM — be conservative
-- If a user memory cap (max_memory_mb) is set, stay well within it
+Reference baseline (what the system would use without AI tuning):
+- workers: %d (cpu_cores - 2, minimum 2)
+- chunk_size: 50000
+- read_ahead_buffers: 4
+- write_ahead_writers: 2
+- parallel_readers: 2
+- max_partitions: %d
+Your job is to BEAT this baseline using the historical data and table characteristics. Do not recommend fewer workers or smaller buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb).
+
+Memory constraint:
+- estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
+- If a user memory cap (max_memory_mb) is set, stay within it
+- On WSL2, exceeding available memory crashes the VM — be more conservative on WSL2 only
 
 Parameters to tune:
-- workers: Parallel migration workers
-- chunk_size: Rows per batch (larger = higher throughput, but uses more memory)
-- read_ahead_buffers: Read buffers per worker
-- write_ahead_writers: Write threads per worker
-- parallel_readers: Parallel readers for large tables
+- workers: Parallel migration workers (scale with CPU cores, baseline is cpu_cores - 2)
+- chunk_size: Rows per batch (50000 is a strong default — only change if historical data shows a better value)
+- read_ahead_buffers: Read buffers per worker (4 is a strong default)
+- write_ahead_writers: Write threads per worker (2 is a strong default)
+- parallel_readers: Parallel readers for large tables (increase for tables with millions of rows)
 - max_partitions: Large table partitions (typically matches workers)
 - large_table_threshold: Row count before partitioning
-- max_source_connections: Source database connection pool size
-- max_target_connections: Target database connection pool size
+- max_source_connections: Source connection pool (workers * parallel_readers + 4)
+- max_target_connections: Target connection pool (workers * write_ahead_writers + 4)
 - upsert_merge_chunk_size: Batch size for upsert operations
 - checkpoint_frequency: How often to checkpoint progress
 - max_retries: Retry count for transient failures
 
 Guidelines:
-1. MEMORY SAFETY FIRST - never exceed available memory. Start conservative, the runtime AI monitor can scale up.
-2. CHUNK SIZE affects throughput significantly, but bigger is not always better due to write overhead and memory pressure.
-3. Workers should scale with CPU cores but leave headroom
-4. Connection pool sizes should accommodate workers * readers/writers plus overhead
-5. Runtime adjustments shown above were REACTIVE to specific runtime conditions — they are context, not starting-point recommendations.
-6. Total row count affects migration DURATION only. The core pipeline parameters (workers, chunk_size, read_ahead_buffers, write_ahead_writers) are optimal regardless of dataset size because each worker processes one chunk at a time. However, large individual tables benefit from higher parallel_readers and max_partitions for intra-table parallelism.
-7. THROUGHPUT OPTIMIZATION: There is an optimal chunk_size for each workload — too small underutilizes the pipeline, too large causes write overhead and memory pressure. When the trajectory includes throughput results, analyze the relationship between chunk_size and measured throughput to find the optimal point.
+1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
+2. Workers should be cpu_cores - 2 unless memory is the bottleneck. Do NOT under-provision workers.
+3. chunk_size=50000 is well-tested. Only deviate if historical throughput data clearly shows a better value.
+4. read_ahead_buffers=4 and write_ahead_writers=2 are well-tested. Do not reduce below these.
+5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
+6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
+7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) — these are caused by external factors like disk contention, not parameter choices.
 
 Respond with ONLY a JSON object:
 {
@@ -790,8 +805,9 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief explanation of choices, referencing memory constraints and historical data>"
-}`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint)
+  "reasoning": "<brief explanation>"
+}`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint,
+		baselineWorkers, baselineWorkers)
 
 	response, err := s.aiMapper.CallAI(ctx, prompt)
 	if err != nil {
@@ -870,42 +886,43 @@ func GetOfflineAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutp
 		memConstraint += " (WSL2 - shared memory with Windows host, OOM kills crash the VM)"
 	}
 
-	prompt := fmt.Sprintf(`You are a database migration performance expert. Recommend optimal configuration parameters based on the system environment.
+	// Calculate baseline defaults
+	baselineWorkers := input.CPUCores - 2
+	if baselineWorkers < 2 {
+		baselineWorkers = 2
+	}
+
+	prompt := fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
 System and Database Info:
 %s
 
 Host Environment:
 - Platform: %s
-- CPU cores: %d (reserve 1-2 for OS and other processes)
+- CPU cores: %d
 - Memory: %s
 - Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+  NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
 
-CRITICAL MEMORY CONSTRAINT:
-- estimated_memory_mb MUST NOT exceed available_memory_mb minus 2GB headroom
-- The host may be running database containers (Docker), IDEs, and other processes
-- On WSL2, exceeding available memory crashes the entire VM — be conservative
-- If a user memory cap (max_memory_mb) is set, stay well within it
+Reference baseline (what the system would use without AI tuning):
+- workers: %d (cpu_cores - 2, minimum 2)
+- chunk_size: 50000
+- read_ahead_buffers: 4
+- write_ahead_writers: 2
+- parallel_readers: 2
+- max_partitions: %d
+Your job is to BEAT this baseline. Do not recommend fewer workers or smaller buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb).
 
-Parameters to tune:
-- workers: Parallel migration workers
-- chunk_size: Rows per batch (larger = higher throughput, but uses more memory)
-- read_ahead_buffers: Read buffers per worker
-- write_ahead_writers: Write threads per worker
-- parallel_readers: Parallel readers for large tables
-- max_partitions: Large table partitions (typically matches workers)
-- large_table_threshold: Row count before partitioning
-- max_source_connections: Source database connection pool size
-- max_target_connections: Target database connection pool size
-- upsert_merge_chunk_size: Batch size for upsert operations
-- checkpoint_frequency: How often to checkpoint progress
-- max_retries: Retry count for transient failures
+Memory constraint:
+- estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
+- If a user memory cap (max_memory_mb) is set, stay within it
+- On WSL2, exceeding available memory crashes the VM — be more conservative on WSL2 only
 
 Guidelines:
-1. MEMORY SAFETY FIRST - never exceed available memory. Start conservative, the runtime AI monitor can scale up.
-2. CHUNK SIZE is most important for throughput - larger = faster, but balance with memory
-3. Workers should scale with CPU cores but leave headroom
-4. Connection pool sizes should accommodate workers * readers/writers plus overhead
+1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
+2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
+3. chunk_size=50000, read_ahead_buffers=4, write_ahead_writers=2 are well-tested defaults. Do not go below these.
+4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
 
 Respond with ONLY a JSON object:
 {
@@ -922,8 +939,9 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief explanation of choices, referencing memory constraints>"
-}`, string(inputJSON), input.Platform, input.CPUCores, memConstraint)
+  "reasoning": "<brief explanation>"
+}`, string(inputJSON), input.Platform, input.CPUCores, memConstraint,
+		baselineWorkers, baselineWorkers)
 
 	response, err := aiMapper.CallAI(ctx, prompt)
 	if err != nil {
