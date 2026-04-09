@@ -754,7 +754,7 @@ Host Environment:
   NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
 
 Reference baseline (what the system would use without AI tuning):
-- workers: %d (cpu_cores - 2)
+- workers: %d (cpu_cores - 2, minimum 2)
 - chunk_size: 50000
 - read_ahead_buffers: 4
 - write_ahead_writers: 2
@@ -775,8 +775,8 @@ Parameters to tune:
 - parallel_readers: Parallel readers for large tables (increase for tables with millions of rows)
 - max_partitions: Large table partitions (typically matches workers)
 - large_table_threshold: Row count before partitioning
-- max_source_connections: Source connection pool (workers + parallel_readers + 2)
-- max_target_connections: Target connection pool (workers * write_ahead_writers + 2)
+- max_source_connections: Source connection pool (workers * parallel_readers + 4)
+- max_target_connections: Target connection pool (workers * write_ahead_writers + 4)
 - upsert_merge_chunk_size: Batch size for upsert operations
 - checkpoint_frequency: How often to checkpoint progress
 - max_retries: Retry count for transient failures
@@ -905,7 +905,7 @@ Host Environment:
   NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
 
 Reference baseline (what the system would use without AI tuning):
-- workers: %d (cpu_cores - 2)
+- workers: %d (cpu_cores - 2, minimum 2)
 - chunk_size: 50000
 - read_ahead_buffers: 4
 - write_ahead_writers: 2
