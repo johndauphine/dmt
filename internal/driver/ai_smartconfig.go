@@ -788,7 +788,7 @@ Guidelines:
 4. read_ahead_buffers=4 and write_ahead_writers=2 are well-tested. Do not reduce below these.
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
-7. When historical throughput data is available, use the chunk_size with the highest measured throughput.
+7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) — these are caused by external factors like disk contention, not parameter choices.
 
 Respond with ONLY a JSON object:
 {
