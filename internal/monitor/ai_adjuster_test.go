@@ -585,17 +585,27 @@ func TestIsPlaceholderLimitError(t *testing.T) {
 		errMsg   string
 		expected bool
 	}{
-		{"placeholder keyword", "too many placeholders in query", true},
-		{"parameter keyword", "exceeded parameter limit", true},
-		{"prepared statement", "prepared statement has too many args", true},
-		{"max_allowed_packet", "max_allowed_packet exceeded", true},
-		{"too many keyword", "too many values in INSERT", true},
-		{"65535 limit", "cannot exceed 65535 parameters", true},
-		{"2100 limit", "exceeds 2100 parameter limit", true},
-		{"args keyword", "too many args for prepared statement", true},
-		{"unrelated error", "connection refused", false},
-		{"timeout error", "context deadline exceeded", false},
-		{"permission error", "access denied for user", false},
+		// Real driver error messages that should match
+		{"mysql 1390", "Error 1390: Prepared statement contains too many placeholders", true},
+		{"mssql rpc", "Too many parameters were provided in this RPC request. The maximum is 2100.", true},
+		{"mssql maximum clause only", "maximum is 2100", true},
+		{"postgres pgx extended", "extended protocol limited to 65535 parameters", true},
+		{"postgres pgx number of parameters", "number of parameters must be between 0 and 65535", true},
+		{"mysql packet", "max_allowed_packet exceeded", true},
+
+		// Unrelated errors that must NOT match (would have matched the old broad patterns)
+		{"too many connections", "ERROR: too many connections for database", false}, // matched old "too many"
+		{"invalid parameter", "invalid parameter value for 'host'", false},           // matched old "parameter"
+		{"missing parameter", "missing parameter: host", false},                      // matched old "parameter"
+		{"port 65535", "port must be between 1 and 65535", false},                    // matched old "65535"
+		{"2100 in unrelated context", "affected 2100 rows", false},                   // matched old "2100"
+		{"args keyword alone", "wrong number of args", false},                        // matched old "args"
+		{"prepared statement unrelated", "prepared statement does not exist", false}, // matched old "prepared statement"
+
+		// Standard negatives
+		{"connection refused", "connection refused", false},
+		{"timeout", "context deadline exceeded", false},
+		{"permission denied", "access denied for user", false},
 		{"empty string", "", false},
 	}
 
@@ -653,7 +663,7 @@ func TestFallbackChunkSize(t *testing.T) {
 			ColumnCount:  10,
 			ChunkSize:    500,
 			RowCount:     500,
-			ErrorMessage: "exceeds 2100 parameter limit",
+			ErrorMessage: "Too many parameters were provided in this RPC request. The maximum is 2100.",
 			TargetDBType: "mssql",
 		}
 

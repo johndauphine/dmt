@@ -958,10 +958,11 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	}
 }
 
-// EvaluateWriteError returns a reduced batch_size for write errors that are
-// deterministically caused by hitting a database's prepared-statement parameter
-// limit (e.g. PostgreSQL's 65,535 placeholder cap). For all other errors it
-// returns 0 so the caller can fall back to its normal retry logic.
+// EvaluateWriteError returns a reduced batch_size only for write errors that
+// are deterministically caused by hitting a database's prepared-statement
+// parameter limit (e.g. PostgreSQL's 65,535 placeholder cap) AND only when the
+// failed batch exceeded the computed safe threshold. In all other cases it
+// returns 0 so the caller falls back to normal retry logic.
 //
 // Implements transfer.WriteErrorAdjuster.
 //
@@ -975,18 +976,20 @@ func (aa *AIAdjuster) EvaluateWriteError(_ context.Context, errCtx transfer.Writ
 	return aa.fallbackChunkSize(errCtx)
 }
 
-// isPlaceholderLimitError checks if the error message indicates a placeholder/parameter limit issue.
+// isPlaceholderLimitError checks if the error message indicates a prepared-statement
+// placeholder/parameter limit issue. Uses specific phrases from each driver's error
+// messages rather than broad substrings — matching "too many" or "parameter" alone
+// would incorrectly fire on unrelated errors like "too many connections" or
+// "invalid parameter", triggering batch size reductions for the wrong reason.
 func isPlaceholderLimitError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	patterns := []string{
-		"placeholder",
-		"parameter",
-		"prepared statement",
-		"max_allowed_packet",
-		"too many",
-		"65535",
-		"2100",
-		"args",
+		"too many placeholders",       // MySQL (go-sql-driver, Error 1390)
+		"too many parameters",         // SQL Server TDS RPC
+		"maximum is 2100",             // SQL Server parameter limit message
+		"extended protocol limited to 65535", // PostgreSQL pgx
+		"number of parameters must be",       // PostgreSQL pgx variant
+		"max_allowed_packet",          // MySQL packet size limit (related structural limit)
 	}
 	for _, p := range patterns {
 		if strings.Contains(lower, p) {
