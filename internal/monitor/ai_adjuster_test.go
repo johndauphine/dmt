@@ -585,17 +585,27 @@ func TestIsPlaceholderLimitError(t *testing.T) {
 		errMsg   string
 		expected bool
 	}{
-		{"placeholder keyword", "too many placeholders in query", true},
-		{"parameter keyword", "exceeded parameter limit", true},
-		{"prepared statement", "prepared statement has too many args", true},
-		{"max_allowed_packet", "max_allowed_packet exceeded", true},
-		{"too many keyword", "too many values in INSERT", true},
-		{"65535 limit", "cannot exceed 65535 parameters", true},
-		{"2100 limit", "exceeds 2100 parameter limit", true},
-		{"args keyword", "too many args for prepared statement", true},
-		{"unrelated error", "connection refused", false},
-		{"timeout error", "context deadline exceeded", false},
-		{"permission error", "access denied for user", false},
+		// Real driver error messages that should match
+		{"mysql 1390", "Error 1390: Prepared statement contains too many placeholders", true},
+		{"mssql rpc", "Too many parameters were provided in this RPC request. The maximum is 2100.", true},
+		{"mssql maximum clause only", "maximum is 2100", true},
+		{"postgres pgx extended", "extended protocol limited to 65535 parameters", true},
+		{"postgres pgx number of parameters", "number of parameters must be between 0 and 65535", true},
+		{"mysql packet", "max_allowed_packet exceeded", true},
+
+		// Unrelated errors that must NOT match (would have matched the old broad patterns)
+		{"too many connections", "ERROR: too many connections for database", false}, // matched old "too many"
+		{"invalid parameter", "invalid parameter value for 'host'", false},           // matched old "parameter"
+		{"missing parameter", "missing parameter: host", false},                      // matched old "parameter"
+		{"port 65535", "port must be between 1 and 65535", false},                    // matched old "65535"
+		{"2100 in unrelated context", "affected 2100 rows", false},                   // matched old "2100"
+		{"args keyword alone", "wrong number of args", false},                        // matched old "args"
+		{"prepared statement unrelated", "prepared statement does not exist", false}, // matched old "prepared statement"
+
+		// Standard negatives
+		{"connection refused", "connection refused", false},
+		{"timeout", "context deadline exceeded", false},
+		{"permission denied", "access denied for user", false},
 		{"empty string", "", false},
 	}
 
@@ -653,7 +663,7 @@ func TestFallbackChunkSize(t *testing.T) {
 			ColumnCount:  10,
 			ChunkSize:    500,
 			RowCount:     500,
-			ErrorMessage: "exceeds 2100 parameter limit",
+			ErrorMessage: "Too many parameters were provided in this RPC request. The maximum is 2100.",
 			TargetDBType: "mssql",
 		}
 
@@ -719,9 +729,8 @@ func TestFallbackChunkSize(t *testing.T) {
 }
 
 func TestEvaluateWriteError(t *testing.T) {
-	t.Run("returns 0 when aiMapper is nil", func(t *testing.T) {
+	t.Run("returns 0 for non-placeholder error", func(t *testing.T) {
 		aa := createTestAdjuster()
-		// aiMapper is nil by default in createTestAdjuster
 
 		errCtx := transfer.WriteErrorContext{
 			TableName:    "test_table",
@@ -734,11 +743,32 @@ func TestEvaluateWriteError(t *testing.T) {
 
 		result := aa.EvaluateWriteError(nil, errCtx)
 		if result != 0 {
-			t.Errorf("expected 0 when aiMapper is nil and error is not placeholder-related, got %d", result)
+			t.Errorf("expected 0 for non-placeholder error, got %d", result)
 		}
 	})
 
-	t.Run("falls back to placeholder logic when aiMapper nil and placeholder error", func(t *testing.T) {
+	t.Run("timeout error must not trigger batch size reduction", func(t *testing.T) {
+		// Regression: a single timeout (caused by concurrency pressure, not query
+		// size) used to trigger a 17x batch size reduction that crushed throughput
+		// for the rest of the table. Timeouts must fall through to retry logic.
+		aa := createTestAdjuster()
+
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "posts",
+			ColumnCount:  20,
+			ChunkSize:    50000,
+			RowCount:     50000,
+			ErrorMessage: "timeout: context deadline exceeded",
+			TargetDBType: "postgres",
+		}
+
+		result := aa.EvaluateWriteError(nil, errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 for timeout error, got %d", result)
+		}
+	})
+
+	t.Run("returns deterministic safe size for placeholder limit error", func(t *testing.T) {
 		aa := createTestAdjuster()
 
 		errCtx := transfer.WriteErrorContext{
@@ -753,7 +783,7 @@ func TestEvaluateWriteError(t *testing.T) {
 		result := aa.EvaluateWriteError(nil, errCtx)
 		expected := 589
 		if result != expected {
-			t.Errorf("expected fallback %d when aiMapper nil, got %d", expected, result)
+			t.Errorf("expected fallback %d for placeholder error, got %d", expected, result)
 		}
 	})
 }

@@ -958,110 +958,38 @@ func (aa *AIAdjuster) fallbackRules() *AdjustmentDecision {
 	}
 }
 
-// EvaluateWriteError asks the AI to recommend a new chunk_size after a write error.
-// Returns the recommended chunk size, or 0 if the AI cannot help (error should be fatal).
+// EvaluateWriteError returns a reduced batch_size only for write errors that
+// are deterministically caused by hitting a database's prepared-statement
+// parameter limit (e.g. PostgreSQL's 65,535 placeholder cap) AND only when the
+// failed batch exceeded the computed safe threshold. In all other cases it
+// returns 0 so the caller falls back to normal retry logic.
+//
 // Implements transfer.WriteErrorAdjuster.
-func (aa *AIAdjuster) EvaluateWriteError(ctx context.Context, errCtx transfer.WriteErrorContext) int {
-	// Build the prompt while holding the lock (reads tuner snapshot)
-	aa.adjustmentsMu.Lock()
-	prompt := aa.buildWriteErrorPrompt(errCtx)
-	aa.adjustmentsMu.Unlock()
-
-	// AI call is a potentially long network request — do NOT hold the lock
-	if aa.aiMapper == nil {
-		return aa.fallbackChunkSize(errCtx)
-	}
-	response, err := aa.aiMapper.CallAI(ctx, prompt)
-	if err != nil {
-		logging.Warn("AI error diagnosis failed: %v, using fallback", err)
-		return aa.fallbackChunkSize(errCtx)
-	}
-
-	decision, err := aa.parseDecision(response)
-	if err != nil {
-		logging.Warn("Failed to parse AI error response: %v, using fallback", err)
-		return aa.fallbackChunkSize(errCtx)
-	}
-
-	// Check for batch_size (preferred) or chunk_size (backward compat) in response
-	if newSize, ok := decision.Adjustments["batch_size"]; ok && newSize > 0 {
-		logging.Info("AI recommended batch_size=%d for table %s: %s", newSize, errCtx.TableName, decision.Reasoning)
-		return newSize
-	}
-	if newSize, ok := decision.Adjustments["chunk_size"]; ok && newSize > 0 {
-		logging.Info("AI recommended batch_size=%d (via chunk_size) for table %s: %s", newSize, errCtx.TableName, decision.Reasoning)
-		return newSize
-	}
-
-	// AI didn't recommend a batch size change — error is not batch-size related
-	return 0
+//
+// Error diagnosis is deliberately NOT AI-driven here. Automatically changing
+// runtime config based on a model's interpretation of an error message is
+// dangerous: transient errors like timeouts, deadlocks, and connection drops
+// get misread as "too many placeholders" and trigger 10-20x batch size
+// reductions that destroy throughput for the rest of the table. Placeholder
+// limits are deterministic math, so we handle them deterministically.
+func (aa *AIAdjuster) EvaluateWriteError(_ context.Context, errCtx transfer.WriteErrorContext) int {
+	return aa.fallbackChunkSize(errCtx)
 }
 
-// buildWriteErrorPrompt constructs a prompt for AI to diagnose a write error and recommend batch_size.
-func (aa *AIAdjuster) buildWriteErrorPrompt(errCtx transfer.WriteErrorContext) string {
-	var sb strings.Builder
-
-	sb.WriteString("A database write operation failed during migration. Analyze the error and recommend a new batch_size if the error is related to the number of rows per INSERT statement.\n\n")
-
-	sb.WriteString("## Error Context\n")
-	sb.WriteString(fmt.Sprintf("- Table: %s\n", errCtx.TableName))
-	sb.WriteString(fmt.Sprintf("- Target database: %s\n", errCtx.TargetDBType))
-	sb.WriteString(fmt.Sprintf("- Column count: %d\n", errCtx.ColumnCount))
-	sb.WriteString(fmt.Sprintf("- Current batch_size: %d (rows per INSERT)\n", errCtx.ChunkSize))
-	sb.WriteString(fmt.Sprintf("- Rows in failed batch: %d\n", errCtx.RowCount))
-	sb.WriteString(fmt.Sprintf("- Total placeholders: %d (rows × columns)\n", errCtx.RowCount*errCtx.ColumnCount))
-	sb.WriteString(fmt.Sprintf("- Error: %s\n\n", errCtx.ErrorMessage))
-
-	sb.WriteString("## Current Configuration\n")
-	config := aa.tuner.Snapshot()
-	sb.WriteString(fmt.Sprintf("- Global chunk_size (reader): %d\n", config.ChunkSize))
-	sb.WriteString(fmt.Sprintf("- workers: %d\n", config.WriteAheadWriters))
-	sb.WriteString("\n")
-
-	sb.WriteString(`## Instructions
-Analyze the error and determine if it can be fixed by reducing batch_size (rows per INSERT statement).
-
-Note: batch_size controls the writer side (rows per INSERT). chunk_size controls the reader side (rows per source query). They are independent parameters.
-
-Known database limits:
-- MySQL: max 65,535 prepared statement placeholders (batch_size × columns must be < 65,535)
-- MySQL: max_allowed_packet limits total query size
-- PostgreSQL: max 65,535 parameters per query
-- SQL Server: max 2,100 parameters per query (but uses bulk copy, so this rarely applies)
-
-If the error IS related to batch size:
-- Calculate the optimal batch_size that avoids the error while maximizing throughput
-- Apply a 10% safety margin below the hard limit
-- Consider that this batch_size will apply to future batches for this table
-
-If the error is NOT related to batch size:
-- Set batch_size to 0 to indicate this error cannot be fixed by batch_size adjustment
-
-Return ONLY valid JSON:
-{
-  "action": "adjust_batch_size",
-  "adjustments": {
-    "batch_size": <recommended value, or 0 if not a batch_size issue>
-  },
-  "reasoning": "<explain the root cause and how the new batch_size fixes it>",
-  "confidence": "high|medium|low"
-}`)
-
-	return sb.String()
-}
-
-// isPlaceholderLimitError checks if the error message indicates a placeholder/parameter limit issue.
+// isPlaceholderLimitError checks if the error message indicates a prepared-statement
+// placeholder/parameter limit issue. Uses specific phrases from each driver's error
+// messages rather than broad substrings — matching "too many" or "parameter" alone
+// would incorrectly fire on unrelated errors like "too many connections" or
+// "invalid parameter", triggering batch size reductions for the wrong reason.
 func isPlaceholderLimitError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	patterns := []string{
-		"placeholder",
-		"parameter",
-		"prepared statement",
-		"max_allowed_packet",
-		"too many",
-		"65535",
-		"2100",
-		"args",
+		"too many placeholders",       // MySQL (go-sql-driver, Error 1390)
+		"too many parameters",         // SQL Server TDS RPC
+		"maximum is 2100",             // SQL Server parameter limit message
+		"extended protocol limited to 65535", // PostgreSQL pgx
+		"number of parameters must be",       // PostgreSQL pgx variant
+		"max_allowed_packet",          // MySQL packet size limit (related structural limit)
 	}
 	for _, p := range patterns {
 		if strings.Contains(lower, p) {
