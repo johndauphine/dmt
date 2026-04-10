@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -811,6 +812,56 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+// CopyBinaryFrom streams raw binary COPY input from r into the target table.
+// Implements driver.BinaryCopyWriter — used by the PG→PG fast path to bypass
+// row-by-row encoding on the target side. The caller is expected to feed bytes
+// in the same binary format produced by the source's COPY (... ) TO STDOUT
+// (FORMAT BINARY). The returned count is the number of rows COPIED.
+//
+// The COPY runs inside a transaction so a mid-stream failure (timeout, network
+// drop, format mismatch) rolls back cleanly, matching the safety guarantee of
+// the existing WriteBatch CopyFrom path.
+func (w *Writer) CopyBinaryFrom(ctx context.Context, r io.Reader, opts driver.CopyBinaryOptions) (int64, error) {
+	if len(opts.Columns) == 0 {
+		return 0, fmt.Errorf("CopyBinaryFrom: columns required")
+	}
+
+	sanitizedTable := sanitizePGTableName(opts.Table)
+	quotedCols := make([]string, len(opts.Columns))
+	for i, c := range opts.Columns {
+		quotedCols[i] = w.dialect.QuoteIdentifier(sanitizePGIdentifier(c))
+	}
+
+	sql := fmt.Sprintf(
+		"COPY %s (%s) FROM STDIN (FORMAT BINARY)",
+		w.dialect.QualifyTable(opts.Schema, sanitizedTable),
+		strings.Join(quotedCols, ", "),
+	)
+
+	conn, err := w.pool.Acquire(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquiring target conn: %w", err)
+	}
+	defer conn.Release()
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(context.Background())
+
+	ct, err := tx.Conn().PgConn().CopyFrom(ctx, r, sql)
+	if err != nil {
+		return 0, fmt.Errorf("binary COPY FROM into %s.%s: %w", opts.Schema, sanitizedTable, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit binary COPY: %w", err)
+	}
+
+	return ct.RowsAffected(), nil
 }
 
 // UpsertBatch performs an upsert using staging table + INSERT ON CONFLICT.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -520,6 +521,53 @@ func (r *Reader) readFullTable(ctx context.Context, batches chan<- driver.Batch,
 
 		queryTime = 0 // Only first batch has query time
 	}
+}
+
+// CopyBinaryTo streams raw binary COPY output for the given table to w.
+// Implements driver.BinaryCopyReader — used by the PG→PG fast path to bypass
+// row-by-row scan/encode on the source side. The returned count is the number
+// of rows that pgconn.CopyTo reports in its CommandTag.
+//
+// The SQL is built as:
+//
+//	COPY (SELECT "col1","col2",... FROM "schema"."table" [WHERE <where>]) TO STDOUT (FORMAT BINARY)
+//
+// opts.Where is inlined verbatim — callers must pre-render literal values and
+// quote identifiers. No parameter binding is available inside COPY ... TO.
+func (r *Reader) CopyBinaryTo(ctx context.Context, w io.Writer, opts driver.CopyBinaryOptions) (int64, error) {
+	if len(opts.Columns) == 0 {
+		return 0, fmt.Errorf("CopyBinaryTo: columns required")
+	}
+
+	quotedCols := make([]string, len(opts.Columns))
+	for i, c := range opts.Columns {
+		quotedCols[i] = r.dialect.QuoteIdentifier(c)
+	}
+
+	whereClause := ""
+	if opts.Where != "" {
+		whereClause = " WHERE " + opts.Where
+	}
+
+	sql := fmt.Sprintf(
+		"COPY (SELECT %s FROM %s%s) TO STDOUT (FORMAT BINARY)",
+		strings.Join(quotedCols, ", "),
+		r.dialect.QualifyTable(opts.Schema, opts.Table),
+		whereClause,
+	)
+
+	conn, err := r.pool.Acquire(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquiring source conn: %w", err)
+	}
+	defer conn.Release()
+
+	ct, err := conn.Conn().PgConn().CopyTo(ctx, w, sql)
+	if err != nil {
+		return 0, fmt.Errorf("binary COPY TO from %s.%s: %w", opts.Schema, opts.Table, err)
+	}
+
+	return ct.RowsAffected(), nil
 }
 
 // GetRowCount returns the row count for a table.

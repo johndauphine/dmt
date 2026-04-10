@@ -277,6 +277,16 @@ func Execute(
 		targetTableName = job.Table.Name // Preserve original case for MSSQL
 	}
 
+	// PG → PG binary COPY relay fast path (Phase 1: non-partitioned tables only).
+	// Skips the row-by-row scan/encode pipeline by streaming raw binary COPY
+	// bytes directly between source and target pgx connections via an io.Pipe.
+	// Eligibility is gated in pgFastCopyEligible — any disqualifying condition
+	// falls through to the generic pipeline below.
+	if bcr, bcw, ok := pgFastCopyEligible(srcPool, tgtPool, cfg, job, resumeLastPK); ok {
+		logging.Info("pg fast copy: activating for table %s (%d columns)", job.Table.Name, len(cols))
+		return executePgFastCopy(ctx, bcr, bcw, cfg, job, cols, targetTableName, prog)
+	}
+
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
 		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)

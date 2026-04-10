@@ -242,6 +242,8 @@ type MigrationConfig struct {
 	// AI-driven real-time parameter adjustment
 	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
 	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
+	// PG → PG binary COPY relay fast path
+	PgFastCopyDisabled bool `yaml:"pg_fast_copy_disabled"` // Disable the PG→PG binary COPY relay fast path (default: false, fast path enabled)
 }
 
 // LoadOptions controls configuration loading behavior.
