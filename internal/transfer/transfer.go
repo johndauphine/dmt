@@ -277,13 +277,18 @@ func Execute(
 		targetTableName = job.Table.Name // Preserve original case for MSSQL
 	}
 
-	// PG → PG binary COPY relay fast path (Phase 1: non-partitioned tables only).
-	// Skips the row-by-row scan/encode pipeline by streaming raw binary COPY
-	// bytes directly between source and target pgx connections via an io.Pipe.
-	// Eligibility is gated in pgFastCopyEligible — any disqualifying condition
-	// falls through to the generic pipeline below.
+	// PG → PG binary COPY relay fast path. Skips the row-by-row scan/encode
+	// pipeline by streaming raw binary COPY bytes directly between source
+	// and target pgx connections via a buffered pipe. Partitioned jobs get
+	// inline integer WHERE bounds so each partition runs its own concurrent
+	// stream. Eligibility is gated in pgFastCopyEligible — any disqualifying
+	// condition falls through to the generic pipeline below.
 	if bcr, bcw, ok := pgFastCopyEligible(srcPool, tgtPool, cfg, job, resumeLastPK); ok {
-		logging.Info("pg fast copy: activating for table %s (%d columns)", job.Table.Name, len(cols))
+		partInfo := ""
+		if job.Partition != nil {
+			partInfo = fmt.Sprintf(" partition=%d", job.Partition.PartitionID)
+		}
+		logging.Info("pg fast copy: activating for table %s%s (%d columns)", job.Table.Name, partInfo, len(cols))
 		return executePgFastCopy(ctx, bcr, bcw, cfg, job, cols, targetTableName, prog)
 	}
 

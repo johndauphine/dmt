@@ -60,6 +60,117 @@ func baseJob() Job {
 	}
 }
 
+func TestBuildFastCopySubRanges(t *testing.T) {
+	t.Run("non-partitioned returns single empty clause", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 || got[0] != "" {
+			t.Errorf("expected single empty clause, got %v", got)
+		}
+	})
+
+	t.Run("partition smaller than chunk size produces one sub-range", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{MinPK: int64(1), MaxPK: int64(1000)}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 sub-range, got %d: %v", len(got), got)
+		}
+		want := `"id" >= 1 AND "id" <= 1000`
+		if got[0] != want {
+			t.Errorf("got %q, want %q", got[0], want)
+		}
+	})
+
+	t.Run("partition exactly chunkSize rows is one sub-range", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{MinPK: int64(1), MaxPK: int64(50000)}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 sub-range for exact chunk boundary, got %d: %v", len(got), got)
+		}
+		want := `"id" >= 1 AND "id" <= 50000`
+		if got[0] != want {
+			t.Errorf("got %q, want %q", got[0], want)
+		}
+	})
+
+	t.Run("partition splits across multiple sub-ranges non-overlapping", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		// 125001 - 1 + 1 = 125001 rows, chunkSize=50000 → 3 sub-ranges
+		j.Partition = &driver.Partition{MinPK: int64(1), MaxPK: int64(125001)}
+		got := buildFastCopySubRanges(j, 50000)
+		want := []string{
+			`"id" >= 1 AND "id" <= 50000`,
+			`"id" >= 50001 AND "id" <= 100000`,
+			`"id" >= 100001 AND "id" <= 125001`,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("expected %d sub-ranges, got %d: %v", len(want), len(got), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("sub-range %d: got %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("negative and wide partitions still slice correctly", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"badge_id"}
+		j.Partition = &driver.Partition{MinPK: int64(-5), MaxPK: int64(4)}
+		got := buildFastCopySubRanges(j, 4)
+		want := []string{
+			`"badge_id" >= -5 AND "badge_id" <= -2`,
+			`"badge_id" >= -1 AND "badge_id" <= 2`,
+			`"badge_id" >= 3 AND "badge_id" <= 4`,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("expected %d sub-ranges, got %d: %v", len(want), len(got), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("sub-range %d: got %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("int32 bounds are coerced", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{MinPK: int32(1), MaxPK: int32(100)}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 || got[0] != `"id" >= 1 AND "id" <= 100` {
+			t.Errorf("int32 coercion failed: %v", got)
+		}
+	})
+
+	t.Run("string bounds fall back to empty single clause", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{MinPK: "a", MaxPK: "z"}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 || got[0] != "" {
+			t.Errorf("expected single empty clause for string bounds, got %v", got)
+		}
+	})
+
+	t.Run("zero chunkSize uses default", func(t *testing.T) {
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{MinPK: int64(1), MaxPK: int64(100000)}
+		got := buildFastCopySubRanges(j, 0)
+		// default chunkSize is 50000, so 100000 rows = 2 sub-ranges
+		if len(got) != 2 {
+			t.Fatalf("expected 2 sub-ranges with default chunkSize, got %d: %v", len(got), got)
+		}
+	})
+}
+
 func TestPgFastCopyEligible(t *testing.T) {
 	cfg := baseCfg()
 	job := baseJob()
@@ -126,13 +237,59 @@ func TestPgFastCopyEligible(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects partitioned job", func(t *testing.T) {
+	t.Run("accepts partitioned job with integer bounds", func(t *testing.T) {
 		var src pool.SourcePool = stubReaderPGWithCopy{}
 		var tgt pool.TargetPool = stubWriterPGWithCopy{}
 		j := baseJob()
-		j.Partition = &driver.Partition{}
+		j.Partition = &driver.Partition{
+			PartitionID: 1,
+			MinPK:       int64(1),
+			MaxPK:       int64(1000),
+		}
+		if _, _, ok := pgFastCopyEligible(src, tgt, cfg, j, nil); !ok {
+			t.Error("expected partitioned job with int64 bounds to be accepted (phase 2)")
+		}
+	})
+
+	t.Run("accepts partitioned job with plain int bounds", func(t *testing.T) {
+		var src pool.SourcePool = stubReaderPGWithCopy{}
+		var tgt pool.TargetPool = stubWriterPGWithCopy{}
+		j := baseJob()
+		j.Partition = &driver.Partition{
+			PartitionID: 1,
+			MinPK:       int(1),
+			MaxPK:       int(1000),
+		}
+		if _, _, ok := pgFastCopyEligible(src, tgt, cfg, j, nil); !ok {
+			t.Error("expected partitioned job with int bounds to be accepted")
+		}
+	})
+
+	t.Run("rejects partitioned job with non-integer bounds", func(t *testing.T) {
+		var src pool.SourcePool = stubReaderPGWithCopy{}
+		var tgt pool.TargetPool = stubWriterPGWithCopy{}
+		j := baseJob()
+		j.Partition = &driver.Partition{
+			PartitionID: 1,
+			MinPK:       "abc",
+			MaxPK:       "xyz",
+		}
 		if _, _, ok := pgFastCopyEligible(src, tgt, cfg, j, nil); ok {
-			t.Error("expected partitioned job to be rejected (phase 1)")
+			t.Error("expected string-keyed partition to be rejected")
+		}
+	})
+
+	t.Run("rejects partitioned job with nil bounds", func(t *testing.T) {
+		var src pool.SourcePool = stubReaderPGWithCopy{}
+		var tgt pool.TargetPool = stubWriterPGWithCopy{}
+		j := baseJob()
+		j.Partition = &driver.Partition{
+			PartitionID: 1,
+			MinPK:       nil,
+			MaxPK:       nil,
+		}
+		if _, _, ok := pgFastCopyEligible(src, tgt, cfg, j, nil); ok {
+			t.Error("expected nil-bound partition to be rejected")
 		}
 	})
 
