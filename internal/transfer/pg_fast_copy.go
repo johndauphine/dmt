@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -255,6 +256,11 @@ func runFastCopyPair(
 // Note: because pk values are dense-integer (NTILE partitioning uses ORDER
 // BY pk), chunkSize rows ≈ chunkSize pk units for typical SO2013 tables.
 // If PKs are sparse this will under-fill chunks but will still be correct.
+//
+// Integer-overflow safety: cur + (chunkSize - 1) is never computed if it
+// would overflow int64. We check whether cur exceeds (maxPK - chunkSpan)
+// first and clamp end to maxPK in that case. This matters for tables with
+// PK values near math.MaxInt64 (e.g. int8/bigserial at the top of range).
 func buildFastCopySubRanges(job Job, chunkSize int) []string {
 	if job.Partition == nil || len(job.Table.PrimaryKey) == 0 {
 		return []string{""}
@@ -272,17 +278,26 @@ func buildFastCopySubRanges(job Job, chunkSize int) []string {
 		chunkSize = 50000
 	}
 
-	pkQuoted := `"` + job.Table.PrimaryKey[0] + `"`
+	// Use the Postgres dialect to quote the PK identifier so embedded
+	// double quotes or other special characters are escaped correctly,
+	// matching how every other COPY/SELECT path quotes identifiers.
+	pgDialect := driver.GetDialect("postgres")
+	pkQuoted := pgDialect.QuoteIdentifier(job.Table.PrimaryKey[0])
+
+	chunkSpan := int64(chunkSize - 1)
 	var ranges []string
 	cur := minPK
 	for cur <= maxPK {
-		end := cur + int64(chunkSize) - 1
-		if end > maxPK {
-			end = maxPK
+		// Compute end without risking int64 overflow. When cur is within
+		// chunkSpan of maxPK (or beyond), clamp to maxPK directly.
+		end := maxPK
+		if cur <= maxPK-chunkSpan {
+			end = cur + chunkSpan
 		}
 		ranges = append(ranges, fmt.Sprintf("%s >= %d AND %s <= %d", pkQuoted, cur, pkQuoted, end))
-		// Guard against overflow when end is very close to int64 max.
-		if end == maxPK {
+		// Stop if we've reached the top of the range, or if advancing
+		// would overflow int64.
+		if end >= maxPK || end == math.MaxInt64 {
 			break
 		}
 		cur = end + 1

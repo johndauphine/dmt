@@ -1,6 +1,8 @@
 package transfer
 
 import (
+	"fmt"
+	"math"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -167,6 +169,59 @@ func TestBuildFastCopySubRanges(t *testing.T) {
 		// default chunkSize is 50000, so 100000 rows = 2 sub-ranges
 		if len(got) != 2 {
 			t.Fatalf("expected 2 sub-ranges with default chunkSize, got %d: %v", len(got), got)
+		}
+	})
+
+	t.Run("partition near int64 max does not overflow", func(t *testing.T) {
+		// Regression: cur + (chunkSize - 1) must not overflow int64 even
+		// when cur is close to math.MaxInt64. Must terminate cleanly.
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{
+			MinPK: int64(math.MaxInt64 - 100),
+			MaxPK: int64(math.MaxInt64),
+		}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 {
+			t.Fatalf("expected exactly one sub-range near int64 max, got %d: %v", len(got), got)
+		}
+		want := fmt.Sprintf(`"id" >= %d AND "id" <= %d`, int64(math.MaxInt64-100), int64(math.MaxInt64))
+		if got[0] != want {
+			t.Errorf("got %q, want %q", got[0], want)
+		}
+	})
+
+	t.Run("exact int64 max upper bound terminates", func(t *testing.T) {
+		// Ensure the loop terminates when end == math.MaxInt64 without
+		// attempting cur = end + 1 which would wrap.
+		j := baseJob()
+		j.Table.PrimaryKey = []string{"id"}
+		j.Partition = &driver.Partition{
+			MinPK: int64(math.MaxInt64 - 5),
+			MaxPK: int64(math.MaxInt64),
+		}
+		got := buildFastCopySubRanges(j, 3)
+		// 6 rows total (MaxInt-5 .. MaxInt), chunkSize=3 → 2 sub-ranges
+		if len(got) != 2 {
+			t.Fatalf("expected 2 sub-ranges at int64 max boundary, got %d: %v", len(got), got)
+		}
+	})
+
+	t.Run("pk identifier with embedded quote is escaped via dialect", func(t *testing.T) {
+		// Regression: manual '"' + ident + '"' quoting would leave embedded
+		// double quotes unescaped and produce invalid SQL. The postgres
+		// dialect's QuoteIdentifier doubles any embedded " to "".
+		j := baseJob()
+		j.Table.PrimaryKey = []string{`weird"id`}
+		j.Partition = &driver.Partition{MinPK: int64(1), MaxPK: int64(10)}
+		got := buildFastCopySubRanges(j, 50000)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 sub-range, got %d", len(got))
+		}
+		// Postgres identifier quoting doubles embedded " → "weird""id"
+		want := `"weird""id" >= 1 AND "weird""id" <= 10`
+		if got[0] != want {
+			t.Errorf("identifier escape failed: got %q, want %q", got[0], want)
 		}
 	})
 }
