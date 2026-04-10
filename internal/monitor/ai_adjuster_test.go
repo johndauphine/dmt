@@ -719,9 +719,8 @@ func TestFallbackChunkSize(t *testing.T) {
 }
 
 func TestEvaluateWriteError(t *testing.T) {
-	t.Run("returns 0 when aiMapper is nil", func(t *testing.T) {
+	t.Run("returns 0 for non-placeholder error", func(t *testing.T) {
 		aa := createTestAdjuster()
-		// aiMapper is nil by default in createTestAdjuster
 
 		errCtx := transfer.WriteErrorContext{
 			TableName:    "test_table",
@@ -734,11 +733,32 @@ func TestEvaluateWriteError(t *testing.T) {
 
 		result := aa.EvaluateWriteError(nil, errCtx)
 		if result != 0 {
-			t.Errorf("expected 0 when aiMapper is nil and error is not placeholder-related, got %d", result)
+			t.Errorf("expected 0 for non-placeholder error, got %d", result)
 		}
 	})
 
-	t.Run("falls back to placeholder logic when aiMapper nil and placeholder error", func(t *testing.T) {
+	t.Run("timeout error must not trigger batch size reduction", func(t *testing.T) {
+		// Regression: a single timeout (caused by concurrency pressure, not query
+		// size) used to trigger a 17x batch size reduction that crushed throughput
+		// for the rest of the table. Timeouts must fall through to retry logic.
+		aa := createTestAdjuster()
+
+		errCtx := transfer.WriteErrorContext{
+			TableName:    "posts",
+			ColumnCount:  20,
+			ChunkSize:    50000,
+			RowCount:     50000,
+			ErrorMessage: "timeout: context deadline exceeded",
+			TargetDBType: "postgres",
+		}
+
+		result := aa.EvaluateWriteError(nil, errCtx)
+		if result != 0 {
+			t.Errorf("expected 0 for timeout error, got %d", result)
+		}
+	})
+
+	t.Run("returns deterministic safe size for placeholder limit error", func(t *testing.T) {
 		aa := createTestAdjuster()
 
 		errCtx := transfer.WriteErrorContext{
@@ -753,7 +773,7 @@ func TestEvaluateWriteError(t *testing.T) {
 		result := aa.EvaluateWriteError(nil, errCtx)
 		expected := 589
 		if result != expected {
-			t.Errorf("expected fallback %d when aiMapper nil, got %d", expected, result)
+			t.Errorf("expected fallback %d for placeholder error, got %d", expected, result)
 		}
 	})
 }
