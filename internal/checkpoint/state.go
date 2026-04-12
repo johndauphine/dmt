@@ -1082,17 +1082,23 @@ func (s *State) SaveAIAdjustment(runID string, record AIAdjustmentRecord) error 
 	return err
 }
 
+// queryWithOptionalLimit executes a query, appending " LIMIT ?" only when limit > 0.
+func (s *State) queryWithOptionalLimit(query string, limit int, args ...any) (*sql.Rows, error) {
+	if limit > 0 {
+		return s.db.Query(query+" LIMIT ?", append(args, limit)...)
+	}
+	return s.db.Query(query, args...)
+}
+
 // GetAIAdjustments returns the most recent AI adjustment records across all runs.
 func (s *State) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
 		       throughput_before, throughput_after, effect_percent,
 		       cpu_before, cpu_after, memory_before, memory_after,
 		       reasoning, confidence
 		FROM ai_adjustments
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, limit)
+		ORDER BY timestamp DESC`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1103,16 +1109,14 @@ func (s *State) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
 
 // GetAIAdjustmentsByAction returns AI adjustment records filtered by action type.
 func (s *State) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
 		       throughput_before, throughput_after, effect_percent,
 		       cpu_before, cpu_after, memory_before, memory_after,
 		       reasoning, confidence
 		FROM ai_adjustments
 		WHERE action = ?
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, action, limit)
+		ORDER BY timestamp DESC`, limit, action)
 	if err != nil {
 		return nil, err
 	}
@@ -1221,10 +1225,10 @@ func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64) e
 	return err
 }
 
-// GetAITuningHistory returns the most recent AI tuning recommendations
-// filtered by migration direction (e.g., "mssql"→"postgres").
+// GetAITuningHistory returns AI tuning recommendations filtered by migration
+// direction (e.g., "mssql"→"postgres"). Pass limit=0 to fetch all records.
 func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, timestamp, source_db_type, target_db_type,
 		       total_tables, total_rows, avg_row_size_bytes,
 		       cpu_cores, memory_gb,
@@ -1235,9 +1239,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		       final_throughput, final_duration_seconds
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, sourceType, targetType, limit)
+		ORDER BY timestamp DESC`, limit, sourceType, targetType)
 	if err != nil {
 		return nil, err
 	}
