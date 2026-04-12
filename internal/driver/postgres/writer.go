@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -677,36 +678,55 @@ const (
 	maxCopyBatchRows  = 50_000  // cap to prevent oversized batches
 )
 
-// estimateAvgRowBytes samples up to sampleSize rows and returns an estimate of
-// the average serialized row size in bytes. Fixed-width types (numbers, bools)
-// count as 8 bytes; strings and byte slices use their actual length.
-// Returns at least 64 to avoid degenerate batch sizes on empty/tiny rows.
-func estimateAvgRowBytes(rows [][]any, sampleSize int) int {
-	if len(rows) == 0 {
+// estimateRowBytes samples up to sampleSize rows and returns a conservative
+// estimate of the row size in bytes for COPY batch sizing. For tables with
+// high variance (e.g., posts with Body ranging from 0 to 53KB), using the
+// average underestimates batch sizes and causes timeouts. Instead, we use
+// the p90 row size from the sample to handle outlier-heavy distributions
+// while avoiding worst-case degenerate sizing from a single max row.
+// Fixed-width types (numbers, bools) count as 8 bytes; strings and byte
+// slices use their actual length. Returns at least 64.
+func estimateRowBytes(rows [][]any, sampleSize int) int {
+	if len(rows) == 0 || sampleSize <= 0 {
 		return 64
 	}
 	n := sampleSize
 	if n > len(rows) {
 		n = len(rows)
 	}
-	total := 0
+
+	// Spread samples proportionally across the batch to avoid sampling bias
+	// from clustered large/small rows at the start or tail.
+	sizes := make([]int, n)
 	for i := 0; i < n; i++ {
-		for _, v := range rows[i] {
+		idx := i * (len(rows) - 1) / max(n-1, 1)
+		rowSize := 0
+		for _, v := range rows[idx] {
 			switch val := v.(type) {
 			case string:
-				total += len(val)
+				rowSize += len(val)
 			case []byte:
-				total += len(val)
+				rowSize += len(val)
 			default:
-				total += 8
+				rowSize += 8
 			}
 		}
+		sizes[i] = rowSize
 	}
-	avg := total / n
-	if avg < 64 {
+
+	// Use p90: sort and pick the 90th percentile value.
+	// This handles outlier-heavy distributions (posts, comments) without
+	// being as pessimistic as max (which could be a single 53KB row).
+	sort.Ints(sizes)
+	p90Idx := n * 9 / 10
+	if p90Idx >= n {
+		p90Idx = n - 1
+	}
+	estimate := sizes[p90Idx]
+	if estimate < 64 {
 		return 64
 	}
-	return avg
+	return estimate
 }
 
 // probeCopyBatchBytes acquires a connection, reads the TCP send buffer size
@@ -743,8 +763,8 @@ func probeCopyBatchBytes(pool *pgxpool.Pool) int {
 // copyBatchSize returns the number of rows to send in a single CopyFrom call,
 // targeting targetBytes per operation and clamped to [minCopyBatchRows, maxCopyBatchRows].
 func copyBatchSize(rows [][]any, targetBytes int) int {
-	avg := estimateAvgRowBytes(rows, 10)
-	n := targetBytes / avg
+	rowBytes := estimateRowBytes(rows, 100)
+	n := targetBytes / rowBytes
 	if n < minCopyBatchRows {
 		return minCopyBatchRows
 	}
@@ -794,12 +814,23 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			end = len(opts.Rows)
 		}
 
-		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		subBatch := opts.Rows[start:end]
+		batchBytes := estimateRowBytes(subBatch, 100) * len(subBatch)
+		// Timeout: assume minimum 1 MB/s write throughput, with a 30s floor.
+		// A 3MB batch gets 30s; a 60MB batch gets 60s. Prevents 5-minute
+		// silent stalls from outlier-heavy batches that complete just under
+		// a fixed timeout.
+		const mb = 1024 * 1024
+		timeoutSecs := (batchBytes + mb - 1) / mb
+		if timeoutSecs < 30 {
+			timeoutSecs = 30
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 		_, err = tx.CopyFrom(
 			copyCtx,
 			ident,
 			sanitizedCols,
-			pgx.CopyFromRows(opts.Rows[start:end]),
+			pgx.CopyFromRows(subBatch),
 		)
 		cancel()
 		if err != nil {
@@ -844,12 +875,19 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
-		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		subBatch := opts.Rows[start:end]
+		const upsertMB = 1024 * 1024
+		upsertBatchBytes := estimateRowBytes(subBatch, 100) * len(subBatch)
+		upsertTimeoutSecs := (upsertBatchBytes + upsertMB - 1) / upsertMB
+		if upsertTimeoutSecs < 30 {
+			upsertTimeoutSecs = 30
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(upsertTimeoutSecs)*time.Second)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
-			pgx.CopyFromRows(opts.Rows[start:end]),
+			pgx.CopyFromRows(subBatch),
 		)
 		cancel()
 		if err != nil {
