@@ -554,7 +554,7 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	var sb strings.Builder
 
 	// Section 1: Parameter trajectory from past tuning runs (filtered by direction)
-	tuningHistory, err := s.historyProvider.GetAITuningHistory(5, s.dbType, s.targetDBType)
+	tuningHistory, err := s.historyProvider.GetAITuningHistory(0, s.dbType, s.targetDBType)
 	if err == nil && len(tuningHistory) > 0 {
 		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses, oldest first):\n")
 		for i := len(tuningHistory) - 1; i >= 0; i-- {

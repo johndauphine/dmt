@@ -244,6 +244,101 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 	}
 }
 
+func TestAITuningHistoryLimitZeroReturnsAll(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	// Insert 7 records for the same direction
+	for i := 0; i < 7; i++ {
+		rec := AITuningRecord{
+			Timestamp:    time.Now().Add(time.Duration(i) * time.Second),
+			SourceDBType: "mssql",
+			TargetDBType: "postgres",
+			TotalTables:  9,
+			TotalRows:    int64(1000 * (i + 1)),
+			Workers:      i + 1,
+			ChunkSize:    50000,
+			WasAIUsed:    true,
+		}
+		if err := state.SaveAITuning(rec); err != nil {
+			t.Fatalf("SaveAITuning(%d) error: %v", i, err)
+		}
+	}
+
+	// limit=0 should return all 7
+	all, err := state.GetAITuningHistory(0, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetAITuningHistory(0) error: %v", err)
+	}
+	if len(all) != 7 {
+		t.Fatalf("limit=0: expected 7 records, got %d", len(all))
+	}
+
+	// limit=3 should return exactly 3
+	limited, err := state.GetAITuningHistory(3, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetAITuningHistory(3) error: %v", err)
+	}
+	if len(limited) != 3 {
+		t.Fatalf("limit=3: expected 3 records, got %d", len(limited))
+	}
+
+	// Both should return most recent first (highest Workers value)
+	if all[0].Workers != 7 {
+		t.Errorf("limit=0: expected most recent first (workers=7), got workers=%d", all[0].Workers)
+	}
+	if limited[0].Workers != 7 {
+		t.Errorf("limit=3: expected most recent first (workers=7), got workers=%d", limited[0].Workers)
+	}
+}
+
+func TestAIAdjustmentsLimitZeroReturnsAll(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	// Create a run to attach adjustments to
+	if err := state.CreateRun("test-run", "dbo", "public", "", "", ""); err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+
+	// Insert 4 adjustment records
+	for i := 0; i < 4; i++ {
+		rec := AIAdjustmentRecord{
+			AdjustmentNumber: i + 1,
+			Timestamp:        time.Now().Add(time.Duration(i) * time.Second),
+			Action:           "scale_up",
+			Adjustments:      map[string]int{"workers": i + 2},
+		}
+		if err := state.SaveAIAdjustment("test-run", rec); err != nil {
+			t.Fatalf("SaveAIAdjustment(%d) error: %v", i, err)
+		}
+	}
+
+	// limit=0 should return all 4
+	all, err := state.GetAIAdjustments(0)
+	if err != nil {
+		t.Fatalf("GetAIAdjustments(0) error: %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("limit=0: expected 4 records, got %d", len(all))
+	}
+
+	// limit=2 should return exactly 2
+	limited, err := state.GetAIAdjustments(2)
+	if err != nil {
+		t.Fatalf("GetAIAdjustments(2) error: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Fatalf("limit=2: expected 2 records, got %d", len(limited))
+	}
+}
+
 func TestSyncTimestamps(t *testing.T) {
 	state, err := New(t.TempDir())
 	if err != nil {
