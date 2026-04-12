@@ -687,7 +687,7 @@ const (
 // Fixed-width types (numbers, bools) count as 8 bytes; strings and byte
 // slices use their actual length. Returns at least 64.
 func estimateRowBytes(rows [][]any, sampleSize int) int {
-	if len(rows) == 0 {
+	if len(rows) == 0 || sampleSize <= 0 {
 		return 64
 	}
 	n := sampleSize
@@ -695,18 +695,11 @@ func estimateRowBytes(rows [][]any, sampleSize int) int {
 		n = len(rows)
 	}
 
-	// Spread samples evenly across the batch to avoid sampling bias
-	// from clustered large/small rows at the start.
+	// Spread samples proportionally across the batch to avoid sampling bias
+	// from clustered large/small rows at the start or tail.
 	sizes := make([]int, n)
-	step := len(rows) / n
-	if step < 1 {
-		step = 1
-	}
 	for i := 0; i < n; i++ {
-		idx := i * step
-		if idx >= len(rows) {
-			idx = len(rows) - 1
-		}
+		idx := i * (len(rows) - 1) / max(n-1, 1)
 		rowSize := 0
 		for _, v := range rows[idx] {
 			switch val := v.(type) {
@@ -827,7 +820,8 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		// A 3MB batch gets 30s; a 60MB batch gets 60s. Prevents 5-minute
 		// silent stalls from outlier-heavy batches that complete just under
 		// a fixed timeout.
-		timeoutSecs := batchBytes / (1024 * 1024)
+		const mb = 1024 * 1024
+		timeoutSecs := (batchBytes + mb - 1) / mb
 		if timeoutSecs < 30 {
 			timeoutSecs = 30
 		}
@@ -881,12 +875,19 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		if end > len(opts.Rows) {
 			end = len(opts.Rows)
 		}
-		copyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		subBatch := opts.Rows[start:end]
+		const upsertMB = 1024 * 1024
+		upsertBatchBytes := estimateRowBytes(subBatch, 100) * len(subBatch)
+		upsertTimeoutSecs := (upsertBatchBytes + upsertMB - 1) / upsertMB
+		if upsertTimeoutSecs < 30 {
+			upsertTimeoutSecs = 30
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(upsertTimeoutSecs)*time.Second)
 		_, err = conn.Conn().CopyFrom(
 			copyCtx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
-			pgx.CopyFromRows(opts.Rows[start:end]),
+			pgx.CopyFromRows(subBatch),
 		)
 		cancel()
 		if err != nil {
