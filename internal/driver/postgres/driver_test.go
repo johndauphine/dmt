@@ -70,7 +70,7 @@ func TestAvailableDrivers(t *testing.T) {
 	}
 }
 
-func TestEstimateAvgRowBytes(t *testing.T) {
+func TestEstimateRowBytes(t *testing.T) {
 	tests := []struct {
 		name string
 		rows [][]any
@@ -88,9 +88,9 @@ func TestEstimateAvgRowBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := estimateAvgRowBytes(tt.rows, 10)
+			got := estimateRowBytes(tt.rows, 10)
 			if got < tt.want {
-				t.Errorf("estimateAvgRowBytes() = %d, want >= %d", got, tt.want)
+				t.Errorf("estimateRowBytes() = %d, want >= %d", got, tt.want)
 			}
 		})
 	}
