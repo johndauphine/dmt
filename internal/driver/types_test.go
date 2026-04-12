@@ -223,7 +223,7 @@ func TestGoHeapBytesPerRow(t *testing.T) {
 			name: "SO2013 Posts-like table (wide rows with text)",
 			columns: []Column{
 				{Name: "Id", DataType: "int"},
-				{Name: "Body", DataType: "nvarchar", MaxLength: -1},       // MAX → 256 default
+				{Name: "Body", DataType: "nvarchar", MaxLength: -1},       // MAX → 4096 (same as TEXT/NTEXT)
 				{Name: "Title", DataType: "nvarchar", MaxLength: 250},
 				{Name: "Tags", DataType: "nvarchar", MaxLength: 250},
 				{Name: "OwnerUserId", DataType: "int"},
@@ -231,9 +231,9 @@ func TestGoHeapBytesPerRow(t *testing.T) {
 				{Name: "ViewCount", DataType: "int"},
 				{Name: "CreationDate", DataType: "datetime"},
 			},
-			// Much larger than Votes due to string columns
-			wantMin: 600,
-			wantMax: 1200,
+			// Much larger than Votes due to nvarchar(MAX) Body column
+			wantMin: 4400,
+			wantMax: 5200,
 		},
 		{
 			name: "all scalar types",
