@@ -277,11 +277,40 @@ func TestGoValueBytes(t *testing.T) {
 		t.Errorf("GoValueBytes() for text = %d, want 4112", got2)
 	}
 
-	// Int column
-	col3 := Column{Name: "id", DataType: "int"}
+	// Unbounded nvarchar(MAX) defaults to 4096 (same as text/ntext)
+	col3 := Column{Name: "body", DataType: "nvarchar", MaxLength: -1}
 	got3 := col3.GoValueBytes()
-	if got3 != 8 {
-		t.Errorf("GoValueBytes() for int = %d, want 8", got3)
+	if got3 != 4112 {
+		t.Errorf("GoValueBytes() for nvarchar(MAX) = %d, want 4112", got3)
+	}
+
+	// Unbounded varchar(MAX) defaults to 4096
+	col4 := Column{Name: "content", DataType: "varchar", MaxLength: 0}
+	got4 := col4.GoValueBytes()
+	if got4 != 4112 {
+		t.Errorf("GoValueBytes() for varchar(MAX) = %d, want 4112", got4)
+	}
+
+	// Unbounded varbinary(MAX) defaults to 4096 (same as image/blob)
+	col5 := Column{Name: "data", DataType: "varbinary", MaxLength: -1}
+	got5 := col5.GoValueBytes()
+	// slice header (24) + 4096 default = 4120
+	if got5 != 4120 {
+		t.Errorf("GoValueBytes() for varbinary(MAX) = %d, want 4120", got5)
+	}
+
+	// Bounded varchar still uses declared length
+	col6 := Column{Name: "title", DataType: "nvarchar", MaxLength: 250}
+	got6 := col6.GoValueBytes()
+	if got6 != 266 {
+		t.Errorf("GoValueBytes() for nvarchar(250) = %d, want 266", got6)
+	}
+
+	// Int column
+	col7 := Column{Name: "id", DataType: "int"}
+	got7 := col7.GoValueBytes()
+	if got7 != 8 {
+		t.Errorf("GoValueBytes() for int = %d, want 8", got7)
 	}
 }
 

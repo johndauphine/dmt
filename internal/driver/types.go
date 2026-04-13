@@ -215,8 +215,9 @@ func (c *Column) GoValueBytes() int64 {
 
 	// String types → string header + character data.
 	// Unbounded types (MAX/-1) like nvarchar(MAX) commonly hold large content
-	// identical to TEXT/NTEXT, so they use the same 4KB estimate to prevent
-	// pipeline buffer undersizing that causes memory ballooning.
+	// identical to TEXT/NTEXT, so they use the same 4KB estimate to avoid
+	// underestimating row bytes, which makes bytes-per-chunk look smaller,
+	// allows too many buffered chunks, and can balloon memory usage.
 	case dt == "varchar" || dt == "nvarchar" || dt == "char" || dt == "nchar" ||
 		dt == "tinytext" ||
 		dt == "character varying" || dt == "character":
