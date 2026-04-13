@@ -191,11 +191,13 @@ func (c *Column) GoValueBytes() int64 {
 		}
 		return sizeofSliceHeader + dataLen
 
-	// Fixed/small binary types → []byte header + data
+	// Binary types → []byte header + data.
+	// Unbounded varbinary(MAX) can hold large content like image/blob types,
+	// so it uses the same 4KB estimate to match the large binary branch above.
 	case dt == "varbinary" || dt == "binary" || dt == "tinyblob":
 		dataLen := int64(c.MaxLength)
 		if dataLen <= 0 || dataLen > 8000 {
-			dataLen = 256 // unbounded varbinary: conservative baseline
+			dataLen = 4096 // unbounded varbinary(MAX): same as IMAGE/BLOB estimate
 		}
 		return sizeofSliceHeader + dataLen
 
@@ -211,13 +213,17 @@ func (c *Column) GoValueBytes() int64 {
 		}
 		return sizeofStringHeader + dataLen
 
-	// String types → string header + character data
+	// String types → string header + character data.
+	// Unbounded types (MAX/-1) like nvarchar(MAX) commonly hold large content
+	// identical to TEXT/NTEXT, so they use the same 4KB estimate to avoid
+	// underestimating row bytes, which makes bytes-per-chunk look smaller,
+	// allows too many buffered chunks, and can balloon memory usage.
 	case dt == "varchar" || dt == "nvarchar" || dt == "char" || dt == "nchar" ||
 		dt == "tinytext" ||
 		dt == "character varying" || dt == "character":
 		dataLen := int64(c.MaxLength)
 		if dataLen <= 0 || dataLen > 8000 {
-			dataLen = 256 // unbounded varchar: conservative baseline
+			dataLen = 4096 // unbounded varchar(MAX): same as TEXT/NTEXT estimate
 		}
 		return sizeofStringHeader + dataLen
 
