@@ -407,6 +407,11 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		logging.Debug("%s", changes)
 	}
 
+	// Persist the post-tuning config so `dmt history --run <id>` reflects what actually ran.
+	if err := o.state.UpdateRunConfig(runID, o.config.Sanitized()); err != nil {
+		logging.Warn("failed to persist post-tuning config: %v", err)
+	}
+
 	// Print pagination strategy summary
 	keysetCount := 0
 	rowNumberCount := 0
@@ -820,6 +825,11 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Apply AI-recommended parameters (if AI is available)
 	o.applyAITuning(ctx)
+
+	// Persist the post-tuning config so `dmt history --run <id>` reflects what actually ran.
+	if err := o.state.UpdateRunConfig(run.ID, o.config.Sanitized()); err != nil {
+		logging.Warn("failed to persist post-tuning config: %v", err)
+	}
 
 	// Get tables that were successfully transferred in the previous run
 	completedTables, err := o.state.GetCompletedTables(run.ID)

@@ -110,6 +110,11 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 	return fs.save()
 }
 
+// UpdateRunConfig is a no-op for the file backend (it does not persist the full config).
+func (fs *FileState) UpdateRunConfig(id string, config any) error {
+	return nil
+}
+
 // CompleteRun marks the run as complete.
 func (fs *FileState) CompleteRun(id string, status string, errorMsg string) error {
 	fs.mu.Lock()
