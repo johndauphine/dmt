@@ -484,6 +484,16 @@ func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, pro
 	return err
 }
 
+// UpdateRunConfig overwrites the persisted config snapshot for a run.
+// Called after AI tuning so history reflects the values actually used.
+// config_hash is intentionally left unchanged — it's computed against the
+// pre-AI config for resume validation against the user's YAML.
+func (s *State) UpdateRunConfig(id string, config any) error {
+	configJSON, _ := json.Marshal(config)
+	_, err := s.db.Exec(`UPDATE runs SET config = ? WHERE id = ?`, string(configJSON), id)
+	return err
+}
+
 // CompleteRun marks a run as complete
 func (s *State) CompleteRun(id string, status string, errorMsg string) error {
 	_, err := s.db.Exec(`
