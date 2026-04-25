@@ -489,9 +489,22 @@ func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, pro
 // config_hash is intentionally left unchanged — it's computed against the
 // pre-AI config for resume validation against the user's YAML.
 func (s *State) UpdateRunConfig(id string, config any) error {
-	configJSON, _ := json.Marshal(config)
-	_, err := s.db.Exec(`UPDATE runs SET config = ? WHERE id = ?`, string(configJSON), id)
-	return err
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal run config: %w", err)
+	}
+	result, err := s.db.Exec(`UPDATE runs SET config = ? WHERE id = ?`, string(configJSON), id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("update run config: no run with id %q", id)
+	}
+	return nil
 }
 
 // CompleteRun marks a run as complete

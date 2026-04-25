@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -407,6 +408,44 @@ func TestSyncTimestamps(t *testing.T) {
 	}
 	if ts != nil {
 		t.Errorf("Expected nil timestamp for different target schema, got %v", ts)
+	}
+}
+
+func TestUpdateRunConfig(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	const runID = "run-update-config"
+	original := map[string]any{"workers": 12, "chunk_size": 113510}
+	if err := state.CreateRun(runID, "dbo", "public", original, "", ""); err != nil {
+		t.Fatalf("CreateRun error: %v", err)
+	}
+
+	updated := map[string]any{"workers": 6, "chunk_size": 100000}
+	if err := state.UpdateRunConfig(runID, updated); err != nil {
+		t.Fatalf("UpdateRunConfig error: %v", err)
+	}
+
+	run, err := state.GetRunByID(runID)
+	if err != nil {
+		t.Fatalf("GetRunByID error: %v", err)
+	}
+	if run == nil {
+		t.Fatalf("run not found after UpdateRunConfig")
+	}
+	if !strings.Contains(run.Config, `"workers":6`) || !strings.Contains(run.Config, `"chunk_size":100000`) {
+		t.Errorf("config not updated, got: %s", run.Config)
+	}
+	if strings.Contains(run.Config, `"workers":12`) {
+		t.Errorf("config still contains pre-update workers=12: %s", run.Config)
+	}
+
+	// Unknown run id should return an error rather than silently succeeding.
+	if err := state.UpdateRunConfig("does-not-exist", updated); err == nil {
+		t.Errorf("expected error for unknown run id, got nil")
 	}
 }
 
