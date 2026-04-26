@@ -773,7 +773,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 | 5 | 278s | 383K | 471K |
 | **Avg (warm 2-5)** | **279s** | **382K** | **466K** |
 
-Repeated runs after fully resetting WSL (`wsl --shutdown`) and the PG volume settle into the lower band consistently. Detach + re-attach + cache-priming experiments did not recover the higher numbers — the gap appears to come from transient kernel/scheduler state on first migrations after attach, which is not reproducible in steady-state operation.
+After fully resetting WSL (`wsl --shutdown`) and recreating the PG volume, repeated runs settle into the lower band consistently. Detach + re-attach + cache-priming experiments did not recover the higher numbers — the gap appears to come from transient kernel/scheduler state on first migrations after attach, which is not reproducible in steady-state operation.
 
 The first-attach figures stay published as the high-water mark, but the steady-state numbers are what a long-running deployment will see.
 
@@ -781,7 +781,7 @@ AI converged on `W=12 C=50K PR=6` for SO2013 — same plateau as the initial SO2
 
 #### Cross-platform comparison (SO2013 transfer rate)
 
-| | Core Ultra 7 358H 32GB — first attach | Core Ultra 7 358H 32GB — steady state | M5 Pro (macOS / Rosetta) | M3 Max (macOS / Rosetta) |
+| | Core Ultra 7 358H 32GB — first attach | Core Ultra 7 358H 32GB — steady-state | M5 Pro (macOS / Rosetta) | M3 Max (macOS / Rosetta) |
 |---|---|---|---|---|
 | Transfer rate | 772K | **466K** | 795K | 287K |
 | Duration | 173s | 279s | 134s | 372s |
