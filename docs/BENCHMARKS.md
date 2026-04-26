@@ -781,12 +781,12 @@ AI converged on `W=12 C=50K PR=6` for SO2013 — same plateau as the initial SO2
 
 #### Cross-platform comparison (SO2013 transfer rate)
 
-| | This box — first attach | This box — steady state | M5 Pro (macOS / Rosetta) | M3 Max (macOS / Rosetta) |
+| | Core Ultra 7 358H 32GB — first attach | Core Ultra 7 358H 32GB — steady state | M5 Pro (macOS / Rosetta) | M3 Max (macOS / Rosetta) |
 |---|---|---|---|---|
 | Transfer rate | 772K | **466K** | 795K | 287K |
 | Duration | 173s | 279s | 134s | 372s |
 
-The first-attach number ties M5 Pro on transfer throughput despite a lower-spec CPU (no Rosetta penalty). The steady-state number is the more honest comparison for ongoing workloads — still well ahead of M3 Max (Rosetta) but ~40% behind M5 Pro, reflecting Docker Desktop's VHDX-on-NTFS storage overhead in WSL2 vs native macOS file I/O.
+The first-attach number on the Core Ultra 7 358H ties M5 Pro on transfer throughput despite a lower-spec CPU (no Rosetta penalty). The steady-state number is the more honest comparison for ongoing workloads — still well ahead of M3 Max (Rosetta) but ~40% behind M5 Pro, reflecting Docker Desktop's VHDX-on-NTFS storage overhead in WSL2 vs native macOS file I/O.
 
 ### Memory-pressure caveats observed
 - Bumping `MSSQL_MEMORY_LIMIT_MB` to 12288 on SO2013 caused WSL to swap (only 24GB total, MSSQL+PG+dmt+OS exceeded budget). Throughput dropped ~30%. Practical ceiling: 8GB MSSQL cap on a 24GB WSL.
