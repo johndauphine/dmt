@@ -728,6 +728,53 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 3. **Docker 29.3.1 eliminates buffer pool thrashing** — all 5 runs stable, no alternating fast/slow pattern seen on Docker 29.3.0
 4. **AI settles on 4-5 workers / 50K chunks** — consistent with SO2010 findings under Azure SQL Edge's 4-core limit
 
+## Panther Lake / WSL2 (x86 native, no Rosetta) — SO2010 + SO2013
+
+### Environment
+- **CPU**: Intel Core Ultra 7 358H (Panther Lake, 16C/16T, no HT)
+- **Host RAM**: 32GB; WSL allocated 14 cores / 24GB via `.wslconfig`
+- **Containers**: `make bench-dbs-up` profile — MSSQL `MSSQL_MEMORY_LIMIT_MB=8192`, PG `shared_buffers=1GB / fsync=off / synchronous_commit=off / max_wal_size=4GB / wal_buffers=64MB`
+- **dmt**: built from `main` (post PR #125), AI tuner enabled with Anthropic `claude-haiku-4-5-20251001`
+- **Disk I/O** (`dd bs=1M count=1024` × 5 in container, named volume): write 2.4 GB/s, read ~14 GB/s
+
+### SO2010 (10GB, 19.3M rows, MSSQL → PG)
+
+| Phase | Config | Transfer avg (rows/s) | Overall peak (rows/s) | Duration peak |
+|-------|--------|-----------------------|-----------------------|---------------|
+| AI default (free) | W=12 C=50K PR=6 | 875K | 715K | 27s |
+| AI converged after exploration | W=12 C=25K PR=8 | **905K** | 715K | 27s |
+| Hand-pushed exploration | W=12 C=10K PR=8 | 898K | **743K** | **26s** |
+
+> AI smart-config converged stably on `W=12 C=25K PR=8` after seeing exploration results in history (PR #122 history visibility + PR #125 post-AI config persistence working as intended).
+> Peak transfer 916K rows/s observed in a single run (C=10K).
+
+### SO2013 (52GB, 106.5M rows, MSSQL → PG)
+
+| Run | Duration | Overall (rows/s) | Transfer (rows/s) |
+|-----|----------|------------------|-------------------|
+| 1 (cold) | 192s | 555K | 676K |
+| 2 | 190s | 561K | 695K |
+| 3 | 222s | 480K | 572K |
+| 4 | 198s | 538K | 670K |
+| **5** | **173s** | **616K** | **772K** ← peak |
+| 6 | 184s | 579K | 713K |
+| **Avg (warm 2-6)** | **193s** | **555K** | **685K** |
+
+AI converged on `W=12 C=50K PR=6` for SO2013 — same plateau as the initial SO2010 default, did not explore smaller chunks unprompted. Smaller chunks did not help on SO2013 in side-tests; bottleneck shifted from pipeline handoff (writer-bound on cached SO2010) to MSSQL disk reads (read-bound on the 52GB dataset that exceeds 8GB cache).
+
+### Cross-platform comparison (SO2013 transfer rate)
+
+| | This box (Panther Lake / WSL2 x86 native) | M5 Pro (macOS / Rosetta) | M3 Max (macOS / Rosetta) |
+|---|---|---|---|
+| Transfer rate | **772K** | 795K | 287K |
+| Duration | 173s | 134s | 372s |
+
+Effectively ties M5 Pro on transfer throughput despite a lower-spec CPU, by skipping the Rosetta penalty. M5 Pro's faster duration (134s vs 173s) comes from lower fixed-phase overhead (DDL/index/validation), not transfer rate.
+
+### Memory-pressure caveats observed
+- Bumping `MSSQL_MEMORY_LIMIT_MB` to 12288 on SO2013 caused WSL to swap (only 24GB total, MSSQL+PG+dmt+OS exceeded budget). Throughput dropped ~30%. Practical ceiling: 8GB MSSQL cap on a 24GB WSL.
+- After accumulated swap activity (cumulative `pswpout` > 23GB), SO2013 throughput regressed ~33% vs cold-start state even after container restarts. A `wsl --shutdown` is required for a true clean reset; container restarts alone don't reclaim the WSL kernel's degraded page-cache state.
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
