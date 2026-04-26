@@ -734,25 +734,25 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 - **CPU**: Intel Core Ultra 7 358H (Panther Lake, 16C/16T, no HT)
 - **Host RAM**: 32GB; WSL allocated 14 cores / 24GB via `.wslconfig`
 - **Containers**: `make bench-dbs-up` profile — MSSQL `MSSQL_MEMORY_LIMIT_MB=8192`, PG `shared_buffers=1GB / fsync=off / synchronous_commit=off / max_wal_size=4GB / wal_buffers=64MB`
-- **dmt**: built from `main` (post PR #125), AI tuner enabled with Anthropic `claude-haiku-4-5`
+- **dmt**: built from `main` (post PR #125), AI tuner enabled with Anthropic `claude-haiku-4-5-20251001`
 - **Disk I/O** (`dd bs=1M count=1024` × 5 in container, named volume): write 2.4 GB/s, read ~14 GB/s
 
 ### SO2010 (10GB, 19.3M rows, MSSQL → PG)
 
-| Phase | Config | Transfer (avg) | Overall (peak) | Duration (peak) |
-|-------|--------|----------------|----------------|-----------------|
-| AI default (free) | W=12 C=50K PR=6 | 875K rows/s | 715K rows/s | 27s |
-| AI converged after exploration | W=12 C=25K PR=8 | **905K rows/s** | 715K rows/s | 27s |
-| Hand-pushed exploration | W=12 C=10K PR=8 | 898K rows/s | **743K rows/s** | **26s** |
+| Phase | Config | Transfer avg (rows/s) | Overall peak (rows/s) | Duration peak |
+|-------|--------|-----------------------|-----------------------|---------------|
+| AI default (free) | W=12 C=50K PR=6 | 875K | 715K | 27s |
+| AI converged after exploration | W=12 C=25K PR=8 | **905K** | 715K | 27s |
+| Hand-pushed exploration | W=12 C=10K PR=8 | 898K | **743K** | **26s** |
 
 > AI smart-config converged stably on `W=12 C=25K PR=8` after seeing exploration results in history (PR #122 history visibility + PR #125 post-AI config persistence working as intended).
 > Peak transfer 916K rows/s observed in a single run (C=10K).
 
 ### SO2013 (52GB, 106.5M rows, MSSQL → PG)
 
-| Run | Duration | Overall | Transfer |
-|-----|----------|---------|----------|
-| 1 (cold) | 192s | 555K rows/s | 676K |
+| Run | Duration | Overall (rows/s) | Transfer (rows/s) |
+|-----|----------|------------------|-------------------|
+| 1 (cold) | 192s | 555K | 676K |
 | 2 | 190s | 561K | 695K |
 | 3 | 222s | 480K | 572K |
 | 4 | 198s | 538K | 670K |
@@ -760,7 +760,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 | 6 | 184s | 579K | 713K |
 | **Avg (warm 2-6)** | **193s** | **555K** | **685K** |
 
-AI converged on `W=12 C=50000 PR=6` for SO2013 — same plateau as the initial SO2010 default, did not explore smaller chunks unprompted. Smaller chunks did not help on SO2013 in side-tests; bottleneck shifted from pipeline handoff (writer-bound on cached SO2010) to MSSQL disk reads (read-bound on the 52GB dataset that exceeds 8GB cache).
+AI converged on `W=12 C=50K PR=6` for SO2013 — same plateau as the initial SO2010 default, did not explore smaller chunks unprompted. Smaller chunks did not help on SO2013 in side-tests; bottleneck shifted from pipeline handoff (writer-bound on cached SO2010) to MSSQL disk reads (read-bound on the 52GB dataset that exceeds 8GB cache).
 
 ### Cross-platform comparison (SO2013 transfer rate)
 
