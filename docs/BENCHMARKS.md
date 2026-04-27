@@ -823,6 +823,135 @@ The first-attach number on the Core Ultra 7 358H ties M5 Pro on transfer through
 - Bumping `MSSQL_MEMORY_LIMIT_MB` to 12288 on SO2013 caused WSL to swap (only 24GB total, MSSQL+PG+dmt+OS exceeded budget). Throughput dropped ~30%. Practical ceiling: 8GB MSSQL cap on a 24GB WSL.
 - After accumulated swap activity (cumulative `pswpout` > 23GB), SO2013 throughput regressed ~33% vs cold-start state even after container restarts. A `wsl --shutdown` is required for a true clean reset; container restarts alone don't reclaim the WSL kernel's degraded page-cache state.
 
+## M5 Pro 48GB — Host Memory Pressure Finding (SO2010 + SO2013, MSSQL→PG)
+
+### Test Environment
+
+- **Hardware**: Apple M5 Pro, **48GB RAM**, 18 CPU cores (distinct from prior M5 Pro 24GB host runs)
+- **OS**: macOS (Darwin 25.4.0)
+- **Source**: SQL Server 2022 (linux/amd64 image under Rosetta 2, Docker, named volume)
+- **Target**: PostgreSQL 16 (Alpine, Docker, named volume, tuned)
+- **Datasets**: StackOverflow2010 (~19.3M rows) and StackOverflow2013 (~106.5M rows), full Brent Ozar dumps attached and upgraded to compatibility level 160
+- **AI Provider**: Anthropic (`claude-haiku-4-5-20251001`)
+- **Mode**: `drop_recreate`, AI tuning enabled, `workers`/`chunk_size` removed from config so AI controls them
+- **Code**: HEAD `08b1284`
+- **Date**: April 2026
+
+### Disk I/O (Docker VM, named volume, 24GB Docker allocation)
+
+| Metric | Value |
+|--------|------:|
+| Sequential write | 2.7 GB/s |
+| Sequential read (cached) | 11.0 GB/s |
+
+> Average of 5 runs, `dd bs=1M count=1024` inside Docker container. `/proc/sys/vm/drop_caches`
+> is read-only inside Docker Desktop, so the read number reflects cached reads.
+
+### Database Configuration
+
+Container sizing was scaled proportionally from the `Makefile` `bench-dbs-up` recipe (which targets 8GB Docker → 4GB MSSQL / 1GB PG `shared_buffers`). For 24GB Docker:
+
+**SQL Server 2022** (source, Rosetta 2): `MSSQL_MEMORY_LIMIT_MB=12288` (12 GB)
+
+**PostgreSQL 16** (target):
+- `shared_buffers=3GB`, `effective_cache_size=12GB`
+- `work_mem=384MB`, `maintenance_work_mem=768MB`
+- `max_wal_size=6GB`, `min_wal_size=1500MB`, `wal_buffers=64MB`
+- `synchronous_commit=off`, `fsync=off`, `wal_level=minimal`, `max_wal_senders=0`
+- `--shm-size=3g`
+
+### Host Memory Pressure: 32GB Docker vs 24GB Docker (Activity Monitor, mid-run)
+
+Initial runs sized Docker at 32GB (the default suggestion when host has 48GB). Activity Monitor showed sustained pressure: dmt + Docker + browser + OS exceeded 48GB, macOS aggressively compressed memory, and throughput collapsed. Dropping Docker to 24GB recovered ~2.5x throughput on SO2013.
+
+| Metric | 32GB Docker | 24GB Docker | Δ |
+|--------|------------:|------------:|---|
+| Docker VM (RSS) | 32.01 GB | 24.06 GB | −8 GB (the resize) |
+| dmt process (RSS) | 9.46 GB | 5.55 GB | −41% |
+| **Compressed memory** | **25.22 GB** | **1.88 GB** | **−93%** |
+| Swap used | 3.89 GB | 1.24 GB | −68% |
+| Cached files (host) | 4.05 GB | 6.86 GB | +69% |
+| Memory Pressure chart | yellow (sustained) | **green** | — |
+
+The mechanism: every page touch in compressed memory pays a decompression cost that steals CPU from PG and MSSQL, and the swapped pages compete with `.mdf` reads on the same NVMe. Dropping Docker to 24GB also frees the host page cache to speed `.mdf` source reads.
+
+### SO2010 Results (5 Runs, 24GB Docker, fresh PG volume)
+
+| Run | Transfer | Overall | Time | Notes |
+|----:|---------:|--------:|-----:|-------|
+| 1 (cold) | 426K rows/s | 358K rows/s | 54s | retry on Posts (3.4% rework) |
+| 2 | 1,193K rows/s | 861K rows/s | 22s | clean |
+| 3 | **1,451K rows/s** | **1,074K rows/s** | 18s | clean — best |
+| 4 | 1,411K rows/s | 1,047K rows/s | 18s | clean |
+| 5 | 501K rows/s | 416K rows/s | 46s | retry on Posts (5.3% rework) |
+| **Clean avg (2,3,4)** | **1,352K rows/s** | **994K rows/s** | **19s** | excludes retries |
+
+### SO2013 Results (5 Runs, 24GB Docker, fresh PG volume)
+
+| Run | Transfer | Overall | Time | Notes |
+|----:|---------:|--------:|-----:|-------|
+| 1 (cold) | 1,141K rows/s | 858K rows/s | 2m04s | retry on Posts (0.7% rework) |
+| 2 | 1,140K rows/s | 848K rows/s | 2m06s | clean — exact 106.5M |
+| 3 | 962K rows/s | 751K rows/s | 2m22s | retry on Posts (1.4% rework) |
+| 4 | 1,032K rows/s | 812K rows/s | 2m11s | clean — exact 106.5M |
+| 5 | 988K rows/s | 724K rows/s | 2m27s | retries (3.6% rework) |
+| **5-run avg** | **1,053K rows/s** | **799K rows/s** | **2m14s** | |
+| **Clean avg (1,2,4)** | **1,104K rows/s** | **839K rows/s** | **2m07s** | |
+
+### SO2013 Pressure Comparison (same hardware, same code, 32GB vs 24GB Docker)
+
+| Configuration | Run 1 (cold) Overall | Run 2 Overall |
+|---------------|---------------------:|---------------:|
+| 32GB Docker (host pressured) | 341K rows/s (5m12s) | 399K rows/s (4m27s) |
+| 24GB Docker (host healthy) | **858K rows/s (2m04s)** | **848K rows/s (2m06s)** |
+| Δ | **+152%** | **+113%** |
+
+> Two cold-start data points at 32GB Docker were captured before the batch was killed
+> and Docker resized. The improvement at 24GB is unambiguous and reproduces across all 5 runs.
+
+### Cross-Config Comparison (SO2010, MSSQL→PG)
+
+| Configuration | Transfer (avg) | Overall (avg) |
+|---------------|---------------:|--------------:|
+| M3 Max + Rosetta 2 + bind mount, 8GB Docker (original) | 472K rows/s | 287K rows/s |
+| M3 Max Azure SQL Edge + named volume, fresh-PG steady-state | 880K rows/s | 686K rows/s |
+| M3 Max Azure SQL Edge first-attach (prior peak) | 1,168K rows/s | 832K rows/s |
+| M5 Pro 24GB host + 8GB Docker, Azure SQL Edge | 918K rows/s | 651K rows/s |
+| **M5 Pro 48GB host + 24GB Docker, SQL Server 2022 (Rosetta 2)** | **1,352K rows/s** | **994K rows/s** |
+| **M5 Pro 48GB host + 24GB Docker, best run** | **1,451K rows/s** | **1,074K rows/s** |
+
+### Cross-Config Comparison (SO2013, MSSQL→PG)
+
+| Configuration | Transfer (avg) | Overall (avg) |
+|---------------|---------------:|--------------:|
+| M3 Max + Rosetta 2 + bind mount, 8GB Docker (original) | 287K rows/s | — |
+| M3 Max Azure SQL Edge + named volume, run 2-3-5 avg | 981K rows/s | 714K rows/s |
+| M5 Pro 24GB host + 8GB Docker, Azure SQL Edge | 964K rows/s | 710K rows/s |
+| M5 Pro 48GB host + 32GB Docker (pressured) — single run | 406K rows/s | 341K rows/s |
+| **M5 Pro 48GB host + 24GB Docker, 5-run avg** | **1,053K rows/s** | **799K rows/s** |
+| **M5 Pro 48GB host + 24GB Docker, clean-run avg** | **1,104K rows/s** | **839K rows/s** |
+| **M5 Pro 48GB host + 24GB Docker, best run** | **1,141K rows/s** | **858K rows/s** |
+
+### Posts Wide-Row Retry Pattern
+
+Across both datasets, 40–60% of runs hit `WARN Retry 1/3 for Posts ... copy batch [N:M]: timeout: context deadline exceeded` on the PG write side. Behavior:
+
+- **Independent of host pressure**: same retry rate on healthy 24GB Docker as on pressured 32GB Docker.
+- **Independent of configured `chunk_size`**: a side-test pinning `chunk_size=30000` halved retry rate vs the AI-chosen 50000, but did not eliminate retries.
+- **Sub-chunk batches still time out**: failed-batch logs show ranges like `[13152:15344]` (2,192 rows) — the runtime tuner is already shrinking Posts chunks well below the configured size, but PG still exceeds the COPY context deadline on those rows.
+- **Cause**: Posts' `nvarchar(MAX) Body` column (HTML/markdown question and answer text) produces wide rows whose COPY parsing cost on PG can exceed the write context deadline regardless of how few rows are batched.
+- **Cost when it fires**: 0.7–5.3% rework, knocking overall throughput by 15–60%. Retries succeed on second attempt every time, so correctness is unaffected.
+
+A per-table chunk override for Posts (e.g., 1–2K) or a longer COPY context deadline are the obvious next investigations.
+
+### Key Findings
+
+1. **Host memory pressure dominates throughput on Apple Silicon laptops with consumer RAM budgets.** On a 48GB host, allocating 32GB to Docker pushed dmt + Docker + browser + macOS over the physical limit and triggered ~25 GB of compressed memory; throughput dropped 2.5x on SO2013. Dropping Docker to 24GB (50% of host) restored full throughput. The AI tuner sized for "20.2 GB available" based on the 48GB host total but did not subtract the 32GB Docker allocation — reasonable on Linux, where Docker is host-resident, but wrong on macOS where Docker runs in a wired-memory hypervisor VM.
+2. **Rosetta 2 is not visibly the bottleneck on this hardware.** SQL Server 2022 (Rosetta 2) on M5 Pro 48GB / 24GB Docker reaches **1,141K transfer / 858K overall on SO2013 and 1,451K / 1,074K on SO2010** — exceeding all prior published numbers including ARM-native Azure SQL Edge on M3 Max. Peak instantaneous on these runs hits ~2.0M rows/s, well above the M3 Max Azure SQL Edge first-attach peak of 1.17M.
+3. **First time overall throughput exceeds 1M rows/s on this codebase** — SO2010 best run 1,074K overall, code unchanged from the M3 Max measurements.
+4. **Posts wide-row choke point persists.** Independent of host pressure or chunk_size, 40–60% of runs hit a single chunk-write timeout on Posts. Per-table chunk override or COPY deadline tuning is the next lever.
+5. **Sizing rule of thumb (Apple Silicon laptops):** allocate Docker no more than ~50% of host RAM if dmt + browser + IDE will run concurrently. The other 50% is needed for dmt's working set, the host page cache that backs `.mdf` reads, and OS overhead.
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
