@@ -196,7 +196,9 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 - `max_wal_size` = 4GB, `wal_buffers` = 64MB, `checkpoint_completion_target` = 0.9
 - `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders` = 0, `fsync` = off
 
-### Results (MSSQL→PG, 5 Runs)
+### Results (MSSQL→PG)
+
+#### First-attach measurements (favorable conditions, not repeatable)
 
 | Run | Transfer | Overall | Duration |
 |-----|----------|---------|----------|
@@ -207,20 +209,49 @@ All configs: `synchronous_commit` = off, `wal_level` = minimal, `max_wal_senders
 | 5 | 1,164K rows/s | 799K rows/s | 24s |
 | **Avg (2-5)** | **1,168K rows/s** | **832K rows/s** | **23s** |
 
+#### Steady-state measurements (HEAD `79a3f41`, fresh PG volume, April 2026)
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 711K rows/s | 571K rows/s | 34s |
+| 2 | **941K rows/s** | **733K rows/s** | 26s |
+| 3 | 906K rows/s | 700K rows/s | 28s |
+| 4 | 889K rows/s | 688K rows/s | 28s |
+| 5 | 784K rows/s | 624K rows/s | 31s |
+| **Avg (2-5)** | **880K rows/s** | **686K rows/s** | **28s** |
+
+#### Aged-volume measurements (HEAD `79a3f41`, 2-month-old PG volume, April 2026)
+
+| Source engine | Transfer (avg 2-5) | Overall (avg 2-5) |
+|---|---|---|
+| Azure SQL Edge (native ARM64) | 627K rows/s | 438K rows/s |
+| SQL Server 2022 (Rosetta 2) | 615K rows/s | 464K rows/s |
+
+The fresh-volume numbers were captured on a brand-new `pg-bench-data-fresh` volume; the aged numbers came from the same `pg-bench-data` volume that had been used across ~2 months of repeated benchmarks. The aged volume caps throughput on the wide-row Posts table at ~250K rows/s instantaneous, regardless of source engine — the per-tick trace shows 1.7-1.9M rows/s on small tables and 1.2-1.4M on Votes, but stalls on Posts. Recreating the PG volume restores most of the headroom.
+
+The first-attach figures stay published as the high-water mark, but the steady-state numbers (fresh PG, code-equivalent to the original measurements) are what a clean redeploy will see.
+
+#### Code-regression check
+
+Bisected back to the original measurement commit (`98b94a6`, March): identical 624K transfer / 458K overall on the aged PG volume. PRs #115, #119, #120, #122, #123, #124 between March and April had **no measurable throughput effect** on this dataset. The gap between first-attach (1,168K) and today's fresh-PG (880K) is environmental — most likely Docker 29.3.1 → 29.4.0 (doc previously flagged Docker write regressions) and a Docker VM disk-write drift from 3.4 GB/s to 2.9 GB/s.
+
 ### Cross-Config Comparison (M3 Max, SO2010, MSSQL→PG)
 
 | Configuration | Transfer | Overall | vs Baseline |
 |---------------|----------|---------|-------------|
 | SQL Server 2022 + bind mount (old) | 472K rows/s | 287K rows/s | — |
-| **Azure SQL Edge + named volume** | **1,168K rows/s** | **832K rows/s** | **+147% / +190%** |
+| Azure SQL Edge + named volume — first attach | **1,168K rows/s** | **832K rows/s** | **+147% / +190%** |
+| Azure SQL Edge + named volume — steady-state (HEAD, fresh PG) | 880K rows/s | 686K rows/s | +86% / +139% |
+| Azure SQL Edge + named volume — aged PG (HEAD) | 627K rows/s | 438K rows/s | +33% / +53% |
 
 ### Key Findings
 
-1. **Eliminating Rosetta 2 + using named volumes delivers a 2.5x speedup** — from 472K to 1,168K transfer rows/s on the same hardware
-2. **M3 Max now matches M5 Pro on MSSQL→PG** — 1,168K vs 1,357K (86%), compared to the old 472K vs 1,357K (35%) when both platforms were bottlenecked by Rosetta 2
-3. **Named volumes are essential on macOS** — Docker's VM-internal ext4 delivers 3.4 GB/s writes vs 1.5 GB/s through VirtioFS bind mounts
-4. **Native ARM64 SQL Server eliminates the #1 Mac bottleneck** — consistent with WSL2 ARM64 findings (Azure SQL Edge matched M3 Max Rosetta with fewer cores and slower disk)
-5. **AI tuning converges quickly** — peak transfer (1,227K) achieved on run 3, stable ±6% across warm runs
+1. **First-attach (1,168K) is a high-water mark, not a steady state** — repeating the same benchmark on a fresh PG volume with HEAD code lands at 880K transfer / 686K overall, ~25% below the published peak. The 1,168K figure is the achievable peak on a fresh container/disk; the 880K is the realistic warm-state ceiling on this hardware/Docker version.
+2. **PG volume state is the dominant runtime variable** — the same code, hardware, and source engine runs at 627K on a 2-month-old PG volume vs 880K on a fresh one (+40% just from recreating the target volume). Drop-recreate of tables alone is not enough to recover the headroom; the volume itself must be recreated.
+3. **Source-engine Rosetta penalty is small at this throughput band** — Azure SQL Edge (native ARM64, 627K) ties SQL Server 2022 under Rosetta 2 (615K) on the aged-volume runs. The original "+147% from eliminating Rosetta" claim conflated Rosetta removal with the move from bind mounts to named volumes; the named-volume change carried most of the speedup. On a fresh PG volume, neither configuration approaches first-attach numbers, so Rosetta is not the active bottleneck.
+4. **The wide-row Posts table is the choke point** — instantaneous throughput drops from 1.7–1.9M rows/s on small tables to 250–580K rows/s during Posts (avg 2,290 byte/row, contains nvarchar(MAX) Body). On the aged PG volume the dip is severe enough to dominate total runtime; on a fresh volume it recovers more gracefully.
+5. **Code is unchanged March → April** — bisection at `98b94a6` (March), `7a34d21` (pre-#123/#124), and HEAD `79a3f41` all produce within ±5% of each other. PRs #115 (transactional CopyFrom), #123 (COPY batch sizing), and #124 (varchar(MAX) memory estimate) had no measurable impact on this benchmark.
+6. **AI tuning converges quickly** — peak transfer (941K, fresh-PG run 2) achieved on run 2, stable across warm runs. AI-applied parameters: workers=10, chunk_size=45K, parallel_readers=5.
 
 ## M3 Max Azure SQL Edge Benchmark (StackOverflow2013, MSSQL→PG)
 
