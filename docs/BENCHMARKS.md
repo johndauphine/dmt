@@ -828,7 +828,7 @@ The first-attach number on the Core Ultra 7 358H ties M5 Pro on transfer through
 ### Test Environment
 
 - **Hardware**: Apple M5 Pro, **48GB RAM**, 18 CPU cores (distinct from prior M5 Pro 24GB host runs)
-- **OS**: macOS 26.4.1 (Darwin 25.4.0)
+- **OS**: macOS (Darwin 25.4.0)
 - **Source**: SQL Server 2022 (linux/amd64 image under Rosetta 2, Docker, named volume)
 - **Target**: PostgreSQL 16 (Alpine, Docker, named volume, tuned)
 - **Datasets**: StackOverflow2010 (~19.3M rows) and StackOverflow2013 (~106.5M rows), full Brent Ozar dumps attached and upgraded to compatibility level 160
@@ -913,24 +913,24 @@ The mechanism: every page touch in compressed memory pays a decompression cost t
 
 | Configuration | Transfer (avg) | Overall (avg) |
 |---------------|---------------:|--------------:|
-| M3 Max + Rosetta 2 + bind mount, 8GB Docker (original) | 472K | 287K |
-| M3 Max Azure SQL Edge + named volume, fresh-PG steady-state | 880K | 686K |
-| M3 Max Azure SQL Edge first-attach (prior peak) | 1,168K | 832K |
-| M5 Pro 24GB host + 8GB Docker, Azure SQL Edge | 918K | 651K |
-| **M5 Pro 48GB host + 24GB Docker, SQL Server 2022 (Rosetta 2)** | **1,352K** | **994K** |
-| **M5 Pro 48GB host + 24GB Docker, best run** | **1,451K** | **1,074K** |
+| M3 Max + Rosetta 2 + bind mount, 8GB Docker (original) | 472K rows/s | 287K rows/s |
+| M3 Max Azure SQL Edge + named volume, fresh-PG steady-state | 880K rows/s | 686K rows/s |
+| M3 Max Azure SQL Edge first-attach (prior peak) | 1,168K rows/s | 832K rows/s |
+| M5 Pro 24GB host + 8GB Docker, Azure SQL Edge | 918K rows/s | 651K rows/s |
+| **M5 Pro 48GB host + 24GB Docker, SQL Server 2022 (Rosetta 2)** | **1,352K rows/s** | **994K rows/s** |
+| **M5 Pro 48GB host + 24GB Docker, best run** | **1,451K rows/s** | **1,074K rows/s** |
 
 ### Cross-Config Comparison (SO2013, MSSQL→PG)
 
 | Configuration | Transfer (avg) | Overall (avg) |
 |---------------|---------------:|--------------:|
-| M3 Max + Rosetta 2 + bind mount, 8GB Docker (original) | 287K | — |
-| M3 Max Azure SQL Edge + named volume, run 2-3-5 avg | 981K | 714K |
-| M5 Pro 24GB host + 8GB Docker, Azure SQL Edge | 964K | 710K |
-| M5 Pro 48GB host + 32GB Docker (pressured) — single run | 406K | 341K |
-| **M5 Pro 48GB host + 24GB Docker, 5-run avg** | **1,053K** | **799K** |
-| **M5 Pro 48GB host + 24GB Docker, clean-run avg** | **1,104K** | **839K** |
-| **M5 Pro 48GB host + 24GB Docker, best run** | **1,141K** | **858K** |
+| M3 Max + Rosetta 2 + bind mount, 8GB Docker (original) | 287K rows/s | — |
+| M3 Max Azure SQL Edge + named volume, run 2-3-5 avg | 981K rows/s | 714K rows/s |
+| M5 Pro 24GB host + 8GB Docker, Azure SQL Edge | 964K rows/s | 710K rows/s |
+| M5 Pro 48GB host + 32GB Docker (pressured) — single run | 406K rows/s | 341K rows/s |
+| **M5 Pro 48GB host + 24GB Docker, 5-run avg** | **1,053K rows/s** | **799K rows/s** |
+| **M5 Pro 48GB host + 24GB Docker, clean-run avg** | **1,104K rows/s** | **839K rows/s** |
+| **M5 Pro 48GB host + 24GB Docker, best run** | **1,141K rows/s** | **858K rows/s** |
 
 ### Posts Wide-Row Retry Pattern
 
