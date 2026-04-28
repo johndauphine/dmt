@@ -339,12 +339,15 @@ func (s *State) ensureTuningResultColumns() error {
 
 	hasThroughput := false
 	hasDuration := false
+	hasChunkRetries := false
 	for _, col := range columns {
 		switch col {
 		case "final_throughput":
 			hasThroughput = true
 		case "final_duration_seconds":
 			hasDuration = true
+		case "chunk_retry_count":
+			hasChunkRetries = true
 		}
 	}
 
@@ -355,6 +358,11 @@ func (s *State) ensureTuningResultColumns() error {
 	}
 	if !hasDuration {
 		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN final_duration_seconds REAL`); err != nil {
+			return err
+		}
+	}
+	if !hasChunkRetries {
+		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN chunk_retry_count INTEGER DEFAULT 0`); err != nil {
 			return err
 		}
 	}
@@ -1236,15 +1244,18 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 // UpdateAITuningResult updates the most recent tuning record that hasn't been
 // populated with results yet. This avoids race conditions with concurrent
 // analyze runs by targeting NULL final_throughput rather than MAX(id).
-func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+//
+// chunkRetryCount is the cumulative count of transient chunk retries observed
+// during the run (RuntimeMetrics.ChunkRetryCount); 0 for a clean run.
+func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
 	_, err := s.db.Exec(`
 		UPDATE ai_tuning_history
-		SET final_throughput = ?, final_duration_seconds = ?
+		SET final_throughput = ?, final_duration_seconds = ?, chunk_retry_count = ?
 		WHERE id = (
 			SELECT MAX(id) FROM ai_tuning_history
 			WHERE final_throughput IS NULL
 		)
-	`, throughput, durationSecs)
+	`, throughput, durationSecs, chunkRetryCount)
 	return err
 }
 
@@ -1259,7 +1270,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		       parallel_readers, max_partitions, large_table_threshold,
 		       max_source_connections, max_target_connections,
 		       estimated_memory_mb, ai_reasoning, was_ai_used,
-		       final_throughput, final_duration_seconds
+		       final_throughput, final_duration_seconds, chunk_retry_count
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
 		ORDER BY timestamp DESC`, limit, sourceType, targetType)
@@ -1278,6 +1289,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		var largeTableThreshold, maxSourceConns, maxTargetConns, estimatedMem sql.NullInt64
 		var wasAIUsed int
 		var finalThroughput, finalDurationSecs sql.NullFloat64
+		var chunkRetryCount sql.NullInt64
 
 		if err := rows.Scan(
 			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
@@ -1287,9 +1299,12 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 			&parallelReaders, &maxPartitions, &largeTableThreshold,
 			&maxSourceConns, &maxTargetConns,
 			&estimatedMem, &aiReasoning, &wasAIUsed,
-			&finalThroughput, &finalDurationSecs,
+			&finalThroughput, &finalDurationSecs, &chunkRetryCount,
 		); err != nil {
 			return nil, err
+		}
+		if chunkRetryCount.Valid {
+			r.ChunkRetryCount = int(chunkRetryCount.Int64)
 		}
 
 		r.Timestamp, _ = time.Parse("2006-01-02 15:04:05", timestampStr)

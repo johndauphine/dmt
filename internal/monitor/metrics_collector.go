@@ -32,9 +32,10 @@ type PerformanceSnapshot struct {
 	WriteTimePercent float64
 
 	// Transfer breakdown
-	ActiveWorkers int
-	QueueDepth    int // Buffered chunks waiting
-	ErrorCount    int
+	ActiveWorkers   int
+	QueueDepth      int // Buffered chunks waiting
+	ErrorCount      int // Tables that exhausted all retries
+	ChunkRetryCount int // Transient chunk retries that succeeded on a later attempt
 
 	// Current configuration
 	CurrentConfig ConfigSnapshot
@@ -151,6 +152,7 @@ func (mc *MetricsCollector) collectSnapshot() {
 	snapshot.ActiveWorkers = metrics.ActiveJobs
 	snapshot.QueueDepth = metrics.QueueDepth
 	snapshot.ErrorCount = metrics.ErrorCount
+	snapshot.ChunkRetryCount = metrics.ChunkRetryCount
 
 	// Hold lock for windowed throughput/time calculation, trend, and append
 	mc.metricsMu.Lock()

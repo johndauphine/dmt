@@ -473,7 +473,12 @@ func (aa *AIAdjuster) buildAdjustmentPrompt() string {
 		sb.WriteString(fmt.Sprintf("- Memory: %d MB (%.1f%%)\n", latest.MemoryUsedMB, latest.MemoryPercent))
 		sb.WriteString(fmt.Sprintf("- Active jobs: %d (concurrent table transfers)\n", latest.ActiveWorkers))
 		sb.WriteString(fmt.Sprintf("- Queue depth: %d (chunks buffered in read-ahead pipeline)\n", latest.QueueDepth))
-		sb.WriteString(fmt.Sprintf("- Error count: %d (failed tables)\n", latest.ErrorCount))
+		sb.WriteString(fmt.Sprintf("- Failed tables: %d (terminal — exhausted all retries)\n", latest.ErrorCount))
+		if latest.ChunkRetryCount > 0 {
+			sb.WriteString(fmt.Sprintf("- Chunk retries: %d (transient stalls that succeeded on retry — investigate concurrency / chunk_size when this is non-zero)\n", latest.ChunkRetryCount))
+		} else {
+			sb.WriteString(fmt.Sprintf("- Chunk retries: 0\n"))
+		}
 		sb.WriteString(fmt.Sprintf("- Elapsed: %.0f seconds\n", latest.ElapsedSeconds))
 		sb.WriteString(fmt.Sprintf("- Rows processed: %d\n", latest.RowsProcessed))
 	}

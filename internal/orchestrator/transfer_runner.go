@@ -59,8 +59,9 @@ func NewTransferRunner(
 
 // RunResult contains the outcome of a transfer run.
 type RunResult struct {
-	TableStats    map[string]*transfer.TransferStats
-	TableFailures []TableFailure
+	TableStats      map[string]*transfer.TransferStats
+	TableFailures   []TableFailure
+	ChunkRetryCount int // Cumulative count of transient chunk retries across the run
 }
 
 // tableStats tracks stats for a single table (internal).
@@ -217,6 +218,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	for name, ts := range statsMap {
 		result.TableStats[name] = ts.stats
 	}
+	if tuner != nil {
+		result.ChunkRetryCount = tuner.Metrics().ChunkRetryCount
+	}
 
 	return result, nil
 }
@@ -369,6 +373,12 @@ retryLoop:
 		if attempt > 0 {
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
 			logging.Warn("Retry %d/%d for %s after %v (error: %v)", attempt, maxRetries, j.Table.Name, backoff, err)
+			// Feed each retry attempt back to the AI tuner so concurrency /
+			// chunk-size choices that produce transient stalls show up as a
+			// distinct signal even when the table eventually succeeds.
+			if tuner != nil {
+				tuner.ReportChunkRetry()
+			}
 			select {
 			case <-ctx.Done():
 				err = ctx.Err()

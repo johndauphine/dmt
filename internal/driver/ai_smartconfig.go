@@ -170,8 +170,9 @@ type TuningHistoryProvider interface {
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error
-	// UpdateAITuningResult updates the most recent tuning record with final throughput
-	UpdateAITuningResult(throughput float64, durationSecs float64) error
+	// UpdateAITuningResult updates the most recent tuning record with final
+	// throughput and the cumulative chunk retry count observed during the run.
+	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment from runtime migration.
@@ -208,6 +209,7 @@ type AITuningRecord struct {
 	WasAIUsed            bool      `json:"was_ai_used"`
 	FinalThroughput      float64   `json:"final_throughput,omitempty"`      // rows/sec from completed migration
 	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
+	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`     // chunk retries observed during the run (0 = clean)
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -568,6 +570,9 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 				h.MaxSourceConnections, h.MaxTargetConnections))
 			if h.FinalThroughput > 0 {
 				sb.WriteString(fmt.Sprintf(" → result: %.0f rows/sec (%.0fs)", h.FinalThroughput, h.FinalDurationSecs))
+				if h.ChunkRetryCount > 0 {
+					sb.WriteString(fmt.Sprintf(", %d chunk retries", h.ChunkRetryCount))
+				}
 			}
 			sb.WriteString("\n")
 		}

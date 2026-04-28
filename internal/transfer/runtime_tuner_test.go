@@ -155,6 +155,29 @@ func TestRuntimeTunerReportError(t *testing.T) {
 	}
 }
 
+func TestRuntimeTunerReportChunkRetry(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	// Counter starts at zero
+	if got := tuner.Metrics().ChunkRetryCount; got != 0 {
+		t.Errorf("initial ChunkRetryCount = %d, want 0", got)
+	}
+
+	// Each call increments by one and is independent of ReportError
+	tuner.ReportChunkRetry()
+	tuner.ReportChunkRetry()
+	tuner.ReportError() // does not affect ChunkRetryCount
+	tuner.ReportChunkRetry()
+
+	m := tuner.Metrics()
+	if m.ChunkRetryCount != 3 {
+		t.Errorf("ChunkRetryCount = %d, want 3", m.ChunkRetryCount)
+	}
+	if m.ErrorCount != 1 {
+		t.Errorf("ErrorCount = %d, want 1 (separate counter)", m.ErrorCount)
+	}
+}
+
 func TestRuntimeTunerReportTransferTime(t *testing.T) {
 	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
 

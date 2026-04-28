@@ -149,7 +149,7 @@ func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
 	m.saved = &record
 	return nil
 }
-func (m *mockHistoryProvider) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+func (m *mockHistoryProvider) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
 	return nil
 }
 
