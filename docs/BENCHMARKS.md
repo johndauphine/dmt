@@ -932,25 +932,47 @@ The mechanism: every page touch in compressed memory pays a decompression cost t
 | **M5 Pro 48GB host + 24GB Docker, clean-run avg** | **1,104K rows/s** | **839K rows/s** |
 | **M5 Pro 48GB host + 24GB Docker, best run** | **1,141K rows/s** | **858K rows/s** |
 
-### Posts Wide-Row Retry Pattern
+### Concurrent COPY Stalls — Docker VM Networking Limit (was: "Posts Wide-Row Retry Pattern")
 
-Across both datasets, 40–60% of runs hit `WARN Retry 1/3 for Posts ... copy batch [N:M]: timeout: context deadline exceeded` on the PG write side. Behavior:
+Initial framing was wrong. The retries were attributed to Posts' `nvarchar(MAX) Body` rows producing batches that exceeded the COPY context deadline. A follow-up investigation falsified that hypothesis and identified a different root cause.
 
-- **Independent of host pressure**: same retry rate on healthy 24GB Docker as on pressured 32GB Docker.
-- **Independent of configured `chunk_size`**: a side-test pinning `chunk_size=30000` halved retry rate vs the AI-chosen 50000, but did not eliminate retries.
-- **Sub-chunk batches still time out**: failed-batch logs show ranges like `[13152:15344]` (2,192 rows) — the runtime tuner is already shrinking Posts chunks well below the configured size, but PG still exceeds the COPY context deadline on those rows.
-- **Cause**: Posts' `nvarchar(MAX) Body` column (HTML/markdown question and answer text) produces wide rows whose COPY parsing cost on PG can exceed the write context deadline regardless of how few rows are batched.
-- **Cost when it fires**: 0.7–5.3% rework, knocking overall throughput by 15–60%. Retries succeed on second attempt every time, so correctness is unaffected.
+#### Evidence that wide rows are *not* the cause
 
-A per-table chunk override for Posts (e.g., 1–2K) or a longer COPY context deadline are the obvious next investigations.
+- A side-test pinning `chunk_size=30000` halved retry rate vs `chunk_size=50000` but did not eliminate retries. The runtime tuner was already shrinking Posts chunks: failed batches were sub-chunks of ~2,000 rows, not full 30K/50K chunks.
+- Posts.Body actual distribution (SO2010, measured): p50=988B, p90=2,954B, p99=7,956B, p999=19,955B, max=97,394B. The largest *row* is 95KB; even a sub-batch full of outliers totals only a few MB. At PG's normal local-Docker COPY throughput (50–100 MB/s), this should complete in tens to hundreds of milliseconds, not the 30+ seconds that timed out.
+- Live `pg_stat_activity` capture during a stall showed the stuck backend in wait state **`Client / ClientRead`** with `pg_stat_progress_copy.bytes_processed` frozen at the same value for 100+ seconds. PG was not slow, locked, or checkpointing — it was sitting in `recv()` waiting for the client to send more bytes. The stall is *upstream* of PG.
+
+#### Mitigation experiments (M5 Pro 48GB / 24GB Docker / SQL Server 2022 Rosetta / SO2010, AI tuning enabled, `target_mode=drop_recreate`, fresh PG volume per run)
+
+| Configuration | Sample | Retry rate | Run-time band | Notes |
+|---------------|-------:|-----------:|---------------|-------|
+| 30s timeout floor (original) | 5 runs | 2/5 (40%) | 22s – 2m18s | Baseline. Retries cluster around marginal-timeout cases. |
+| 120s timeout floor | 5 runs | 1/5 (20%) | 21s – 2m18s | Halves the rate by absorbing marginal-timeout sub-batches. The remaining stalls last the full 120s. |
+| 120s floor + PG `tcp_keepalives_idle=10 tcp_keepalives_interval=5 tcp_keepalives_count=3` | 10 runs | 1/10 (10%) | 19s – 2m15s | Keepalives did not detect failure during the stall — the connection stayed established, it was just slow. Rules out packet loss / dead path. |
+| 120s floor + keepalives + **`write_ahead_writers=1`** (down from AI default 2) | 10 runs | **0/10 (0%)** | **20s – 27s** | Halves total concurrent COPY connections from 36 (18 workers × 2) to 18. **All 10 runs clean.** |
+| **`write_ahead_writers=1` alone (30s floor, no keepalives)** | 10 runs | **0/10 (0%)** | **22s – 27s** | The concurrency cap is the only change that matters — 120s floor and keepalives add no incremental value when paired with it. |
+
+The `write_ahead_writers=1` runs dropped peak per-run throughput by ~10–15% (best run 924K overall vs 1,074K with `writers=2`), but eliminated 100% of stalls and shrank the runtime band to a tight 22–27s window with no 2m+ outliers.
+
+#### Root cause
+
+**Docker Desktop VM networking saturates under concurrent COPY connection load.** With `workers=18` and `write_ahead_writers=2`, dmt holds 36 concurrent COPY connections to PG. Docker Desktop on macOS uses a vsock + userspace network stack with documented per-flow throughput limits under heavy concurrent connection counts. Above some threshold a small subset of connections enters a degraded-throughput regime (data trickles through at KB/s instead of MB/s) without dropping — the connection stays established, but `pg_stat_progress_copy.bytes_processed` barely advances. dmt's 30s timeout fires; the chunk retries on a fresh connection and succeeds.
+
+This is environment, not code. The same dmt code on Linux native (no Docker VM network layer) does not exhibit the pattern, and prior M3 Max / WSL2 benchmarks didn't surface it. dmt makes the issue visible on macOS by picking concurrency settings tuned for the underlying CPU (`workers=18` for 18 cores) without subtracting capacity for the VM network bottleneck.
+
+#### Recommendations
+
+- **macOS Docker Desktop deployments:** cap `write_ahead_writers=1` (not 2). Drops concurrent COPY count from `2 × workers` to `1 × workers`, eliminating the stalls in the test above. Cost: ~10–15% lower peak throughput, gained: 100% predictable runtime.
+- **Native Linux deployments:** keep `write_ahead_writers=2` (or whatever AI picks). The Docker VM bottleneck doesn't apply.
+- **AI smartconfig (`internal/driver/ai_smartconfig.go`)** should detect macOS host + Docker target and cap `write_ahead_writers=1`. Until then, override in config when running on Apple Silicon Docker Desktop.
 
 ### Key Findings
 
 1. **Host memory pressure dominates throughput on Apple Silicon laptops with consumer RAM budgets.** On a 48GB host, allocating 32GB to Docker pushed dmt + Docker + browser + macOS over the physical limit and triggered ~25 GB of compressed memory; throughput dropped 2.5x on SO2013. Dropping Docker to 24GB (50% of host) restored full throughput. The AI tuner sized for "20.2 GB available" based on the 48GB host total but did not subtract the 32GB Docker allocation — reasonable on Linux, where Docker is host-resident, but wrong on macOS where Docker runs in a wired-memory hypervisor VM.
 2. **Rosetta 2 is not visibly the bottleneck on this hardware.** SQL Server 2022 (Rosetta 2) on M5 Pro 48GB / 24GB Docker reaches **1,141K transfer / 858K overall on SO2013 and 1,451K / 1,074K on SO2010** — exceeding all prior published numbers including ARM-native Azure SQL Edge on M3 Max. Peak instantaneous on these runs hits ~2.0M rows/s, well above the M3 Max Azure SQL Edge first-attach peak of 1.17M.
 3. **First time overall throughput exceeds 1M rows/s on this codebase** — SO2010 best run 1,074K overall, code unchanged from the M3 Max measurements.
-4. **Posts wide-row choke point persists.** Independent of host pressure or chunk_size, 40–60% of runs hit a single chunk-write timeout on Posts. Per-table chunk override or COPY deadline tuning is the next lever.
-5. **Sizing rule of thumb (Apple Silicon laptops):** allocate Docker no more than ~50% of host RAM if dmt + browser + IDE will run concurrently. The other 50% is needed for dmt's working set, the host page cache that backs `.mdf` reads, and OS overhead.
+4. **The "Posts wide-row choke point" was Docker VM networking, not wide rows.** Capping `write_ahead_writers=1` (halving concurrent COPY connections from 36 to 18) eliminates 100% of stalls in a 10-run sample, at a cost of ~10–15% peak throughput. PG-side `pg_stat_activity` evidence (`Client / ClientRead` wait, frozen `bytes_processed`) confirms the bottleneck is outside both PG and the row-size estimator.
+5. **Sizing rule of thumb (Apple Silicon laptops):** allocate Docker no more than ~50% of host RAM if dmt + browser + IDE will run concurrently. The other 50% is needed for dmt's working set, the host page cache that backs `.mdf` reads, and OS overhead. For target writes specifically: cap `write_ahead_writers=1` to stay below the Docker VM concurrent-connection threshold.
 
 ## Implemented Optimizations
 
