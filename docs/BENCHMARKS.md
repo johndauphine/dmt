@@ -942,20 +942,21 @@ Initial framing was wrong. The retries were attributed to Posts' `nvarchar(MAX) 
 - Posts.Body actual distribution (SO2010, measured): p50=988B, p90=2,954B, p99=7,956B, p999=19,955B, max=97,394B. The largest *row* is 95KB; even a sub-batch full of outliers totals only a few MB. At PG's normal local-Docker COPY throughput (50–100 MB/s), this should complete in tens to hundreds of milliseconds, not the 30+ seconds that timed out.
 - Live `pg_stat_activity` capture during a stall showed the stuck backend in wait state **`Client / ClientRead`** with `pg_stat_progress_copy.bytes_processed` frozen at the same value for 100+ seconds. PG was not slow, locked, or checkpointing — it was sitting in `recv()` waiting for the client to send more bytes. The stall is *upstream* of PG.
 
-#### Mitigation experiments (M5 Pro 48GB / 24GB Docker / SQL Server 2022 Rosetta / SO2010, AI tuning enabled, `target_mode=drop_recreate`, fresh PG volume per batch)
+#### Mitigation experiments (M5 Pro 48GB / 24GB Docker / SQL Server 2022 Rosetta / SO2010, AI tuning enabled, `target_mode=drop_recreate`, fresh PG volume per run)
 
 | Configuration | Sample | Retry rate | Run-time band | Notes |
 |---------------|-------:|-----------:|---------------|-------|
 | 30s timeout floor (original) | 5 runs | 2/5 (40%) | 22s – 2m18s | Baseline. Retries cluster around marginal-timeout cases. |
-| 120s timeout floor (PR #131) | 5 runs | 1/5 (20%) | 21s – 2m18s | Halves the rate by absorbing marginal-timeout sub-batches. The remaining stalls last the full 120s. |
-| 120s floor + PG `tcp_keepalives_idle=10 interval=5 count=3` | 10 runs | 1/10 (10%) | 19s – 2m15s | Keepalives never fired during the stall. Connection isn't dead — it's slow. Rules out packet loss / dead path. |
+| 120s timeout floor | 5 runs | 1/5 (20%) | 21s – 2m18s | Halves the rate by absorbing marginal-timeout sub-batches. The remaining stalls last the full 120s. |
+| 120s floor + PG `tcp_keepalives_idle=10 tcp_keepalives_interval=5 tcp_keepalives_count=3` | 10 runs | 1/10 (10%) | 19s – 2m15s | Keepalives did not detect failure during the stall — the connection stayed established, it was just slow. Rules out packet loss / dead path. |
 | 120s floor + keepalives + **`write_ahead_writers=1`** (down from AI default 2) | 10 runs | **0/10 (0%)** | **20s – 27s** | Halves total concurrent COPY connections from 36 (18 workers × 2) to 18. **All 10 runs clean.** |
+| **`write_ahead_writers=1` alone (30s floor, no keepalives)** | 10 runs | **0/10 (0%)** | **22s – 27s** | The concurrency cap is the only change that matters — 120s floor and keepalives add no incremental value when paired with it. |
 
-The `write_ahead_writers=1` run dropped peak per-run throughput by ~10–15% (best run 924K overall vs 1,074K with `writers=2`), but eliminated 100% of stalls and shrank the runtime band to a tight 20–27s window with no 2m+ outliers.
+The `write_ahead_writers=1` runs dropped peak per-run throughput by ~10–15% (best run 924K overall vs 1,074K with `writers=2`), but eliminated 100% of stalls and shrank the runtime band to a tight 22–27s window with no 2m+ outliers.
 
 #### Root cause
 
-**Docker Desktop VM networking saturates under concurrent COPY connection load.** With `workers=18` and `write_ahead_writers=2`, dmt holds 36 concurrent COPY connections to PG. Docker Desktop on macOS uses a vsock + userspace network stack with documented per-flow throughput limits under heavy concurrent connection counts. Above some threshold a small subset of connections enters a degraded-throughput regime (data trickles through at KB/s instead of MB/s) without dropping — keepalives stay green, but `pg_stat_progress_copy.bytes_processed` barely advances. dmt's 30s (or 120s) timeout fires; the chunk retries on a fresh connection and succeeds.
+**Docker Desktop VM networking saturates under concurrent COPY connection load.** With `workers=18` and `write_ahead_writers=2`, dmt holds 36 concurrent COPY connections to PG. Docker Desktop on macOS uses a vsock + userspace network stack with documented per-flow throughput limits under heavy concurrent connection counts. Above some threshold a small subset of connections enters a degraded-throughput regime (data trickles through at KB/s instead of MB/s) without dropping — the connection stays established, but `pg_stat_progress_copy.bytes_processed` barely advances. dmt's 30s timeout fires; the chunk retries on a fresh connection and succeeds.
 
 This is environment, not code. The same dmt code on Linux native (no Docker VM network layer) does not exhibit the pattern, and prior M3 Max / WSL2 benchmarks didn't surface it. dmt makes the issue visible on macOS by picking concurrency settings tuned for the underlying CPU (`workers=18` for 18 cores) without subtracting capacity for the VM network bottleneck.
 
@@ -964,7 +965,6 @@ This is environment, not code. The same dmt code on Linux native (no Docker VM n
 - **macOS Docker Desktop deployments:** cap `write_ahead_writers=1` (not 2). Drops concurrent COPY count from `2 × workers` to `1 × workers`, eliminating the stalls in the test above. Cost: ~10–15% lower peak throughput, gained: 100% predictable runtime.
 - **Native Linux deployments:** keep `write_ahead_writers=2` (or whatever AI picks). The Docker VM bottleneck doesn't apply.
 - **AI smartconfig (`internal/driver/ai_smartconfig.go`)** should detect macOS host + Docker target and cap `write_ahead_writers=1`. Until then, override in config when running on Apple Silicon Docker Desktop.
-- **PR #131's 120s timeout floor** is still useful. It absorbs the marginal-timeout cases (~half of all retries pre-PR) regardless of the macOS-specific stall behavior, and adds tolerance for transient PG-side stalls (checkpoints, eviction) on any platform.
 
 ### Key Findings
 
