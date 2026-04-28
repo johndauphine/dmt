@@ -816,14 +816,19 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 		subBatch := opts.Rows[start:end]
 		batchBytes := estimateRowBytes(subBatch, 100) * len(subBatch)
-		// Timeout: assume minimum 1 MB/s write throughput, with a 30s floor.
-		// A 3MB batch gets 30s; a 60MB batch gets 60s. Prevents 5-minute
-		// silent stalls from outlier-heavy batches that complete just under
-		// a fixed timeout.
+		// Timeout: assume minimum 1 MB/s write throughput, with a 120s floor.
+		// A 3MB batch gets 120s; a 240MB batch gets 240s. The floor tolerates
+		// transient PG stalls (checkpoint, dirty-page eviction under memory
+		// pressure, autovacuum competition) that are uncorrelated with batch
+		// size. Empirically the previous 30s floor caused ~40-60% of Posts
+		// runs to retry — those retries always succeeded on the second
+		// attempt, confirming the stalls were transient rather than real
+		// hangs. With 3 retries still in place above this layer, worst-case
+		// "real hang" detection slows by ~90s but stays bounded.
 		const mb = 1024 * 1024
 		timeoutSecs := (batchBytes + mb - 1) / mb
-		if timeoutSecs < 30 {
-			timeoutSecs = 30
+		if timeoutSecs < 120 {
+			timeoutSecs = 120
 		}
 		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 		_, err = tx.CopyFrom(
@@ -879,8 +884,9 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		const upsertMB = 1024 * 1024
 		upsertBatchBytes := estimateRowBytes(subBatch, 100) * len(subBatch)
 		upsertTimeoutSecs := (upsertBatchBytes + upsertMB - 1) / upsertMB
-		if upsertTimeoutSecs < 30 {
-			upsertTimeoutSecs = 30
+		// Same 120s floor as WriteBatch above — see comment there for rationale.
+		if upsertTimeoutSecs < 120 {
+			upsertTimeoutSecs = 120
 		}
 		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(upsertTimeoutSecs)*time.Second)
 		_, err = conn.Conn().CopyFrom(
