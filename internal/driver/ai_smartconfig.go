@@ -790,10 +790,10 @@ Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck. Do NOT under-provision workers.
 3. chunk_size=50000 is well-tested. Only deviate if historical throughput data clearly shows a better value.
-4. read_ahead_buffers=4 and write_ahead_writers=2 are well-tested. Do not reduce below these.
+4. read_ahead_buffers=4 is a well-tested floor — do not reduce below this. write_ahead_writers=2 is the default, but if past runs in PARAMETER TRAJECTORY show non-zero "chunk retries" for the same configuration, the target's transport is saturated under concurrent writes — drop to write_ahead_writers=1 to halve concurrent COPY connections per worker. ~10-15%% lower peak throughput is the correct trade for eliminating the transient stalls (which can drag overall runtime down 2-3x). When chunk_retry_count is consistently 0 across history, write_ahead_writers=2 is fine.
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
-7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) — these are caused by external factors like disk contention, not parameter choices.
+7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput AND zero chunk retries. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
 
 Respond with ONLY a JSON object:
 {
@@ -916,7 +916,7 @@ Reference baseline (what the system would use without AI tuning):
 - write_ahead_writers: 2
 - parallel_readers: 2
 - max_partitions: %d
-Your job is to BEAT this baseline. Do not recommend fewer workers or smaller buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb).
+Your job is to BEAT this baseline. Do not recommend fewer workers or smaller read/parallel buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb). The exception is write_ahead_writers — see guideline 3.
 
 Memory constraint:
 - estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
@@ -926,7 +926,7 @@ Memory constraint:
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
-3. chunk_size=50000, read_ahead_buffers=4, write_ahead_writers=2 are well-tested defaults. Do not go below these.
+3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but drop to 1 on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch). On these platforms, 2 write threads × workers concurrent COPY connections can saturate the per-flow throughput limit and produce transient stalls. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2.
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
 
 Respond with ONLY a JSON object:
