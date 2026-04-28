@@ -34,8 +34,8 @@ type PerformanceSnapshot struct {
 	// Transfer breakdown
 	ActiveWorkers   int
 	QueueDepth      int // Buffered chunks waiting
-	ErrorCount      int // Tables that exhausted all retries
-	ChunkRetryCount int // Transient chunk retries that succeeded on a later attempt
+	ErrorCount      int // Transfer jobs (per-table or per-partition) that exhausted all retries
+	ChunkRetryCount int // Chunk retry attempts triggered by transient failures (most succeed on the next attempt)
 
 	// Current configuration
 	CurrentConfig ConfigSnapshot

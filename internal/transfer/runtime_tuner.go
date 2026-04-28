@@ -31,8 +31,8 @@ type RuntimeUpdate struct {
 type RuntimeMetrics struct {
 	ActiveJobs      int // Number of concurrently executing transfer jobs
 	QueueDepth      int // Aggregate read-ahead queue depth across all active jobs
-	ErrorCount      int // Cumulative count of tables that exhausted all retries
-	ChunkRetryCount int // Cumulative count of chunk retries (transient failures that succeeded on a later attempt)
+	ErrorCount      int // Cumulative count of transfer jobs (per-table or per-partition) that exhausted all retries
+	ChunkRetryCount int // Cumulative count of chunk retry attempts triggered by transient failures (most succeed on the next attempt; the few that fail terminally are also counted in ErrorCount)
 
 	// Cumulative transfer time breakdown (nanoseconds)
 	TotalQueryNs      int64
@@ -66,8 +66,8 @@ type RuntimeTuner interface {
 	SetTableBatchSize(tableName string, size int)   // Sets per-table batch size override
 	ReportActiveJobs(delta int)                               // Atomically adjust active job count (+1 on start, -1 on end)
 	ReportQueueDepth(delta int)                               // Atomically adjust aggregate queue depth (use deltas per job)
-	ReportError()                                             // Atomically increment terminal error count (table failed after exhausting retries)
-	ReportChunkRetry()                                        // Atomically increment chunk retry count (transient failure that will be retried)
+	ReportError()                                             // Atomically increment terminal error count (job exhausted all retries)
+	ReportChunkRetry()                                        // Atomically increment chunk retry count (transient failure about to be retried)
 	ReportTransferTime(queryNs, scanNs, writeNs, rows int64) // Atomically add cumulative transfer time breakdown
 	Metrics() RuntimeMetrics                                  // Read current operational metrics
 }
@@ -153,17 +153,21 @@ func (rt *runtimeTuner) ReportQueueDepth(delta int) {
 	rt.queueDepth.Add(int32(delta))
 }
 
-// ReportError atomically increments the terminal error count (a table that
-// failed after exhausting all retries).
+// ReportError atomically increments the terminal error count (a transfer job
+// that failed after exhausting all retries). Note: jobs are per-table for
+// non-partitioned tables and per-partition for partitioned tables, so this
+// counter tracks failed jobs/partitions rather than unique failed tables.
 func (rt *runtimeTuner) ReportError() {
 	rt.errorCount.Add(1)
 }
 
 // ReportChunkRetry atomically increments the chunk retry count. Called once per
-// retry attempt for transient errors (deadline exceeded, connection reset, etc.)
-// that the orchestrator's retry loop will retry. Surfaces as a feedback signal
-// to the AI adjuster so it can correlate concurrency / chunk-size choices with
-// transient-stall pressure even when the migration ultimately succeeds.
+// retry attempt that actually executes — i.e., after the backoff completes and
+// the context wasn't canceled — for transient errors (deadline exceeded,
+// connection reset, etc.) that the orchestrator's retry loop will retry.
+// Surfaces as a feedback signal to the AI adjuster so it can correlate
+// concurrency / chunk-size choices with transient-stall pressure even when the
+// migration ultimately succeeds.
 func (rt *runtimeTuner) ReportChunkRetry() {
 	rt.chunkRetryCount.Add(1)
 }
