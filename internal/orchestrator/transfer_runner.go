@@ -59,8 +59,9 @@ func NewTransferRunner(
 
 // RunResult contains the outcome of a transfer run.
 type RunResult struct {
-	TableStats    map[string]*transfer.TransferStats
-	TableFailures []TableFailure
+	TableStats      map[string]*transfer.TransferStats
+	TableFailures   []TableFailure
+	ChunkRetryCount int // Cumulative count of transient chunk retries across the run
 }
 
 // tableStats tracks stats for a single table (internal).
@@ -105,9 +106,23 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		return nil, err
 	}
 
+	// Always create the runtime tuner so chunk-retry / error / queue-depth
+	// metrics flow into RunResult and downstream into ai_tuning_history. The
+	// AI monitor (which makes runtime adjustments) only attaches if
+	// AIAdjust is enabled and an AI mapper is configured, but the tuner's
+	// metrics are useful for the smartconfig history feedback loop even
+	// without runtime adjustment enabled.
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
+		ChunkSize:            r.config.Migration.ChunkSize,
+		ReadAheadBuffers:     r.config.Migration.ReadAheadBuffers,
+		ParallelReaders:      r.config.Migration.ParallelReaders,
+		WriteAheadWriters:    r.config.Migration.WriteAheadWriters,
+		CheckpointFrequency:  r.config.Migration.CheckpointFrequency,
+		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
+	})
+
 	// Setup AI-driven monitoring if enabled (from global secrets)
 	var aiMonitor *monitor.AIMonitor
-	var tuner transfer.RuntimeTuner
 	aiAdjustEnabled := false
 	aiAdjustInterval := 30 * time.Second // Default
 	if secretsCfg, err := secrets.Load(); err == nil {
@@ -126,15 +141,6 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		if err == nil && typeMapper != nil {
 			// Type-assert to AITypeMapper
 			if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
-				// Create runtime tuner with initial values from config
-				tuner = transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
-					ChunkSize:            r.config.Migration.ChunkSize,
-					ReadAheadBuffers:     r.config.Migration.ReadAheadBuffers,
-					ParallelReaders:      r.config.Migration.ParallelReaders,
-					WriteAheadWriters:    r.config.Migration.WriteAheadWriters,
-					CheckpointFrequency:  r.config.Migration.CheckpointFrequency,
-					UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
-				})
 				aiMonitor = monitor.NewAIMonitor(tuner, aiMapper, aiAdjustInterval)
 
 				// Set connection limits from config for AI guardrails
@@ -216,6 +222,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	}
 	for name, ts := range statsMap {
 		result.TableStats[name] = ts.stats
+	}
+	if tuner != nil {
+		result.ChunkRetryCount = tuner.Metrics().ChunkRetryCount
 	}
 
 	return result, nil
@@ -374,6 +383,13 @@ retryLoop:
 				err = ctx.Err()
 				break retryLoop
 			case <-time.After(backoff):
+			}
+			// Increment AFTER the backoff completes (and ctx wasn't canceled),
+			// so the metric reflects retries that actually executed rather than
+			// retries scheduled but aborted by cancellation. Also keeps the
+			// counter in sync with the "retry attempt about to fire" semantic.
+			if tuner != nil {
+				tuner.ReportChunkRetry()
 			}
 		}
 

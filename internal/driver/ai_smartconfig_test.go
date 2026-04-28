@@ -149,7 +149,7 @@ func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
 	m.saved = &record
 	return nil
 }
-func (m *mockHistoryProvider) UpdateAITuningResult(throughput float64, durationSecs float64) error {
+func (m *mockHistoryProvider) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
 	return nil
 }
 
@@ -274,5 +274,81 @@ func TestTrajectoryIncludesAllTunableParams(t *testing.T) {
 		if !strings.Contains(ctx, p) {
 			t.Errorf("trajectory missing %q", p)
 		}
+	}
+}
+
+func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
+	tests := []struct {
+		name         string
+		history      []AITuningRecord
+		wantContains []string
+		wantEmpty    bool
+	}{
+		{
+			name:      "empty history",
+			history:   nil,
+			wantEmpty: true,
+		},
+		{
+			name: "skips records without completed runs",
+			history: []AITuningRecord{
+				{WriteAheadWriters: 2, FinalThroughput: 0, ChunkRetryCount: 5},
+			},
+			wantEmpty: true,
+		},
+		{
+			name: "single config with no retries",
+			history: []AITuningRecord{
+				{WriteAheadWriters: 2, FinalThroughput: 1000000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1100000, ChunkRetryCount: 0},
+			},
+			wantContains: []string{
+				"write_ahead_writers=2 → 0/2 runs retried (0% retry rate, 0 total chunk retries)",
+			},
+		},
+		{
+			name: "mixed retry rates per config — the case the AI must not cherry-pick",
+			history: []AITuningRecord{
+				// waw=2: 3 of 11 retried (matches the empirically observed regression case)
+				{WriteAheadWriters: 2, FinalThroughput: 1200000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1100000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1300000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1250000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1180000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1190000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1320000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 1370000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 2, FinalThroughput: 500000, ChunkRetryCount: 1},
+				{WriteAheadWriters: 2, FinalThroughput: 466000, ChunkRetryCount: 1},
+				{WriteAheadWriters: 2, FinalThroughput: 428000, ChunkRetryCount: 1},
+				// waw=1: 0 of 4 retried
+				{WriteAheadWriters: 1, FinalThroughput: 920000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 1, FinalThroughput: 880000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 1, FinalThroughput: 900000, ChunkRetryCount: 0},
+				{WriteAheadWriters: 1, FinalThroughput: 870000, ChunkRetryCount: 0},
+			},
+			wantContains: []string{
+				"write_ahead_writers=1 → 0/4 runs retried (0% retry rate, 0 total chunk retries)",
+				"write_ahead_writers=2 → 3/11 runs retried (27% retry rate, 3 total chunk retries)",
+				"any non-zero retry rate at a given write_ahead_writers value means the target's transport saturates",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := summarizeWriteAheadWritersRetryRate(tt.history)
+			if tt.wantEmpty {
+				if result != "" {
+					t.Errorf("expected empty result, got: %q", result)
+				}
+				return
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("result missing %q\nfull result:\n%s", want, result)
+				}
+			}
+		})
 	}
 }

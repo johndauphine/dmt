@@ -58,6 +58,10 @@ type Orchestrator struct {
 	runConfig  string
 	opts       Options
 	targetMode TargetModeStrategy
+
+	// Set by transferAll after each run; used by UpdateAITuningResult to persist
+	// retry pressure into ai_tuning_history.
+	lastChunkRetryCount int
 }
 
 // Options configures the orchestrator.
@@ -548,7 +552,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	if transferDurationSecs > 0 {
 		transferThroughput = float64(totalRows) / transferDurationSecs
 	}
-	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs); err != nil {
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 
@@ -692,6 +696,10 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	if err != nil {
 		return nil, err
 	}
+
+	// Stash chunk retry count so the orchestrator can persist it with the run's
+	// final tuning result. Read by the UpdateAITuningResult call sites in Run/Resume.
+	o.lastChunkRetryCount = result.ChunkRetryCount
 
 	return result.TableFailures, nil
 }
@@ -883,7 +891,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 		o.state.CompleteRun(run.ID, "success", "")
 		duration := time.Since(startTime)
-		if err := o.state.UpdateAITuningResult(0, duration.Seconds()); err != nil {
+		if err := o.state.UpdateAITuningResult(0, duration.Seconds(), o.lastChunkRetryCount); err != nil {
 			logging.Debug("Failed to update AI tuning result: %v", err)
 		}
 		logging.Info("Resume complete!")
@@ -1059,7 +1067,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	if transferDurationSecs > 0 {
 		transferThroughput = float64(totalRows) / transferDurationSecs
 	}
-	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs); err != nil {
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 

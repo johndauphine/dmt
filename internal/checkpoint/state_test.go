@@ -119,7 +119,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	}
 
 	// Update with throughput result
-	if err := state.UpdateAITuningResult(450000, 240.5); err != nil {
+	if err := state.UpdateAITuningResult(450000, 240.5, 0); err != nil {
 		t.Fatalf("UpdateAITuningResult() error: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	if err := state.SaveAITuning(record2); err != nil {
 		t.Fatalf("SaveAITuning(record2) error: %v", err)
 	}
-	if err := state.UpdateAITuningResult(300000, 350.0); err != nil {
+	if err := state.UpdateAITuningResult(300000, 350.0, 2); err != nil {
 		t.Fatalf("UpdateAITuningResult(record2) error: %v", err)
 	}
 
@@ -173,6 +173,15 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	// First record should still have its original throughput (not overwritten)
 	if math.Abs(history[1].FinalThroughput-450000) > 1 {
 		t.Errorf("Oldest FinalThroughput = %f, want 450000 (should not be overwritten)", history[1].FinalThroughput)
+	}
+
+	// Newest record should reflect the chunk retry count we passed in
+	if history[0].ChunkRetryCount != 2 {
+		t.Errorf("Newest ChunkRetryCount = %d, want 2", history[0].ChunkRetryCount)
+	}
+	// Oldest record was updated with chunkRetryCount=0
+	if history[1].ChunkRetryCount != 0 {
+		t.Errorf("Oldest ChunkRetryCount = %d, want 0", history[1].ChunkRetryCount)
 	}
 }
 

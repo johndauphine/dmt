@@ -170,8 +170,9 @@ type TuningHistoryProvider interface {
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error
-	// UpdateAITuningResult updates the most recent tuning record with final throughput
-	UpdateAITuningResult(throughput float64, durationSecs float64) error
+	// UpdateAITuningResult updates the most recent tuning record with final
+	// throughput and the cumulative chunk retry count observed during the run.
+	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment from runtime migration.
@@ -208,6 +209,7 @@ type AITuningRecord struct {
 	WasAIUsed            bool      `json:"was_ai_used"`
 	FinalThroughput      float64   `json:"final_throughput,omitempty"`      // rows/sec from completed migration
 	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
+	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`     // chunk retries observed during the run (0 = clean)
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -568,6 +570,9 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 				h.MaxSourceConnections, h.MaxTargetConnections))
 			if h.FinalThroughput > 0 {
 				sb.WriteString(fmt.Sprintf(" → result: %.0f rows/sec (%.0fs)", h.FinalThroughput, h.FinalDurationSecs))
+				if h.ChunkRetryCount > 0 {
+					sb.WriteString(fmt.Sprintf(", %d chunk retries", h.ChunkRetryCount))
+				}
 			}
 			sb.WriteString("\n")
 		}
@@ -579,6 +584,13 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 		// Summarize chunk_size vs throughput relationship if we have data
 		if summary := summarizeChunkPerformance(tuningHistory); summary != "" {
+			sb.WriteString(summary)
+		}
+
+		// Summarize retry rate per write_ahead_writers value so the AI sees
+		// a pre-computed per-configuration retry rate instead of having to
+		// count individual run lines (which it tends to cherry-pick).
+		if summary := summarizeWriteAheadWritersRetryRate(tuningHistory); summary != "" {
 			sb.WriteString(summary)
 		}
 	}
@@ -667,6 +679,61 @@ func detectParameterTrend(history []AITuningRecord) string {
 	}
 
 	return strings.Join(warnings, "; ")
+}
+
+// summarizeWriteAheadWritersRetryRate aggregates retry rate by
+// write_ahead_writers so the per-configuration retry pressure is unmissable
+// in the AI prompt. Without this summary the AI tends to cherry-pick the
+// clean runs of a high-retry configuration and rationalize away the retried
+// ones (observed empirically: an 11-run history with 3 retried runs at waw=2
+// was summarized by the AI as "recent runs show zero retries").
+func summarizeWriteAheadWritersRetryRate(history []AITuningRecord) string {
+	type wawStats struct {
+		totalRuns       int
+		runsWithRetries int
+		totalRetries    int
+	}
+	byWaw := make(map[int]*wawStats)
+	for _, h := range history {
+		if h.FinalThroughput <= 0 {
+			continue // skip records without a completed run (no retry data either)
+		}
+		s, ok := byWaw[h.WriteAheadWriters]
+		if !ok {
+			s = &wawStats{}
+			byWaw[h.WriteAheadWriters] = s
+		}
+		s.totalRuns++
+		if h.ChunkRetryCount > 0 {
+			s.runsWithRetries++
+			s.totalRetries += h.ChunkRetryCount
+		}
+	}
+
+	if len(byWaw) == 0 {
+		return ""
+	}
+
+	waws := make([]int, 0, len(byWaw))
+	for w := range byWaw {
+		waws = append(waws, w)
+	}
+	sort.Ints(waws)
+
+	var sb strings.Builder
+	sb.WriteString("\n  WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE:\n")
+	for _, w := range waws {
+		s := byWaw[w]
+		if s.totalRuns == 0 {
+			continue
+		}
+		retryRate := float64(s.runsWithRetries) / float64(s.totalRuns) * 100
+		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.0f%% retry rate, %d total chunk retries)\n",
+			w, s.runsWithRetries, s.totalRuns, retryRate, s.totalRetries))
+	}
+	sb.WriteString("    Read this as a per-configuration constraint, not aggregate noise: any non-zero retry rate at a given write_ahead_writers value means the target's transport saturates at that concurrency level on this hardware. The retries always succeed eventually but cost 30s+ each, dragging overall throughput down 2-3x on the unlucky runs.\n")
+
+	return sb.String()
 }
 
 // summarizeChunkPerformance aggregates throughput by chunk_size to show
@@ -785,10 +852,10 @@ Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck. Do NOT under-provision workers.
 3. chunk_size=50000 is well-tested. Only deviate if historical throughput data clearly shows a better value.
-4. read_ahead_buffers=4 and write_ahead_writers=2 are well-tested. Do not reduce below these.
+4. read_ahead_buffers=4 is a well-tested floor — do not reduce below this. For write_ahead_writers, consult the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary in the historical context. The rule is mechanical, not interpretive: if write_ahead_writers=2 has any non-zero retry rate (even 1 retried run out of 10), AND write_ahead_writers=1 either has a lower retry rate or hasn't been tried yet, you MUST pick write_ahead_writers=1. Do not rationalize the retries as "transient" or attribute them to other tuning — at this concurrency level on this hardware, the target transport saturates and produces the retries deterministically. The peak throughput at write_ahead_writers=2 is misleading because the retried runs drag the realized throughput down 2-3x. If the summary shows write_ahead_writers=1 with 0%% retry rate over a meaningful sample (>=3 runs), keep it there. Only escalate back to 2 if you have evidence that 1 has been the floor for many runs and throughput is bottlenecked on the writer (which is rare).
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
-7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) — these are caused by external factors like disk contention, not parameter choices.
+7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput AND zero chunk retries. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
 
 Respond with ONLY a JSON object:
 {
@@ -911,7 +978,7 @@ Reference baseline (what the system would use without AI tuning):
 - write_ahead_writers: 2
 - parallel_readers: 2
 - max_partitions: %d
-Your job is to BEAT this baseline. Do not recommend fewer workers or smaller buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb).
+Your job is to BEAT this baseline. Do not recommend fewer workers or smaller read/parallel buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb). The exception is write_ahead_writers — see guideline 3.
 
 Memory constraint:
 - estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
@@ -921,7 +988,7 @@ Memory constraint:
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
-3. chunk_size=50000, read_ahead_buffers=4, write_ahead_writers=2 are well-tested defaults. Do not go below these.
+3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but drop to 1 on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch). On these platforms, 2 write threads × workers concurrent COPY connections can saturate the per-flow throughput limit and produce transient stalls. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2.
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
 
 Respond with ONLY a JSON object:
