@@ -1453,4 +1453,3 @@ func TestOpenAIResponse_ReasoningContent(t *testing.T) {
 		})
 	}
 }
-

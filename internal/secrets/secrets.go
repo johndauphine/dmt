@@ -555,7 +555,7 @@ ai:
       # - mistral, mixtral: 8192-32768 (varies)
 
     lmstudio:
-      base_url: "http://localhost:1234/v1"
+      base_url: "http://localhost:1234"
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
       # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
