@@ -1455,16 +1455,25 @@ func TestOpenAIResponse_ReasoningContent(t *testing.T) {
 }
 
 func TestOpenAIResponse_ErrorMessage(t *testing.T) {
+	// 220-char string used to verify the 200-char truncation cap inherited from
+	// sanitizeErrorResponse — picked >200 so the trailing "..." appears.
+	longMsg := strings.Repeat("x", 220)
 	tests := []struct {
-		name string
-		body string
-		want string
+		name      string
+		body      string
+		want      string
+		wantHasUp string // optional: substring that must be present (for redaction-style assertions)
 	}{
-		{"no error field", `{"choices":[{"message":{"content":"ok"}}]}`, ""},
-		{"explicit null error", `{"error":null,"choices":[]}`, ""},
-		{"openai/anthropic struct shape", `{"error":{"message":"rate limit","type":"rate_limit"}}`, "rate limit"},
-		{"lmstudio bare string shape", `{"error":"Unexpected endpoint or method. (POST /v1/v1/chat/completions)"}`, "Unexpected endpoint or method. (POST /v1/v1/chat/completions)"},
-		{"struct with empty message falls back", `{"error":{"type":"unknown"}}`, `{"type":"unknown"}`},
+		{name: "no error field", body: `{"choices":[{"message":{"content":"ok"}}]}`, want: ""},
+		{name: "explicit null error", body: `{"error":null,"choices":[]}`, want: ""},
+		// json.RawMessage doesn't see leading whitespace (it's part of the parent doc), so this
+		// covers the trimmed-form case directly via the resp.Error assignment.
+		{name: "whitespace-padded null still no-error", body: `{"error": null }`, want: ""},
+		{name: "openai/anthropic struct shape", body: `{"error":{"message":"rate limit","type":"rate_limit"}}`, want: "rate limit"},
+		{name: "lmstudio bare string shape", body: `{"error":"Unexpected endpoint or method. (POST /v1/v1/chat/completions)"}`, want: "Unexpected endpoint or method. (POST /v1/v1/chat/completions)"},
+		{name: "struct with empty message falls back to raw JSON", body: `{"error":{"type":"unknown"}}`, want: `{"type":"unknown"}`},
+		{name: "very long string is truncated to ~200 chars + ...", body: `{"error":"` + longMsg + `"}`, want: longMsg[:200] + "..."},
+		{name: "API-style key in error message is redacted", body: `{"error":"failed: token sk-abcdef0123456789abcdef0123456789abcdef rejected"}`, wantHasUp: "[REDACTED]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1473,6 +1482,12 @@ func TestOpenAIResponse_ErrorMessage(t *testing.T) {
 				t.Fatalf("unmarshal failed: %v", err)
 			}
 			got := resp.ErrorMessage()
+			if tt.wantHasUp != "" {
+				if !strings.Contains(got, tt.wantHasUp) {
+					t.Errorf("ErrorMessage() = %q, want to contain %q", got, tt.wantHasUp)
+				}
+				return
+			}
 			if got != tt.want {
 				t.Errorf("ErrorMessage() = %q, want %q", got, tt.want)
 			}
