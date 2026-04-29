@@ -755,9 +755,37 @@ type openAIResponse struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Error *struct {
+	// Error is stored as RawMessage so that both shapes are accepted:
+	//   OpenAI/Anthropic style: {"error": {"message": "...", "type": "..."}}
+	//   LM Studio style:        {"error": "..."}
+	// Without this, a string-shaped error blows up the entire response unmarshal,
+	// turning a meaningful provider error message into "cannot unmarshal string
+	// into Go struct field openAIResponse.error".
+	Error json.RawMessage `json:"error,omitempty"`
+}
+
+// ErrorMessage extracts a human-readable error message from openAIResponse.Error,
+// handling both the struct shape ({"message": "..."}) used by OpenAI/Anthropic
+// and the bare-string shape ("...") used by LM Studio. Returns "" if there is
+// no error in the response.
+func (r *openAIResponse) ErrorMessage() string {
+	if len(r.Error) == 0 || string(r.Error) == "null" {
+		return ""
+	}
+	// Try struct shape first.
+	var asStruct struct {
 		Message string `json:"message"`
-	} `json:"error"`
+	}
+	if err := json.Unmarshal(r.Error, &asStruct); err == nil && asStruct.Message != "" {
+		return asStruct.Message
+	}
+	// Fall back to string shape.
+	var asString string
+	if err := json.Unmarshal(r.Error, &asString); err == nil && asString != "" {
+		return asString
+	}
+	// Unknown shape — surface the raw JSON so the user can at least see it.
+	return string(r.Error)
 }
 
 func (m *AITypeMapper) queryOpenAIAPI(ctx context.Context, prompt string, url string) (string, error) {
@@ -816,8 +844,8 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 		return "", fmt.Errorf("parsing response: %w", err)
 	}
 
-	if openAIResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
+	if msg := openAIResp.ErrorMessage(); msg != "" {
+		return "", fmt.Errorf("API error: %s", msg)
 	}
 
 	if len(openAIResp.Choices) == 0 {
@@ -910,8 +938,8 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 		return "", fmt.Errorf("parsing response: %w", err)
 	}
 
-	if openAIResp.Error != nil {
-		return "", fmt.Errorf("API error: %s", openAIResp.Error.Message)
+	if msg := openAIResp.ErrorMessage(); msg != "" {
+		return "", fmt.Errorf("API error: %s", msg)
 	}
 
 	if len(openAIResp.Choices) == 0 {

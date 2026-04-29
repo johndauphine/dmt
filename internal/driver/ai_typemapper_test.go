@@ -1453,3 +1453,29 @@ func TestOpenAIResponse_ReasoningContent(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIResponse_ErrorMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"no error field", `{"choices":[{"message":{"content":"ok"}}]}`, ""},
+		{"explicit null error", `{"error":null,"choices":[]}`, ""},
+		{"openai/anthropic struct shape", `{"error":{"message":"rate limit","type":"rate_limit"}}`, "rate limit"},
+		{"lmstudio bare string shape", `{"error":"Unexpected endpoint or method. (POST /v1/v1/chat/completions)"}`, "Unexpected endpoint or method. (POST /v1/v1/chat/completions)"},
+		{"struct with empty message falls back", `{"error":{"type":"unknown"}}`, `{"type":"unknown"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp openAIResponse
+			if err := json.Unmarshal([]byte(tt.body), &resp); err != nil {
+				t.Fatalf("unmarshal failed: %v", err)
+			}
+			got := resp.ErrorMessage()
+			if got != tt.want {
+				t.Errorf("ErrorMessage() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
