@@ -566,12 +566,55 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 > more of the 10GB dataset cached. The PG shared_buffers decrease (2GB→1GB) did not hurt — write
 > throughput is dominated by WAL and CopyFrom, not shared_buffers.
 
+### Constrained Re-validation (582eb82 — 10GB WSL2 / 8 CPU)
+
+**Environment changes from 24GB re-validation:**
+- **Code**: 582eb82 (PRs #135–#137 LM Studio infrastructure fixes; same dmt logic as 0735127)
+- **WSL2**: 10GB RAM, 8 CPUs (`.wslconfig` capped vs. 24GB / 10 CPU above)
+- **MSSQL container**: 5GB (`--memory=5g`), `max server memory` = 3072 (set via `sp_configure`, not env var)
+- **PG container**: 3GB (`--memory=3g`), `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB, durability-off (`fsync=off`, `synchronous_commit=off`, `full_page_writes=off`, `wal_level=minimal`)
+- **AI tuning**: Anthropic (`claude-haiku-4-5-20251001`), selected workers=6, parallel_readers=4, chunk_size=50000, write_ahead_writers=1, read_ahead_buffers=4
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 462K rows/s | 301K rows/s | 1m4s |
+| 2 | **581K rows/s** | **409K rows/s** | 47s |
+| 3 | 546K rows/s | 408K rows/s | 47s |
+| 4 | 527K rows/s | 375K rows/s | 52s |
+| **Avg (2-4)** | **551K rows/s** | **398K rows/s** | **49s** |
+
+> AI converged on `write_ahead_writers=1` from run 1 onward — the smartconfig retry-rate
+> rule (PR #133) flagged `write_ahead_writers=2` as risky given the constrained target
+> transport. Chunk size dropped to 50000 (vs 100000 in the 24GB run) to fit the smaller
+> per-worker memory budget. Run 1 cold cache penalty is larger here (-16% vs warm) than
+> in the 24GB run (-7%), because the 3GB MSSQL buffer pool can hold only ~30% of the
+> 10GB dataset, so disk seeks dominate the first pass.
+
+**vs 24GB re-validation:**
+
+| Metric | 24GB / 10 CPU | 10GB / 8 CPU | Delta |
+|--------|---------------|--------------|-------|
+| Transfer (warm avg) | 635K rows/s | 551K rows/s | **-13%** |
+| Overall (warm avg) | 424K rows/s | 398K rows/s | **-6%** |
+| MSSQL buffer pool | 8GB | 3GB | -5GB |
+| WSL2 cores | 10 | 8 | -2 |
+| AI workers | 6 | 6 | — |
+| AI parallel_readers | 3 | 4 | +1 |
+| AI chunk_size | 100000 | 50000 | -50% |
+| AI write_ahead_writers | 2 | 1 | -1 |
+
+> The 13% transfer-side regression tracks the smaller MSSQL buffer pool (3GB vs 8GB
+> can no longer keep the full 10GB dataset hot) and 2 fewer CPU cores. Overall throughput
+> is hit less (-6%) because PG-side write speed is unchanged — durability is still off
+> and `shared_buffers=1GB` matches the 24GB run.
+
 ### Cross-Machine Comparison (SO2010, MSSQL→PG, transfer-only)
 
 | Machine | Source Engine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro (SS2022) |
 |---------|-------------|-------|-----|-------------|---------------|-----------|
 | M3 Max (16GB Docker) | SQL Server 2022 (Rosetta) | 14 | 36GB | 2.7 GB/s | 472K rows/s | -65% |
 | WSL2 ARM64 (afda4e0) | Azure SQL Edge | 10 | 24GB | 1.3 GB/s | 487K rows/s | -64% |
+| WSL2 ARM64 (582eb82, **constrained**) | Azure SQL Edge | 8 | 10GB | n/m | 551K rows/s | -59% |
 | **WSL2 ARM64 (0735127)** | **Azure SQL Edge** | **10** | **24GB** | **2.4 GB/s** | **635K rows/s** | **-53%** |
 | M5 Pro (8GB Docker) | Azure SQL Edge | 15 | 24GB | 4.4 GB/s | 886K rows/s | -35% |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
