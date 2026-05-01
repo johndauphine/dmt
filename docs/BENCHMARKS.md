@@ -571,7 +571,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 **Environment changes from 24GB re-validation:**
 - **Code**: 582eb82 (PRs #135–#137 LM Studio infrastructure fixes; same dmt logic as 0735127)
 - **WSL2**: 10GB RAM, 8 CPUs (`.wslconfig` capped vs. 24GB / 10 CPU above)
-- **MSSQL container**: 5GB (`--memory=5g`), `max server memory` = 3072 (set via `sp_configure`, not env var)
+- **MSSQL container**: 5GB (`--memory=5g`), `max server memory` = 3072MB (set via `sp_configure`, not env var)
 - **PG container**: 3GB (`--memory=3g`), `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB, durability-off (`fsync=off`, `synchronous_commit=off`, `full_page_writes=off`, `wal_level=minimal`)
 - **AI tuning**: Anthropic (`claude-haiku-4-5-20251001`), selected workers=6, parallel_readers=4, chunk_size=50000, write_ahead_writers=1, read_ahead_buffers=4
 
@@ -658,8 +658,8 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 |---------|-------------|-------|-----|-------------|---------------|-----------|
 | M3 Max (16GB Docker) | SQL Server 2022 (Rosetta) | 14 | 36GB | 2.7 GB/s | 472K rows/s | -65% |
 | WSL2 ARM64 (afda4e0) | Azure SQL Edge | 10 | 24GB | 1.3 GB/s | 487K rows/s | -64% |
-| WSL2 ARM64 (582eb82, **constrained**) | Azure SQL Edge | 8 | 10GB | n/m | 551K rows/s | -59% |
-| WSL2 ARM64 (582eb82, 16 CPU / 11GB) | Azure SQL Edge | 16 | 11GB | n/m | 527K rows/s | -60% |
+| WSL2 ARM64 (582eb82, **constrained**) | Azure SQL Edge | 8 | 10GB | — | 551K rows/s | -59% |
+| WSL2 ARM64 (582eb82, 16 CPU / 11GB) | Azure SQL Edge | 16 | 11GB | — | 527K rows/s | -60% |
 | **WSL2 ARM64 (0735127)** | **Azure SQL Edge** | **10** | **24GB** | **2.4 GB/s** | **635K rows/s** | **-53%** |
 | M5 Pro (8GB Docker) | Azure SQL Edge | 15 | 24GB | 4.4 GB/s | 886K rows/s | -35% |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
