@@ -566,12 +566,100 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 > more of the 10GB dataset cached. The PG shared_buffers decrease (2GB→1GB) did not hurt — write
 > throughput is dominated by WAL and CopyFrom, not shared_buffers.
 
+### Constrained Re-validation (582eb82 — 10GB WSL2 / 8 CPU)
+
+**Environment changes from 24GB re-validation:**
+- **Code**: 582eb82 (PRs #135–#137 LM Studio infrastructure fixes; same dmt logic as 0735127)
+- **WSL2**: 10GB RAM, 8 CPUs (`.wslconfig` capped vs. 24GB / 10 CPU above)
+- **MSSQL container**: 5GB (`--memory=5g`), `max server memory` = 3072MB (set via `sp_configure`, not env var)
+- **PG container**: 3GB (`--memory=3g`), `shared_buffers` = 1GB, `work_mem` = 256MB, `maintenance_work_mem` = 512MB, durability-off (`fsync=off`, `synchronous_commit=off`, `full_page_writes=off`, `wal_level=minimal`)
+- **AI tuning**: Anthropic (`claude-haiku-4-5-20251001`), selected workers=6, parallel_readers=4, chunk_size=50000, write_ahead_writers=1, read_ahead_buffers=4
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 (cold) | 462K rows/s | 301K rows/s | 1m4s |
+| 2 | **581K rows/s** | **409K rows/s** | 47s |
+| 3 | 546K rows/s | 408K rows/s | 47s |
+| 4 | 527K rows/s | 375K rows/s | 52s |
+| **Avg (2-4)** | **551K rows/s** | **398K rows/s** | **49s** |
+
+> AI converged on `write_ahead_writers=1` from run 1 onward — the smartconfig retry-rate
+> rule (PR #133) flagged `write_ahead_writers=2` as risky given the constrained target
+> transport. Chunk size dropped to 50000 (vs 100000 in the 24GB run) to fit the smaller
+> per-worker memory budget. Run 1 cold cache penalty is larger here (-16% vs warm) than
+> in the 24GB run (-7%), because the 3GB MSSQL buffer pool can hold only ~30% of the
+> 10GB dataset, so disk seeks dominate the first pass.
+
+**vs 24GB re-validation:**
+
+| Metric | 24GB / 10 CPU | 10GB / 8 CPU | Delta |
+|--------|---------------|--------------|-------|
+| Transfer (warm avg) | 635K rows/s | 551K rows/s | **-13%** |
+| Overall (warm avg) | 424K rows/s | 398K rows/s | **-6%** |
+| MSSQL buffer pool | 8GB | 3GB | -5GB |
+| WSL2 cores | 10 | 8 | -2 |
+| AI workers | 6 | 6 | — |
+| AI parallel_readers | 3 | 4 | +1 |
+| AI chunk_size | 100000 | 50000 | -50% |
+| AI write_ahead_writers | 2 | 1 | -1 |
+
+> The 13% transfer-side regression tracks the smaller MSSQL buffer pool (3GB vs 8GB
+> can no longer keep the full 10GB dataset hot) and 2 fewer CPU cores. Overall throughput
+> is hit less (-6%) because PG-side write speed is unchanged — durability is still off
+> and `shared_buffers=1GB` matches the 24GB run.
+
+### Resource-Headroom Re-validation (582eb82 — 11GB WSL2 / 16 CPU)
+
+**Environment changes from 10GB / 8 CPU run:**
+- **Code**: 582eb82 (same dmt logic; only `.wslconfig` changed)
+- **WSL2**: 11GB RAM, 16 CPUs (`.wslconfig`: `memory=11GB processors=16 swap=4GB`) on a Snapdragon X2 Elite host with 16GB total RAM and 18 cores
+- **Containers, AI provider, schema**: unchanged from the 10GB / 8 CPU run
+
+| Run | Workers (AI) | Transfer | Overall | Duration |
+|-----|--------------|----------|---------|----------|
+| 1 (cold) | 14 | 506K rows/s | 354K rows/s | 54s |
+| 2 | 6 | 421K rows/s | 323K rows/s | 1m0s |
+| 3 | 6 | 451K rows/s | 339K rows/s | 57s |
+| 4 | 6 | **707K rows/s** | **483K rows/s** | 40s |
+| **Avg (2-4)** | — | **527K rows/s** | **382K rows/s** | **52s** |
+
+> **AI anchored on prior history, not new resources.** Run 1 saw 16 cores and scaled to
+> `workers=14` (`cpu_cores - 2`), measured 506K rows/s transfer, then in runs 2–4 the
+> tuner observed that historical workers=6 runs (from the 8-CPU baseline) had higher
+> median throughput and reverted to `workers=6`. Other AI-selected params were stable
+> across runs 2–4: `chunk_size=50000`, `parallel_readers=4`, `write_ahead_writers=1`,
+> `read_ahead_buffers=4` — identical to the 10GB / 8 CPU run.
+>
+> **Throughput regressed slightly vs. the 10GB / 8 CPU baseline** (527K vs 551K transfer
+> warm avg; 382K vs 398K overall). With the AI parameters held constant, doubling cores
+> (8 → 16) and adding 1GB of memory did **not** translate into more dmt throughput on
+> this host — the migration was already CPU- and memory-bound by the database
+> containers, not by dmt's pipeline. Run-to-run variance was also higher (warm range
+> 421–707K vs 527–581K in the 10GB run), tracking a more crowded host.
+>
+> **WSL2 hard-crashed during the first attempt at run 3.** The `.wslconfig` allocates
+> 11GB out of 16GB total host RAM, leaving only ~5GB for Windows + non-WSL processes.
+> Mid-migration WSL2 went unresponsive and the host rebooted. After bringing the
+> session back up, runs 1–2 were intact (cleanly written to disk before the crash) and
+> runs 3–4 were re-executed cleanly. **Operationally: 11GB allocation on a 16GB host
+> is fragile** — keep the WSL2 memory cap at no more than ~60–65% of host RAM if
+> running real workloads.
+>
+> **Note on `--output-file` JSON correctness:** when dmt resumes a previously-crashed
+> run from its SQLite checkpoint, the periodic `--output-file` writer continues to emit
+> the *original* run's stale state (`status: running`, partial row count) instead of
+> being replaced by the new run's results. The migration logs reflect the actual run.
+> The numbers in this table are pulled from `Migration complete:` log lines, not
+> from the JSON output files. Worth filing as a separate issue.
+
 ### Cross-Machine Comparison (SO2010, MSSQL→PG, transfer-only)
 
 | Machine | Source Engine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro (SS2022) |
 |---------|-------------|-------|-----|-------------|---------------|-----------|
 | M3 Max (16GB Docker) | SQL Server 2022 (Rosetta) | 14 | 36GB | 2.7 GB/s | 472K rows/s | -65% |
 | WSL2 ARM64 (afda4e0) | Azure SQL Edge | 10 | 24GB | 1.3 GB/s | 487K rows/s | -64% |
+| WSL2 ARM64 (582eb82, **constrained**) | Azure SQL Edge | 8 | 10GB | — | 551K rows/s | -59% |
+| WSL2 ARM64 (582eb82, 16 CPU / 11GB) | Azure SQL Edge | 16 | 11GB | — | 527K rows/s | -60% |
 | **WSL2 ARM64 (0735127)** | **Azure SQL Edge** | **10** | **24GB** | **2.4 GB/s** | **635K rows/s** | **-53%** |
 | M5 Pro (8GB Docker) | Azure SQL Edge | 15 | 24GB | 4.4 GB/s | 886K rows/s | -35% |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
