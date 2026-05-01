@@ -652,6 +652,87 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 > The numbers in this table are pulled from `Migration complete:` log lines, not
 > from the JSON output files. Worth filing as a separate issue.
 
+### Sweet-Spot Re-validation (5dbd5ab — 9GB WSL2 / 14 CPU)
+
+**Environment changes from the 11GB / 16 CPU run:**
+- **Code**: 5dbd5ab (same dmt logic as 582eb82; PR #138 was docs-only)
+- **WSL2**: 9GB RAM, 14 CPUs (`.wslconfig`: `memory=9GB processors=14 swap=4GB`) — settled here after the 11GB cap crashed the host
+- **MSSQL container**: 4GB (`--memory=4g`, trimmed from 5g via `docker update`), `max server memory` = 3072MB unchanged
+- **PG container**: 2GB (`--memory=2g`, trimmed from 3g), durability/buffers unchanged
+- **AI provider, schema, dataset**: unchanged
+
+Two independent batches of 4 runs each were executed back-to-back to verify reproducibility, on the same `~/.dmt/state.db` (i.e. accumulated AI tuning history from prior runs).
+
+| Batch | Run 1 (cold) | Run 2 | Run 3 | Run 4 | Warm Avg (2-4) |
+|-------|--------------|-------|-------|-------|----------------|
+| A — transfer | 610K rows/s | 780K | 792K | 816K | **796K rows/s** |
+| A — overall  | 425K rows/s | 512K | 519K | 504K | **512K rows/s** |
+| B — transfer | 727K rows/s | 797K | 817K | 792K | **802K rows/s** |
+| B — overall  | 498K rows/s | 514K | 536K | 491K | **514K rows/s** |
+
+> **The two batches reproduce within 1%** (796K vs 802K transfer; 512K vs 514K overall).
+> Combined warm avg across the 6 warm runs: **799K transfer, 513K overall.** AI selected
+> `workers=6, parallel_readers=4, chunk_size=50000, write_ahead_writers=1, read_ahead_buffers=4`
+> on every iteration — identical to the 10GB and 11GB runs.
+>
+> **Why this configuration wins on this host.** The 9-table SO2010 migration is bottlenecked
+> by the database containers (sqledge-so2010 / pg-so2010 CPU+memory), not by dmt's pipeline.
+> Adding cores or RAM beyond what the containers consume just adds host-side noise. The
+> 9GB/14CPU cap leaves more headroom for the Windows host (~7GB free vs ~5GB at the 11GB
+> cap) and avoids the host-crash failure mode. Trimming containers to 4GB/2GB (vs 5GB/3GB
+> at the higher caps) keeps the same 6GB combined DB budget inside a smaller WSL2 footprint.
+>
+> **Caveat on AI tuner warm-up.** The SQLite checkpoint at `~/.dmt/migrate.db` had 15+
+> historical runs by the start of this re-test, so the tuner converged on the proven
+> `workers=6` configuration immediately on run 1. With a fresh checkpoint, run 1 would
+> re-explore. **The 799K/513K figure is the operational steady-state**, not a cold-start
+> number — but see the cold-tuner verification below.
+
+#### Cold-Tuner Verification (same hardware, fresh `migrate.db`, restarted DB containers)
+
+To confirm the sweet-spot result was not a tuning artifact, we wiped `~/.dmt/migrate.db`,
+restarted both DB containers (clearing their buffer pools — but OS page cache stayed hot,
+no sudo for `vm.drop_caches`), and re-ran 4 iterations from scratch.
+
+| Run | AI workers | Transfer | Overall |
+|-----|-----------:|---------:|--------:|
+| 1 (cold tuner, cold buffer pools) | 12 | 596K rows/s | 432K rows/s |
+| 2 | 12 | 741K rows/s | 499K rows/s |
+| 3 | 12 | 825K rows/s | 553K rows/s |
+| 4 | 12 | **836K rows/s** | 540K rows/s |
+| **Warm avg (2-4)** | 12 | **801K rows/s** | **531K rows/s** |
+
+> **The cold-tuner warm avg (801K / 531K) matches the warm-tuner warm avg (799K / 513K)
+> within 1% on transfer and is actually *higher* on overall (531K vs 513K).** The
+> hardware genuinely sustains this throughput on the 9GB/14CPU cap — the warm-tuner
+> result was not inflated by accumulated history.
+>
+> **Notable side finding:** the cold tuner explored `workers=12` (cpu_cores-2) and
+> reached the same throughput as the warm tuner's preferred `workers=6`. The AI's
+> warm-history preference for `workers=6` was driven by a single peak observation
+> (run 10 of the original 10GB/8CPU batch at 707K rows/s) that wasn't structurally
+> better — at this hardware scale, workers from 6 to 12 all hit the DB-container
+> bottleneck at the same ceiling. `write_ahead_writers=1` is the load-bearing parameter,
+> not the worker count.
+
+**vs prior WSL2 ARM64 re-validations:**
+
+| Metric              | 10GB / 8 CPU | 11GB / 16 CPU | 9GB / 14 CPU |
+|---------------------|--------------|---------------|--------------|
+| Transfer (warm avg) | 551K rows/s  | 527K rows/s   | **799K rows/s** |
+| Overall (warm avg)  | 398K rows/s  | 382K rows/s   | **513K rows/s** |
+| WSL2 cap            | 10GB         | 11GB          | 9GB          |
+| Cores               | 8            | 16            | 14           |
+| Windows host headroom | ~6GB       | ~5GB          | ~7GB         |
+| Container budget    | 5GB+3GB      | 5GB+3GB       | 4GB+2GB      |
+| AI workers          | 6            | 6             | 6            |
+| AI history at run 1 | 0            | 4             | 15+          |
+| Host crashes mid-batch | 0         | 1             | 0            |
+
+> The 9GB/14CPU cap is the sweet spot for this hardware: highest sustained throughput,
+> the lowest host-crash risk, and the same AI parameters as the other two configurations.
+> ~45% faster transfer-side than 10GB/8CPU, ~52% faster than 11GB/16CPU.
+
 ### Cross-Machine Comparison (SO2010, MSSQL→PG, transfer-only)
 
 | Machine | Source Engine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro (SS2022) |
@@ -660,6 +741,7 @@ Target DB dropped and recreated between each run to eliminate autovacuum interfe
 | WSL2 ARM64 (afda4e0) | Azure SQL Edge | 10 | 24GB | 1.3 GB/s | 487K rows/s | -64% |
 | WSL2 ARM64 (582eb82, **constrained**) | Azure SQL Edge | 8 | 10GB | — | 551K rows/s | -59% |
 | WSL2 ARM64 (582eb82, 16 CPU / 11GB) | Azure SQL Edge | 16 | 11GB | — | 527K rows/s | -60% |
+| WSL2 ARM64 (5dbd5ab, **sweet spot** 9GB / 14 CPU) | Azure SQL Edge | 14 | 9GB | — | 799K rows/s | -41% |
 | **WSL2 ARM64 (0735127)** | **Azure SQL Edge** | **10** | **24GB** | **2.4 GB/s** | **635K rows/s** | **-53%** |
 | M5 Pro (8GB Docker) | Azure SQL Edge | 15 | 24GB | 4.4 GB/s | 886K rows/s | -35% |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
