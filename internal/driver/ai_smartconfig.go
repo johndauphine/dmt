@@ -158,8 +158,12 @@ type AutoTuneOutput struct {
 	UpsertMergeChunkSize int    `json:"upsert_merge_chunk_size"`
 	CheckpointFrequency  int    `json:"checkpoint_frequency"`
 	MaxRetries           int    `json:"max_retries"`
-	ObservedRetryRates   string `json:"observed_retry_rates,omitempty"`
-	Reasoning            string `json:"reasoning,omitempty"`
+	// ObservedRetryRates is intentionally NOT omitempty — the prompt requires
+	// the model to populate it (verbatim citation from the per-waw retry-rate
+	// summary, or "no history"). An empty value indicates the model skipped the
+	// grounding step and the reasoning may be ungrounded.
+	ObservedRetryRates string `json:"observed_retry_rates"`
+	Reasoning          string `json:"reasoning,omitempty"`
 }
 
 // TuningHistoryProvider provides access to historical tuning data.
@@ -731,7 +735,11 @@ func summarizeWriteAheadWritersRetryRate(history []AITuningRecord) string {
 			continue
 		}
 		retryRate := float64(s.runsWithRetries) / float64(s.totalRuns) * 100
-		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.0f%% retry rate, %d total chunk retries)\n",
+		// Use %.1f%% so a small-but-nonzero retry rate (e.g. 1/200 = 0.5%%)
+		// doesn't round to 0%% and falsely trip clause 4(b) "rule does not
+		// apply." The raw runsWithRetries/totalRuns counts are also rendered
+		// alongside as the unambiguous source of truth.
+		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.1f%% retry rate, %d total chunk retries)\n",
 			w, s.runsWithRetries, s.totalRuns, retryRate, s.totalRetries))
 	}
 	sb.WriteString("    Read this as a per-configuration observation. The retry-rate rule applies ONLY to waw values that show a non-zero retry rate above. If every row above shows 0% retry rate over a meaningful sample, the rule is silent — the choice must be driven by observed throughput from the trajectory, not by an assumed mechanism. Retries are factual events from the chunk_retry_count column; do not invent or repeat causal explanations (e.g. \"transport saturation\", \"connection pool exhaustion\") that are not visible in this column.\n")
@@ -899,6 +907,14 @@ Respond with ONLY a JSON object:
 	if err := json.Unmarshal([]byte(jsonStr), &output); err != nil {
 		logging.Debug("AI response JSON parse error: %s", truncate(jsonStr, 200))
 		return nil, fmt.Errorf("parsing AI response JSON: %w", err)
+	}
+
+	// Verify the model actually grounded its choice in the per-waw retry-rate
+	// summary (issue #139). We don't fail the run — the parameter recommendation
+	// is still usable — but the warning surfaces that the reasoning may be
+	// ungrounded.
+	if output.ObservedRetryRates == "" {
+		logging.Warn("AI smartconfig response omitted observed_retry_rates; reasoning may be ungrounded (see #139)")
 	}
 
 	// Trust AI recommendations - only apply minimal sanity checks for obviously invalid values
