@@ -330,7 +330,11 @@ func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
 			wantContains: []string{
 				"write_ahead_writers=1 → 0/4 runs retried (0% retry rate, 0 total chunk retries)",
 				"write_ahead_writers=2 → 3/11 runs retried (27% retry rate, 3 total chunk retries)",
-				"any non-zero retry rate at a given write_ahead_writers value means the target's transport saturates",
+				// The framing must be neutral and data-grounded, not assertive about
+				// causal mechanisms (issue #139): the AI was echoing "transport saturation"
+				// even when retry rates were uniformly zero.
+				"The retry-rate rule applies ONLY to waw values that show a non-zero retry rate",
+				"do not invent or repeat causal explanations",
 			},
 		},
 	}
