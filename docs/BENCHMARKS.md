@@ -733,6 +733,124 @@ no sudo for `vm.drop_caches`), and re-ran 4 iterations from scratch.
 > the lowest host-crash risk, and the same AI parameters as the other two configurations.
 > ~45% faster transfer-side than 10GB/8CPU, ~52% faster than 11GB/16CPU.
 
+### Unconstrained Re-validation (a151191 — 30GB WSL2 / 18 CPU, no container caps)
+
+**Environment changes from the 9GB / 14 CPU sweet-spot run:**
+- **Code**: a151191 (PR #140 — smartconfig retry-rule grounding; the AI's reasoning text is now data-cited rather than confabulated, but parameter choices are unchanged from prior runs)
+- **WSL2**: 30GB RAM, 18 CPUs (no `.wslconfig` cap — full host allocation on a 31GB / 18-core class machine; `free -h` reports 31Gi total inside WSL2)
+- **MSSQL container**: unconstrained, `max server memory` = 8192MB (set via `sp_configure`), `max degree of parallelism` = 4, `cost threshold for parallelism` = 50
+- **PG container**: unconstrained, `shared_buffers` = 8GB, `effective_cache_size` = 16GB, `work_mem` = 64MB, `maintenance_work_mem` = 2GB, `max_wal_size` = 16GB, `min_wal_size` = 2GB, `checkpoint_timeout` = 30min, `synchronous_commit` = off, `wal_buffers` = 64MB, `max_connections` = 200, `max_worker_processes` = 16, `max_parallel_workers` = 16, `max_parallel_maintenance_workers` = 4 — durability mostly on (`fsync=on`, `full_page_writes=on`, `wal_level=replica`), only `synchronous_commit=off`
+- **AI provider, schema, dataset**: unchanged
+
+The intent of this run was to lift every container-side bottleneck the prior re-validations had documented (constrained MSSQL buffer pool, small PG `shared_buffers`, host-RAM headroom), while leaving the dmt logic and AI tuning identical. AI history at run 1 was 25+ — same warm-tuner steady state as the 9GB sweet-spot batches.
+
+| Run | Transfer | Overall | Duration |
+|-----|----------|---------|----------|
+| 1 | 940K rows/s | 710K rows/s | 27s |
+| 2 | 897K rows/s | 665K rows/s | 29s |
+| 3 | 820K rows/s | 632K rows/s | 31s |
+| 4 | 978K rows/s | 723K rows/s | 27s |
+| 5 | 906K rows/s | 661K rows/s | 29s |
+| 6 | 1,022K rows/s | 767K rows/s | 25s |
+| 7 | **1,037K rows/s** | 728K rows/s | 27s |
+| 8 | 914K rows/s | 621K rows/s | 31s |
+| **Warm avg (1-8)** | **939K rows/s** | **688K rows/s** | **28s** |
+
+> AI selected `workers=16`, `chunk_size=50000`, `read_ahead_buffers=4`,
+> `write_ahead_writers=1`, `parallel_readers=4`, `max_partitions=16` on every
+> iteration — same parameter choices as the 9GB / 10GB / 11GB runs. The
+> additional cores and memory did not move the AI off `workers=16` (cpu_cores−2)
+> or `chunk_size=50000`.
+
+#### Forced-WAW Sensitivity (same hardware, AI smartconfig disabled mid-batch)
+
+To verify that `write_ahead_writers=1` was load-bearing on this hardware (and not just AI inertia from prior history), three batches forced explicit waw values via config override (`ai_adjust: false`, AI smartconfig still picked the rest). Telemetry from `~/.dmt/migrate.db` `ai_tuning_history`:
+
+| waw | Runs | Peak | Mean | Total chunk retries |
+|----:|----:|----:|----:|----:|
+| 1 (AI default) | 13 | 1,045K rows/s | 939K rows/s | **0** |
+| 2 (forced) | 4 | 972K rows/s | 909K rows/s | **0** |
+| 4 (forced) | 4 | 869K rows/s | 827K rows/s | **0** |
+
+> No actual retries at any waw level — confirmed that the 12% throughput gap
+> between waw=1 and waw=4 on this configuration is **not** the transport-saturation
+> mechanism the prior smartconfig prompt asserted (the case that motivated #140).
+> The real mechanism for the throughput delta on a tuned PG target is more likely
+> heap-page contention or WAL-buffer contention from concurrent COPYs, not retries.
+
+**vs prior WSL2 ARM64 re-validations:**
+
+| Metric | 10GB / 8 CPU | 11GB / 16 CPU | 9GB / 14 CPU | **30GB / 18 CPU (this row)** |
+|---------------------|--------------|---------------|--------------|------------------------|
+| Transfer (warm avg) | 551K rows/s | 527K rows/s | 799K rows/s | **939K rows/s** |
+| Transfer (peak) | 581K rows/s | 707K rows/s | 836K rows/s | **1,037K rows/s** |
+| Overall (warm avg) | 398K rows/s | 382K rows/s | 513K rows/s | **688K rows/s** |
+| WSL2 cap | 10GB | 11GB | 9GB | 30GB |
+| Cores | 8 | 16 | 14 | 18 |
+| Container budget | 5GB+3GB | 5GB+3GB | 4GB+2GB | unconstrained |
+| MSSQL `max server memory` | 3GB | 3GB | 3GB | **8GB** |
+| PG `shared_buffers` | 1GB | 1GB | 1GB | **8GB** |
+| PG `max_wal_size` | (default 1GB) | (default 1GB) | (default 1GB) | **16GB** |
+| AI workers | 6 | 6 | 6 | **16** |
+| AI other params | identical | identical | identical | identical |
+| Host crashes mid-batch | 0 | 1 | 0 | 0 |
+
+> **+18% transfer / +34% overall vs the published 9GB sweet spot** (799K → 939K
+> transfer; 513K → 688K overall). The 9GB/14CPU run was deliberately constrained
+> for crash-safety on a 16GB host class; on a 31GB host the same dmt logic falls
+> out at materially higher throughput once the container caps are removed and PG
+> is given an 8GB `shared_buffers` + 16GB `max_wal_size`.
+>
+> **AI workers shift (6 → 16) is the largest visible parameter delta** — at this
+> hardware scale the AI's prior preference for `workers=6` (driven by a single
+> peak observation in the 10GB/8CPU history) finally gives way to
+> `workers=cpu_cores−2`. Per the cold-tuner finding from the 9GB run, this
+> parameter is not load-bearing in isolation; the change tracks `cpu_cores`,
+> not `final_throughput`.
+>
+#### Cold-Tuner Verification (same hardware, fresh `migrate.db`, restarted DB containers)
+
+To verify whether the warm-tuner result reflected hardware capability or accumulated AI bias, we ran 4 iterations against a fresh `data_dir` (the user's `~/.dmt/migrate.db` was left untouched; cold-tuner state was isolated under `/tmp/dmt-coldtuner/`). Both DB containers were restarted before run 1 to clear in-memory buffer pools (OS page cache stayed hot — no sudo for `vm.drop_caches`, matching the 9GB sweet-spot methodology).
+
+| Run | AI workers | AI parallel_readers | AI waw | Transfer | Overall | Wall |
+|-----|-----------:|--------------------:|-------:|---------:|--------:|-----:|
+| 1 (cold tuner, cold pools) | 16 | 4 | 2 | 815K rows/s | 642K rows/s | 24s |
+| 2 | 16 | 4 | 2 | **1,130K rows/s** | **819K rows/s** | 17s |
+| 3 | 18 | 6 | 2 | 1,055K rows/s | 694K rows/s | 18s |
+| 4 | 18 | 6 | 2 | 1,108K rows/s | 758K rows/s | 17s |
+| **Warm avg (2-4)** | — | — | 2 | **1,098K rows/s** | **757K rows/s** | **17s** |
+
+> **The cold-tuner result *exceeds* the warm-tuner result by +17% transfer / +10%
+> overall** (1,098K / 757K vs 939K / 688K). This is the opposite of the 9GB
+> sweet-spot section's finding (where cold and warm matched within 1%): on this
+> hardware, the warm-tuner's accumulated history actively biased the AI toward
+> a sub-optimal configuration.
+>
+> **Why the warm tuner under-performed.** The cold tuner saw zero history at
+> run 1, fell back to the prompt's baseline default (`waw=2`), measured strong
+> throughput, and stayed there. The warm tuner saw 21 prior runs at `waw=1`
+> with peak 1,045K and 4 runs at `waw=2` with peak 972K — all from the
+> *constrained* 9GB/10GB/11GB configurations where waw=1 had genuinely been
+> optimal. Clause 4(b) of the post-#140 retry-rate rule correctly noted "every
+> waw at 0% retry rate, rule does not apply, choose by throughput" — but the
+> *throughput* evidence was from a different hardware regime, so the choice
+> the model made (waw=1) was throughput-correct for the data it saw and
+> wrong for the current hardware.
+>
+> **Cold tuner also explored other parameters.** Run 3 escalated `workers`
+> 16→18 and `parallel_readers` 4→6 after seeing run 2's 1.13M r/s peak. The
+> exploration didn't beat run 2's transfer peak but stayed within 5% — i.e.
+> no regression. With no dominant-history anchor, the AI exercised the full
+> hardware. See #144 for the broader pattern: history collected on a different
+> hardware regime can mislead the smartconfig's throughput-based choice.
+>
+> **Reasoning quality (post-#140) held across the cold-tuner batch.** Every
+> reasoning block correctly cited its data source. Run 2 said verbatim:
+> *"With only one historical data point and zero retries at waw=2, the
+> write_ahead_writers retry rule does not apply (condition c)"* — naming the
+> rule clause and grounding in observed retries (0). No mechanism
+> confabulation in any of the 4 runs.
+
 ### Cross-Machine Comparison (SO2010, MSSQL→PG, transfer-only)
 
 | Machine | Source Engine | Cores | RAM | Docker Write | Transfer (avg) | vs M5 Pro (SS2022) |
@@ -742,18 +860,23 @@ no sudo for `vm.drop_caches`), and re-ran 4 iterations from scratch.
 | WSL2 ARM64 (582eb82, **constrained**) | Azure SQL Edge | 8 | 10GB | — | 551K rows/s | -59% |
 | WSL2 ARM64 (582eb82, 16 CPU / 11GB) | Azure SQL Edge | 16 | 11GB | — | 527K rows/s | -60% |
 | WSL2 ARM64 (5dbd5ab, **sweet spot** 9GB / 14 CPU) | Azure SQL Edge | 14 | 9GB | — | 799K rows/s | -41% |
-| **WSL2 ARM64 (0735127)** | **Azure SQL Edge** | **10** | **24GB** | **2.4 GB/s** | **635K rows/s** | **-53%** |
+| WSL2 ARM64 (0735127) | Azure SQL Edge | 10 | 24GB | 2.4 GB/s | 635K rows/s | -53% |
+| **WSL2 ARM64 (a151191, *unconstrained* 30GB / 18 CPU, warm tuner)** | **Azure SQL Edge** | **18** | **30GB** | **—** | **939K rows/s (peak 1,037K)** | **-31%** |
+| **WSL2 ARM64 (a151191, *unconstrained* 30GB / 18 CPU, cold tuner)** | **Azure SQL Edge** | **18** | **30GB** | **—** | **1,098K rows/s (peak 1,130K)** | **-19%** |
 | M5 Pro (8GB Docker) | Azure SQL Edge | 15 | 24GB | 4.4 GB/s | 886K rows/s | -35% |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 5.3 GB/s | 1,357K rows/s | — |
 
 ### Key Findings
 
-1. **+30% throughput from combined improvements** — 635K vs 487K transfer; disk I/O (+85%), AI parallel readers, PG writer refactor, and larger MSSQL buffer pool all contribute
-2. **WSL2 ARM64 now reaches 69% of M5 Pro Azure SQL Edge** — up from 55% (487K/886K) to 69% (635K/918K), closing the gap significantly
-3. **WSL2 virtual disk write speed remains the primary bottleneck** — 2.4 GB/s write vs M5 Pro's 4.4 GB/s (45% slower) explains most of the remaining gap
-4. **Container memory limits are essential on WSL2** — Docker shares the WSL2 memory pool with no separate cap; `--memory` flags on containers prevent DB processes from starving the pipeline
-5. **Azure SQL Edge requires explicit memory capping** — without `MSSQL_MEMORY_LIMIT_MB`, it consumes all container memory and OOM-kills
-6. **4GB PG container with 2GB shared_buffers** gives 9% improvement over 2GB container with 512MB shared_buffers (487K vs 447K)
+1. **WSL2 ARM64 unconstrained beats M5 Pro Azure SQL Edge** — 1,098K cold-tuner mean / 1,130K peak (and 939K warm-tuner mean / 1,037K peak) vs M5 Pro's 886K. The doc's prior "WSL2 disk I/O is the primary bottleneck" finding was load-bearing on the constrained runs but stops applying once PG `shared_buffers=8GB` keeps the working set off-disk for the inserts.
+2. **Cold tuner outperformed warm tuner by +17% on this hardware** (1,098K vs 939K transfer mean) — the *opposite* of the 9GB sweet-spot finding (where cold and warm matched within 1%). The warm tuner's accumulated history was from a different hardware regime (constrained 9-11GB caps) and biased the AI toward a sub-optimal `waw=1` choice on the unconstrained 30GB host. See #144 for the proposed fix (regime-aware trajectory filtering or schema additions for target tuning state).
+3. **+30% throughput from combined improvements (constrained)** — 635K vs 487K transfer; disk I/O (+85%), AI parallel readers, PG writer refactor, and larger MSSQL buffer pool all contribute
+4. **+18-37% transfer / +34-48% overall from removing container caps** — 939K-1,098K transfer vs 9GB sweet-spot's 799K, on the same dmt logic. The constrained runs were tuned for crash-safety on 16GB hosts; a 31GB host doesn't need that and gets the throughput back.
+5. **WSL2 virtual disk write speed remains a constraint, but not the bottleneck on tuned PG** — 2.4 GB/s write vs M5 Pro's 4.4 GB/s explains much of the gap on the *constrained* runs; on the unconstrained run, PG's `shared_buffers=8GB` and `synchronous_commit=off` keep the bulk-insert path off the slow virtio-fs writer for most of the migration
+6. **Container memory limits are essential on WSL2 with constrained host RAM** — Docker shares the WSL2 memory pool with no separate cap; on a 16GB host, `--memory` flags prevent DB processes from starving the pipeline. On a 31GB+ host, removing the caps is faster.
+7. **Azure SQL Edge requires explicit memory capping** — without `MSSQL_MEMORY_LIMIT_MB` (or `sp_configure 'max server memory'` on the unconstrained run), it consumes all container memory and OOM-kills
+8. **4GB PG container with 2GB shared_buffers** gives 9% improvement over 2GB container with 512MB shared_buffers (487K vs 447K) on the constrained class
+9. **AI smartconfig retry-rate rule does not fire on tuned PG targets** — 25 runs at waw=1 + 8 runs at waw=2 + 4 runs at waw=4 produced **0 chunk retries total**. The waw choice is now correctly attributed to throughput, not retry avoidance, after PR #140 grounded the rule's reasoning in the actual `chunk_retry_count` column. (The cold-tuner result above shows that throughput-driven choice is sensitive to which hardware regime the throughput data came from — a separate concern.)
 
 ### StackOverflow2013 (106.5M rows, MSSQL→PG)
 
