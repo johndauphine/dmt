@@ -121,15 +121,29 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
 	})
 
-	// Setup AI-driven monitoring if enabled (from global secrets)
+	// Setup AI-driven monitoring if enabled. Precedence (highest to lowest):
+	//   1. Per-migration config `migration.ai_adjust`
+	//   2. Global secrets default `migration_defaults.ai_adjust`
+	//   3. Disabled (false)
+	// Pre-#149 this read directly from secrets, so the per-migration override
+	// had no path to disable the runtime tuner.
 	var aiMonitor *monitor.AIMonitor
 	aiAdjustEnabled := false
 	aiAdjustInterval := 30 * time.Second // Default
-	if secretsCfg, err := secrets.Load(); err == nil {
+	if r.config.Migration.AIAdjust != nil {
+		aiAdjustEnabled = *r.config.Migration.AIAdjust
+	} else if secretsCfg, err := secrets.Load(); err == nil {
 		defaults := secretsCfg.GetMigrationDefaults()
 		if defaults.AIAdjust != nil {
 			aiAdjustEnabled = *defaults.AIAdjust
 		}
+	}
+	if r.config.Migration.AIAdjustInterval != "" {
+		if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
+			aiAdjustInterval = d
+		}
+	} else if secretsCfg, err := secrets.Load(); err == nil {
+		defaults := secretsCfg.GetMigrationDefaults()
 		if defaults.AIAdjustInterval != "" {
 			if d, err := time.ParseDuration(defaults.AIAdjustInterval); err == nil {
 				aiAdjustInterval = d

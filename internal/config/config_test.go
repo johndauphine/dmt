@@ -575,6 +575,77 @@ func TestAutoTuneUserOverride(t *testing.T) {
 	}
 }
 
+// TestAIAdjustExplicitFalseRespected pins issue #149: setting
+// `migration.ai_adjust: false` in a per-migration YAML config must not be
+// silently flipped back to true by the auto-enable logic. Pre-fix, the field
+// was a plain `bool` and the parser couldn't distinguish "explicit false"
+// from "unset", so the auto-enable code always overrode false→true.
+func TestAIAdjustExplicitFalseRespected(t *testing.T) {
+	enabled := false
+	cfg := minConfigWithAI()
+	cfg.Migration.AIAdjust = &enabled
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.AIAdjust == nil {
+		t.Fatal("AIAdjust was nil after applyDefaults — auto-enable should preserve explicit pointer")
+	}
+	if *cfg.Migration.AIAdjust != false {
+		t.Error("explicit ai_adjust: false was overridden to true (issue #149 regression)")
+	}
+}
+
+// TestAIAdjustExplicitTrueRespected verifies the symmetric case — explicit
+// `ai_adjust: true` must also stick (no special-case behavior).
+func TestAIAdjustExplicitTrueRespected(t *testing.T) {
+	enabled := true
+	cfg := minConfigWithAI()
+	cfg.Migration.AIAdjust = &enabled
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.AIAdjust == nil || *cfg.Migration.AIAdjust != true {
+		t.Errorf("explicit ai_adjust: true should stick; got %v", cfg.Migration.AIAdjust)
+	}
+}
+
+// TestAIAdjustUnsetAutoEnabled covers the third state — the field is unset
+// (nil) and the user has AI configured, so the auto-enable kicks in.
+func TestAIAdjustUnsetAutoEnabled(t *testing.T) {
+	cfg := minConfigWithAI()
+	// Migration.AIAdjust left nil (zero value for *bool).
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.AIAdjust == nil {
+		t.Fatal("AIAdjust still nil after auto-enable — auto-enable should have populated it")
+	}
+	if *cfg.Migration.AIAdjust != true {
+		t.Error("auto-enable should set AIAdjust to true when unset and AI is configured")
+	}
+}
+
+// minConfigWithAI returns the minimal Config that triggers the AI auto-enable
+// branch in applyDefaults.
+func minConfigWithAI() *Config {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type: "postgres", Host: "localhost", Port: 5432,
+			Database: "source", User: "user", Password: "pass",
+		},
+		Target: TargetConfig{
+			Type: "mssql", Host: "localhost", Port: 1433,
+			Database: "target", User: "user", Password: "pass",
+		},
+		AI: &AIConfig{
+			APIKey:   "sk-ant-test",
+			Provider: "anthropic",
+		},
+	}
+	cfg.autoConfig.CPUCores = 16
+	return cfg
+}
+
 func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	// Test that connection pools get reasonable values
 	cfg := &Config{
