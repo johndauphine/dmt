@@ -1,8 +1,10 @@
 package driver
 
 import (
+	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectParameterTrend(t *testing.T) {
@@ -134,6 +136,10 @@ func TestDetectParameterTrend(t *testing.T) {
 }
 
 // mockHistoryProvider implements TuningHistoryProvider for testing.
+// `history` is treated as the full ai_tuning_history; GetAITuningHistory respects
+// the limit param (smartconfig uses trajectoryLimit for the bounded trajectory),
+// and the aggregate methods compute over the FULL history exactly the way the
+// SQL backend would.
 type mockHistoryProvider struct {
 	saved   *AITuningRecord
 	history []AITuningRecord
@@ -142,9 +148,97 @@ type mockHistoryProvider struct {
 func (m *mockHistoryProvider) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
 	return nil, nil
 }
+
 func (m *mockHistoryProvider) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
-	return m.history, nil
+	// Match the SQL backend's ordering: most-recent first by Timestamp.
+	// Without this, tests that depend on "last N" semantics could drift away
+	// from production behavior (caught in PR #145 review). SliceStable
+	// preserves test-fixture order for rows with equal (e.g. zero) Timestamps.
+	sorted := make([]AITuningRecord, len(m.history))
+	copy(sorted, m.history)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Timestamp.After(sorted[j].Timestamp)
+	})
+	if limit > 0 && limit < len(sorted) {
+		return sorted[:limit], nil
+	}
+	return sorted, nil
 }
+
+func (m *mockHistoryProvider) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
+	type stats struct{ totalRuns, retried, totalRetries int; peak, sum float64 }
+	byWaw := map[int]*stats{}
+	for _, h := range m.history {
+		if h.FinalThroughput <= 0 {
+			continue
+		}
+		s, ok := byWaw[h.WriteAheadWriters]
+		if !ok {
+			s = &stats{}
+			byWaw[h.WriteAheadWriters] = s
+		}
+		s.totalRuns++
+		s.sum += h.FinalThroughput
+		if h.FinalThroughput > s.peak {
+			s.peak = h.FinalThroughput
+		}
+		if h.ChunkRetryCount > 0 {
+			s.retried++
+			s.totalRetries += h.ChunkRetryCount
+		}
+	}
+	keys := make([]int, 0, len(byWaw))
+	for k := range byWaw {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	out := make([]WawAggregateRecord, 0, len(keys))
+	for _, k := range keys {
+		s := byWaw[k]
+		out = append(out, WawAggregateRecord{
+			WriteAheadWriters: k,
+			TotalRuns:         s.totalRuns,
+			RunsWithRetries:   s.retried,
+			TotalRetries:      s.totalRetries,
+			PeakThroughput:    s.peak,
+			MeanThroughput:    s.sum / float64(s.totalRuns),
+		})
+	}
+	return out, nil
+}
+
+func (m *mockHistoryProvider) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
+	type stats struct{ runs int; sum float64 }
+	byChunk := map[int]*stats{}
+	for _, h := range m.history {
+		if h.FinalThroughput <= 0 {
+			continue
+		}
+		s, ok := byChunk[h.ChunkSize]
+		if !ok {
+			s = &stats{}
+			byChunk[h.ChunkSize] = s
+		}
+		s.runs++
+		s.sum += h.FinalThroughput
+	}
+	keys := make([]int, 0, len(byChunk))
+	for k := range byChunk {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	out := make([]ChunkSizeAggregateRecord, 0, len(keys))
+	for _, k := range keys {
+		s := byChunk[k]
+		out = append(out, ChunkSizeAggregateRecord{
+			ChunkSize:     k,
+			Runs:          s.runs,
+			AvgThroughput: s.sum / float64(s.runs),
+		})
+	}
+	return out, nil
+}
+
 func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
 	m.saved = &record
 	return nil
@@ -234,6 +328,90 @@ func TestSaveTuningWithActualParams_NoPending(t *testing.T) {
 	}
 }
 
+// TestFormatHistoricalContextBoundsTrajectory pins the issue #141 behavior:
+// the trajectory section in the prompt MUST be bounded to trajectoryLimit rows
+// regardless of how much history exists, but the per-waw and per-chunk-size
+// summaries downstream MUST reflect the FULL history (not just the bounded
+// slice). Without this split, the retry-rate rule's denominators would silently
+// drop older runs.
+//
+// The fixture uses distinct timestamps and distinct throughput values so the
+// test can verify which rows are selected, not just how many — i.e. that the
+// trajectory really is the *most recent* 20 (not just any 20). PR #145 review
+// flagged the prior version as too weak.
+func TestFormatHistoricalContextBoundsTrajectory(t *testing.T) {
+	// Build 50 history rows. Throughput is a function of index so we can detect
+	// which rows landed in the trajectory: row i has FinalThroughput=1000000+i.
+	// Older rows (low i) have older Timestamps so production sorting puts them
+	// at the back — the trajectory should contain rows i in [30..49] only.
+	const totalRows = 50
+	base := time.Now()
+	hist := make([]AITuningRecord, 0, totalRows)
+	for i := 0; i < totalRows; i++ {
+		waw := 1
+		if i%2 == 0 {
+			waw = 2
+		}
+		hist = append(hist, AITuningRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			Timestamp:         base.Add(time.Duration(i) * time.Minute),
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			Workers:           16,
+			ReadAheadBuffers:  4,
+			ParallelReaders:   4,
+			MaxPartitions:     16,
+			FinalThroughput:   float64(1000000 + i),
+			FinalDurationSecs: 20,
+			ChunkRetryCount:   0,
+		})
+	}
+	mock := &mockHistoryProvider{history: hist}
+	analyzer := &SmartConfigAnalyzer{historyProvider: mock, dbType: "mssql", targetDBType: "postgres"}
+	ctx := analyzer.formatHistoricalContext()
+
+	// Trajectory section must announce the bounded count, not the full 50.
+	wantHeader := "PARAMETER TRAJECTORY (most recent 20 analyses"
+	if !strings.Contains(ctx, wantHeader) {
+		t.Errorf("trajectory header missing %q\nfull context:\n%s", wantHeader, ctx)
+	}
+
+	// Numbered rows should stop at 20.
+	if strings.Contains(ctx, "  21. ") {
+		t.Error("trajectory rendered more than trajectoryLimit rows; row 21 should not appear")
+	}
+
+	// Recency assertion: the most recent run (i=49, throughput=1000049) must be
+	// in the trajectory, and the oldest run (i=0, throughput=1000000) must NOT
+	// be. Without the Timestamp DESC sort in the mock + production code, this
+	// would slip through.
+	if !strings.Contains(ctx, "1000049 rows/sec") {
+		t.Errorf("trajectory missing the most-recent run (throughput=1000049); selection is not by recency\nfull context:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "1000000 rows/sec") {
+		t.Errorf("trajectory contains the oldest run (throughput=1000000); should have been bounded out by recency\nfull context:\n%s", ctx)
+	}
+	// And a row from the middle (i=20, throughput=1000020) is in the bounded
+	// window: rows 30..49 are kept; row 20 is dropped.
+	if strings.Contains(ctx, "1000020 rows/sec") {
+		t.Errorf("trajectory contains row from beyond the bounded window (throughput=1000020 = i=20); only the 20 most recent (i=30..49) should appear\nfull context:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "1000030 rows/sec") {
+		t.Errorf("trajectory missing the boundary recent row (throughput=1000030 = i=30, which IS in the most-recent 20)\nfull context:\n%s", ctx)
+	}
+
+	// But the per-waw summary must still see all 50 rows (25/waw).
+	wantWaw1 := "write_ahead_writers=1 → 0/25 runs retried (0.0% retry rate, 0 total chunk retries)"
+	wantWaw2 := "write_ahead_writers=2 → 0/25 runs retried (0.0% retry rate, 0 total chunk retries)"
+	if !strings.Contains(ctx, wantWaw1) {
+		t.Errorf("per-waw summary missing %q (denominator should reflect full history, not bounded trajectory)\nfull context:\n%s", wantWaw1, ctx)
+	}
+	if !strings.Contains(ctx, wantWaw2) {
+		t.Errorf("per-waw summary missing %q\nfull context:\n%s", wantWaw2, ctx)
+	}
+}
+
 // TestTrajectoryRendersZeroChunkRetries pins the post-#139 behavior: a clean
 // run (chunk_retry_count=0) MUST render ", 0 chunk retries" in the trajectory.
 // Pre-fix, the suffix was omitted for clean runs, leaving zeros invisible and
@@ -312,7 +490,14 @@ func TestTrajectoryIncludesAllTunableParams(t *testing.T) {
 	}
 }
 
-func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
+// TestFormatWawAggregateBlock exercises the rendering of the per-write_ahead_writers
+// retry-rate block. Inputs are raw history records for ergonomic test fixtures;
+// the test pipes them through mockHistoryProvider.GetAITuningAggregatesByWaw
+// (which mirrors the SQL backend's GROUP BY) and then through the format helper.
+//
+// Renamed from TestSummarizeWriteAheadWritersRetryRate after PR #141 split the
+// aggregator (now SQL-side) from the formatter (now formatWawAggregateBlock).
+func TestFormatWawAggregateBlock(t *testing.T) {
 	tests := []struct {
 		name         string
 		history      []AITuningRecord
@@ -394,7 +579,17 @@ func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := summarizeWriteAheadWritersRetryRate(tt.history)
+			// Aggregation moved to SQL (issue #141); drive the test through the
+			// mock's aggregator so the test inputs stay easy to express as raw
+			// records. Pre-#141 this was a single-call path; now it's two
+			// calls (aggregate, then format) but the formatted output is the
+			// same load-bearing string the AI prompt depends on.
+			mock := &mockHistoryProvider{history: tt.history}
+			aggs, err := mock.GetAITuningAggregatesByWaw("", "")
+			if err != nil {
+				t.Fatalf("aggregator: %v", err)
+			}
+			result := formatWawAggregateBlock(aggs)
 			if tt.wantEmpty {
 				if result != "" {
 					t.Errorf("expected empty result, got: %q", result)

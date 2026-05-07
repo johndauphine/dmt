@@ -50,6 +50,14 @@ type StateBackend interface {
 	// AI tuning history for analyze command (optional - file backend returns empty/no-op)
 	SaveAITuning(record AITuningRecord) error
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
+	// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over the
+	// FULL ai_tuning_history (no limit). Pulled via SQL GROUP BY so the smartconfig
+	// can show bounded recent trajectory rows in the prompt while still presenting
+	// honest retry-rate denominators across all history (issue #141).
+	GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error)
+	// GetAITuningAggregatesByChunkSize returns per-chunk_size aggregates over the
+	// FULL ai_tuning_history. Same rationale as GetAITuningAggregatesByWaw.
+	GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error)
 	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
 }
 
@@ -101,6 +109,26 @@ type AITuningRecord struct {
 	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
 	FinalDurationSecs float64 `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
 	ChunkRetryCount   int     `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
+}
+
+// WawAggregateRecord pre-aggregates ai_tuning_history rows by write_ahead_writers.
+// Used by smartconfig to keep retry-rate denominators honest while bounding the
+// per-row trajectory in the prompt (issue #141). Ordered by WriteAheadWriters ASC.
+type WawAggregateRecord struct {
+	WriteAheadWriters int     `json:"write_ahead_writers"`
+	TotalRuns         int     `json:"total_runs"`
+	RunsWithRetries   int     `json:"runs_with_retries"`
+	TotalRetries      int     `json:"total_retries"`
+	PeakThroughput    float64 `json:"peak_throughput"`
+	MeanThroughput    float64 `json:"mean_throughput"`
+}
+
+// ChunkSizeAggregateRecord pre-aggregates ai_tuning_history rows by chunk_size.
+// Ordered by ChunkSize ASC.
+type ChunkSizeAggregateRecord struct {
+	ChunkSize     int     `json:"chunk_size"`
+	Runs          int     `json:"runs"`
+	AvgThroughput float64 `json:"avg_throughput"`
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment decision.
