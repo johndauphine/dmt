@@ -239,9 +239,12 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
-	// AI-driven real-time parameter adjustment
-	AIAdjust         bool   `yaml:"ai_adjust"`          // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"` // How often AI evaluates metrics (default: 30s)
+	// AI-driven real-time parameter adjustment.
+	// AIAdjust is *bool so the parser can distinguish "user explicitly set false"
+	// from "field unset" (which inherits the secrets default). A plain bool would
+	// silently revert false → true at the auto-enable step (issue #149).
+	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"` // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
+	AIAdjustInterval string `yaml:"ai_adjust_interval"`  // How often AI evaluates metrics (default: 30s)
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -411,6 +414,18 @@ func (c *Config) applyGlobalDefaults() {
 	}
 	if c.Migration.SampleSize == 0 && defaults.SampleSize > 0 {
 		c.Migration.SampleSize = defaults.SampleSize
+	}
+
+	// AI adjust: inherit from secrets only if the per-migration field is unset.
+	// Both layers use *bool so we can correctly distinguish unset (nil) from
+	// explicit-false (issue #149). Without this, the auto-enable site downstream
+	// fills nil → &true and silently overrides any global `ai_adjust: false`.
+	if c.Migration.AIAdjust == nil && defaults.AIAdjust != nil {
+		v := *defaults.AIAdjust
+		c.Migration.AIAdjust = &v
+	}
+	if c.Migration.AIAdjustInterval == "" && defaults.AIAdjustInterval != "" {
+		c.Migration.AIAdjustInterval = defaults.AIAdjustInterval
 	}
 
 	// Checkpoint and recovery
@@ -748,9 +763,13 @@ func (c *Config) applyDefaults() error {
 			c.AI.TypeMapping.Enabled = &enabled
 		}
 
-		// AI adjust: auto-enable when AI is configured
-		if !c.Migration.AIAdjust {
-			c.Migration.AIAdjust = true
+		// AI adjust: auto-enable when AI is configured, but only if the user
+		// didn't explicitly set it. nil means "unset by user" — fill in true.
+		// Pre-#149 this was a `bool` field with `if !c.Migration.AIAdjust { ...
+		// = true }` which clobbered any explicit `ai_adjust: false`.
+		if c.Migration.AIAdjust == nil {
+			enabled := true
+			c.Migration.AIAdjust = &enabled
 		}
 		if c.Migration.AIAdjustInterval == "" {
 			c.Migration.AIAdjustInterval = "30s"

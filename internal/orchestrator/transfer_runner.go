@@ -16,7 +16,6 @@ import (
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
@@ -121,19 +120,19 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
 	})
 
-	// Setup AI-driven monitoring if enabled (from global secrets)
+	// Setup AI-driven monitoring if enabled. Precedence is now handled
+	// entirely in the config layer (applyGlobalDefaults inherits secrets
+	// defaults into Migration when unset, then the AI auto-enable site fills
+	// in the final default). This site just reads the resolved values.
 	var aiMonitor *monitor.AIMonitor
 	aiAdjustEnabled := false
-	aiAdjustInterval := 30 * time.Second // Default
-	if secretsCfg, err := secrets.Load(); err == nil {
-		defaults := secretsCfg.GetMigrationDefaults()
-		if defaults.AIAdjust != nil {
-			aiAdjustEnabled = *defaults.AIAdjust
-		}
-		if defaults.AIAdjustInterval != "" {
-			if d, err := time.ParseDuration(defaults.AIAdjustInterval); err == nil {
-				aiAdjustInterval = d
-			}
+	aiAdjustInterval := 30 * time.Second
+	if r.config.Migration.AIAdjust != nil {
+		aiAdjustEnabled = *r.config.Migration.AIAdjust
+	}
+	if r.config.Migration.AIAdjustInterval != "" {
+		if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
+			aiAdjustInterval = d
 		}
 	}
 	if aiAdjustEnabled {
