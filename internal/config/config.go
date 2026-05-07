@@ -416,6 +416,18 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.SampleSize = defaults.SampleSize
 	}
 
+	// AI adjust: inherit from secrets only if the per-migration field is unset.
+	// Both layers use *bool so we can correctly distinguish unset (nil) from
+	// explicit-false (issue #149). Without this, the auto-enable site downstream
+	// fills nil → &true and silently overrides any global `ai_adjust: false`.
+	if c.Migration.AIAdjust == nil && defaults.AIAdjust != nil {
+		v := *defaults.AIAdjust
+		c.Migration.AIAdjust = &v
+	}
+	if c.Migration.AIAdjustInterval == "" && defaults.AIAdjustInterval != "" {
+		c.Migration.AIAdjustInterval = defaults.AIAdjustInterval
+	}
+
 	// Checkpoint and recovery
 	if c.Migration.CheckpointFrequency == 0 && defaults.CheckpointFrequency > 0 {
 		c.Migration.CheckpointFrequency = defaults.CheckpointFrequency

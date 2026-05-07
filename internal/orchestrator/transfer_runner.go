@@ -16,7 +16,6 @@ import (
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
@@ -121,36 +120,18 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
 	})
 
-	// Setup AI-driven monitoring if enabled. Precedence (highest to lowest):
-	//   1. Per-migration config `migration.ai_adjust` / `ai_adjust_interval`
-	//   2. Global secrets default from migration_defaults
-	//   3. Disabled / 30s default
-	// Pre-#149 this read directly from secrets, so the per-migration override
-	// had no path to disable the runtime tuner.
+	// Setup AI-driven monitoring if enabled. Precedence is now handled
+	// entirely in the config layer (applyGlobalDefaults inherits secrets
+	// defaults into Migration when unset, then the AI auto-enable site fills
+	// in the final default). This site just reads the resolved values.
 	var aiMonitor *monitor.AIMonitor
 	aiAdjustEnabled := false
-	aiAdjustInterval := 30 * time.Second // Default
-
-	// Load secrets once for both fallbacks — cheap but no reason to do it twice.
-	var secretsDefaults *secrets.MigrationDefaults
-	if secretsCfg, err := secrets.Load(); err == nil {
-		secretsDefaults = secretsCfg.GetMigrationDefaults()
-	}
-
-	switch {
-	case r.config.Migration.AIAdjust != nil:
+	aiAdjustInterval := 30 * time.Second
+	if r.config.Migration.AIAdjust != nil {
 		aiAdjustEnabled = *r.config.Migration.AIAdjust
-	case secretsDefaults != nil && secretsDefaults.AIAdjust != nil:
-		aiAdjustEnabled = *secretsDefaults.AIAdjust
 	}
-
-	switch {
-	case r.config.Migration.AIAdjustInterval != "":
+	if r.config.Migration.AIAdjustInterval != "" {
 		if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
-			aiAdjustInterval = d
-		}
-	case secretsDefaults != nil && secretsDefaults.AIAdjustInterval != "":
-		if d, err := time.ParseDuration(secretsDefaults.AIAdjustInterval); err == nil {
 			aiAdjustInterval = d
 		}
 	}

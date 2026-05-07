@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 func TestMSSQLDSNURLEncoding(t *testing.T) {
@@ -623,6 +625,66 @@ func TestAIAdjustUnsetAutoEnabled(t *testing.T) {
 	if *cfg.Migration.AIAdjust != true {
 		t.Error("auto-enable should set AIAdjust to true when unset and AI is configured")
 	}
+}
+
+// TestAIAdjustInheritsSecretsFalse pins the second-tier precedence from PR #150
+// review: when the per-migration YAML doesn't set ai_adjust but the secrets
+// file's migration_defaults.ai_adjust is explicitly false, the per-migration
+// field must inherit that false (not get auto-enabled to true). Pre-Copilot-fix
+// this was broken — applyGlobalDefaults didn't copy AIAdjust, then the
+// AI auto-enable site flipped nil → true, silently overriding the secrets
+// default.
+func TestAIAdjustInheritsSecretsFalse(t *testing.T) {
+	tmp := t.TempDir()
+	secretsPath := filepath.Join(tmp, "dmt-config.yaml")
+	if err := os.WriteFile(secretsPath, []byte(`
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "sk-ant-test"
+
+migration_defaults:
+  ai_adjust: false
+  ai_adjust_interval: "60s"
+`), 0600); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	t.Setenv("DMT_SECRETS_FILE", secretsPath)
+	secrets.Reset()
+	t.Cleanup(secrets.Reset)
+
+	cfg := minConfigWithoutAI()
+	// Migration.AIAdjust left nil; secrets defaults should fill it with false.
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.AIAdjust == nil {
+		t.Fatal("AIAdjust still nil — applyGlobalDefaults should have inherited the secrets value")
+	}
+	if *cfg.Migration.AIAdjust != false {
+		t.Errorf("AIAdjust = true; expected false (from migration_defaults.ai_adjust). Auto-enable site clobbered the secrets default.")
+	}
+	if cfg.Migration.AIAdjustInterval != "60s" {
+		t.Errorf("AIAdjustInterval = %q; expected \"60s\" (from migration_defaults)", cfg.Migration.AIAdjustInterval)
+	}
+}
+
+// minConfigWithoutAI is identical to minConfigWithAI but without the AI block.
+// Used for the inheritance test — the secrets file provides AI in that case.
+func minConfigWithoutAI() *Config {
+	cfg := &Config{
+		Source: SourceConfig{
+			Type: "postgres", Host: "localhost", Port: 5432,
+			Database: "source", User: "user", Password: "pass",
+		},
+		Target: TargetConfig{
+			Type: "mssql", Host: "localhost", Port: 1433,
+			Database: "target", User: "user", Password: "pass",
+		},
+	}
+	cfg.autoConfig.CPUCores = 16
+	return cfg
 }
 
 // minConfigWithAI returns the minimal Config that triggers the AI auto-enable
