@@ -756,6 +756,9 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		for _, c := range changes {
 			logging.Info("  %s: %d -> %d", c.Name, c.OldValue, c.NewValue)
 		}
+		if suggestions.AISuggestions != nil && suggestions.AISuggestions.ObservedRetryRates != "" {
+			logging.Info("AI observed retry rates: %s", suggestions.AISuggestions.ObservedRetryRates)
+		}
 		if suggestions.AISuggestions != nil && suggestions.AISuggestions.Reasoning != "" {
 			logging.Info("AI reasoning: %s", suggestions.AISuggestions.Reasoning)
 		}

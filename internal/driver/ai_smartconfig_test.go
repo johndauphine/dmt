@@ -234,6 +234,41 @@ func TestSaveTuningWithActualParams_NoPending(t *testing.T) {
 	}
 }
 
+// TestTrajectoryRendersZeroChunkRetries pins the post-#139 behavior: a clean
+// run (chunk_retry_count=0) MUST render ", 0 chunk retries" in the trajectory.
+// Pre-fix, the suffix was omitted for clean runs, leaving zeros invisible and
+// priming the AI to confabulate retries when applying the retry-rate rule.
+func TestTrajectoryRendersZeroChunkRetries(t *testing.T) {
+	mock := &mockHistoryProvider{
+		history: []AITuningRecord{
+			{
+				SourceDBType:      "mssql",
+				WriteAheadWriters: 1,
+				FinalThroughput:   1044709,
+				FinalDurationSecs: 18,
+				ChunkRetryCount:   0,
+			},
+			{
+				SourceDBType:      "mssql",
+				WriteAheadWriters: 2,
+				FinalThroughput:   500000,
+				FinalDurationSecs: 40,
+				ChunkRetryCount:   3,
+			},
+		},
+	}
+	analyzer := &SmartConfigAnalyzer{historyProvider: mock}
+	ctx := analyzer.formatHistoricalContext()
+
+	// Both runs must render the chunk-retries suffix explicitly.
+	if !strings.Contains(ctx, "0 chunk retries") {
+		t.Errorf("clean run did not render \"0 chunk retries\" suffix; full trajectory:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "3 chunk retries") {
+		t.Errorf("retried run did not render \"3 chunk retries\" suffix; full trajectory:\n%s", ctx)
+	}
+}
+
 func TestTrajectoryIncludesAllTunableParams(t *testing.T) {
 	mock := &mockHistoryProvider{
 		history: []AITuningRecord{
@@ -303,7 +338,7 @@ func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
 				{WriteAheadWriters: 2, FinalThroughput: 1100000, ChunkRetryCount: 0},
 			},
 			wantContains: []string{
-				"write_ahead_writers=2 → 0/2 runs retried (0% retry rate, 0 total chunk retries)",
+				"write_ahead_writers=2 → 0/2 runs retried (0.0% retry rate, 0 total chunk retries)",
 			},
 		},
 		{
@@ -328,9 +363,31 @@ func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
 				{WriteAheadWriters: 1, FinalThroughput: 870000, ChunkRetryCount: 0},
 			},
 			wantContains: []string{
-				"write_ahead_writers=1 → 0/4 runs retried (0% retry rate, 0 total chunk retries)",
-				"write_ahead_writers=2 → 3/11 runs retried (27% retry rate, 3 total chunk retries)",
-				"any non-zero retry rate at a given write_ahead_writers value means the target's transport saturates",
+				"write_ahead_writers=1 → 0/4 runs retried (0.0% retry rate, 0 total chunk retries)",
+				"write_ahead_writers=2 → 3/11 runs retried (27.3% retry rate, 3 total chunk retries)",
+				// The framing must be neutral and data-grounded, not assertive about
+				// causal mechanisms (issue #139): the AI was echoing "transport saturation"
+				// even when retry rates were uniformly zero.
+				"The retry-rate rule applies ONLY to waw values that show a non-zero retry rate",
+				"do not invent or repeat causal explanations",
+			},
+		},
+		{
+			// Regression test: a small-but-nonzero retry rate (1/200 = 0.5%)
+			// must NOT round to "0%" in the prompt — that would falsely trip
+			// clause 4(b) "rule does not apply" and disable the retry-rate
+			// rule. Caught in PR #140 review.
+			name: "low-retry-rate must not round to zero",
+			history: func() []AITuningRecord {
+				h := make([]AITuningRecord, 0, 200)
+				for i := 0; i < 199; i++ {
+					h = append(h, AITuningRecord{WriteAheadWriters: 2, FinalThroughput: 1000000, ChunkRetryCount: 0})
+				}
+				h = append(h, AITuningRecord{WriteAheadWriters: 2, FinalThroughput: 500000, ChunkRetryCount: 1})
+				return h
+			}(),
+			wantContains: []string{
+				"write_ahead_writers=2 → 1/200 runs retried (0.5% retry rate, 1 total chunk retries)",
 			},
 		},
 	}

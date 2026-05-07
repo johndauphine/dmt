@@ -158,7 +158,12 @@ type AutoTuneOutput struct {
 	UpsertMergeChunkSize int    `json:"upsert_merge_chunk_size"`
 	CheckpointFrequency  int    `json:"checkpoint_frequency"`
 	MaxRetries           int    `json:"max_retries"`
-	Reasoning            string `json:"reasoning,omitempty"`
+	// ObservedRetryRates is intentionally NOT omitempty — the prompt requires
+	// the model to populate it (verbatim citation from the per-waw retry-rate
+	// summary, or "no history"). An empty value indicates the model skipped the
+	// grounding step and the reasoning may be ungrounded.
+	ObservedRetryRates string `json:"observed_retry_rates"`
+	Reasoning          string `json:"reasoning,omitempty"`
 }
 
 // TuningHistoryProvider provides access to historical tuning data.
@@ -569,10 +574,12 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 				h.ParallelReaders, h.MaxPartitions, h.LargeTableThreshold,
 				h.MaxSourceConnections, h.MaxTargetConnections))
 			if h.FinalThroughput > 0 {
-				sb.WriteString(fmt.Sprintf(" → result: %.0f rows/sec (%.0fs)", h.FinalThroughput, h.FinalDurationSecs))
-				if h.ChunkRetryCount > 0 {
-					sb.WriteString(fmt.Sprintf(", %d chunk retries", h.ChunkRetryCount))
-				}
+				// Always render chunk_retry_count (including 0) so the AI has
+				// positive evidence of retry-clean runs. Silently omitting the
+				// 0 case primes the model to confabulate retries when applying
+				// the retry-rate rule (issue #139).
+				sb.WriteString(fmt.Sprintf(" → result: %.0f rows/sec (%.0fs), %d chunk retries",
+					h.FinalThroughput, h.FinalDurationSecs, h.ChunkRetryCount))
 			}
 			sb.WriteString("\n")
 		}
@@ -728,10 +735,14 @@ func summarizeWriteAheadWritersRetryRate(history []AITuningRecord) string {
 			continue
 		}
 		retryRate := float64(s.runsWithRetries) / float64(s.totalRuns) * 100
-		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.0f%% retry rate, %d total chunk retries)\n",
+		// Use %.1f%% so a small-but-nonzero retry rate (e.g. 1/200 = 0.5%%)
+		// doesn't round to 0%% and falsely trip clause 4(b) "rule does not
+		// apply." The raw runsWithRetries/totalRuns counts are also rendered
+		// alongside as the unambiguous source of truth.
+		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.1f%% retry rate, %d total chunk retries)\n",
 			w, s.runsWithRetries, s.totalRuns, retryRate, s.totalRetries))
 	}
-	sb.WriteString("    Read this as a per-configuration constraint, not aggregate noise: any non-zero retry rate at a given write_ahead_writers value means the target's transport saturates at that concurrency level on this hardware. The retries always succeed eventually but cost 30s+ each, dragging overall throughput down 2-3x on the unlucky runs.\n")
+	sb.WriteString("    Read this as a per-configuration observation. The retry-rate rule applies ONLY to waw values that show a non-zero retry rate above. If every row above shows 0% retry rate over a meaningful sample, the rule is silent — the choice must be driven by observed throughput from the trajectory, not by an assumed mechanism. Retries are factual events from the chunk_retry_count column; do not invent or repeat causal explanations (e.g. \"transport saturation\", \"connection pool exhaustion\") that are not visible in this column.\n")
 
 	return sb.String()
 }
@@ -852,7 +863,11 @@ Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck. Do NOT under-provision workers.
 3. chunk_size=50000 is well-tested. Only deviate if historical throughput data clearly shows a better value.
-4. read_ahead_buffers=4 is a well-tested floor — do not reduce below this. For write_ahead_writers, consult the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary in the historical context. The rule is mechanical, not interpretive: if write_ahead_writers=2 has any non-zero retry rate (even 1 retried run out of 10), AND write_ahead_writers=1 either has a lower retry rate or hasn't been tried yet, you MUST pick write_ahead_writers=1. Do not rationalize the retries as "transient" or attribute them to other tuning — at this concurrency level on this hardware, the target transport saturates and produces the retries deterministically. The peak throughput at write_ahead_writers=2 is misleading because the retried runs drag the realized throughput down 2-3x. If the summary shows write_ahead_writers=1 with 0%% retry rate over a meaningful sample (>=3 runs), keep it there. Only escalate back to 2 if you have evidence that 1 has been the floor for many runs and throughput is bottlenecked on the writer (which is rare).
+4. read_ahead_buffers=4 is a well-tested floor — do not reduce below this. For write_ahead_writers, consult the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary in the historical context. The rule is mechanical and fires only on observed retries:
+   (a) IF a waw value has a non-zero retry rate AND a lower waw has either zero retry rate or hasn't been tried, you MUST pick the lower value.
+   (b) IF every waw row in the summary has 0%% retry rate over a meaningful sample (>=3 runs each), the rule does NOT apply — choose by observed throughput from the trajectory.
+   (c) IF only one waw value has been tried, the rule does NOT apply — pick by throughput estimate or stay at baseline.
+   When you invoke or decline the rule, your "observed_retry_rates" field MUST verbatim cite the literal counts from the summary (e.g. "waw=1: 0/27 (0%%); waw=2: 0/4 (0%%)"). Do not assert a causal mechanism for the choice (e.g. "transport saturation", "memory pressure", "connection saturation") unless that mechanism is directly visible in the data shown to you. If you cannot point at a non-zero retry count or other concrete signal in this prompt, do not name a mechanism — say "lower observed throughput, mechanism unknown" instead.
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
 7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput AND zero chunk retries. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
@@ -872,7 +887,8 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief explanation>"
+  "observed_retry_rates": "<verbatim citation from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary, e.g. 'waw=1: 0/27 (0%%); waw=2: 0/4 (0%%); waw=4: 0/4 (0%%)'. If the summary is empty (no history), write 'no history'.>",
+  "reasoning": "<brief explanation; must be consistent with observed_retry_rates and must not assert mechanisms (saturation, pressure, contention) unless backed by data shown in this prompt>"
 }`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint,
 		baselineWorkers, baselineWorkers)
 
@@ -891,6 +907,14 @@ Respond with ONLY a JSON object:
 	if err := json.Unmarshal([]byte(jsonStr), &output); err != nil {
 		logging.Debug("AI response JSON parse error: %s", truncate(jsonStr, 200))
 		return nil, fmt.Errorf("parsing AI response JSON: %w", err)
+	}
+
+	// Verify the model actually grounded its choice in the per-waw retry-rate
+	// summary (issue #139). We don't fail the run — the parameter recommendation
+	// is still usable — but the warning surfaces that the reasoning may be
+	// ungrounded.
+	if output.ObservedRetryRates == "" {
+		logging.Warn("AI smartconfig response omitted observed_retry_rates; reasoning may be ungrounded (see #139)")
 	}
 
 	// Trust AI recommendations - only apply minimal sanity checks for obviously invalid values
