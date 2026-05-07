@@ -172,16 +172,21 @@ type TuningHistoryProvider interface {
 	// GetAIAdjustments returns recent runtime AI adjustments from migrations
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
 	// GetAITuningHistory returns recent tuning recommendations filtered by
-	// migration direction. Pass limit > 0 to bound the slice; the smartconfig
-	// uses a small bound for the per-row trajectory rendering, with aggregates
-	// pulled separately via the GetAITuningAggregates* methods (issue #141).
+	// migration direction, ordered by Timestamp DESC (most recent first).
+	// Pass limit > 0 to bound the slice; the smartconfig uses a small bound
+	// for the per-row trajectory rendering, with aggregates pulled separately
+	// via the GetAITuningAggregates* methods (issue #141).
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over
-	// the FULL ai_tuning_history. Used so the retry-rate rule's denominators stay
-	// honest while the per-row trajectory in the prompt is bounded.
+	// the FULL ai_tuning_history, ordered by WriteAheadWriters ASC. Used so the
+	// retry-rate rule's denominators stay honest while the per-row trajectory in
+	// the prompt is bounded. Implementations MUST return rows in ascending key
+	// order — the prompt-formatting helpers depend on this for deterministic
+	// output, since the model is asked to verbatim cite the table contents.
 	GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error)
 	// GetAITuningAggregatesByChunkSize returns per-chunk_size aggregates over the
-	// FULL ai_tuning_history.
+	// FULL ai_tuning_history, ordered by ChunkSize ASC. Same ordering contract as
+	// GetAITuningAggregatesByWaw.
 	GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error

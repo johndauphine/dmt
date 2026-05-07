@@ -1364,8 +1364,10 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 // GetAITuningAggregatesByWaw aggregates the FULL ai_tuning_history table by
 // write_ahead_writers for the given migration direction. Used by smartconfig to
 // keep retry-rate denominators honest while the trajectory rows in the prompt
-// are bounded (issue #141). Records without a completed run (final_throughput=0)
-// are excluded, matching the prior Go-side aggregation behavior.
+// are bounded (issue #141). Records without a completed run are excluded via
+// `final_throughput > 0` — this correctly filters both NULL (the on-disk state
+// before UpdateAITuningResult fires) and 0 values, matching the prior Go-side
+// `if h.FinalThroughput <= 0 { continue }` aggregation behavior.
 func (s *State) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
 	rows, err := s.db.Query(`
 		SELECT write_ahead_writers,

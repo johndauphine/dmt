@@ -149,10 +149,19 @@ func (m *mockHistoryProvider) GetAIAdjustments(limit int) ([]AIAdjustmentRecord,
 }
 
 func (m *mockHistoryProvider) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
-	if limit > 0 && limit < len(m.history) {
-		return m.history[:limit], nil
+	// Match the SQL backend's ordering: most-recent first by Timestamp.
+	// Without this, tests that depend on "last N" semantics could drift away
+	// from production behavior (caught in PR #145 review). SliceStable
+	// preserves test-fixture order for rows with equal (e.g. zero) Timestamps.
+	sorted := make([]AITuningRecord, len(m.history))
+	copy(sorted, m.history)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Timestamp.After(sorted[j].Timestamp)
+	})
+	if limit > 0 && limit < len(sorted) {
+		return sorted[:limit], nil
 	}
-	return m.history, nil
+	return sorted, nil
 }
 
 func (m *mockHistoryProvider) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {

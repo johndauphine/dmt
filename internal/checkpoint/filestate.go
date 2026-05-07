@@ -477,12 +477,13 @@ func (fs *FileState) GetAITuningHistory(limit int, sourceType, targetType string
 	return nil, nil
 }
 
-// GetAITuningAggregatesByWaw returns empty slice for file state.
+// GetAITuningAggregatesByWaw returns nil for file state — no history persisted.
+// len(nil) == 0 so the smartconfig format helper correctly skips the section.
 func (fs *FileState) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
 	return nil, nil
 }
 
-// GetAITuningAggregatesByChunkSize returns empty slice for file state.
+// GetAITuningAggregatesByChunkSize returns nil for file state — no history persisted.
 func (fs *FileState) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
 	return nil, nil
 }
