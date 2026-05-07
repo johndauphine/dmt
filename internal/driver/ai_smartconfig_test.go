@@ -371,15 +371,31 @@ func TestFormatHistoricalContextBoundsTrajectory(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{historyProvider: mock, dbType: "mssql", targetDBType: "postgres"}
 	ctx := analyzer.formatHistoricalContext()
 
-	// Trajectory section must announce the bounded count, not the full 50.
-	wantHeader := "PARAMETER TRAJECTORY (most recent 20 analyses"
+	// Trajectory section must announce the bounding ratio (issue #146 — header
+	// now says "BOUNDED — most recent 20 of 50 completed analyses" so the
+	// model can SEE the bounded vs full-history distinction).
+	wantHeader := "PARAMETER TRAJECTORY (BOUNDED — most recent 20 of 50 completed analyses"
 	if !strings.Contains(ctx, wantHeader) {
 		t.Errorf("trajectory header missing %q\nfull context:\n%s", wantHeader, ctx)
+	}
+
+	// And the prompt must explicitly forbid using trajectory rows as
+	// retry-rate denominators (the citation-source disambiguation from #146).
+	wantWarning := "Do NOT count waw values or chunk_size values within these rows to derive retry-rate or sample-size denominators"
+	if !strings.Contains(ctx, wantWarning) {
+		t.Errorf("trajectory warning missing %q\nfull context:\n%s", wantWarning, ctx)
 	}
 
 	// Numbered rows should stop at 20.
 	if strings.Contains(ctx, "  21. ") {
 		t.Error("trajectory rendered more than trajectoryLimit rows; row 21 should not appear")
+	}
+
+	// Aggregate block header must surface the full-history denominator with
+	// the explicit "cite from HERE" instruction (issue #146).
+	wantAggHeader := "WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE (FULL-HISTORY aggregate over all 50 completed analyses — cite denominators from HERE, not from the bounded trajectory above)"
+	if !strings.Contains(ctx, wantAggHeader) {
+		t.Errorf("aggregate header missing %q\nfull context:\n%s", wantAggHeader, ctx)
 	}
 
 	// Recency assertion: the most recent run (i=49, throughput=1000049) must be
@@ -409,6 +425,47 @@ func TestFormatHistoricalContextBoundsTrajectory(t *testing.T) {
 	}
 	if !strings.Contains(ctx, wantWaw2) {
 		t.Errorf("per-waw summary missing %q\nfull context:\n%s", wantWaw2, ctx)
+	}
+}
+
+// TestFormatHistoricalContextNoBoundingWhenSmall verifies that the trajectory
+// header drops the "BOUNDED — X of Y" qualifier when all completed runs fit
+// within trajectoryLimit. The bounded-warning text is also absent in that case
+// (no need to disambiguate two views when they're the same).
+func TestFormatHistoricalContextNoBoundingWhenSmall(t *testing.T) {
+	hist := make([]AITuningRecord, 0, 5)
+	base := time.Now()
+	for i := 0; i < 5; i++ {
+		hist = append(hist, AITuningRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			Timestamp:         base.Add(time.Duration(i) * time.Minute),
+			WriteAheadWriters: 1,
+			ChunkSize:         50000,
+			Workers:           16,
+			ReadAheadBuffers:  4,
+			ParallelReaders:   4,
+			MaxPartitions:     16,
+			FinalThroughput:   1000000,
+			FinalDurationSecs: 20,
+			ChunkRetryCount:   0,
+		})
+	}
+	mock := &mockHistoryProvider{history: hist}
+	analyzer := &SmartConfigAnalyzer{historyProvider: mock, dbType: "mssql", targetDBType: "postgres"}
+	ctx := analyzer.formatHistoricalContext()
+
+	// Header should NOT have the BOUNDED qualifier — 5 ≤ trajectoryLimit (20).
+	if strings.Contains(ctx, "BOUNDED — most recent") {
+		t.Errorf("trajectory header should not be marked BOUNDED when history fits within trajectoryLimit\nfull context:\n%s", ctx)
+	}
+	wantHeader := "PARAMETER TRAJECTORY (most recent 5 analyses, oldest first)"
+	if !strings.Contains(ctx, wantHeader) {
+		t.Errorf("trajectory header missing %q\nfull context:\n%s", wantHeader, ctx)
+	}
+	// And the disambiguation warning is irrelevant when there's no bounding.
+	if strings.Contains(ctx, "Do NOT count waw values") {
+		t.Errorf("disambiguation warning should not appear when history fits within trajectoryLimit\nfull context:\n%s", ctx)
 	}
 }
 
@@ -589,7 +646,11 @@ func TestFormatWawAggregateBlock(t *testing.T) {
 			if err != nil {
 				t.Fatalf("aggregator: %v", err)
 			}
-			result := formatWawAggregateBlock(aggs)
+			totalCompleted := 0
+			for _, a := range aggs {
+				totalCompleted += a.TotalRuns
+			}
+			result := formatWawAggregateBlock(aggs, totalCompleted)
 			if tt.wantEmpty {
 				if result != "" {
 					t.Errorf("expected empty result, got: %q", result)
