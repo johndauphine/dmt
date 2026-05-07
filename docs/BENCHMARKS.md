@@ -895,12 +895,105 @@ To verify whether the warm-tuner result reflected hardware capability or accumul
 > AI startup tuning used sensible defaults (API credits unavailable).
 > With AI-optimized parameters, throughput may be slightly higher.
 
+### SO2013 on Unconstrained 30GB / 18 CPU (a151191 — five-knob experiment)
+
+**Environment changes from the 12GB-container SO2013 run above:**
+- **Code**: a151191 + #146 (post-PR #145 / #146 — bounded-history smartconfig + citation disambiguation)
+- **WSL2**: 30GB RAM, 18 CPUs (matches the 30GB SO2010 unconstrained section above; same `.wslconfig`)
+- **MSSQL container**: unconstrained, `max server memory` = 8192MB (one variant at 16384MB — see below), `maxdop` = 4, `cost threshold for parallelism` = 50
+- **PG container**: unconstrained, baseline `shared_buffers=8GB, synchronous_commit=off, max_wal_size=16GB, fsync=on, full_page_writes=on, wal_level=replica`
+- **AI provider**: `claude-haiku-4-5-20251001`
+- **Dataset**: Full Brent Ozar SO2013 (SQL Server 2008 format MDF + 4 NDF data files, ~52GB attached, 9 tables, 106.5M rows). Compatibility level set to 150 for Azure SQL Edge.
+
+Five experiments tested in sequence to isolate which knob actually moves the needle on this 5.5×-larger-than-SO2010 dataset:
+
+| Config | mssql memory | PG durability | Trials | Mean transfer (warm) | Mean overall (warm) | Peak transfer | Δ vs warm-tuner baseline |
+|---|---|---|---|---|---|---|---|
+| Warm-tuner baseline (SO2010 history seeded) | 8GB | on | 1 | 469K rows/s | 364K rows/s | 469K | — |
+| Cold-tuner (no history; AI escalated `pr` 4→6) | 8GB | on | 4 (warm 2-4) | 380K rows/s | 308K rows/s | 396K | **-19%** |
+| Forced `chunk_size=100K` @ pr=4 | 8GB | on | 3 | 388K rows/s | 311K rows/s | 408K | **-17%** |
+| Forced @ pr=4, `mssql max=16GB` | 16GB | on | 3 (warm 2-3) | 447K rows/s | 349K rows/s | 448K | **-5%** (within noise) |
+| **Forced @ pr=4, PG durability-off triad** | **8GB** | **off** | **7 (warm 2-7)** | **535K rows/s** | **398K rows/s** | **576K** | **+14%** |
+
+> **One clear winner: the PG durability-off triad** (`fsync=off`, `full_page_writes=off`,
+> `wal_level=minimal`, plus `autovacuum=off`, `maintenance_work_mem=4GB`,
+> `max_parallel_maintenance_workers=8`). +14% transfer / +9% overall on a clean
+> A/B against the warm-tuner baseline. Six warm samples, range 491–576K, peak 576K.
+> Run 5 hit `19310s @ 576K rows/s` transfer in 3m05s — best SO2013 result on this
+> hardware. **Bench-only — `fsync=off` and `full_page_writes=off` lose crash safety;
+> revert to durability-on for production data.**
+>
+> **The doc's published 9GB sweet-spot SO2010 result (799K)** also used the
+> durability-off triad (see "Constrained Re-validation" environment section above).
+> Today's earlier SO2010 unconstrained section measured **with durability ON**, so its
+> published 939K mean is durability-on — apples-to-apples comparison with the prior
+> 9GB sweet-spot is +18% from removing container caps even after subtracting the
+> 14% durability-off was already worth.
+
+#### Why the other four knobs didn't help
+
+1. **Cold-tuner found a *worse* local optimum than the warm-tuner.** With no history, the AI's smartconfig escalated `parallel_readers` 4→6 after a single +5% improvement that turned out to be noise. Subsequent runs locked in that decision. The warm-tuner's "stale" SO2010 evidence happened to keep `pr=4` which is the genuinely better choice on a disk-bound source. **Opposite outcome from the SO2010 cold-tuner finding above** (where cold-tuner outperformed warm-tuner by +17%) — see #144 for the underlying regime-mismatch issue. On SO2013 the regime mismatch saved us; on SO2010 it cost us.
+
+2. **`chunk_size=100K` rejected.** Hypothesis was that with 2,128 chunks at 50K rows the per-chunk overhead would amortize better at 100K (1,064 chunks). Empirical: 388K mean across 3 runs (-17% vs 469K baseline). Per-chunk overhead is NOT the binding constraint at the cs=50K floor on this dataset; PG COPY's per-chunk cost may actually scale super-linearly with chunk size in the ranges that matter, and bigger in-flight buffers add memory pressure that offsets any savings.
+
+3. **`mssql max_server_memory=16GB` was within noise.** Hypothesis: doubling the buffer pool would push cache hit ratio from ~15% to ~31% on the 52GB dataset. Empirical: 447K mean across 2 warm samples (-5% vs 469K baseline — within run-to-run variance). The largest tables (Posts, Comments, Votes) are individually under 16GB but together push out the others as MSSQL sequentially scans them; cache size is not the binding constraint at this hardware class.
+
+4. **`parallel_readers` escalation hurts at this hardware scale.** AI's pr=4→6 in the cold-tuner cost -18% vs warm-tuner baseline. More concurrent SELECTs against a disk-bound source amplify cache thrash at the OS page cache layer. Same direction of regression as the earlier SO2010 forced-waw=4 experiment (-19% vs the chosen waw=2).
+
+#### Forced-config detail (the durability-off winner)
+
+```yaml
+migration:
+  target_mode: drop_recreate
+  workers: 16              # cpu_cores - 2
+  chunk_size: 50000
+  read_ahead_buffers: 4
+  write_ahead_writers: 2
+  parallel_readers: 4
+  max_partitions: 16
+```
+
+PG settings flipped from PR #145-era baseline:
+```sql
+ALTER SYSTEM SET fsync = 'off';
+ALTER SYSTEM SET full_page_writes = 'off';
+ALTER SYSTEM SET wal_level = 'minimal';
+ALTER SYSTEM SET max_wal_senders = 0;
+ALTER SYSTEM SET autovacuum = 'off';
+ALTER SYSTEM SET maintenance_work_mem = '4GB';
+ALTER SYSTEM SET max_parallel_maintenance_workers = 8;
+```
+
+#### Per-run trajectory under durability-off
+
+| Run | Cache | Transfer | Overall |
+|-----|-------|----------|---------|
+| 1 | cold mssql + cold pg | 396K | 317K |
+| 2 | warm | 491K | 371K |
+| 3 | warm | 547K | 407K |
+| 4 | warm | 546K | 404K |
+| 5 | warm | **576K** | **419K** |
+| 6 | warm | 533K | 400K |
+| 7 | warm | 517K | 389K |
+| **Warm avg (runs 2-7)** | | **535K rows/s** | **398K rows/s** |
+
+> The cold-cache penalty is small (Run 1 396K vs warm avg 535K = -26%); steady state
+> is reached by Run 2. Run-to-run variance under steady state is ±8% which is consistent
+> with the SO2010 30GB unconstrained variance.
+
+#### Practical caveats
+
+- The `migration.ai_adjust: false` flag in the per-migration YAML was intended for these forced experiments but is silently ignored by dmt's config parser — the runtime tuner ran throughout. Tracked in **#149**. The persisted run records confirm the user-explicit `chunk_size`, `parallel_readers`, etc. values stuck regardless, so the forced-config experiments are still informative.
+- The smartconfig prompt's guideline 6 ("row count does not affect optimal parameters") was empirically validated on this dataset — `chunk_size` up did not help. The earlier hypothesis that the guideline should be loosened for high chunk counts is rejected.
+
 ### Cross-Machine Comparison (SO2013, MSSQL→PG, transfer-only)
 
 | Machine | Source Engine | Cores | RAM | Transfer (avg) | vs M5 Pro (SS2022) |
 |---------|-------------|-------|-----|---------------|-----------|
 | M3 Max (16GB Docker) | SQL Server 2022 (Rosetta) | 14 | 36GB | 287K rows/s | -64% |
-| **WSL2 ARM64 (12GB container)** | **Azure SQL Edge** | **10** | **24GB** | **417K rows/s** | **-48%** |
+| WSL2 ARM64 (12GB container) | Azure SQL Edge | 10 | 24GB | 417K rows/s | -48% |
+| **WSL2 ARM64 (a151191, *unconstrained* 30GB / 18 CPU, durability-on)** | **Azure SQL Edge** | **18** | **30GB** | **469K rows/s** | **-41%** |
+| **WSL2 ARM64 (a151191, *unconstrained* 30GB / 18 CPU, durability-off)** | **Azure SQL Edge** | **18** | **30GB** | **535K rows/s (peak 576K)** | **-33%** |
 | M5 Pro (8GB Docker) | SQL Server 2022 (Rosetta) | 15 | 24GB | 795K rows/s | — |
 | M5 Pro (12GB container) | Azure SQL Edge | 15 | 24GB | 1,042K rows/s | * |
 
@@ -909,10 +1002,14 @@ To verify whether the warm-tuner result reflected hardware capability or accumul
 
 ### SO2013 Key Findings
 
-1. **Native ARM64 advantage holds at scale** — WSL2 (417K) beats M3 Max (287K) by 45% on SO2013, consistent with the SO2010 advantage
-2. **Gap to M5 Pro is larger than SO2010** — -48% (SO2013) vs -64% (SO2010), because the 52GB dataset exceeds all caches, amplifying the WSL2 disk I/O bottleneck
-3. **Warm-cache improvement is modest** — run 1 (402K) to run 3 (423K) = +5%, as the 52GB dataset far exceeds the 8GB MSSQL buffer pool
-4. **Azure SQL Edge handles 52GB database without issues** — all 106.5M rows validated across 9 tables
+1. **PG durability-off triad is the dominant lever on SO2013, +14% transfer.** Six warm-sample mean of 535K rows/sec (peak 576K) on the same dmt config (`cs=50K, pr=4, waw=2`) that gets 469K under durability-on. The +14% comes from `fsync=off` + `full_page_writes=off` + `wal_level=minimal` skipping the per-COPY WAL safety overhead. Bench-only — these settings lose crash safety.
+2. **mssql memory size is NOT the binding constraint at 8GB.** Doubling to 16GB gave ~447K mean — within run-to-run noise of the 469K 8GB baseline. The 52GB dataset cycles through any cache size that's smaller than itself; cache hit ratio matters less than absolute disk read bandwidth.
+3. **chunk_size=100K rejected on SO2013.** 388K mean across 3 forced trials — actually worse than the cs=50K baseline. The smartconfig prompt's guideline "row count does not affect optimal parameters" is empirically validated.
+4. **AI cold-tuner ALSO worse than warm-tuner on SO2013** — the *opposite* of the SO2010 cold-tuner finding. The cold tuner's free exploration converged on `parallel_readers=6` after a single noisy +5% gain, which underperforms the warm-tuner's `pr=4` by -18%. Issue #144 notes that history-regime mismatch can cut either way; on SO2013 the SO2010-derived priors saved us, on SO2010 they cost us.
+5. **Native ARM64 advantage holds at scale** — even the durability-on baseline (469K) beats both the prior 12GB-container WSL2 ARM64 (417K, +12%) and M3 Max (287K, +63%).
+6. **Gap to M5 Pro narrows under durability-off.** Durability-on is -41% vs M5 Pro SS2022; durability-off is -33%. Some of M5 Pro's published peak likely also benefits from less safety overhead.
+7. **Warm-cache improvement is modest under durability-on** — run 1 (402K) to run 3 (423K) = +5%, as the 52GB dataset far exceeds the 8GB MSSQL buffer pool. Larger improvements come from PG-side durability or from fitting the dataset entirely in a buffer pool (impossible at 52GB on 30GB WSL).
+8. **Azure SQL Edge handles 52GB database without issues** — all 106.5M rows validated across 9 tables in every run.
 
 ## M5 Pro Azure SQL Edge Benchmarks
 
