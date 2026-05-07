@@ -602,12 +602,32 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 	var sb strings.Builder
 
-	// Section 1: Bounded recent trajectory (most recent N rows). Aggregates for
-	// the rule's denominators come from separate SQL queries below — keeps the
-	// prompt size bounded as history grows (issue #141).
-	tuningHistory, err := s.historyProvider.GetAITuningHistory(trajectoryLimit, s.dbType, s.targetDBType)
-	if err == nil && len(tuningHistory) > 0 {
-		sb.WriteString(fmt.Sprintf("\nPARAMETER TRAJECTORY (most recent %d analyses, oldest first):\n", len(tuningHistory)))
+	// Fetch all three views up front so the trajectory header can show the
+	// "X of Y" bounding ratio. The aggregate methods filter on
+	// final_throughput > 0, so summing TotalRuns gives the count of completed
+	// runs (which is what the rule cares about).
+	tuningHistory, _ := s.historyProvider.GetAITuningHistory(trajectoryLimit, s.dbType, s.targetDBType)
+	wawAggs, _ := s.historyProvider.GetAITuningAggregatesByWaw(s.dbType, s.targetDBType)
+	chunkAggs, _ := s.historyProvider.GetAITuningAggregatesByChunkSize(s.dbType, s.targetDBType)
+
+	totalCompleted := 0
+	for _, a := range wawAggs {
+		totalCompleted += a.TotalRuns
+	}
+
+	// Section 1: Bounded recent trajectory (most recent N rows). The header
+	// surfaces the bounding ratio AND explicitly forbids using these rows for
+	// retry-rate denominators — issue #146 documents the model citing trajectory
+	// counts when the bounded slice diverged from the full-history aggregate.
+	if len(tuningHistory) > 0 {
+		if totalCompleted > len(tuningHistory) {
+			sb.WriteString(fmt.Sprintf("\nPARAMETER TRAJECTORY (BOUNDED — most recent %d of %d completed analyses, oldest of these first):\n",
+				len(tuningHistory), totalCompleted))
+			sb.WriteString("  IMPORTANT: this list is BOUNDED. Do NOT count waw values or chunk_size values within these rows to derive retry-rate or sample-size denominators — those come from the FULL-HISTORY aggregate blocks below (\"WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE\" and \"CHUNK SIZE vs THROUGHPUT\"). Use this list ONLY to see what configurations have been tried recently.\n")
+		} else {
+			// All completed runs fit in the trajectory — no bounding to flag.
+			sb.WriteString(fmt.Sprintf("\nPARAMETER TRAJECTORY (most recent %d analyses, oldest first):\n", len(tuningHistory)))
+		}
 		for i := len(tuningHistory) - 1; i >= 0; i-- {
 			h := tuningHistory[i]
 			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
@@ -636,18 +656,14 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 	// Per-chunk-size aggregates over FULL history — the trajectory above is
 	// bounded but the rule's denominator must reflect every recorded run.
-	if chunkAggs, err := s.historyProvider.GetAITuningAggregatesByChunkSize(s.dbType, s.targetDBType); err == nil {
-		if summary := formatChunkSizeAggregateBlock(chunkAggs); summary != "" {
-			sb.WriteString(summary)
-		}
+	if summary := formatChunkSizeAggregateBlock(chunkAggs, totalCompleted); summary != "" {
+		sb.WriteString(summary)
 	}
 
 	// Per-waw aggregates over FULL history — same rationale; preserves the
 	// retry-rate rule's data grounding (PR #140 / issue #139).
-	if wawAggs, err := s.historyProvider.GetAITuningAggregatesByWaw(s.dbType, s.targetDBType); err == nil {
-		if summary := formatWawAggregateBlock(wawAggs); summary != "" {
-			sb.WriteString(summary)
-		}
+	if summary := formatWawAggregateBlock(wawAggs, totalCompleted); summary != "" {
+		sb.WriteString(summary)
 	}
 
 	// Section 2: Runtime adjustments as reactive context (NOT recommendations)
@@ -740,17 +756,31 @@ func detectParameterTrend(history []AITuningRecord) string {
 // for the smartconfig prompt. Aggregates come pre-computed from the SQL backend
 // (issue #141) — this helper is pure formatting, no Go-side accumulation.
 //
+// totalCompleted is the count of completed runs the aggregates summarize over;
+// it appears in the block header so the model can SEE that the denominators
+// here are full-history (not the bounded trajectory's). When totalCompleted=0
+// the helper falls back to "<n> rows" without the "of N" qualifier.
+//
 // Without this block the AI tends to cherry-pick the clean runs of a high-retry
 // configuration and rationalize away the retried ones (observed empirically:
 // an 11-run history with 3 retried runs at waw=2 was summarized by the AI as
 // "recent runs show zero retries"). PR #140 grounded the rule's reasoning in
 // this exact summary, so the output format is part of the load-bearing contract.
-func formatWawAggregateBlock(aggs []WawAggregateRecord) string {
+//
+// Issue #146: this block's header now explicitly says "OVER ALL N COMPLETED
+// ANALYSES" and the rule's instruction text says citations come from this
+// block — both nudge the model toward the full-history denominator instead of
+// counting waw values within the bounded trajectory.
+func formatWawAggregateBlock(aggs []WawAggregateRecord, totalCompleted int) string {
 	if len(aggs) == 0 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("\n  WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE:\n")
+	if totalCompleted > 0 {
+		sb.WriteString(fmt.Sprintf("\n  WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE (FULL-HISTORY aggregate over all %d completed analyses — cite denominators from HERE, not from the bounded trajectory above):\n", totalCompleted))
+	} else {
+		sb.WriteString("\n  WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE:\n")
+	}
 	for _, a := range aggs {
 		if a.TotalRuns == 0 {
 			continue
@@ -763,19 +793,25 @@ func formatWawAggregateBlock(aggs []WawAggregateRecord) string {
 		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.1f%% retry rate, %d total chunk retries)\n",
 			a.WriteAheadWriters, a.RunsWithRetries, a.TotalRuns, retryRate, a.TotalRetries))
 	}
-	sb.WriteString("    Read this as a per-configuration observation. The retry-rate rule applies ONLY to waw values that show a non-zero retry rate above. If every row above shows 0% retry rate over a meaningful sample, the rule is silent — the choice must be driven by observed throughput from the trajectory, not by an assumed mechanism. Retries are factual events from the chunk_retry_count column; do not invent or repeat causal explanations (e.g. \"transport saturation\", \"connection pool exhaustion\") that are not visible in this column.\n")
+	sb.WriteString("    Read this as a per-configuration observation over FULL history. The retry-rate rule applies ONLY to waw values that show a non-zero retry rate above. If every row above shows 0% retry rate over a meaningful sample, the rule is silent — the choice must be driven by observed throughput from the trajectory, not by an assumed mechanism. Retries are factual events from the chunk_retry_count column; do not invent or repeat causal explanations (e.g. \"transport saturation\", \"connection pool exhaustion\") that are not visible in this column. When you populate the \"observed_retry_rates\" output field, copy the denominators from THIS block — do not re-count waw values from the bounded trajectory above.\n")
 
 	return sb.String()
 }
 
 // formatChunkSizeAggregateBlock renders the chunk_size vs throughput summary.
 // Like formatWawAggregateBlock, takes pre-aggregated data from the SQL backend.
-func formatChunkSizeAggregateBlock(aggs []ChunkSizeAggregateRecord) string {
+// totalCompleted, when > 0, surfaces the full-history denominator in the header
+// (issue #146 — disambiguate full aggregates from the bounded trajectory).
+func formatChunkSizeAggregateBlock(aggs []ChunkSizeAggregateRecord, totalCompleted int) string {
 	if len(aggs) < 2 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("\n  CHUNK SIZE vs THROUGHPUT (averaged across runs):\n")
+	if totalCompleted > 0 {
+		sb.WriteString(fmt.Sprintf("\n  CHUNK SIZE vs THROUGHPUT (FULL-HISTORY aggregate over all %d completed analyses, averaged):\n", totalCompleted))
+	} else {
+		sb.WriteString("\n  CHUNK SIZE vs THROUGHPUT (averaged across runs):\n")
+	}
 	for _, a := range aggs {
 		sb.WriteString(fmt.Sprintf("    chunk_size=%d → avg %.0f rows/sec (%d runs)\n",
 			a.ChunkSize, a.AvgThroughput, a.Runs))
@@ -860,7 +896,7 @@ Guidelines:
    (a) IF a waw value has a non-zero retry rate AND a lower waw has either zero retry rate or hasn't been tried, you MUST pick the lower value.
    (b) IF every waw row in the summary has 0%% retry rate over a meaningful sample (>=3 runs each), the rule does NOT apply — choose by observed throughput from the trajectory.
    (c) IF only one waw value has been tried, the rule does NOT apply — pick by throughput estimate or stay at baseline.
-   When you invoke or decline the rule, your "observed_retry_rates" field MUST verbatim cite the literal counts from the summary (e.g. "waw=1: 0/27 (0%%); waw=2: 0/4 (0%%)"). Do not assert a causal mechanism for the choice (e.g. "transport saturation", "memory pressure", "connection saturation") unless that mechanism is directly visible in the data shown to you. If you cannot point at a non-zero retry count or other concrete signal in this prompt, do not name a mechanism — say "lower observed throughput, mechanism unknown" instead.
+   When you invoke or decline the rule, your "observed_retry_rates" field MUST verbatim cite the literal denominators from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE block (e.g. "waw=1: 0/35 (0%%); waw=2: 0/15 (0%%)"). DO NOT count waw values from the BOUNDED PARAMETER TRAJECTORY above — its denominators are wrong because that section is capped at recent rows; only the aggregate block has full-history counts. If a waw value appears in the aggregate block but not in the recent trajectory, you must STILL cite its denominator from the aggregate, not say "no samples". Do not assert a causal mechanism for the choice (e.g. "transport saturation", "memory pressure", "connection saturation") unless that mechanism is directly visible in the data shown to you. If you cannot point at a non-zero retry count or other concrete signal in this prompt, do not name a mechanism — say "lower observed throughput, mechanism unknown" instead.
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
 7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput AND zero chunk retries. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
@@ -880,7 +916,7 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "observed_retry_rates": "<verbatim citation from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary, e.g. 'waw=1: 0/27 (0%%); waw=2: 0/4 (0%%); waw=4: 0/4 (0%%)'. If the summary is empty (no history), write 'no history'.>",
+  "observed_retry_rates": "<verbatim copy of the per-waw lines from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE block (the FULL-HISTORY aggregate). DO NOT count waw values from the bounded PARAMETER TRAJECTORY rows — its denominators are wrong because the trajectory is bounded. If a waw value appears in the aggregate block, cite ITS denominator from there even if that waw doesn't appear in the bounded trajectory. Format: 'waw=1: 0/35 (0.0%%); waw=2: 0/15 (0.0%%); waw=4: 0/4 (0.0%%)'. If no aggregate block exists (no completed history), write 'no history'.>",
   "reasoning": "<brief explanation; must be consistent with observed_retry_rates and must not assert mechanisms (saturation, pressure, contention) unless backed by data shown in this prompt>"
 }`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint,
 		baselineWorkers, baselineWorkers)
