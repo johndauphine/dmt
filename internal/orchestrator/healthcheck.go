@@ -390,6 +390,46 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetTy
 	return result, nil
 }
 
+// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over
+// the full ai_tuning_history (issue #141 — keep retry-rate denominators honest
+// when the trajectory rows in the prompt are bounded).
+func (a *stateHistoryAdapter) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]driver.WawAggregateRecord, error) {
+	aggs, err := a.state.GetAITuningAggregatesByWaw(sourceType, targetType)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]driver.WawAggregateRecord, len(aggs))
+	for i, ag := range aggs {
+		result[i] = driver.WawAggregateRecord{
+			WriteAheadWriters: ag.WriteAheadWriters,
+			TotalRuns:         ag.TotalRuns,
+			RunsWithRetries:   ag.RunsWithRetries,
+			TotalRetries:      ag.TotalRetries,
+			PeakThroughput:    ag.PeakThroughput,
+			MeanThroughput:    ag.MeanThroughput,
+		}
+	}
+	return result, nil
+}
+
+// GetAITuningAggregatesByChunkSize returns per-chunk_size aggregates over the
+// full ai_tuning_history.
+func (a *stateHistoryAdapter) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]driver.ChunkSizeAggregateRecord, error) {
+	aggs, err := a.state.GetAITuningAggregatesByChunkSize(sourceType, targetType)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]driver.ChunkSizeAggregateRecord, len(aggs))
+	for i, ag := range aggs {
+		result[i] = driver.ChunkSizeAggregateRecord{
+			ChunkSize:     ag.ChunkSize,
+			Runs:          ag.Runs,
+			AvgThroughput: ag.AvgThroughput,
+		}
+	}
+	return result, nil
+}
+
 // SaveAITuning saves a tuning recommendation for future reference.
 func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 	return a.state.SaveAITuning(checkpoint.AITuningRecord{

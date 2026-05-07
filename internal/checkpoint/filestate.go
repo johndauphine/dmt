@@ -477,6 +477,16 @@ func (fs *FileState) GetAITuningHistory(limit int, sourceType, targetType string
 	return nil, nil
 }
 
+// GetAITuningAggregatesByWaw returns empty slice for file state.
+func (fs *FileState) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
+	return nil, nil
+}
+
+// GetAITuningAggregatesByChunkSize returns empty slice for file state.
+func (fs *FileState) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
+	return nil, nil
+}
+
 // Close is a no-op for file state.
 func (fs *FileState) Close() error {
 	return nil

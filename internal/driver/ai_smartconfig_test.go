@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"sort"
 	"strings"
 	"testing"
 )
@@ -134,6 +135,10 @@ func TestDetectParameterTrend(t *testing.T) {
 }
 
 // mockHistoryProvider implements TuningHistoryProvider for testing.
+// `history` is treated as the full ai_tuning_history; GetAITuningHistory respects
+// the limit param (smartconfig uses trajectoryLimit for the bounded trajectory),
+// and the aggregate methods compute over the FULL history exactly the way the
+// SQL backend would.
 type mockHistoryProvider struct {
 	saved   *AITuningRecord
 	history []AITuningRecord
@@ -142,9 +147,88 @@ type mockHistoryProvider struct {
 func (m *mockHistoryProvider) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
 	return nil, nil
 }
+
 func (m *mockHistoryProvider) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
+	if limit > 0 && limit < len(m.history) {
+		return m.history[:limit], nil
+	}
 	return m.history, nil
 }
+
+func (m *mockHistoryProvider) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
+	type stats struct{ totalRuns, retried, totalRetries int; peak, sum float64 }
+	byWaw := map[int]*stats{}
+	for _, h := range m.history {
+		if h.FinalThroughput <= 0 {
+			continue
+		}
+		s, ok := byWaw[h.WriteAheadWriters]
+		if !ok {
+			s = &stats{}
+			byWaw[h.WriteAheadWriters] = s
+		}
+		s.totalRuns++
+		s.sum += h.FinalThroughput
+		if h.FinalThroughput > s.peak {
+			s.peak = h.FinalThroughput
+		}
+		if h.ChunkRetryCount > 0 {
+			s.retried++
+			s.totalRetries += h.ChunkRetryCount
+		}
+	}
+	keys := make([]int, 0, len(byWaw))
+	for k := range byWaw {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	out := make([]WawAggregateRecord, 0, len(keys))
+	for _, k := range keys {
+		s := byWaw[k]
+		out = append(out, WawAggregateRecord{
+			WriteAheadWriters: k,
+			TotalRuns:         s.totalRuns,
+			RunsWithRetries:   s.retried,
+			TotalRetries:      s.totalRetries,
+			PeakThroughput:    s.peak,
+			MeanThroughput:    s.sum / float64(s.totalRuns),
+		})
+	}
+	return out, nil
+}
+
+func (m *mockHistoryProvider) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
+	type stats struct{ runs int; sum float64 }
+	byChunk := map[int]*stats{}
+	for _, h := range m.history {
+		if h.FinalThroughput <= 0 {
+			continue
+		}
+		s, ok := byChunk[h.ChunkSize]
+		if !ok {
+			s = &stats{}
+			byChunk[h.ChunkSize] = s
+		}
+		s.runs++
+		s.sum += h.FinalThroughput
+	}
+	keys := make([]int, 0, len(byChunk))
+	for k := range byChunk {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	out := make([]ChunkSizeAggregateRecord, 0, len(keys))
+	for _, k := range keys {
+		s := byChunk[k]
+		out = append(out, ChunkSizeAggregateRecord{
+			ChunkSize:     k,
+			Runs:          s.runs,
+			AvgThroughput: s.sum / float64(s.runs),
+		})
+	}
+	return out, nil
+}
+
 func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
 	m.saved = &record
 	return nil
@@ -231,6 +315,63 @@ func TestSaveTuningWithActualParams_NoPending(t *testing.T) {
 
 	if mock.saved != nil {
 		t.Error("should not save when no pending save exists")
+	}
+}
+
+// TestFormatHistoricalContextBoundsTrajectory pins the issue #141 behavior:
+// the trajectory section in the prompt MUST be bounded to trajectoryLimit rows
+// regardless of how much history exists, but the per-waw and per-chunk-size
+// summaries downstream MUST reflect the FULL history (not just the bounded
+// slice). Without this split, the retry-rate rule's denominators would silently
+// drop older runs.
+func TestFormatHistoricalContextBoundsTrajectory(t *testing.T) {
+	// Build 50 history rows: alternating waw=1 and waw=2 with varying chunk sizes,
+	// some with retries. We expect the prompt to show only the most-recent
+	// trajectoryLimit (=20) rows in the trajectory section, but the per-waw
+	// summary should still report 25 runs at each waw.
+	hist := make([]AITuningRecord, 0, 50)
+	for i := 0; i < 50; i++ {
+		waw := 1
+		if i%2 == 0 {
+			waw = 2
+		}
+		hist = append(hist, AITuningRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			Workers:           16,
+			ReadAheadBuffers:  4,
+			ParallelReaders:   4,
+			MaxPartitions:     16,
+			FinalThroughput:   1000000,
+			FinalDurationSecs: 20,
+			ChunkRetryCount:   0,
+		})
+	}
+	mock := &mockHistoryProvider{history: hist}
+	analyzer := &SmartConfigAnalyzer{historyProvider: mock, dbType: "mssql", targetDBType: "postgres"}
+	ctx := analyzer.formatHistoricalContext()
+
+	// Trajectory section must announce the bounded count, not the full 50.
+	wantHeader := "PARAMETER TRAJECTORY (most recent 20 analyses"
+	if !strings.Contains(ctx, wantHeader) {
+		t.Errorf("trajectory header missing %q\nfull context:\n%s", wantHeader, ctx)
+	}
+
+	// Numbered rows should stop at 20.
+	if strings.Contains(ctx, "  21. ") {
+		t.Error("trajectory rendered more than trajectoryLimit rows; row 21 should not appear")
+	}
+
+	// But the per-waw summary must still see all 50 rows (25/waw).
+	wantWaw1 := "write_ahead_writers=1 → 0/25 runs retried (0.0% retry rate, 0 total chunk retries)"
+	wantWaw2 := "write_ahead_writers=2 → 0/25 runs retried (0.0% retry rate, 0 total chunk retries)"
+	if !strings.Contains(ctx, wantWaw1) {
+		t.Errorf("per-waw summary missing %q (denominator should reflect full history, not bounded trajectory)\nfull context:\n%s", wantWaw1, ctx)
+	}
+	if !strings.Contains(ctx, wantWaw2) {
+		t.Errorf("per-waw summary missing %q\nfull context:\n%s", wantWaw2, ctx)
 	}
 }
 
@@ -394,7 +535,17 @@ func TestSummarizeWriteAheadWritersRetryRate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := summarizeWriteAheadWritersRetryRate(tt.history)
+			// Aggregation moved to SQL (issue #141); drive the test through the
+			// mock's aggregator so the test inputs stay easy to express as raw
+			// records. Pre-#141 this was a single-call path; now it's two
+			// calls (aggregate, then format) but the formatted output is the
+			// same load-bearing string the AI prompt depends on.
+			mock := &mockHistoryProvider{history: tt.history}
+			aggs, err := mock.GetAITuningAggregatesByWaw("", "")
+			if err != nil {
+				t.Fatalf("aggregator: %v", err)
+			}
+			result := formatWawAggregateBlock(aggs)
 			if tt.wantEmpty {
 				if result != "" {
 					t.Errorf("expected empty result, got: %q", result)

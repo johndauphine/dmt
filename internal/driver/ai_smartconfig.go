@@ -171,13 +171,43 @@ type AutoTuneOutput struct {
 type TuningHistoryProvider interface {
 	// GetAIAdjustments returns recent runtime AI adjustments from migrations
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
-	// GetAITuningHistory returns recent tuning recommendations filtered by migration direction.
+	// GetAITuningHistory returns recent tuning recommendations filtered by
+	// migration direction. Pass limit > 0 to bound the slice; the smartconfig
+	// uses a small bound for the per-row trajectory rendering, with aggregates
+	// pulled separately via the GetAITuningAggregates* methods (issue #141).
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
+	// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over
+	// the FULL ai_tuning_history. Used so the retry-rate rule's denominators stay
+	// honest while the per-row trajectory in the prompt is bounded.
+	GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error)
+	// GetAITuningAggregatesByChunkSize returns per-chunk_size aggregates over the
+	// FULL ai_tuning_history.
+	GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error)
 	// SaveAITuning saves a tuning recommendation for future reference
 	SaveAITuning(record AITuningRecord) error
 	// UpdateAITuningResult updates the most recent tuning record with final
 	// throughput and the cumulative chunk retry count observed during the run.
 	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
+}
+
+// WawAggregateRecord pre-aggregates ai_tuning_history rows by write_ahead_writers.
+// Mirrors checkpoint.WawAggregateRecord — the orchestrator's stateHistoryAdapter
+// converts between the two packages.
+type WawAggregateRecord struct {
+	WriteAheadWriters int
+	TotalRuns         int
+	RunsWithRetries   int
+	TotalRetries      int
+	PeakThroughput    float64
+	MeanThroughput    float64
+}
+
+// ChunkSizeAggregateRecord pre-aggregates ai_tuning_history rows by chunk_size.
+// Mirrors checkpoint.ChunkSizeAggregateRecord.
+type ChunkSizeAggregateRecord struct {
+	ChunkSize     int
+	Runs          int
+	AvgThroughput float64
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment from runtime migration.
@@ -552,6 +582,13 @@ func detectPlatform() string {
 	return "linux"
 }
 
+// trajectoryLimit caps the number of per-row history entries rendered in the
+// PARAMETER TRAJECTORY section of the smartconfig prompt (issue #141). The
+// per-waw and per-chunk-size aggregates are pulled separately as SQL GROUP BY
+// queries so the rule denominators stay accurate over the full table even
+// when the trajectory itself is bounded.
+const trajectoryLimit = 20
+
 // formatHistoricalContext builds a historical context string from past tuning data.
 func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	if s.historyProvider == nil {
@@ -560,10 +597,12 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 
 	var sb strings.Builder
 
-	// Section 1: Parameter trajectory from past tuning runs (filtered by direction)
-	tuningHistory, err := s.historyProvider.GetAITuningHistory(0, s.dbType, s.targetDBType)
+	// Section 1: Bounded recent trajectory (most recent N rows). Aggregates for
+	// the rule's denominators come from separate SQL queries below — keeps the
+	// prompt size bounded as history grows (issue #141).
+	tuningHistory, err := s.historyProvider.GetAITuningHistory(trajectoryLimit, s.dbType, s.targetDBType)
 	if err == nil && len(tuningHistory) > 0 {
-		sb.WriteString("\nPARAMETER TRAJECTORY (starting parameters from successive analyses, oldest first):\n")
+		sb.WriteString(fmt.Sprintf("\nPARAMETER TRAJECTORY (most recent %d analyses, oldest first):\n", len(tuningHistory)))
 		for i := len(tuningHistory) - 1; i >= 0; i-- {
 			h := tuningHistory[i]
 			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
@@ -584,20 +623,24 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 			sb.WriteString("\n")
 		}
 
-		// Detect and warn about downward trends
+		// Detect and warn about downward trends within the bounded window.
 		if trend := detectParameterTrend(tuningHistory); trend != "" {
 			sb.WriteString(fmt.Sprintf("  WARNING: %s\n", trend))
 		}
+	}
 
-		// Summarize chunk_size vs throughput relationship if we have data
-		if summary := summarizeChunkPerformance(tuningHistory); summary != "" {
+	// Per-chunk-size aggregates over FULL history — the trajectory above is
+	// bounded but the rule's denominator must reflect every recorded run.
+	if chunkAggs, err := s.historyProvider.GetAITuningAggregatesByChunkSize(s.dbType, s.targetDBType); err == nil {
+		if summary := formatChunkSizeAggregateBlock(chunkAggs); summary != "" {
 			sb.WriteString(summary)
 		}
+	}
 
-		// Summarize retry rate per write_ahead_writers value so the AI sees
-		// a pre-computed per-configuration retry rate instead of having to
-		// count individual run lines (which it tends to cherry-pick).
-		if summary := summarizeWriteAheadWritersRetryRate(tuningHistory); summary != "" {
+	// Per-waw aggregates over FULL history — same rationale; preserves the
+	// retry-rate rule's data grounding (PR #140 / issue #139).
+	if wawAggs, err := s.historyProvider.GetAITuningAggregatesByWaw(s.dbType, s.targetDBType); err == nil {
+		if summary := formatWawAggregateBlock(wawAggs); summary != "" {
 			sb.WriteString(summary)
 		}
 	}
@@ -688,106 +731,50 @@ func detectParameterTrend(history []AITuningRecord) string {
 	return strings.Join(warnings, "; ")
 }
 
-// summarizeWriteAheadWritersRetryRate aggregates retry rate by
-// write_ahead_writers so the per-configuration retry pressure is unmissable
-// in the AI prompt. Without this summary the AI tends to cherry-pick the
-// clean runs of a high-retry configuration and rationalize away the retried
-// ones (observed empirically: an 11-run history with 3 retried runs at waw=2
-// was summarized by the AI as "recent runs show zero retries").
-func summarizeWriteAheadWritersRetryRate(history []AITuningRecord) string {
-	type wawStats struct {
-		totalRuns       int
-		runsWithRetries int
-		totalRetries    int
-	}
-	byWaw := make(map[int]*wawStats)
-	for _, h := range history {
-		if h.FinalThroughput <= 0 {
-			continue // skip records without a completed run (no retry data either)
-		}
-		s, ok := byWaw[h.WriteAheadWriters]
-		if !ok {
-			s = &wawStats{}
-			byWaw[h.WriteAheadWriters] = s
-		}
-		s.totalRuns++
-		if h.ChunkRetryCount > 0 {
-			s.runsWithRetries++
-			s.totalRetries += h.ChunkRetryCount
-		}
-	}
-
-	if len(byWaw) == 0 {
+// formatWawAggregateBlock renders the per-write_ahead_writers retry-rate summary
+// for the smartconfig prompt. Aggregates come pre-computed from the SQL backend
+// (issue #141) — this helper is pure formatting, no Go-side accumulation.
+//
+// Without this block the AI tends to cherry-pick the clean runs of a high-retry
+// configuration and rationalize away the retried ones (observed empirically:
+// an 11-run history with 3 retried runs at waw=2 was summarized by the AI as
+// "recent runs show zero retries"). PR #140 grounded the rule's reasoning in
+// this exact summary, so the output format is part of the load-bearing contract.
+func formatWawAggregateBlock(aggs []WawAggregateRecord) string {
+	if len(aggs) == 0 {
 		return ""
 	}
-
-	waws := make([]int, 0, len(byWaw))
-	for w := range byWaw {
-		waws = append(waws, w)
-	}
-	sort.Ints(waws)
-
 	var sb strings.Builder
 	sb.WriteString("\n  WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE:\n")
-	for _, w := range waws {
-		s := byWaw[w]
-		if s.totalRuns == 0 {
+	for _, a := range aggs {
+		if a.TotalRuns == 0 {
 			continue
 		}
-		retryRate := float64(s.runsWithRetries) / float64(s.totalRuns) * 100
+		retryRate := float64(a.RunsWithRetries) / float64(a.TotalRuns) * 100
 		// Use %.1f%% so a small-but-nonzero retry rate (e.g. 1/200 = 0.5%%)
 		// doesn't round to 0%% and falsely trip clause 4(b) "rule does not
 		// apply." The raw runsWithRetries/totalRuns counts are also rendered
 		// alongside as the unambiguous source of truth.
 		sb.WriteString(fmt.Sprintf("    write_ahead_writers=%d → %d/%d runs retried (%.1f%% retry rate, %d total chunk retries)\n",
-			w, s.runsWithRetries, s.totalRuns, retryRate, s.totalRetries))
+			a.WriteAheadWriters, a.RunsWithRetries, a.TotalRuns, retryRate, a.TotalRetries))
 	}
 	sb.WriteString("    Read this as a per-configuration observation. The retry-rate rule applies ONLY to waw values that show a non-zero retry rate above. If every row above shows 0% retry rate over a meaningful sample, the rule is silent — the choice must be driven by observed throughput from the trajectory, not by an assumed mechanism. Retries are factual events from the chunk_retry_count column; do not invent or repeat causal explanations (e.g. \"transport saturation\", \"connection pool exhaustion\") that are not visible in this column.\n")
 
 	return sb.String()
 }
 
-// summarizeChunkPerformance aggregates throughput by chunk_size to show
-// the relationship between chunk size and actual performance.
-func summarizeChunkPerformance(history []AITuningRecord) string {
-	// Group throughput by chunk_size
-	type chunkStats struct {
-		totalThroughput float64
-		count           int
-	}
-	byChunk := make(map[int]*chunkStats)
-	for _, h := range history {
-		if h.FinalThroughput <= 0 {
-			continue
-		}
-		s, ok := byChunk[h.ChunkSize]
-		if !ok {
-			s = &chunkStats{}
-			byChunk[h.ChunkSize] = s
-		}
-		s.totalThroughput += h.FinalThroughput
-		s.count++
-	}
-
-	if len(byChunk) < 2 {
+// formatChunkSizeAggregateBlock renders the chunk_size vs throughput summary.
+// Like formatWawAggregateBlock, takes pre-aggregated data from the SQL backend.
+func formatChunkSizeAggregateBlock(aggs []ChunkSizeAggregateRecord) string {
+	if len(aggs) < 2 {
 		return ""
 	}
-
-	// Sort chunk sizes for consistent output
-	sizes := make([]int, 0, len(byChunk))
-	for size := range byChunk {
-		sizes = append(sizes, size)
-	}
-	sort.Ints(sizes)
-
 	var sb strings.Builder
 	sb.WriteString("\n  CHUNK SIZE vs THROUGHPUT (averaged across runs):\n")
-	for _, size := range sizes {
-		s := byChunk[size]
-		avg := s.totalThroughput / float64(s.count)
-		sb.WriteString(fmt.Sprintf("    chunk_size=%d → avg %.0f rows/sec (%d runs)\n", size, avg, s.count))
+	for _, a := range aggs {
+		sb.WriteString(fmt.Sprintf("    chunk_size=%d → avg %.0f rows/sec (%d runs)\n",
+			a.ChunkSize, a.AvgThroughput, a.Runs))
 	}
-
 	return sb.String()
 }
 
@@ -800,6 +787,7 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 
 	// Get historical context from past analyses and migrations
 	historicalContext := s.formatHistoricalContext()
+	logging.Debug("smartconfig historical context (%d bytes):\n%s", len(historicalContext), historicalContext)
 
 	// Build memory constraint description
 	memConstraint := fmt.Sprintf("Total RAM: %dGB, Available: %dMB", input.MemoryGB, input.AvailableMemoryMB)
