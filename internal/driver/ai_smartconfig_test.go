@@ -578,17 +578,27 @@ func TestFormatHistoricalContextIncludesRegimeApplicability(t *testing.T) {
 		MemoryGB:          30,
 		AvailableMemoryMB: 28000,
 	}
-	ctx := analyzer.formatHistoricalContextForInput(&input)
+	currentTuning := DBTuningSnapshot{
+		TargetSharedBuffersMB: 8192,
+		TargetSyncCommit:      "off",
+		TargetFsync:           "on",
+		TargetMaxWALSizeMB:    16384,
+		TargetWALLevel:        "replica",
+	}
+	ctx := analyzer.formatHistoricalContextForInput(&input, currentTuning)
 
 	musts := []string{
 		"HISTORY APPLICABILITY:",
 		"Treat historical throughput as regime-specific, not universal",
 		"Current run host regime: platform=wsl2, cpu_cores=18, memory_gb=30, available_memory_mb=28000, max_memory_mb=none.",
+		"Current run effective DB tuning: pg{shared_buffers=8192MB, sync_commit=off, fsync=on, max_wal=16384MB, wal_level=replica}.",
 		"target shared_buffers, max_wal_size, synchronous_commit, source max server memory",
 		"prefer the baseline and state that history may be out-of-regime",
-		"not effective DB tuning settings",
-		"mssql->postgres (2026-05-08, 10 tables, 1.0M rows, cpu_cores=14, memory_gb=9, host_regime=different_from_current_host)",
-		"mssql->postgres (2026-05-08, 10 tables, 1.0M rows, cpu_cores=18, memory_gb=30, host_regime=similar_to_current_host)",
+		// Both fixture rows have unknown DB tuning (zero/empty), so the
+		// classifier reports "different_hw" or "same_regime" based on
+		// hardware alone.
+		"mssql->postgres (2026-05-08, 10 tables, 1.0M rows, cpu_cores=14, memory_gb=9, tuning=unknown, regime=different_hw [hw: history=14c/9GB vs current=18c/30GB])",
+		"mssql->postgres (2026-05-08, 10 tables, 1.0M rows, cpu_cores=18, memory_gb=30, tuning=unknown, regime=same_regime)",
 	}
 	for _, m := range musts {
 		if !strings.Contains(ctx, m) {
@@ -788,6 +798,121 @@ func TestFormatWawAggregateBlock(t *testing.T) {
 			for _, want := range tt.wantContains {
 				if !strings.Contains(result, want) {
 					t.Errorf("result missing %q\nfull result:\n%s", want, result)
+				}
+			}
+		})
+	}
+}
+
+// TestClassifyRegimeDeltas exercises the multi-axis regime classifier added
+// alongside Codex's #144 first cut. It covers all four label paths
+// (same_regime, different_hw, different_tuning, different_hw_and_tuning,
+// unknown) plus the deltas list contents.
+func TestClassifyRegimeDeltas(t *testing.T) {
+	current := AutoTuneInput{CPUCores: 18, MemoryGB: 30}
+	currentTuning := DBTuningSnapshot{
+		TargetSharedBuffersMB: 8192,
+		TargetSyncCommit:      "off",
+		TargetFsync:           "on",
+		TargetMaxWALSizeMB:    16384,
+		TargetWALLevel:        "replica",
+	}
+
+	cases := []struct {
+		name      string
+		history   AITuningRecord
+		wantLabel string
+		wantInOne []string // every substring must appear in at least one delta
+	}{
+		{
+			name: "same hardware and same tuning",
+			history: AITuningRecord{
+				CPUCores: 18, MemoryGB: 30,
+				TargetSharedBuffersMB: 8192, TargetSyncCommit: "off",
+				TargetFsync: "on", TargetMaxWALSizeMB: 16384, TargetWALLevel: "replica",
+			},
+			wantLabel: "same_regime",
+		},
+		{
+			name: "same hardware, fsync flipped",
+			history: AITuningRecord{
+				CPUCores: 18, MemoryGB: 30,
+				TargetSharedBuffersMB: 8192, TargetSyncCommit: "off",
+				TargetFsync: "off", TargetMaxWALSizeMB: 16384, TargetWALLevel: "replica",
+			},
+			wantLabel: "different_tuning",
+			wantInOne: []string{"pg_fsync: off→on"},
+		},
+		{
+			name: "same hardware, smaller PG buffers",
+			history: AITuningRecord{
+				CPUCores: 18, MemoryGB: 30,
+				TargetSharedBuffersMB: 1024, TargetSyncCommit: "off",
+				TargetFsync: "on", TargetMaxWALSizeMB: 16384, TargetWALLevel: "replica",
+			},
+			wantLabel: "different_tuning",
+			wantInOne: []string{"pg_shared_buffers: 1024MB→8192MB"},
+		},
+		{
+			name: "different hardware, same tuning",
+			history: AITuningRecord{
+				CPUCores: 8, MemoryGB: 16,
+				TargetSharedBuffersMB: 8192, TargetSyncCommit: "off",
+				TargetFsync: "on", TargetMaxWALSizeMB: 16384, TargetWALLevel: "replica",
+			},
+			wantLabel: "different_hw",
+			wantInOne: []string{"hw: history=8c/16GB vs current=18c/30GB"},
+		},
+		{
+			name: "different hardware AND tuning",
+			history: AITuningRecord{
+				CPUCores: 8, MemoryGB: 16,
+				TargetSharedBuffersMB: 1024, TargetFsync: "off",
+			},
+			wantLabel: "different_hw_and_tuning",
+			wantInOne: []string{"hw: history=8c/16GB", "pg_fsync: off→on"},
+		},
+		{
+			name:      "unknown when history hardware missing",
+			history:   AITuningRecord{CPUCores: 0, MemoryGB: 0, TargetFsync: "off"},
+			wantLabel: "unknown",
+		},
+		{
+			name: "small PG buffer diff within tolerance is NOT a regime change",
+			history: AITuningRecord{
+				CPUCores: 18, MemoryGB: 30,
+				TargetSharedBuffersMB: 8000, // 192MB diff (~2.3%) within 10% tolerance
+				TargetSyncCommit:      "off",
+				TargetFsync:           "on", TargetMaxWALSizeMB: 16384, TargetWALLevel: "replica",
+			},
+			wantLabel: "same_regime",
+		},
+		{
+			name: "history with empty tuning fields skips them (treats as unknown, not mismatch)",
+			history: AITuningRecord{
+				CPUCores: 18, MemoryGB: 30,
+				// No tuning fields at all (pre-#144 row)
+			},
+			wantLabel: "same_regime",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			label, deltas := classifyRegime(tc.history, current, currentTuning)
+			if label != tc.wantLabel {
+				t.Errorf("label = %q, want %q (deltas: %v)", label, tc.wantLabel, deltas)
+			}
+			for _, want := range tc.wantInOne {
+				found := false
+				for _, d := range deltas {
+					if strings.Contains(d, want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected a delta containing %q; got %v", want, deltas)
 				}
 			}
 		})

@@ -337,33 +337,38 @@ func (s *State) ensureTuningResultColumns() error {
 		return err
 	}
 
-	hasThroughput := false
-	hasDuration := false
-	hasChunkRetries := false
+	have := make(map[string]bool, len(columns))
 	for _, col := range columns {
-		switch col {
-		case "final_throughput":
-			hasThroughput = true
-		case "final_duration_seconds":
-			hasDuration = true
-		case "chunk_retry_count":
-			hasChunkRetries = true
-		}
+		have[col] = true
 	}
 
-	if !hasThroughput {
-		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN final_throughput REAL`); err != nil {
-			return err
-		}
+	// Each entry: (column name, ALTER TABLE DDL).
+	// Older migrations added throughput, duration, and chunk_retry_count.
+	// The "regime" columns below were added in #144 follow-up to capture
+	// effective DB tuning per run so the smartconfig prompt can compare
+	// trajectory rows against the current run's tuning, not just hardware.
+	migrations := []struct {
+		col, ddl string
+	}{
+		{"final_throughput", "ALTER TABLE ai_tuning_history ADD COLUMN final_throughput REAL"},
+		{"final_duration_seconds", "ALTER TABLE ai_tuning_history ADD COLUMN final_duration_seconds REAL"},
+		{"chunk_retry_count", "ALTER TABLE ai_tuning_history ADD COLUMN chunk_retry_count INTEGER DEFAULT 0"},
+		// #144 regime tracking — effective DB tuning settings captured at run start.
+		{"platform", "ALTER TABLE ai_tuning_history ADD COLUMN platform TEXT"},
+		{"target_shared_buffers_mb", "ALTER TABLE ai_tuning_history ADD COLUMN target_shared_buffers_mb INTEGER"},
+		{"target_synchronous_commit", "ALTER TABLE ai_tuning_history ADD COLUMN target_synchronous_commit TEXT"},
+		{"target_fsync", "ALTER TABLE ai_tuning_history ADD COLUMN target_fsync TEXT"},
+		{"target_full_page_writes", "ALTER TABLE ai_tuning_history ADD COLUMN target_full_page_writes TEXT"},
+		{"target_max_wal_size_mb", "ALTER TABLE ai_tuning_history ADD COLUMN target_max_wal_size_mb INTEGER"},
+		{"target_wal_level", "ALTER TABLE ai_tuning_history ADD COLUMN target_wal_level TEXT"},
+		{"source_max_server_memory_mb", "ALTER TABLE ai_tuning_history ADD COLUMN source_max_server_memory_mb INTEGER"},
 	}
-	if !hasDuration {
-		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN final_duration_seconds REAL`); err != nil {
-			return err
+	for _, m := range migrations {
+		if have[m.col] {
+			continue
 		}
-	}
-	if !hasChunkRetries {
-		if _, err := s.db.Exec(`ALTER TABLE ai_tuning_history ADD COLUMN chunk_retry_count INTEGER DEFAULT 0`); err != nil {
-			return err
+		if _, err := s.db.Exec(m.ddl); err != nil {
+			return fmt.Errorf("migrating ai_tuning_history.%s: %w", m.col, err)
 		}
 	}
 	return nil
@@ -1218,6 +1223,23 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 		wasAIUsed = 1
 	}
 
+	// Helper to convert empty strings / zeros into nullable values so the
+	// new regime columns are stored as SQL NULL when unknown rather than
+	// as "" or 0 (which the smartconfig render path would otherwise treat
+	// as a real value and try to compare against the current run).
+	nullStr := func(s string) interface{} {
+		if s == "" {
+			return nil
+		}
+		return s
+	}
+	nullInt := func(v int64) interface{} {
+		if v == 0 {
+			return nil
+		}
+		return v
+	}
+
 	_, err := s.db.Exec(`
 		INSERT INTO ai_tuning_history (
 			timestamp, source_db_type, target_db_type,
@@ -1226,8 +1248,11 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 			workers, chunk_size, read_ahead_buffers, write_ahead_writers,
 			parallel_readers, max_partitions, large_table_threshold,
 			max_source_connections, max_target_connections,
-			estimated_memory_mb, ai_reasoning, was_ai_used
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			estimated_memory_mb, ai_reasoning, was_ai_used,
+			platform, target_shared_buffers_mb, target_synchronous_commit,
+			target_fsync, target_full_page_writes, target_max_wal_size_mb,
+			target_wal_level, source_max_server_memory_mb
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.Timestamp.Format("2006-01-02 15:04:05"),
 		record.SourceDBType, record.TargetDBType,
@@ -1237,6 +1262,9 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 		record.ParallelReaders, record.MaxPartitions, record.LargeTableThreshold,
 		record.MaxSourceConns, record.MaxTargetConns,
 		record.EstimatedMemoryMB, record.AIReasoning, wasAIUsed,
+		nullStr(record.Platform), nullInt(record.TargetSharedBuffersMB), nullStr(record.TargetSyncCommit),
+		nullStr(record.TargetFsync), nullStr(record.TargetFullPageWrites), nullInt(record.TargetMaxWALSizeMB),
+		nullStr(record.TargetWALLevel), nullInt(record.SourceMaxServerMemoryMB),
 	)
 	return err
 }
@@ -1270,7 +1298,10 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		       parallel_readers, max_partitions, large_table_threshold,
 		       max_source_connections, max_target_connections,
 		       estimated_memory_mb, ai_reasoning, was_ai_used,
-		       final_throughput, final_duration_seconds, chunk_retry_count
+		       final_throughput, final_duration_seconds, chunk_retry_count,
+		       platform, target_shared_buffers_mb, target_synchronous_commit,
+		       target_fsync, target_full_page_writes, target_max_wal_size_mb,
+		       target_wal_level, source_max_server_memory_mb
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
 		ORDER BY timestamp DESC`, limit, sourceType, targetType)
@@ -1290,6 +1321,9 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		var wasAIUsed int
 		var finalThroughput, finalDurationSecs sql.NullFloat64
 		var chunkRetryCount sql.NullInt64
+		// #144 regime columns; nullable for older rows that predate the migration.
+		var platform, targetSyncCommit, targetFsync, targetFullPageWrites, targetWALLevel sql.NullString
+		var targetSharedBuffersMB, targetMaxWALSizeMB, sourceMaxServerMemoryMB sql.NullInt64
 
 		if err := rows.Scan(
 			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
@@ -1300,11 +1334,38 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 			&maxSourceConns, &maxTargetConns,
 			&estimatedMem, &aiReasoning, &wasAIUsed,
 			&finalThroughput, &finalDurationSecs, &chunkRetryCount,
+			&platform, &targetSharedBuffersMB, &targetSyncCommit,
+			&targetFsync, &targetFullPageWrites, &targetMaxWALSizeMB,
+			&targetWALLevel, &sourceMaxServerMemoryMB,
 		); err != nil {
 			return nil, err
 		}
 		if chunkRetryCount.Valid {
 			r.ChunkRetryCount = int(chunkRetryCount.Int64)
+		}
+		if platform.Valid {
+			r.Platform = platform.String
+		}
+		if targetSharedBuffersMB.Valid {
+			r.TargetSharedBuffersMB = targetSharedBuffersMB.Int64
+		}
+		if targetSyncCommit.Valid {
+			r.TargetSyncCommit = targetSyncCommit.String
+		}
+		if targetFsync.Valid {
+			r.TargetFsync = targetFsync.String
+		}
+		if targetFullPageWrites.Valid {
+			r.TargetFullPageWrites = targetFullPageWrites.String
+		}
+		if targetMaxWALSizeMB.Valid {
+			r.TargetMaxWALSizeMB = targetMaxWALSizeMB.Int64
+		}
+		if targetWALLevel.Valid {
+			r.TargetWALLevel = targetWALLevel.String
+		}
+		if sourceMaxServerMemoryMB.Valid {
+			r.SourceMaxServerMemoryMB = sourceMaxServerMemoryMB.Int64
 		}
 
 		r.Timestamp, _ = time.Parse("2006-01-02 15:04:05", timestampStr)

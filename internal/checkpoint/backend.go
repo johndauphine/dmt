@@ -109,6 +109,19 @@ type AITuningRecord struct {
 	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
 	FinalDurationSecs float64 `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
 	ChunkRetryCount   int     `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
+
+	// Effective DB tuning captured at run start. Used by the smartconfig
+	// trajectory rendering to compare history against the current run's
+	// regime (#144 follow-up). Empty/zero values indicate the field was
+	// either unknown at capture time or persisted before this column existed.
+	Platform                string `json:"platform,omitempty"`
+	TargetSharedBuffersMB   int64  `json:"target_shared_buffers_mb,omitempty"`
+	TargetSyncCommit        string `json:"target_synchronous_commit,omitempty"`
+	TargetFsync             string `json:"target_fsync,omitempty"`
+	TargetFullPageWrites    string `json:"target_full_page_writes,omitempty"`
+	TargetMaxWALSizeMB      int64  `json:"target_max_wal_size_mb,omitempty"`
+	TargetWALLevel          string `json:"target_wal_level,omitempty"`
+	SourceMaxServerMemoryMB int64  `json:"source_max_server_memory_mb,omitempty"`
 }
 
 // WawAggregateRecord pre-aggregates ai_tuning_history rows by write_ahead_writers.

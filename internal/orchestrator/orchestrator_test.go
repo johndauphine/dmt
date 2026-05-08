@@ -375,3 +375,28 @@ func TestSanitizeForLog(t *testing.T) {
 		}
 	}
 }
+
+// TestParsePGSize covers the conversion from PG SHOW values to MB.
+func TestParsePGSize(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantMB    int64
+		wantOK    bool
+	}{
+		{"8GB", 8 * 1024, true},
+		{"16384MB", 16384, true},
+		{"1024kB", 1, true},     // 1024 KB = 1 MB
+		{"512kB", 0, true},      // sub-MB rounds down to 0
+		{"2TB", 2 * 1024 * 1024, true},
+		{"  8GB  ", 8 * 1024, true}, // trim
+		{"GARBAGE", 0, false},
+		{"", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := parsePGSize(tc.raw)
+		if ok != tc.wantOK || got != tc.wantMB {
+			t.Errorf("parsePGSize(%q) = (%d, %v), want (%d, %v)",
+				tc.raw, got, ok, tc.wantMB, tc.wantOK)
+		}
+	}
+}

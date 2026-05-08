@@ -385,6 +385,15 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetTy
 			FinalThroughput:      r.FinalThroughput,
 			FinalDurationSecs:    r.FinalDurationSecs,
 			ChunkRetryCount:      r.ChunkRetryCount,
+			// #144 regime fields
+			Platform:                r.Platform,
+			TargetSharedBuffersMB:   r.TargetSharedBuffersMB,
+			TargetSyncCommit:        r.TargetSyncCommit,
+			TargetFsync:             r.TargetFsync,
+			TargetFullPageWrites:    r.TargetFullPageWrites,
+			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
+			TargetWALLevel:          r.TargetWALLevel,
+			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
 		}
 	}
 	return result, nil
@@ -453,6 +462,15 @@ func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 		EstimatedMemoryMB:   record.EstimatedMemoryMB,
 		AIReasoning:         record.AIReasoning,
 		WasAIUsed:           record.WasAIUsed,
+		// #144 regime fields
+		Platform:                record.Platform,
+		TargetSharedBuffersMB:   record.TargetSharedBuffersMB,
+		TargetSyncCommit:        record.TargetSyncCommit,
+		TargetFsync:             record.TargetFsync,
+		TargetFullPageWrites:    record.TargetFullPageWrites,
+		TargetMaxWALSizeMB:      record.TargetMaxWALSizeMB,
+		TargetWALLevel:          record.TargetWALLevel,
+		SourceMaxServerMemoryMB: record.SourceMaxServerMemoryMB,
 	})
 }
 

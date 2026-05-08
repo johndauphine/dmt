@@ -736,6 +736,24 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		analyzer.SetMaxMemoryMB(o.config.Migration.MaxMemoryMB)
 	}
 
+	// Capture effective DB tuning at run start (#144). Used for both:
+	//   (a) smartconfig prompt regime classification (per trajectory row)
+	//   (b) persisting on the saved AITuningRecord so future runs can
+	//       classify against THIS run.
+	// Best-effort: failures yield zero-valued fields, which the render path
+	// and classifier treat as "unknown".
+	tuning := captureDBTuning(ctx, o.sourcePool.DB(), o.targetPool.DB(),
+		o.config.Source.Type, o.config.Target.Type)
+	analyzer.SetCurrentTuning(driver.DBTuningSnapshot{
+		TargetSharedBuffersMB:   tuning.TargetSharedBuffersMB,
+		TargetSyncCommit:        tuning.TargetSyncCommit,
+		TargetFsync:             tuning.TargetFsync,
+		TargetFullPageWrites:    tuning.TargetFullPageWrites,
+		TargetMaxWALSizeMB:      tuning.TargetMaxWALSizeMB,
+		TargetWALLevel:          tuning.TargetWALLevel,
+		SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
+	})
+
 	// Run analysis with timeout to avoid delaying migration start.
 	// Use the AI mapper's configured timeout (respects provider config,
 	// local provider defaults, and user overrides).
@@ -774,7 +792,10 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		logging.Info("AI reasoning: %s", sanitizeForLog(suggestions.AISuggestions.Reasoning))
 	}
 
-	// Save tuning history with actual params used (after user overrides)
+	// Save tuning history with actual params used (after user overrides).
+	// `tuning` was captured earlier so the smartconfig prompt could classify
+	// against it; same snapshot is persisted here so future runs see this
+	// run's effective tuning when classifying their own trajectory rows.
 	analyzer.SaveTuningWithActualParams(driver.ActualParams{
 		Workers:           o.config.Migration.Workers,
 		ChunkSize:         o.config.Migration.ChunkSize,
@@ -782,6 +803,16 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		WriteAheadWriters: o.config.Migration.WriteAheadWriters,
 		ParallelReaders:   o.config.Migration.ParallelReaders,
 		MaxPartitions:     o.config.Migration.MaxPartitions,
+		// #144 regime fields. Platform comes from gopsutil-detected runtime
+		// (already in AutoTuneInput); the DB-tuning fields come from
+		// captureDBTuning above.
+		TargetSharedBuffersMB:   tuning.TargetSharedBuffersMB,
+		TargetSyncCommit:        tuning.TargetSyncCommit,
+		TargetFsync:             tuning.TargetFsync,
+		TargetFullPageWrites:    tuning.TargetFullPageWrites,
+		TargetMaxWALSizeMB:      tuning.TargetMaxWALSizeMB,
+		TargetWALLevel:          tuning.TargetWALLevel,
+		SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
 	})
 }
 
