@@ -390,7 +390,7 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(ctx context.Context, table
 		output, err := s.getAIAutoTune(ctx, input)
 		if err == nil && output != nil {
 			s.suggestions.AISuggestions = output
-			s.applyAISuggestions(output)
+			s.applyAISuggestions(output, input)
 			wasAIUsed = true
 			aiReasoning = output.Reasoning
 			logging.Debug("AI tuning applied")
@@ -513,8 +513,26 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// computeEstimatedMemMB returns the theoretical-maximum memory footprint of a
+// migration config in megabytes, using the same formula advertised in the AI
+// smartconfig prompt:
+//
+//	workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+//
+// This is computed deterministically in Go rather than trusting an LLM's
+// arithmetic — see issue #153 for observed under-estimates of 1.4-3x when the
+// LLM was asked to populate `estimated_memory_mb`.
+func computeEstimatedMemMB(workers, readAheadBuffers, writeAheadWriters, chunkSize int, avgRowBytes int64) int64 {
+	return int64(workers) * int64(readAheadBuffers+writeAheadWriters) * int64(chunkSize) * avgRowBytes / 1024 / 1024
+}
+
 // applyAISuggestions applies AI-recommended values to the suggestions.
-func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput) {
+//
+// The LLM's `estimated_memory_mb` field is intentionally ignored — it is
+// recomputed in Go from the LLM's chosen params (see computeEstimatedMemMB and
+// issue #153). The LLM still produces the field per the prompt spec; we read
+// the value into AISuggestions for telemetry but do not use it for control.
+func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput, input AutoTuneInput) {
 	s.suggestions.Workers = ai.Workers
 	s.suggestions.ChunkSizeRecommendation = ai.ChunkSize
 	s.suggestions.ReadAheadBuffers = ai.ReadAheadBuffers
@@ -527,7 +545,13 @@ func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput) {
 	s.suggestions.UpsertMergeChunkSize = ai.UpsertMergeChunkSize
 	s.suggestions.CheckpointFrequency = ai.CheckpointFrequency
 	s.suggestions.MaxRetries = ai.MaxRetries
-	s.suggestions.EstimatedMemMB = ai.EstimatedMemoryMB
+	s.suggestions.EstimatedMemMB = computeEstimatedMemMB(
+		ai.Workers,
+		ai.ReadAheadBuffers,
+		ai.WriteAheadWriters,
+		ai.ChunkSize,
+		input.AvgRowBytes,
+	)
 }
 
 // applyDefaultSuggestions applies sensible defaults based on system resources.
@@ -552,8 +576,13 @@ func (s *SmartConfigAnalyzer) applyDefaultSuggestions(input AutoTuneInput) {
 	s.suggestions.CheckpointFrequency = 20
 	s.suggestions.MaxRetries = 3
 
-	// Estimate memory usage
-	s.suggestions.EstimatedMemMB = int64(workers) * 4 * int64(s.suggestions.ChunkSizeRecommendation) * input.AvgRowBytes / 1024 / 1024
+	s.suggestions.EstimatedMemMB = computeEstimatedMemMB(
+		s.suggestions.Workers,
+		s.suggestions.ReadAheadBuffers,
+		s.suggestions.WriteAheadWriters,
+		s.suggestions.ChunkSizeRecommendation,
+		input.AvgRowBytes,
+	)
 }
 
 // calculateAvgRowSize calculates average row size from top 5 largest tables.

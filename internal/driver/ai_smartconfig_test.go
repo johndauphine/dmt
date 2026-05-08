@@ -918,3 +918,79 @@ func TestClassifyRegimeDeltas(t *testing.T) {
 		})
 	}
 }
+
+// TestComputeEstimatedMemMB locks in the formula advertised in the smartconfig
+// prompt: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size *
+// avg_row_bytes / 1024 / 1024. The third case mirrors the SO2013 run #3
+// reproduction in issue #153, where the LLM returned 343 MB.
+func TestComputeEstimatedMemMB(t *testing.T) {
+	tests := []struct {
+		name              string
+		workers, raw, waw int
+		chunkSize         int
+		avgRowBytes       int64
+		want              int64
+	}{
+		{"so2010-typical", 6, 4, 2, 50000, 509, 873},
+		{"so2013-waw1", 6, 4, 1, 50000, 573, 819},
+		{"so2013-waw2-issue-153", 6, 4, 2, 50000, 573, 983},
+		{"zero-workers", 0, 4, 2, 50000, 500, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeEstimatedMemMB(tc.workers, tc.raw, tc.waw, tc.chunkSize, tc.avgRowBytes)
+			if got != tc.want {
+				t.Errorf("computeEstimatedMemMB(%d, %d, %d, %d, %d) = %d, want %d",
+					tc.workers, tc.raw, tc.waw, tc.chunkSize, tc.avgRowBytes, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestApplyAISuggestionsIgnoresLLMMemoryEstimate verifies the fix for issue
+// #153 — applyAISuggestions must recompute EstimatedMemMB from the chosen
+// params, not trust the LLM's reported value.
+func TestApplyAISuggestionsIgnoresLLMMemoryEstimate(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{
+		suggestions: &SmartConfigSuggestions{},
+	}
+	// LLM-returned params plus a deliberately-wrong memory claim (matches the
+	// SO2013 run #3 case from the bug report — model said 343, real is 983).
+	ai := &AutoTuneOutput{
+		Workers:           6,
+		ChunkSize:         50000,
+		ReadAheadBuffers:  4,
+		WriteAheadWriters: 2,
+		EstimatedMemoryMB: 343, // bogus — must be ignored
+	}
+	input := AutoTuneInput{AvgRowBytes: 573}
+
+	analyzer.applyAISuggestions(ai, input)
+
+	const want = int64(983)
+	if got := analyzer.suggestions.EstimatedMemMB; got != want {
+		t.Errorf("EstimatedMemMB = %d, want %d (recomputed from params; LLM's 343 must be ignored)", got, want)
+	}
+}
+
+// TestApplyDefaultSuggestionsUsesBufferSum verifies the fallback formula uses
+// (read_ahead_buffers + write_ahead_writers) instead of a hard-coded 4 — keeping
+// the no-AI path consistent with the AI path and the prompt's stated formula.
+func TestApplyDefaultSuggestionsUsesBufferSum(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{
+		suggestions: &SmartConfigSuggestions{},
+	}
+	input := AutoTuneInput{
+		CPUCores:    8, // → workers = 6
+		AvgRowBytes: 500,
+	}
+
+	analyzer.applyDefaultSuggestions(input)
+
+	// Defaults: workers=6, read_ahead_buffers=4, write_ahead_writers=2,
+	// chunk_size=50000, avg_row_bytes=500. Formula: 6 * 6 * 50000 * 500 / 1024 / 1024 = 858 MB.
+	const want = int64(858)
+	if got := analyzer.suggestions.EstimatedMemMB; got != want {
+		t.Errorf("EstimatedMemMB = %d, want %d", got, want)
+	}
+}
