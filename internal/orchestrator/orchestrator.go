@@ -764,11 +764,14 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	// gated on len(changes)>0, so when the AI converged on a config matching
 	// the current effective values (a steady-state outcome) the rule's
 	// citation requirement from #140 became unverifiable in production logs.
+	// Sanitize the AI-supplied strings before logging — multi-line content
+	// from the model would otherwise produce log entries where subsequent
+	// lines lack timestamps/levels, breaking parsers.
 	if suggestions.AISuggestions != nil && suggestions.AISuggestions.ObservedRetryRates != "" {
-		logging.Info("AI observed retry rates: %s", suggestions.AISuggestions.ObservedRetryRates)
+		logging.Info("AI observed retry rates: %s", sanitizeForLog(suggestions.AISuggestions.ObservedRetryRates))
 	}
 	if suggestions.AISuggestions != nil && suggestions.AISuggestions.Reasoning != "" {
-		logging.Info("AI reasoning: %s", suggestions.AISuggestions.Reasoning)
+		logging.Info("AI reasoning: %s", sanitizeForLog(suggestions.AISuggestions.Reasoning))
 	}
 
 	// Save tuning history with actual params used (after user overrides)
@@ -1085,4 +1088,19 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// sanitizeForLog flattens AI-supplied strings to a single line before logging.
+// Newlines, carriage returns, and tabs become spaces; runs of whitespace
+// collapse. Without this, multi-paragraph reasoning from the model would
+// produce log entries where the second+ lines lack timestamps/levels and
+// break log parsers (issue #143 / PR #151 review).
+func sanitizeForLog(s string) string {
+	r := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
+	flat := r.Replace(s)
+	// Collapse repeated spaces.
+	for strings.Contains(flat, "  ") {
+		flat = strings.ReplaceAll(flat, "  ", " ")
+	}
+	return strings.TrimSpace(flat)
 }

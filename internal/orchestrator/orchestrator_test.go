@@ -351,3 +351,27 @@ func TestOptionsWithValues(t *testing.T) {
 		t.Error("ForceResume = false, want true")
 	}
 }
+
+// TestSanitizeForLog pins the log-injection guard added in PR #151 review:
+// AI-supplied strings (ObservedRetryRates / Reasoning) are logged verbatim
+// at INFO and could otherwise contain newlines that break log parsers.
+func TestSanitizeForLog(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"single line", "single line"},
+		{"multi\nline\nreasoning", "multi line reasoning"},
+		{"tabs\ttoo", "tabs too"},
+		{"carriage\r\nreturn", "carriage return"},
+		{"  leading and trailing  ", "leading and trailing"},
+		{"runs   of    spaces", "runs of spaces"},
+		{"", ""},
+		{"\n\n\n", ""},
+	}
+	for _, tc := range cases {
+		got := sanitizeForLog(tc.in)
+		if got != tc.want {
+			t.Errorf("sanitizeForLog(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

@@ -994,75 +994,7 @@ func GetOfflineAutoTune(ctx context.Context, input AutoTuneInput) (*AutoTuneOutp
 		return nil, fmt.Errorf("marshaling input: %w", err)
 	}
 
-	// Build memory constraint description
-	memConstraint := fmt.Sprintf("Total RAM: %dGB, Available: %dMB", input.MemoryGB, input.AvailableMemoryMB)
-	if input.MaxMemoryMB > 0 {
-		memConstraint += fmt.Sprintf(", User cap: %dMB", input.MaxMemoryMB)
-	}
-	if input.SwapTotalMB > 0 {
-		memConstraint += fmt.Sprintf(", Swap: %dMB", input.SwapTotalMB)
-	}
-	if input.Platform == "wsl2" {
-		memConstraint += " (WSL2 - shared memory with Windows host, OOM kills crash the VM)"
-	}
-
-	// Calculate baseline defaults
-	baselineWorkers := input.CPUCores - 2
-	if baselineWorkers < 2 {
-		baselineWorkers = 2
-	}
-
-	prompt := fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
-
-System and Database Info:
-%s
-
-Host Environment:
-- Platform: %s
-- CPU cores: %d
-- Memory: %s
-- Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
-  NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
-
-Reference baseline (what the system would use without AI tuning):
-- workers: %d (cpu_cores - 2, minimum 2)
-- chunk_size: 50000
-- read_ahead_buffers: 4
-- write_ahead_writers: 2
-- parallel_readers: 2
-- max_partitions: %d
-Your job is to BEAT this baseline. Do not recommend fewer workers or smaller read/parallel buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb). The exception is write_ahead_writers — see guideline 3.
-
-Memory constraint:
-- estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
-- If a user memory cap (max_memory_mb) is set, stay within it
-- On WSL2, exceeding available memory crashes the VM — be more conservative on WSL2 only
-
-Guidelines:
-1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
-2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
-3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch), the per-flow throughput between writer threads and the target may be lower, in which case dropping to 1 may help. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2. The retry-rate rule that the with-history smartconfig uses does NOT apply here — there's no chunk_retry_count history to consult, so this is a heuristic only.
-4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
-
-Respond with ONLY a JSON object:
-{
-  "workers": <int>,
-  "chunk_size": <int>,
-  "read_ahead_buffers": <int>,
-  "write_ahead_writers": <int>,
-  "parallel_readers": <int>,
-  "max_partitions": <int>,
-  "large_table_threshold": <int>,
-  "max_source_connections": <int>,
-  "max_target_connections": <int>,
-  "upsert_merge_chunk_size": <int>,
-  "checkpoint_frequency": <int>,
-  "max_retries": <int>,
-  "estimated_memory_mb": <int>,
-  "observed_retry_rates": "no history",
-  "reasoning": "<brief explanation; do not assert mechanisms (saturation, pressure, contention) — there is no historical data to ground them>"
-}`, string(inputJSON), input.Platform, input.CPUCores, memConstraint,
-		baselineWorkers, baselineWorkers)
+	prompt := buildOfflinePrompt(input, string(inputJSON))
 
 	response, err := aiMapper.CallAI(ctx, prompt)
 	if err != nil {
@@ -1114,6 +1046,83 @@ Respond with ONLY a JSON object:
 	}
 
 	return &output, nil
+}
+
+// buildOfflinePrompt constructs the heuristic-only smartconfig prompt used
+// when no source DB connection is available. Extracted from
+// GetOfflineAutoTune so a unit test can assert prompt invariants
+// (#142 / PR #151 review): the JSON schema must include
+// observed_retry_rates, the retry-rate rule must be marked non-applicable,
+// and the language must NOT assert causal mechanisms (since there's no
+// chunk_retry_count history to ground them).
+func buildOfflinePrompt(input AutoTuneInput, inputJSON string) string {
+	memConstraint := fmt.Sprintf("Total RAM: %dGB, Available: %dMB", input.MemoryGB, input.AvailableMemoryMB)
+	if input.MaxMemoryMB > 0 {
+		memConstraint += fmt.Sprintf(", User cap: %dMB", input.MaxMemoryMB)
+	}
+	if input.SwapTotalMB > 0 {
+		memConstraint += fmt.Sprintf(", Swap: %dMB", input.SwapTotalMB)
+	}
+	if input.Platform == "wsl2" {
+		memConstraint += " (WSL2 - shared memory with Windows host, OOM kills crash the VM)"
+	}
+
+	baselineWorkers := input.CPUCores - 2
+	if baselineWorkers < 2 {
+		baselineWorkers = 2
+	}
+
+	return fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
+
+System and Database Info:
+%s
+
+Host Environment:
+- Platform: %s
+- CPU cores: %d
+- Memory: %s
+- Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
+  NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
+
+Reference baseline (what the system would use without AI tuning):
+- workers: %d (cpu_cores - 2, minimum 2)
+- chunk_size: 50000
+- read_ahead_buffers: 4
+- write_ahead_writers: 2
+- parallel_readers: 2
+- max_partitions: %d
+Your job is to BEAT this baseline. Do not recommend fewer workers or smaller read/parallel buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb). The exception is write_ahead_writers — see guideline 3.
+
+Memory constraint:
+- estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
+- If a user memory cap (max_memory_mb) is set, stay within it
+- On WSL2, exceeding available memory crashes the VM — be more conservative on WSL2 only
+
+Guidelines:
+1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
+2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
+3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch), the per-flow throughput between writer threads and the target may be lower, in which case dropping to 1 may help. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2. The retry-rate rule that the with-history smartconfig uses does NOT apply here — there's no chunk_retry_count history to consult, so this is a heuristic only.
+4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
+
+Respond with ONLY a JSON object:
+{
+  "workers": <int>,
+  "chunk_size": <int>,
+  "read_ahead_buffers": <int>,
+  "write_ahead_writers": <int>,
+  "parallel_readers": <int>,
+  "max_partitions": <int>,
+  "large_table_threshold": <int>,
+  "max_source_connections": <int>,
+  "max_target_connections": <int>,
+  "upsert_merge_chunk_size": <int>,
+  "checkpoint_frequency": <int>,
+  "max_retries": <int>,
+  "estimated_memory_mb": <int>,
+  "observed_retry_rates": "no history",
+  "reasoning": "<brief explanation; do not assert mechanisms (saturation, pressure, contention) — there is no historical data to ground them>"
+}`, inputJSON, input.Platform, input.CPUCores, memConstraint,
+		baselineWorkers, baselineWorkers)
 }
 
 // formatRowCount formats large row counts with K/M/B suffixes.
