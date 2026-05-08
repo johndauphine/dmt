@@ -428,6 +428,60 @@ func TestFormatHistoricalContextBoundsTrajectory(t *testing.T) {
 	}
 }
 
+// TestBuildOfflinePromptInvariants pins #142 / PR #151 review:
+// the offline (no-history) smartconfig prompt must (a) include the
+// observed_retry_rates JSON field with "no history" as the instructed
+// value (so future shared post-unmarshal validation passes), (b) explicitly
+// mark the retry-rate rule as non-applicable offline, (c) avoid asserting
+// causal mechanisms (saturation/pressure/contention) since there's no
+// chunk_retry_count history to ground them, and (d) keep the JSON schema
+// in sync with the online prompt's tunable-parameter list.
+func TestBuildOfflinePromptInvariants(t *testing.T) {
+	input := AutoTuneInput{
+		Platform:          "linux",
+		CPUCores:          16,
+		MemoryGB:          32,
+		AvailableMemoryMB: 30000,
+	}
+	prompt := buildOfflinePrompt(input, `{"placeholder": "test"}`)
+
+	musts := []string{
+		// (a) schema parity
+		`"observed_retry_rates": "no history"`,
+		// (b) rule explicitly inapplicable
+		"retry-rate rule that the with-history smartconfig uses does NOT apply",
+		// (d) all tunable parameters present in the JSON schema
+		`"workers": <int>`,
+		`"chunk_size": <int>`,
+		`"read_ahead_buffers": <int>`,
+		`"write_ahead_writers": <int>`,
+		`"parallel_readers": <int>`,
+		`"max_partitions": <int>`,
+		// reasoning instruction forbids mechanism assertion
+		"do not assert mechanisms",
+	}
+	for _, m := range musts {
+		if !strings.Contains(prompt, m) {
+			t.Errorf("offline prompt missing required substring %q\nfull prompt:\n%s", m, prompt)
+		}
+	}
+
+	// (c) no causal-mechanism language directly asserted in the guideline
+	// text. The "do not assert mechanisms (saturation, pressure, contention)"
+	// instruction itself is allowed (it forbids the assertions). The pre-fix
+	// affirmative claims must not appear.
+	mustsNot := []string{
+		"can saturate",
+		"produce transient stalls",
+		"deterministically",
+	}
+	for _, m := range mustsNot {
+		if strings.Contains(prompt, m) {
+			t.Errorf("offline prompt contains forbidden mechanism-assertion language %q (issue #142): post-#140 the prompt must avoid these claims since there's no telemetry to ground them\nfull prompt:\n%s", m, prompt)
+		}
+	}
+}
+
 // TestFormatHistoricalContextNoBoundingWhenSmall verifies that the trajectory
 // header drops the "BOUNDED — X of Y" qualifier when all completed runs fit
 // within trajectoryLimit. The bounded-warning text is also absent in that case
