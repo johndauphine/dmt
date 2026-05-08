@@ -205,6 +205,24 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		analyzer.SetTargetDBType(o.targetPool.DBType())
 	}
 
+	// Capture effective DB tuning for regime classification (#144). Without
+	// this the analyze path's prompt has no current-tuning baseline and every
+	// trajectory row's regime collapses to same_regime regardless of tuning
+	// differences.
+	if o.targetPool != nil {
+		tuning := captureDBTuning(ctx, o.sourcePool.DB(), o.targetPool.DB(),
+			o.sourcePool.DBType(), o.targetPool.DBType())
+		analyzer.SetCurrentTuning(driver.DBTuningSnapshot{
+			TargetSharedBuffersMB:   tuning.TargetSharedBuffersMB,
+			TargetSyncCommit:        tuning.TargetSyncCommit,
+			TargetFsync:             tuning.TargetFsync,
+			TargetFullPageWrites:    tuning.TargetFullPageWrites,
+			TargetMaxWALSizeMB:      tuning.TargetMaxWALSizeMB,
+			TargetWALLevel:          tuning.TargetWALLevel,
+			SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
+		})
+	}
+
 	// Run analysis
 	suggestions, err := analyzer.Analyze(ctx, schema)
 	if err != nil {
