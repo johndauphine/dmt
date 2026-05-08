@@ -1041,7 +1041,7 @@ Memory constraint:
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
-3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but drop to 1 on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch). On these platforms, 2 write threads × workers concurrent COPY connections can saturate the per-flow throughput limit and produce transient stalls. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2.
+3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch), the per-flow throughput between writer threads and the target may be lower, in which case dropping to 1 may help. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2. The retry-rate rule that the with-history smartconfig uses does NOT apply here — there's no chunk_retry_count history to consult, so this is a heuristic only.
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
 
 Respond with ONLY a JSON object:
@@ -1059,7 +1059,8 @@ Respond with ONLY a JSON object:
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
   "estimated_memory_mb": <int>,
-  "reasoning": "<brief explanation>"
+  "observed_retry_rates": "no history",
+  "reasoning": "<brief explanation; do not assert mechanisms (saturation, pressure, contention) — there is no historical data to ground them>"
 }`, string(inputJSON), input.Platform, input.CPUCores, memConstraint,
 		baselineWorkers, baselineWorkers)
 

@@ -756,14 +756,19 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		for _, c := range changes {
 			logging.Info("  %s: %d -> %d", c.Name, c.OldValue, c.NewValue)
 		}
-		if suggestions.AISuggestions != nil && suggestions.AISuggestions.ObservedRetryRates != "" {
-			logging.Info("AI observed retry rates: %s", suggestions.AISuggestions.ObservedRetryRates)
-		}
-		if suggestions.AISuggestions != nil && suggestions.AISuggestions.Reasoning != "" {
-			logging.Info("AI reasoning: %s", suggestions.AISuggestions.Reasoning)
-		}
 	} else {
-		logging.Debug("AI tuning: no changes needed")
+		logging.Info("AI tuning: no changes (recommendation matches current config)")
+	}
+	// Always log the AI's grounding citation + reasoning when smartconfig ran,
+	// regardless of whether any parameters changed. Pre-#143 these lines were
+	// gated on len(changes)>0, so when the AI converged on a config matching
+	// the current effective values (a steady-state outcome) the rule's
+	// citation requirement from #140 became unverifiable in production logs.
+	if suggestions.AISuggestions != nil && suggestions.AISuggestions.ObservedRetryRates != "" {
+		logging.Info("AI observed retry rates: %s", suggestions.AISuggestions.ObservedRetryRates)
+	}
+	if suggestions.AISuggestions != nil && suggestions.AISuggestions.Reasoning != "" {
+		logging.Info("AI reasoning: %s", suggestions.AISuggestions.Reasoning)
 	}
 
 	// Save tuning history with actual params used (after user overrides)
