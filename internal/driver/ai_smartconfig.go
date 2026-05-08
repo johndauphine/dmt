@@ -121,9 +121,9 @@ type AutoTuneInput struct {
 	MaxMemoryMB       int64  `json:"max_memory_mb"` // User-configured cap (0 = none)
 
 	// Database info
-	DatabaseType string `json:"database_type"`           // source: "mssql", "postgres", "mysql", "oracle"
-	TargetType   string `json:"target_type,omitempty"`   // target database type
-	TargetMode   string `json:"target_mode,omitempty"`   // "drop_recreate" or "upsert"
+	DatabaseType string `json:"database_type"`         // source: "mssql", "postgres", "mysql", "oracle"
+	TargetType   string `json:"target_type,omitempty"` // target database type
+	TargetMode   string `json:"target_mode,omitempty"` // "drop_recreate" or "upsert"
 	TotalTables  int    `json:"total_tables"`
 	TotalRows    int64  `json:"total_rows"`
 	AvgRowBytes  int64  `json:"avg_row_bytes"`
@@ -155,9 +155,9 @@ type AutoTuneOutput struct {
 	MaxTargetConnections int `json:"max_target_connections"`
 
 	// Additional tuning
-	UpsertMergeChunkSize int    `json:"upsert_merge_chunk_size"`
-	CheckpointFrequency  int    `json:"checkpoint_frequency"`
-	MaxRetries           int    `json:"max_retries"`
+	UpsertMergeChunkSize int `json:"upsert_merge_chunk_size"`
+	CheckpointFrequency  int `json:"checkpoint_frequency"`
+	MaxRetries           int `json:"max_retries"`
 	// ObservedRetryRates is intentionally NOT omitempty — the prompt requires
 	// the model to populate it (verbatim citation from the per-waw retry-rate
 	// summary, or "no history"). An empty value indicates the model skipped the
@@ -247,9 +247,9 @@ type AITuningRecord struct {
 	EstimatedMemoryMB    int64     `json:"estimated_memory_mb"`
 	AIReasoning          string    `json:"ai_reasoning"`
 	WasAIUsed            bool      `json:"was_ai_used"`
-	FinalThroughput      float64   `json:"final_throughput,omitempty"`      // rows/sec from completed migration
+	FinalThroughput      float64   `json:"final_throughput,omitempty"`       // rows/sec from completed migration
 	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
-	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`     // chunk retries observed during the run (0 = clean)
+	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -596,6 +596,10 @@ const trajectoryLimit = 20
 
 // formatHistoricalContext builds a historical context string from past tuning data.
 func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
+	return s.formatHistoricalContextForInput(nil)
+}
+
+func (s *SmartConfigAnalyzer) formatHistoricalContextForInput(input *AutoTuneInput) string {
 	if s.historyProvider == nil {
 		return ""
 	}
@@ -620,6 +624,19 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	// retry-rate denominators — issue #146 documents the model citing trajectory
 	// counts when the bounded slice diverged from the full-history aggregate.
 	if len(tuningHistory) > 0 {
+		sb.WriteString("\nHISTORY APPLICABILITY:\n")
+		sb.WriteString("  Treat historical throughput as regime-specific, not universal. Compare the current Host Environment below with each trajectory row's cpu_cores and memory_gb before using that row to choose parameters.\n")
+		if input != nil {
+			maxMemory := "none"
+			if input.MaxMemoryMB > 0 {
+				maxMemory = fmt.Sprintf("%d", input.MaxMemoryMB)
+			}
+			sb.WriteString(fmt.Sprintf("  Current run host regime: platform=%s, cpu_cores=%d, memory_gb=%d, available_memory_mb=%d, max_memory_mb=%s.\n",
+				input.Platform, input.CPUCores, input.MemoryGB, input.AvailableMemoryMB, maxMemory))
+		}
+		sb.WriteString("  If trajectory rows span materially different hardware or DB-tuning regimes (CPU cores, RAM/container limits, target shared_buffers, max_wal_size, synchronous_commit, source max server memory), do not let out-of-regime peak throughput override baseline defaults. If same-regime evidence is sparse or absent, prefer the baseline and state that history may be out-of-regime.\n")
+		sb.WriteString("  This history currently records host CPU/RAM but not effective DB tuning settings, so treat throughput differences across unknown target/source tuning as weak evidence.\n")
+
 		if totalCompleted > len(tuningHistory) {
 			sb.WriteString(fmt.Sprintf("\nPARAMETER TRAJECTORY (BOUNDED — most recent %d of %d completed analyses, oldest of these first):\n",
 				len(tuningHistory), totalCompleted))
@@ -630,9 +647,17 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 		}
 		for i := len(tuningHistory) - 1; i >= 0; i-- {
 			h := tuningHistory[i]
-			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
-				len(tuningHistory)-i, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
-				h.TotalTables, formatRowCount(h.TotalRows)))
+			direction := h.SourceDBType
+			if h.TargetDBType != "" {
+				direction = fmt.Sprintf("%s->%s", h.SourceDBType, h.TargetDBType)
+			}
+			hostRegime := ""
+			if input != nil {
+				hostRegime = fmt.Sprintf(", host_regime=%s", classifyHostRegime(h, *input))
+			}
+			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows, cpu_cores=%s, memory_gb=%s%s):\n",
+				len(tuningHistory)-i, direction, h.Timestamp.Format("2006-01-02"),
+				h.TotalTables, formatRowCount(h.TotalRows), formatOptionalInt(h.CPUCores), formatOptionalInt(h.MemoryGB), hostRegime))
 			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead_buffers=%d, write_ahead_writers=%d, parallel_readers=%d, max_partitions=%d, large_table_threshold=%d, max_source_connections=%d, max_target_connections=%d",
 				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters,
 				h.ParallelReaders, h.MaxPartitions, h.LargeTableThreshold,
@@ -827,7 +852,7 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 	}
 
 	// Get historical context from past analyses and migrations
-	historicalContext := s.formatHistoricalContext()
+	historicalContext := s.formatHistoricalContextForInput(&input)
 	logging.Debug("smartconfig historical context (%d bytes):\n%s", len(historicalContext), historicalContext)
 
 	// Build memory constraint description
@@ -899,7 +924,7 @@ Guidelines:
    When you invoke or decline the rule, your "observed_retry_rates" field MUST verbatim cite the literal denominators from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE block (e.g. "waw=1: 0/35 (0%%); waw=2: 0/15 (0%%)"). DO NOT count waw values from the BOUNDED PARAMETER TRAJECTORY above — its denominators are wrong because that section is capped at recent rows; only the aggregate block has full-history counts. If a waw value appears in the aggregate block but not in the recent trajectory, you must STILL cite its denominator from the aggregate, not say "no samples". Do not assert a causal mechanism for the choice (e.g. "transport saturation", "memory pressure", "connection saturation") unless that mechanism is directly visible in the data shown to you. If you cannot point at a non-zero retry count or other concrete signal in this prompt, do not name a mechanism — say "lower observed throughput, mechanism unknown" instead.
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
-7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput AND zero chunk retries. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
+7. Historical throughput is regime-specific. Prefer the highest measured throughput with zero chunk retries only among rows that are plausibly same-regime as the current Host Environment. Discount out-of-regime rows when CPU cores, memory, container limits, or DB tuning differ materially. Because the history does not yet record effective DB tuning settings (for example target shared_buffers/max_wal_size/synchronous_commit or source max server memory), treat conflicting throughput evidence from unknown DB-tuning regimes as weak evidence; if same-regime evidence is sparse or absent, stay near the baseline defaults and explain that the history may be out-of-regime. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
 
 Respond with ONLY a JSON object:
 {
@@ -1137,6 +1162,50 @@ func formatRowCount(count int64) string {
 		return fmt.Sprintf("%.1fK", float64(count)/1000)
 	}
 	return fmt.Sprintf("%d", count)
+}
+
+func formatOptionalInt(value int) string {
+	if value <= 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", value)
+}
+
+func classifyHostRegime(history AITuningRecord, current AutoTuneInput) string {
+	if history.CPUCores <= 0 || history.MemoryGB <= 0 || current.CPUCores <= 0 || current.MemoryGB <= 0 {
+		return "unknown"
+	}
+
+	cpuDiff := absInt(history.CPUCores - current.CPUCores)
+	cpuThreshold := maxInt(2, current.CPUCores/5)
+	lowerMemory := minInt(history.MemoryGB, current.MemoryGB)
+	upperMemory := maxInt(history.MemoryGB, current.MemoryGB)
+	memorySimilar := lowerMemory*100 >= upperMemory*80
+	if cpuDiff <= cpuThreshold && memorySimilar {
+		return "similar_to_current_host"
+	}
+	return "different_from_current_host"
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // tableInfo holds basic table metadata.

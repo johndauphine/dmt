@@ -166,7 +166,10 @@ func (m *mockHistoryProvider) GetAITuningHistory(limit int, sourceType, targetTy
 }
 
 func (m *mockHistoryProvider) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
-	type stats struct{ totalRuns, retried, totalRetries int; peak, sum float64 }
+	type stats struct {
+		totalRuns, retried, totalRetries int
+		peak, sum                        float64
+	}
 	byWaw := map[int]*stats{}
 	for _, h := range m.history {
 		if h.FinalThroughput <= 0 {
@@ -208,7 +211,10 @@ func (m *mockHistoryProvider) GetAITuningAggregatesByWaw(sourceType, targetType 
 }
 
 func (m *mockHistoryProvider) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
-	type stats struct{ runs int; sum float64 }
+	type stats struct {
+		runs int
+		sum  float64
+	}
 	byChunk := map[int]*stats{}
 	for _, h := range m.history {
 		if h.FinalThroughput <= 0 {
@@ -520,6 +526,74 @@ func TestFormatHistoricalContextNoBoundingWhenSmall(t *testing.T) {
 	// And the disambiguation warning is irrelevant when there's no bounding.
 	if strings.Contains(ctx, "Do NOT count waw values") {
 		t.Errorf("disambiguation warning should not appear when history fits within trajectoryLimit\nfull context:\n%s", ctx)
+	}
+}
+
+func TestFormatHistoricalContextIncludesRegimeApplicability(t *testing.T) {
+	base := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	mock := &mockHistoryProvider{
+		history: []AITuningRecord{
+			{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				Timestamp:         base.Add(time.Minute),
+				TotalTables:       10,
+				TotalRows:         1000000,
+				CPUCores:          18,
+				MemoryGB:          30,
+				Workers:           16,
+				ChunkSize:         50000,
+				ReadAheadBuffers:  4,
+				WriteAheadWriters: 2,
+				ParallelReaders:   4,
+				MaxPartitions:     16,
+				FinalThroughput:   1100000,
+				FinalDurationSecs: 20,
+				ChunkRetryCount:   0,
+			},
+			{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				Timestamp:         base,
+				TotalTables:       10,
+				TotalRows:         1000000,
+				CPUCores:          14,
+				MemoryGB:          9,
+				Workers:           12,
+				ChunkSize:         50000,
+				ReadAheadBuffers:  4,
+				WriteAheadWriters: 1,
+				ParallelReaders:   4,
+				MaxPartitions:     12,
+				FinalThroughput:   900000,
+				FinalDurationSecs: 24,
+				ChunkRetryCount:   0,
+			},
+		},
+	}
+	analyzer := &SmartConfigAnalyzer{historyProvider: mock, dbType: "mssql", targetDBType: "postgres"}
+	input := AutoTuneInput{
+		Platform:          "wsl2",
+		CPUCores:          18,
+		MemoryGB:          30,
+		AvailableMemoryMB: 28000,
+	}
+	ctx := analyzer.formatHistoricalContextForInput(&input)
+
+	musts := []string{
+		"HISTORY APPLICABILITY:",
+		"Treat historical throughput as regime-specific, not universal",
+		"Current run host regime: platform=wsl2, cpu_cores=18, memory_gb=30, available_memory_mb=28000, max_memory_mb=none.",
+		"target shared_buffers, max_wal_size, synchronous_commit, source max server memory",
+		"prefer the baseline and state that history may be out-of-regime",
+		"not effective DB tuning settings",
+		"mssql->postgres (2026-05-08, 10 tables, 1.0M rows, cpu_cores=14, memory_gb=9, host_regime=different_from_current_host)",
+		"mssql->postgres (2026-05-08, 10 tables, 1.0M rows, cpu_cores=18, memory_gb=30, host_regime=similar_to_current_host)",
+	}
+	for _, m := range musts {
+		if !strings.Contains(ctx, m) {
+			t.Errorf("historical context missing regime-applicability substring %q\nfull context:\n%s", m, ctx)
+		}
 	}
 }
 
