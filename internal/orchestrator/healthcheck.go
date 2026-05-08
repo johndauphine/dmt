@@ -306,7 +306,13 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 		suggestions.UpsertMergeChunkSize = output.UpsertMergeChunkSize
 		suggestions.CheckpointFrequency = output.CheckpointFrequency
 		suggestions.MaxRetries = output.MaxRetries
-		suggestions.EstimatedMemMB = output.EstimatedMemoryMB
+		suggestions.EstimatedMemMB = driver.ComputeEstimatedMemMB(
+			output.Workers,
+			output.ReadAheadBuffers,
+			output.WriteAheadWriters,
+			output.ChunkSize,
+			input.AvgRowBytes,
+		)
 		logging.Info("Using AI-generated recommendations (offline mode)")
 		return suggestions
 	}

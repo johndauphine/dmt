@@ -148,7 +148,6 @@ type AutoTuneOutput struct {
 	ParallelReaders     int   `json:"parallel_readers"`
 	MaxPartitions       int   `json:"max_partitions"`
 	LargeTableThreshold int64 `json:"large_table_threshold"`
-	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
 
 	// Connection pool tuning
 	MaxSourceConnections int `json:"max_source_connections"`
@@ -513,7 +512,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// computeEstimatedMemMB returns the theoretical-maximum memory footprint of a
+// ComputeEstimatedMemMB returns the theoretical-maximum memory footprint of a
 // migration config in megabytes, using the same formula advertised in the AI
 // smartconfig prompt:
 //
@@ -522,16 +521,67 @@ func firstNonEmpty(values ...string) string {
 // This is computed deterministically in Go rather than trusting an LLM's
 // arithmetic — see issue #153 for observed under-estimates of 1.4-3x when the
 // LLM was asked to populate `estimated_memory_mb`.
-func computeEstimatedMemMB(workers, readAheadBuffers, writeAheadWriters, chunkSize int, avgRowBytes int64) int64 {
+func ComputeEstimatedMemMB(workers, readAheadBuffers, writeAheadWriters, chunkSize int, avgRowBytes int64) int64 {
 	return int64(workers) * int64(readAheadBuffers+writeAheadWriters) * int64(chunkSize) * avgRowBytes / 1024 / 1024
+}
+
+// computeSafeChunkSize returns the maximum chunk_size that fits inside
+// budgetMB given the supplied workers/buffers/avg_row_bytes. Used to compose
+// the AI smartconfig prompt's "Memory budget" block so the LLM gets a
+// concrete bound it doesn't have to derive itself.
+func computeSafeChunkSize(budgetMB int64, workers, readAheadBuffers, writeAheadWriters int, avgRowBytes int64) int64 {
+	denom := int64(workers) * int64(readAheadBuffers+writeAheadWriters) * avgRowBytes
+	if denom <= 0 {
+		return 0
+	}
+	return budgetMB * 1024 * 1024 / denom
+}
+
+// buildMemoryBudgetBlock renders the prompt section that tells the LLM how
+// much memory it has to work with and what the safe chunk_size ceiling is at
+// the baseline worker/buffer counts. Doing the math in Go (rather than asking
+// the LLM to apply the formula itself) closes the bug class addressed by
+// PR #154 — observed LLMs miscompute by 7x in either direction on this input.
+func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
+	avg := input.AvgRowBytes
+	if avg <= 0 {
+		avg = 500
+	}
+
+	budgetMB := input.AvailableMemoryMB - 2048 // 2GB headroom
+	if input.MaxMemoryMB > 0 && input.MaxMemoryMB < budgetMB {
+		budgetMB = input.MaxMemoryMB
+	}
+	if budgetMB < 0 {
+		budgetMB = 0
+	}
+
+	const baselineRead = 4
+	const baselineWrite = 2
+	maxChunkBaseline := computeSafeChunkSize(budgetMB, baselineWorkers, baselineRead, baselineWrite, avg)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "- Memory budget: %d MB (available_memory_mb - 2048 MB headroom", budgetMB)
+	if input.MaxMemoryMB > 0 {
+		fmt.Fprintf(&b, ", capped at user max_memory_mb=%d", input.MaxMemoryMB)
+	}
+	b.WriteString(")\n")
+	fmt.Fprintf(&b, "- Avg row size: %d bytes\n", avg)
+	fmt.Fprintf(&b, "- At baseline workers=%d, read_ahead_buffers=4, write_ahead_writers=2, the safe chunk_size ceiling is ~%d rows.\n", baselineWorkers, maxChunkBaseline)
+	b.WriteString("- Doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. Adjust accordingly.\n")
+	if input.Platform == "wsl2" {
+		b.WriteString("- Platform=wsl2: exceeding the budget can OOM-kill the WSL2 VM. Stay strictly within budget.\n")
+	}
+	return b.String()
 }
 
 // applyAISuggestions applies AI-recommended values to the suggestions.
 //
-// The LLM's `estimated_memory_mb` field is intentionally ignored — it is
-// recomputed in Go from the LLM's chosen params (see computeEstimatedMemMB and
-// issue #153). The LLM still produces the field per the prompt spec; we read
-// the value into AISuggestions for telemetry but do not use it for control.
+// EstimatedMemMB is computed in Go from the LLM's chosen params (see
+// ComputeEstimatedMemMB). The LLM no longer outputs `estimated_memory_mb` at
+// all — the prompt instead injects a Go-computed memory budget so the model
+// can stay inside it without doing arithmetic. See issue #153 / PR #154 and
+// the follow-up that removed the field from the schema.
 func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput, input AutoTuneInput) {
 	s.suggestions.Workers = ai.Workers
 	s.suggestions.ChunkSizeRecommendation = ai.ChunkSize
@@ -545,7 +595,7 @@ func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput, input AutoT
 	s.suggestions.UpsertMergeChunkSize = ai.UpsertMergeChunkSize
 	s.suggestions.CheckpointFrequency = ai.CheckpointFrequency
 	s.suggestions.MaxRetries = ai.MaxRetries
-	s.suggestions.EstimatedMemMB = computeEstimatedMemMB(
+	s.suggestions.EstimatedMemMB = ComputeEstimatedMemMB(
 		ai.Workers,
 		ai.ReadAheadBuffers,
 		ai.WriteAheadWriters,
@@ -576,7 +626,7 @@ func (s *SmartConfigAnalyzer) applyDefaultSuggestions(input AutoTuneInput) {
 	s.suggestions.CheckpointFrequency = 20
 	s.suggestions.MaxRetries = 3
 
-	s.suggestions.EstimatedMemMB = computeEstimatedMemMB(
+	s.suggestions.EstimatedMemMB = ComputeEstimatedMemMB(
 		s.suggestions.Workers,
 		s.suggestions.ReadAheadBuffers,
 		s.suggestions.WriteAheadWriters,
@@ -977,6 +1027,11 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 		baselineWorkers = 2
 	}
 
+	// Pre-compute the memory budget block so the LLM doesn't have to do
+	// arithmetic — see issue #155 / PR #154 for why we don't trust LLMs to
+	// compute estimated_memory_mb themselves.
+	memBudget := buildMemoryBudgetBlock(input, baselineWorkers)
+
 	prompt := fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
 System and Database Info:
@@ -986,8 +1041,9 @@ Host Environment:
 - Platform: %s
 - CPU cores: %d
 - Memory: %s
-- Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
-  NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
+
+Memory budget (computed for you — do not redo this arithmetic):
+%s
 
 Reference baseline (what the system would use without AI tuning):
 - workers: %d (cpu_cores - 2, minimum 2)
@@ -996,12 +1052,7 @@ Reference baseline (what the system would use without AI tuning):
 - write_ahead_writers: 2
 - parallel_readers: 2
 - max_partitions: %d
-Your job is to BEAT this baseline using the historical data and table characteristics. Do not recommend fewer workers or smaller buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb).
-
-Memory constraint:
-- estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
-- If a user memory cap (max_memory_mb) is set, stay within it
-- On WSL2, exceeding available memory crashes the VM — be more conservative on WSL2 only
+Your job is to BEAT this baseline using the historical data and table characteristics. Stay within the memory budget above; otherwise do not under-provision.
 
 Parameters to tune:
 - workers: Parallel migration workers (scale with CPU cores, baseline is cpu_cores - 2)
@@ -1044,10 +1095,9 @@ Respond with ONLY a JSON object:
   "upsert_merge_chunk_size": <int>,
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
-  "estimated_memory_mb": <int>,
   "observed_retry_rates": "<verbatim copy of the per-waw lines from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE block (the FULL-HISTORY aggregate). DO NOT count waw values from the bounded PARAMETER TRAJECTORY rows — its denominators are wrong because the trajectory is bounded. If a waw value appears in the aggregate block, cite ITS denominator from there even if that waw doesn't appear in the bounded trajectory. Format: 'waw=1: 0/35 (0.0%%); waw=2: 0/15 (0.0%%); waw=4: 0/4 (0.0%%)'. If no aggregate block exists (no completed history), write 'no history'.>",
   "reasoning": "<brief explanation; must be consistent with observed_retry_rates and must not assert mechanisms (saturation, pressure, contention) unless backed by data shown in this prompt>"
-}`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint,
+}`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint, memBudget,
 		baselineWorkers, baselineWorkers)
 
 	response, err := s.aiMapper.CallAI(ctx, prompt)
@@ -1201,6 +1251,8 @@ func buildOfflinePrompt(input AutoTuneInput, inputJSON string) string {
 		baselineWorkers = 2
 	}
 
+	memBudget := buildMemoryBudgetBlock(input, baselineWorkers)
+
 	return fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
 System and Database Info:
@@ -1210,8 +1262,9 @@ Host Environment:
 - Platform: %s
 - CPU cores: %d
 - Memory: %s
-- Memory formula: workers * (read_ahead_buffers + write_ahead_writers) * chunk_size * avg_row_bytes / 1024 / 1024
-  NOTE: This is the theoretical maximum — actual usage is lower because buffers are not all full simultaneously.
+
+Memory budget (computed for you — do not redo this arithmetic):
+%s
 
 Reference baseline (what the system would use without AI tuning):
 - workers: %d (cpu_cores - 2, minimum 2)
@@ -1220,12 +1273,7 @@ Reference baseline (what the system would use without AI tuning):
 - write_ahead_writers: 2
 - parallel_readers: 2
 - max_partitions: %d
-Your job is to BEAT this baseline. Do not recommend fewer workers or smaller read/parallel buffers than the baseline unless memory is genuinely constrained (estimated_memory_mb > 80%% of available_memory_mb). The exception is write_ahead_writers — see guideline 3.
-
-Memory constraint:
-- estimated_memory_mb must not exceed available_memory_mb minus 2GB headroom
-- If a user memory cap (max_memory_mb) is set, stay within it
-- On WSL2, exceeding available memory crashes the VM — be more conservative on WSL2 only
+Your job is to BEAT this baseline. Stay within the memory budget above. Do not under-provision read_ahead_buffers or parallel_readers. The exception is write_ahead_writers — see guideline 3.
 
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
@@ -1247,10 +1295,9 @@ Respond with ONLY a JSON object:
   "upsert_merge_chunk_size": <int>,
   "checkpoint_frequency": <int>,
   "max_retries": <int>,
-  "estimated_memory_mb": <int>,
   "observed_retry_rates": "no history",
   "reasoning": "<brief explanation; do not assert mechanisms (saturation, pressure, contention) — there is no historical data to ground them>"
-}`, inputJSON, input.Platform, input.CPUCores, memConstraint,
+}`, inputJSON, input.Platform, input.CPUCores, memConstraint, memBudget,
 		baselineWorkers, baselineWorkers)
 }
 
