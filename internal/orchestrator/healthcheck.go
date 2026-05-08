@@ -205,6 +205,24 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		analyzer.SetTargetDBType(o.targetPool.DBType())
 	}
 
+	// Capture effective DB tuning for regime classification (#144). Without
+	// this the analyze path's prompt has no current-tuning baseline and every
+	// trajectory row's regime collapses to same_regime regardless of tuning
+	// differences.
+	if o.targetPool != nil {
+		tuning := captureDBTuning(ctx, o.sourcePool.DB(), o.targetPool.DB(),
+			o.sourcePool.DBType(), o.targetPool.DBType())
+		analyzer.SetCurrentTuning(driver.DBTuningSnapshot{
+			TargetSharedBuffersMB:   tuning.TargetSharedBuffersMB,
+			TargetSyncCommit:        tuning.TargetSyncCommit,
+			TargetFsync:             tuning.TargetFsync,
+			TargetFullPageWrites:    tuning.TargetFullPageWrites,
+			TargetMaxWALSizeMB:      tuning.TargetMaxWALSizeMB,
+			TargetWALLevel:          tuning.TargetWALLevel,
+			SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
+		})
+	}
+
 	// Run analysis
 	suggestions, err := analyzer.Analyze(ctx, schema)
 	if err != nil {
@@ -385,6 +403,15 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetTy
 			FinalThroughput:      r.FinalThroughput,
 			FinalDurationSecs:    r.FinalDurationSecs,
 			ChunkRetryCount:      r.ChunkRetryCount,
+			// #144 regime fields
+			Platform:                r.Platform,
+			TargetSharedBuffersMB:   r.TargetSharedBuffersMB,
+			TargetSyncCommit:        r.TargetSyncCommit,
+			TargetFsync:             r.TargetFsync,
+			TargetFullPageWrites:    r.TargetFullPageWrites,
+			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
+			TargetWALLevel:          r.TargetWALLevel,
+			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
 		}
 	}
 	return result, nil
@@ -453,6 +480,15 @@ func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 		EstimatedMemoryMB:   record.EstimatedMemoryMB,
 		AIReasoning:         record.AIReasoning,
 		WasAIUsed:           record.WasAIUsed,
+		// #144 regime fields
+		Platform:                record.Platform,
+		TargetSharedBuffersMB:   record.TargetSharedBuffersMB,
+		TargetSyncCommit:        record.TargetSyncCommit,
+		TargetFsync:             record.TargetFsync,
+		TargetFullPageWrites:    record.TargetFullPageWrites,
+		TargetMaxWALSizeMB:      record.TargetMaxWALSizeMB,
+		TargetWALLevel:          record.TargetWALLevel,
+		SourceMaxServerMemoryMB: record.SourceMaxServerMemoryMB,
 	})
 }
 

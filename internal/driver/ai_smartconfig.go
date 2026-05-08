@@ -121,9 +121,9 @@ type AutoTuneInput struct {
 	MaxMemoryMB       int64  `json:"max_memory_mb"` // User-configured cap (0 = none)
 
 	// Database info
-	DatabaseType string `json:"database_type"`           // source: "mssql", "postgres", "mysql", "oracle"
-	TargetType   string `json:"target_type,omitempty"`   // target database type
-	TargetMode   string `json:"target_mode,omitempty"`   // "drop_recreate" or "upsert"
+	DatabaseType string `json:"database_type"`         // source: "mssql", "postgres", "mysql", "oracle"
+	TargetType   string `json:"target_type,omitempty"` // target database type
+	TargetMode   string `json:"target_mode,omitempty"` // "drop_recreate" or "upsert"
 	TotalTables  int    `json:"total_tables"`
 	TotalRows    int64  `json:"total_rows"`
 	AvgRowBytes  int64  `json:"avg_row_bytes"`
@@ -155,9 +155,9 @@ type AutoTuneOutput struct {
 	MaxTargetConnections int `json:"max_target_connections"`
 
 	// Additional tuning
-	UpsertMergeChunkSize int    `json:"upsert_merge_chunk_size"`
-	CheckpointFrequency  int    `json:"checkpoint_frequency"`
-	MaxRetries           int    `json:"max_retries"`
+	UpsertMergeChunkSize int `json:"upsert_merge_chunk_size"`
+	CheckpointFrequency  int `json:"checkpoint_frequency"`
+	MaxRetries           int `json:"max_retries"`
 	// ObservedRetryRates is intentionally NOT omitempty — the prompt requires
 	// the model to populate it (verbatim citation from the per-waw retry-rate
 	// summary, or "no history"). An empty value indicates the model skipped the
@@ -247,9 +247,21 @@ type AITuningRecord struct {
 	EstimatedMemoryMB    int64     `json:"estimated_memory_mb"`
 	AIReasoning          string    `json:"ai_reasoning"`
 	WasAIUsed            bool      `json:"was_ai_used"`
-	FinalThroughput      float64   `json:"final_throughput,omitempty"`      // rows/sec from completed migration
+	FinalThroughput      float64   `json:"final_throughput,omitempty"`       // rows/sec from completed migration
 	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
-	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`     // chunk retries observed during the run (0 = clean)
+	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
+
+	// Effective DB tuning captured at run start (#144). Mirrors the same
+	// fields in checkpoint.AITuningRecord. Used by the trajectory
+	// rendering to compare each row's regime against the current run.
+	Platform                string `json:"platform,omitempty"`
+	TargetSharedBuffersMB   int64  `json:"target_shared_buffers_mb,omitempty"`
+	TargetSyncCommit        string `json:"target_synchronous_commit,omitempty"`
+	TargetFsync             string `json:"target_fsync,omitempty"`
+	TargetFullPageWrites    string `json:"target_full_page_writes,omitempty"`
+	TargetMaxWALSizeMB      int64  `json:"target_max_wal_size_mb,omitempty"`
+	TargetWALLevel          string `json:"target_wal_level,omitempty"`
+	SourceMaxServerMemoryMB int64  `json:"source_max_server_memory_mb,omitempty"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal configuration.
@@ -264,6 +276,7 @@ type SmartConfigAnalyzer struct {
 	historyProvider TuningHistoryProvider
 	maxMemoryMB     int64 // user-configured memory cap (passed to AI)
 	pendingSave     *pendingTuningSave
+	currentTuning   DBTuningSnapshot // captured at run start (#144); used for per-row regime classification
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -284,6 +297,13 @@ func NewSmartConfigAnalyzer(db *sql.DB, dbType string, aiMapper *AITypeMapper) *
 // SetHistoryProvider sets the history provider for learning from past analyses.
 func (s *SmartConfigAnalyzer) SetHistoryProvider(provider TuningHistoryProvider) {
 	s.historyProvider = provider
+}
+
+// SetCurrentTuning records the effective DB tuning captured at run start so
+// the smartconfig prompt can compare each trajectory row's regime against the
+// current run's (issue #144).
+func (s *SmartConfigAnalyzer) SetCurrentTuning(t DBTuningSnapshot) {
+	s.currentTuning = t
 }
 
 // SetMaxMemoryMB sets the user-configured memory cap so AI can respect it.
@@ -396,7 +416,10 @@ type pendingTuningSave struct {
 	aiReasoning string
 }
 
-// ActualParams holds the actual migration parameters used after user overrides.
+// ActualParams holds the actual migration parameters used after user overrides,
+// plus effective DB tuning captured at run start (#144). The tuning fields are
+// optional — leave them zero/empty when capture failed and the smartconfig
+// render will treat them as "unknown" rather than 0.
 type ActualParams struct {
 	Workers           int
 	ChunkSize         int
@@ -404,6 +427,17 @@ type ActualParams struct {
 	WriteAheadWriters int
 	ParallelReaders   int
 	MaxPartitions     int
+
+	// Regime fields (#144). Populated by the orchestrator from
+	// captureDBTuning before this struct reaches SaveTuningWithActualParams.
+	Platform                string
+	TargetSharedBuffersMB   int64
+	TargetSyncCommit        string
+	TargetFsync             string
+	TargetFullPageWrites    string
+	TargetMaxWALSizeMB      int64
+	TargetWALLevel          string
+	SourceMaxServerMemoryMB int64
 }
 
 // SaveTuningWithActualParams saves tuning history with the actual params used
@@ -423,11 +457,11 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
 	s.suggestions.ParallelReaders = actual.ParallelReaders
 	s.suggestions.MaxPartitions = actual.MaxPartitions
 
-	s.saveTuningResult(ps.input, ps.wasAIUsed, ps.aiReasoning)
+	s.saveTuningResult(ps.input, ps.wasAIUsed, ps.aiReasoning, actual)
 }
 
 // saveTuningResult saves the tuning recommendation to history for future analyses.
-func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, wasAIUsed bool, aiReasoning string) {
+func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, wasAIUsed bool, aiReasoning string, actual ActualParams) {
 	if s.historyProvider == nil {
 		return
 	}
@@ -453,11 +487,30 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, wasAIUsed bo
 		EstimatedMemoryMB:    s.suggestions.EstimatedMemMB,
 		AIReasoning:          aiReasoning,
 		WasAIUsed:            wasAIUsed,
+		// #144 regime fields. Platform falls back to the AutoTuneInput value
+		// when ActualParams didn't capture it (i.e., older callers).
+		Platform:                firstNonEmpty(actual.Platform, input.Platform),
+		TargetSharedBuffersMB:   actual.TargetSharedBuffersMB,
+		TargetSyncCommit:        actual.TargetSyncCommit,
+		TargetFsync:             actual.TargetFsync,
+		TargetFullPageWrites:    actual.TargetFullPageWrites,
+		TargetMaxWALSizeMB:      actual.TargetMaxWALSizeMB,
+		TargetWALLevel:          actual.TargetWALLevel,
+		SourceMaxServerMemoryMB: actual.SourceMaxServerMemoryMB,
 	}
 
 	if err := s.historyProvider.SaveAITuning(record); err != nil {
 		logging.Debug("Failed to save tuning history: %v", err)
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // applyAISuggestions applies AI-recommended values to the suggestions.
@@ -596,6 +649,10 @@ const trajectoryLimit = 20
 
 // formatHistoricalContext builds a historical context string from past tuning data.
 func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
+	return s.formatHistoricalContextForInput(nil, DBTuningSnapshot{})
+}
+
+func (s *SmartConfigAnalyzer) formatHistoricalContextForInput(input *AutoTuneInput, currentTuning DBTuningSnapshot) string {
 	if s.historyProvider == nil {
 		return ""
 	}
@@ -620,6 +677,30 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 	// retry-rate denominators — issue #146 documents the model citing trajectory
 	// counts when the bounded slice diverged from the full-history aggregate.
 	if len(tuningHistory) > 0 {
+		sb.WriteString("\nHISTORY APPLICABILITY:\n")
+		sb.WriteString("  Treat historical throughput as regime-specific, not universal. Compare the current Host Environment below with each trajectory row's cpu_cores and memory_gb before using that row to choose parameters.\n")
+		if input != nil {
+			maxMemory := "none"
+			if input.MaxMemoryMB > 0 {
+				maxMemory = fmt.Sprintf("%d", input.MaxMemoryMB)
+			}
+			sb.WriteString(fmt.Sprintf("  Current run host regime: platform=%s, cpu_cores=%d, memory_gb=%d, available_memory_mb=%d, max_memory_mb=%s.\n",
+				input.Platform, input.CPUCores, input.MemoryGB, input.AvailableMemoryMB, maxMemory))
+		}
+		sb.WriteString("  If trajectory rows span materially different hardware or DB-tuning regimes (CPU cores, RAM/container limits, target shared_buffers, max_wal_size, synchronous_commit, source max server memory), do not let out-of-regime peak throughput override baseline defaults. If same-regime evidence is sparse or absent, prefer the baseline and state that history may be out-of-regime.\n")
+		// Each trajectory row below is annotated with `regime: ...` based on a
+		// per-row classification against the current run. `same_regime` means
+		// hardware AND captured DB tuning match (within tolerance);
+		// `different_tuning` means same hardware but PG fsync / shared_buffers
+		// / synchronous_commit / mssql max_server_memory etc. differ;
+		// `different_hw` means CPU cores or RAM differ; `different_hw_and_tuning`
+		// means both. `unknown` means CPU/RAM are missing on the row (older
+		// records from before the schema added those columns).
+		if input != nil {
+			sb.WriteString(fmt.Sprintf("  Current run effective DB tuning: %s.\n", formatTuningSnippetCurrent(currentTuning)))
+		}
+		sb.WriteString("  Trajectory rows annotated `regime=different_*` came from a different hardware or DB-tuning regime; their throughput is at most weak evidence for the current run. Rows annotated `regime=unknown` predate the schema that records this and should also be treated as weak evidence.\n")
+
 		if totalCompleted > len(tuningHistory) {
 			sb.WriteString(fmt.Sprintf("\nPARAMETER TRAJECTORY (BOUNDED — most recent %d of %d completed analyses, oldest of these first):\n",
 				len(tuningHistory), totalCompleted))
@@ -630,9 +711,25 @@ func (s *SmartConfigAnalyzer) formatHistoricalContext() string {
 		}
 		for i := len(tuningHistory) - 1; i >= 0; i-- {
 			h := tuningHistory[i]
-			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows):\n",
-				len(tuningHistory)-i, h.SourceDBType, h.Timestamp.Format("2006-01-02"),
-				h.TotalTables, formatRowCount(h.TotalRows)))
+			direction := h.SourceDBType
+			if h.TargetDBType != "" {
+				direction = fmt.Sprintf("%s->%s", h.SourceDBType, h.TargetDBType)
+			}
+			regimeAnnotation := ""
+			if input != nil {
+				label, deltas := classifyRegime(h, *input, currentTuning)
+				if len(deltas) > 0 {
+					regimeAnnotation = fmt.Sprintf(", regime=%s [%s]", label, strings.Join(deltas, "; "))
+				} else {
+					regimeAnnotation = fmt.Sprintf(", regime=%s", label)
+				}
+			}
+			tuningSnippet := formatTuningSnippetForRow(h)
+			sb.WriteString(fmt.Sprintf("  %d. %s (%s, %d tables, %s rows, cpu_cores=%s, memory_gb=%s, %s%s):\n",
+				len(tuningHistory)-i, direction, h.Timestamp.Format("2006-01-02"),
+				h.TotalTables, formatRowCount(h.TotalRows),
+				formatOptionalInt(h.CPUCores), formatOptionalInt(h.MemoryGB),
+				tuningSnippet, regimeAnnotation))
 			sb.WriteString(fmt.Sprintf("     workers=%d, chunk_size=%d, read_ahead_buffers=%d, write_ahead_writers=%d, parallel_readers=%d, max_partitions=%d, large_table_threshold=%d, max_source_connections=%d, max_target_connections=%d",
 				h.Workers, h.ChunkSize, h.ReadAheadBuffers, h.WriteAheadWriters,
 				h.ParallelReaders, h.MaxPartitions, h.LargeTableThreshold,
@@ -826,8 +923,11 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 		return nil, fmt.Errorf("marshaling input: %w", err)
 	}
 
-	// Get historical context from past analyses and migrations
-	historicalContext := s.formatHistoricalContext()
+	// Get historical context from past analyses and migrations. The captured
+	// tuning snapshot (set by the orchestrator via SetCurrentTuning before
+	// this call) lets each trajectory row be classified against the current
+	// run's regime.
+	historicalContext := s.formatHistoricalContextForInput(&input, s.currentTuning)
 	logging.Debug("smartconfig historical context (%d bytes):\n%s", len(historicalContext), historicalContext)
 
 	// Build memory constraint description
@@ -899,7 +999,7 @@ Guidelines:
    When you invoke or decline the rule, your "observed_retry_rates" field MUST verbatim cite the literal denominators from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE block (e.g. "waw=1: 0/35 (0%%); waw=2: 0/15 (0%%)"). DO NOT count waw values from the BOUNDED PARAMETER TRAJECTORY above — its denominators are wrong because that section is capped at recent rows; only the aggregate block has full-history counts. If a waw value appears in the aggregate block but not in the recent trajectory, you must STILL cite its denominator from the aggregate, not say "no samples". Do not assert a causal mechanism for the choice (e.g. "transport saturation", "memory pressure", "connection saturation") unless that mechanism is directly visible in the data shown to you. If you cannot point at a non-zero retry count or other concrete signal in this prompt, do not name a mechanism — say "lower observed throughput, mechanism unknown" instead.
 5. Runtime adjustments in the log were REACTIVE to runtime conditions — do not use them as starting-point recommendations.
 6. Row count does not affect optimal parameters — each worker processes one chunk at a time regardless of total rows. Large individual tables benefit from higher parallel_readers.
-7. When historical throughput data is available, prefer the parameter combination that achieved the highest measured throughput AND zero chunk retries. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
+7. Historical throughput is regime-specific. Prefer the highest measured throughput with zero chunk retries only among rows that are plausibly same-regime as the current Host Environment. Discount out-of-regime rows when CPU cores, memory, container limits, or DB tuning differ materially. Because the history does not yet record effective DB tuning settings (for example target shared_buffers/max_wal_size/synchronous_commit or source max server memory), treat conflicting throughput evidence from unknown DB-tuning regimes as weak evidence; if same-regime evidence is sparse or absent, stay near the baseline defaults and explain that the history may be out-of-regime. A configuration with high peak throughput but recurring retries (>=20%% of runs) is worse than one with slightly lower peak but no retries — the retries cost wall-clock time and predictability. Ignore outlier runs with abnormally low throughput (e.g., less than 50%% of the median) only when chunk_retry_count is also 0 — low throughput WITH retries is a load-related signal, not noise.
 
 Respond with ONLY a JSON object:
 {
@@ -1137,6 +1237,180 @@ func formatRowCount(count int64) string {
 		return fmt.Sprintf("%.1fK", float64(count)/1000)
 	}
 	return fmt.Sprintf("%d", count)
+}
+
+func formatOptionalInt(value int) string {
+	if value <= 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", value)
+}
+
+// formatTuningSnippetForRow renders the captured DB tuning fields for a
+// trajectory row. Empty/zero fields are omitted; if no fields are populated
+// (e.g. a pre-#144 row), returns "tuning=unknown".
+func formatTuningSnippetForRow(r AITuningRecord) string {
+	var pg []string
+	if r.TargetSharedBuffersMB > 0 {
+		pg = append(pg, fmt.Sprintf("shared_buffers=%dMB", r.TargetSharedBuffersMB))
+	}
+	if r.TargetSyncCommit != "" {
+		pg = append(pg, "sync_commit="+r.TargetSyncCommit)
+	}
+	if r.TargetFsync != "" {
+		pg = append(pg, "fsync="+r.TargetFsync)
+	}
+	if r.TargetFullPageWrites != "" {
+		pg = append(pg, "full_page_writes="+r.TargetFullPageWrites)
+	}
+	if r.TargetMaxWALSizeMB > 0 {
+		pg = append(pg, fmt.Sprintf("max_wal=%dMB", r.TargetMaxWALSizeMB))
+	}
+	if r.TargetWALLevel != "" {
+		pg = append(pg, "wal_level="+r.TargetWALLevel)
+	}
+	var parts []string
+	if len(pg) > 0 {
+		parts = append(parts, "pg{"+strings.Join(pg, ", ")+"}")
+	}
+	if r.SourceMaxServerMemoryMB > 0 {
+		parts = append(parts, fmt.Sprintf("mssql{max_server_memory=%dMB}", r.SourceMaxServerMemoryMB))
+	}
+	if len(parts) == 0 {
+		return "tuning=unknown"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatTuningSnippetCurrent renders the current run's captured tuning for
+// the prompt's preamble (as opposed to per-row in the trajectory).
+func formatTuningSnippetCurrent(t DBTuningSnapshot) string {
+	rec := AITuningRecord{
+		TargetSharedBuffersMB:   t.TargetSharedBuffersMB,
+		TargetSyncCommit:        t.TargetSyncCommit,
+		TargetFsync:             t.TargetFsync,
+		TargetFullPageWrites:    t.TargetFullPageWrites,
+		TargetMaxWALSizeMB:      t.TargetMaxWALSizeMB,
+		TargetWALLevel:          t.TargetWALLevel,
+		SourceMaxServerMemoryMB: t.SourceMaxServerMemoryMB,
+	}
+	return formatTuningSnippetForRow(rec)
+}
+
+// classifyRegime compares a history row against the current run's host AND
+// effective DB tuning. Returns a label for the row plus a deltas list naming
+// the specific differences. The classifier was previously hardware-only
+// (issue #144's first cut), but the empirical cases in BENCHMARKS.md happen
+// on the same hardware with different DB tuning (PG fsync on/off, mssql
+// max_server_memory 8/16GB, etc.). This expanded classifier exposes those
+// deltas to the AI so it can weight throughput evidence accordingly.
+//
+// Outputs (label, deltas):
+//   - "same_regime", []  — hardware similar AND known tuning fields all match
+//   - "different_hw", ["hw: ..."]  — hardware differs (regardless of tuning)
+//   - "different_tuning", ["pg_fsync: on→off", ...]  — same hardware, tuning differs
+//   - "different_hw_and_tuning", [hw, tuning, ...] — both differ
+//   - "unknown", []  — required hardware fields missing on either side
+//
+// Tuning fields that are zero/empty on either side are not compared (the
+// migration that adds these columns leaves NULL for older rows; treating
+// missing as "matches" would falsely cluster pre-migration rows with
+// post-migration ones).
+func classifyRegime(history AITuningRecord, current AutoTuneInput, currentTuning DBTuningSnapshot) (label string, deltas []string) {
+	if history.CPUCores <= 0 || history.MemoryGB <= 0 || current.CPUCores <= 0 || current.MemoryGB <= 0 {
+		return "unknown", nil
+	}
+
+	hwDiffer := false
+	cpuDiff := absInt(history.CPUCores - current.CPUCores)
+	cpuThreshold := max(2, current.CPUCores/5)
+	lowerMemory := min(history.MemoryGB, current.MemoryGB)
+	upperMemory := max(history.MemoryGB, current.MemoryGB)
+	memorySimilar := lowerMemory*100 >= upperMemory*80
+	if cpuDiff > cpuThreshold || !memorySimilar {
+		hwDiffer = true
+		deltas = append(deltas, fmt.Sprintf("hw: history=%dc/%dGB vs current=%dc/%dGB",
+			history.CPUCores, history.MemoryGB, current.CPUCores, current.MemoryGB))
+	}
+
+	tuningDiffer := false
+	addStrDelta := func(label, hist, curr string) {
+		if hist == "" || curr == "" || hist == curr {
+			return
+		}
+		tuningDiffer = true
+		deltas = append(deltas, fmt.Sprintf("%s: %s→%s", label, hist, curr))
+	}
+	addSizeDelta := func(label string, hist, curr int64, tolerancePct int) {
+		if hist == 0 || curr == 0 {
+			return
+		}
+		// Discrete tolerance for size-style fields (e.g. shared_buffers
+		// 8000MB vs 8192MB shouldn't count as a regime change).
+		lower, upper := hist, curr
+		if lower > upper {
+			lower, upper = upper, lower
+		}
+		if lower*100 >= upper*int64(100-tolerancePct) {
+			return
+		}
+		tuningDiffer = true
+		deltas = append(deltas, fmt.Sprintf("%s: %dMB→%dMB", label, hist, curr))
+	}
+
+	addSizeDelta("pg_shared_buffers", history.TargetSharedBuffersMB, currentTuning.TargetSharedBuffersMB, 10)
+	addStrDelta("pg_sync_commit", history.TargetSyncCommit, currentTuning.TargetSyncCommit)
+	addStrDelta("pg_fsync", history.TargetFsync, currentTuning.TargetFsync)
+	addStrDelta("pg_full_page_writes", history.TargetFullPageWrites, currentTuning.TargetFullPageWrites)
+	addSizeDelta("pg_max_wal", history.TargetMaxWALSizeMB, currentTuning.TargetMaxWALSizeMB, 10)
+	addStrDelta("pg_wal_level", history.TargetWALLevel, currentTuning.TargetWALLevel)
+	addSizeDelta("mssql_max_server_memory", history.SourceMaxServerMemoryMB, currentTuning.SourceMaxServerMemoryMB, 10)
+
+	switch {
+	case hwDiffer && tuningDiffer:
+		return "different_hw_and_tuning", deltas
+	case hwDiffer:
+		return "different_hw", deltas
+	case tuningDiffer:
+		return "different_tuning", deltas
+	default:
+		return "same_regime", nil
+	}
+}
+
+// DBTuningSnapshot holds the effective DB tuning fields used by classifyRegime.
+// Mirrors the regime fields on AITuningRecord; populated by the orchestrator
+// from captureDBTuning at smartconfig-call time.
+type DBTuningSnapshot struct {
+	TargetSharedBuffersMB   int64
+	TargetSyncCommit        string
+	TargetFsync             string
+	TargetFullPageWrites    string
+	TargetMaxWALSizeMB      int64
+	TargetWALLevel          string
+	SourceMaxServerMemoryMB int64
+}
+
+// classifyHostRegime preserved for the existing test that exercises the
+// hardware-only path. New callers should use classifyRegime.
+func classifyHostRegime(history AITuningRecord, current AutoTuneInput) string {
+	label, _ := classifyRegime(history, current, DBTuningSnapshot{})
+	switch label {
+	case "different_hw", "different_hw_and_tuning":
+		return "different_from_current_host"
+	case "unknown":
+		return "unknown"
+	default:
+		// "same_regime" or "different_tuning" — both have similar hardware
+		return "similar_to_current_host"
+	}
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // tableInfo holds basic table metadata.

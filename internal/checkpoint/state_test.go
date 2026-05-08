@@ -670,3 +670,106 @@ func TestCountPartitionTasks(t *testing.T) {
 		t.Errorf("expected 0 partition tasks for nonexistent table, got %d", count)
 	}
 }
+
+// TestAITuningRegimeColumnsRoundTrip pins the #144 follow-up: the new regime
+// columns (platform, target_shared_buffers_mb, target_synchronous_commit, etc.)
+// must persist and round-trip correctly through SaveAITuning + GetAITuningHistory.
+// Pre-fix, the SQL didn't reference them, so a record with those fields set
+// would silently lose them.
+func TestAITuningRegimeColumnsRoundTrip(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	rec := AITuningRecord{
+		Timestamp:               time.Now(),
+		SourceDBType:            "mssql",
+		TargetDBType:            "postgres",
+		Workers:                 16,
+		ChunkSize:               50000,
+		WasAIUsed:               true,
+		Platform:                "wsl2",
+		TargetSharedBuffersMB:   8192,
+		TargetSyncCommit:        "off",
+		TargetFsync:             "on",
+		TargetFullPageWrites:    "on",
+		TargetMaxWALSizeMB:      16384,
+		TargetWALLevel:          "replica",
+		SourceMaxServerMemoryMB: 8192,
+	}
+	if err := state.SaveAITuning(rec); err != nil {
+		t.Fatalf("SaveAITuning error: %v", err)
+	}
+
+	out, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetAITuningHistory error: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(out))
+	}
+	got := out[0]
+	if got.Platform != "wsl2" {
+		t.Errorf("Platform = %q, want %q", got.Platform, "wsl2")
+	}
+	if got.TargetSharedBuffersMB != 8192 {
+		t.Errorf("TargetSharedBuffersMB = %d, want 8192", got.TargetSharedBuffersMB)
+	}
+	if got.TargetSyncCommit != "off" {
+		t.Errorf("TargetSyncCommit = %q, want %q", got.TargetSyncCommit, "off")
+	}
+	if got.TargetFsync != "on" {
+		t.Errorf("TargetFsync = %q, want %q", got.TargetFsync, "on")
+	}
+	if got.TargetFullPageWrites != "on" {
+		t.Errorf("TargetFullPageWrites = %q, want %q", got.TargetFullPageWrites, "on")
+	}
+	if got.TargetMaxWALSizeMB != 16384 {
+		t.Errorf("TargetMaxWALSizeMB = %d, want 16384", got.TargetMaxWALSizeMB)
+	}
+	if got.TargetWALLevel != "replica" {
+		t.Errorf("TargetWALLevel = %q, want %q", got.TargetWALLevel, "replica")
+	}
+	if got.SourceMaxServerMemoryMB != 8192 {
+		t.Errorf("SourceMaxServerMemoryMB = %d, want 8192", got.SourceMaxServerMemoryMB)
+	}
+}
+
+// TestAITuningRegimeColumnsNullForOldRecords verifies that records saved
+// without regime fields read back as zero/empty (the smartconfig render path
+// treats those as "unknown" rather than as real values).
+func TestAITuningRegimeColumnsNullForOldRecords(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	// Save without setting any regime fields (simulates a pre-#144 record).
+	rec := AITuningRecord{
+		Timestamp:    time.Now(),
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		Workers:      16,
+	}
+	if err := state.SaveAITuning(rec); err != nil {
+		t.Fatalf("SaveAITuning error: %v", err)
+	}
+
+	out, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetAITuningHistory error: %v", err)
+	}
+	got := out[0]
+	if got.Platform != "" {
+		t.Errorf("Platform should be empty for unset record, got %q", got.Platform)
+	}
+	if got.TargetSharedBuffersMB != 0 {
+		t.Errorf("TargetSharedBuffersMB should be 0, got %d", got.TargetSharedBuffersMB)
+	}
+	if got.TargetSyncCommit != "" {
+		t.Errorf("TargetSyncCommit should be empty, got %q", got.TargetSyncCommit)
+	}
+}
