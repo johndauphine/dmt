@@ -14,11 +14,14 @@
 // AI fallback narrows to Raw types only — vendor-specific types not in
 // the canonical catalog (PG inet/cidr/macaddr, MSSQL hierarchyid, etc.).
 //
-// Ported from UVG (/Users/john/repos/uvg/src/ddl_typemap/), Apache-2.0 /
-// MIT dual-licensed. Per-file attribution headers point at the source
-// .rs files. Standard porting pattern: Rust enum → Go tagged struct,
-// Option<i32> → *int, Vec<String> → []string, Box<T> → *T.
+// Ported from UVG src/ddl_typemap/ (Apache-2.0 / MIT dual-licensed),
+// pinned at https://github.com/johndauphine/uvg/tree/3106f79c. Per-file
+// attribution headers point at the source .rs files. Standard porting
+// pattern: Rust enum → Go tagged struct, Option<i32> → *int,
+// Vec<String> → []string, Box<T> → *T.
 package typemap
+
+import "fmt"
 
 // Kind tags a CanonicalType variant. Maps 1:1 to UVG's CanonicalType
 // enum variants.
@@ -151,6 +154,12 @@ func ToCanonical(col ColumnInfo, dialect string) CanonicalType {
 
 // FromCanonical emits a canonical type as a DDL fragment for the target
 // dialect.
+//
+// On an unknown dialect, falls back to the Raw type name when one is
+// present (only Kind=KindRaw populates TypeName; for other variants
+// TypeName is empty). When neither applies, emits an approximate TEXT
+// with a warning so callers don't silently produce an empty SQLType
+// (Copilot review on PR #185).
 func FromCanonical(ct CanonicalType, dialect string) DdlType {
 	switch dialect {
 	case DialectPostgres:
@@ -160,7 +169,10 @@ func FromCanonical(ct CanonicalType, dialect string) DdlType {
 	case DialectMySQL:
 		return mysqlFromCanonical(ct)
 	default:
-		return DdlType{SQLType: ct.TypeName}
+		if ct.TypeName != "" {
+			return exactDDL(ct.TypeName)
+		}
+		return approxDDL("TEXT", fmt.Sprintf("unknown target dialect %q; defaulting to TEXT for kind %d", dialect, ct.Kind))
 	}
 }
 

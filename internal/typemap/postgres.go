@@ -1,9 +1,11 @@
 // PostgreSQL dialect mapper.
 //
-// Port of /Users/john/repos/uvg/src/ddl_typemap/pg.rs (Apache-2.0 / MIT,
-// see UVG NOTICE). Behavior preserved verbatim — Rust match arms become
-// Go switch cases; Option<i32> becomes *int; the recursive Array case
-// recurses through ToCanonical/FromCanonical the same way.
+// Port of UVG src/ddl_typemap/pg.rs (Apache-2.0 / MIT, see UVG NOTICE):
+// https://github.com/johndauphine/uvg/blob/3106f79c/src/ddl_typemap/pg.rs
+//
+// Behavior preserved verbatim — Rust match arms become Go switch cases;
+// Option<i32> becomes *int; the recursive Array case recurses through
+// ToCanonical/FromCanonical the same way.
 
 package typemap
 

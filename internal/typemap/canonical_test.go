@@ -1,10 +1,12 @@
 // Cross-dialect MapDDLType tests.
 //
-// Ported from UVG /Users/john/repos/uvg/src/ddl_typemap/mod.rs (the
-// embedded `#[cfg(test)] mod tests` block — the deterministic regression
-// corpus for end-to-end source→target mapping). Same expectations as
-// the Rust tests, swapped to dmt's "postgres" / "mssql" / "mysql"
-// dialect names.
+// Ported from UVG src/ddl_typemap/mod.rs (embedded `#[cfg(test)] mod
+// tests` block — the deterministic regression corpus for end-to-end
+// source→target mapping):
+// https://github.com/johndauphine/uvg/blob/3106f79c/src/ddl_typemap/mod.rs
+//
+// Same expectations as the Rust tests, swapped to dmt's "postgres" /
+// "mssql" / "mysql" dialect names.
 
 package typemap
 
@@ -145,9 +147,39 @@ func TestMapDDLType_UnknownDialect_Falls_Through(t *testing.T) {
 	col := ColumnInfo{Name: "x", UDTName: "weirdtype"}
 	got := MapDDLType(col, "oracle", "snowflake")
 	// Unknown source dialect → Raw{TypeName: col.UDTName}
-	// Unknown target dialect → SQLType: ct.TypeName, no warning
+	// Unknown target dialect → SQLType: ct.TypeName (Raw passthrough)
 	if got.SQLType != "weirdtype" {
 		t.Errorf("got %q, want weirdtype", got.SQLType)
+	}
+}
+
+// TestFromCanonical_UnknownDialect_NonRawFallsBackToText — Copilot review
+// regression on PR #185. Without the fallback, FromCanonical's default
+// branch returned ct.TypeName, which is empty for any non-Raw kind:
+// silent empty-SQLType bug. Now: emit TEXT with an approximate warning.
+func TestFromCanonical_UnknownDialect_NonRawFallsBackToText(t *testing.T) {
+	got := FromCanonical(CanonicalType{Kind: KindBoolean}, "oracle")
+	if got.SQLType != "TEXT" {
+		t.Errorf("unknown dialect + non-Raw kind should emit TEXT, got %q", got.SQLType)
+	}
+	if !got.IsApproximate {
+		t.Error("unknown-dialect fallback should be marked approximate")
+	}
+	if got.Warning == "" {
+		t.Error("unknown-dialect fallback should carry a warning")
+	}
+}
+
+// TestFromCanonical_UnknownDialect_RawPassthroughExact — paired with the
+// non-Raw test above: when TypeName IS populated (Raw kind), the unknown-
+// dialect fallback should emit it exact, not approximate.
+func TestFromCanonical_UnknownDialect_RawPassthroughExact(t *testing.T) {
+	got := FromCanonical(CanonicalType{Kind: KindRaw, TypeName: "GEOMETRY"}, "oracle")
+	if got.SQLType != "GEOMETRY" {
+		t.Errorf("Raw passthrough should emit verbatim, got %q", got.SQLType)
+	}
+	if got.IsApproximate {
+		t.Error("Raw passthrough should be exact, not approximate")
 	}
 }
 

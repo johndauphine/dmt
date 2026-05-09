@@ -1,7 +1,7 @@
 // MySQL / MariaDB dialect mapper.
 //
-// Port of /Users/john/repos/uvg/src/ddl_typemap/mysql.rs (Apache-2.0 /
-// MIT, see UVG NOTICE).
+// Port of UVG src/ddl_typemap/mysql.rs (Apache-2.0 / MIT, see UVG NOTICE):
+// https://github.com/johndauphine/uvg/blob/3106f79c/src/ddl_typemap/mysql.rs
 
 package typemap
 
@@ -62,11 +62,21 @@ func mysqlToCanonical(col ColumnInfo) CanonicalType {
 	case "json":
 		return CanonicalType{Kind: KindJSON}
 	case "enum":
-		return CanonicalType{Kind: KindEnum, Values: parseMySQLEnumValues(col.DataType)}
+		// Parse failure (malformed data_type, missing parens) → fall
+		// back to Raw passthrough so mysqlFromCanonical doesn't end up
+		// emitting an invalid bare ENUM() (Copilot review on PR #185).
+		values := parseMySQLEnumValues(col.DataType)
+		if len(values) == 0 {
+			return CanonicalType{Kind: KindRaw, TypeName: col.DataType}
+		}
+		return CanonicalType{Kind: KindEnum, Values: values}
 	case "set":
 		// MySQL SET is comma-separated multi-value; no portable
-		// canonical equivalent. Preserve verbatim as Raw.
-		return CanonicalType{Kind: KindRaw, TypeName: strings.ToUpper(col.DataType)}
+		// canonical equivalent. Preserve the data_type verbatim — the
+		// quoted string literals inside (e.g. set('a','b')) must NOT
+		// be uppercased, since their values are case-sensitive
+		// (Copilot review on PR #185).
+		return CanonicalType{Kind: KindRaw, TypeName: col.DataType}
 	case "bit":
 		// BIT(1) is the conventional Boolean; BIT(N) for N>1 has no
 		// portable equivalent.
@@ -77,7 +87,7 @@ func mysqlToCanonical(col ColumnInfo) CanonicalType {
 		if precision == 1 {
 			return CanonicalType{Kind: KindBoolean}
 		}
-		return CanonicalType{Kind: KindRaw, TypeName: strings.ToUpper(col.DataType)}
+		return CanonicalType{Kind: KindRaw, TypeName: col.DataType}
 	case "boolean", "bool":
 		return CanonicalType{Kind: KindBoolean}
 	default:
@@ -146,6 +156,14 @@ func mysqlFromCanonical(ct CanonicalType) DdlType {
 	case KindJSONB:
 		return approxDDL("JSON", "JSONB binary indexing not available in MySQL")
 	case KindEnum:
+		// An empty value list would emit invalid bare `ENUM()` —
+		// upstream filtering ensures Values is non-empty at the
+		// to_canonical layer (parse failure routes to Raw), but guard
+		// here too so a hand-built CanonicalType{Kind: KindEnum} can't
+		// produce broken DDL (Copilot review on PR #185).
+		if len(ct.Values) == 0 {
+			return approxDDL("VARCHAR(255)", "Enum has no values; defaulting to VARCHAR(255)")
+		}
 		quoted := make([]string, len(ct.Values))
 		for i, v := range ct.Values {
 			quoted[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
@@ -169,8 +187,8 @@ func isTinyintBool(col ColumnInfo) bool {
 
 // parseMySQLEnumValues extracts the enum value list from a column_type
 // string of the form "enum('a','b','c')". Handles single-quote escaping
-// (MySQL doubles quotes inside enum values: "enum('it”s')") byte by
-// byte to match UVG's parser.
+// (MySQL doubles single quotes inside enum values: enum('it''s'))
+// byte by byte to match UVG's parser.
 func parseMySQLEnumValues(columnType string) []string {
 	openIdx := strings.Index(columnType, "(")
 	closeIdx := strings.LastIndex(columnType, ")")

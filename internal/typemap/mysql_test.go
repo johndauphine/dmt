@@ -1,7 +1,7 @@
 // MySQL / MariaDB dialect tests.
 //
-// Ported from UVG /Users/john/repos/uvg/src/ddl_typemap/mysql.rs
-// `#[cfg(test)] mod tests`.
+// Ported from UVG src/ddl_typemap/mysql.rs `#[cfg(test)] mod tests`:
+// https://github.com/johndauphine/uvg/blob/3106f79c/src/ddl_typemap/mysql.rs
 
 package typemap
 
@@ -175,5 +175,49 @@ func TestMySQLEnumValues_Empty(t *testing.T) {
 	}
 	if got := parseMySQLEnumValues("not_an_enum"); got != nil {
 		t.Errorf("no parens → nil, got %v", got)
+	}
+}
+
+// TestMySQLToCanonical_EnumParseFailure_FallsBackToRaw — Copilot review
+// regression on PR #185. A malformed enum data_type would previously
+// return KindEnum with nil Values, which downstream emits as invalid
+// bare ENUM(). Now it routes to Raw passthrough so the original
+// data_type survives.
+func TestMySQLToCanonical_EnumParseFailure_FallsBackToRaw(t *testing.T) {
+	col := ColumnInfo{UDTName: "enum", DataType: "enum"} // missing parens
+	got := mysqlToCanonical(col)
+	if got.Kind != KindRaw {
+		t.Errorf("malformed enum should fall back to Raw, got Kind=%v", got.Kind)
+	}
+	if got.TypeName != "enum" {
+		t.Errorf("TypeName should preserve original data_type verbatim, got %q", got.TypeName)
+	}
+}
+
+// TestMySQLToCanonical_SetPreservesCase — Copilot review regression on
+// PR #185. SET values are case-sensitive; uppercasing the data_type
+// would mutate the quoted literals and change semantics. Verifies the
+// passthrough preserves them verbatim.
+func TestMySQLToCanonical_SetPreservesCase(t *testing.T) {
+	col := ColumnInfo{UDTName: "set", DataType: "set('Active','InActive','PENDING')"}
+	got := mysqlToCanonical(col)
+	if got.Kind != KindRaw {
+		t.Errorf("set should map to Raw, got Kind=%v", got.Kind)
+	}
+	if got.TypeName != "set('Active','InActive','PENDING')" {
+		t.Errorf("set values must be preserved verbatim (case-sensitive); got %q", got.TypeName)
+	}
+}
+
+// TestMySQLFromCanonical_EmptyEnumApproximate — Copilot review regression
+// on PR #185. An empty Values list must NOT emit invalid bare ENUM();
+// fall back to VARCHAR(255) with an IsApproximate warning.
+func TestMySQLFromCanonical_EmptyEnumApproximate(t *testing.T) {
+	got := mysqlFromCanonical(CanonicalType{Kind: KindEnum})
+	if got.SQLType != "VARCHAR(255)" {
+		t.Errorf("empty enum should fall back to VARCHAR(255), got %q", got.SQLType)
+	}
+	if !got.IsApproximate {
+		t.Error("empty enum fallback should be marked approximate")
 	}
 }

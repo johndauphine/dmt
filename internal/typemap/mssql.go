@@ -1,7 +1,7 @@
 // SQL Server dialect mapper.
 //
-// Port of /Users/john/repos/uvg/src/ddl_typemap/mssql.rs (Apache-2.0 /
-// MIT, see UVG NOTICE).
+// Port of UVG src/ddl_typemap/mssql.rs (Apache-2.0 / MIT, see UVG NOTICE):
+// https://github.com/johndauphine/uvg/blob/3106f79c/src/ddl_typemap/mssql.rs
 
 package typemap
 

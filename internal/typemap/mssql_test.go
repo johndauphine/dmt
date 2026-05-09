@@ -1,7 +1,7 @@
 // SQL Server dialect tests.
 //
-// Ported from UVG /Users/john/repos/uvg/src/ddl_typemap/mssql.rs
-// `#[cfg(test)] mod tests`.
+// Ported from UVG src/ddl_typemap/mssql.rs `#[cfg(test)] mod tests`:
+// https://github.com/johndauphine/uvg/blob/3106f79c/src/ddl_typemap/mssql.rs
 
 package typemap
 
