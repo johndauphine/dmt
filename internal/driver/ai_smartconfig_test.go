@@ -550,7 +550,12 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 		"Avg row size: 248 bytes",
 		"baseline workers=16",
 		"safe chunk_size ceiling is ~1231090 rows", // int math: 27952 * 1MiB / (16*6*248)
-		"Doubling workers OR doubling",
+		"CRITICAL CONSTRAINT",                      // imperative framing (issue #162)
+		"MUST NOT exceed 1231090",                  // ceiling restated as hard cap
+		"Default action: set chunk_size = 50000",   // ceiling-as-cap: 50000 wins when it fits (PR #163 review)
+		"hard cap, not a target",                   // makes ceiling-as-cap framing explicit
+		"silently auto-clamp",                      // consequence framing
+		"doubling workers OR doubling",             // scaling rule still present
 		"Platform=wsl2",
 	}
 	for _, m := range musts {
@@ -576,6 +581,32 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	gotLin := buildMemoryBudgetBlock(inLin, 16)
 	if strings.Contains(gotLin, "Platform=wsl2") {
 		t.Errorf("Linux platform should not render the WSL2 caveat; got:\n%s", gotLin)
+	}
+
+	// Ceiling-below-50000 branch (PR #163 review): when the safe ceiling is
+	// below the 50000 baseline default, "Default action" must use the ceiling
+	// and explain that 50000 does not fit. With budget=512 MB, baseline=16,
+	// avg=248 → ceiling = 512*1MiB/(16*6*248) ≈ 22550 (computeSafeChunkSize).
+	inTight := AutoTuneInput{
+		Platform:          "linux",
+		CPUCores:          18,
+		MemoryGB:          1,
+		AvailableMemoryMB: 0,
+		MaxMemoryMB:       512,
+		AvgRowBytes:       248,
+	}
+	gotTight := buildMemoryBudgetBlock(inTight, 16)
+	tightMusts := []string{
+		"Memory budget: 512 MB",
+		"safe chunk_size ceiling is ~22550 rows",
+		"Default action: set chunk_size = 22550",
+		"50000 default does not fit",
+		"Picking a larger value is forbidden",
+	}
+	for _, m := range tightMusts {
+		if !strings.Contains(gotTight, m) {
+			t.Errorf("tight-budget block missing %q; got:\n%s", m, gotTight)
+		}
 	}
 }
 
