@@ -71,42 +71,72 @@ type DriverProfile struct {
 	HardChunkLimit        int    // #166 — 0 means no protocol cap
 }
 
-// HistoryProvider supplies past-run data for history-aware selection.
-// PR1 calls Aggregates() only. May be nil — Tune treats it as no-history
-// and returns a pure-baseline output.
+// HistoryProvider supplies past-run rows for history-aware selection.
+// PR1 reads raw rows and does its own regime/outlier filtering +
+// per-WAW aggregation in-package. May be nil — Tune treats nil as
+// no-history and returns a pure-baseline output.
 type HistoryProvider interface {
-	// AggregatesByWAW returns per-(write_ahead_writers) totals over the
-	// full ai_tuning_history filtered to (source, target). Ordered by WAW
-	// ascending. Caller in PR1 uses this for smoothed-mean selection +
-	// RULE 1 retry filter.
-	AggregatesByWAW(sourceDBType, targetDBType string) ([]WAWAggregate, error)
-
-	// AggregatesByChunkSize returns per-chunk_size mean throughput over the
-	// same filtered history. Ordered by chunk_size ascending.
-	AggregatesByChunkSize(sourceDBType, targetDBType string) ([]ChunkSizeAggregate, error)
+	// Records returns the migration history for the given (source, target)
+	// pair. Order is not significant — Tune sorts/filters as needed.
+	// Implementations may bound the result; PR1 doesn't depend on a
+	// specific bound (regime + outlier filtering shrink the effective
+	// dataset before selection).
+	Records(sourceDBType, targetDBType string) ([]HistoryRecord, error)
 }
 
-// WAWAggregate is one row of per-WAW history.
-type WAWAggregate struct {
+// HistoryRecord is one past migration's input + outcome, just the fields
+// the tuner reads. Mirrors the relevant subset of the SQL ai_tuning_history
+// schema; the smartconfig analyzer's adapter populates this from the
+// checkpoint backend.
+type HistoryRecord struct {
+	SourceDBType string
+	TargetDBType string
+
+	// What ran
+	Workers           int
+	ChunkSize         int
 	WriteAheadWriters int
-	TotalRuns         int
-	RunsWithRetries   int
-	MeanThroughput    float64
+
+	// What happened
+	FinalThroughput float64
+	ChunkRetryCount int
+
+	// Regime classification fields (host)
+	CPUCores int
+	MemoryGB int
+
+	// DB-tuning regime snapshot (#144 — older rows leave these zero/empty
+	// and classify as "unknown" regime).
+	Platform                string
+	TargetSharedBuffersMB   int64
+	TargetSyncCommit        string
+	TargetFsync             string
+	TargetFullPageWrites    string
+	TargetMaxWALSizeMB      int64
+	TargetWALLevel          string
+	SourceMaxServerMemoryMB int64
 }
 
-// ChunkSizeAggregate is one row of per-chunk_size history.
-type ChunkSizeAggregate struct {
-	ChunkSize     int
-	Runs          int
-	AvgThroughput float64
+// DBTuning is the current run's DB-tuning snapshot used by ClassifyRegime
+// to flag history rows that ran under different DB-side settings (#144).
+// Lifted from internal/driver.DBTuningSnapshot.
+type DBTuning struct {
+	TargetSharedBuffersMB   int64
+	TargetSyncCommit        string
+	TargetFsync             string
+	TargetFullPageWrites    string
+	TargetMaxWALSizeMB      int64
+	TargetWALLevel          string
+	SourceMaxServerMemoryMB int64
 }
 
 // Tune computes the recommended parameters for a migration. The history
-// provider is optional — pass nil for pure-baseline (cold-start) output.
-func Tune(in Input, profile DriverProfile, history HistoryProvider) Output {
+// provider and DBTuning are optional — pass nil / zero-value for pure-
+// baseline (cold-start) output.
+func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) Output {
 	out := baseline(in, profile)
 	if history != nil {
-		applyHistory(&out, in, profile, history)
+		applyHistory(&out, in, profile, history, currentTuning)
 	}
 	applyMemoryClamp(&out, in)
 	return out
