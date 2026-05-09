@@ -79,9 +79,9 @@ type regressionModel struct {
 	modes []string  // categorical level for target_mode; deterministic order
 
 	// Numeric standardization: subtract mean, divide by std.
-	wawMean, wawStd                 float64
-	csMean, csStd                   float64
-	logAvgMean, logAvgStd           float64
+	wawMean, wawStd       float64
+	csMean, csStd         float64
+	logAvgMean, logAvgStd float64
 
 	beta []float64 // one coefficient per feature column, in column order
 }
@@ -204,12 +204,12 @@ func (m *regressionModel) Predict(waw int, csBytes int64, sourceDB, targetDB, mo
 	cz := standardize(float64(csBytes), m.csMean, m.csStd)
 	laz := standardize(math.Log(math.Max(1, float64(avgRowBytes))), m.logAvgMean, m.logAvgStd)
 
-	pred := m.beta[0]            // intercept
-	pred += m.beta[1] * wz       // waw
-	pred += m.beta[2] * wz * wz  // waw²
-	pred += m.beta[3] * cz       // cs
-	pred += m.beta[4] * cz * cz  // cs²
-	pred += m.beta[5] * laz      // log(avg)
+	pred := m.beta[0]           // intercept
+	pred += m.beta[1] * wz      // waw
+	pred += m.beta[2] * wz * wz // waw²
+	pred += m.beta[3] * cz      // cs
+	pred += m.beta[4] * cz * cz // cs²
+	pred += m.beta[5] * laz     // log(avg)
 
 	for j, p := range m.pairs {
 		if p.source == sourceDB && p.target == targetDB {
@@ -275,4 +275,3 @@ func stddevSafe(sqSum, mean, n float64) float64 {
 	}
 	return math.Sqrt(variance)
 }
-

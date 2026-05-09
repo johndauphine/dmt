@@ -98,7 +98,7 @@ type replayResult struct {
 	totalRows          int
 	wawAgree           int
 	chunkAgree         int
-	disagreementsTotal int          // count across all rows
+	disagreementsTotal int            // count across all rows
 	disagreements      []disagreement // capped at maxDisagreementSamples to bound memory
 }
 

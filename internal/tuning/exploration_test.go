@@ -157,8 +157,8 @@ func TestTune_ForceExploreOverridesHistory(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:    "linux",
-		AvgRowBytes: 500,
+		Platform:     "linux",
+		AvgRowBytes:  500,
 		ForceExplore: true,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000, ScaleWritersWithCores: true}

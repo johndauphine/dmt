@@ -41,8 +41,8 @@ type Input struct {
 	// bucket state. ExplorationEpsilon is the steady-state perturbation
 	// probability — 0 disables ε-perturbation, 0.15 is the documented
 	// "balanced" default.
-	ForceExplore        bool
-	ExplorationEpsilon  float64
+	ForceExplore       bool
+	ExplorationEpsilon float64
 }
 
 // Output is the complete recommended parameter set. Mirrors the fields
