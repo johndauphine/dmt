@@ -1179,3 +1179,244 @@ func TestApplyDefaultSuggestionsUsesBufferSum(t *testing.T) {
 		t.Errorf("EstimatedMemMB = %d, want %d", got, want)
 	}
 }
+
+// TestEffectiveMemoryBudgetMB locks in the priority order shared by the
+// prompt's "Memory budget" block AND the post-AI clamp (issue #156): user
+// MaxMemoryMB > available - 2GB headroom > 1024 MB last-resort default.
+// These two callers MUST agree on the budget number, else the LLM is told
+// one ceiling and the clamp enforces a different one.
+func TestEffectiveMemoryBudgetMB(t *testing.T) {
+	cases := []struct {
+		name       string
+		in         AutoTuneInput
+		wantBudget int64
+		wantSrcSub string // substring expected in the source description
+	}{
+		{
+			name:       "cap < available-headroom → cap wins",
+			in:         AutoTuneInput{AvailableMemoryMB: 30000, MaxMemoryMB: 2000},
+			wantBudget: 2000,
+			wantSrcSub: "user max_memory_mb=2000",
+		},
+		{
+			name:       "cap > available-headroom → headroom wins",
+			in:         AutoTuneInput{AvailableMemoryMB: 30000, MaxMemoryMB: 50000},
+			wantBudget: 27952,
+			wantSrcSub: "available_memory_mb=30000",
+		},
+		{
+			name:       "no cap → headroom",
+			in:         AutoTuneInput{AvailableMemoryMB: 30000},
+			wantBudget: 27952,
+			wantSrcSub: "available_memory_mb=30000",
+		},
+		{
+			name:       "available unset, cap set → cap (issue #158 fix)",
+			in:         AutoTuneInput{AvailableMemoryMB: 0, MaxMemoryMB: 2000},
+			wantBudget: 2000,
+			wantSrcSub: "user max_memory_mb=2000",
+		},
+		{
+			name:       "both unset → fallback default, NOT 0",
+			in:         AutoTuneInput{},
+			wantBudget: 1024,
+			wantSrcSub: "fallback default",
+		},
+		{
+			name:       "available below 2GB headroom + no cap → fallback default",
+			in:         AutoTuneInput{AvailableMemoryMB: 1000},
+			wantBudget: 1024,
+			wantSrcSub: "fallback default",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotBudget, gotSrc := effectiveMemoryBudgetMB(tc.in)
+			if gotBudget != tc.wantBudget {
+				t.Errorf("budget = %d MB, want %d", gotBudget, tc.wantBudget)
+			}
+			if !strings.Contains(gotSrc, tc.wantSrcSub) {
+				t.Errorf("source = %q, want substring %q", gotSrc, tc.wantSrcSub)
+			}
+		})
+	}
+}
+
+// TestClampChunkSizeToBudget locks in issue #156 enforcement: when the
+// LLM's chosen params exceed the memory budget, chunk_size is clamped to
+// fit and EstimatedMemMB is recomputed. The clamp persists into the
+// suggestions struct so AI tuning history records the post-clamp value.
+func TestClampChunkSizeToBudget(t *testing.T) {
+	t.Run("clamps over-budget AI choice (cap=200 vs Sonnet 35K)", func(t *testing.T) {
+		// Real reproduction from the issue #156 sweep: at cap=200 the AI
+		// picked chunk_size=35000 → 794 MB → 297% over cap. Safe ceiling
+		// at workers=16, buffers=4+2=6, avg=248 is ~8808 rows.
+		analyzer := &SmartConfigAnalyzer{
+			suggestions: &SmartConfigSuggestions{
+				Workers:                 16,
+				ChunkSizeRecommendation: 35000,
+				ReadAheadBuffers:        4,
+				WriteAheadWriters:       2,
+				EstimatedMemMB:          794, // pre-clamp value matching the LLM's choice
+			},
+		}
+		input := AutoTuneInput{
+			AvailableMemoryMB: 30000,
+			MaxMemoryMB:       200,
+			AvgRowBytes:       248,
+		}
+
+		analyzer.clampChunkSizeToBudget(input)
+
+		// Safe ceiling: 200 * 1MiB / (16*6*248) = 8808 rows.
+		const wantChunk = 8808
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got != wantChunk {
+			t.Errorf("ChunkSizeRecommendation = %d, want %d (the safe ceiling at this budget; clamp didn't fire if got==35000)", got, wantChunk)
+		}
+		// EstimatedMemMB must be recomputed from the clamped chunk_size, not
+		// left at the pre-clamp 794 MB. Otherwise the AI tuning history would
+		// record a memory value inconsistent with the actual params.
+		const wantMem = 199 // 16*6*8808*248 / 1MiB = ~199 MB; just under cap
+		if got := analyzer.suggestions.EstimatedMemMB; got != wantMem {
+			t.Errorf("EstimatedMemMB = %d MB, want %d (recomputed from clamped chunk_size)", got, wantMem)
+		}
+	})
+
+	t.Run("no-op when AI choice already fits", func(t *testing.T) {
+		// Default chunk=50000 at workers=16, buffers=6, avg=248 → 1135 MB.
+		// Cap=2000 leaves room. Clamp must not trigger.
+		analyzer := &SmartConfigAnalyzer{
+			suggestions: &SmartConfigSuggestions{
+				Workers:                 16,
+				ChunkSizeRecommendation: 50000,
+				ReadAheadBuffers:        4,
+				WriteAheadWriters:       2,
+				EstimatedMemMB:          1135,
+			},
+		}
+		input := AutoTuneInput{
+			AvailableMemoryMB: 30000,
+			MaxMemoryMB:       2000,
+			AvgRowBytes:       248,
+		}
+
+		analyzer.clampChunkSizeToBudget(input)
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got != 50000 {
+			t.Errorf("ChunkSizeRecommendation modified to %d; should be unchanged at 50000 (clamp must be a no-op when 1135 MB <= 2000 MB budget)", got)
+		}
+		if got := analyzer.suggestions.EstimatedMemMB; got != 1135 {
+			t.Errorf("EstimatedMemMB modified to %d; should be unchanged at 1135", got)
+		}
+	})
+
+	t.Run("no-op when no cap and plenty of headroom", func(t *testing.T) {
+		// Common path: user did not set max_memory_mb, system has 30 GB.
+		// Default chunk=50000 → 1135 MB; budget = 30000 - 2048 = 27952. Fits.
+		analyzer := &SmartConfigAnalyzer{
+			suggestions: &SmartConfigSuggestions{
+				Workers:                 16,
+				ChunkSizeRecommendation: 50000,
+				ReadAheadBuffers:        4,
+				WriteAheadWriters:       2,
+				EstimatedMemMB:          1135,
+			},
+		}
+		input := AutoTuneInput{AvailableMemoryMB: 30000, AvgRowBytes: 248}
+
+		analyzer.clampChunkSizeToBudget(input)
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got != 50000 {
+			t.Errorf("ChunkSizeRecommendation = %d; clamp must be a no-op when no cap is set and headroom is plenty", got)
+		}
+	})
+
+	t.Run("refuses to clamp to zero", func(t *testing.T) {
+		// Pathological: zero workers means computeSafeChunkSize returns 0.
+		// Clamping to 0 would block the migration entirely; better to leave
+		// the original chunk and let the migration fail loudly elsewhere.
+		analyzer := &SmartConfigAnalyzer{
+			suggestions: &SmartConfigSuggestions{
+				Workers:                 0, // pathological
+				ChunkSizeRecommendation: 50000,
+				ReadAheadBuffers:        4,
+				WriteAheadWriters:       2,
+				EstimatedMemMB:          5000, // arbitrary high value
+			},
+		}
+		input := AutoTuneInput{
+			AvailableMemoryMB: 30000,
+			MaxMemoryMB:       100,
+			AvgRowBytes:       248,
+		}
+
+		analyzer.clampChunkSizeToBudget(input)
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got != 50000 {
+			t.Errorf("ChunkSizeRecommendation = %d; should be unchanged at 50000 to avoid blocking the migration", got)
+		}
+	})
+
+	t.Run("clamp gate uses bytes, not floor-MB (Copilot review fix)", func(t *testing.T) {
+		// Pre-fix: EstimatedMemMB used integer division to MB, so a real
+		// footprint of e.g. 200.9 MiB would render as 200 MB and slide
+		// under a 200 MB cap. Post-fix: gate compares bytes directly.
+		//
+		// Construct params where bytes / 1024 / 1024 truncates from
+		// strictly-over-cap to exactly-at-cap. With workers=1, buffers=1,
+		// avg=1024, chunk=205200: bytes = 1*1*205200*1024 = 210,124,800 =
+		// ~200.4 MiB; floor MB = 200. At a 200 MB cap, the floor-MB
+		// comparison would say "200 <= 200" and skip; the bytes comparison
+		// correctly says "210124800 > 209715200" and clamps.
+		analyzer := &SmartConfigAnalyzer{
+			suggestions: &SmartConfigSuggestions{
+				Workers:                 1,
+				ChunkSizeRecommendation: 205200,
+				ReadAheadBuffers:        1,
+				WriteAheadWriters:       0,
+				EstimatedMemMB:          200, // ComputeEstimatedMemMB floors to 200
+			},
+		}
+		input := AutoTuneInput{
+			AvailableMemoryMB: 30000,
+			MaxMemoryMB:       200,
+			AvgRowBytes:       1024,
+		}
+
+		analyzer.clampChunkSizeToBudget(input)
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got >= 205200 {
+			t.Errorf("ChunkSizeRecommendation = %d; expected clamp to fire on 210MB > 200MB cap (bytes comparison, not floor-MB)", got)
+		}
+	})
+}
+
+// TestApplyAISuggestionsClampsOverBudget verifies the clamp is wired into
+// applyAISuggestions, not just the standalone helper. Reproduces the
+// cap=500 + Sonnet failure mode from issue #156: AI returns chunk=35000
+// (794 MB), Go clamps to fit the 500 MB cap.
+func TestApplyAISuggestionsClampsOverBudget(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{
+		suggestions: &SmartConfigSuggestions{},
+	}
+	ai := &AutoTuneOutput{
+		Workers:           16,
+		ChunkSize:         35000,
+		ReadAheadBuffers:  4,
+		WriteAheadWriters: 2,
+		ParallelReaders:   4,
+	}
+	input := AutoTuneInput{
+		AvailableMemoryMB: 30000,
+		MaxMemoryMB:       500,
+		AvgRowBytes:       248,
+	}
+
+	analyzer.applyAISuggestions(ai, input)
+
+	// Safe ceiling at 500 MB budget: 500 * 1MiB / (16*6*248) = 22021 rows.
+	const wantChunk = 22021
+	if got := analyzer.suggestions.ChunkSizeRecommendation; got != wantChunk {
+		t.Errorf("ChunkSizeRecommendation = %d, want %d (clamped from AI's 35000)", got, wantChunk)
+	}
+	// Recomputed memory should be just under the cap.
+	if got := analyzer.suggestions.EstimatedMemMB; got > 500 {
+		t.Errorf("EstimatedMemMB = %d MB, want <= 500 (post-clamp must fit cap)", got)
+	}
+}
