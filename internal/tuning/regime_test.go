@@ -162,8 +162,8 @@ func TestClassifyRegime_DifferentHWAndTuning(t *testing.T) {
 func TestClassifyRegime_DeltasAreReadable(t *testing.T) {
 	current := Input{CPUCores: 16, MemoryGB: 48}
 	hist := HistoryRecord{
-		CPUCores:        4,
-		MemoryGB:        16,
+		CPUCores:         4,
+		MemoryGB:         16,
 		TargetSyncCommit: "off",
 	}
 	tuning := DBTuning{TargetSyncCommit: "on"}

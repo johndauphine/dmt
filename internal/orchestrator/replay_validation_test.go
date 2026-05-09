@@ -94,24 +94,24 @@ func allHistoryPairs(state *checkpoint.State) (map[historyKey][]checkpoint.AITun
 }
 
 type replayResult struct {
-	totalRows    int
-	wawAgree     int
-	chunkAgree   int
+	totalRows     int
+	wawAgree      int
+	chunkAgree    int
 	disagreements []disagreement
 }
 
 type disagreement struct {
-	timestamp        string
-	avgRowBytes      int64
-	cpuCores         int
-	memoryGB         int
-	wasAIUsed        bool
-	recordedWAW      int
-	predictedWAW     int
-	recordedChunk    int
-	predictedChunk   int
-	finalThroughput  float64
-	chunkRetryCount  int
+	timestamp       string
+	avgRowBytes     int64
+	cpuCores        int
+	memoryGB        int
+	wasAIUsed       bool
+	recordedWAW     int
+	predictedWAW    int
+	recordedChunk   int
+	predictedChunk  int
+	finalThroughput float64
+	chunkRetryCount int
 }
 
 // replayPair walks the rows for one (source, target) pair in chronological

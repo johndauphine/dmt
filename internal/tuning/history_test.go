@@ -101,7 +101,7 @@ func TestAggregateByWAW(t *testing.T) {
 		{WriteAheadWriters: 1, FinalThroughput: 500_000, ChunkRetryCount: 0},
 		{WriteAheadWriters: 1, FinalThroughput: 600_000, ChunkRetryCount: 0},
 		{WriteAheadWriters: 2, FinalThroughput: 700_000, ChunkRetryCount: 1},
-		{WriteAheadWriters: 2, FinalThroughput: 0},        // incomplete; should be ignored
+		{WriteAheadWriters: 2, FinalThroughput: 0}, // incomplete; should be ignored
 		{WriteAheadWriters: 4, FinalThroughput: 800_000},
 	}
 	bins := aggregateByWAW(rows)
@@ -125,9 +125,9 @@ func TestFilterByRegime(t *testing.T) {
 	current := Input{CPUCores: 16, MemoryGB: 48}
 	currentTuning := DBTuning{}
 	rows := []HistoryRecord{
-		{CPUCores: 16, MemoryGB: 48, FinalThroughput: 500_000},  // same
-		{CPUCores: 4, MemoryGB: 48, FinalThroughput: 400_000},   // different_hw — drop
-		{CPUCores: 0, MemoryGB: 0, FinalThroughput: 600_000},    // unknown — drop
+		{CPUCores: 16, MemoryGB: 48, FinalThroughput: 500_000}, // same
+		{CPUCores: 4, MemoryGB: 48, FinalThroughput: 400_000},  // different_hw — drop
+		{CPUCores: 0, MemoryGB: 0, FinalThroughput: 600_000},   // unknown — drop
 	}
 	kept := filterByRegime(rows, current, currentTuning)
 	if len(kept) != 1 {
