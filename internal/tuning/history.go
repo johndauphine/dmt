@@ -35,6 +35,24 @@ const outlierFloorRatio = 0.5
 // derive this dynamically from cores or driver hints.
 const maxWAWForGrid = 8
 
+// retryRateExclusionThreshold is the per-WAW retry rate above which the
+// selection paths (smoothed bins, regression argmax) refuse to recommend
+// the WAW. Below this rate, transient retries don't poison a WAW value.
+//
+// Exploration paths (planned grid, ε-perturbation) ignore this entirely
+// — they keep probing so historical verdicts get re-examined as new
+// data arrives. See issue #186: under the original "any retry → permanent
+// exclusion" rule, AI-era runs at WAW=2 (~17% retries from AI's other
+// bad choices, not WAW itself) permanently locked the deterministic
+// tuner out of WAW=2.
+const retryRateExclusionThreshold = 0.15
+
+// minRunsForRetryExclusion is the floor on per-WAW sample count before
+// the retry-rate filter is allowed to trigger. With <3 runs the rate is
+// too noisy to act on (1/1 = 100% from a single transient retry would
+// fire the filter); let exploration accumulate more data first.
+const minRunsForRetryExclusion = 3
+
 // applyHistory layers history-aware selection on top of the baseline.
 // Tiered engagement (PR2 #179):
 //
@@ -119,17 +137,19 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 	if picked != out.WriteAheadWriters {
 		out.WriteAheadWriters = picked
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after RULE 1, regime, outlier, and ≥%d-run threshold filters)",
+			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after retry-rate, regime, outlier, and ≥%d-run threshold filters)",
 			picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
 		)
 	}
 }
 
 // applyHistoryRegression fits the quadratic model to the filtered rows
-// and walks the (WAW × CS_BYTES) grid to pick the argmax under RULE 1
-// + HardChunkLimit. Returns true when it picks (and applies) a
-// recommendation; false on fit failure or empty grid (caller falls
-// through to smoothed bins).
+// and walks the (WAW × CS_BYTES) grid to pick the argmax. The grid is
+// filtered by wawsWithHighRetryRate (#186 — exclude WAWs whose retry
+// rate clears the threshold over enough samples) and HardChunkLimit
+// (skip CS values above the protocol cap). Returns true when it picks
+// (and applies) a recommendation; false on fit failure or empty grid
+// (caller falls through to smoothed bins).
 func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) bool {
 	model, err := fitRegression(rows)
 	if err != nil {
@@ -137,7 +157,7 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 		return false
 	}
 
-	skip := wawsWithRetries(rows)
+	skip := wawsWithHighRetryRate(rows)
 	pickedWAW, pickedCSBytes, predicted, ok := argmaxRegression(model, in, profile, skip)
 	if !ok {
 		return false
@@ -161,10 +181,11 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 }
 
 // argmaxRegression walks the small (WAW, CS_BYTES) grid and returns the
-// candidate with the highest predicted throughput, subject to RULE 1
-// (skip WAWs that have any historical retries) and HardChunkLimit
-// (skip CS values above the protocol cap). Returns ok=false when every
-// grid point is filtered out.
+// candidate with the highest predicted throughput, subject to the
+// retry-rate exclusion (skip WAWs whose historical retry rate clears
+// retryRateExclusionThreshold over ≥minRunsForRetryExclusion runs) and
+// HardChunkLimit (skip CS values above the protocol cap). Returns
+// ok=false when every grid point is filtered out.
 func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, skip map[int]bool) (waw int, csBytes int64, predicted float64, ok bool) {
 	const fallbackBytes int64 = 10_000_000
 	optimumBytes := profile.OptimumBulkChunkBytes
@@ -207,17 +228,40 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 	return bestWAW, bestCSBytes, bestPred, true
 }
 
-// wawsWithRetries collects the set of WAW values that had at least one
-// historical retry — RULE 1 hard exclusion for the regression argmax.
-// Mirrors the bin-level filter in selectWAW for the smoothed-bins path.
-func wawsWithRetries(rows []HistoryRecord) map[int]bool {
-	m := map[int]bool{}
+// wawsWithHighRetryRate returns the set of WAW values whose historical
+// retry rate exceeds retryRateExclusionThreshold once we have at least
+// minRunsForRetryExclusion samples. Used by the SELECTION paths only
+// (smoothed bins via selectWAW, regression via argmaxRegression).
+//
+// Replaces the original "any retry → permanent exclusion" filter
+// (issue #186): a single transient retry no longer poisons a WAW
+// value forever, and AI-era retries no longer prevent the deterministic
+// tuner from re-examining historically-flagged WAWs once exploration
+// has gathered fresh data.
+func wawsWithHighRetryRate(rows []HistoryRecord) map[int]bool {
+	type counter struct{ runs, retried int }
+	c := map[int]*counter{}
 	for _, r := range rows {
+		cnt := c[r.WriteAheadWriters]
+		if cnt == nil {
+			cnt = &counter{}
+			c[r.WriteAheadWriters] = cnt
+		}
+		cnt.runs++
 		if r.ChunkRetryCount > 0 {
-			m[r.WriteAheadWriters] = true
+			cnt.retried++
 		}
 	}
-	return m
+	out := map[int]bool{}
+	for waw, cnt := range c {
+		if cnt.runs < minRunsForRetryExclusion {
+			continue
+		}
+		if float64(cnt.retried)/float64(cnt.runs) > retryRateExclusionThreshold {
+			out[waw] = true
+		}
+	}
+	return out
 }
 
 // filterByRegime keeps rows that ran on comparable hardware. Same regime
@@ -327,14 +371,16 @@ func aggregateByWAW(rows []HistoryRecord) []wawBin {
 }
 
 // selectWAW picks the WriteAheadWriters value with the highest shrunk
-// mean throughput among bins with zero retries (RULE 1).
+// mean throughput among bins below the retry-rate exclusion threshold
+// (#186 — see isHighRetryRateBin / retryRateExclusionThreshold).
 //
 // Smoothed mean: μ̂_bin = (n·mean + k·global) / (n + k). With small n the
 // estimate collapses toward the global mean (don't trust noisy bins);
 // with large n it converges to the bin's measured mean.
 //
-// Returns the picked WAW, its shrunk mean, and ok=true if a clean bin
-// was found. ok=false when every bin has retries or no bins exist.
+// Returns the picked WAW, its shrunk mean, and ok=true if at least one
+// eligible bin was found. ok=false when every bin clears the retry-rate
+// threshold (or no bins exist).
 func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 	// Global mean across all bins (including ones with retries — they're
 	// real measurements; just not eligible for selection).
@@ -352,8 +398,9 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 	bestWAW := -1
 	bestShrunk := -1.0
 	for _, b := range bins {
-		if b.RunsWithRetries > 0 {
-			continue // RULE 1: any history of retries → exclude
+		if isHighRetryRateBin(b) {
+			continue // retry-rate exclusion (issue #186 — replaces the
+			// any-retry hard rule)
 		}
 		if b.TotalRuns < minRunsPerBin {
 			continue // not enough evidence to override baseline
@@ -372,17 +419,28 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 }
 
 // countEligibleBins returns the count of bins selectWAW would actually
-// consider — clean of retries (RULE 1) AND with enough runs to clear
-// the minRunsPerBin floor. Used in the reasoning string so a reviewer
-// can see how thin the basis was.
+// consider — below the retry-rate threshold AND with enough runs to
+// clear the minRunsPerBin floor. Used in the reasoning string so a
+// reviewer can see how thin the basis was.
 func countEligibleBins(bins []wawBin) int {
 	n := 0
 	for _, b := range bins {
-		if b.RunsWithRetries == 0 && b.TotalRuns >= minRunsPerBin {
+		if !isHighRetryRateBin(b) && b.TotalRuns >= minRunsPerBin {
 			n++
 		}
 	}
 	return n
+}
+
+// isHighRetryRateBin is the bin-level mirror of wawsWithHighRetryRate.
+// Returns true when the bin has enough samples AND its retry rate
+// exceeds the threshold. Below the sample-count floor it returns false
+// (insufficient evidence to exclude — let exploration probe more).
+func isHighRetryRateBin(b wawBin) bool {
+	if b.TotalRuns < minRunsForRetryExclusion {
+		return false
+	}
+	return float64(b.RunsWithRetries)/float64(b.TotalRuns) > retryRateExclusionThreshold
 }
 
 // appendReasoning concatenates a new structured reason onto the existing

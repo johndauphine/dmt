@@ -39,12 +39,11 @@ func TestShouldExplore(t *testing.T) {
 func TestApplyGridExploration_RotatesByBucketCount(t *testing.T) {
 	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
-	skip := map[int]bool{}
 
 	picks := make(map[gridCandidate]int)
 	for i := 0; i < explorationGridRuns; i++ {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, i, skip)
+		applyGridExploration(&out, in, profile, i)
 		// Reverse the CSFraction from out.ChunkSize for set-membership check.
 		// At avg=500, full optimum 25MB → 50000 rows; half → 25000 rows.
 		var frac float64
@@ -64,22 +63,26 @@ func TestApplyGridExploration_RotatesByBucketCount(t *testing.T) {
 	}
 }
 
-// TestApplyGridExploration_RespectsRule1 verifies the planned grid skips
-// candidates whose WAW had historical retries — same RULE 1 as the
-// regression argmax.
-func TestApplyGridExploration_RespectsRule1(t *testing.T) {
+// TestApplyGridExploration_IgnoresHistoricalRetries — issue #186
+// regression guard. Exploration probes every WAW in the planned grid
+// regardless of historical retries, since exploration's purpose is
+// gathering data so historical verdicts can be re-examined. The
+// retry-rate filter applies to SELECTION paths only, not exploration.
+func TestApplyGridExploration_IgnoresHistoricalRetries(t *testing.T) {
 	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
-	// Skip WAW=1 and WAW=2 — entire CSFraction=0.5 sub-grid is excluded
-	// (WAW=3 is allowed, WAW=maxWAWForGrid is allowed).
-	skip := map[int]bool{1: true, 2: true}
 
+	// Walk all 6 cold-start positions; the planned grid lists WAW=2 at
+	// idx 1 and idx 5, so we must see WAW=2 picked at least twice.
+	wawCounts := map[int]int{}
 	for i := 0; i < explorationGridRuns; i++ {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, i, skip)
-		if out.WriteAheadWriters == 1 || out.WriteAheadWriters == 2 {
-			t.Errorf("bucketCount=%d: picked WAW=%d, but RULE 1 excluded {1, 2}", i, out.WriteAheadWriters)
-		}
+		applyGridExploration(&out, in, profile, i)
+		wawCounts[out.WriteAheadWriters]++
+	}
+	if wawCounts[2] < 2 {
+		t.Errorf("planned grid should probe WAW=2 at least twice across cold-start runs; got %d (counts %v)",
+			wawCounts[2], wawCounts)
 	}
 }
 
@@ -98,7 +101,7 @@ func TestApplyGridExploration_RespectsHardChunkLimit(t *testing.T) {
 	}
 	out := baseline(in, profile)
 	originalChunk := out.ChunkSize
-	applyGridExploration(&out, in, profile, 0, map[int]bool{})
+	applyGridExploration(&out, in, profile, 0)
 	if out.ChunkSize > 10000 {
 		t.Errorf("ChunkSize=%d exceeds HardChunkLimit=10000; filter should have skipped or baseline should hold", out.ChunkSize)
 	}
@@ -133,7 +136,7 @@ func TestApplyEpsilonPerturbation_NudgesOneStep(t *testing.T) {
 	for trial := 0; trial < 50; trial++ {
 		out := Output{WriteAheadWriters: 3, ChunkSize: 30000}
 		original := out
-		applyEpsilonPerturbation(&out, profile, nil)
+		applyEpsilonPerturbation(&out, profile)
 		changed := out.WriteAheadWriters != original.WriteAheadWriters || out.ChunkSize != original.ChunkSize
 		if !changed {
 			t.Errorf("trial %d: perturbation didn't change anything (WAW=%d, CS=%d)",
