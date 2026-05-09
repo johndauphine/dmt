@@ -142,7 +142,7 @@ type DBTuning struct {
 func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) Output {
 	out := baseline(in, profile)
 	if history != nil {
-		applyHistory(&out, in, history, currentTuning)
+		applyHistory(&out, in, profile, history, currentTuning)
 	}
 	applyMemoryClamp(&out, in)
 	return out

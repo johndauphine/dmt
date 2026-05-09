@@ -2,6 +2,7 @@ package tuning
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -29,20 +30,33 @@ const minRunsPerBin = 3
 // WITH retries is real load contention and stays in the pool.
 const outlierFloorRatio = 0.5
 
+// maxWAWForGrid bounds the WAW search grid used by the regression's
+// argmax. Most parallel-write workloads peak well below 8; PR3+ can
+// derive this dynamically from cores or driver hints.
+const maxWAWForGrid = 8
+
 // applyHistory layers history-aware selection on top of the baseline.
-// Steps:
+// Tiered engagement (PR2 #179):
+//
+//	rows < minRunsPerBin (3)   → baseline stands (no history signal)
+//	rows < minRowsForRegression → smoothed bins from PR1
+//	rows ≥ minRowsForRegression → quadratic regression (PR2 §A)
+//
+// The regression tier picks both WAW and chunk_size from a small grid;
+// the smoothed-bins tier picks WAW only and leaves chunk_size at the
+// per-target byte anchor from baseline. On regression failure the
+// caller falls through to the smoothed-bins path so a degenerate fit
+// doesn't lose the run.
+//
+// Filter chain (applied before tier dispatch):
 //  1. Pull raw records from the provider for the (source, target) pair.
 //  2. Filter to comparable regimes (same_regime + different_tuning;
 //     exclude different_hw + different_hw_and_tuning + unknown).
 //  3. Drop outliers — clean runs whose throughput is below half the
 //     median of the surviving rows.
-//  4. Aggregate per-WAW: TotalRuns, RunsWithRetries, MeanThroughput.
-//  5. Pick the WAW with the highest shrunk mean among bins with zero
-//     retries (RULE 1 hard exclusion). Smoothed-mean shrinks each bin's
-//     measured mean toward the global mean by run count.
 //
 // On any error or empty post-filter dataset, the baseline output stands.
-func applyHistory(out *Output, in Input, history HistoryProvider, currentTuning DBTuning) {
+func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) {
 	rows, err := history.Records(in.SourceDBType, in.TargetDBType)
 	if err != nil {
 		logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
@@ -62,6 +76,20 @@ func applyHistory(out *Output, in Input, history HistoryProvider, currentTuning 
 		return
 	}
 
+	// Regression tier first — when the row count clears the floor and the
+	// fit succeeds, the model picks both WAW and chunk_size from the
+	// per-target grid.
+	if len(rows) >= minRowsForRegression {
+		if applyHistoryRegression(out, in, profile, rows) {
+			return
+		}
+		// Fit failed (singular even with ridge, or some other numerical
+		// edge) — fall through to smoothed bins. Reasoning will reflect
+		// whichever tier actually picked.
+	}
+
+	// Smoothed-bins tier (PR1 path). Picks WAW only; chunk_size stays at
+	// the baseline anchor from chunkRowsFromProfile.
 	bins := aggregateByWAW(rows)
 	if len(bins) == 0 {
 		return
@@ -78,6 +106,97 @@ func applyHistory(out *Output, in Input, history HistoryProvider, currentTuning 
 			picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
 		)
 	}
+}
+
+// applyHistoryRegression fits the quadratic model to the filtered rows
+// and walks the (WAW × CS_BYTES) grid to pick the argmax under RULE 1
+// + HardChunkLimit. Returns true when it picks (and applies) a
+// recommendation; false on fit failure or empty grid (caller falls
+// through to smoothed bins).
+func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) bool {
+	model, err := fitRegression(rows)
+	if err != nil {
+		logging.Debug("tuning: regression fit failed (%v) — falling through to smoothed bins", err)
+		return false
+	}
+
+	skip := wawsWithRetries(rows)
+	pickedWAW, pickedCSBytes, predicted, ok := argmaxRegression(model, in, profile, skip)
+	if !ok {
+		return false
+	}
+
+	out.WriteAheadWriters = pickedWAW
+	avg := in.AvgRowBytes
+	if avg <= 0 {
+		avg = 500
+	}
+	out.ChunkSize = int(pickedCSBytes / avg)
+	out.Reasoning = appendReasoning(out.Reasoning,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB) over %d filtered rows; predicted %.0f rows/s",
+		pickedWAW, out.ChunkSize, float64(pickedCSBytes)/1024/1024, len(rows), predicted,
+	)
+	return true
+}
+
+// argmaxRegression walks the small (WAW, CS_BYTES) grid and returns the
+// candidate with the highest predicted throughput, subject to RULE 1
+// (skip WAWs that have any historical retries) and HardChunkLimit
+// (skip CS values above the protocol cap). Returns ok=false when every
+// grid point is filtered out.
+func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, skip map[int]bool) (waw int, csBytes int64, predicted float64, ok bool) {
+	const fallbackBytes int64 = 10_000_000
+	optimumBytes := profile.OptimumBulkChunkBytes
+	if optimumBytes <= 0 {
+		optimumBytes = fallbackBytes
+	}
+	avg := in.AvgRowBytes
+	if avg <= 0 {
+		avg = 500
+	}
+	csCandidates := []int64{
+		int64(halfOptimumFraction * float64(optimumBytes)),
+		int64(fullOptimumFraction * float64(optimumBytes)),
+	}
+
+	bestWAW := -1
+	var bestCSBytes int64
+	bestPred := math.Inf(-1)
+
+	for w := 1; w <= maxWAWForGrid; w++ {
+		if skip[w] {
+			continue
+		}
+		for _, cs := range csCandidates {
+			csRows := int(cs / avg)
+			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
+				continue
+			}
+			pred := model.Predict(w, cs, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
+			if pred > bestPred {
+				bestPred = pred
+				bestWAW = w
+				bestCSBytes = cs
+			}
+		}
+	}
+	if bestWAW < 0 {
+		return 0, 0, 0, false
+	}
+	return bestWAW, bestCSBytes, bestPred, true
+}
+
+// wawsWithRetries collects the set of WAW values that had at least one
+// historical retry — RULE 1 hard exclusion for the regression argmax.
+// Mirrors the bin-level filter in selectWAW for the smoothed-bins path.
+func wawsWithRetries(rows []HistoryRecord) map[int]bool {
+	m := map[int]bool{}
+	for _, r := range rows {
+		if r.ChunkRetryCount > 0 {
+			m[r.WriteAheadWriters] = true
+		}
+	}
+	return m
 }
 
 // filterByRegime keeps rows that ran on comparable hardware. Same regime
