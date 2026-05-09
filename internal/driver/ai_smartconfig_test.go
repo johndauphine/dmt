@@ -602,14 +602,11 @@ func TestComputeSafeChunkSize(t *testing.T) {
 	}
 }
 
-// TestBuildMemoryBudgetBlock locks in the prompt invariants for the
-// pre-computed budget block so a future refactor doesn't accidentally drop
-// the budget number, the avg-row-size, or the WSL2 caveat.
-// pgStub mimics the postgres driver for tests in this package, which can't
-// blank-import driver/postgres without an init-cycle. Only the methods
-// buildMemoryBudgetBlock actually calls are populated; the embedded Driver
-// is nil, so any other method call would NPE — that's intentional, it
-// surfaces accidental new dependencies on the stub instead of silently
+// chunkAdviceStub mimics a registered driver for tests in this package,
+// which can't blank-import driver/postgres without an init-cycle. Only the
+// methods buildMemoryBudgetBlock actually calls are populated; the embedded
+// Driver is nil, so any other method call would NPE — that's intentional,
+// it surfaces accidental new dependencies on the stub instead of silently
 // returning zero values.
 type chunkAdviceStub struct {
 	Driver
@@ -622,6 +619,9 @@ func (s *chunkAdviceStub) Defaults() DriverDefaults {
 }
 func (s *chunkAdviceStub) HardChunkLimit(int64) int { return s.hardLimit }
 
+// TestBuildMemoryBudgetBlock locks in the prompt invariants for the
+// pre-computed budget block so a future refactor doesn't accidentally drop
+// the budget number, the avg-row-size, or the WSL2 caveat.
 func TestBuildMemoryBudgetBlock(t *testing.T) {
 	pg := &chunkAdviceStub{bytes: 25_000_000} // PG seed value (#166)
 	in := AutoTuneInput{
