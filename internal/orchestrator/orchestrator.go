@@ -704,21 +704,17 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	return result.TableFailures, nil
 }
 
-// applyAITuning uses AI to optimize migration parameters before transfer begins.
-// Only overrides formula-computed values (where Original* == 0), never user-specified values.
-// Falls back to formula defaults on any failure (logged at Debug/Warn level).
+// applyAITuning runs the deterministic tuner (internal/tuning) to set
+// migration parameters before transfer begins. Only overrides
+// formula-computed values (where Original* == 0), never user-specified
+// values. Function name kept for now; rename pending in a follow-up
+// cleanup (#175 PR1 minimized public-API churn). Falls back to baseline
+// on any failure (logged at Debug/Warn level).
 func (o *Orchestrator) applyAITuning(ctx context.Context) {
-	// Check if AI is available
-	aiMapper, err := driver.NewAITypeMapperFromSecrets()
-	if err != nil {
-		logging.Debug("AI tuning skipped: %v", err)
-		return
-	}
+	logging.Debug("Running parameter tuning...")
 
-	logging.Debug("Running AI parameter tuning...")
-
-	// Create analyzer (same pattern as AnalyzeConfig in healthcheck.go)
-	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType(), aiMapper)
+	// Create analyzer (same pattern as AnalyzeConfig in healthcheck.go).
+	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
 
 	// Set up history provider for learning from past runs
 	if o.state != nil {
@@ -754,42 +750,32 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
 	})
 
-	// Run analysis with timeout to avoid delaying migration start.
-	// Use the AI mapper's configured timeout (respects provider config,
-	// local provider defaults, and user overrides).
-	aiTimeout := time.Duration(aiMapper.TimeoutSeconds()) * time.Second
-	analyzeCtx, cancel := context.WithTimeout(ctx, aiTimeout)
+	// Deterministic tuning is fast (no network round-trip). 30s is generous
+	// for the SQL probing inside Analyze (getTables + per-table date-column
+	// detection); leave headroom for slow source DBs.
+	analyzeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	suggestions, err := analyzer.Analyze(analyzeCtx, o.config.Source.Schema)
 	if err != nil {
-		logging.Warn("AI tuning failed, using formula defaults: %v", err)
+		logging.Warn("Tuning analysis failed, using formula defaults: %v", err)
 		return
 	}
 
 	// Apply suggestions only where user didn't specify values
 	changes := o.config.ApplyAISuggestions(suggestions)
 	if len(changes) > 0 {
-		logging.Info("AI tuning applied %d parameter(s):", len(changes))
+		logging.Info("Tuning applied %d parameter(s):", len(changes))
 		for _, c := range changes {
 			logging.Info("  %s: %d -> %d", c.Name, c.OldValue, c.NewValue)
 		}
 	} else {
-		logging.Info("AI tuning: no changes (recommendation matches current config)")
+		logging.Info("Tuning: no changes (recommendation matches current config)")
 	}
-	// Always log the AI's grounding citation + reasoning when smartconfig ran,
-	// regardless of whether any parameters changed. Pre-#143 these lines were
-	// gated on len(changes)>0, so when the AI converged on a config matching
-	// the current effective values (a steady-state outcome) the rule's
-	// citation requirement from #140 became unverifiable in production logs.
-	// Sanitize the AI-supplied strings before logging — multi-line content
-	// from the model would otherwise produce log entries where subsequent
-	// lines lack timestamps/levels, breaking parsers.
-	if suggestions.AISuggestions != nil && suggestions.AISuggestions.ObservedRetryRates != "" {
-		logging.Info("AI observed retry rates: %s", sanitizeForLog(suggestions.AISuggestions.ObservedRetryRates))
-	}
-	if suggestions.AISuggestions != nil && suggestions.AISuggestions.Reasoning != "" {
-		logging.Info("AI reasoning: %s", sanitizeForLog(suggestions.AISuggestions.Reasoning))
+	// Log the tuner's reasoning when it deviated from baseline.
+	// sanitizeForLog guards against multi-line content breaking log parsers.
+	if suggestions.Reasoning != "" {
+		logging.Info("Tuning reasoning: %s", sanitizeForLog(suggestions.Reasoning))
 	}
 
 	// Save tuning history with actual params used (after user overrides).

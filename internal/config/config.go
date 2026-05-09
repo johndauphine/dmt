@@ -245,6 +245,12 @@ type MigrationConfig struct {
 	// silently revert false → true at the auto-enable step (issue #149).
 	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"` // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
 	AIAdjustInterval string `yaml:"ai_adjust_interval"`  // How often AI evaluates metrics (default: 30s)
+
+	// Explore forces an exploration probe on this run instead of the
+	// tuner's argmax pick (PR2 #179 wires the actual exploration policy;
+	// PR1 #175 just plumbs the flag through CLI → config → orchestrator).
+	// Settable via YAML (`explore: true`) or CLI (`--explore`).
+	Explore bool `yaml:"explore,omitempty"`
 }
 
 // LoadOptions controls configuration loading behavior.

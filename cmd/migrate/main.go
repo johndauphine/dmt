@@ -138,6 +138,10 @@ func main() {
 						Name:  "dry-run",
 						Usage: "Preview migration plan without executing",
 					},
+					&cli.BoolFlag{
+						Name:  "explore",
+						Usage: "Force a tuning exploration probe on this run (PR2 #179 activates this; PR1 #175 plumbs the flag)",
+					},
 				},
 			},
 			{
@@ -335,6 +339,9 @@ func runMigration(c *cli.Context) error {
 	}
 	if c.IsSet("workers") {
 		cfg.Migration.Workers = c.Int("workers")
+	}
+	if c.IsSet("explore") {
+		cfg.Migration.Explore = c.Bool("explore")
 	}
 
 	// Build orchestrator options
