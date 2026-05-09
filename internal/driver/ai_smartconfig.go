@@ -658,8 +658,12 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // 4 of 6 tested models (Haiku 4.5, Qwen3 Coder 30B, gpt-oss-20B, Gemma 4
 // e4b) ignore a descriptive budget block entirely and pick a constant
 // chunk_size=50000 regardless of budget. The CRITICAL framing + explicit
-// auto-clamp consequence + ceiling-as-default ("set chunk_size=<ceiling>")
-// is intended to bind the LLM rather than describe a passive upper bound.
+// auto-clamp consequence + a concrete "Default action" anchor are intended
+// to bind the LLM rather than describe a passive upper bound. The default
+// is min(50000, ceiling) — the ceiling acts as a hard cap, not a target,
+// so on high-memory hosts the well-tested 50000 default still wins (PR #163
+// review: keeps "ceiling-as-cap" semantics consistent with guideline #3
+// and the chunk_size parameter description).
 func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	avg := input.AvgRowBytes
 	if avg <= 0 {
@@ -672,12 +676,21 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	const baselineWrite = 2
 	maxChunkBaseline := computeSafeChunkSize(budgetMB, baselineWorkers, baselineRead, baselineWrite, avg)
 
+	defaultChunk := maxChunkBaseline
+	if defaultChunk > 50000 {
+		defaultChunk = 50000
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Memory budget: %d MB (%s)\n", budgetMB, budgetSource)
 	fmt.Fprintf(&b, "- Avg row size: %d bytes\n", avg)
 	fmt.Fprintf(&b, "- At baseline workers=%d, read_ahead_buffers=4, write_ahead_writers=2, the safe chunk_size ceiling is ~%d rows.\n", baselineWorkers, maxChunkBaseline)
-	fmt.Fprintf(&b, "- **CRITICAL CONSTRAINT — chunk_size MUST NOT exceed %d.** This is a HARD ceiling, not a suggestion. If you output a chunk_size above %d, the system will silently auto-clamp it down (overriding your recommendation) and your reasoning about throughput will be wrong. The 50000 default mentioned elsewhere in this prompt DOES NOT APPLY when it exceeds the ceiling above — the ceiling wins.\n", maxChunkBaseline, maxChunkBaseline)
-	fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", maxChunkBaseline)
+	fmt.Fprintf(&b, "- **CRITICAL CONSTRAINT — chunk_size MUST NOT exceed %d.** This is a HARD cap, not a suggestion. If you output a chunk_size above %d, the system will silently auto-clamp it down (overriding your recommendation) and your reasoning about throughput will be wrong. The ceiling is a cap, not a target — when 50000 fits under it, prefer 50000.\n", maxChunkBaseline, maxChunkBaseline)
+	if maxChunkBaseline < 50000 {
+		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline; 50000 default does not fit this budget). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", defaultChunk)
+	} else {
+		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the well-tested baseline default; the %d ceiling above is a hard cap, not a target). Only deviate if historical throughput data clearly shows a better value, and never above the ceiling.\n", defaultChunk, maxChunkBaseline)
+	}
 	b.WriteString("- Scaling rule: doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. If you change those knobs from baseline, recompute the ceiling and stay under it.\n")
 	if input.Platform == "wsl2" {
 		b.WriteString("- Platform=wsl2: exceeding the budget can also OOM-kill the WSL2 VM. The auto-clamp catches the chunk_size case; OS-level OOM still kills the run.\n")
