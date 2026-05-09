@@ -537,6 +537,86 @@ func computeSafeChunkSize(budgetMB int64, workers, readAheadBuffers, writeAheadW
 	return budgetMB * 1024 * 1024 / denom
 }
 
+// effectiveMemoryBudgetMB returns the memory budget the smartconfig prompt
+// advertises to the LLM AND that the post-AI clamp enforces. Priority:
+// user-set MaxMemoryMB > AvailableMemoryMB - 2GB headroom > 1024 MB
+// last-resort default. Returns the budget in MB plus a short source
+// description suitable for prompt rendering and warning messages.
+//
+// Issue #158 covers the fallback for offline callers that leave
+// AvailableMemoryMB at zero. Issue #156 covers the post-AI clamp that uses
+// the returned budget as a hard ceiling on chunk_size, since LLMs of every
+// tested size confabulate around the soft prompt constraint.
+func effectiveMemoryBudgetMB(input AutoTuneInput) (budgetMB int64, source string) {
+	const fallbackBudgetMB = 1024
+	switch {
+	case input.MaxMemoryMB > 0 && input.AvailableMemoryMB > 2048:
+		// Both known — pick the more-restrictive of (cap, available - headroom).
+		headroomBudget := input.AvailableMemoryMB - 2048
+		if input.MaxMemoryMB < headroomBudget {
+			return input.MaxMemoryMB, fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
+		}
+		return headroomBudget, fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
+	case input.MaxMemoryMB > 0:
+		return input.MaxMemoryMB, fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
+	case input.AvailableMemoryMB > 2048:
+		return input.AvailableMemoryMB - 2048, fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
+	default:
+		return fallbackBudgetMB, "fallback default; AvailableMemoryMB and MaxMemoryMB both unset"
+	}
+}
+
+// clampChunkSizeToBudget enforces the memory budget as a hard ceiling on
+// ChunkSizeRecommendation, recomputing EstimatedMemMB after any clamp. Soft
+// prompt constraints DO NOT bind reliably even on Sonnet 4.6 / Opus 4.7 —
+// see issue #156 for sweep evidence (Sonnet violated cap=500 by 59% via
+// confabulated arithmetic; Opus violated cap=200 by 297% with incoherent
+// rationalization). The Go layer is the only safety mechanism that holds
+// across model sizes and providers.
+//
+// Returns true when a clamp was applied (caller logs / records the override).
+func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) bool {
+	budgetMB, _ := effectiveMemoryBudgetMB(input)
+	if s.suggestions.EstimatedMemMB <= budgetMB {
+		return false
+	}
+
+	avg := input.AvgRowBytes
+	if avg <= 0 {
+		avg = 500
+	}
+	safeChunk := computeSafeChunkSize(
+		budgetMB,
+		s.suggestions.Workers,
+		s.suggestions.ReadAheadBuffers,
+		s.suggestions.WriteAheadWriters,
+		avg,
+	)
+	// Refuse to clamp to zero — that would block the migration. Caller already
+	// logged warnings for any earlier issue (e.g. zero workers); leave the
+	// pre-clamp value so the migration at least attempts to run.
+	if safeChunk <= 0 {
+		return false
+	}
+
+	original := s.suggestions.ChunkSizeRecommendation
+	originalMem := s.suggestions.EstimatedMemMB
+	s.suggestions.ChunkSizeRecommendation = int(safeChunk)
+	s.suggestions.EstimatedMemMB = ComputeEstimatedMemMB(
+		s.suggestions.Workers,
+		s.suggestions.ReadAheadBuffers,
+		s.suggestions.WriteAheadWriters,
+		s.suggestions.ChunkSizeRecommendation,
+		avg,
+	)
+	logging.Warn(
+		"smartconfig: clamping chunk_size %d→%d to fit memory budget (was %d MB, budget %d MB, now %d MB)",
+		original, s.suggestions.ChunkSizeRecommendation,
+		originalMem, budgetMB, s.suggestions.EstimatedMemMB,
+	)
+	return true
+}
+
 // buildMemoryBudgetBlock renders the prompt section that tells the LLM how
 // much memory it has to work with and what the safe chunk_size ceiling is at
 // the baseline worker/buffer counts. Doing the math in Go (rather than asking
@@ -548,37 +628,7 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 		avg = 500
 	}
 
-	// Priority: user cap > available - 2GB headroom > last-resort default.
-	// Issue #158: pre-fix this computed budget = AvailableMemoryMB - 2048 first
-	// and only narrowed by MaxMemoryMB when the cap was less than that
-	// pre-headroom number. When AvailableMemoryMB was 0 (offline callers,
-	// failed probes), budget clamped to 0 and the user cap was silently
-	// discarded — the prompt then told the LLM "Memory budget: 0 MB" which
-	// is worse than any sensible default.
-	const fallbackBudgetMB = 1024
-	var budgetSource string
-	var budgetMB int64
-	switch {
-	case input.MaxMemoryMB > 0 && input.AvailableMemoryMB > 2048:
-		// Both known — pick the more-restrictive of (cap, available - headroom).
-		headroomBudget := input.AvailableMemoryMB - 2048
-		if input.MaxMemoryMB < headroomBudget {
-			budgetMB = input.MaxMemoryMB
-			budgetSource = fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
-		} else {
-			budgetMB = headroomBudget
-			budgetSource = fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
-		}
-	case input.MaxMemoryMB > 0:
-		budgetMB = input.MaxMemoryMB
-		budgetSource = fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
-	case input.AvailableMemoryMB > 2048:
-		budgetMB = input.AvailableMemoryMB - 2048
-		budgetSource = fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
-	default:
-		budgetMB = fallbackBudgetMB
-		budgetSource = "fallback default; AvailableMemoryMB and MaxMemoryMB both unset"
-	}
+	budgetMB, budgetSource := effectiveMemoryBudgetMB(input)
 
 	const baselineRead = 4
 	const baselineWrite = 2
@@ -622,6 +672,14 @@ func (s *SmartConfigAnalyzer) applyAISuggestions(ai *AutoTuneOutput, input AutoT
 		ai.ChunkSize,
 		input.AvgRowBytes,
 	)
+	// Issue #156: enforce the memory budget AFTER applying the LLM's choices.
+	// Soft prompt constraints don't bind reliably (verified across Haiku 4.5,
+	// Sonnet 4.6, Opus 4.7 — all confabulate or rationalize past the budget
+	// when their preferred chunk_size doesn't fit). The clamp persists into
+	// AI tuning history so the next run's trajectory reflects the clamped
+	// value, not the LLM's pre-clamp choice (avoids the "history pollution"
+	// effect documented in #156).
+	s.clampChunkSizeToBudget(input)
 }
 
 // applyDefaultSuggestions applies sensible defaults based on system resources.
@@ -653,6 +711,10 @@ func (s *SmartConfigAnalyzer) applyDefaultSuggestions(input AutoTuneInput) {
 		s.suggestions.ChunkSizeRecommendation,
 		input.AvgRowBytes,
 	)
+	// Issue #156: defense-in-depth. Defaults usually fit any sensible budget,
+	// but a tight user max_memory_mb plus large avg_row_bytes can blow past
+	// it. The clamp is a no-op when defaults already fit.
+	s.clampChunkSizeToBudget(input)
 }
 
 // calculateAvgRowSize calculates average row size from top 5 largest tables.
