@@ -143,6 +143,40 @@ func TestMapDDLType_PG_Array_To_MySQL_Approximate(t *testing.T) {
 	}
 }
 
+// TestMapDDLType_MSSQL_NvarcharMax_RoundTrips — Codex review on PR #185.
+// MSSQL nvarchar(max) survives the full source→canonical→target round
+// trip (and cross-dialect mappings) without producing invalid DDL with
+// the -1 sentinel.
+func TestMapDDLType_MSSQL_NvarcharMax_RoundTrips(t *testing.T) {
+	col := ColumnInfo{Name: "body", UDTName: "nvarchar", CharacterMaximumLength: IntPtr(-1)}
+
+	if got := MapDDLType(col, DialectMSSQL, DialectMSSQL); got.SQLType != "NVARCHAR(MAX)" {
+		t.Errorf("MSSQL → MSSQL: got %q, want NVARCHAR(MAX)", got.SQLType)
+	}
+	if got := MapDDLType(col, DialectMSSQL, DialectPostgres); got.SQLType != "VARCHAR" {
+		t.Errorf("MSSQL → PG: got %q, want VARCHAR (no length)", got.SQLType)
+	}
+	if got := MapDDLType(col, DialectMSSQL, DialectMySQL); got.SQLType != "VARCHAR(255)" {
+		t.Errorf("MSSQL → MySQL: got %q, want VARCHAR(255)", got.SQLType)
+	}
+}
+
+// TestMapDDLType_MSSQL_VarbinaryMax_RoundTrips — paired with the
+// nvarchar(max) test above; the -1 sentinel applies to varbinary too.
+func TestMapDDLType_MSSQL_VarbinaryMax_RoundTrips(t *testing.T) {
+	col := ColumnInfo{Name: "blob", UDTName: "varbinary", CharacterMaximumLength: IntPtr(-1)}
+
+	if got := MapDDLType(col, DialectMSSQL, DialectMSSQL); got.SQLType != "VARBINARY(MAX)" {
+		t.Errorf("MSSQL → MSSQL: got %q, want VARBINARY(MAX)", got.SQLType)
+	}
+	if got := MapDDLType(col, DialectMSSQL, DialectPostgres); got.SQLType != "BYTEA" {
+		t.Errorf("MSSQL → PG: got %q, want BYTEA", got.SQLType)
+	}
+	if got := MapDDLType(col, DialectMSSQL, DialectMySQL); got.SQLType != "BLOB" {
+		t.Errorf("MSSQL → MySQL: got %q, want BLOB", got.SQLType)
+	}
+}
+
 func TestMapDDLType_UnknownDialect_Falls_Through(t *testing.T) {
 	col := ColumnInfo{Name: "x", UDTName: "weirdtype"}
 	got := MapDDLType(col, "oracle", "snowflake")

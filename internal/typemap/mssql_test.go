@@ -98,6 +98,67 @@ func TestMSSQLFromCanonical_Exact(t *testing.T) {
 	}
 }
 
+// TestMSSQLToCanonical_NormalizesMaxLengthSentinel — Codex review on
+// PR #185. MSSQL's CHARACTER_MAXIMUM_LENGTH is -1 for nvarchar(max) /
+// varchar(max) / varbinary(max) / image. The mapper must normalize the
+// sentinel to a nil canonical Length so downstream emitters don't
+// produce invalid DDL like NVARCHAR(-1).
+func TestMSSQLToCanonical_NormalizesMaxLengthSentinel(t *testing.T) {
+	tests := []struct {
+		name string
+		col  ColumnInfo
+		want CanonicalType
+	}{
+		{"nvarchar(max)", ColumnInfo{UDTName: "nvarchar", CharacterMaximumLength: IntPtr(-1)},
+			CanonicalType{Kind: KindVarchar}},
+		{"varchar(max)", ColumnInfo{UDTName: "varchar", CharacterMaximumLength: IntPtr(-1)},
+			CanonicalType{Kind: KindVarchar}},
+		{"nchar(max-ish)", ColumnInfo{UDTName: "nchar", CharacterMaximumLength: IntPtr(-1)},
+			CanonicalType{Kind: KindChar}},
+		{"varbinary(max)", ColumnInfo{UDTName: "varbinary", CharacterMaximumLength: IntPtr(-1)},
+			CanonicalType{Kind: KindBytes}},
+		{"image", ColumnInfo{UDTName: "image", CharacterMaximumLength: IntPtr(-1)},
+			CanonicalType{Kind: KindBytes}},
+		{"zero_treated_as_unbounded", ColumnInfo{UDTName: "nvarchar", CharacterMaximumLength: IntPtr(0)},
+			CanonicalType{Kind: KindVarchar}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mssqlToCanonical(tc.col)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMSSQLFromCanonical_NonPositiveLengthEmitsMax — defensive guard
+// from the same Codex review. Even if a non-positive Length leaks into
+// the IR (from another dialect, hand-built CanonicalType, etc.), the
+// MSSQL emitter must NOT produce invalid DDL like NVARCHAR(-1) or
+// VARBINARY(0).
+func TestMSSQLFromCanonical_NonPositiveLengthEmitsMax(t *testing.T) {
+	tests := []struct {
+		name string
+		ct   CanonicalType
+		want string
+	}{
+		{"varchar_neg1_max", CanonicalType{Kind: KindVarchar, Length: IntPtr(-1)}, "NVARCHAR(MAX)"},
+		{"varchar_zero_max", CanonicalType{Kind: KindVarchar, Length: IntPtr(0)}, "NVARCHAR(MAX)"},
+		{"char_neg1_default", CanonicalType{Kind: KindChar, Length: IntPtr(-1)}, "NCHAR(1)"},
+		{"bytes_neg1_max", CanonicalType{Kind: KindBytes, Length: IntPtr(-1)}, "VARBINARY(MAX)"},
+		{"bytes_zero_max", CanonicalType{Kind: KindBytes, Length: IntPtr(0)}, "VARBINARY(MAX)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mssqlFromCanonical(tc.ct)
+			if got.SQLType != tc.want {
+				t.Errorf("got %q, want %q", got.SQLType, tc.want)
+			}
+		})
+	}
+}
+
 func TestMSSQLFromCanonical_Approximate(t *testing.T) {
 	// All of these target an MSSQL surface that lacks the canonical
 	// type — they must come back IsApproximate=true with a non-empty

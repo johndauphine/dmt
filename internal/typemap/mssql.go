@@ -39,19 +39,19 @@ func mssqlToCanonical(col ColumnInfo) CanonicalType {
 	case "smallmoney":
 		return CanonicalType{Kind: KindDecimal, Precision: IntPtr(10), Scale: IntPtr(4)}
 	case "varchar":
-		return CanonicalType{Kind: KindVarchar, Length: col.CharacterMaximumLength}
+		return CanonicalType{Kind: KindVarchar, Length: mssqlMaxLengthOrNil(col.CharacterMaximumLength)}
 	case "char":
-		return CanonicalType{Kind: KindChar, Length: col.CharacterMaximumLength}
+		return CanonicalType{Kind: KindChar, Length: mssqlMaxLengthOrNil(col.CharacterMaximumLength)}
 	case "nvarchar":
 		// Canonical drops the wide-char distinction. Target dialect
 		// chooses NVARCHAR vs VARCHAR based on its own conventions.
-		return CanonicalType{Kind: KindVarchar, Length: col.CharacterMaximumLength}
+		return CanonicalType{Kind: KindVarchar, Length: mssqlMaxLengthOrNil(col.CharacterMaximumLength)}
 	case "nchar":
-		return CanonicalType{Kind: KindChar, Length: col.CharacterMaximumLength}
+		return CanonicalType{Kind: KindChar, Length: mssqlMaxLengthOrNil(col.CharacterMaximumLength)}
 	case "text", "ntext":
 		return CanonicalType{Kind: KindText}
 	case "binary", "varbinary", "image":
-		return CanonicalType{Kind: KindBytes, Length: col.CharacterMaximumLength}
+		return CanonicalType{Kind: KindBytes, Length: mssqlMaxLengthOrNil(col.CharacterMaximumLength)}
 	case "date":
 		return CanonicalType{Kind: KindDate}
 	case "time":
@@ -65,6 +65,23 @@ func mssqlToCanonical(col ColumnInfo) CanonicalType {
 	default:
 		return CanonicalType{Kind: KindRaw, TypeName: strings.ToUpper(udt)}
 	}
+}
+
+// mssqlMaxLengthOrNil normalizes MSSQL's -1 "MAX" sentinel for
+// CHARACTER_MAXIMUM_LENGTH to nil so the canonical IR doesn't carry a
+// dialect-specific magic number downstream. Negative or zero lengths
+// are not meaningful as concrete sizes; treating them as nil makes the
+// IR semantically clean (canonical Length means "explicitly N
+// characters/bytes," nil means "unbounded / target chooses default").
+//
+// Codex review on PR #185 caught the original implementation passing
+// -1 straight through to mssqlFromCanonical, producing invalid
+// NVARCHAR(-1) / VARBINARY(-1) DDL.
+func mssqlMaxLengthOrNil(length *int) *int {
+	if length == nil || *length <= 0 {
+		return nil
+	}
+	return length
 }
 
 // mssqlFromCanonical emits a canonical type as MSSQL DDL.
@@ -96,19 +113,22 @@ func mssqlFromCanonical(ct CanonicalType) DdlType {
 			return exactDDL("DECIMAL")
 		}
 	case KindVarchar:
-		if ct.Length != nil {
+		// Defensive: a non-positive Length (e.g. MSSQL's -1 MAX
+		// sentinel leaking through) emits MAX rather than the invalid
+		// NVARCHAR(-1) DDL (Codex review on PR #185).
+		if ct.Length != nil && *ct.Length > 0 {
 			return exactDDL(fmt.Sprintf("NVARCHAR(%d)", *ct.Length))
 		}
 		return exactDDL("NVARCHAR(MAX)")
 	case KindChar:
-		if ct.Length != nil {
+		if ct.Length != nil && *ct.Length > 0 {
 			return exactDDL(fmt.Sprintf("NCHAR(%d)", *ct.Length))
 		}
 		return exactDDL("NCHAR(1)")
 	case KindText:
 		return exactDDL("NVARCHAR(MAX)")
 	case KindBytes:
-		if ct.Length != nil {
+		if ct.Length != nil && *ct.Length > 0 {
 			return exactDDL(fmt.Sprintf("VARBINARY(%d)", *ct.Length))
 		}
 		return exactDDL("VARBINARY(MAX)")
