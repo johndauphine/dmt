@@ -14,6 +14,8 @@
 // (#179) adds quadratic regression + planned-grid exploration.
 package tuning
 
+import "time"
+
 // Input carries the system + workload inputs the tuner reasons about.
 // All fields are populated from the smartconfig analyzer's existing
 // data collection — no new probes here.
@@ -98,6 +100,11 @@ type HistoryProvider interface {
 // schema; the smartconfig analyzer's adapter populates this from the
 // checkpoint backend.
 type HistoryRecord struct {
+	// Timestamp is the migration completion time. Used by PR2's regime-
+	// drift detector to compare median throughput in the most-recent N
+	// runs against earlier runs at the same (WAW, CS) config.
+	Timestamp time.Time
+
 	SourceDBType string
 	TargetDBType string
 
@@ -169,15 +176,19 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		}
 	}
 
-	// Exploration enters two ways:
+	// Exploration enters three ways:
 	//   1. The user forced it via --explore, regardless of history state.
 	//   2. We have a history backend AND the bucket is in cold-start
 	//      (< explorationGridRuns runs) — the planned grid fills out
 	//      the regression's training data.
+	//   3. Regime-drift detector fires — throughput at a fixed (WAW, CS)
+	//      config has shifted materially, so the regression's training
+	//      data is stale and we re-explore to refresh.
 	// Nil-history (file-state checkpoint, fresh install) does NOT enter
 	// exploration on its own — there's no place to learn from, so the
 	// baseline output is what the user gets.
-	if in.ForceExplore || (history != nil && shouldExplore(in, len(rows))) {
+	driftDetected := history != nil && detectRegimeDrift(rows)
+	if in.ForceExplore || driftDetected || (history != nil && shouldExplore(in, len(rows))) {
 		applyGridExploration(&out, in, profile, len(rows), wawsWithRetries(rows))
 	} else if len(rows) > 0 {
 		applyHistorySelection(&out, in, profile, rows)

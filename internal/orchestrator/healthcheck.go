@@ -290,15 +290,17 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 	// when no row stats are available, #157). The deterministic tuner
 	// handles the rest, including the per-target chunk-byte anchor (#166).
 	in := tuning.Input{
-		CPUCores:          cores,
-		MemoryGB:          memGB,
-		AvailableMemoryMB: availableMemoryMB,
-		MaxMemoryMB:       cfg.Migration.MaxMemoryMB,
-		Platform:          driver.DetectPlatform(),
-		SourceDBType:      cfg.Source.Type,
-		TargetDBType:      cfg.Target.Type,
-		TargetMode:        cfg.Migration.TargetMode,
-		AvgRowBytes:       500,
+		CPUCores:           cores,
+		MemoryGB:           memGB,
+		AvailableMemoryMB:  availableMemoryMB,
+		MaxMemoryMB:        cfg.Migration.MaxMemoryMB,
+		Platform:           driver.DetectPlatform(),
+		SourceDBType:       cfg.Source.Type,
+		TargetDBType:       cfg.Target.Type,
+		TargetMode:         cfg.Migration.TargetMode,
+		AvgRowBytes:        500,
+		ForceExplore:       cfg.Migration.Explore,
+		ExplorationEpsilon: driver.ExplorationEpsilon(cfg.Migration.ExploreMode),
 	}
 	profile := tuning.DriverProfile{Name: cfg.Target.Type, BaselineWAW: 2}
 	if d, err := driver.Get(cfg.Target.Type); err == nil {

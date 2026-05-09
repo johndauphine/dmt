@@ -201,6 +201,7 @@ func convertHistoryRows(rows []checkpoint.AITuningRecord) []tuning.HistoryRecord
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{
+			Timestamp:               r.Timestamp,
 			SourceDBType:            r.SourceDBType,
 			TargetDBType:            r.TargetDBType,
 			Workers:                 r.Workers,
