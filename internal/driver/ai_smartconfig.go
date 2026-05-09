@@ -544,7 +544,8 @@ func computeSafeChunkSize(budgetMB int64, workers, readAheadBuffers, writeAheadW
 //   - If MaxMemoryMB and AvailableMemoryMB are both > 0, return the
 //     more-restrictive of (cap, available - 2 GB headroom floored at
 //     fallback). The user's cap and the headroom guard are independent
-//     floors; respecting both means honoring the smaller.
+//     ceilings on memory usage; respecting both means honoring the
+//     smaller (i.e. tighter) ceiling.
 //   - Otherwise return whichever single source is set; both unset falls
 //     back to 1024 MB so the prompt never renders "Memory budget: 0 MB".
 //
