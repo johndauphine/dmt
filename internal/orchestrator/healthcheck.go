@@ -13,6 +13,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/tuning"
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
@@ -193,7 +194,7 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	logging.Debug("Analyzing source database for configuration suggestions...")
 
 	// Create the smart config analyzer
-	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType(), aiMapper)
+	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
 
 	// Set up history provider using the state backend for learning from past analyses
 	if o.state != nil {
@@ -284,82 +285,46 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 		availableMemoryMB = int64(v.Available / (1024 * 1024))
 	}
 
-	input := buildOfflineAutoTuneInput(cfg, cores, memGB, availableMemoryMB)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if output, err := driver.GetOfflineAutoTune(ctx, input); err == nil && output != nil {
-		suggestions.Workers = output.Workers
-		suggestions.ChunkSizeRecommendation = output.ChunkSize
-		suggestions.ReadAheadBuffers = output.ReadAheadBuffers
-		suggestions.WriteAheadWriters = output.WriteAheadWriters
-		suggestions.ParallelReaders = output.ParallelReaders
-		suggestions.MaxPartitions = output.MaxPartitions
-		suggestions.LargeTableThreshold = int64(output.LargeTableThreshold)
-		suggestions.MaxSourceConnections = output.MaxSourceConnections
-		suggestions.MaxTargetConnections = output.MaxTargetConnections
-		suggestions.UpsertMergeChunkSize = output.UpsertMergeChunkSize
-		suggestions.CheckpointFrequency = output.CheckpointFrequency
-		suggestions.MaxRetries = output.MaxRetries
-		suggestions.EstimatedMemMB = driver.ComputeEstimatedMemMB(
-			output.Workers,
-			output.ReadAheadBuffers,
-			output.WriteAheadWriters,
-			output.ChunkSize,
-			input.AvgRowBytes,
-		)
-		logging.Info("Using AI-generated recommendations (offline mode)")
-		return suggestions
-	}
-
-	// Fall back to system-based defaults
-	logging.Info("AI unavailable - using system-based defaults")
-
-	workers := cores - 2
-	if workers < 2 {
-		workers = 2
-	}
-
-	suggestions.Workers = workers
-	suggestions.ChunkSizeRecommendation = 50000
-	suggestions.ReadAheadBuffers = 4
-	suggestions.WriteAheadWriters = 2
-	suggestions.ParallelReaders = 2
-	suggestions.MaxPartitions = workers
-	suggestions.LargeTableThreshold = 1000000
-	suggestions.MaxSourceConnections = workers + 4
-	suggestions.MaxTargetConnections = workers*2 + 4
-	suggestions.UpsertMergeChunkSize = 5000
-	suggestions.CheckpointFrequency = 20
-	suggestions.MaxRetries = 3
-	suggestions.EstimatedMemMB = int64(workers) * 4 * int64(suggestions.ChunkSizeRecommendation) * 500 / 1024 / 1024
-
-	// Adjust for high-memory systems
-	if memGB > 32 {
-		suggestions.ChunkSizeRecommendation = 100000
-		suggestions.ReadAheadBuffers = 8
-	}
-
-	return suggestions
-}
-
-// buildOfflineAutoTuneInput composes the AutoTuneInput passed to the offline
-// AI smartconfig path. Issue #157: AvgRowBytes and AvailableMemoryMB MUST be
-// populated, or the smartconfig prompt's Memory budget block degenerates to
-// "Memory budget: 0 MB" and the LLM under-provisions. The 500-byte default
-// mirrors the fallback in calculateAvgRowSize when no source row stats are
-// available. MaxMemoryMB flows through so the user's cap is honored.
-func buildOfflineAutoTuneInput(cfg *config.Config, cores, memGB int, availableMemoryMB int64) driver.AutoTuneInput {
-	return driver.AutoTuneInput{
+	// Build a tuning.Input directly — offline path has no source schema, so
+	// AvgRowBytes defaults to 500 (mirrors calculateAvgRowSize's fallback
+	// when no row stats are available, #157). The deterministic tuner
+	// handles the rest, including the per-target chunk-byte anchor (#166).
+	in := tuning.Input{
 		CPUCores:          cores,
 		MemoryGB:          memGB,
 		AvailableMemoryMB: availableMemoryMB,
-		AvgRowBytes:       500,
 		MaxMemoryMB:       cfg.Migration.MaxMemoryMB,
-		DatabaseType:      cfg.Source.Type,
-		TargetType:        cfg.Target.Type,
+		Platform:          driver.DetectPlatform(),
+		SourceDBType:      cfg.Source.Type,
+		TargetDBType:      cfg.Target.Type,
+		TargetMode:        cfg.Migration.TargetMode,
+		AvgRowBytes:       500,
 	}
+	profile := tuning.DriverProfile{Name: cfg.Target.Type, BaselineWAW: 2}
+	if d, err := driver.Get(cfg.Target.Type); err == nil {
+		defaults := d.Defaults()
+		profile.BaselineWAW = defaults.WriteAheadWriters
+		profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
+		profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
+		profile.HardChunkLimit = d.HardChunkLimit(in.AvgRowBytes)
+	}
+	out := tuning.Tune(in, profile, nil, tuning.DBTuning{})
+
+	suggestions.Workers = out.Workers
+	suggestions.ChunkSizeRecommendation = out.ChunkSize
+	suggestions.ReadAheadBuffers = out.ReadAheadBuffers
+	suggestions.WriteAheadWriters = out.WriteAheadWriters
+	suggestions.ParallelReaders = out.ParallelReaders
+	suggestions.MaxPartitions = out.MaxPartitions
+	suggestions.LargeTableThreshold = out.LargeTableThreshold
+	suggestions.MaxSourceConnections = out.MaxSourceConnections
+	suggestions.MaxTargetConnections = out.MaxTargetConnections
+	suggestions.UpsertMergeChunkSize = out.UpsertMergeChunkSize
+	suggestions.CheckpointFrequency = out.CheckpointFrequency
+	suggestions.MaxRetries = out.MaxRetries
+	suggestions.EstimatedMemMB = out.EstimatedMemMB
+	suggestions.Reasoning = out.Reasoning
+	return suggestions
 }
 
 // stateHistoryAdapter adapts checkpoint.StateBackend to driver.TuningHistoryProvider.
@@ -432,46 +397,6 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetTy
 			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
 			TargetWALLevel:          r.TargetWALLevel,
 			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
-		}
-	}
-	return result, nil
-}
-
-// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over
-// the full ai_tuning_history (issue #141 — keep retry-rate denominators honest
-// when the trajectory rows in the prompt are bounded).
-func (a *stateHistoryAdapter) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]driver.WawAggregateRecord, error) {
-	aggs, err := a.state.GetAITuningAggregatesByWaw(sourceType, targetType)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]driver.WawAggregateRecord, len(aggs))
-	for i, ag := range aggs {
-		result[i] = driver.WawAggregateRecord{
-			WriteAheadWriters: ag.WriteAheadWriters,
-			TotalRuns:         ag.TotalRuns,
-			RunsWithRetries:   ag.RunsWithRetries,
-			TotalRetries:      ag.TotalRetries,
-			PeakThroughput:    ag.PeakThroughput,
-			MeanThroughput:    ag.MeanThroughput,
-		}
-	}
-	return result, nil
-}
-
-// GetAITuningAggregatesByChunkSize returns per-chunk_size aggregates over the
-// full ai_tuning_history.
-func (a *stateHistoryAdapter) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]driver.ChunkSizeAggregateRecord, error) {
-	aggs, err := a.state.GetAITuningAggregatesByChunkSize(sourceType, targetType)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]driver.ChunkSizeAggregateRecord, len(aggs))
-	for i, ag := range aggs {
-		result[i] = driver.ChunkSizeAggregateRecord{
-			ChunkSize:     ag.ChunkSize,
-			Runs:          ag.Runs,
-			AvgThroughput: ag.AvgThroughput,
 		}
 	}
 	return result, nil
