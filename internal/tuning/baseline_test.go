@@ -98,6 +98,45 @@ func TestBaseline_PlatformWAW(t *testing.T) {
 	}
 }
 
+// TestBaseline_ScalesWAWWithCores locks in the parity-with-config-applyDefaults
+// behavior: when ScaleWritersWithCores is set on the driver (PG, MySQL),
+// the baseline WAW is max(declared, cores/4) so the tuner doesn't silently
+// regress the cores-scaled value config would otherwise have set when no
+// history is available. MSSQL leaves the flag false and gets the declared
+// baseline. Platform cap fires last.
+func TestBaseline_ScalesWAWWithCores(t *testing.T) {
+	cases := []struct {
+		name        string
+		platform    string
+		cores       int
+		scale       bool
+		baselineWAW int
+		wantWAW     int
+	}{
+		{"PG-style scaled, large host", "linux", 16, true, 2, 4}, // cores/4=4 > 2
+		{"PG-style scaled, small host", "linux", 4, true, 2, 2},  // cores/4=1 < 2 → baseline wins
+		{"PG-style scaled, very large", "linux", 32, true, 2, 8}, // cores/4=8 > 2
+		{"MSSQL-style not scaled", "linux", 32, false, 2, 2},     // scaling off → declared baseline
+		{"PG-style scaled, virtualized capped", "wsl2", 32, true, 2, 1},
+		{"PG-style scaled, darwin capped", "darwin", 32, true, 2, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := Input{CPUCores: tc.cores, AvgRowBytes: 500, Platform: tc.platform}
+			profile := DriverProfile{
+				Name:                  "test",
+				BaselineWAW:           tc.baselineWAW,
+				ScaleWritersWithCores: tc.scale,
+				OptimumBulkChunkBytes: 25_000_000,
+			}
+			out := baseline(in, profile)
+			if out.WriteAheadWriters != tc.wantWAW {
+				t.Errorf("WriteAheadWriters: got %d, want %d", out.WriteAheadWriters, tc.wantWAW)
+			}
+		})
+	}
+}
+
 // TestBaseline_FixedKnobs locks the constants the deterministic baseline
 // hard-codes (read_ahead_buffers, parallel_readers, etc.) so future drift
 // from the documented defaults shows up as a test diff.

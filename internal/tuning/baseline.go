@@ -20,7 +20,7 @@ func baseline(in Input, profile DriverProfile) Output {
 		maxRetries           = 3
 	)
 
-	waw := baselineWAW(in.Platform, profile)
+	waw := baselineWAW(in, profile)
 
 	chunkSize := chunkRowsFromProfile(profile, in.AvgRowBytes)
 
@@ -40,17 +40,34 @@ func baseline(in Input, profile DriverProfile) Output {
 	}
 }
 
-// baselineWAW caps the driver-declared baseline WAW at 1 on platforms with
-// virtualized network transports between dmt and the target (Docker
-// Desktop on macOS/Windows, WSL2). The transport layer's per-flow
-// throughput is lower there, and parallel writers contend; on native
-// Linux (Unix socket or real NIC) the driver default applies.
-func baselineWAW(platform string, profile DriverProfile) int {
+// baselineWAW computes the platform- and core-aware baseline write_ahead_writers.
+//
+// Steps, in order:
+//  1. Start at profile.BaselineWAW (the driver's declared default).
+//  2. If profile.ScaleWritersWithCores is true (PG, MySQL — bulk paths
+//     that benefit from parallel writers), bump up to cores/4 if higher.
+//     Mirrors config.applyDefaults's WAW logic so the tuner's baseline
+//     doesn't silently regress the cores-scaled value config would
+//     otherwise have set when no history is available. MSSQL declares
+//     ScaleWritersWithCores: false because TABLOCK serializes BCP, so
+//     this branch is skipped and the declared baseline holds.
+//  3. Floor at 1 (defensive against zero-valued profiles).
+//  4. Cap at 1 on platforms with virtualized network transports between
+//     dmt and the target (Docker Desktop on macOS/Windows, WSL2). The
+//     transport layer's per-flow throughput is lower there and parallel
+//     writers contend; on native Linux (Unix socket or real NIC) the
+//     scaled value applies.
+func baselineWAW(in Input, profile DriverProfile) int {
 	waw := profile.BaselineWAW
+	if profile.ScaleWritersWithCores && in.CPUCores > 0 {
+		if scaled := in.CPUCores / 4; scaled > waw {
+			waw = scaled
+		}
+	}
 	if waw < 1 {
 		waw = 1
 	}
-	switch platform {
+	switch in.Platform {
 	case "wsl2", "darwin", "windows":
 		if waw > 1 {
 			waw = 1

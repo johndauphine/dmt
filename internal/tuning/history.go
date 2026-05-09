@@ -42,7 +42,7 @@ const outlierFloorRatio = 0.5
 //     measured mean toward the global mean by run count.
 //
 // On any error or empty post-filter dataset, the baseline output stands.
-func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) {
+func applyHistory(out *Output, in Input, history HistoryProvider, currentTuning DBTuning) {
 	rows, err := history.Records(in.SourceDBType, in.TargetDBType)
 	if err != nil {
 		logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
@@ -67,7 +67,7 @@ func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryP
 		return
 	}
 
-	picked, picked_mean, ok := selectWAW(bins, profile.BaselineWAW)
+	picked, pickedMean, ok := selectWAW(bins)
 	if !ok {
 		return
 	}
@@ -75,7 +75,7 @@ func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryP
 		out.WriteAheadWriters = picked
 		out.Reasoning = appendReasoning(out.Reasoning,
 			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins survived RULE 1 + regime + outlier filters)",
-			picked, picked_mean, countCleanBins(bins),
+			picked, pickedMean, countCleanBins(bins),
 		)
 	}
 }
@@ -185,7 +185,7 @@ func aggregateByWAW(rows []HistoryRecord) []wawBin {
 //
 // Returns the picked WAW, its shrunk mean, and ok=true if a clean bin
 // was found. ok=false when every bin has retries or no bins exist.
-func selectWAW(bins []wawBin, baselineWAW int) (waw int, shrunkMean float64, ok bool) {
+func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 	// Global mean across all bins (including ones with retries — they're
 	// real measurements; just not eligible for selection).
 	var total float64

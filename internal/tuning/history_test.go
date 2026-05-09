@@ -23,7 +23,7 @@ func TestSelectWAW_PicksHighestShrunkMean(t *testing.T) {
 		{WAW: 2, TotalRuns: 10, MeanThroughput: 700_000}, // best
 		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000},
 	}
-	got, _, ok := selectWAW(bins, 2)
+	got, _, ok := selectWAW(bins)
 	if !ok || got != 2 {
 		t.Errorf("got (%d, %v), want (2, true)", got, ok)
 	}
@@ -37,7 +37,7 @@ func TestSelectWAW_Rule1(t *testing.T) {
 		{WAW: 2, TotalRuns: 10, MeanThroughput: 800_000, RunsWithRetries: 1}, // excluded
 		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000},                     // wins
 	}
-	got, _, ok := selectWAW(bins, 2)
+	got, _, ok := selectWAW(bins)
 	if !ok || got != 4 {
 		t.Errorf("got (%d, %v), want (4, true)", got, ok)
 	}
@@ -50,7 +50,7 @@ func TestSelectWAW_AllBinsHaveRetries(t *testing.T) {
 		{WAW: 1, TotalRuns: 5, MeanThroughput: 500_000, RunsWithRetries: 1},
 		{WAW: 2, TotalRuns: 5, MeanThroughput: 700_000, RunsWithRetries: 1},
 	}
-	_, _, ok := selectWAW(bins, 2)
+	_, _, ok := selectWAW(bins)
 	if ok {
 		t.Error("ok should be false when every bin has retries")
 	}
@@ -58,7 +58,7 @@ func TestSelectWAW_AllBinsHaveRetries(t *testing.T) {
 
 // TestSelectWAW_EmptyBins guards the no-data path.
 func TestSelectWAW_EmptyBins(t *testing.T) {
-	_, _, ok := selectWAW(nil, 2)
+	_, _, ok := selectWAW(nil)
 	if ok {
 		t.Error("ok should be false for empty bins")
 	}
@@ -74,7 +74,7 @@ func TestSelectWAW_ThresholdExcludesSparseBins(t *testing.T) {
 		{WAW: 1, TotalRuns: 100, MeanThroughput: 600_000}, // stable
 		{WAW: 2, TotalRuns: 1, MeanThroughput: 900_000},   // sparse peak — excluded
 	}
-	got, _, ok := selectWAW(bins, 2)
+	got, _, ok := selectWAW(bins)
 	if !ok || got != 1 {
 		t.Errorf("got (%d, %v), want (1, true) — sparse bin should be threshold-excluded", got, ok)
 	}
@@ -88,7 +88,7 @@ func TestSelectWAW_BelowThresholdReturnsFalse(t *testing.T) {
 		{WAW: 1, TotalRuns: 1, MeanThroughput: 600_000},
 		{WAW: 2, TotalRuns: 2, MeanThroughput: 700_000},
 	}
-	_, _, ok := selectWAW(bins, 2)
+	_, _, ok := selectWAW(bins)
 	if ok {
 		t.Error("ok should be false when no bin clears minRunsPerBin")
 	}
@@ -194,7 +194,7 @@ func TestApplyHistory_EndToEnd(t *testing.T) {
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 620_000},
 	}}
 
-	applyHistory(&out, in, profile, history, DBTuning{})
+	applyHistory(&out, in, history, DBTuning{})
 
 	if out.WriteAheadWriters != 1 {
 		t.Errorf("WAW: got %d, want 1 (RULE 1 should exclude WAW=2; WAW=1 has higher mean than WAW=4)",
@@ -231,7 +231,7 @@ func TestApplyHistory_AllBinsRetried(t *testing.T) {
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 700_000, ChunkRetryCount: 1},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 600_000, ChunkRetryCount: 2},
 	}}
-	applyHistory(&out, in, profile, history, DBTuning{})
+	applyHistory(&out, in, history, DBTuning{})
 
 	if out.WriteAheadWriters != originalWAW {
 		t.Errorf("WAW should remain at baseline %d when every bin has retries; got %d",
@@ -253,7 +253,7 @@ func TestApplyHistory_OutOfRegimeRowsDropped(t *testing.T) {
 		{CPUCores: 4, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 1_000_000},
 		{CPUCores: 4, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 900_000},
 	}}
-	applyHistory(&out, in, profile, history, DBTuning{})
+	applyHistory(&out, in, history, DBTuning{})
 
 	if out.WriteAheadWriters != originalWAW {
 		t.Errorf("WAW should remain at baseline %d when no in-regime history exists; got %d",
