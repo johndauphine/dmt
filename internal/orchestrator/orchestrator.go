@@ -732,6 +732,10 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 		analyzer.SetMaxMemoryMB(o.config.Migration.MaxMemoryMB)
 	}
 
+	// Wire exploration policy (#179): --explore flag forces a planned-grid
+	// pick this run; ExploreMode controls steady-state ε strength.
+	analyzer.SetExploration(o.config.Migration.Explore, o.config.Migration.ExploreMode)
+
 	// Capture effective DB tuning at run start (#144). Used for both:
 	//   (a) smartconfig prompt regime classification (per trajectory row)
 	//   (b) persisting on the saved AITuningRecord so future runs can

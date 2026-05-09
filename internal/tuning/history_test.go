@@ -194,7 +194,7 @@ func TestApplyHistory_EndToEnd(t *testing.T) {
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 620_000},
 	}}
 
-	applyHistory(&out, in, history, DBTuning{})
+	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters != 1 {
 		t.Errorf("WAW: got %d, want 1 (RULE 1 should exclude WAW=2; WAW=1 has higher mean than WAW=4)",
@@ -231,12 +231,166 @@ func TestApplyHistory_AllBinsRetried(t *testing.T) {
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 700_000, ChunkRetryCount: 1},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 600_000, ChunkRetryCount: 2},
 	}}
-	applyHistory(&out, in, history, DBTuning{})
+	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters != originalWAW {
 		t.Errorf("WAW should remain at baseline %d when every bin has retries; got %d",
 			originalWAW, out.WriteAheadWriters)
 	}
+}
+
+// TestApplyHistory_RegressionTier verifies the tiered dispatch fires the
+// regression once row count clears minRowsForRegression. With a synthetic
+// quadratic-peak fixture (throughput peaks at WAW=4), the regression
+// should pick WAW=4 — something the smoothed-bins tier with its
+// linear-mean comparison can't reliably do for non-monotone surfaces.
+func TestApplyHistory_RegressionTier(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+	originalChunk := out.ChunkSize
+
+	// 60 rows, throughput = 1000 - 50·(WAW-4)² + 100 (positive bias).
+	// WAW range 1..6 spread evenly; all clean (no retries) so RULE 1
+	// doesn't fire. Should clear minRowsForRegression and pick WAW=4.
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		dev := waw - 4
+		thru := 1000.0 - 50.0*float64(dev*dev) + 100.0
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50_000,
+			AvgRowBytes:       500,
+			FinalThroughput:   thru,
+			CPUCores:          16,
+			MemoryGB:          48,
+		}
+	}
+	history := &stubHistory{rows: rows}
+
+	applyHistory(&out, in, profile, history, DBTuning{})
+
+	if out.WriteAheadWriters != 4 {
+		t.Errorf("WAW: got %d, want 4 (regression should detect quadratic peak)", out.WriteAheadWriters)
+	}
+	if out.ChunkSize == originalChunk {
+		t.Errorf("ChunkSize should have been overridden by regression; still at baseline %d", out.ChunkSize)
+	}
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Reasoning should record regression tier; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyHistory_RegressionRespectsRule1 verifies RULE 1 (skip WAW
+// values with any historical retries) applies to the regression argmax,
+// not just the smoothed-bins selectWAW. WAW=4 has the best raw throughput
+// but one retry — argmax must skip it and pick the next-best clean WAW.
+func TestApplyHistory_RegressionRespectsRule1(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+
+	// 60 rows. WAW=4 has high throughput AND one retry; should be skipped.
+	// WAW=2 has clean runs at lower throughput but is the next best.
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		thru := 600_000.0 + 100.0*float64(waw)
+		retries := 0
+		if waw == 4 {
+			thru = 1_200_000 // best mean, but...
+			retries = 1      // ...has a retry, RULE 1 excludes
+		}
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50_000,
+			AvgRowBytes:       500,
+			FinalThroughput:   thru,
+			ChunkRetryCount:   retries,
+			CPUCores:          16,
+			MemoryGB:          48,
+		}
+	}
+	history := &stubHistory{rows: rows}
+
+	applyHistory(&out, in, profile, history, DBTuning{})
+
+	if out.WriteAheadWriters == 4 {
+		t.Error("RULE 1 should have excluded WAW=4 (has historical retries)")
+	}
+	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxWAWForGrid {
+		t.Errorf("picked WAW=%d outside valid grid [1..%d]", out.WriteAheadWriters, maxWAWForGrid)
+	}
+}
+
+// TestApplyHistory_RegressionRespectsHardChunkLimit verifies the argmax
+// skips CS_BYTES candidates that translate to row counts above the
+// HardChunkLimit. Critical for MySQL once the @@max_allowed_packet probe
+// lands; PR1's #166 has all drivers returning 0 today so this is a
+// future-proofing test against synthetic data.
+func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mysql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	// HardChunkLimit=10 (artificially tight). All grid CS values
+	// translate to row counts > 10, so HardChunkLimit filter rejects all
+	// candidates → argmax returns ok=false → falls through to smoothed
+	// bins.
+	profile := DriverProfile{
+		Name:                  "postgres",
+		BaselineWAW:           2,
+		OptimumBulkChunkBytes: 25_000_000,
+		HardChunkLimit:        10,
+	}
+	out := baseline(in, profile)
+	originalWAW := out.WriteAheadWriters
+
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mysql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         5,
+			AvgRowBytes:       500,
+			FinalThroughput:   500_000 + float64(waw*1000),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	history := &stubHistory{rows: rows}
+
+	applyHistory(&out, in, profile, history, DBTuning{})
+
+	// Either smoothed bins picked or baseline stood; regression's grid was
+	// fully filtered. WAW shouldn't be a wild value.
+	if out.WriteAheadWriters > maxWAWForGrid {
+		t.Errorf("WAW=%d outside valid range; HardChunkLimit filter should have constrained selection", out.WriteAheadWriters)
+	}
+	// Reasoning should not mention regression-selected (every grid point
+	// was filtered out).
+	if strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Reasoning should not say regression-selected when grid was fully filtered; got %q", out.Reasoning)
+	}
+	_ = originalWAW
 }
 
 // TestApplyHistory_OutOfRegimeRowsDropped verifies regime filter excludes
@@ -253,7 +407,7 @@ func TestApplyHistory_OutOfRegimeRowsDropped(t *testing.T) {
 		{CPUCores: 4, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 1_000_000},
 		{CPUCores: 4, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 900_000},
 	}}
-	applyHistory(&out, in, history, DBTuning{})
+	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters != originalWAW {
 		t.Errorf("WAW should remain at baseline %d when no in-regime history exists; got %d",

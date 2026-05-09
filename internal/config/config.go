@@ -251,6 +251,13 @@ type MigrationConfig struct {
 	// PR1 #175 just plumbs the flag through CLI → config → orchestrator).
 	// Settable via YAML (`explore: true`) or CLI (`--explore`).
 	Explore bool `yaml:"explore,omitempty"`
+
+	// ExploreMode controls the steady-state ε-perturbation probability
+	// the tuner uses to keep training data refreshing after the planned-
+	// grid phase ends. Recognized values: "off" (0), "low" (0.10),
+	// "balanced" (0.15, also the default for empty), "high" (0.25). PR2
+	// #179 reads this; unknown values fall back to "balanced".
+	ExploreMode string `yaml:"explore_mode,omitempty"`
 }
 
 // LoadOptions controls configuration loading behavior.

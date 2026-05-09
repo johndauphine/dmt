@@ -15,6 +15,7 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/urfave/cli/v2 v2.27.5
 	golang.org/x/term v0.34.0
+	gonum.org/v1/gonum v0.17.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.4
 )

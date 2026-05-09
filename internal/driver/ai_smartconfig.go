@@ -226,7 +226,8 @@ type AITuningRecord struct {
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal
 // configuration. PR1 dropped the aiMapper / useAI fields — the deterministic
-// tuner doesn't need them.
+// tuner doesn't need them. PR2 added forceExplore + exploreMode for the
+// exploration policy in internal/tuning (#179).
 type SmartConfigAnalyzer struct {
 	db              *sql.DB
 	dbType          string
@@ -237,6 +238,8 @@ type SmartConfigAnalyzer struct {
 	maxMemoryMB     int64
 	pendingSave     *pendingTuningSave
 	currentTuning   DBTuningSnapshot
+	forceExplore    bool   // mirrors cfg.Migration.Explore
+	exploreMode     string // mirrors cfg.Migration.ExploreMode
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -276,6 +279,15 @@ func (s *SmartConfigAnalyzer) SetTargetDBType(targetType string) {
 // SetTargetMode sets the migration target mode (drop_recreate or upsert).
 func (s *SmartConfigAnalyzer) SetTargetMode(mode string) {
 	s.targetMode = mode
+}
+
+// SetExploration wires the exploration policy fields from config into the
+// analyzer. force corresponds to cfg.Migration.Explore (--explore CLI
+// flag); mode corresponds to cfg.Migration.ExploreMode (ε strength —
+// "off" | "low" | "balanced" | "high"). See #179.
+func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
+	s.forceExplore = force
+	s.exploreMode = mode
 }
 
 // Analyze performs smart configuration detection on the source database.
@@ -340,20 +352,50 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 	s.pendingSave = &pendingTuningSave{input: input, reasoning: output.Reasoning}
 }
 
-// toTuningInput maps the analyzer's AutoTuneInput onto tuning.Input.
+// toTuningInput maps the analyzer's AutoTuneInput onto tuning.Input,
+// adding the exploration fields from the analyzer's configured state.
 func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 	return tuning.Input{
-		CPUCores:          in.CPUCores,
-		MemoryGB:          in.MemoryGB,
-		AvailableMemoryMB: in.AvailableMemoryMB,
-		MaxMemoryMB:       in.MaxMemoryMB,
-		Platform:          in.Platform,
-		SourceDBType:      in.DatabaseType,
-		TargetDBType:      in.TargetType,
-		TargetMode:        in.TargetMode,
-		TotalTables:       in.TotalTables,
-		TotalRows:         in.TotalRows,
-		AvgRowBytes:       in.AvgRowBytes,
+		CPUCores:           in.CPUCores,
+		MemoryGB:           in.MemoryGB,
+		AvailableMemoryMB:  in.AvailableMemoryMB,
+		MaxMemoryMB:        in.MaxMemoryMB,
+		Platform:           in.Platform,
+		SourceDBType:       in.DatabaseType,
+		TargetDBType:       in.TargetType,
+		TargetMode:         in.TargetMode,
+		TotalTables:        in.TotalTables,
+		TotalRows:          in.TotalRows,
+		AvgRowBytes:        in.AvgRowBytes,
+		ForceExplore:       s.forceExplore,
+		ExplorationEpsilon: explorationEpsilon(s.exploreMode),
+	}
+}
+
+// ExplorationEpsilon is the package-public version of explorationEpsilon
+// for callers outside the smartconfig analyzer (e.g. healthcheck's
+// offline path). Same mapping; same fallback behavior.
+func ExplorationEpsilon(mode string) float64 {
+	return explorationEpsilon(mode)
+}
+
+// explorationEpsilon maps the user-facing ExploreMode string to the
+// numeric ε used by the tuner's perturbation policy (#179). Empty
+// defaults to "balanced" (0.15) — the documented PR2 default. Unknown
+// values fall back to "balanced" rather than failing, since this is
+// configuration data and a typo shouldn't break tuning.
+func explorationEpsilon(mode string) float64 {
+	switch mode {
+	case "off":
+		return 0
+	case "low":
+		return 0.10
+	case "high":
+		return 0.25
+	case "", "balanced":
+		return 0.15
+	default:
+		return 0.15
 	}
 }
 
@@ -405,11 +447,13 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{
+			Timestamp:               r.Timestamp,
 			SourceDBType:            r.SourceDBType,
 			TargetDBType:            r.TargetDBType,
 			Workers:                 r.Workers,
 			ChunkSize:               r.ChunkSize,
 			WriteAheadWriters:       r.WriteAheadWriters,
+			AvgRowBytes:             r.AvgRowSizeBytes,
 			FinalThroughput:         r.FinalThroughput,
 			ChunkRetryCount:         r.ChunkRetryCount,
 			CPUCores:                r.CPUCores,

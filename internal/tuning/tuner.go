@@ -14,6 +14,12 @@
 // (#179) adds quadratic regression + planned-grid exploration.
 package tuning
 
+import (
+	"time"
+
+	"github.com/johndauphine/dmt/internal/logging"
+)
+
 // Input carries the system + workload inputs the tuner reasons about.
 // All fields are populated from the smartconfig analyzer's existing
 // data collection — no new probes here.
@@ -32,6 +38,15 @@ type Input struct {
 	TotalTables  int
 	TotalRows    int64
 	AvgRowBytes  int64
+
+	// Exploration policy (PR2 #179). ForceExplore mirrors the user's
+	// --explore CLI flag / cfg.Migration.Explore: when true, the tuner
+	// picks from the planned exploration grid this run regardless of
+	// bucket state. ExplorationEpsilon is the steady-state perturbation
+	// probability — 0 disables ε-perturbation, 0.15 is the documented
+	// "balanced" default.
+	ForceExplore       bool
+	ExplorationEpsilon float64
 }
 
 // Output is the complete recommended parameter set. Mirrors the fields
@@ -89,6 +104,11 @@ type HistoryProvider interface {
 // schema; the smartconfig analyzer's adapter populates this from the
 // checkpoint backend.
 type HistoryRecord struct {
+	// Timestamp is the migration completion time. Used by PR2's regime-
+	// drift detector to compare median throughput in the most-recent N
+	// runs against earlier runs at the same (WAW, CS) config.
+	Timestamp time.Time
+
 	SourceDBType string
 	TargetDBType string
 
@@ -96,6 +116,12 @@ type HistoryRecord struct {
 	Workers           int
 	ChunkSize         int
 	WriteAheadWriters int
+
+	// AvgRowBytes is the avg_row_size_bytes the analyzer recorded for
+	// the migration that produced this row. Used by PR2's regression to
+	// derive chunk_size in bytes (chunk_rows × avg_row_bytes) for the
+	// quadratic CS feature.
+	AvgRowBytes int64
 
 	// What happened
 	FinalThroughput float64
@@ -133,11 +159,60 @@ type DBTuning struct {
 // Tune computes the recommended parameters for a migration. The history
 // provider and DBTuning are optional — pass nil / zero-value for pure-
 // baseline (cold-start) output.
+//
+// Decision flow (PR2 #179):
+//
+//	baseline → fetch+filter history rows → (
+//	  shouldExplore        → planned-grid pick (override regression)
+//	  steady-state         → tier dispatch (regression or smoothed bins)
+//	                       → with prob ε, ε-perturbation around argmax
+//	) → memory clamp
 func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) Output {
 	out := baseline(in, profile)
+
+	// Fetch + filter once so both exploration and history-selection see
+	// the same row set. Track whether the fetch actually succeeded so a
+	// failed fetch doesn't masquerade as cold-start (Copilot review on
+	// PR #183).
+	//
+	// regimeRows holds the regime-filtered set BEFORE the outlier filter
+	// runs — drift detection inspects this so a drift-induced burst of
+	// low-throughput-but-clean runs doesn't get classified as "noise"
+	// and removed before the detector can compare it to older runs
+	// (Codex review on PR #183 — bug fix).
+	var regimeRows, rows []HistoryRecord
+	historyAvailable := false
 	if history != nil {
-		applyHistory(&out, in, history, currentTuning)
+		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
+			historyAvailable = true
+			regimeRows = filterByRegime(r, in, currentTuning)
+			rows = filterOutliers(regimeRows)
+		} else {
+			logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
+		}
 	}
+
+	// Exploration enters three ways:
+	//   1. The user forced it via --explore, regardless of history state.
+	//   2. We have a working history backend AND the bucket is in
+	//      cold-start (< explorationGridRuns runs) — the planned grid
+	//      fills out the regression's training data.
+	//   3. Regime-drift detector fires — throughput at a fixed (WAW, CS)
+	//      config has shifted materially, so the regression's training
+	//      data is stale and we re-explore to refresh.
+	// Nil-history OR a failed history fetch does NOT enter exploration
+	// on its own — there's nowhere to learn from / persist the probe
+	// to, so the baseline output is what the user gets.
+	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
+	if in.ForceExplore || driftDetected || (historyAvailable && shouldExplore(in, len(rows))) {
+		applyGridExploration(&out, in, profile, len(rows), wawsWithRetries(rows))
+	} else if len(rows) > 0 {
+		applyHistorySelection(&out, in, profile, rows)
+		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
+			applyEpsilonPerturbation(&out, profile, wawsWithRetries(rows))
+		}
+	}
+
 	applyMemoryClamp(&out, in)
 	return out
 }
