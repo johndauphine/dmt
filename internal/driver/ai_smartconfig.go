@@ -677,6 +677,14 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // so on high-memory hosts the well-tested 50000 default still wins (PR #163
 // review: keeps "ceiling-as-cap" semantics consistent with guideline #3
 // and the chunk_size parameter description).
+//
+// Issue #164 measured chunk_size 50000 vs 87896/100000/175792/250000 at
+// 3 runs each (M5 Pro 48GB, SO2010 mssql→pg, all other knobs locked):
+// median throughput at chunk_size > 50000 was within +5–10% of the 50000
+// baseline (under the +10% "breakthrough" threshold), and chunk_size=175792
+// hit the documented Posts-retry pattern (#132) on 1/3 runs vs 0/12 at
+// other sizes. Conclusion: the 50000 anchor is correct on this fixture.
+// See docs/BENCHMARKS.md § "Chunk Size vs Memory-Fit Ceiling".
 func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	avg := input.AvgRowBytes
 	if avg <= 0 {

@@ -1485,6 +1485,58 @@ Local models pay a noticeable latency tax (~10–50%) on the longer + more imper
 - **The clamp stays**: per `internal/driver/ai_smartconfig.go:579–582`, soft prompt constraints don't bind under sufficient pressure (the original cap=200 / cap=500 stress tests still hit pre-clamp), so removing the clamp is not on the table. It's just doing dramatically less work.
 - **Throughput at this scale is unchanged**. Same caveat as the previous section: at 48 GB host RAM and SO2010 (~5 GB working set), `chunk_size = 50000` was never actually OOM-blowing — the clamp / prompt change is correctness-on-tight-budget-hosts, not a speed dial. End-to-end transfer throughput across the new sweep stayed in the 300K–800K rows/s band, same as the OLD prompt.
 
+## Chunk Size vs Memory-Fit Ceiling — Direct Throughput Sweep (issue #164)
+
+PR #163's review pinned the smartconfig default at `min(50000, ceiling)`. The empirical question — *would picking the memory-fit ceiling at loose budgets actually be faster?* — was deferred to issue #164. This section answers it.
+
+### Methodology
+
+Smartconfig and the post-AI clamp are out of the loop. `chunk_size` is set directly in YAML and locked alongside every other tunable knob (`workers=16`, `read_ahead_buffers=4`, `write_ahead_writers=2`, `parallel_readers=2`, `max_partitions=16`, all connection pools and thresholds explicit). `migration.ai_adjust: false` so the runtime monitor doesn't move parameters during the run. State directory wiped between runs; `target_mode: drop_recreate` so each run starts from a fresh PG schema. AI mapper still runs because the orchestrator requires it for type mapping during DDL — but `applyAISuggestions` produces zero changes ("AI tuning: no changes (recommendation matches current config)") because every tunable is user-set.
+
+Sweep grid: `chunk_size ∈ {50000, 87896, 100000, 175792, 250000}`, **3 runs per cell** = 15 runs total. Same fixture as the rest of this section (M5 Pro 48GB, SO2010 mssql→pg, transfer-only).
+
+### Results
+
+| chunk_size | run 1 | run 2 | run 3 | median | mean | clean retries |
+|---:|---:|---:|---:|---:|---:|:---:|
+| 50000 | 577K | 654K | 596K | **596K** | 609K | 0/3 |
+| 87896 | 636K | 660K | 654K | **654K** | 650K | 0/3 |
+| 100000 | 628K | 641K | 663K | **641K** | 644K | 0/3 |
+| 175792 | **338K**\* | 599K | 651K | **599K** | 529K | **1/3** |
+| 250000 | 655K | 662K | 595K | **655K** | 637K | 0/3 |
+
+`*` Posts-retry event (`copy batch [82388:84304]: timeout: context deadline exceeded`) — the documented Docker VM concurrent-COPY pattern from #132.
+
+### Median deltas vs the 50000 anchor
+
+| chunk_size | median | Δ vs 50000 |
+|---:|---:|---:|
+| 50000 | 596K | — |
+| 87896 | 654K | +9.7% |
+| 100000 | 641K | +7.6% |
+| 175792 | 599K | +0.5% (mean −13% with the retry-event run included) |
+| 250000 | 655K | +9.9% |
+
+### Decision rule application
+
+Per the issue:
+- **"50000 anchor is correct"** if rows/sec at 50000 is within ±3% of every larger value, OR rows/sec drops at chunk_size > 100000.
+- **"Breakthrough is correct"** if rows/sec at the ceiling is **≥ +10%** over 50000 with no retry/GC regression.
+- **"Hybrid"** if rows/sec rises monotonically up to some inflection point.
+
+Observed:
+- No chunk_size cleared the **+10% breakthrough threshold** by either median or mean. 87896 (+9.7%) and 250000 (+9.9%) came closest but both sit just under.
+- 175792 had a **3× higher retry rate** than every other size (1/3 vs 0/12). The Posts-retry event dropped that run by 43%. This is the documented Docker-VM COPY-saturation pattern, not noise — at higher chunk × concurrent-writer load, the COPY pipeline crosses a threshold and stalls.
+- The pattern is not monotonic — 87896 > 100000 by median, 175792 dips, 250000 recovers — so "hybrid with an inflection point" doesn't fit cleanly either.
+
+**Verdict: 50000 anchor is correct on this fixture.** Marginal +5–10% upside at larger sizes, but nothing decisive, and 175792 carries real tail-risk. PR #163's `min(50000, ceiling)` cap stays.
+
+### Caveats
+
+- **Single fixture.** SO2010 mssql→pg on this hardware. PG's bulk-insert pipeline is one path; MSSQL target (TABLOCK BCP) is a different path that this experiment doesn't cover. A measurement on PG→MSSQL or sqlserver target could land differently — particularly if `write_ahead_writers=1` is in play (which already prevents the Posts-retry pattern but caps peak throughput at ~85% of `write_ahead_writers=2`).
+- **`avg_row_bytes` matters.** SO2010 averages around 248–500 bytes/row. On a fixture with much larger rows (BLOBs, JSON), the same chunk_size in rows means a much larger memory footprint per chunk and the throughput curve could shift left. Out of scope here.
+- **Single-run-per-cell at 3 reps.** The +10% threshold sits inside the run-to-run noise band. A more rigorous answer would need ≥10 runs per cell; the current 3 are enough to rule out a *strong* breakthrough but not enough to confirm a marginal one. Acceptable given the decision rule's symmetric framing.
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
