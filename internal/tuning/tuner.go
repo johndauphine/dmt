@@ -97,6 +97,12 @@ type HistoryRecord struct {
 	ChunkSize         int
 	WriteAheadWriters int
 
+	// AvgRowBytes is the avg_row_size_bytes the analyzer recorded for
+	// the migration that produced this row. Used by PR2's regression to
+	// derive chunk_size in bytes (chunk_rows × avg_row_bytes) for the
+	// quadratic CS feature.
+	AvgRowBytes int64
+
 	// What happened
 	FinalThroughput float64
 	ChunkRetryCount int

@@ -206,6 +206,7 @@ func convertHistoryRows(rows []checkpoint.AITuningRecord) []tuning.HistoryRecord
 			Workers:                 r.Workers,
 			ChunkSize:               r.ChunkSize,
 			WriteAheadWriters:       r.WriteAheadWriters,
+			AvgRowBytes:             r.AvgRowSizeBytes,
 			FinalThroughput:         r.FinalThroughput,
 			ChunkRetryCount:         r.ChunkRetryCount,
 			CPUCores:                r.CPUCores,

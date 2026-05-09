@@ -410,6 +410,7 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			Workers:                 r.Workers,
 			ChunkSize:               r.ChunkSize,
 			WriteAheadWriters:       r.WriteAheadWriters,
+			AvgRowBytes:             r.AvgRowSizeBytes,
 			FinalThroughput:         r.FinalThroughput,
 			ChunkRetryCount:         r.ChunkRetryCount,
 			CPUCores:                r.CPUCores,
