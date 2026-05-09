@@ -1537,6 +1537,29 @@ Observed:
 - **`avg_row_bytes` matters.** SO2010 averages around 248–500 bytes/row. On a fixture with much larger rows (BLOBs, JSON), the same chunk_size in rows means a much larger memory footprint per chunk and the throughput curve could shift left. Out of scope here.
 - **Single-run-per-cell at 3 reps.** The +10% threshold sits inside the run-to-run noise band. A more rigorous answer would need ≥10 runs per cell; the current 3 are enough to rule out a *strong* breakthrough but not enough to confirm a marginal one. Acceptable given the decision rule's symmetric framing.
 
+### Confirmation Sweep — 50000 vs 87896 at n=15 (interleaved)
+
+The original n=3 sweep above showed 87896 with a +9.7% median advantage over 50000 — under the +10% breakthrough bar but suggestive enough that an arbitrary-threshold rule wasn't the right way to settle it. This subsection answers the question with significance testing instead of a fixed threshold.
+
+**Methodology**: same fixed-knob config as above, but only 50000 and 87896. **n=15 runs each = 30 runs total**, **interleaved** (50K, 87K, 50K, 87K, …) so any time-correlated noise (PG cache warmth, host thermal state, transient background load) hits both groups equally rather than correlating with order.
+
+**Result: the n=3 effect did not replicate. 87896 is not statistically faster than 50000.**
+
+| dataset | n | mean(87896 − 50000) | Welch t | M-W z | p (one-sided H₁: 87896 > 50000) |
+|---|---:|---:|---:|---:|---:|
+| Full | 15 / 15 | −17.8K (−3.0%) | −0.39 | −1.35 | M-W: 0.91 |
+| Drop warmup (seq 1–2) | 14 / 14 | −31.8K (−5.1%) | −0.74 | −1.61 | M-W: 0.95 |
+| Drop warmup + transient (seq 1,2,17,18) | 13 / 13 | −35.6K (−5.6%) | −1.03 | −1.82 | M-W: 0.97 |
+| Clean only (also drop seq 30 retry event) | 13 / 12 | −14.1K (−2.2%) | −0.52 | −1.58 | M-W: 0.94 |
+
+Mann-Whitney one-sided p-values for "87896 > 50000" range 0.91–0.97 — the data points the *opposite* direction. Two-sided p (0.07–0.18) also fails to clear α=0.05, so we can't say "they're different" either. **Conclusion: 50000 and 87896 are statistically indistinguishable on this fixture.**
+
+**Tail risk re-confirmed**: in the n=15 sweep the 87896 group hit one Posts-retry event (`seq=30`, 347K rows/s, `retry_count=1`); the 50000 group hit zero retries across 15 runs. Same #132 Docker-VM concurrent-COPY pattern that took down `175792` in the original sweep, just less frequently at 87896.
+
+**Why the n=3 result misled us**: with the observed n=15 standard deviation (~100K), the SE of a 3-run median is ~75K. A "+9.7% gap" between two 3-run samples is well within sampling noise. The +10% bar in the issue's decision rule, despite looking arbitrary, was a reasonable proxy for "an effect big enough to detect at n=3." Below that bar, n=3 is just under-powered.
+
+**Verdict reaffirmed**: keep `min(50000, ceiling)`. The cap was already correct; this measurement makes the basis explicit instead of marginal.
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers

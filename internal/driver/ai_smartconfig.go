@@ -683,8 +683,14 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // median throughput at chunk_size > 50000 was within +5–10% of the 50000
 // baseline (under the +10% "breakthrough" threshold), and chunk_size=175792
 // hit the documented Posts-retry pattern (#132) on 1/3 runs vs 0/12 at
-// other sizes. Conclusion: the 50000 anchor is correct on this fixture.
-// See docs/BENCHMARKS.md § "Chunk Size vs Memory-Fit Ceiling".
+// other sizes. A follow-up confirmation sweep at n=15 (interleaved 50000
+// vs 87896) replaced the +10% threshold with significance testing — the
+// n=3 effect didn't replicate; Mann-Whitney one-sided p ≈ 0.91–0.97 in
+// the wrong direction, two-sided p ≈ 0.07–0.18 (no significant difference
+// either way), and the 87896 group hit one Posts-retry event 50000 didn't.
+// Conclusion: the 50000 anchor is correct on this fixture. See
+// docs/BENCHMARKS.md § "Chunk Size vs Memory-Fit Ceiling" (and the
+// "Confirmation Sweep — 50000 vs 87896 at n=15" subsection).
 func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	avg := input.AvgRowBytes
 	if avg <= 0 {
