@@ -538,10 +538,18 @@ func computeSafeChunkSize(budgetMB int64, workers, readAheadBuffers, writeAheadW
 }
 
 // effectiveMemoryBudgetMB returns the memory budget the smartconfig prompt
-// advertises to the LLM AND that the post-AI clamp enforces. Priority:
-// user-set MaxMemoryMB > AvailableMemoryMB - 2GB headroom > 1024 MB
-// last-resort default. Returns the budget in MB plus a short source
-// description suitable for prompt rendering and warning messages.
+// advertises to the LLM AND that the post-AI clamp enforces. Selection
+// rules:
+//
+//   - If MaxMemoryMB and (AvailableMemoryMB - 2GB) are both > 0, return the
+//     more-restrictive of the two (i.e., min). The user's cap and the
+//     headroom guard are independent floors; respecting both means honoring
+//     the smaller.
+//   - Otherwise return whichever single source is set; both unset falls
+//     back to 1024 MB so the prompt never renders "Memory budget: 0 MB".
+//
+// Returns the budget in MB plus a short source description suitable for
+// prompt rendering and warning messages.
 //
 // Issue #158 covers the fallback for offline callers that leave
 // AvailableMemoryMB at zero. Issue #156 covers the post-AI clamp that uses
@@ -574,17 +582,25 @@ func effectiveMemoryBudgetMB(input AutoTuneInput) (budgetMB int64, source string
 // rationalization). The Go layer is the only safety mechanism that holds
 // across model sizes and providers.
 //
-// Returns true when a clamp was applied (caller logs / records the override).
-func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) bool {
+// The gate compares in BYTES, not the floor-MB EstimatedMemMB field, so a
+// real footprint of e.g. 200.9 MiB doesn't slide under a 200 MB cap by
+// integer truncation. EstimatedMemMB stays as floor-MB for telemetry/logging.
+func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 	budgetMB, _ := effectiveMemoryBudgetMB(input)
-	if s.suggestions.EstimatedMemMB <= budgetMB {
-		return false
-	}
 
 	avg := input.AvgRowBytes
 	if avg <= 0 {
 		avg = 500
 	}
+
+	estimatedBytes := int64(s.suggestions.Workers) *
+		int64(s.suggestions.ReadAheadBuffers+s.suggestions.WriteAheadWriters) *
+		int64(s.suggestions.ChunkSizeRecommendation) * avg
+	budgetBytes := budgetMB * 1024 * 1024
+	if estimatedBytes <= budgetBytes {
+		return
+	}
+
 	safeChunk := computeSafeChunkSize(
 		budgetMB,
 		s.suggestions.Workers,
@@ -596,7 +612,7 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) bool {
 	// logged warnings for any earlier issue (e.g. zero workers); leave the
 	// pre-clamp value so the migration at least attempts to run.
 	if safeChunk <= 0 {
-		return false
+		return
 	}
 
 	original := s.suggestions.ChunkSizeRecommendation
@@ -614,7 +630,6 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) bool {
 		original, s.suggestions.ChunkSizeRecommendation,
 		originalMem, budgetMB, s.suggestions.EstimatedMemMB,
 	)
-	return true
 }
 
 // buildMemoryBudgetBlock renders the prompt section that tells the LLM how

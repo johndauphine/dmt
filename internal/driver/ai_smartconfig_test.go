@@ -1266,15 +1266,12 @@ func TestClampChunkSizeToBudget(t *testing.T) {
 			AvgRowBytes:       248,
 		}
 
-		clamped := analyzer.clampChunkSizeToBudget(input)
-		if !clamped {
-			t.Fatal("expected clamp to fire when 794 MB > 200 MB budget")
-		}
+		analyzer.clampChunkSizeToBudget(input)
 
 		// Safe ceiling: 200 * 1MiB / (16*6*248) = 8808 rows.
 		const wantChunk = 8808
 		if got := analyzer.suggestions.ChunkSizeRecommendation; got != wantChunk {
-			t.Errorf("ChunkSizeRecommendation = %d, want %d (the safe ceiling at this budget)", got, wantChunk)
+			t.Errorf("ChunkSizeRecommendation = %d, want %d (the safe ceiling at this budget; clamp didn't fire if got==35000)", got, wantChunk)
 		}
 		// EstimatedMemMB must be recomputed from the clamped chunk_size, not
 		// left at the pre-clamp 794 MB. Otherwise the AI tuning history would
@@ -1303,12 +1300,9 @@ func TestClampChunkSizeToBudget(t *testing.T) {
 			AvgRowBytes:       248,
 		}
 
-		clamped := analyzer.clampChunkSizeToBudget(input)
-		if clamped {
-			t.Error("clamp should be a no-op when 1135 MB <= 2000 MB budget")
-		}
+		analyzer.clampChunkSizeToBudget(input)
 		if got := analyzer.suggestions.ChunkSizeRecommendation; got != 50000 {
-			t.Errorf("ChunkSizeRecommendation modified to %d; should be unchanged at 50000", got)
+			t.Errorf("ChunkSizeRecommendation modified to %d; should be unchanged at 50000 (clamp must be a no-op when 1135 MB <= 2000 MB budget)", got)
 		}
 		if got := analyzer.suggestions.EstimatedMemMB; got != 1135 {
 			t.Errorf("EstimatedMemMB modified to %d; should be unchanged at 1135", got)
@@ -1329,8 +1323,9 @@ func TestClampChunkSizeToBudget(t *testing.T) {
 		}
 		input := AutoTuneInput{AvailableMemoryMB: 30000, AvgRowBytes: 248}
 
-		if clamped := analyzer.clampChunkSizeToBudget(input); clamped {
-			t.Error("clamp should be a no-op when no cap is set and headroom is plenty")
+		analyzer.clampChunkSizeToBudget(input)
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got != 50000 {
+			t.Errorf("ChunkSizeRecommendation = %d; clamp must be a no-op when no cap is set and headroom is plenty", got)
 		}
 	})
 
@@ -1353,12 +1348,41 @@ func TestClampChunkSizeToBudget(t *testing.T) {
 			AvgRowBytes:       248,
 		}
 
-		clamped := analyzer.clampChunkSizeToBudget(input)
-		if clamped {
-			t.Error("clamp should refuse to set chunk_size=0 even when over budget")
-		}
+		analyzer.clampChunkSizeToBudget(input)
 		if got := analyzer.suggestions.ChunkSizeRecommendation; got != 50000 {
 			t.Errorf("ChunkSizeRecommendation = %d; should be unchanged at 50000 to avoid blocking the migration", got)
+		}
+	})
+
+	t.Run("clamp gate uses bytes, not floor-MB (Copilot review fix)", func(t *testing.T) {
+		// Pre-fix: EstimatedMemMB used integer division to MB, so a real
+		// footprint of e.g. 200.9 MiB would render as 200 MB and slide
+		// under a 200 MB cap. Post-fix: gate compares bytes directly.
+		//
+		// Construct params where bytes / 1024 / 1024 truncates from
+		// strictly-over-cap to exactly-at-cap. With workers=1, buffers=1,
+		// avg=1024, chunk=205200: bytes = 1*1*205200*1024 = 210,124,800 =
+		// ~200.4 MiB; floor MB = 200. At a 200 MB cap, the floor-MB
+		// comparison would say "200 <= 200" and skip; the bytes comparison
+		// correctly says "210124800 > 209715200" and clamps.
+		analyzer := &SmartConfigAnalyzer{
+			suggestions: &SmartConfigSuggestions{
+				Workers:                 1,
+				ChunkSizeRecommendation: 205200,
+				ReadAheadBuffers:        1,
+				WriteAheadWriters:       0,
+				EstimatedMemMB:          200, // ComputeEstimatedMemMB floors to 200
+			},
+		}
+		input := AutoTuneInput{
+			AvailableMemoryMB: 30000,
+			MaxMemoryMB:       200,
+			AvgRowBytes:       1024,
+		}
+
+		analyzer.clampChunkSizeToBudget(input)
+		if got := analyzer.suggestions.ChunkSizeRecommendation; got >= 205200 {
+			t.Errorf("ChunkSizeRecommendation = %d; expected clamp to fire on 210MB > 200MB cap (bytes comparison, not floor-MB)", got)
 		}
 	})
 }
