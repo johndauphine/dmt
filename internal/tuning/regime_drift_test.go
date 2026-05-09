@@ -1,6 +1,7 @@
 package tuning
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,6 +63,48 @@ func TestDetectRegimeDrift_BelowGlobalMin(t *testing.T) {
 	})
 	if detectRegimeDrift(rows) {
 		t.Error("should not fire below global minimum")
+	}
+}
+
+// TestTune_DriftDetectedBeforeOutlierFilter is the regression for the
+// Codex-flagged ordering bug on PR #183: when recent clean runs slow
+// down enough to fall below the outlier-filter floor (< 0.5×median),
+// running detectRegimeDrift on the post-outlier set would silently lose
+// exactly the rows that signal drift. Tune now runs drift on the
+// regime-filtered, pre-outlier set so this case fires.
+func TestTune_DriftDetectedBeforeOutlierFilter(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	// 6 older runs around 1M rows/s + 3 recent runs around 380K. The
+	// recent runs are clean (no retries), so the outlier filter would
+	// drop them as "noise" (380K < 0.5 × 1M median). Without the fix,
+	// drift detection on the post-outlier set wouldn't see the recent
+	// runs and would NOT fire. With the fix, drift runs on the
+	// regime-filtered set and catches the shift.
+	rows := makeFixedConfigRuns(2, 50000, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		380_000, 400_000, 360_000, // recent — would be "noise" post-filter
+	})
+	history := &stubHistory{rows: rows}
+
+	out := Tune(in, profile, history, DBTuning{})
+
+	// Drift forces exploration; the planned-grid pick produces a
+	// "exploration: planned grid" reasoning entry (vs. regression-
+	// or history-selected which would mean drift was missed).
+	if out.Reasoning == "" {
+		t.Fatalf("expected exploration reasoning when drift fires, got empty")
+	}
+	want := "exploration: planned grid"
+	if !strings.Contains(out.Reasoning, want) {
+		t.Errorf("expected reasoning to mention %q (drift → exploration); got %q", want, out.Reasoning)
 	}
 }
 

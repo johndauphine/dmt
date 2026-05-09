@@ -237,29 +237,39 @@ func filterByRegime(rows []HistoryRecord, in Input, currentTuning DBTuning) []Hi
 	return out
 }
 
-// filterOutliers drops noise-shaped rows: throughput below half the
-// median AND zero retries means measurement variance, not load. Low
-// throughput with retries is a real contention signal and stays.
+// filterOutliers drops two kinds of unhelpful rows:
+//   - Incomplete: FinalThroughput == 0 (NULL coerced to zero by the
+//     checkpoint backend before UpdateAITuningResult fires for the
+//     row's run). The smoothed-bins aggregator skips these too; the
+//     regression in fitRegression would otherwise train on them as
+//     legitimate 0 rows/s observations, biasing the fit toward zero
+//     (Codex review on PR #183 — bug fix).
+//   - Noise: throughput below half the median AND zero retries means
+//     measurement variance, not load. Low throughput with retries is
+//     a real contention signal and stays.
 func filterOutliers(rows []HistoryRecord) []HistoryRecord {
-	if len(rows) < 3 {
-		return rows
-	}
-	throughputs := make([]float64, 0, len(rows))
+	// First pass: drop incomplete rows so neither pipeline tier sees
+	// them. Median below is computed on completed runs only.
+	completed := make([]HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		if r.FinalThroughput > 0 {
-			throughputs = append(throughputs, r.FinalThroughput)
+			completed = append(completed, r)
 		}
 	}
-	if len(throughputs) == 0 {
-		return rows
+	if len(completed) < 3 {
+		return completed
+	}
+	throughputs := make([]float64, 0, len(completed))
+	for _, r := range completed {
+		throughputs = append(throughputs, r.FinalThroughput)
 	}
 	sort.Float64s(throughputs)
 	median := throughputs[len(throughputs)/2]
 	floor := median * outlierFloorRatio
 
-	kept := make([]HistoryRecord, 0, len(rows))
-	for _, r := range rows {
-		if r.FinalThroughput > 0 && r.FinalThroughput < floor && r.ChunkRetryCount == 0 {
+	kept := make([]HistoryRecord, 0, len(completed))
+	for _, r := range completed {
+		if r.FinalThroughput < floor && r.ChunkRetryCount == 0 {
 			continue // measurement noise
 		}
 		kept = append(kept, r)

@@ -174,13 +174,19 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// the same row set. Track whether the fetch actually succeeded so a
 	// failed fetch doesn't masquerade as cold-start (Copilot review on
 	// PR #183).
-	var rows []HistoryRecord
+	//
+	// regimeRows holds the regime-filtered set BEFORE the outlier filter
+	// runs — drift detection inspects this so a drift-induced burst of
+	// low-throughput-but-clean runs doesn't get classified as "noise"
+	// and removed before the detector can compare it to older runs
+	// (Codex review on PR #183 — bug fix).
+	var regimeRows, rows []HistoryRecord
 	historyAvailable := false
 	if history != nil {
 		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
 			historyAvailable = true
-			rows = filterByRegime(r, in, currentTuning)
-			rows = filterOutliers(rows)
+			regimeRows = filterByRegime(r, in, currentTuning)
+			rows = filterOutliers(regimeRows)
 		} else {
 			logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
 		}
@@ -197,7 +203,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// Nil-history OR a failed history fetch does NOT enter exploration
 	// on its own — there's nowhere to learn from / persist the probe
 	// to, so the baseline output is what the user gets.
-	driftDetected := historyAvailable && detectRegimeDrift(rows)
+	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
 	if in.ForceExplore || driftDetected || (historyAvailable && shouldExplore(in, len(rows))) {
 		applyGridExploration(&out, in, profile, len(rows), wawsWithRetries(rows))
 	} else if len(rows) > 0 {
