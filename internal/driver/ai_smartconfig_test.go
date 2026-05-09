@@ -545,8 +545,8 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	}
 	got := buildMemoryBudgetBlock(in, 16)
 	musts := []string{
-		"Memory budget: 27952 MB",                  // 30000 - 2048 headroom
-		"available_memory_mb=30000",                // budget source attribution
+		"Memory budget: 27952 MB",   // 30000 - 2048 headroom
+		"available_memory_mb=30000", // budget source attribution
 		"Avg row size: 248 bytes",
 		"baseline workers=16",
 		"safe chunk_size ceiling is ~1231090 rows", // int math: 27952 * 1MiB / (16*6*248)
@@ -616,14 +616,18 @@ func TestBuildMemoryBudgetBlockFallback(t *testing.T) {
 			},
 		},
 		{
-			name: "available=1000 (below 2GB headroom) + cap=0 → fallback default",
+			// Pre-fix this hit the bare "fallback default" branch via the
+			// `available > 2048` guard. After the floor refactor it routes
+			// through the headroom path and reports the floor explicitly.
+			// Same budget value (1024 MB), more honest source label.
+			name: "available=1000 (below 2GB headroom) + cap=0 → floored",
 			in: AutoTuneInput{
 				AvailableMemoryMB: 1000,
 				MaxMemoryMB:       0,
 				AvgRowBytes:       248,
 			},
 			wantBudget: "Memory budget: 1024 MB",
-			wantSource: "fallback default",
+			wantSource: "floored at 1024",
 		},
 		{
 			name: "available=30000 + cap=0 → headroom budget",
@@ -1223,10 +1227,45 @@ func TestEffectiveMemoryBudgetMB(t *testing.T) {
 			wantSrcSub: "fallback default",
 		},
 		{
-			name:       "available below 2GB headroom + no cap → fallback default",
+			name:       "available below 2GB headroom + no cap → floored at fallback",
 			in:         AutoTuneInput{AvailableMemoryMB: 1000},
 			wantBudget: 1024,
-			wantSrcSub: "fallback default",
+			wantSrcSub: "floored",
+		},
+		// Regression: monotonicity around the 2 GB headroom threshold.
+		// Previously available=2049 fell into the headroom branch and yielded
+		// budget=1 (available - 2048), while available=2048 hit the fallback
+		// and yielded budget=1024 — i.e. less RAM produced a bigger budget.
+		// Reproduced on WSL2 (7.7 GB host) where back-to-back SO2010 runs
+		// crossed the cliff and the second run got chunk_size clamped from
+		// 50K to ~19.5K despite the first run proving the larger value fit.
+		{
+			name:       "available just above headroom threshold → floored, not cliff",
+			in:         AutoTuneInput{AvailableMemoryMB: 2049},
+			wantBudget: 1024,
+			wantSrcSub: "floored",
+		},
+		{
+			// With cap=2000 and available=2049, raw headroom is 1 MB; floored
+			// to 1024. Floored headroom (1024) is more restrictive than the
+			// cap (2000), so floored headroom wins per the min-of-ceilings
+			// rule. Pre-fix this returned 1 MB.
+			name:       "available just above headroom + cap → floor wins over cap",
+			in:         AutoTuneInput{AvailableMemoryMB: 2049, MaxMemoryMB: 2000},
+			wantBudget: 1024,
+			wantSrcSub: "floored",
+		},
+		{
+			name:       "available exactly 3072 → headroom equals floor (1024)",
+			in:         AutoTuneInput{AvailableMemoryMB: 3072},
+			wantBudget: 1024,
+			wantSrcSub: "floored",
+		},
+		{
+			name:       "available 4096 → headroom 2048 wins over floor",
+			in:         AutoTuneInput{AvailableMemoryMB: 4096},
+			wantBudget: 2048,
+			wantSrcSub: "available_memory_mb=4096",
 		},
 	}
 	for _, tc := range cases {

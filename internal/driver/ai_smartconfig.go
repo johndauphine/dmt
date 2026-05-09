@@ -541,12 +541,19 @@ func computeSafeChunkSize(budgetMB int64, workers, readAheadBuffers, writeAheadW
 // advertises to the LLM AND that the post-AI clamp enforces. Selection
 // rules:
 //
-//   - If MaxMemoryMB and (AvailableMemoryMB - 2GB) are both > 0, return the
-//     more-restrictive of the two (i.e., min). The user's cap and the
-//     headroom guard are independent floors; respecting both means honoring
-//     the smaller.
+//   - If MaxMemoryMB and AvailableMemoryMB are both > 0, return the
+//     more-restrictive of (cap, available - 2 GB headroom floored at
+//     fallback). The user's cap and the headroom guard are independent
+//     floors; respecting both means honoring the smaller.
 //   - Otherwise return whichever single source is set; both unset falls
 //     back to 1024 MB so the prompt never renders "Memory budget: 0 MB".
+//
+// The headroom result is floored at fallbackBudgetMB to prevent a
+// non-monotone cliff: previously available=2049 (with no cap) produced
+// budget=1 MB (available - 2048), while available=2048 produced budget=1024
+// MB via the fallback — i.e. less RAM yielded a bigger budget. Reproduced
+// on a WSL2 host where back-to-back SO2010 runs straddled the boundary and
+// the second run got chunk_size needlessly clamped from 50K to ~19.5K.
 //
 // Returns the budget in MB plus a short source description suitable for
 // prompt rendering and warning messages.
@@ -557,18 +564,26 @@ func computeSafeChunkSize(budgetMB int64, workers, readAheadBuffers, writeAheadW
 // tested size confabulate around the soft prompt constraint.
 func effectiveMemoryBudgetMB(input AutoTuneInput) (budgetMB int64, source string) {
 	const fallbackBudgetMB = 1024
+
+	headroomBudget := func(available int64) (int64, string) {
+		raw := available - 2048
+		if raw <= fallbackBudgetMB {
+			return fallbackBudgetMB, fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom (floored at %d)", available, fallbackBudgetMB)
+		}
+		return raw, fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", available)
+	}
+
 	switch {
-	case input.MaxMemoryMB > 0 && input.AvailableMemoryMB > 2048:
-		// Both known — pick the more-restrictive of (cap, available - headroom).
-		headroomBudget := input.AvailableMemoryMB - 2048
-		if input.MaxMemoryMB < headroomBudget {
+	case input.MaxMemoryMB > 0 && input.AvailableMemoryMB > 0:
+		h, hSrc := headroomBudget(input.AvailableMemoryMB)
+		if input.MaxMemoryMB < h {
 			return input.MaxMemoryMB, fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
 		}
-		return headroomBudget, fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
+		return h, hSrc
 	case input.MaxMemoryMB > 0:
 		return input.MaxMemoryMB, fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
-	case input.AvailableMemoryMB > 2048:
-		return input.AvailableMemoryMB - 2048, fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
+	case input.AvailableMemoryMB > 0:
+		return headroomBudget(input.AvailableMemoryMB)
 	default:
 		return fallbackBudgetMB, "fallback default; AvailableMemoryMB and MaxMemoryMB both unset"
 	}
