@@ -32,6 +32,15 @@ type Input struct {
 	TotalTables  int
 	TotalRows    int64
 	AvgRowBytes  int64
+
+	// Exploration policy (PR2 #179). ForceExplore mirrors the user's
+	// --explore CLI flag / cfg.Migration.Explore: when true, the tuner
+	// picks from the planned exploration grid this run regardless of
+	// bucket state. ExplorationEpsilon is the steady-state perturbation
+	// probability — 0 disables ε-perturbation, 0.15 is the documented
+	// "balanced" default.
+	ForceExplore        bool
+	ExplorationEpsilon  float64
 }
 
 // Output is the complete recommended parameter set. Mirrors the fields
@@ -139,11 +148,44 @@ type DBTuning struct {
 // Tune computes the recommended parameters for a migration. The history
 // provider and DBTuning are optional — pass nil / zero-value for pure-
 // baseline (cold-start) output.
+//
+// Decision flow (PR2 #179):
+//
+//	baseline → fetch+filter history rows → (
+//	  shouldExplore        → planned-grid pick (override regression)
+//	  steady-state         → tier dispatch (regression or smoothed bins)
+//	                       → with prob ε, ε-perturbation around argmax
+//	) → memory clamp
 func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) Output {
 	out := baseline(in, profile)
+
+	// Fetch + filter once so both exploration and history-selection see
+	// the same row set.
+	var rows []HistoryRecord
 	if history != nil {
-		applyHistory(&out, in, profile, history, currentTuning)
+		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
+			rows = filterByRegime(r, in, currentTuning)
+			rows = filterOutliers(rows)
+		}
 	}
+
+	// Exploration enters two ways:
+	//   1. The user forced it via --explore, regardless of history state.
+	//   2. We have a history backend AND the bucket is in cold-start
+	//      (< explorationGridRuns runs) — the planned grid fills out
+	//      the regression's training data.
+	// Nil-history (file-state checkpoint, fresh install) does NOT enter
+	// exploration on its own — there's no place to learn from, so the
+	// baseline output is what the user gets.
+	if in.ForceExplore || (history != nil && shouldExplore(in, len(rows))) {
+		applyGridExploration(&out, in, profile, len(rows), wawsWithRetries(rows))
+	} else if len(rows) > 0 {
+		applyHistorySelection(&out, in, profile, rows)
+		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
+			applyEpsilonPerturbation(&out, in, profile)
+		}
+	}
+
 	applyMemoryClamp(&out, in)
 	return out
 }

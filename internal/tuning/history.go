@@ -56,6 +56,11 @@ const maxWAWForGrid = 8
 //     median of the surviving rows.
 //
 // On any error or empty post-filter dataset, the baseline output stands.
+//
+// Production calls flow through Tune (which fetches + filters once and
+// dispatches between exploration and history selection). This wrapper
+// exists so the existing tests can exercise applyHistory's behavior
+// directly without rebuilding the whole Tune pipeline.
 func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) {
 	rows, err := history.Records(in.SourceDBType, in.TargetDBType)
 	if err != nil {
@@ -72,6 +77,18 @@ func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryP
 	}
 
 	rows = filterOutliers(rows)
+	if len(rows) == 0 {
+		return
+	}
+
+	applyHistorySelection(out, in, profile, rows)
+}
+
+// applyHistorySelection is the tier dispatcher: regression first when
+// rows ≥ minRowsForRegression, smoothed bins as fallback. Operates on
+// pre-filtered rows; the caller (Tune or applyHistory) handles fetch +
+// regime + outlier filtering.
+func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) {
 	if len(rows) == 0 {
 		return
 	}
