@@ -67,14 +67,15 @@ type historyKey struct {
 	target string
 }
 
+// allHistoryPairs returns all history rows the State backend has, grouped
+// by (source, target). Uses a hardcoded candidate list of canonical driver
+// pairs because checkpoint.State doesn't expose a "list distinct pairs"
+// method — adding one is scope creep for PR1. Pairs using non-canonical
+// driver names (aliases) or future drivers added without updating this
+// list would be silently missed; harmless for the diagnostic-only purpose
+// of this test.
 func allHistoryPairs(state *checkpoint.State) (map[historyKey][]checkpoint.AITuningRecord, error) {
-	// Pull all rows by querying with empty type filters via two passes:
-	// first list distinct pairs, then GetAITuningHistory per pair. Cheaper
-	// to just walk every row once with a SELECT *, but the State API
-	// already exposes per-pair fetch — use it.
 	pairs := map[historyKey][]checkpoint.AITuningRecord{}
-	// Heuristic: try the canonical driver pairs. If a pair has no rows,
-	// the call returns an empty slice.
 	candidates := []historyKey{
 		{"mssql", "postgres"}, {"postgres", "mssql"},
 		{"mssql", "mysql"}, {"mysql", "mssql"},

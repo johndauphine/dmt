@@ -64,10 +64,15 @@ func memoryBudgetMB(in Input) (budgetMB int64, source string) {
 	}
 }
 
-// applyMemoryClamp enforces the memory budget and the per-target hard
-// limit (#166) on out.ChunkSize, recomputing EstimatedMemMB after any
-// clamp. Real-bytes comparison (not floor-MB) so a 200.9 MiB footprint
-// doesn't slide under a 200 MB cap by integer truncation (#156).
+// applyMemoryClamp enforces the memory budget on out.ChunkSize,
+// recomputing EstimatedMemMB after any clamp. Real-bytes comparison
+// (not floor-MB) so a 200.9 MiB footprint doesn't slide under a 200 MB
+// cap by integer truncation (#156).
+//
+// The per-target HardChunkLimit (#166) is enforced upstream in baseline
+// (see chunkRowsFromProfile), not here — capping in baseline keeps the
+// hard limit binding regardless of whether the memory budget would have
+// fired. This function only handles the memory-budget axis.
 //
 // The clamp is intentionally conservative — when input is malformed
 // (zero workers, zero buffers, zero rows) it leaves chunk_size alone

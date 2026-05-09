@@ -39,6 +39,45 @@ func TestBaseline_KnobsByCPU(t *testing.T) {
 	}
 }
 
+// TestBaseline_ChunkSizeFloors locks in chunkRowsFromProfile's two
+// outputs that prevent pathological zero / over-protocol values:
+//   - Floor at 1 row when avg_row_bytes > byte budget (would otherwise
+//     return 0 and block the migration).
+//   - Cap at HardChunkLimit when set (the per-target protocol cap from
+//     #166 — currently 0 for all drivers, but the enforcement lands now).
+func TestBaseline_ChunkSizeFloors(t *testing.T) {
+	// Floor: 10 MB fallback budget at 50 MB/row → 0 rows mathematically;
+	// floored to 1 so WriteBatch doesn't get a zero-size chunk.
+	in := Input{CPUCores: 8, AvgRowBytes: 50_000_000, Platform: "linux"}
+	profile := DriverProfile{Name: "test", BaselineWAW: 2}
+	out := baseline(in, profile)
+	if out.ChunkSize != 1 {
+		t.Errorf("ChunkSize for 50MB rows: got %d, want 1 (floor)", out.ChunkSize)
+	}
+
+	// Hard limit cap: 25 MB optimum at 500 B = 50000 rows mathematically;
+	// HardChunkLimit=1000 should cap to 1000.
+	in = Input{CPUCores: 8, AvgRowBytes: 500, Platform: "linux"}
+	profile = DriverProfile{
+		Name:                  "test",
+		BaselineWAW:           2,
+		OptimumBulkChunkBytes: 25_000_000,
+		HardChunkLimit:        1000,
+	}
+	out = baseline(in, profile)
+	if out.ChunkSize != 1000 {
+		t.Errorf("ChunkSize with HardChunkLimit=1000: got %d, want 1000", out.ChunkSize)
+	}
+
+	// Hard limit not binding: 25 MB optimum at 500 B = 50000 rows;
+	// HardChunkLimit=100000 leaves the optimum alone.
+	profile.HardChunkLimit = 100000
+	out = baseline(in, profile)
+	if out.ChunkSize != 50000 {
+		t.Errorf("ChunkSize with HardChunkLimit=100000 (non-binding): got %d, want 50000", out.ChunkSize)
+	}
+}
+
 // TestBaseline_ChunkSizeFromProfile verifies the per-target byte-shaped
 // anchor (#166) drives chunk_size, and the 10 MB conservative fallback
 // fires for unmeasured targets.

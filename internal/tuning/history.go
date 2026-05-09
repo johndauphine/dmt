@@ -74,8 +74,8 @@ func applyHistory(out *Output, in Input, history HistoryProvider, currentTuning 
 	if picked != out.WriteAheadWriters {
 		out.WriteAheadWriters = picked
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins survived RULE 1 + regime + outlier filters)",
-			picked, pickedMean, countCleanBins(bins),
+			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after RULE 1, regime, outlier, and ≥%d-run threshold filters)",
+			picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
 		)
 	}
 }
@@ -221,12 +221,14 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 	return bestWAW, bestShrunk, true
 }
 
-// countCleanBins returns the count of bins surviving RULE 1, used for the
-// reasoning string so a reviewer can see how thin the basis was.
-func countCleanBins(bins []wawBin) int {
+// countEligibleBins returns the count of bins selectWAW would actually
+// consider — clean of retries (RULE 1) AND with enough runs to clear
+// the minRunsPerBin floor. Used in the reasoning string so a reviewer
+// can see how thin the basis was.
+func countEligibleBins(bins []wawBin) int {
 	n := 0
 	for _, b := range bins {
-		if b.RunsWithRetries == 0 {
+		if b.RunsWithRetries == 0 && b.TotalRuns >= minRunsPerBin {
 			n++
 		}
 	}

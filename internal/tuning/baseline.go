@@ -44,13 +44,13 @@ func baseline(in Input, profile DriverProfile) Output {
 //
 // Steps, in order:
 //  1. Start at profile.BaselineWAW (the driver's declared default).
-//  2. If profile.ScaleWritersWithCores is true (PG, MySQL — bulk paths
-//     that benefit from parallel writers), bump up to cores/4 if higher.
-//     Mirrors config.applyDefaults's WAW logic so the tuner's baseline
-//     doesn't silently regress the cores-scaled value config would
-//     otherwise have set when no history is available. MSSQL declares
-//     ScaleWritersWithCores: false because TABLOCK serializes BCP, so
-//     this branch is skipped and the declared baseline holds.
+//  2. If profile.ScaleWritersWithCores is true, bump up to cores/4 if
+//     higher. All three current drivers (PG, MSSQL, MySQL) set this true
+//     in their Defaults() — PG and MySQL use bulk paths with native
+//     parallelism (COPY, multi-value INSERT); MSSQL uses parallel BCP
+//     without TABLOCK. Mirrors config.applyDefaults's WAW logic so the
+//     tuner's baseline doesn't silently regress the cores-scaled value
+//     config would otherwise have set when no history is available.
 //  3. Floor at 1 (defensive against zero-valued profiles).
 //  4. Cap at 1 on platforms with virtualized network transports between
 //     dmt and the target (Docker Desktop on macOS/Windows, WSL2). The
@@ -77,8 +77,16 @@ func baselineWAW(in Input, profile DriverProfile) int {
 }
 
 // chunkRowsFromProfile derives the chunk_size in rows from the per-target
-// byte-shaped optimum (#166). Falls back to a 10 MB conservative default
+// byte-shaped optimum (#166), then caps by the protocol-level hard limit
+// (e.g. MySQL @@max_allowed_packet — currently 0 for all drivers; MySQL
+// probe lands separately). Falls back to a 10 MB conservative default
 // for unmeasured targets.
+//
+// Floors at 1 row to prevent migrations from blocking on pathological
+// wide-row + small-byte-budget combinations (e.g. 50 MB row on the
+// 10 MB unmeasured fallback divides to 0). At 1 row per chunk the
+// throughput is awful but the migration still progresses; the alternative
+// of returning 0 silently breaks WriteBatch.
 func chunkRowsFromProfile(profile DriverProfile, avgRowBytes int64) int {
 	const fallbackBytes int64 = 10_000_000
 	if avgRowBytes <= 0 {
@@ -88,5 +96,12 @@ func chunkRowsFromProfile(profile DriverProfile, avgRowBytes int64) int {
 	if bytes <= 0 {
 		bytes = fallbackBytes
 	}
-	return int(bytes / avgRowBytes)
+	rows := int(bytes / avgRowBytes)
+	if rows < 1 {
+		rows = 1
+	}
+	if profile.HardChunkLimit > 0 && rows > profile.HardChunkLimit {
+		rows = profile.HardChunkLimit
+	}
+	return rows
 }
