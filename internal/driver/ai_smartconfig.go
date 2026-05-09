@@ -370,6 +370,10 @@ func (s *SmartConfigAnalyzer) toTuningProfile() tuning.DriverProfile {
 	profile.BaselineWAW = defaults.WriteAheadWriters
 	profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
 	profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
+	// TODO(#166): when the MySQL @@max_allowed_packet probe lands and
+	// HardChunkLimit becomes row-size-dependent, thread the analyzer's
+	// avg_row_bytes into this call. PR1 ships with all drivers returning 0
+	// regardless of input, so passing 0 is a no-op today.
 	profile.HardChunkLimit = d.HardChunkLimit(0)
 	return profile
 }

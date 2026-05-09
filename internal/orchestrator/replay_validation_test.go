@@ -94,11 +94,17 @@ func allHistoryPairs(state *checkpoint.State) (map[historyKey][]checkpoint.AITun
 }
 
 type replayResult struct {
-	totalRows     int
-	wawAgree      int
-	chunkAgree    int
-	disagreements []disagreement
+	totalRows          int
+	wawAgree           int
+	chunkAgree         int
+	disagreementsTotal int          // count across all rows
+	disagreements      []disagreement // capped at maxDisagreementSamples to bound memory
 }
+
+// maxDisagreementSamples caps how many disagreement records replayPair
+// retains. Format prints the first 10; anything past 100 is just memory
+// overhead on a busy database.
+const maxDisagreementSamples = 100
 
 type disagreement struct {
 	timestamp       string
@@ -158,19 +164,22 @@ func replayPair(rows []checkpoint.AITuningRecord) replayResult {
 			result.chunkAgree++
 		}
 		if out.WriteAheadWriters != r.WriteAheadWriters || out.ChunkSize != r.ChunkSize {
-			result.disagreements = append(result.disagreements, disagreement{
-				timestamp:       r.Timestamp.Format("2006-01-02 15:04"),
-				avgRowBytes:     r.AvgRowSizeBytes,
-				cpuCores:        r.CPUCores,
-				memoryGB:        r.MemoryGB,
-				wasAIUsed:       r.WasAIUsed,
-				recordedWAW:     r.WriteAheadWriters,
-				predictedWAW:    out.WriteAheadWriters,
-				recordedChunk:   r.ChunkSize,
-				predictedChunk:  out.ChunkSize,
-				finalThroughput: r.FinalThroughput,
-				chunkRetryCount: r.ChunkRetryCount,
-			})
+			result.disagreementsTotal++
+			if len(result.disagreements) < maxDisagreementSamples {
+				result.disagreements = append(result.disagreements, disagreement{
+					timestamp:       r.Timestamp.Format("2006-01-02 15:04"),
+					avgRowBytes:     r.AvgRowSizeBytes,
+					cpuCores:        r.CPUCores,
+					memoryGB:        r.MemoryGB,
+					wasAIUsed:       r.WasAIUsed,
+					recordedWAW:     r.WriteAheadWriters,
+					predictedWAW:    out.WriteAheadWriters,
+					recordedChunk:   r.ChunkSize,
+					predictedChunk:  out.ChunkSize,
+					finalThroughput: r.FinalThroughput,
+					chunkRetryCount: r.ChunkRetryCount,
+				})
+			}
 		}
 	}
 	return result
@@ -223,6 +232,9 @@ func buildProfile(targetType string) tuning.DriverProfile {
 	profile.BaselineWAW = defaults.WriteAheadWriters
 	profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
 	profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
+	// TODO(#166): pass r.AvgRowSizeBytes once HardChunkLimit becomes
+	// row-size-dependent (MySQL @@max_allowed_packet probe). All drivers
+	// return 0 today regardless of input.
 	profile.HardChunkLimit = d.HardChunkLimit(0)
 	return profile
 }
@@ -254,8 +266,8 @@ func (r replayResult) format(pair historyKey) string {
 			d.finalThroughput, d.chunkRetryCount,
 		)
 	}
-	if len(r.disagreements) > maxShown {
-		out += fmt.Sprintf("  ... and %d more\n", len(r.disagreements)-maxShown)
+	if r.disagreementsTotal > maxShown {
+		out += fmt.Sprintf("  ... and %d more\n", r.disagreementsTotal-maxShown)
 	}
 	return out
 }
