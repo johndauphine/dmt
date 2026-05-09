@@ -1429,6 +1429,62 @@ End-to-end transfer throughput across the 36-run matrix sat in 299K–849K rows/
 
 Counterintuitively, **Sonnet's runs were consistently the lowest-throughput** (566K–655K) despite being the only model to pick a correct `chunk_size`. On SO2010 at this scale, `chunk_size = 50000` is not actually OOM-blowing the ~5 GB working set the model is told to respect — so the clamp's value is **safety on tight-budget hosts**, not throughput on this 48GB host. The clamp pays dividends where the model's mispick would actually exceed RAM.
 
+## Smartconfig Memory-Budget Compliance — Re-Sweep After PR #163 Imperative-Prompt Change
+
+PR #163 (issue #162) rewrote `buildMemoryBudgetBlock` to be imperative: leads with `**CRITICAL CONSTRAINT — chunk_size MUST NOT exceed N**`, names the post-AI clamp as the consequence of violation, and emits a concrete `**Default action: set chunk_size = <default>**` line where `default = min(50000, ceiling)`. Two conflicting anchors ("50000 is a strong default", "do not under-provision") were rescoped so the budget block isn't fighting the rest of the prompt.
+
+Same matrix as the previous section (M5 Pro 48GB, SO2010, MSSQL→PG, `drop_recreate`, no DDL, `migration.ai_adjust: false`, state dir wiped per run, single run per cell). Code: `492aa08` (post-merge of #163, including the loose-budget-anchor fix from review).
+
+### Sub-budget Go-clamp engagements per model (lower = better)
+
+| Model | OLD prompt | NEW prompt | Δ |
+|---|---:|---:|---|
+| Sonnet 4.6 | 0 / 4 | **0 / 4** | unchanged (already perfect) |
+| Gemma 4 26B-MLX | 1 / 4 | **0 / 4** | now perfect |
+| gpt-oss-20B | 4 / 4 | **0 / 4** | full fix |
+| Qwen3 Coder 30B | 4 / 4 | **0 / 4** | full fix |
+| Gemma 4 e4b-MLX | 4 / 4 | **0 / 4** | full fix |
+| Haiku 4.5 | 4 / 4 | **1 / 4** | partial — still clamps at 2048 MB only |
+
+**5 of 6 models go from clamp-needing to perfect compliance on the new prompt.** Issue #162's success threshold ("≥4/6 models bind on all 4 sub-budget cells") is exceeded. Haiku is the lone holdout, clamping only at 2048 MB (raw pick rounds up past the 43948 ceiling).
+
+### Per-budget detail — applied `chunk_size`
+
+| Budget | Sonnet OLD→NEW | Haiku OLD→NEW | gpt-oss OLD→NEW | Qwen3-Coder OLD→NEW | Gemma 26B OLD→NEW | Gemma e4b OLD→NEW |
+|---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 256 MB | 5000 → 5493 | 5493\* → 5493 | 5493\* → 5493 | 5493\* → 5493 | 5493\* → 5493 | 5493\* → 5493 |
+| 512 MB | 10000 → 10987 | 10987\* → 10987 | 10987\* → 10987 | 10987\* → 10987 | 10987 → 10987 | 10987\* → 10987 |
+| 1024 MB | 21974 → 21974 | 21974\* → 21974 | 21974\* → 21974 | 21974\* → 21974 | 21974 → 21974 | 21974\* → 21974 |
+| 2048 MB | 43000 → 43948 | 43948\* → 43948\* | 43948\* → 43948 | 43948\* → 43948 | 43948 → 43948 | 43948\* → 43948 |
+| 4096 MB | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 |
+| 8192 MB | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 | 50000 → 50000 |
+
+`*` = Go-side clamp fired (raw pick was 50000 in every starred cell, both prompts).
+
+Two notes on cells that look interesting in the raw sweep:
+
+- **Sonnet 4.6 at 256/512 MB** picks the *exact* safe ceiling (5493 / 10987) on the new prompt where it previously rounded down to clean numbers (5000 / 10000). Tighter binding to the printed value.
+- **Loose budgets (4096 / 8192 MB)** were unstable mid-PR. An earlier draft of #163 caused Haiku, gpt-oss-20B, Qwen3-Coder, and Gemma 4 e4b to break through the 50000 anchor *upward* to 87896 / 175792 (the actual safe ceiling at those budgets). Copilot review flagged this as an unmeasured behavioral change conflicting with the well-tested 50000 default; the merged version pins `default = min(50000, ceiling)` to keep the loose-budget anchor at 50000. **Re-running this sweep against current `main` will see 50000 at 4096/8192 across all six models, not the upward jumps.**
+
+### AI prompt latency — old vs new (median per model)
+
+| Model | OLD median | NEW median | Δ |
+|---|---:|---:|---:|
+| Sonnet 4.6 | 10.1 s | 9.5 s | ~ same |
+| Haiku 4.5 | 4.8 s | 5.1 s | +6% |
+| Gemma 26B-MLX | 4.8 s | 5.1 s | +6% |
+| Gemma e4b-MLX | 5.8 s | 6.4 s | +10% |
+| Qwen3-Coder 30B | 4.5 s | 6.4 s | +42% |
+| gpt-oss-20B | 4.4 s | 6.6 s | +50% |
+
+Local models pay a noticeable latency tax (~10–50%) on the longer + more imperative prompt; cloud models are unchanged. Still well under the smartconfig timeout on every model (~30 s default).
+
+### Takeaways
+
+- **Prompt engineering is doing the work**: post-#163, the Go-side clamp engages at most once per six runs across the matrix (Haiku's 2048 MB cell). On the old prompt it engaged 17 times across the same six models × four sub-budget cells.
+- **The clamp stays**: per `internal/driver/ai_smartconfig.go:579–582`, soft prompt constraints don't bind under sufficient pressure (the original cap=200 / cap=500 stress tests still hit pre-clamp), so removing the clamp is not on the table. It's just doing dramatically less work.
+- **Throughput at this scale is unchanged**. Same caveat as the previous section: at 48 GB host RAM and SO2010 (~5 GB working set), `chunk_size = 50000` was never actually OOM-blowing — the clamp / prompt change is correctness-on-tight-budget-hosts, not a speed dial. End-to-end transfer throughput across the new sweep stayed in the 300K–800K rows/s band, same as the OLD prompt.
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
