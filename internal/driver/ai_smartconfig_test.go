@@ -550,7 +550,11 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 		"Avg row size: 248 bytes",
 		"baseline workers=16",
 		"safe chunk_size ceiling is ~1231090 rows", // int math: 27952 * 1MiB / (16*6*248)
-		"Doubling workers OR doubling",
+		"CRITICAL CONSTRAINT",                      // imperative framing (issue #162)
+		"MUST NOT exceed 1231090",                  // ceiling restated as hard cap
+		"Default action: set chunk_size = 1231090", // ceiling-as-default
+		"silently auto-clamp",                      // consequence framing
+		"doubling workers OR doubling",             // scaling rule still present
 		"Platform=wsl2",
 	}
 	for _, m := range musts {

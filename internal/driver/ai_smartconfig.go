@@ -653,6 +653,13 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // the baseline worker/buffer counts. Doing the math in Go (rather than asking
 // the LLM to apply the formula itself) closes the bug class addressed by
 // PR #154 — observed LLMs miscompute by 7x in either direction on this input.
+//
+// Wording is deliberately imperative. Issue #162 sweep evidence shows that
+// 4 of 6 tested models (Haiku 4.5, Qwen3 Coder 30B, gpt-oss-20B, Gemma 4
+// e4b) ignore a descriptive budget block entirely and pick a constant
+// chunk_size=50000 regardless of budget. The CRITICAL framing + explicit
+// auto-clamp consequence + ceiling-as-default ("set chunk_size=<ceiling>")
+// is intended to bind the LLM rather than describe a passive upper bound.
 func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	avg := input.AvgRowBytes
 	if avg <= 0 {
@@ -669,9 +676,11 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	fmt.Fprintf(&b, "- Memory budget: %d MB (%s)\n", budgetMB, budgetSource)
 	fmt.Fprintf(&b, "- Avg row size: %d bytes\n", avg)
 	fmt.Fprintf(&b, "- At baseline workers=%d, read_ahead_buffers=4, write_ahead_writers=2, the safe chunk_size ceiling is ~%d rows.\n", baselineWorkers, maxChunkBaseline)
-	b.WriteString("- Doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. Adjust accordingly.\n")
+	fmt.Fprintf(&b, "- **CRITICAL CONSTRAINT — chunk_size MUST NOT exceed %d.** This is a HARD ceiling, not a suggestion. If you output a chunk_size above %d, the system will silently auto-clamp it down (overriding your recommendation) and your reasoning about throughput will be wrong. The 50000 default mentioned elsewhere in this prompt DOES NOT APPLY when it exceeds the ceiling above — the ceiling wins.\n", maxChunkBaseline, maxChunkBaseline)
+	fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", maxChunkBaseline)
+	b.WriteString("- Scaling rule: doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. If you change those knobs from baseline, recompute the ceiling and stay under it.\n")
 	if input.Platform == "wsl2" {
-		b.WriteString("- Platform=wsl2: exceeding the budget can OOM-kill the WSL2 VM. Stay strictly within budget.\n")
+		b.WriteString("- Platform=wsl2: exceeding the budget can also OOM-kill the WSL2 VM. The auto-clamp catches the chunk_size case; OS-level OOM still kills the run.\n")
 	}
 	return b.String()
 }
@@ -1165,11 +1174,11 @@ Reference baseline (what the system would use without AI tuning):
 - write_ahead_writers: 2
 - parallel_readers: 2
 - max_partitions: %d
-Your job is to BEAT this baseline using the historical data and table characteristics. Stay within the memory budget above; otherwise do not under-provision.
+Your job is to BEAT this baseline using the historical data and table characteristics. The memory budget block above is a HARD constraint — observe it first, then within that envelope do not under-provision other knobs.
 
 Parameters to tune:
 - workers: Parallel migration workers (scale with CPU cores, baseline is cpu_cores - 2)
-- chunk_size: Rows per batch (50000 is a strong default — only change if historical data shows a better value)
+- chunk_size: Rows per batch. 50000 is a default ONLY when the memory-budget ceiling above permits it. When the ceiling is below 50000, the ceiling WINS — set chunk_size to the ceiling, not 50000.
 - read_ahead_buffers: Read buffers per worker (4 is a strong default)
 - write_ahead_writers: Write threads per worker (2 is a strong default)
 - parallel_readers: Parallel readers for large tables (increase for tables with millions of rows)
@@ -1184,7 +1193,7 @@ Parameters to tune:
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck. Do NOT under-provision workers.
-3. chunk_size=50000 is well-tested. Only deviate if historical throughput data clearly shows a better value.
+3. chunk_size=50000 is well-tested AT BASELINE WORKERS AND UNCAPPED MEMORY. When the memory-budget block above shows a ceiling below 50000, the ceiling overrides this default unconditionally — pick the ceiling. Outside that case, only deviate from 50000 if historical throughput data clearly shows a better value.
 4. read_ahead_buffers=4 is a well-tested floor — do not reduce below this. For write_ahead_writers, consult the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary in the historical context. The rule is mechanical and fires only on observed retries:
    (a) IF a waw value has a non-zero retry rate AND a lower waw has either zero retry rate or hasn't been tried, you MUST pick the lower value.
    (b) IF every waw row in the summary has 0%% retry rate over a meaningful sample (>=3 runs each), the rule does NOT apply — choose by observed throughput from the trajectory.
