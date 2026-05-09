@@ -148,10 +148,14 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	if avg <= 0 {
 		avg = 500
 	}
-	out.ChunkSize = int(pickedCSBytes / avg)
+	csRows := int(pickedCSBytes / avg)
+	if csRows < 1 {
+		csRows = 1 // mirror chunkRowsFromProfile's floor (Copilot PR #183 review)
+	}
+	out.ChunkSize = csRows
 	out.Reasoning = appendReasoning(out.Reasoning,
 		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB) over %d filtered rows; predicted %.0f rows/s",
-		pickedWAW, out.ChunkSize, float64(pickedCSBytes)/1024/1024, len(rows), predicted,
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, len(rows), predicted,
 	)
 	return true
 }

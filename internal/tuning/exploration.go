@@ -1,6 +1,7 @@
 package tuning
 
 import (
+	"fmt"
 	"math/rand/v2"
 )
 
@@ -97,9 +98,16 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 		}
 		out.WriteAheadWriters = cand.WAW
 		out.ChunkSize = csRows
+		// Label the run within the cold-start window when we're in it;
+		// for forced-explore on a bucket past K runs, just report the
+		// grid-cell index so we don't print "run 42/6" (Copilot review).
+		runLabel := fmt.Sprintf("probe idx %d/%d", idx+1, len(explorationGrid))
+		if bucketCount < explorationGridRuns {
+			runLabel = fmt.Sprintf("run %d/%d", bucketCount+1, explorationGridRuns)
+		}
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"exploration: planned grid run %d/%d (WAW=%d, CS=%.1f×optimum=%.1fMB)",
-			bucketCount+1, explorationGridRuns, cand.WAW, cand.CSFraction, float64(csBytes)/1024/1024,
+			"exploration: planned grid %s (WAW=%d, CS=%.1f×optimum=%.1fMB)",
+			runLabel, cand.WAW, cand.CSFraction, float64(csBytes)/1024/1024,
 		)
 		return
 	}
@@ -125,38 +133,38 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 
 // applyEpsilonPerturbation nudges the picked (WAW, ChunkSize) by one
 // step in a randomly-chosen direction. The nudge is bounded by the WAW
-// grid and respects HardChunkLimit; if the chosen perturbation would
-// violate a filter, falls through to the next direction so we always
-// generate *some* variance.
+// grid, RULE 1 (skipWAWs), and HardChunkLimit; if the chosen direction
+// would violate a filter, falls through to the next direction so we
+// always generate *some* variance — but never lands on a WAW that has
+// historical retries (RULE 1 is a hard exclusion across both selection
+// and exploration).
 //
 // Picks one of four directions:
 //
-//	WAW + 1   (capped at maxWAWForGrid)
-//	WAW − 1   (floored at 1)
+//	WAW + 1   (capped at maxWAWForGrid; skipped if WAW+1 ∈ skipWAWs)
+//	WAW − 1   (floored at 1; skipped if WAW−1 ∈ skipWAWs)
 //	CS × 1.5  (capped at HardChunkLimit if set)
 //	CS × 0.67 (floored at 1 row)
-func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile) {
+func applyEpsilonPerturbation(out *Output, profile DriverProfile, skipWAWs map[int]bool) {
 	type direction struct {
 		name  string
 		apply func(*Output) bool // returns true when the nudge was actually applied
 	}
-	avg := in.AvgRowBytes
-	if avg <= 0 {
-		avg = 500
-	}
 	dirs := []direction{
 		{"WAW+1", func(o *Output) bool {
-			if o.WriteAheadWriters >= maxWAWForGrid {
+			next := o.WriteAheadWriters + 1
+			if next > maxWAWForGrid || skipWAWs[next] {
 				return false
 			}
-			o.WriteAheadWriters++
+			o.WriteAheadWriters = next
 			return true
 		}},
 		{"WAW-1", func(o *Output) bool {
-			if o.WriteAheadWriters <= 1 {
+			next := o.WriteAheadWriters - 1
+			if next < 1 || skipWAWs[next] {
 				return false
 			}
-			o.WriteAheadWriters--
+			o.WriteAheadWriters = next
 			return true
 		}},
 		{"CS×1.5", func(o *Output) bool {

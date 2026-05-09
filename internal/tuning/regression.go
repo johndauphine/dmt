@@ -90,10 +90,22 @@ type pairKey struct {
 	source, target string
 }
 
+// safeAvgRowBytes guards against historical rows that recorded
+// AvgRowBytes=0 (older schema, manual inserts, or corrupted writes).
+// Falls back to 500 — the same heuristic the analyzer's
+// calculateAvgRowSize uses when no row stats are available (#157).
+func safeAvgRowBytes(v int64) int64 {
+	if v <= 0 {
+		return 500
+	}
+	return v
+}
+
 // fitRegression builds the design matrix from the supplied rows and
-// solves for β via QR. Standardizes numeric features for stability.
-// Rows must have FinalThroughput > 0 (incomplete runs are excluded by
-// the caller in PR1's pipeline).
+// solves for β via ridge-regularized normal equations (NOT pure QR;
+// see the package comment for why). Standardizes numeric features for
+// stability. Rows must have FinalThroughput > 0 (incomplete runs are
+// excluded by the caller in PR1's pipeline).
 func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	if len(rows) < minRowsForRegression {
 		return nil, errInsufficientRowsForRegression
@@ -107,8 +119,8 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	var wawSqSum, csSqSum, logAvgSqSum float64
 	for _, r := range rows {
 		w := float64(r.WriteAheadWriters)
-		c := float64(int64(r.ChunkSize) * r.AvgRowBytes) // CS in bytes
-		la := math.Log(math.Max(1, float64(r.AvgRowBytes)))
+		c := float64(int64(r.ChunkSize) * safeAvgRowBytes(r.AvgRowBytes)) // CS in bytes
+		la := math.Log(float64(safeAvgRowBytes(r.AvgRowBytes)))
 		wawSum += w
 		csSum += c
 		logAvgSum += la
@@ -139,8 +151,8 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 
 	for i, r := range rows {
 		wz := standardize(float64(r.WriteAheadWriters), wawMean, wawStd)
-		cz := standardize(float64(int64(r.ChunkSize)*r.AvgRowBytes), csMean, csStd)
-		laz := standardize(math.Log(math.Max(1, float64(r.AvgRowBytes))), logAvgMean, logAvgStd)
+		cz := standardize(float64(int64(r.ChunkSize)*safeAvgRowBytes(r.AvgRowBytes)), csMean, csStd)
+		laz := standardize(math.Log(float64(safeAvgRowBytes(r.AvgRowBytes))), logAvgMean, logAvgStd)
 
 		X.Set(i, 0, 1)
 		X.Set(i, 1, wz)
@@ -247,9 +259,17 @@ func distinctPairs(rows []HistoryRecord) []pairKey {
 	return out
 }
 
-// distinctModes is the same shape for target_mode. HistoryRecord doesn't
-// carry target_mode today, so this returns an empty slice — kept here so
-// PR2's exploration can populate the field without a structural change.
+// distinctModes is the placeholder for target_mode encoding. The model
+// spec calls for target_mode as a categorical fixed effect, but
+// HistoryRecord doesn't carry target_mode today (the AITuningRecord
+// schema in checkpoint never persisted it). Returns an empty slice so
+// the design matrix has zero mode columns — fitRegression handles this
+// gracefully and Predict's mode parameter is silently ignored.
+//
+// A follow-up issue should add TargetMode to HistoryRecord + adapter +
+// schema migration to ai_tuning_history; once done this function can
+// return the distinct modes seen and the encoding loop in fitRegression
+// will start producing real coefficients.
 func distinctModes(rows []HistoryRecord) []string {
 	_ = rows
 	return nil

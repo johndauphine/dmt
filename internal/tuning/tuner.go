@@ -14,7 +14,11 @@
 // (#179) adds quadratic regression + planned-grid exploration.
 package tuning
 
-import "time"
+import (
+	"time"
+
+	"github.com/johndauphine/dmt/internal/logging"
+)
 
 // Input carries the system + workload inputs the tuner reasons about.
 // All fields are populated from the smartconfig analyzer's existing
@@ -167,33 +171,39 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	out := baseline(in, profile)
 
 	// Fetch + filter once so both exploration and history-selection see
-	// the same row set.
+	// the same row set. Track whether the fetch actually succeeded so a
+	// failed fetch doesn't masquerade as cold-start (Copilot review on
+	// PR #183).
 	var rows []HistoryRecord
+	historyAvailable := false
 	if history != nil {
 		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
+			historyAvailable = true
 			rows = filterByRegime(r, in, currentTuning)
 			rows = filterOutliers(rows)
+		} else {
+			logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
 		}
 	}
 
 	// Exploration enters three ways:
 	//   1. The user forced it via --explore, regardless of history state.
-	//   2. We have a history backend AND the bucket is in cold-start
-	//      (< explorationGridRuns runs) — the planned grid fills out
-	//      the regression's training data.
+	//   2. We have a working history backend AND the bucket is in
+	//      cold-start (< explorationGridRuns runs) — the planned grid
+	//      fills out the regression's training data.
 	//   3. Regime-drift detector fires — throughput at a fixed (WAW, CS)
 	//      config has shifted materially, so the regression's training
 	//      data is stale and we re-explore to refresh.
-	// Nil-history (file-state checkpoint, fresh install) does NOT enter
-	// exploration on its own — there's no place to learn from, so the
-	// baseline output is what the user gets.
-	driftDetected := history != nil && detectRegimeDrift(rows)
-	if in.ForceExplore || driftDetected || (history != nil && shouldExplore(in, len(rows))) {
+	// Nil-history OR a failed history fetch does NOT enter exploration
+	// on its own — there's nowhere to learn from / persist the probe
+	// to, so the baseline output is what the user gets.
+	driftDetected := historyAvailable && detectRegimeDrift(rows)
+	if in.ForceExplore || driftDetected || (historyAvailable && shouldExplore(in, len(rows))) {
 		applyGridExploration(&out, in, profile, len(rows), wawsWithRetries(rows))
 	} else if len(rows) > 0 {
 		applyHistorySelection(&out, in, profile, rows)
 		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-			applyEpsilonPerturbation(&out, in, profile)
+			applyEpsilonPerturbation(&out, profile, wawsWithRetries(rows))
 		}
 	}
 

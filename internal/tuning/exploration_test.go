@@ -128,13 +128,12 @@ func TestShouldEpsilonPerturb_BoundaryProbabilities(t *testing.T) {
 // pushes outside the WAW grid bounds. Doesn't pin which direction
 // (random) — just that the change happened and stayed in range.
 func TestApplyEpsilonPerturbation_NudgesOneStep(t *testing.T) {
-	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 
 	for trial := 0; trial < 50; trial++ {
 		out := Output{WriteAheadWriters: 3, ChunkSize: 30000}
 		original := out
-		applyEpsilonPerturbation(&out, in, profile)
+		applyEpsilonPerturbation(&out, profile, nil)
 		changed := out.WriteAheadWriters != original.WriteAheadWriters || out.ChunkSize != original.ChunkSize
 		if !changed {
 			t.Errorf("trial %d: perturbation didn't change anything (WAW=%d, CS=%d)",
