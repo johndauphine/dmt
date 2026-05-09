@@ -267,12 +267,18 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 			WriteAheadWriters:       2,
 			ParallelReaders:         4,
 			MaxPartitions:           3,
+			// Pre-set to a stale value (representing the smartconfig-time
+			// estimate, which is wrong once user overrides land below).
+			// Issue #160 — without the recompute, this stale 1135 would
+			// be saved alongside the post-override chunk_size=14000.
+			EstimatedMemMB: 1135,
 		},
 	}
 
-	// Simulate deferred save (what Analyze() does)
+	// Simulate deferred save (what Analyze() does). AvgRowBytes is what the
+	// recompute uses to derive the post-override memory estimate.
 	analyzer.pendingSave = &pendingTuningSave{
-		input:       AutoTuneInput{CPUCores: 15, MemoryGB: 24},
+		input:       AutoTuneInput{CPUCores: 15, MemoryGB: 24, AvgRowBytes: 500},
 		wasAIUsed:   true,
 		aiReasoning: "test reasoning",
 	}
@@ -319,6 +325,70 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 	}
 	if mock.saved.TargetDBType != "postgres" {
 		t.Errorf("TargetDBType = %q, want postgres", mock.saved.TargetDBType)
+	}
+
+	// Issue #160: the saved EstimatedMemoryMB must reflect the post-override
+	// params, not the smartconfig-time stale value (1135 above). With
+	// workers=12, ra=4, wa=3, chunk=14000, avg=500, the formula gives
+	// 12 * 7 * 14000 * 500 / 1048576 = 561 MB.
+	wantMem := ComputeEstimatedMemMB(12, 4, 3, 14000, 500)
+	if mock.saved.EstimatedMemoryMB != wantMem {
+		t.Errorf("EstimatedMemoryMB = %d, want %d (recomputed from post-override params; stale pre-save value was 1135)",
+			mock.saved.EstimatedMemoryMB, wantMem)
+	}
+}
+
+// TestSaveTuningWithActualParams_NoOverride pins the no-op case from issue
+// #160's acceptance criteria: when ActualParams matches what smartconfig
+// already had in suggestions, the saved EstimatedMemoryMB equals the same
+// formula applied to those params (no surprise behavior).
+func TestSaveTuningWithActualParams_NoOverride(t *testing.T) {
+	mock := &mockHistoryProvider{}
+
+	const (
+		workers     = 4
+		chunk       = 50000
+		readAhead   = 4
+		writeAhead  = 2
+		parReaders  = 2
+		maxParts    = 4
+		avgRowBytes = 500
+	)
+	preSave := ComputeEstimatedMemMB(workers, readAhead, writeAhead, chunk, avgRowBytes)
+
+	analyzer := &SmartConfigAnalyzer{
+		dbType:          "mssql",
+		targetDBType:    "postgres",
+		historyProvider: mock,
+		suggestions: &SmartConfigSuggestions{
+			Workers:                 workers,
+			ChunkSizeRecommendation: chunk,
+			ReadAheadBuffers:        readAhead,
+			WriteAheadWriters:       writeAhead,
+			ParallelReaders:         parReaders,
+			MaxPartitions:           maxParts,
+			EstimatedMemMB:          preSave,
+		},
+	}
+	analyzer.pendingSave = &pendingTuningSave{
+		input: AutoTuneInput{CPUCores: 8, MemoryGB: 16, AvgRowBytes: avgRowBytes},
+	}
+
+	analyzer.SaveTuningWithActualParams(ActualParams{
+		Workers:           workers,
+		ChunkSize:         chunk,
+		ReadAheadBuffers:  readAhead,
+		WriteAheadWriters: writeAhead,
+		ParallelReaders:   parReaders,
+		MaxPartitions:     maxParts,
+	})
+
+	if mock.saved == nil {
+		t.Fatal("expected record to be saved")
+	}
+	if mock.saved.EstimatedMemoryMB != preSave {
+		t.Errorf("EstimatedMemoryMB = %d, want %d (matching ActualParams should preserve the pre-save formula value)",
+			mock.saved.EstimatedMemoryMB, preSave)
 	}
 }
 

@@ -455,6 +455,19 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
 	s.suggestions.WriteAheadWriters = actual.WriteAheadWriters
 	s.suggestions.ParallelReaders = actual.ParallelReaders
 	s.suggestions.MaxPartitions = actual.MaxPartitions
+	// Re-derive EstimatedMemMB from the post-override params so the value
+	// saved to ai_tuning_history matches the params actually used (issue
+	// #160). User overrides on chunk_size / workers / buffers between
+	// smartconfig analysis and migration runtime would otherwise leave the
+	// pre-override estimate in place, polluting the trajectory that future
+	// smartconfig runs read back as historical context.
+	s.suggestions.EstimatedMemMB = ComputeEstimatedMemMB(
+		actual.Workers,
+		actual.ReadAheadBuffers,
+		actual.WriteAheadWriters,
+		actual.ChunkSize,
+		ps.input.AvgRowBytes,
+	)
 
 	s.saveTuningResult(ps.input, ps.wasAIUsed, ps.aiReasoning, actual)
 }
