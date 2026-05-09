@@ -661,6 +661,27 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 	)
 }
 
+// chunkAdvice resolves the per-target chunk_size advice (#166).
+// usingFallback is true when target is nil or its OptimumBulkChunkBytes
+// is unset, so the prompt can distinguish "measured per-target value"
+// from "conservative default for unmeasured target."
+func chunkAdvice(target Driver, avgRowBytes int64) (optimumRows, hardLimit int, usingFallback bool) {
+	const fallbackOptimumBytes int64 = 10_000_000
+	if avgRowBytes <= 0 {
+		avgRowBytes = 500
+	}
+	optimumBytes := fallbackOptimumBytes
+	usingFallback = true
+	if target != nil {
+		if v := target.Defaults().OptimumBulkChunkBytes; v > 0 {
+			optimumBytes = v
+			usingFallback = false
+		}
+		hardLimit = target.HardChunkLimit(avgRowBytes)
+	}
+	return int(optimumBytes / avgRowBytes), hardLimit, usingFallback
+}
+
 // buildMemoryBudgetBlock renders the prompt section that tells the LLM how
 // much memory it has to work with and what the safe chunk_size ceiling is at
 // the baseline worker/buffer counts. Doing the math in Go (rather than asking
@@ -675,11 +696,12 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // to bind the LLM rather than describe a passive upper bound.
 //
 // The default is min(target-optimum, memory-ceiling, target-hard-limit).
-// target-optimum comes from Driver.OptimumBulkChunkBytes / avg_row_bytes
-// with a 10 MB conservative fallback for unmeasured targets. PG is seeded
-// at 25 MB (50000 rows at SO2010's ~500 B/row) per the #164 sweep and #166
-// confirmation. target-hard-limit is currently 0 for all drivers; the
-// MySQL @@max_allowed_packet probe lands in a follow-up to #166.
+// target-optimum comes from Driver.Defaults().OptimumBulkChunkBytes /
+// avg_row_bytes with a 10 MB conservative fallback for unmeasured targets.
+// PG is seeded at 25 MB (50000 rows at SO2010's ~500 B/row) per the #164
+// sweep and #166 confirmation. target-hard-limit is currently 0 for all
+// drivers; the MySQL @@max_allowed_packet probe lands in a follow-up
+// to #166.
 //
 // Issue #164 measured chunk_size 50000 vs 87896/100000/175792/250000 at
 // 3 runs each (M5 Pro 48GB, SO2010 mssql→pg, all other knobs locked):
@@ -706,18 +728,7 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int, target Dri
 	const baselineWrite = 2
 	maxChunkBaseline := computeSafeChunkSize(budgetMB, baselineWorkers, baselineRead, baselineWrite, avg)
 
-	// Per-target chunk advice (#166): byte-shaped optimum + protocol-level
-	// hard limit. target == nil falls through to a 10 MB conservative default.
-	const fallbackOptimumBytes int64 = 10_000_000
-	optimumBytes := fallbackOptimumBytes
-	var hardLimit int
-	if target != nil {
-		if v := target.Defaults().OptimumBulkChunkBytes; v > 0 {
-			optimumBytes = v
-		}
-		hardLimit = target.HardChunkLimit(avg)
-	}
-	optimumRows := int(optimumBytes / avg)
+	optimumRows, hardLimit, usingFallback := chunkAdvice(target, avg)
 	defaultChunk := maxChunkBaseline
 	if defaultChunk > int64(optimumRows) {
 		defaultChunk = int64(optimumRows)
@@ -726,15 +737,30 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int, target Dri
 		defaultChunk = int64(hardLimit)
 	}
 
+	// Distinguish measured-per-target from conservative-fallback in prose
+	// (review feedback on PR #180): saying "per-target optimum" when the
+	// value is actually the 10 MB unmeasured fallback misleads the LLM into
+	// treating it as authoritative.
+	optimumLabel := fmt.Sprintf("per-target optimum for %s", input.TargetType)
+	optimumNoun := "per-target optimum"
+	if usingFallback {
+		targetTag := input.TargetType
+		if targetTag == "" {
+			targetTag = "unknown"
+		}
+		optimumLabel = fmt.Sprintf("conservative 10 MB default (target %s unmeasured per #166)", targetTag)
+		optimumNoun = "conservative 10 MB default"
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Memory budget: %d MB (%s)\n", budgetMB, budgetSource)
 	fmt.Fprintf(&b, "- Avg row size: %d bytes\n", avg)
 	fmt.Fprintf(&b, "- At baseline workers=%d, read_ahead_buffers=4, write_ahead_writers=2, the safe chunk_size ceiling is ~%d rows.\n", baselineWorkers, maxChunkBaseline)
 	fmt.Fprintf(&b, "- **CRITICAL CONSTRAINT — chunk_size MUST NOT exceed %d.** This is a HARD cap, not a suggestion. If you output a chunk_size above %d, the system will silently auto-clamp it down (overriding your recommendation) and your reasoning about throughput will be wrong. The ceiling is a cap, not a target — when %d fits under it, prefer %d.\n", maxChunkBaseline, maxChunkBaseline, optimumRows, optimumRows)
 	if maxChunkBaseline < int64(optimumRows) {
-		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline; per-target optimum %d does not fit this budget). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", defaultChunk, optimumRows)
+		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline; %s of %d does not fit this budget). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", defaultChunk, optimumNoun, optimumRows)
 	} else {
-		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the per-target optimum for %s; the %d ceiling above is a hard cap, not a target). Only deviate if historical throughput data clearly shows a better value, and never above the ceiling.\n", defaultChunk, input.TargetType, maxChunkBaseline)
+		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the %s; the %d ceiling above is a hard cap, not a target). Only deviate if historical throughput data clearly shows a better value, and never above the ceiling.\n", defaultChunk, optimumLabel, maxChunkBaseline)
 	}
 	b.WriteString("- Scaling rule: doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. If you change those knobs from baseline, recompute the ceiling and stay under it.\n")
 	if input.Platform == "wsl2" {
@@ -1212,6 +1238,7 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 	// compute estimated_memory_mb themselves.
 	target, _ := Get(input.TargetType) // nil if not registered; falls through to conservative default
 	memBudget := buildMemoryBudgetBlock(input, baselineWorkers, target)
+	chunkAnchor, _, _ := chunkAdvice(target, input.AvgRowBytes) // per-target rows for prompt consistency (#166)
 
 	prompt := fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
@@ -1228,7 +1255,7 @@ Memory budget (computed for you — do not redo this arithmetic):
 
 Reference baseline (what the system would use without AI tuning):
 - workers: %d (cpu_cores - 2, minimum 2)
-- chunk_size: 50000
+- chunk_size: %d (per-target anchor; see "Default action" in the memory budget block above for source)
 - read_ahead_buffers: 4
 - write_ahead_writers: 2
 - parallel_readers: 2
@@ -1237,7 +1264,7 @@ Your job is to BEAT this baseline using the historical data and table characteri
 
 Parameters to tune:
 - workers: Parallel migration workers (scale with CPU cores, baseline is cpu_cores - 2)
-- chunk_size: Rows per batch. 50000 is a default ONLY when the memory-budget ceiling above permits it. When the ceiling is below 50000, the ceiling WINS — set chunk_size to the ceiling, not 50000.
+- chunk_size: Rows per batch. The default is the per-target anchor in the memory budget block above. When the memory ceiling is below that anchor, the ceiling WINS — set chunk_size to the ceiling.
 - read_ahead_buffers: Read buffers per worker (4 is a strong default)
 - write_ahead_writers: Write threads per worker (2 is a strong default)
 - parallel_readers: Parallel readers for large tables (increase for tables with millions of rows)
@@ -1252,7 +1279,7 @@ Parameters to tune:
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck. Do NOT under-provision workers.
-3. chunk_size=50000 is well-tested AT BASELINE WORKERS AND UNCAPPED MEMORY. When the memory-budget block above shows a ceiling below 50000, the ceiling overrides this default unconditionally — pick the ceiling. Outside that case, only deviate from 50000 if historical throughput data clearly shows a better value.
+3. The chunk_size anchor is set in the memory budget block above as "Default action" (a per-target byte-shaped optimum). When the memory ceiling is below the anchor, the ceiling overrides — pick the ceiling. Otherwise, only deviate from the anchor if historical throughput data clearly shows a better value.
 4. read_ahead_buffers=4 is a well-tested floor — do not reduce below this. For write_ahead_writers, consult the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE summary in the historical context. The rule is mechanical and fires only on observed retries:
    (a) IF a waw value has a non-zero retry rate AND a lower waw has either zero retry rate or hasn't been tried, you MUST pick the lower value.
    (b) IF every waw row in the summary has 0%% retry rate over a meaningful sample (>=3 runs each), the rule does NOT apply — choose by observed throughput from the trajectory.
@@ -1279,7 +1306,7 @@ Respond with ONLY a JSON object:
   "observed_retry_rates": "<verbatim copy of the per-waw lines from the WRITE_AHEAD_WRITERS vs CHUNK RETRY RATE block (the FULL-HISTORY aggregate). DO NOT count waw values from the bounded PARAMETER TRAJECTORY rows — its denominators are wrong because the trajectory is bounded. If a waw value appears in the aggregate block, cite ITS denominator from there even if that waw doesn't appear in the bounded trajectory. Format: 'waw=1: 0/35 (0.0%%); waw=2: 0/15 (0.0%%); waw=4: 0/4 (0.0%%)'. If no aggregate block exists (no completed history), write 'no history'.>",
   "reasoning": "<brief explanation; must be consistent with observed_retry_rates and must not assert mechanisms (saturation, pressure, contention) unless backed by data shown in this prompt>"
 }`, string(inputJSON), historicalContext, input.Platform, input.CPUCores, memConstraint, memBudget,
-		baselineWorkers, baselineWorkers)
+		baselineWorkers, chunkAnchor, baselineWorkers)
 
 	response, err := s.aiMapper.CallAI(ctx, prompt)
 	if err != nil {
@@ -1434,6 +1461,7 @@ func buildOfflinePrompt(input AutoTuneInput, inputJSON string) string {
 
 	target, _ := Get(input.TargetType) // nil if not registered; falls through to conservative default
 	memBudget := buildMemoryBudgetBlock(input, baselineWorkers, target)
+	chunkAnchor, _, _ := chunkAdvice(target, input.AvgRowBytes) // per-target rows for prompt consistency (#166)
 
 	return fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
@@ -1450,7 +1478,7 @@ Memory budget (computed for you — do not redo this arithmetic):
 
 Reference baseline (what the system would use without AI tuning):
 - workers: %d (cpu_cores - 2, minimum 2)
-- chunk_size: 50000
+- chunk_size: %d (per-target anchor; see "Default action" in the memory budget block above for source)
 - read_ahead_buffers: 4
 - write_ahead_writers: 2
 - parallel_readers: 2
@@ -1460,7 +1488,7 @@ Your job is to BEAT this baseline. Stay within the memory budget above. Do not u
 Guidelines:
 1. MAXIMIZE THROUGHPUT. Use available resources aggressively — the runtime monitor will scale down if needed.
 2. Workers should be cpu_cores - 2 unless memory is the bottleneck.
-3. chunk_size=50000 and read_ahead_buffers=4 are well-tested defaults — do not reduce. write_ahead_writers=2 is the default but on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch), the per-flow throughput between writer threads and the target may be lower, in which case dropping to 1 may help. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2. The retry-rate rule that the with-history smartconfig uses does NOT apply here — there's no chunk_retry_count history to consult, so this is a heuristic only.
+3. The chunk_size anchor is in the memory budget block above ("Default action") and read_ahead_buffers=4 is a well-tested floor — do not reduce. write_ahead_writers=2 is the default but on platforms with virtualized network transports between the dmt host and the target database (Docker Desktop on macOS or Windows, WSL2, vSphere with vSwitch), the per-flow throughput between writer threads and the target may be lower, in which case dropping to 1 may help. Native Linux deployments where dmt and the target share a host (Unix socket) or a real NIC should keep write_ahead_writers=2. The retry-rate rule that the with-history smartconfig uses does NOT apply here — there's no chunk_retry_count history to consult, so this is a heuristic only.
 4. Connection pool sizes should accommodate workers * readers/writers plus overhead.
 
 Respond with ONLY a JSON object:
@@ -1480,7 +1508,7 @@ Respond with ONLY a JSON object:
   "observed_retry_rates": "no history",
   "reasoning": "<brief explanation; do not assert mechanisms (saturation, pressure, contention) — there is no historical data to ground them>"
 }`, inputJSON, input.Platform, input.CPUCores, memConstraint, memBudget,
-		baselineWorkers, baselineWorkers)
+		baselineWorkers, chunkAnchor, baselineWorkers)
 }
 
 // formatRowCount formats large row counts with K/M/B suffixes.

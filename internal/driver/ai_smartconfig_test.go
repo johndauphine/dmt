@@ -691,9 +691,30 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 		"Memory budget: 512 MB",
 		"safe chunk_size ceiling is ~22550 rows",
 		"Default action: set chunk_size = 22550",
-		"per-target optimum 100806 does not fit", // PG 25MB/248B = 100806 (#166)
+		"per-target optimum of 100806 does not fit", // PG 25MB/248B = 100806 (#166)
 		"Picking a larger value is forbidden",
 	}
+	// Fallback wording: when target is nil OR OptimumBulkChunkBytes is unset,
+	// the prose must distinguish "conservative default for unmeasured target"
+	// from "per-target optimum" (review feedback on PR #180). Use a stub with
+	// bytes=0 so the helper's usingFallback path fires while TargetType is
+	// still populated for the prose label.
+	inFallback := AutoTuneInput{
+		Platform:          "linux",
+		CPUCores:          18,
+		MemoryGB:          30,
+		AvailableMemoryMB: 30000,
+		AvgRowBytes:       248,
+		TargetType:        "mssql",
+	}
+	gotFallback := buildMemoryBudgetBlock(inFallback, 16, &chunkAdviceStub{bytes: 0})
+	if !strings.Contains(gotFallback, "conservative 10 MB default (target mssql unmeasured per #166)") {
+		t.Errorf("fallback block missing conservative-default wording; got:\n%s", gotFallback)
+	}
+	if strings.Contains(gotFallback, "per-target optimum for") {
+		t.Errorf("fallback block must NOT claim per-target optimum; got:\n%s", gotFallback)
+	}
+
 	for _, m := range tightMusts {
 		if !strings.Contains(gotTight, m) {
 			t.Errorf("tight-budget block missing %q; got:\n%s", m, gotTight)
