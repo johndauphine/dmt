@@ -465,6 +465,11 @@ func TestBuildOfflinePromptInvariants(t *testing.T) {
 		`"max_partitions": <int>`,
 		// reasoning instruction forbids mechanism assertion
 		"do not assert mechanisms",
+		// Pre-computed memory budget block must replace the old LLM-arithmetic
+		// "Memory formula" / "Memory constraint" pair (follow-up to PR #154).
+		"Memory budget (computed for you",
+		"Memory budget:",
+		"safe chunk_size ceiling",
 	}
 	for _, m := range musts {
 		if !strings.Contains(prompt, m) {
@@ -476,15 +481,196 @@ func TestBuildOfflinePromptInvariants(t *testing.T) {
 	// text. The "do not assert mechanisms (saturation, pressure, contention)"
 	// instruction itself is allowed (it forbids the assertions). The pre-fix
 	// affirmative claims must not appear.
+	//
+	// Plus: the LLM must NOT be asked to compute or output `estimated_memory_mb`
+	// (follow-up to PR #154 — observed wrong by 7-10x on the same inputs;
+	// removing the field entirely is the cleanest fix).
 	mustsNot := []string{
 		"can saturate",
 		"produce transient stalls",
 		"deterministically",
+		"estimated_memory_mb",
+		"Memory formula:",
+		"Memory constraint:",
 	}
 	for _, m := range mustsNot {
 		if strings.Contains(prompt, m) {
-			t.Errorf("offline prompt contains forbidden mechanism-assertion language %q (issue #142): post-#140 the prompt must avoid these claims since there's no telemetry to ground them\nfull prompt:\n%s", m, prompt)
+			t.Errorf("offline prompt contains forbidden substring %q\nfull prompt:\n%s", m, prompt)
 		}
+	}
+}
+
+// TestComputeSafeChunkSize pins the formula used to populate the prompt's
+// "safe chunk_size ceiling" line. Inverts ComputeEstimatedMemMB so that
+// substituting the result back into the formula yields a memory footprint at
+// or below the budget.
+func TestComputeSafeChunkSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		budgetMB    int64
+		workers     int
+		raw, waw    int
+		avgRowBytes int64
+		want        int64
+	}{
+		// Realistic so2010 case: budget=28000 MB, 16 workers, 6 buffers,
+		// 248 bytes/row. Expected from int math: 28000 * 1MiB / (16*6*248).
+		{"so2010", 28000, 16, 4, 2, 248, 1233204},
+		{"capped-rows", 28000, 16, 4, 2, 2000, 152917},
+		{"zero-workers", 28000, 0, 4, 2, 500, 0},
+		{"zero-buffers", 28000, 16, 0, 0, 500, 0},
+		{"zero-budget", 0, 16, 4, 2, 500, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeSafeChunkSize(tc.budgetMB, tc.workers, tc.raw, tc.waw, tc.avgRowBytes)
+			if got != tc.want {
+				t.Errorf("computeSafeChunkSize(%d MB, w=%d, r=%d, w=%d, avg=%d) = %d, want %d",
+					tc.budgetMB, tc.workers, tc.raw, tc.waw, tc.avgRowBytes, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildMemoryBudgetBlock locks in the prompt invariants for the
+// pre-computed budget block so a future refactor doesn't accidentally drop
+// the budget number, the avg-row-size, or the WSL2 caveat.
+func TestBuildMemoryBudgetBlock(t *testing.T) {
+	in := AutoTuneInput{
+		Platform:          "wsl2",
+		CPUCores:          18,
+		MemoryGB:          30,
+		AvailableMemoryMB: 30000,
+		AvgRowBytes:       248,
+	}
+	got := buildMemoryBudgetBlock(in, 16)
+	musts := []string{
+		"Memory budget: 27952 MB",                  // 30000 - 2048 headroom
+		"available_memory_mb=30000",                // budget source attribution
+		"Avg row size: 248 bytes",
+		"baseline workers=16",
+		"safe chunk_size ceiling is ~1231090 rows", // int math: 27952 * 1MiB / (16*6*248)
+		"Doubling workers OR doubling",
+		"Platform=wsl2",
+	}
+	for _, m := range musts {
+		if !strings.Contains(got, m) {
+			t.Errorf("memory budget block missing %q; got:\n%s", m, got)
+		}
+	}
+
+	// User cap should narrow the budget when smaller than (available - 2GB).
+	inCap := in
+	inCap.MaxMemoryMB = 8000
+	gotCap := buildMemoryBudgetBlock(inCap, 16)
+	if !strings.Contains(gotCap, "Memory budget: 8000 MB") {
+		t.Errorf("user-cap budget should win when smaller; got:\n%s", gotCap)
+	}
+	if !strings.Contains(gotCap, "user max_memory_mb=8000") {
+		t.Errorf("missing user-cap source annotation; got:\n%s", gotCap)
+	}
+
+	// Linux platform should not include the WSL2 caveat.
+	inLin := in
+	inLin.Platform = "linux"
+	gotLin := buildMemoryBudgetBlock(inLin, 16)
+	if strings.Contains(gotLin, "Platform=wsl2") {
+		t.Errorf("Linux platform should not render the WSL2 caveat; got:\n%s", gotLin)
+	}
+}
+
+// TestBuildMemoryBudgetBlockFallback locks in the issue #158 fix: when
+// AvailableMemoryMB <= 0 (offline callers, failed system probe), the helper
+// must NOT emit "Memory budget: 0 MB". User cap is authoritative when set;
+// otherwise a sensible default kicks in.
+func TestBuildMemoryBudgetBlockFallback(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          AutoTuneInput
+		wantBudget  string
+		wantSource  string
+		notContains []string // substrings that must NOT appear
+	}{
+		{
+			name: "available=0 + cap=2000 → cap wins",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 0,
+				MaxMemoryMB:       2000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 2000 MB",
+			wantSource: "user max_memory_mb=2000",
+		},
+		{
+			name: "available=0 + cap=0 → fallback default, NOT 0",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 0,
+				MaxMemoryMB:       0,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 1024 MB",
+			wantSource: "fallback default",
+			notContains: []string{
+				"Memory budget: 0 MB",
+				"safe chunk_size ceiling is ~0 rows",
+			},
+		},
+		{
+			name: "available=1000 (below 2GB headroom) + cap=0 → fallback default",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 1000,
+				MaxMemoryMB:       0,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 1024 MB",
+			wantSource: "fallback default",
+		},
+		{
+			name: "available=30000 + cap=0 → headroom budget",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 30000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 27952 MB",
+			wantSource: "available_memory_mb=30000",
+		},
+		{
+			name: "available=30000 + cap=2000 → cap wins (more restrictive)",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 30000,
+				MaxMemoryMB:       2000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 2000 MB",
+			wantSource: "user max_memory_mb=2000",
+		},
+		{
+			name: "available=30000 + cap=50000 → headroom wins (cap is looser)",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 30000,
+				MaxMemoryMB:       50000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 27952 MB",
+			wantSource: "available_memory_mb=30000",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildMemoryBudgetBlock(tc.in, 16)
+			if !strings.Contains(got, tc.wantBudget) {
+				t.Errorf("missing %q; got:\n%s", tc.wantBudget, got)
+			}
+			if !strings.Contains(got, tc.wantSource) {
+				t.Errorf("missing source annotation %q; got:\n%s", tc.wantSource, got)
+			}
+			for _, bad := range tc.notContains {
+				if strings.Contains(got, bad) {
+					t.Errorf("must not contain %q; got:\n%s", bad, got)
+				}
+			}
+		})
 	}
 }
 
@@ -938,30 +1124,29 @@ func TestComputeEstimatedMemMB(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeEstimatedMemMB(tc.workers, tc.raw, tc.waw, tc.chunkSize, tc.avgRowBytes)
+			got := ComputeEstimatedMemMB(tc.workers, tc.raw, tc.waw, tc.chunkSize, tc.avgRowBytes)
 			if got != tc.want {
-				t.Errorf("computeEstimatedMemMB(%d, %d, %d, %d, %d) = %d, want %d",
+				t.Errorf("ComputeEstimatedMemMB(%d, %d, %d, %d, %d) = %d, want %d",
 					tc.workers, tc.raw, tc.waw, tc.chunkSize, tc.avgRowBytes, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestApplyAISuggestionsIgnoresLLMMemoryEstimate verifies the fix for issue
-// #153 — applyAISuggestions must recompute EstimatedMemMB from the chosen
-// params, not trust the LLM's reported value.
-func TestApplyAISuggestionsIgnoresLLMMemoryEstimate(t *testing.T) {
+// TestApplyAISuggestionsComputesMemoryFromParams verifies that
+// applyAISuggestions populates EstimatedMemMB from the formula on the LLM's
+// chosen params. Locks in the fix from issue #153 and the follow-up that
+// removed `estimated_memory_mb` from the prompt schema entirely — the LLM no
+// longer outputs a memory estimate, so the value must come from the formula.
+func TestApplyAISuggestionsComputesMemoryFromParams(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{
 		suggestions: &SmartConfigSuggestions{},
 	}
-	// LLM-returned params plus a deliberately-wrong memory claim (matches the
-	// SO2013 run #3 case from the bug report — model said 343, real is 983).
 	ai := &AutoTuneOutput{
 		Workers:           6,
 		ChunkSize:         50000,
 		ReadAheadBuffers:  4,
 		WriteAheadWriters: 2,
-		EstimatedMemoryMB: 343, // bogus — must be ignored
 	}
 	input := AutoTuneInput{AvgRowBytes: 573}
 
@@ -969,7 +1154,7 @@ func TestApplyAISuggestionsIgnoresLLMMemoryEstimate(t *testing.T) {
 
 	const want = int64(983)
 	if got := analyzer.suggestions.EstimatedMemMB; got != want {
-		t.Errorf("EstimatedMemMB = %d, want %d (recomputed from params; LLM's 343 must be ignored)", got, want)
+		t.Errorf("EstimatedMemMB = %d, want %d (must be computed from params, not from any LLM-supplied field)", got, want)
 	}
 }
 

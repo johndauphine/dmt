@@ -276,19 +276,15 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 
 	cores := runtime.NumCPU()
 	memGB := 8 // default assumption
+	availableMemoryMB := int64(memGB) * 1024
 
 	// Get memory info if available
 	if v, err := mem.VirtualMemory(); err == nil {
 		memGB = int(v.Total / (1024 * 1024 * 1024))
+		availableMemoryMB = int64(v.Available / (1024 * 1024))
 	}
 
-	// Try AI-based tuning first
-	input := driver.AutoTuneInput{
-		CPUCores:     cores,
-		MemoryGB:     memGB,
-		DatabaseType: cfg.Source.Type,
-		TargetType:   cfg.Target.Type,
-	}
+	input := buildOfflineAutoTuneInput(cfg, cores, memGB, availableMemoryMB)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -306,7 +302,13 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 		suggestions.UpsertMergeChunkSize = output.UpsertMergeChunkSize
 		suggestions.CheckpointFrequency = output.CheckpointFrequency
 		suggestions.MaxRetries = output.MaxRetries
-		suggestions.EstimatedMemMB = output.EstimatedMemoryMB
+		suggestions.EstimatedMemMB = driver.ComputeEstimatedMemMB(
+			output.Workers,
+			output.ReadAheadBuffers,
+			output.WriteAheadWriters,
+			output.ChunkSize,
+			input.AvgRowBytes,
+		)
 		logging.Info("Using AI-generated recommendations (offline mode)")
 		return suggestions
 	}
@@ -340,6 +342,24 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 	}
 
 	return suggestions
+}
+
+// buildOfflineAutoTuneInput composes the AutoTuneInput passed to the offline
+// AI smartconfig path. Issue #157: AvgRowBytes and AvailableMemoryMB MUST be
+// populated, or the smartconfig prompt's Memory budget block degenerates to
+// "Memory budget: 0 MB" and the LLM under-provisions. The 500-byte default
+// mirrors the fallback in calculateAvgRowSize when no source row stats are
+// available. MaxMemoryMB flows through so the user's cap is honored.
+func buildOfflineAutoTuneInput(cfg *config.Config, cores, memGB int, availableMemoryMB int64) driver.AutoTuneInput {
+	return driver.AutoTuneInput{
+		CPUCores:          cores,
+		MemoryGB:          memGB,
+		AvailableMemoryMB: availableMemoryMB,
+		AvgRowBytes:       500,
+		MaxMemoryMB:       cfg.Migration.MaxMemoryMB,
+		DatabaseType:      cfg.Source.Type,
+		TargetType:        cfg.Target.Type,
+	}
 }
 
 // stateHistoryAdapter adapts checkpoint.StateBackend to driver.TuningHistoryProvider.
