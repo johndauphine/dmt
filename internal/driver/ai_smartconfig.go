@@ -548,12 +548,36 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 		avg = 500
 	}
 
-	budgetMB := input.AvailableMemoryMB - 2048 // 2GB headroom
-	if input.MaxMemoryMB > 0 && input.MaxMemoryMB < budgetMB {
+	// Priority: user cap > available - 2GB headroom > last-resort default.
+	// Issue #158: pre-fix this computed budget = AvailableMemoryMB - 2048 first
+	// and only narrowed by MaxMemoryMB when the cap was less than that
+	// pre-headroom number. When AvailableMemoryMB was 0 (offline callers,
+	// failed probes), budget clamped to 0 and the user cap was silently
+	// discarded — the prompt then told the LLM "Memory budget: 0 MB" which
+	// is worse than any sensible default.
+	const fallbackBudgetMB = 1024
+	var budgetSource string
+	var budgetMB int64
+	switch {
+	case input.MaxMemoryMB > 0 && input.AvailableMemoryMB > 2048:
+		// Both known — pick the more-restrictive of (cap, available - headroom).
+		headroomBudget := input.AvailableMemoryMB - 2048
+		if input.MaxMemoryMB < headroomBudget {
+			budgetMB = input.MaxMemoryMB
+			budgetSource = fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
+		} else {
+			budgetMB = headroomBudget
+			budgetSource = fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
+		}
+	case input.MaxMemoryMB > 0:
 		budgetMB = input.MaxMemoryMB
-	}
-	if budgetMB < 0 {
-		budgetMB = 0
+		budgetSource = fmt.Sprintf("user max_memory_mb=%d", input.MaxMemoryMB)
+	case input.AvailableMemoryMB > 2048:
+		budgetMB = input.AvailableMemoryMB - 2048
+		budgetSource = fmt.Sprintf("available_memory_mb=%d - 2048 MB headroom", input.AvailableMemoryMB)
+	default:
+		budgetMB = fallbackBudgetMB
+		budgetSource = "fallback default; AvailableMemoryMB and MaxMemoryMB both unset"
 	}
 
 	const baselineRead = 4
@@ -561,11 +585,7 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	maxChunkBaseline := computeSafeChunkSize(budgetMB, baselineWorkers, baselineRead, baselineWrite, avg)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "- Memory budget: %d MB (available_memory_mb - 2048 MB headroom", budgetMB)
-	if input.MaxMemoryMB > 0 {
-		fmt.Fprintf(&b, ", capped at user max_memory_mb=%d", input.MaxMemoryMB)
-	}
-	b.WriteString(")\n")
+	fmt.Fprintf(&b, "- Memory budget: %d MB (%s)\n", budgetMB, budgetSource)
 	fmt.Fprintf(&b, "- Avg row size: %d bytes\n", avg)
 	fmt.Fprintf(&b, "- At baseline workers=%d, read_ahead_buffers=4, write_ahead_writers=2, the safe chunk_size ceiling is ~%d rows.\n", baselineWorkers, maxChunkBaseline)
 	b.WriteString("- Doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. Adjust accordingly.\n")

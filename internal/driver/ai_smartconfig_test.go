@@ -545,7 +545,8 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	}
 	got := buildMemoryBudgetBlock(in, 16)
 	musts := []string{
-		"Memory budget: 27952 MB", // 30000 - 2048 headroom
+		"Memory budget: 27952 MB",                  // 30000 - 2048 headroom
+		"available_memory_mb=30000",                // budget source attribution
 		"Avg row size: 248 bytes",
 		"baseline workers=16",
 		"safe chunk_size ceiling is ~1231090 rows", // int math: 27952 * 1MiB / (16*6*248)
@@ -565,8 +566,8 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	if !strings.Contains(gotCap, "Memory budget: 8000 MB") {
 		t.Errorf("user-cap budget should win when smaller; got:\n%s", gotCap)
 	}
-	if !strings.Contains(gotCap, "capped at user max_memory_mb=8000") {
-		t.Errorf("missing user-cap annotation; got:\n%s", gotCap)
+	if !strings.Contains(gotCap, "user max_memory_mb=8000") {
+		t.Errorf("missing user-cap source annotation; got:\n%s", gotCap)
 	}
 
 	// Linux platform should not include the WSL2 caveat.
@@ -575,6 +576,101 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	gotLin := buildMemoryBudgetBlock(inLin, 16)
 	if strings.Contains(gotLin, "Platform=wsl2") {
 		t.Errorf("Linux platform should not render the WSL2 caveat; got:\n%s", gotLin)
+	}
+}
+
+// TestBuildMemoryBudgetBlockFallback locks in the issue #158 fix: when
+// AvailableMemoryMB <= 0 (offline callers, failed system probe), the helper
+// must NOT emit "Memory budget: 0 MB". User cap is authoritative when set;
+// otherwise a sensible default kicks in.
+func TestBuildMemoryBudgetBlockFallback(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          AutoTuneInput
+		wantBudget  string
+		wantSource  string
+		notContains []string // substrings that must NOT appear
+	}{
+		{
+			name: "available=0 + cap=2000 → cap wins",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 0,
+				MaxMemoryMB:       2000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 2000 MB",
+			wantSource: "user max_memory_mb=2000",
+		},
+		{
+			name: "available=0 + cap=0 → fallback default, NOT 0",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 0,
+				MaxMemoryMB:       0,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 1024 MB",
+			wantSource: "fallback default",
+			notContains: []string{
+				"Memory budget: 0 MB",
+				"safe chunk_size ceiling is ~0 rows",
+			},
+		},
+		{
+			name: "available=1000 (below 2GB headroom) + cap=0 → fallback default",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 1000,
+				MaxMemoryMB:       0,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 1024 MB",
+			wantSource: "fallback default",
+		},
+		{
+			name: "available=30000 + cap=0 → headroom budget",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 30000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 27952 MB",
+			wantSource: "available_memory_mb=30000",
+		},
+		{
+			name: "available=30000 + cap=2000 → cap wins (more restrictive)",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 30000,
+				MaxMemoryMB:       2000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 2000 MB",
+			wantSource: "user max_memory_mb=2000",
+		},
+		{
+			name: "available=30000 + cap=50000 → headroom wins (cap is looser)",
+			in: AutoTuneInput{
+				AvailableMemoryMB: 30000,
+				MaxMemoryMB:       50000,
+				AvgRowBytes:       248,
+			},
+			wantBudget: "Memory budget: 27952 MB",
+			wantSource: "available_memory_mb=30000",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildMemoryBudgetBlock(tc.in, 16)
+			if !strings.Contains(got, tc.wantBudget) {
+				t.Errorf("missing %q; got:\n%s", tc.wantBudget, got)
+			}
+			if !strings.Contains(got, tc.wantSource) {
+				t.Errorf("missing source annotation %q; got:\n%s", tc.wantSource, got)
+			}
+			for _, bad := range tc.notContains {
+				if strings.Contains(got, bad) {
+					t.Errorf("must not contain %q; got:\n%s", bad, got)
+				}
+			}
+		})
 	}
 }
 
