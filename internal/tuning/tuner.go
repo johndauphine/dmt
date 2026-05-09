@@ -205,11 +205,15 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// to, so the baseline output is what the user gets.
 	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
 	if in.ForceExplore || driftDetected || (historyAvailable && shouldExplore(in, len(rows))) {
-		applyGridExploration(&out, in, profile, len(rows), wawsWithRetries(rows))
+		// Exploration paths (planned grid, ε-perturbation) intentionally
+		// don't apply the historical-retry filter — that's a SELECTION
+		// concern (handled inside applyHistorySelection's selectWAW /
+		// argmaxRegression). See issue #186.
+		applyGridExploration(&out, in, profile, len(rows))
 	} else if len(rows) > 0 {
 		applyHistorySelection(&out, in, profile, rows)
 		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-			applyEpsilonPerturbation(&out, profile, wawsWithRetries(rows))
+			applyEpsilonPerturbation(&out, profile)
 		}
 	}
 

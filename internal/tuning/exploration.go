@@ -62,11 +62,15 @@ func shouldExplore(in Input, bucketCount int) bool {
 }
 
 // applyGridExploration picks the next probe from the planned grid based
-// on the bucket's run count, intersected with the same feasibility
-// filters the regression argmax uses (RULE 1, HardChunkLimit). On a
-// fully-filtered grid (every candidate skipped), the baseline output
-// stands.
-func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCount int, skipWAWs map[int]bool) {
+// on the bucket's run count, intersected with HardChunkLimit only.
+// Historical-retry exclusions are intentionally NOT applied here: the
+// planned grid's job is to gather data so historical verdicts can be
+// re-examined as new runs accrue (issue #186 — under the original
+// "any retry → permanent exclusion" rule, AI-era retries at WAW=2
+// permanently locked the deterministic tuner out of probing it). On
+// a fully-filtered grid (every candidate skipped by HardChunkLimit),
+// the baseline output stands.
+func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCount int) {
 	const fallbackBytes int64 = 10_000_000
 	avg := in.AvgRowBytes
 	if avg <= 0 {
@@ -85,9 +89,6 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 	for i := 0; i < n; i++ {
 		idx := (bucketCount + i) % n
 		cand := explorationGrid[idx]
-		if skipWAWs[cand.WAW] {
-			continue
-		}
 		csBytes := int64(cand.CSFraction * float64(optimumBytes))
 		csRows := int(csBytes / avg)
 		if csRows < 1 {
@@ -113,7 +114,9 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 	}
 	// Every grid candidate was filtered out — leave baseline alone. The
 	// caller's memory clamp still runs; this is the safest fallback when
-	// HardChunkLimit + RULE 1 between them eliminate every probe.
+	// HardChunkLimit eliminates every probe (the historical-retry skip
+	// was removed for #186, so HardChunkLimit is now the only way the
+	// grid empties).
 }
 
 // shouldEpsilonPerturb returns true with probability ε. Uses the global
@@ -133,19 +136,22 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 
 // applyEpsilonPerturbation nudges the picked (WAW, ChunkSize) by one
 // step in a randomly-chosen direction. The nudge is bounded by the WAW
-// grid, RULE 1 (skipWAWs), and HardChunkLimit; if the chosen direction
-// would violate a filter, falls through to the next direction so we
-// always generate *some* variance — but never lands on a WAW that has
-// historical retries (RULE 1 is a hard exclusion across both selection
-// and exploration).
+// grid and HardChunkLimit; if the chosen direction would violate a
+// bound, falls through to the next direction so we always generate
+// *some* variance.
+//
+// Historical-retry exclusions are intentionally NOT applied (same
+// reasoning as applyGridExploration — #186). ε-perturbation is an
+// exploration mechanism; its job is to occasionally probe non-argmax
+// points so the regression's training data stays representative.
 //
 // Picks one of four directions:
 //
-//	WAW + 1   (capped at maxWAWForGrid; skipped if WAW+1 ∈ skipWAWs)
-//	WAW − 1   (floored at 1; skipped if WAW−1 ∈ skipWAWs)
+//	WAW + 1   (capped at maxWAWForGrid)
+//	WAW − 1   (floored at 1)
 //	CS × 1.5  (capped at HardChunkLimit if set)
 //	CS × 0.67 (floored at 1 row)
-func applyEpsilonPerturbation(out *Output, profile DriverProfile, skipWAWs map[int]bool) {
+func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 	type direction struct {
 		name  string
 		apply func(*Output) bool // returns true when the nudge was actually applied
@@ -153,7 +159,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, skipWAWs map[i
 	dirs := []direction{
 		{"WAW+1", func(o *Output) bool {
 			next := o.WriteAheadWriters + 1
-			if next > maxWAWForGrid || skipWAWs[next] {
+			if next > maxWAWForGrid {
 				return false
 			}
 			o.WriteAheadWriters = next
@@ -161,7 +167,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, skipWAWs map[i
 		}},
 		{"WAW-1", func(o *Output) bool {
 			next := o.WriteAheadWriters - 1
-			if next < 1 || skipWAWs[next] {
+			if next < 1 {
 				return false
 			}
 			o.WriteAheadWriters = next

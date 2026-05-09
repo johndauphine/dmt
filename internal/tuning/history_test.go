@@ -29,13 +29,15 @@ func TestSelectWAW_PicksHighestShrunkMean(t *testing.T) {
 	}
 }
 
-// TestSelectWAW_Rule1 verifies a high-mean bin loses if it has any
-// retries — RULE 1 is a hard exclusion, not a soft penalty.
-func TestSelectWAW_Rule1(t *testing.T) {
+// TestSelectWAW_HighRetryRateExcluded verifies a high-mean bin loses
+// when its retry rate clears retryRateExclusionThreshold — the rule
+// is "high retry rate excluded," not "any retry excluded" (#186).
+func TestSelectWAW_HighRetryRateExcluded(t *testing.T) {
 	bins := []wawBin{
 		{WAW: 1, TotalRuns: 10, MeanThroughput: 500_000},
-		{WAW: 2, TotalRuns: 10, MeanThroughput: 800_000, RunsWithRetries: 1}, // excluded
-		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000},                     // wins
+		// 3/10 = 30% retry rate, > 15% threshold → excluded
+		{WAW: 2, TotalRuns: 10, MeanThroughput: 800_000, RunsWithRetries: 3},
+		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000}, // wins
 	}
 	got, _, ok := selectWAW(bins)
 	if !ok || got != 4 {
@@ -43,16 +45,55 @@ func TestSelectWAW_Rule1(t *testing.T) {
 	}
 }
 
-// TestSelectWAW_AllBinsHaveRetries returns ok=false so the caller falls
-// back to the baseline WAW.
-func TestSelectWAW_AllBinsHaveRetries(t *testing.T) {
+// TestSelectWAW_LowRetryRateNotExcluded — issue #186 regression guard.
+// A single transient retry over many clean runs (10% retry rate, below
+// the 15% threshold) must NOT exclude the WAW. Under the original
+// "any retry → permanent exclusion" rule, this scenario locked the
+// tuner out of historically-best WAWs forever.
+func TestSelectWAW_LowRetryRateNotExcluded(t *testing.T) {
 	bins := []wawBin{
-		{WAW: 1, TotalRuns: 5, MeanThroughput: 500_000, RunsWithRetries: 1},
-		{WAW: 2, TotalRuns: 5, MeanThroughput: 700_000, RunsWithRetries: 1},
+		{WAW: 1, TotalRuns: 10, MeanThroughput: 500_000},
+		// 1/10 = 10% retry rate, < 15% threshold → eligible. Highest
+		// mean → should win.
+		{WAW: 2, TotalRuns: 10, MeanThroughput: 800_000, RunsWithRetries: 1},
+		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000},
+	}
+	got, _, ok := selectWAW(bins)
+	if !ok || got != 2 {
+		t.Errorf("got (%d, %v), want (2, true) — low-rate retries must not exclude (#186)", got, ok)
+	}
+}
+
+// TestSelectWAW_AllBinsRateExcluded returns ok=false so the caller falls
+// back to baseline. Both bins clear the retry-rate threshold.
+func TestSelectWAW_AllBinsRateExcluded(t *testing.T) {
+	bins := []wawBin{
+		// 2/5 = 40% retry rate, well above threshold
+		{WAW: 1, TotalRuns: 5, MeanThroughput: 500_000, RunsWithRetries: 2},
+		// 3/5 = 60% retry rate
+		{WAW: 2, TotalRuns: 5, MeanThroughput: 700_000, RunsWithRetries: 3},
 	}
 	_, _, ok := selectWAW(bins)
 	if ok {
-		t.Error("ok should be false when every bin has retries")
+		t.Error("ok should be false when every bin clears the retry-rate threshold")
+	}
+}
+
+// TestSelectWAW_BelowMinRunsRetryFloor — a bin with very few samples
+// can't trigger the retry-rate filter even at 100% rate (insufficient
+// evidence). Selection then falls to the minRunsPerBin floor anyway,
+// so the bin still gets excluded — but for the right reason.
+func TestSelectWAW_BelowMinRunsRetryFloor(t *testing.T) {
+	bins := []wawBin{
+		{WAW: 1, TotalRuns: 10, MeanThroughput: 500_000},
+		// 2/2 = 100% rate, but TotalRuns < minRunsForRetryExclusion=3
+		// → retry-rate filter doesn't fire. Falls out via minRunsPerBin
+		// (2 < 3) anyway, so WAW=1 wins.
+		{WAW: 2, TotalRuns: 2, MeanThroughput: 900_000, RunsWithRetries: 2},
+	}
+	got, _, ok := selectWAW(bins)
+	if !ok || got != 1 {
+		t.Errorf("got (%d, %v), want (1, true)", got, ok)
 	}
 }
 
@@ -183,25 +224,72 @@ func TestApplyHistory_EndToEnd(t *testing.T) {
 		t.Fatalf("baseline WAW should be 2, got %d (test fixture broken)", out.WriteAheadWriters)
 	}
 
-	// History: WAW=1 has clean runs at 700K, WAW=2 has retries (excluded
-	// by RULE 1), WAW=4 has clean runs at 600K. WAW=1 should win.
+	// History: WAW=1 has clean runs at 700K, WAW=2 has 3/3 = 100%
+	// retry rate (well above threshold, ≥ minRunsForRetryExclusion →
+	// excluded), WAW=4 has clean runs at 600K. WAW=1 should win.
 	history := &stubHistory{rows: []HistoryRecord{
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 700_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 720_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 680_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 750_000, ChunkRetryCount: 2},
+		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 720_000, ChunkRetryCount: 1},
+		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 760_000, ChunkRetryCount: 3},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 600_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 620_000},
+		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 610_000},
 	}}
 
 	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters != 1 {
-		t.Errorf("WAW: got %d, want 1 (RULE 1 should exclude WAW=2; WAW=1 has higher mean than WAW=4)",
+		t.Errorf("WAW: got %d, want 1 (retry-rate filter should exclude WAW=2; WAW=1 has higher mean than WAW=4)",
 			out.WriteAheadWriters)
 	}
 	if !strings.Contains(out.Reasoning, "history-selected WAW=1") {
 		t.Errorf("Reasoning should record the selection; got %q", out.Reasoning)
+	}
+}
+
+// TestTune_ExplorationProbesAIPollutedWAW — issue #186 integration
+// regression guard. Reproduces the exact scenario the user observed:
+// the SQLite ai_tuning_history table contains AI-era runs at WAW=2
+// with retries (the AI tuner was running at WAW=2 with ~17% retries
+// pre-cutover). Under the original "any retry → permanent exclusion"
+// rule, the deterministic tuner could never probe WAW=2 again because
+// every selection AND exploration path filtered it out.
+//
+// New contract: exploration paths ignore historical retries and probe
+// regardless. With a small history (cold-start window), the planned
+// grid still picks WAW=2 at probe indexes 1 and 5 even though every
+// historical WAW=2 run had retries. Selection paths (separate test
+// above) still respect the retry-rate threshold.
+func TestTune_ExplorationProbesAIPollutedWAW(t *testing.T) {
+	in := Input{
+		CPUCores: 8, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	// 5 AI-era rows at WAW=2 each with retries — places us in cold-
+	// start (rows < explorationGridRuns=6) so the planned grid fires.
+	history := &stubHistory{rows: []HistoryRecord{
+		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 600_000, ChunkRetryCount: 3},
+		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 580_000, ChunkRetryCount: 2},
+		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 620_000, ChunkRetryCount: 4},
+		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 590_000, ChunkRetryCount: 1},
+		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 605_000, ChunkRetryCount: 2},
+	}}
+
+	out := Tune(in, profile, history, DBTuning{})
+
+	// Issue #186 fix verified by Reasoning: the planned grid is the
+	// only code path that records "exploration: planned grid" — if
+	// it appears, exploration fired despite WAW=2's retry history.
+	if !strings.Contains(out.Reasoning, "exploration: planned grid") {
+		t.Errorf("exploration should fire on cold-start history (5 < %d runs); got Reasoning=%q",
+			explorationGridRuns, out.Reasoning)
 	}
 }
 
@@ -219,22 +307,32 @@ func TestTune_NilHistory(t *testing.T) {
 	}
 }
 
-// TestApplyHistory_AllBinsRetried falls back to baseline when RULE 1
-// excludes everything.
-func TestApplyHistory_AllBinsRetried(t *testing.T) {
+// TestApplyHistory_AllBinsRateExcluded falls back to baseline when every
+// bin has a retry rate above the threshold over enough samples to fire.
+func TestApplyHistory_AllBinsRateExcluded(t *testing.T) {
 	in := Input{CPUCores: 16, MemoryGB: 48, SourceDBType: "mssql", TargetDBType: "postgres"}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2}
 	out := baseline(in, profile)
 	originalWAW := out.WriteAheadWriters
 
+	// 4 runs each at WAW=1 and WAW=2; 3 of 4 retried in each → 75%
+	// retry rate, above the 15% threshold, ≥ minRunsForRetryExclusion.
+	makeRow := func(waw, retries int, thru float64) HistoryRecord {
+		return HistoryRecord{
+			CPUCores: 16, MemoryGB: 48,
+			WriteAheadWriters: waw,
+			FinalThroughput:   thru,
+			ChunkRetryCount:   retries,
+		}
+	}
 	history := &stubHistory{rows: []HistoryRecord{
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 700_000, ChunkRetryCount: 1},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 600_000, ChunkRetryCount: 2},
+		makeRow(1, 1, 700_000), makeRow(1, 1, 690_000), makeRow(1, 1, 710_000), makeRow(1, 0, 720_000),
+		makeRow(2, 2, 600_000), makeRow(2, 1, 610_000), makeRow(2, 1, 620_000), makeRow(2, 0, 605_000),
 	}}
 	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters != originalWAW {
-		t.Errorf("WAW should remain at baseline %d when every bin has retries; got %d",
+		t.Errorf("WAW should remain at baseline %d when every bin clears the retry-rate threshold; got %d",
 			originalWAW, out.WriteAheadWriters)
 	}
 }
@@ -289,11 +387,12 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 	}
 }
 
-// TestApplyHistory_RegressionRespectsRule1 verifies RULE 1 (skip WAW
-// values with any historical retries) applies to the regression argmax,
-// not just the smoothed-bins selectWAW. WAW=4 has the best raw throughput
-// but one retry — argmax must skip it and pick the next-best clean WAW.
-func TestApplyHistory_RegressionRespectsRule1(t *testing.T) {
+// TestApplyHistory_RegressionRespectsRetryRateExclusion verifies the
+// retry-rate filter (#186) applies to the regression argmax, not just
+// the smoothed-bins selectWAW. WAW=4 has the best raw throughput but
+// every run retried (100% rate, well above threshold) — argmax must
+// skip it and pick the next-best clean WAW.
+func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
@@ -312,7 +411,7 @@ func TestApplyHistory_RegressionRespectsRule1(t *testing.T) {
 		retries := 0
 		if waw == 4 {
 			thru = 1_200_000 // best mean, but...
-			retries = 1      // ...has a retry, RULE 1 excludes
+			retries = 1      // ...100% retry rate (10/10) → excluded
 		}
 		rows[i] = HistoryRecord{
 			SourceDBType:      "mssql",
@@ -331,7 +430,7 @@ func TestApplyHistory_RegressionRespectsRule1(t *testing.T) {
 	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters == 4 {
-		t.Error("RULE 1 should have excluded WAW=4 (has historical retries)")
+		t.Error("retry-rate filter should have excluded WAW=4 (100% historical retry rate)")
 	}
 	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxWAWForGrid {
 		t.Errorf("picked WAW=%d outside valid grid [1..%d]", out.WriteAheadWriters, maxWAWForGrid)
