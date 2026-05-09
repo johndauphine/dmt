@@ -137,17 +137,19 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 	if picked != out.WriteAheadWriters {
 		out.WriteAheadWriters = picked
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after RULE 1, regime, outlier, and ≥%d-run threshold filters)",
+			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after retry-rate, regime, outlier, and ≥%d-run threshold filters)",
 			picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
 		)
 	}
 }
 
 // applyHistoryRegression fits the quadratic model to the filtered rows
-// and walks the (WAW × CS_BYTES) grid to pick the argmax under RULE 1
-// + HardChunkLimit. Returns true when it picks (and applies) a
-// recommendation; false on fit failure or empty grid (caller falls
-// through to smoothed bins).
+// and walks the (WAW × CS_BYTES) grid to pick the argmax. The grid is
+// filtered by wawsWithHighRetryRate (#186 — exclude WAWs whose retry
+// rate clears the threshold over enough samples) and HardChunkLimit
+// (skip CS values above the protocol cap). Returns true when it picks
+// (and applies) a recommendation; false on fit failure or empty grid
+// (caller falls through to smoothed bins).
 func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) bool {
 	model, err := fitRegression(rows)
 	if err != nil {
@@ -369,14 +371,16 @@ func aggregateByWAW(rows []HistoryRecord) []wawBin {
 }
 
 // selectWAW picks the WriteAheadWriters value with the highest shrunk
-// mean throughput among bins with zero retries (RULE 1).
+// mean throughput among bins below the retry-rate exclusion threshold
+// (#186 — see isHighRetryRateBin / retryRateExclusionThreshold).
 //
 // Smoothed mean: μ̂_bin = (n·mean + k·global) / (n + k). With small n the
 // estimate collapses toward the global mean (don't trust noisy bins);
 // with large n it converges to the bin's measured mean.
 //
-// Returns the picked WAW, its shrunk mean, and ok=true if a clean bin
-// was found. ok=false when every bin has retries or no bins exist.
+// Returns the picked WAW, its shrunk mean, and ok=true if at least one
+// eligible bin was found. ok=false when every bin clears the retry-rate
+// threshold (or no bins exist).
 func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 	// Global mean across all bins (including ones with retries — they're
 	// real measurements; just not eligible for selection).

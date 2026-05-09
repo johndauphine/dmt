@@ -270,10 +270,17 @@ func TestTune_ExplorationProbesAIPollutedWAW(t *testing.T) {
 		Platform:    "linux",
 		AvgRowBytes: 500,
 	}
-	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	// BaselineWAW=1 (NOT 2) so out.WriteAheadWriters starts at 1.
+	// Then "did exploration actually probe WAW=2" is testable by
+	// asserting out.WriteAheadWriters==2 — if exploration silently
+	// filtered WAW=2, the value would stay at 1 (Copilot review on
+	// PR #187: with BaselineWAW=2 the test passed even when the grid
+	// never picked WAW=2).
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 1, OptimumBulkChunkBytes: 25_000_000}
 
 	// 5 AI-era rows at WAW=2 each with retries — places us in cold-
 	// start (rows < explorationGridRuns=6) so the planned grid fires.
+	// With bucketCount=5 the grid lands on idx 5 = {WAW=2, CS=1.0×opt}.
 	history := &stubHistory{rows: []HistoryRecord{
 		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 600_000, ChunkRetryCount: 3},
 		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 580_000, ChunkRetryCount: 2},
@@ -284,12 +291,22 @@ func TestTune_ExplorationProbesAIPollutedWAW(t *testing.T) {
 
 	out := Tune(in, profile, history, DBTuning{})
 
-	// Issue #186 fix verified by Reasoning: the planned grid is the
-	// only code path that records "exploration: planned grid" — if
-	// it appears, exploration fired despite WAW=2's retry history.
+	// Issue #186 fix: exploration must actually pick WAW=2 despite the
+	// historical retry rate, and the Reasoning string must record it.
+	// Both checks are necessary — Reasoning alone (any "exploration:
+	// planned grid" entry) doesn't prove the grid landed on WAW=2;
+	// the WAW value alone (against a baseline that already starts at
+	// 2) doesn't prove exploration fired vs. just inheriting baseline.
+	if out.WriteAheadWriters != 2 {
+		t.Errorf("exploration should pick WAW=2 from the planned grid (bucketCount=5 → grid idx 5); got WAW=%d, Reasoning=%q",
+			out.WriteAheadWriters, out.Reasoning)
+	}
 	if !strings.Contains(out.Reasoning, "exploration: planned grid") {
 		t.Errorf("exploration should fire on cold-start history (5 < %d runs); got Reasoning=%q",
 			explorationGridRuns, out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "WAW=2") {
+		t.Errorf("planned-grid Reasoning should record WAW=2; got %q", out.Reasoning)
 	}
 }
 
