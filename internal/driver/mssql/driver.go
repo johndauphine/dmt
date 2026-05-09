@@ -31,7 +31,18 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		PacketSize:            32767, // 32KB max - significantly improves read/write throughput
 		WriteAheadWriters:     2,     // Base value, scales with cores when ScaleWritersWithCores=true
 		ScaleWritersWithCores: true,  // Parallel BCP without TABLOCK
+
+		// Unmeasured — smartconfig falls back to a conservative 10 MB
+		// default. A target-side throughput sweep (separate issue) will
+		// populate this once we have data. See #166.
+		OptimumBulkChunkBytes: 0,
 	}
+}
+
+// HardChunkLimit returns 0 — TDS BCP has no per-chunk frame limit that
+// matters at our chunk sizes. Memory budget is the only cap.
+func (d *Driver) HardChunkLimit(avgRowBytes int64) int {
+	return 0
 }
 
 // Dialect returns the MSSQL dialect.

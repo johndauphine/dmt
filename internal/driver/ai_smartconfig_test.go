@@ -602,18 +602,37 @@ func TestComputeSafeChunkSize(t *testing.T) {
 	}
 }
 
+// chunkAdviceStub mimics a registered driver for tests in this package,
+// which can't blank-import driver/postgres without an init-cycle. Only the
+// methods buildMemoryBudgetBlock actually calls are populated; the embedded
+// Driver is nil, so any other method call would NPE — that's intentional,
+// it surfaces accidental new dependencies on the stub instead of silently
+// returning zero values.
+type chunkAdviceStub struct {
+	Driver
+	bytes     int64
+	hardLimit int
+}
+
+func (s *chunkAdviceStub) Defaults() DriverDefaults {
+	return DriverDefaults{OptimumBulkChunkBytes: s.bytes}
+}
+func (s *chunkAdviceStub) HardChunkLimit(int64) int { return s.hardLimit }
+
 // TestBuildMemoryBudgetBlock locks in the prompt invariants for the
 // pre-computed budget block so a future refactor doesn't accidentally drop
 // the budget number, the avg-row-size, or the WSL2 caveat.
 func TestBuildMemoryBudgetBlock(t *testing.T) {
+	pg := &chunkAdviceStub{bytes: 25_000_000} // PG seed value (#166)
 	in := AutoTuneInput{
 		Platform:          "wsl2",
 		CPUCores:          18,
 		MemoryGB:          30,
 		AvailableMemoryMB: 30000,
 		AvgRowBytes:       248,
+		TargetType:        "postgres",
 	}
-	got := buildMemoryBudgetBlock(in, 16)
+	got := buildMemoryBudgetBlock(in, 16, pg)
 	musts := []string{
 		"Memory budget: 27952 MB",   // 30000 - 2048 headroom
 		"available_memory_mb=30000", // budget source attribution
@@ -622,7 +641,8 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 		"safe chunk_size ceiling is ~1231090 rows", // int math: 27952 * 1MiB / (16*6*248)
 		"CRITICAL CONSTRAINT",                      // imperative framing (issue #162)
 		"MUST NOT exceed 1231090",                  // ceiling restated as hard cap
-		"Default action: set chunk_size = 50000",   // ceiling-as-cap: 50000 wins when it fits (PR #163 review)
+		"Default action: set chunk_size = 100806",  // PG 25MB/248B = 100806 rows (#166 per-target anchor)
+		"per-target optimum for postgres",          // names the source of the anchor
 		"hard cap, not a target",                   // makes ceiling-as-cap framing explicit
 		"silently auto-clamp",                      // consequence framing
 		"doubling workers OR doubling",             // scaling rule still present
@@ -637,7 +657,7 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	// User cap should narrow the budget when smaller than (available - 2GB).
 	inCap := in
 	inCap.MaxMemoryMB = 8000
-	gotCap := buildMemoryBudgetBlock(inCap, 16)
+	gotCap := buildMemoryBudgetBlock(inCap, 16, pg)
 	if !strings.Contains(gotCap, "Memory budget: 8000 MB") {
 		t.Errorf("user-cap budget should win when smaller; got:\n%s", gotCap)
 	}
@@ -648,7 +668,7 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 	// Linux platform should not include the WSL2 caveat.
 	inLin := in
 	inLin.Platform = "linux"
-	gotLin := buildMemoryBudgetBlock(inLin, 16)
+	gotLin := buildMemoryBudgetBlock(inLin, 16, pg)
 	if strings.Contains(gotLin, "Platform=wsl2") {
 		t.Errorf("Linux platform should not render the WSL2 caveat; got:\n%s", gotLin)
 	}
@@ -664,15 +684,37 @@ func TestBuildMemoryBudgetBlock(t *testing.T) {
 		AvailableMemoryMB: 0,
 		MaxMemoryMB:       512,
 		AvgRowBytes:       248,
+		TargetType:        "postgres",
 	}
-	gotTight := buildMemoryBudgetBlock(inTight, 16)
+	gotTight := buildMemoryBudgetBlock(inTight, 16, pg)
 	tightMusts := []string{
 		"Memory budget: 512 MB",
 		"safe chunk_size ceiling is ~22550 rows",
 		"Default action: set chunk_size = 22550",
-		"50000 default does not fit",
+		"per-target optimum of 100806 does not fit", // PG 25MB/248B = 100806 (#166)
 		"Picking a larger value is forbidden",
 	}
+	// Fallback wording: when target is nil OR OptimumBulkChunkBytes is unset,
+	// the prose must distinguish "conservative default for unmeasured target"
+	// from "per-target optimum" (review feedback on PR #180). Use a stub with
+	// bytes=0 so the helper's usingFallback path fires while TargetType is
+	// still populated for the prose label.
+	inFallback := AutoTuneInput{
+		Platform:          "linux",
+		CPUCores:          18,
+		MemoryGB:          30,
+		AvailableMemoryMB: 30000,
+		AvgRowBytes:       248,
+		TargetType:        "mssql",
+	}
+	gotFallback := buildMemoryBudgetBlock(inFallback, 16, &chunkAdviceStub{bytes: 0})
+	if !strings.Contains(gotFallback, "conservative 10 MB default (target mssql unmeasured per #166)") {
+		t.Errorf("fallback block missing conservative-default wording; got:\n%s", gotFallback)
+	}
+	if strings.Contains(gotFallback, "per-target optimum for") {
+		t.Errorf("fallback block must NOT claim per-target optimum; got:\n%s", gotFallback)
+	}
+
 	for _, m := range tightMusts {
 		if !strings.Contains(gotTight, m) {
 			t.Errorf("tight-budget block missing %q; got:\n%s", m, gotTight)
@@ -763,7 +805,7 @@ func TestBuildMemoryBudgetBlockFallback(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildMemoryBudgetBlock(tc.in, 16)
+			got := buildMemoryBudgetBlock(tc.in, 16, nil) // nil target → 10 MB conservative fallback (#166)
 			if !strings.Contains(got, tc.wantBudget) {
 				t.Errorf("missing %q; got:\n%s", tc.wantBudget, got)
 			}

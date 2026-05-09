@@ -32,7 +32,19 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		SSLMode:               "require", // Secure default
 		WriteAheadWriters:     2,         // Minimum, scaled with cores
 		ScaleWritersWithCores: true,      // COPY handles parallelism well
+
+		// 25 MB per chunk — measured plateau on M5 Pro 48GB SO2010
+		// mssql→pg fixture (#164 n=15 sweep, statistically equivalent
+		// to 87896 with cleaner tail behavior). See docs/BENCHMARKS.md
+		// "Chunk Size vs Memory-Fit Ceiling".
+		OptimumBulkChunkBytes: 25_000_000,
 	}
+}
+
+// HardChunkLimit returns 0 — PG's COPY protocol has no fixed per-chunk
+// frame limit. Memory budget is the only cap.
+func (d *Driver) HardChunkLimit(avgRowBytes int64) int {
+	return 0
 }
 
 // Dialect returns the PostgreSQL dialect.
