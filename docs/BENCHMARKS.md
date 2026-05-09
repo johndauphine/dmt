@@ -1364,6 +1364,71 @@ This is environment, not code. The same dmt code on Linux native (no Docker VM n
 4. **The "Posts wide-row choke point" was Docker VM networking, not wide rows.** Capping `write_ahead_writers=1` (halving concurrent COPY connections from 36 to 18) eliminates 100% of stalls in a 10-run sample, at a cost of ~10–15% peak throughput. PG-side `pg_stat_activity` evidence (`Client / ClientRead` wait, frozen `bytes_processed`) confirms the bottleneck is outside both PG and the row-size estimator.
 5. **Sizing rule of thumb (Apple Silicon laptops):** allocate Docker no more than ~50% of host RAM if dmt + browser + IDE will run concurrently. The other 50% is needed for dmt's working set, the host page cache that backs `.mdf` reads, and OS overhead. For target writes specifically: cap `write_ahead_writers=1` to stay below the Docker VM concurrent-connection threshold.
 
+## Smartconfig Memory-Budget Compliance — 6-Model Sweep (M5 Pro 48GB, SO2010, MSSQL→PG)
+
+This sweep evaluates how well different LLMs respect the smartconfig prompt's `chunk_size` budget at varying `max_memory_mb`, and how often the Go-side post-AI clamp (PR #156) has to step in.
+
+### Test Environment
+
+- **Hardware**: Apple M5 Pro, 48GB RAM, 18 CPU cores
+- **Source / Target**: SQL Server 2022 (Rosetta 2) → PostgreSQL 16, both Docker, named volumes
+- **Dataset**: SO2010 (~19.3M rows)
+- **Mode**: `drop_recreate`, `create_indexes=false`, `create_foreign_keys=false`, `create_check_constraints=false` (transfer-only — isolates AI behavior from DDL noise)
+- **Runtime AI adjuster**: disabled (`migration.ai_adjust: false`) — only the initial smartconfig call runs, no mid-migration adjustments
+- **State directory**: wiped between every run, so smartconfig sees no historical tuning grounding
+- **Instrumentation**: a temporary `time.Since(...)` wrapper around `analyzer.Analyze(...)` in `applyAITuning` captured AI prompt latency; reverted after the sweep
+- **Code**: branch `fix/memory-budget-cliff` (`6064eb5`)
+- **Date**: May 2026
+- **Local LLM host**: LM Studio at `http://localhost:1234`, OpenAI-compat API, MLX where applicable
+- **Cloud**: Anthropic API direct
+- **Sweep values**: `max_memory_mb ∈ {256, 512, 1024, 2048, 4096, 8192}` — single run per (model, budget) cell, 6 budgets × 6 models = 36 runs
+
+### chunk_size raw pick (before clamp); **bold** = Go-side clamp triggered
+
+| Budget | Gemma-26B-MLX | Gemma-e4b-MLX | Qwen3-Coder-30B | gpt-oss-20B | Haiku 4.5 | Sonnet 4.6 |
+|---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 256 MB | **50000** | **50000** | **50000** | **50000** | **50000** | 5000 |
+| 512 MB | 10987 | **50000** | **50000** | **50000** | **50000** | 10000 |
+| 1024 MB | 21974 | **50000** | **50000** | **50000** | **50000** | 21974 |
+| 2048 MB | 43948 | **50000** | **50000** | **50000** | **50000** | 43000 |
+| 4096 MB | 50000 | 50000 | 50000 | 50000 | 50000 | 50000 |
+| 8192 MB | 50000 | 50000 | 50000 | 50000 | 50000 | 50000 |
+| **Sub-budget runs needing clamp** | **1/4** | **4/4** | **4/4** | **4/4** | **4/4** | **0/4** |
+
+After the post-AI clamp, the *applied* `chunk_size` is identical across all six models at every budget (5493 / 10987 / 21974 / 43948 / 50000 / 50000). The clamp is what guarantees correctness; the model only determines how often the clamp has to do that work.
+
+### Quality ranking on the budget-respecting axis
+
+1. **Sonnet 4.6** — 0 clamps. The only model in this matrix that produces a budget-aware `chunk_size` at every budget. At 256/512 MB it rounds down to a clean number (5000, 10000) just under the safe ceiling; at 1024/2048 it picks at-ceiling. Reasoning is genuine, not pattern-matched.
+2. **Gemma 4 26B (MLX)** — 1 clamp (only at the 256 MB extreme). At 512–2048 MB it echoes the Go-computed safe ceiling exactly, doubling cleanly with the budget. Best local model in the matrix, by a wide margin.
+3. **Tied at 4 clamps each** — Haiku 4.5, Qwen3 Coder 30B, gpt-oss-20B, Gemma 4 e4b (MLX). All produce a constant `chunk_size = 50000` regardless of budget. Without the clamp, all four would have shipped chunk_sizes 9.7×, 4.5×, 2.3×, and 1.1× over budget at 256/512/1024/2048 MB respectively.
+
+That Haiku exhibits the same constant-50000 failure as the smaller local models is consistent with the claim in `internal/driver/ai_smartconfig.go:579–582` — soft prompt constraints do not bind reliably across model sizes/providers, *which is why the clamp exists.*
+
+### AI prompt latency (single smartconfig call per run)
+
+| Model | Range | Median |
+|---|---|---:|
+| Sonnet 4.6 | 8.4–11.4 s | 10.1 s |
+| Gemma 4 26B (MLX) | 4.5–6.5 s | 4.8 s |
+| Haiku 4.5 | 4.1–5.5 s | 4.8 s |
+| Gemma 4 e4b (MLX) | 5.3–6.1 s | 5.8 s |
+| Qwen3 Coder 30B | 3.9–4.6 s | 4.5 s |
+| gpt-oss-20B | 3.7–5.7 s | 4.4 s |
+
+Sonnet pays roughly 2× Haiku's latency to deliver genuine budget-aware reasoning. End-to-end migration time difference is small (Sonnet adds ~5 s on a 25–30 s migration); the AI call is a small slice of total run time.
+
+A separate spot-test against `google/gemma-4-26b-a4b` (the **non-MLX** GGUF reasoning variant) at 512 MB picked a budget-aware **10500** — quality similar to the MLX 26B — but AI prompt latency was **78 s**, 17× slower than the MLX cut. Not pursued for the full sweep on cost grounds.
+
+### Throughput note (single-run, included for completeness only)
+
+End-to-end transfer throughput across the 36-run matrix sat in 299K–849K rows/s, with most cells in the 600K–800K band. With one run per cell, only ≥30% deltas are statistically meaningful here. Two robust patterns:
+
+- **Gemma 4 e4b is consistently the slowest end-to-end performer** (always in the 299K–636K band; never breaks 700K). Its constant-50000 picks aren't the cause — the applied `chunk_size` is identical to the other models post-clamp — so the gap must come from second-order knobs (`parallel_readers`, `max_partitions`, `checkpoint_frequency`, `upsert_merge_chunk_size`) where its picks differ.
+- **Haiku has the tightest run-to-run band** (665K–734K rows/s, only 1.1× spread across all 6 budgets) — a useful default for predictable timings.
+
+Counterintuitively, **Sonnet's runs were consistently the lowest-throughput** (566K–655K) despite being the only model to pick a correct `chunk_size`. On SO2010 at this scale, `chunk_size = 50000` is not actually OOM-blowing the ~5 GB working set the model is told to respect — so the clamp's value is **safety on tight-budget hosts**, not throughput on this 48GB host. The clamp pays dividends where the model's mispick would actually exceed RAM.
+
 ## Implemented Optimizations
 
 - [x] Parallel table processing with configurable workers
