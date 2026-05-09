@@ -36,6 +36,15 @@ type DriverDefaults struct {
 	// PostgreSQL: true (COPY handles parallelism well)
 	// MySQL: true (multi-value INSERT parallelism)
 	ScaleWritersWithCores bool
+
+	// OptimumBulkChunkBytes is the empirically-measured "sweet spot" size
+	// in bytes per bulk-insert chunk for this target's bulk path. The
+	// smartconfig anchor for chunk_size is computed as
+	// OptimumBulkChunkBytes / avg_row_bytes (then clamped to memory budget
+	// and HardChunkLimit). 0 signals "unmeasured for this target" — callers
+	// fall back to a conservative 10 MB default rather than picking 50000
+	// rows blindly. See issue #166.
+	OptimumBulkChunkBytes int64
 }
 
 // Driver represents a pluggable database driver that provides all
@@ -65,6 +74,13 @@ type Driver interface {
 
 	// NewWriter creates a new Writer for this database type.
 	NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts WriterOptions) (Writer, error)
+
+	// HardChunkLimit returns the largest chunk_size (in rows) the target
+	// can accept regardless of memory budget — typically driven by a
+	// protocol-level packet/frame limit. Returns 0 when no protocol limit
+	// applies (memory budget is the only cap). Probe-driven values (e.g.
+	// MySQL @@max_allowed_packet) land in a follow-up to #166.
+	HardChunkLimit(avgRowBytes int64) int
 }
 
 // WriterOptions contains options for creating a Writer.

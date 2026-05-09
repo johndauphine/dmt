@@ -32,7 +32,19 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		SSLMode:               "preferred",
 		WriteAheadWriters:     2,
 		ScaleWritersWithCores: true,
+
+		// Unmeasured — smartconfig falls back to a conservative 10 MB
+		// default. A target-side throughput sweep (separate issue) will
+		// populate this once we have data. See #166.
+		OptimumBulkChunkBytes: 0,
 	}
+}
+
+// HardChunkLimit returns 0 in this PR. A follow-up adds the
+// SELECT @@max_allowed_packet probe at writer-init and applies it here
+// (extended INSERT must fit inside the packet). See #166 step 4.
+func (d *Driver) HardChunkLimit(avgRowBytes int64) int {
+	return 0
 }
 
 // Dialect returns the MySQL dialect.

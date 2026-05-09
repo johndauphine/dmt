@@ -672,11 +672,14 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // e4b) ignore a descriptive budget block entirely and pick a constant
 // chunk_size=50000 regardless of budget. The CRITICAL framing + explicit
 // auto-clamp consequence + a concrete "Default action" anchor are intended
-// to bind the LLM rather than describe a passive upper bound. The default
-// is min(50000, ceiling) — the ceiling acts as a hard cap, not a target,
-// so on high-memory hosts the well-tested 50000 default still wins (PR #163
-// review: keeps "ceiling-as-cap" semantics consistent with guideline #3
-// and the chunk_size parameter description).
+// to bind the LLM rather than describe a passive upper bound.
+//
+// The default is min(target-optimum, memory-ceiling, target-hard-limit).
+// target-optimum comes from Driver.OptimumBulkChunkBytes / avg_row_bytes
+// with a 10 MB conservative fallback for unmeasured targets. PG is seeded
+// at 25 MB (50000 rows at SO2010's ~500 B/row) per the #164 sweep and #166
+// confirmation. target-hard-limit is currently 0 for all drivers; the
+// MySQL @@max_allowed_packet probe lands in a follow-up to #166.
 //
 // Issue #164 measured chunk_size 50000 vs 87896/100000/175792/250000 at
 // 3 runs each (M5 Pro 48GB, SO2010 mssql→pg, all other knobs locked):
@@ -691,7 +694,7 @@ func (s *SmartConfigAnalyzer) clampChunkSizeToBudget(input AutoTuneInput) {
 // Conclusion: the 50000 anchor is correct on this fixture. See
 // docs/BENCHMARKS.md § "Chunk Size vs Memory-Fit Ceiling" (and the
 // "Confirmation Sweep — 50000 vs 87896 at n=15" subsection).
-func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
+func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int, target Driver) string {
 	avg := input.AvgRowBytes
 	if avg <= 0 {
 		avg = 500
@@ -703,20 +706,35 @@ func buildMemoryBudgetBlock(input AutoTuneInput, baselineWorkers int) string {
 	const baselineWrite = 2
 	maxChunkBaseline := computeSafeChunkSize(budgetMB, baselineWorkers, baselineRead, baselineWrite, avg)
 
+	// Per-target chunk advice (#166): byte-shaped optimum + protocol-level
+	// hard limit. target == nil falls through to a 10 MB conservative default.
+	const fallbackOptimumBytes int64 = 10_000_000
+	optimumBytes := fallbackOptimumBytes
+	var hardLimit int
+	if target != nil {
+		if v := target.Defaults().OptimumBulkChunkBytes; v > 0 {
+			optimumBytes = v
+		}
+		hardLimit = target.HardChunkLimit(avg)
+	}
+	optimumRows := int(optimumBytes / avg)
 	defaultChunk := maxChunkBaseline
-	if defaultChunk > 50000 {
-		defaultChunk = 50000
+	if defaultChunk > int64(optimumRows) {
+		defaultChunk = int64(optimumRows)
+	}
+	if hardLimit > 0 && defaultChunk > int64(hardLimit) {
+		defaultChunk = int64(hardLimit)
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Memory budget: %d MB (%s)\n", budgetMB, budgetSource)
 	fmt.Fprintf(&b, "- Avg row size: %d bytes\n", avg)
 	fmt.Fprintf(&b, "- At baseline workers=%d, read_ahead_buffers=4, write_ahead_writers=2, the safe chunk_size ceiling is ~%d rows.\n", baselineWorkers, maxChunkBaseline)
-	fmt.Fprintf(&b, "- **CRITICAL CONSTRAINT — chunk_size MUST NOT exceed %d.** This is a HARD cap, not a suggestion. If you output a chunk_size above %d, the system will silently auto-clamp it down (overriding your recommendation) and your reasoning about throughput will be wrong. The ceiling is a cap, not a target — when 50000 fits under it, prefer 50000.\n", maxChunkBaseline, maxChunkBaseline)
-	if maxChunkBaseline < 50000 {
-		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline; 50000 default does not fit this budget). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", defaultChunk)
+	fmt.Fprintf(&b, "- **CRITICAL CONSTRAINT — chunk_size MUST NOT exceed %d.** This is a HARD cap, not a suggestion. If you output a chunk_size above %d, the system will silently auto-clamp it down (overriding your recommendation) and your reasoning about throughput will be wrong. The ceiling is a cap, not a target — when %d fits under it, prefer %d.\n", maxChunkBaseline, maxChunkBaseline, optimumRows, optimumRows)
+	if maxChunkBaseline < int64(optimumRows) {
+		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the safe ceiling at baseline; per-target optimum %d does not fit this budget). Pick a smaller value only if you are also raising workers or buffers above baseline (which lowers the ceiling — see scaling rule below). Picking a larger value is forbidden.\n", defaultChunk, optimumRows)
 	} else {
-		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the well-tested baseline default; the %d ceiling above is a hard cap, not a target). Only deviate if historical throughput data clearly shows a better value, and never above the ceiling.\n", defaultChunk, maxChunkBaseline)
+		fmt.Fprintf(&b, "- **Default action: set chunk_size = %d** (the per-target optimum for %s; the %d ceiling above is a hard cap, not a target). Only deviate if historical throughput data clearly shows a better value, and never above the ceiling.\n", defaultChunk, input.TargetType, maxChunkBaseline)
 	}
 	b.WriteString("- Scaling rule: doubling workers OR doubling (read_ahead_buffers + write_ahead_writers) halves the safe chunk_size ceiling. If you change those knobs from baseline, recompute the ceiling and stay under it.\n")
 	if input.Platform == "wsl2" {
@@ -1192,7 +1210,8 @@ func (s *SmartConfigAnalyzer) getAIAutoTune(ctx context.Context, input AutoTuneI
 	// Pre-compute the memory budget block so the LLM doesn't have to do
 	// arithmetic — see issue #155 / PR #154 for why we don't trust LLMs to
 	// compute estimated_memory_mb themselves.
-	memBudget := buildMemoryBudgetBlock(input, baselineWorkers)
+	target, _ := Get(input.TargetType) // nil if not registered; falls through to conservative default
+	memBudget := buildMemoryBudgetBlock(input, baselineWorkers, target)
 
 	prompt := fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
@@ -1413,7 +1432,8 @@ func buildOfflinePrompt(input AutoTuneInput, inputJSON string) string {
 		baselineWorkers = 2
 	}
 
-	memBudget := buildMemoryBudgetBlock(input, baselineWorkers)
+	target, _ := Get(input.TargetType) // nil if not registered; falls through to conservative default
+	memBudget := buildMemoryBudgetBlock(input, baselineWorkers, target)
 
 	return fmt.Sprintf(`You are a database migration performance tuner. Optimize configuration for MAXIMUM THROUGHPUT while staying within memory limits.
 
