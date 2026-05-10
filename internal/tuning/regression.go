@@ -84,6 +84,126 @@ type regressionModel struct {
 	logAvgMean, logAvgStd float64
 
 	beta []float64 // one coefficient per feature column, in column order
+
+	// Fit-quality signals (#216). Populated by fitRegression after the
+	// β solve; surfaced in the regression-tier reasoning string so users
+	// can tell whether to trust the prediction.
+	//
+	// r2 is the training-set R² (1 - SSE/SST). nil when SST==0
+	// (degenerate constant-y training data).
+	r2 *float64
+	// sigmaSq is residual variance σ̂² = SSE / (n - p). Used by
+	// PredictionInterval. nil when n ≤ p (degenerate dof).
+	sigmaSq *float64
+	// xtxInverse is (XᵀX + λI)⁻¹ cached from the ridge solve so
+	// PredictionInterval's leverage term doesn't re-do the matrix
+	// inversion. nil when the inversion failed (extremely rare with
+	// ridge regularization).
+	xtxInverse *mat.Dense
+	// nObs / nFeat are the dimensions used for the fit. CI math needs
+	// them for the t-critical lookup and dof check.
+	nObs  int
+	nFeat int
+}
+
+// PredictionInterval returns the 95% prediction interval at the given
+// candidate point: low and high values such that the true throughput is
+// expected to fall in [low, high] 95% of the time. Standard ridge-OLS
+// formula:
+//
+//	ŷ ± t_{0.975, n-p} × σ̂ × √(1 + x*ᵀ (XᵀX + λI)⁻¹ x*)
+//
+// Returns (predicted, predicted) when the model can't compute a valid
+// interval — degenerate dof (nObs ≤ nFeat), missing residual variance,
+// or singular xtxInverse. Caller should treat low == high as "N/A" and
+// emit a corresponding marker in the reasoning string.
+//
+// Complement to R²: R² says how well the model fits its training data
+// (model-level signal); the prediction interval says how uncertain the
+// prediction at THIS specific point is (point-level signal). Tight CI
+// at a point in a sparsely-trained region is mathematically rare — the
+// (XᵀX)⁻¹ leverage term grows when x* is far from training-row centers.
+func (m *regressionModel) PredictionInterval(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) (low, high float64) {
+	pred := m.Predict(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
+	if m.sigmaSq == nil || m.xtxInverse == nil {
+		return pred, pred
+	}
+	xStar := m.featureVector(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
+	var leverage mat.VecDense
+	leverage.MulVec(m.xtxInverse, xStar)
+	quad := mat.Dot(xStar, &leverage)
+	if quad < 0 {
+		// Numerical noise; clamp at 0 so the sqrt below is real.
+		quad = 0
+	}
+	se := math.Sqrt(*m.sigmaSq * (1 + quad))
+	tCrit := tCritical(m.nObs - m.nFeat)
+	return pred - tCrit*se, pred + tCrit*se
+}
+
+// featureVector builds the standardized feature vector x* for a
+// prediction candidate, in the same column layout fitRegression used
+// to build the design matrix X. Used by both Predict (via inline
+// expansion) and PredictionInterval (via this helper). Kept separate
+// from Predict so the two paths can't drift out of sync.
+func (m *regressionModel) featureVector(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) *mat.VecDense {
+	wz := standardize(float64(waw), m.wawMean, m.wawStd)
+	cz := standardize(float64(csBytes), m.csMean, m.csStd)
+	laz := standardize(math.Log(math.Max(1, float64(avgRowBytes))), m.logAvgMean, m.logAvgStd)
+
+	x := mat.NewVecDense(m.nFeat, nil)
+	x.SetVec(0, 1) // intercept
+	x.SetVec(1, wz)
+	x.SetVec(2, wz*wz)
+	x.SetVec(3, cz)
+	x.SetVec(4, cz*cz)
+	x.SetVec(5, laz)
+
+	for j, p := range m.pairs {
+		if p.source == sourceDB && p.target == targetDB {
+			x.SetVec(6+j, 1)
+			break
+		}
+	}
+	for j, mm := range m.modes {
+		if mm == mode {
+			x.SetVec(6+len(m.pairs)+j, 1)
+			break
+		}
+	}
+	return x
+}
+
+// tCritical returns the two-tailed 95% t-critical value for the given
+// degrees of freedom. Small lookup table for the dofs we actually see
+// (n - p where minRowsForRegression=30 and the largest model has
+// ~16 features, so dof typically ≥ 14). Falls back to 1.96 for large
+// dof (the t distribution converges to the normal).
+//
+// Returns 1.96 (the normal-approximation value) for dof > 100 and for
+// dof < 1 (degenerate; caller should be using a fallback marker
+// anyway). Conservative interpolation between table values isn't worth
+// the precision cost — a 0.05 difference in t-crit shifts the CI by a
+// similar fraction; users care about order-of-magnitude not exact width.
+func tCritical(dof int) float64 {
+	switch {
+	case dof < 1:
+		return 1.96 // degenerate; caller won't reach this in practice
+	case dof <= 5:
+		return 2.57
+	case dof <= 10:
+		return 2.23
+	case dof <= 20:
+		return 2.09
+	case dof <= 30:
+		return 2.04
+	case dof <= 50:
+		return 2.01
+	case dof <= 100:
+		return 1.98
+	default:
+		return 1.96
+	}
 }
 
 type pairKey struct {
@@ -193,7 +313,7 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 		betaSlice[i] = beta.AtVec(i)
 	}
 
-	return &regressionModel{
+	m := &regressionModel{
 		pairs:      pairs,
 		modes:      modes,
 		wawMean:    wawMean,
@@ -203,7 +323,71 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 		logAvgMean: logAvgMean,
 		logAvgStd:  logAvgStd,
 		beta:       betaSlice,
-	}, nil
+		nObs:       len(rows),
+		nFeat:      nFeat,
+	}
+
+	// Fit-quality signals (#216). Computed after the β solve so
+	// PredictionInterval and the reasoning string both have access to
+	// R² and the cached (XᵀX + λI)⁻¹ leverage matrix.
+	computeFitQuality(m, X, y, &XtX)
+
+	return m, nil
+}
+
+// computeFitQuality populates the model's R², residual variance, and
+// cached (XᵀX + λI)⁻¹ leverage matrix from the freshly-solved fit
+// (#216). All three are nil-able to signal "couldn't compute" cases:
+// constant-y training data leaves R² nil; n ≤ p degenerate dof leaves
+// sigmaSq nil; numerical inversion failure leaves xtxInverse nil. The
+// caller (PredictionInterval) and reasoning emitter both handle nils.
+func computeFitQuality(m *regressionModel, X *mat.Dense, y *mat.VecDense, ridgeXtX *mat.Dense) {
+	n := y.Len()
+
+	// Sum of squares: SSE = Σ(yᵢ - ŷᵢ)²; SST = Σ(yᵢ - ȳ)².
+	var ySum float64
+	for i := 0; i < n; i++ {
+		ySum += y.AtVec(i)
+	}
+	yMean := ySum / float64(n)
+
+	// Compute ŷ = Xβ via matrix multiply; faster than per-row dot.
+	var yHat mat.VecDense
+	betaVec := mat.NewVecDense(m.nFeat, m.beta)
+	yHat.MulVec(X, betaVec)
+
+	var ssRes, ssTot float64
+	for i := 0; i < n; i++ {
+		residual := y.AtVec(i) - yHat.AtVec(i)
+		ssRes += residual * residual
+		dev := y.AtVec(i) - yMean
+		ssTot += dev * dev
+	}
+
+	// R² = 1 - SSE/SST. Defined only when SST > 0; constant-y training
+	// data leaves R² unmeasurable (nothing to "explain").
+	if ssTot > 0 {
+		r2 := 1.0 - ssRes/ssTot
+		m.r2 = &r2
+	}
+
+	// Residual variance σ̂² = SSE / (n - p). Defined only when n > p;
+	// otherwise the dof is non-positive and the variance estimate is
+	// undefined.
+	dof := m.nObs - m.nFeat
+	if dof > 0 {
+		sigmaSq := ssRes / float64(dof)
+		m.sigmaSq = &sigmaSq
+	}
+
+	// Cache (XᵀX + λI)⁻¹ for PredictionInterval's leverage term. The
+	// ridge-augmented matrix is generally invertible (that's the point
+	// of ridge); leave nil on the rare failure so PredictionInterval
+	// returns the "N/A" sentinel.
+	var inv mat.Dense
+	if err := inv.Inverse(ridgeXtX); err == nil {
+		m.xtxInverse = &inv
+	}
 }
 
 // Predict returns the model's expected throughput for a candidate (waw,

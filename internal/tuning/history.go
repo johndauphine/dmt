@@ -197,11 +197,47 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	out.WriteAheadWriters = pickedWAW
 	out.ChunkSize = csRows
 	out.Tier = TierRegression
+
+	// Fit-quality signals (#216): R² (model-level) + 95% prediction
+	// interval at the picked point (point-level). Both nil when the
+	// model couldn't compute them — emit "N/A" to keep the format
+	// consistent without lying about confidence.
+	r2Str := "N/A"
+	if model.r2 != nil {
+		r2Str = fmt.Sprintf("%.2f", *model.r2)
+	}
+	low, high := model.PredictionInterval(pickedWAW, pickedCSBytes, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
+	ciStr := "N/A"
+	if low != high {
+		ciStr = formatThroughputRange(low, high)
+	}
+
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB) over %d filtered rows; predicted %.0f rows/s",
-		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, len(rows), predicted,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB) over %d filtered rows; predicted %.0f rows/s [95%% CI: %s]; R²=%s",
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, len(rows), predicted, ciStr, r2Str,
 	)
 	return true
+}
+
+// formatThroughputRange formats a (low, high) throughput pair as a
+// short human-readable range. Picks units (K vs M rows/s) based on
+// magnitude so the reasoning string stays readable. Always emits both
+// endpoints in the same unit for easy visual comparison.
+//
+// Negative low values (the prediction interval can extend below zero
+// when uncertainty is large) are clamped to 0 in the display — a
+// "throughput could be negative" string would mislead users; the
+// information that matters is "the lower bound is essentially zero,
+// model has very low confidence."
+func formatThroughputRange(low, high float64) string {
+	if low < 0 {
+		low = 0
+	}
+	// Pick the larger endpoint's natural unit; small numbers in K, large in M.
+	if high >= 1_000_000 {
+		return fmt.Sprintf("%.2fM–%.2fM rows/s", low/1_000_000, high/1_000_000)
+	}
+	return fmt.Sprintf("%.0fK–%.0fK rows/s", low/1000, high/1000)
 }
 
 // sortedKeys returns the int keys of m sorted ascending. Used by the
