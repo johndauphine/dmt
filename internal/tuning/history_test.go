@@ -576,11 +576,14 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 
 	// 60 rows. WAW=4 has 100% retry rate AND below-median throughput;
 	// both gates of the throughput-aware filter (#204) fire → excluded.
-	// Per-WAW means are 600K + 100·waw → [700, 800, 900, 200, 1100,
-	// 1200] for WAW=1..6. Median across 6 means = upper-middle = 1000.
-	// WAW=4's 200K < 1000 → excluded. Pre-#204 test had WAW=4 at 1.2M
-	// (above median) and the retry-rate-only filter still excluded it;
-	// post-#204 we need WAW=4 to actually be a bad config to be filtered.
+	// Per-WAW means are 600K + 100K·waw, with WAW=4 overridden to 200K:
+	//   WAW=1..6 → [700K, 800K, 900K, 200K, 1.1M, 1.2M]
+	//   sorted   → [200K, 700K, 800K, 900K, 1.1M, 1.2M]
+	//   median   = upper-middle (len/2 = 3) = 900K
+	// WAW=4's 200K < 900K → excluded. Pre-#204 test had WAW=4 at 1.2M
+	// (above any median) and the retry-rate-only filter still excluded
+	// it; post-#204 we need WAW=4 to actually be a bad config to be
+	// filtered.
 	rows := make([]HistoryRecord, 60)
 	for i := range rows {
 		waw := (i % 6) + 1
