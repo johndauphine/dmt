@@ -36,7 +36,7 @@ func GenerateIndex(table TableInfo, idx Index, sourceDialect, targetDialect stri
 		uniqueClause = "UNIQUE "
 	}
 
-	tableName := QualifiedTableName(table.Schema, table.Name, sourceDialect, targetDialect)
+	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
 	cols := quoteColumnList(idx.Columns, targetDialect)
 
 	return fmt.Sprintf(

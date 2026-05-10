@@ -33,76 +33,80 @@ func TestQuoteIdentifier(t *testing.T) {
 
 func TestQualifiedTableName_DefaultSchemaSuppressed(t *testing.T) {
 	tests := []struct {
-		name              string
-		schema, table     string
-		src, tgt          string
-		want              string
+		name          string
+		schema, table string
+		target        string
+		want          string
 	}{
-		{"pg_default_public_suppressed", "public", "users", DialectPostgres, DialectPostgres, `"users"`},
-		{"mssql_default_dbo_suppressed", "dbo", "users", DialectMSSQL, DialectMSSQL, "[users]"},
-		{"mysql_schema_always_suppressed", "anything", "users", DialectMySQL, DialectMySQL, "`users`"},
-		{"empty_schema_suppressed", "", "users", DialectPostgres, DialectPostgres, `"users"`},
+		{"pg_default_public_suppressed", "public", "users", DialectPostgres, `"users"`},
+		{"mssql_default_dbo_suppressed", "dbo", "users", DialectMSSQL, "[users]"},
+		{"mysql_schema_always_suppressed", "anything", "users", DialectMySQL, "`users`"},
+		{"empty_schema_suppressed", "", "users", DialectPostgres, `"users"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := QualifiedTableName(tc.schema, tc.table, tc.src, tc.tgt); got != tc.want {
+			if got := QualifiedTableName(tc.schema, tc.table, tc.target); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestQualifiedTableName_CrossDialectDefaultMapping(t *testing.T) {
-	// MSSQL "dbo" source → PG target: source default suppressed,
-	// target uses its implicit default schema
-	if got := QualifiedTableName("dbo", "users", DialectMSSQL, DialectPostgres); got != `"users"` {
-		t.Errorf("MSSQL→PG dbo: got %q, want %q", got, `"users"`)
-	}
-	// PG "public" source → MSSQL target: same pattern
-	if got := QualifiedTableName("public", "users", DialectPostgres, DialectMSSQL); got != "[users]" {
-		t.Errorf("PG→MSSQL public: got %q, want %q", got, "[users]")
-	}
-}
-
 func TestQualifiedTableName_NonDefaultSchemaPreserved(t *testing.T) {
-	// Custom non-default schema is preserved on PG and MSSQL
-	if got := QualifiedTableName("inventory", "items", DialectPostgres, DialectPostgres); got != `"inventory"."items"` {
+	// Custom non-default schema is preserved on PG and MSSQL.
+	if got := QualifiedTableName("inventory", "items", DialectPostgres); got != `"inventory"."items"` {
 		t.Errorf("PG custom schema: got %q, want %q", got, `"inventory"."items"`)
 	}
-	if got := QualifiedTableName("Sales", "orders", DialectMSSQL, DialectMSSQL); got != "[Sales].[orders]" {
+	if got := QualifiedTableName("Sales", "orders", DialectMSSQL); got != "[Sales].[orders]" {
 		t.Errorf("MSSQL custom schema: got %q, want %q", got, "[Sales].[orders]")
 	}
 }
 
-// TestQualifiedTableName_PreservesUserSchemaNamedDefault — Codex review
-// catch on PR #188. The original implementation hard-coded a list
-// (`dbo`, `public`, `main`) and suppressed any schema literally
-// matching one regardless of source dialect — a legitimate
-// user-defined PG schema named `dbo` would be silently dropped and the
-// table would merge into the target's default schema (or, on a PG→PG
-// migration, into "public" instead of "dbo").
+// TestQualifiedTableName_PreservesUserSchemaNamedSourceDefault — Codex
+// review on PR #190. The original PR #188 implementation suppressed
+// any schema matching the SOURCE dialect's default, on the theory that
+// the schema field carried the source's schema and we wanted the
+// target to use its own default. That was wrong for dmt's use case
+// where the schema field actually carries the user-chosen TARGET
+// schema; the suppression silently dropped the user's choice when
+// their target schema happened to match the source dialect's default
+// name (e.g., source=mssql, TargetSchema="dbo" on a non-MSSQL target).
 //
-// The fix takes sourceDialect as a parameter and only suppresses when
-// the schema matches the SOURCE dialect's default (or the target's).
-func TestQualifiedTableName_PreservesUserSchemaNamedDefault(t *testing.T) {
-	// PG user schema literally named "dbo" → PG target. "dbo" is NOT
-	// PG's default ("public" is), and NOT PG target's default either,
-	// so the schema must be preserved.
-	if got := QualifiedTableName("dbo", "users", DialectPostgres, DialectPostgres); got != `"dbo"."users"` {
-		t.Errorf("PG user schema 'dbo' → PG: got %q, want %q (#188 regression)",
+// The fix removed the rule and the sourceDialect parameter entirely.
+// QualifiedTableName now treats the schema as the literal target
+// schema; cross-dialect default mapping is the caller's responsibility
+// (typically by passing empty schema). These cases would have been
+// silently suppressed under the old rule:
+func TestQualifiedTableName_PreservesUserSchemaNamedSourceDefault(t *testing.T) {
+	// "dbo" is MSSQL's default schema name. A user targeting PG with
+	// TargetSchema="dbo" wants a literal "dbo" schema in PG. The old
+	// code silently dropped this when source happened to be MSSQL.
+	if got := QualifiedTableName("dbo", "users", DialectPostgres); got != `"dbo"."users"` {
+		t.Errorf("user schema 'dbo' → PG target: got %q, want %q (#190 regression)",
 			got, `"dbo"."users"`)
 	}
-	// MSSQL user schema literally named "public" → MSSQL target. Same
-	// pattern: not MSSQL's default ("dbo" is), not target default
-	// either, must preserve.
-	if got := QualifiedTableName("public", "users", DialectMSSQL, DialectMSSQL); got != "[public].[users]" {
-		t.Errorf("MSSQL user schema 'public' → MSSQL: got %q, want %q (#188 regression)",
+	// "public" is PG's default schema name. Same scenario inverted:
+	// user targets MSSQL with TargetSchema="public".
+	if got := QualifiedTableName("public", "users", DialectMSSQL); got != "[public].[users]" {
+		t.Errorf("user schema 'public' → MSSQL target: got %q, want %q (#190 regression)",
 			got, "[public].[users]")
 	}
-	// PG user schema "dbo" → MySQL target. MySQL always suppresses.
-	// (sanity check: the MySQL-suppression rule still applies even
-	// when the schema is a non-default user name.)
-	if got := QualifiedTableName("dbo", "users", DialectPostgres, DialectMySQL); got != "`users`" {
-		t.Errorf("PG user schema 'dbo' → MySQL: got %q, want %q", got, "`users`")
+	// Same-dialect case still preserves a non-target-default schema.
+	if got := QualifiedTableName("dbo", "users", DialectPostgres); got != `"dbo"."users"` {
+		t.Errorf("PG → PG with non-default schema 'dbo': got %q, want %q",
+			got, `"dbo"."users"`)
+	}
+}
+
+// TestQualifiedTableName_MySQLSuppressesAlways verifies the third
+// suppression rule still works after the parameter change.
+func TestQualifiedTableName_MySQLSuppressesAlways(t *testing.T) {
+	for _, schema := range []string{"any_schema", "dbo", "public", ""} {
+		t.Run("schema_"+schema, func(t *testing.T) {
+			if got := QualifiedTableName(schema, "users", DialectMySQL); got != "`users`" {
+				t.Errorf("MySQL target should suppress schema %q; got %q",
+					schema, got)
+			}
+		})
 	}
 }

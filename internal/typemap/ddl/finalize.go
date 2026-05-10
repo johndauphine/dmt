@@ -36,11 +36,11 @@ import (
 // The ON DELETE / ON UPDATE clauses are omitted when the action is
 // NO ACTION (the SQL default; emitting it is redundant and noisier).
 func GenerateAddForeignKey(table TableInfo, c Constraint, sourceDialect, targetDialect string) string {
-	tableName := QualifiedTableName(table.Schema, table.Name, sourceDialect, targetDialect)
+	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
 	localCols := quoteColumnList(c.Columns, targetDialect)
 
 	fk := c.ForeignKey
-	refTable := QualifiedTableName(fk.RefSchema, fk.RefTable, sourceDialect, targetDialect)
+	refTable := QualifiedTableName(fk.RefSchema, fk.RefTable, targetDialect)
 	refCols := quoteColumnList(fk.RefColumns, targetDialect)
 
 	stmt := fmt.Sprintf(
@@ -67,7 +67,7 @@ func GenerateAddForeignKey(table TableInfo, c Constraint, sourceDialect, targetD
 // ConstraintUnique. Single- and multi-column unique constraints share
 // the same form (composite is just longer column list).
 func GenerateAddUnique(table TableInfo, c Constraint, sourceDialect, targetDialect string) string {
-	tableName := QualifiedTableName(table.Schema, table.Name, sourceDialect, targetDialect)
+	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
 	cols := quoteColumnList(c.Columns, targetDialect)
 
 	return fmt.Sprintf(
@@ -88,7 +88,7 @@ func GenerateAddUnique(table TableInfo, c Constraint, sourceDialect, targetDiale
 // literals, IN clauses on enum-style values, simple column references)
 // pass through correctly via this verbatim emission.
 func GenerateAddCheck(table TableInfo, c Constraint, sourceDialect, targetDialect string) string {
-	tableName := QualifiedTableName(table.Schema, table.Name, sourceDialect, targetDialect)
+	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
 
 	return fmt.Sprintf(
 		"ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s);",
