@@ -92,6 +92,9 @@ func (m *DeterministicMapper) SupportedTargets() []string {
 // log reasoning so a reviewer can see the mapped target type per
 // source column without re-parsing the DDL string.
 func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error) {
+	if req.SourceTable == nil {
+		return nil, fmt.Errorf("GenerateTableDDL: SourceTable is required")
+	}
 	if !m.CanMap(req.SourceDBType, req.TargetDBType) {
 		return nil, fmt.Errorf("deterministic mapper does not support %s → %s",
 			req.SourceDBType, req.TargetDBType)
@@ -124,6 +127,9 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 // dmt-driver constraint shapes (driver.ForeignKey, driver.Index,
 // driver.CheckConstraint) to the typemap/ddl shapes.
 func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
+	if req.Table == nil {
+		return "", fmt.Errorf("GenerateFinalizationDDL: Table is required")
+	}
 	if !m.CanMap(req.SourceDBType, req.TargetDBType) {
 		return "", fmt.Errorf("deterministic mapper does not support %s → %s",
 			req.SourceDBType, req.TargetDBType)
@@ -172,6 +178,12 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 // drops are handled separately by the orchestrator's drop sequence,
 // not bundled here.
 func (m *DeterministicMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error) {
+	if req.TableName == "" {
+		return "", fmt.Errorf("GenerateDropTableDDL: TableName is required")
+	}
+	if !isSupportedDialect(req.TargetDBType) {
+		return "", fmt.Errorf("deterministic mapper does not support target dialect %q", req.TargetDBType)
+	}
 	return generateDropTable(req.TargetSchema, req.TableName, req.TargetDBType), nil
 }
 
@@ -187,10 +199,28 @@ func isSupportedDialect(dialect string) bool {
 }
 
 // generateDropTable emits the simple DROP TABLE IF EXISTS form.
-// Schema-qualified when the target schema is non-default. Targets all
-// three dialects with the same ANSI-style syntax — all three accept it.
+//
+// MSSQL behavior is special: the schema is ALWAYS qualified when
+// non-empty, even when it matches the dialect's default ("dbo").
+// SQL Server allows per-login default schemas, so an unqualified
+// `DROP TABLE [users]` could resolve to a different schema than the
+// subsequent CREATE / INSERT operations (which always qualify via
+// Dialect.QualifyTable elsewhere in the MSSQL driver). The deterministic
+// adapter MUST stay consistent with that convention or DROP/CREATE
+// can target different objects (Copilot review on PR #190).
+//
+// PG and MySQL behave correctly under QualifiedTableName's default-
+// suppression rules: PG's session search_path always puts the default
+// schema first, and MySQL has no schema distinct from the database.
 func generateDropTable(schema, tableName, targetDialect string) string {
-	qname := ddl.QualifiedTableName(schema, tableName, targetDialect, targetDialect)
+	if targetDialect == typemap.DialectMSSQL && schema != "" {
+		// Always qualify on MSSQL — see function doc.
+		return fmt.Sprintf("DROP TABLE IF EXISTS %s.%s;",
+			ddl.QuoteIdentifier(schema, targetDialect),
+			ddl.QuoteIdentifier(tableName, targetDialect),
+		)
+	}
+	qname := ddl.QualifiedTableName(schema, tableName, targetDialect)
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", qname)
 }
 
@@ -237,10 +267,13 @@ func driverColumnToDDL(col Column) ddl.Column {
 }
 
 // driverTableToDDL projects a driver.Table to ddl.TableInfo. The PK
-// constraint name is synthesized from the table name (pk_<table>)
-// since dmt's reader stores PK as a column-name list with no
-// constraint name; the synthesized name matches PG's default naming
-// convention and works on all three dialects.
+// constraint name is synthesized as `pk_<table>` since dmt's reader
+// stores PK as a column-name list with no constraint name. The
+// synthesized name does NOT match Postgres's actual default
+// (Postgres uses `<table>_pkey`) — it's just a readable convention
+// the deterministic mapper picks; introspecting the resulting target
+// will show the synthesized name, not the source's PK name (Copilot
+// review on PR #190).
 //
 // Indexes are passed through; FK and CHECK constraints are NOT
 // included on the TableInfo because GenerateCreateTable emits PK only

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
 // ---------- MapType (column-level) ----------
@@ -439,9 +440,17 @@ func TestDeterministicMapper_GenerateDropTableDDL(t *testing.T) {
 		dialect       string
 		want          string
 	}{
-		{"pg_default_schema", "public", "users", typemap.DialectPostgres, `DROP TABLE IF EXISTS "users";`},
-		{"pg_custom_schema", "inventory", "items", typemap.DialectPostgres, `DROP TABLE IF EXISTS "inventory"."items";`},
-		{"mssql_default_schema", "dbo", "users", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [users];"},
+		{"pg_default_schema_suppressed", "public", "users", typemap.DialectPostgres, `DROP TABLE IF EXISTS "users";`},
+		{"pg_custom_schema_qualified", "inventory", "items", typemap.DialectPostgres, `DROP TABLE IF EXISTS "inventory"."items";`},
+		// MSSQL must ALWAYS qualify when schema is non-empty — even
+		// "dbo" — to stay consistent with Dialect.QualifyTable used
+		// elsewhere in the MSSQL driver. SQL Server allows per-login
+		// default schemas; an unqualified DROP could resolve to a
+		// different schema than the corresponding CREATE/INSERT
+		// (Copilot review on PR #190).
+		{"mssql_default_dbo_qualified", "dbo", "users", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [dbo].[users];"},
+		{"mssql_custom_schema_qualified", "Sales", "orders", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [Sales].[orders];"},
+		{"mssql_empty_schema_unqualified", "", "users", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [users];"},
 		{"mysql_always_suppressed", "any", "users", typemap.DialectMySQL, "DROP TABLE IF EXISTS `users`;"},
 	}
 	for _, tc := range cases {
@@ -458,6 +467,91 @@ func TestDeterministicMapper_GenerateDropTableDDL(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDeterministicMapper_GenerateDropTableDDL_Validation — Copilot
+// review on PR #190. The mapper should error on missing required
+// fields and on unsupported dialects rather than emit invalid SQL.
+func TestDeterministicMapper_GenerateDropTableDDL_Validation(t *testing.T) {
+	m := NewDeterministicMapper()
+
+	if _, err := m.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
+		TargetDBType: typemap.DialectPostgres,
+		// TableName missing
+	}); err == nil {
+		t.Error("expected error when TableName is empty")
+	}
+
+	if _, err := m.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
+		TableName:    "users",
+		TargetDBType: "oracle",
+	}); err == nil {
+		t.Error("expected error for unsupported target dialect")
+	}
+}
+
+// TestDeterministicMapper_GenerateTableDDL_NilSourceTable — Copilot
+// review on PR #190. Nil source must produce a user-facing error,
+// not a panic.
+func TestDeterministicMapper_GenerateTableDDL_NilSourceTable(t *testing.T) {
+	m := NewDeterministicMapper()
+	_, err := m.GenerateTableDDL(context.Background(), TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectPostgres,
+		// SourceTable: nil
+	})
+	if err == nil {
+		t.Fatal("expected error for nil SourceTable; got nil — would have panicked")
+	}
+	if !strings.Contains(err.Error(), "SourceTable") {
+		t.Errorf("error should mention SourceTable; got %q", err.Error())
+	}
+}
+
+// TestDeterministicMapper_GenerateFinalizationDDL_NilTable — Copilot
+// review on PR #190. Same nil-validation guard for the finalization
+// path.
+func TestDeterministicMapper_GenerateFinalizationDDL_NilTable(t *testing.T) {
+	m := NewDeterministicMapper()
+	_, err := m.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectPostgres,
+		// Table: nil
+	})
+	if err == nil {
+		t.Fatal("expected error for nil Table; got nil — would have panicked")
+	}
+}
+
+// TestDeterministicMapper_GenerateTableDDL_TargetSchemaPreservedAcrossSourceDefault
+// — Copilot review on PR #190 (regression guard for the schema-
+// suppression fix). When the user explicitly sets a TargetSchema whose
+// name happens to match the SOURCE dialect's default ("dbo" for an
+// MSSQL source), the deterministic adapter must preserve it on the
+// target — not silently suppress because the name collides with the
+// source's default.
+func TestDeterministicMapper_GenerateTableDDL_TargetSchemaPreservedAcrossSourceDefault(t *testing.T) {
+	m := NewDeterministicMapper()
+	table := &Table{
+		Schema: "myapp", Name: "users",
+		Columns: []Column{{Name: "id", DataType: "int", IsNullable: false}},
+		PrimaryKey: []string{"id"},
+	}
+	resp, err := m.GenerateTableDDL(context.Background(), TableDDLRequest{
+		SourceDBType: typemap.DialectMSSQL, // mssql default = "dbo"
+		TargetDBType: typemap.DialectPostgres,
+		SourceTable:  table,
+		TargetSchema: "dbo", // PG schema literally named "dbo"
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// PG quoting + schema preserved
+	if !strings.Contains(resp.CreateTableDDL, `CREATE TABLE "dbo"."users"`) {
+		t.Errorf("target schema 'dbo' must be preserved on PG even though source is MSSQL; got:\n%s",
+			resp.CreateTableDDL)
 	}
 }
 
@@ -512,7 +606,7 @@ func TestDriverTableToDDL_SynthesizesPKName(t *testing.T) {
 	if got.Constraints[0].Name != "pk_users" {
 		t.Errorf("synthesized PK name: got %q, want pk_users", got.Constraints[0].Name)
 	}
-	if got.Constraints[0].Type != 0 { // ConstraintPrimaryKey is iota 0
+	if got.Constraints[0].Type != ddl.ConstraintPrimaryKey {
 		t.Errorf("synthesized PK type: got %d, want ConstraintPrimaryKey", got.Constraints[0].Type)
 	}
 }

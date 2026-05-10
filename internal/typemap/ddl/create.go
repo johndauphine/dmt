@@ -37,7 +37,7 @@ import (
 // type mapping, nullability, DEFAULT translation, auto-increment, and
 // inline MySQL comments.
 func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) string {
-	qname := QualifiedTableName(table.Schema, table.Name, sourceDialect, targetDialect)
+	qname := QualifiedTableName(table.Schema, table.Name, targetDialect)
 
 	parts := make([]string, 0, len(table.Columns)+1)
 	for _, col := range table.Columns {

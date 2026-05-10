@@ -44,26 +44,30 @@ func QuoteIdentifier(name, dialect string) string {
 }
 
 // QualifiedTableName returns the schema-qualified table name for the
-// target dialect, suppressing the schema prefix when it would be
-// redundant or wrong:
+// target dialect, suppressing the schema prefix only when it would be
+// redundant:
 //
-//   - empty schema, or schema matches the TARGET's default → suppress
-//   - schema matches the SOURCE dialect's default → suppress (cross-
-//     dialect default mapping: PG "public" → MSSQL writes into "dbo",
-//     not into a literal "public" schema)
-//   - MySQL target, always → suppress (MySQL's "schema" is the database
-//     name, always set at connection time)
+//   - empty schema → suppress (caller is opting out of qualification)
+//   - schema matches the TARGET dialect's default → suppress (the
+//     target dialect would resolve the same table either way)
+//   - MySQL target, always → suppress (MySQL's "schema" is the
+//     database name, always set at connection time)
 //
-// The sourceDialect parameter is required for the second rule: without
-// it, a real user-defined PG schema named "dbo" (or MSSQL schema named
-// "public") would be silently suppressed and tables would merge into
-// the target's default schema (Codex review on PR #188).
-func QualifiedTableName(schema, table, sourceDialect, targetDialect string) string {
+// The schema argument is treated as the LITERAL target schema — what
+// the caller wants to appear in the emitted DDL. No cross-dialect
+// "source default → target default" mapping happens here. Callers
+// that want that behavior must perform the mapping themselves before
+// calling this function (typically by passing empty schema).
+//
+// History: PR #188 added a `sourceDialect` parameter and a
+// "schema-matches-source-default → suppress" rule borrowed from UVG.
+// That rule misfires when a caller passes the user's chosen TARGET
+// schema and that name happens to collide with the source dialect's
+// default — e.g., source=mssql with user-chosen TargetSchema="dbo"
+// on a non-MSSQL target would be silently dropped (Copilot review on
+// PR #190). The rule and the parameter are removed.
+func QualifiedTableName(schema, table, targetDialect string) string {
 	if schema == "" || schema == defaultSchema(targetDialect) {
-		return QuoteIdentifier(table, targetDialect)
-	}
-
-	if schema == defaultSchema(sourceDialect) {
 		return QuoteIdentifier(table, targetDialect)
 	}
 
@@ -89,4 +93,3 @@ func defaultSchema(dialect string) string {
 		return ""
 	}
 }
-
