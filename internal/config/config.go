@@ -986,8 +986,11 @@ func (c *Config) validate() error {
 
 	switch c.Migration.ApproxTypeAction {
 	case "", "deterministic", "ai_fallback":
-		// Valid. Same empty-is-OK rule as UnmappedTypeAction; default
-		// is set in applyDefaults. Issue #197.
+		// Valid. Empty intentionally falls through to NewFallbackChain
+		// (#209) which picks ai_fallback when AI is configured,
+		// deterministic when AI isn't — config doesn't know about AI
+		// availability, the chain does. Explicit values override that
+		// runtime decision. Issues #197, #209.
 	default:
 		return fmt.Errorf("migration.approx_type_action must be 'deterministic' or 'ai_fallback'; got %q",
 			c.Migration.ApproxTypeAction)

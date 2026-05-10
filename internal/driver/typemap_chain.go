@@ -62,17 +62,22 @@ const (
 type ApproxAction string
 
 const (
-	// ApproxActionDeterministic keeps the deterministic mapping. The
-	// default — preserves the AI-optional epic's "fast deterministic
-	// path" promise. Users get a one-time INFO log per migration
-	// listing approx columns so they can decide whether to flip the
-	// knob.
+	// ApproxActionDeterministic keeps the deterministic mapping and
+	// emits a one-time INFO log per migration listing affected approx
+	// columns so the user can decide whether to flip the knob.
+	// NewFallbackChain selects this when no AI fallback is available
+	// (no AI to route to); users with AI configured can also force
+	// this explicitly.
 	ApproxActionDeterministic ApproxAction = "deterministic"
 
 	// ApproxActionAIFallback routes any table containing approx columns
 	// through the AI fallback (same path as Raw-bearing tables). AI
 	// sees the whole table and may produce better DDL — at the cost
-	// of an AI call per affected table. Opt-in.
+	// of an AI call per affected table. NewFallbackChain selects this
+	// by default when AI is configured (issue #209 — consistent with
+	// how Raw / table-DDL-error / finalization-error paths default-on
+	// when AI is available); users opt out via explicit
+	// ApproxActionDeterministic.
 	ApproxActionAIFallback ApproxAction = "ai_fallback"
 )
 
@@ -207,13 +212,15 @@ func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLReques
 			req.SourceTable.Name, rawCols, c.action)
 	}
 
-	// #197: optional opt-in routing for approximate (lossy-but-mapped)
-	// columns. The Raw check above handles the "no mapping" case;
-	// this handles the "mapping exists but lossy" case (e.g. PG
-	// INTERVAL → MSSQL NVARCHAR(255)). Default action is
-	// ApproxActionDeterministic — log once per table when approx
-	// columns are present so the user can decide whether to flip
-	// the knob, but don't take action.
+	// #197: optional routing for approximate (lossy-but-mapped) columns.
+	// The Raw check above handles the "no mapping" case; this handles
+	// the "mapping exists but lossy" case (e.g. PG INTERVAL → MSSQL
+	// NVARCHAR(255)). Action selected per-chain in NewFallbackChain:
+	// ai_fallback when AI is configured (#209 — implicit opt-in),
+	// deterministic when AI isn't, with explicit overrides respected.
+	// On the deterministic branch (or when ai_fallback was requested
+	// but the AI mapper doesn't implement TableTypeMapper), log once
+	// per table naming the approx columns.
 	if approxCols := c.findApproximateColumns(req); len(approxCols) > 0 {
 		if c.approxAction == ApproxActionAIFallback && c.fallback != nil {
 			if tableMapper, ok := c.fallback.(TableTypeMapper); ok {
