@@ -52,10 +52,10 @@ func GenerateAddForeignKey(table TableInfo, c Constraint, sourceDialect, targetD
 		strings.Join(refCols, ", "),
 	)
 
-	if action := normalizeAction(fk.DeleteRule); action != "" {
+	if action := normalizeActionForTarget(fk.DeleteRule, targetDialect); action != "" {
 		stmt += " ON DELETE " + action
 	}
-	if action := normalizeAction(fk.UpdateRule); action != "" {
+	if action := normalizeActionForTarget(fk.UpdateRule, targetDialect); action != "" {
 		stmt += " ON UPDATE " + action
 	}
 
@@ -108,13 +108,30 @@ func quoteColumnList(cols []string, targetDialect string) []string {
 	return out
 }
 
-// normalizeAction returns the FK referential-action string after
-// suppressing NO ACTION (the SQL default — emitting it is redundant).
-// Other actions pass through unchanged. Case-folded comparison so
-// drivers reporting "no action" / "No Action" / "NO ACTION" all match.
-func normalizeAction(rule string) string {
+// normalizeActionForTarget returns the FK referential-action string
+// after applying two cross-dialect rules:
+//
+//  1. NO ACTION (the SQL default) is suppressed for ALL targets —
+//     emitting it is redundant noise.
+//  2. RESTRICT is suppressed for MSSQL targets — MSSQL does not accept
+//     RESTRICT as a referential action (only CASCADE / SET NULL /
+//     SET DEFAULT / NO ACTION are valid). PG and MySQL both report
+//     RESTRICT in information_schema (PG treats it as the strict
+//     immediate-check semantic; MySQL parses it as a synonym for
+//     NO ACTION). Mapping to NO ACTION on MSSQL is the standard
+//     cross-dialect translation — without this, PG/MySQL → MSSQL
+//     migrations would emit invalid `ON DELETE RESTRICT` and FK
+//     creation would fail (Codex review on PR #189).
+//
+// Other actions (CASCADE, SET NULL, SET DEFAULT) pass through
+// unchanged. Case-folded comparison so drivers reporting "no action" /
+// "No Action" / "NO ACTION" all match.
+func normalizeActionForTarget(rule, targetDialect string) string {
 	trimmed := strings.TrimSpace(rule)
 	if trimmed == "" || strings.EqualFold(trimmed, "NO ACTION") {
+		return ""
+	}
+	if targetDialect == DialectMSSQL && strings.EqualFold(trimmed, "RESTRICT") {
 		return ""
 	}
 	return trimmed
