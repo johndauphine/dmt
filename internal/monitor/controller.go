@@ -173,6 +173,14 @@ func (c *Controller) SetClock(now func() time.Time) {
 	c.nowFn = now
 }
 
+// UpdateRowsProcessed forwards the live row count to the underlying
+// MetricsCollector. Mirrors AIMonitor.UpdateRowsProcessed so the
+// transfer runner can update rows processed without knowing which
+// monitor implementation is in use.
+func (c *Controller) UpdateRowsProcessed(count int64) {
+	c.collector.UpdateRowCount(count)
+}
+
 // Start runs the controller's tick loop AND spawns the collector
 // goroutine — drop-in replacement for AIMonitor.Start so wiring
 // (transfer_runner) is a one-line swap in 172b.
