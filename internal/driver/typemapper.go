@@ -262,7 +262,7 @@ type DropTableDDLRequest struct {
 // at ~/.dmt/type-cache.json doesn't get loaded twice or written
 // concurrently from two AITypeMapper instances (Copilot review on
 // PR #192).
-func GetTypeMapper(action UnmappedAction) (TypeMapper, error) {
+func GetTypeMapper(action UnmappedAction, approxAction ApproxAction) (TypeMapper, error) {
 	primary := NewDeterministicMapper()
 	// Avoid Go's typed-nil-into-interface trap: assigning a
 	// (*AITypeMapper)(nil) directly to the TypeMapper interface
@@ -272,9 +272,9 @@ func GetTypeMapper(action UnmappedAction) (TypeMapper, error) {
 	// with a nil-pointer-deref. Pass nil interface explicitly when
 	// the AI mapper isn't available.
 	if ai := loadCachedAIMapper(); ai != nil {
-		return NewFallbackChain(primary, ai, action), nil
+		return NewFallbackChain(primary, ai, action, approxAction), nil
 	}
-	return NewFallbackChain(primary, nil, action), nil
+	return NewFallbackChain(primary, nil, action, approxAction), nil
 }
 
 // GetAIMapper returns the AI type mapper if AI is configured, or nil
