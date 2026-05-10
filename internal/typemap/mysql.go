@@ -43,11 +43,29 @@ func mysqlToCanonical(col ColumnInfo) CanonicalType {
 		return CanonicalType{Kind: KindVarchar, Length: col.CharacterMaximumLength}
 	case "char":
 		return CanonicalType{Kind: KindChar, Length: col.CharacterMaximumLength}
-	case "text", "tinytext", "mediumtext", "longtext":
+	case "tinytext":
+		// #206: preserve the source-side byte capacity so a MySQL →
+		// MySQL round-trip emits TINYTEXT again (was widening to TEXT
+		// pre-#196 and to LONGTEXT post-#196).
+		return CanonicalType{Kind: KindText, MaxBytes: Int64Ptr(255)}
+	case "text":
+		return CanonicalType{Kind: KindText, MaxBytes: Int64Ptr(65_535)}
+	case "mediumtext":
+		return CanonicalType{Kind: KindText, MaxBytes: Int64Ptr(16_777_215)}
+	case "longtext":
+		// LONGTEXT is the unbounded tier — no MaxBytes set (matches
+		// the canonical convention that nil = unbounded).
 		return CanonicalType{Kind: KindText}
 	case "binary", "varbinary":
 		return CanonicalType{Kind: KindBytes, Length: col.CharacterMaximumLength}
-	case "blob", "tinyblob", "mediumblob", "longblob":
+	case "tinyblob":
+		// #206: same shape as the text tiers.
+		return CanonicalType{Kind: KindBytes, MaxBytes: Int64Ptr(255)}
+	case "blob":
+		return CanonicalType{Kind: KindBytes, MaxBytes: Int64Ptr(65_535)}
+	case "mediumblob":
+		return CanonicalType{Kind: KindBytes, MaxBytes: Int64Ptr(16_777_215)}
+	case "longblob":
 		return CanonicalType{Kind: KindBytes}
 	case "date":
 		return CanonicalType{Kind: KindDate}
@@ -140,21 +158,21 @@ func mysqlFromCanonical(ct CanonicalType) DdlType {
 		}
 		return exactDDL("CHAR(1)")
 	case KindText:
-		// Issue #196: canonical KindText models *unbounded* text per the
-		// IR contract (MSSQL text/ntext, PG text → KindText). MySQL TEXT
-		// is the smallest of the four sized text types (64 KB) and
-		// silently truncates at the boundary. LONGTEXT preserves
-		// fidelity for unbounded source text.
-		return exactDDL("LONGTEXT")
+		// Issue #206 builds on #196: pick the smallest MySQL text tier
+		// that fits the source's MaxBytes capacity. nil MaxBytes
+		// (unbounded source — MSSQL nvarchar(max), PG TEXT, MySQL
+		// LONGTEXT) → LONGTEXT. Sized source (MySQL TINYTEXT/TEXT/
+		// MEDIUMTEXT) round-trips faithfully via mysqlToCanonical
+		// setting MaxBytes to the source byte cap.
+		return exactDDL(mysqlTextTierFor(ct.MaxBytes))
 	case KindBytes:
 		if ct.Length != nil {
 			return exactDDL(fmt.Sprintf("VARBINARY(%d)", *ct.Length))
 		}
-		// Issue #196 (parallel to the text fix): nil Length on KindBytes
-		// means unbounded source bytes (MSSQL varbinary(max)/image, PG
-		// bytea). MySQL BLOB caps at 64 KB; LONGBLOB (4 GB, stored
-		// off-row) is the safe default for unbounded source bytes.
-		return exactDDL("LONGBLOB")
+		// Issue #206 / #196: same shape as KindText — pick the smallest
+		// blob tier that fits MaxBytes. Unbounded source (MSSQL
+		// varbinary(max)/image, PG bytea, MySQL LONGBLOB) → LONGBLOB.
+		return exactDDL(mysqlBlobTierFor(ct.MaxBytes))
 	case KindDate:
 		return exactDDL("DATE")
 	case KindTime:
@@ -204,6 +222,53 @@ func mysqlFromCanonical(ct CanonicalType) DdlType {
 // stay SmallInt.
 func isTinyintBool(col ColumnInfo) bool {
 	return col.UDTName == "tinyint" && strings.HasPrefix(col.DataType, "tinyint(1)")
+}
+
+// MySQL text/blob tier byte caps. Matches the MySQL data dictionary:
+// TINYTEXT/TINYBLOB hold up to 255 bytes; TEXT/BLOB up to 64 KB - 1;
+// MEDIUMTEXT/MEDIUMBLOB up to 16 MB - 1; LONGTEXT/LONGBLOB up to 4 GB - 1.
+const (
+	mysqlTinyTierBytes   = 255
+	mysqlTextTierBytes   = 65_535
+	mysqlMediumTierBytes = 16_777_215
+)
+
+// mysqlTextTierFor picks the smallest MySQL text tier that fits the
+// source's MaxBytes capacity (#206). nil MaxBytes means unbounded
+// source — emit LONGTEXT (matches the #196 default for unbounded
+// PG/MSSQL text).
+func mysqlTextTierFor(maxBytes *int64) string {
+	if maxBytes == nil {
+		return "LONGTEXT"
+	}
+	switch {
+	case *maxBytes <= mysqlTinyTierBytes:
+		return "TINYTEXT"
+	case *maxBytes <= mysqlTextTierBytes:
+		return "TEXT"
+	case *maxBytes <= mysqlMediumTierBytes:
+		return "MEDIUMTEXT"
+	default:
+		return "LONGTEXT"
+	}
+}
+
+// mysqlBlobTierFor is the binary companion to mysqlTextTierFor (#206).
+// Same byte-cap thresholds; emits the BLOB-family type at each tier.
+func mysqlBlobTierFor(maxBytes *int64) string {
+	if maxBytes == nil {
+		return "LONGBLOB"
+	}
+	switch {
+	case *maxBytes <= mysqlTinyTierBytes:
+		return "TINYBLOB"
+	case *maxBytes <= mysqlTextTierBytes:
+		return "BLOB"
+	case *maxBytes <= mysqlMediumTierBytes:
+		return "MEDIUMBLOB"
+	default:
+		return "LONGBLOB"
+	}
 }
 
 // parseMySQLEnumValues extracts the enum value list from a column_type
