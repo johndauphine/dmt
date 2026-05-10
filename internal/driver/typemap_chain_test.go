@@ -51,7 +51,7 @@ func (s *stubMapper) GenerateFinalizationDDL(_ context.Context, _ FinalizationDD
 
 func TestFallbackChain_MapType_KnownType_NoAIRouting(t *testing.T) {
 	stub := &stubMapper{mapTypeReturns: "FROM_AI"}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	got := chain.MapType(TypeInfo{
 		SourceDBType: typemap.DialectPostgres,
@@ -69,7 +69,7 @@ func TestFallbackChain_MapType_KnownType_NoAIRouting(t *testing.T) {
 
 func TestFallbackChain_MapType_RawType_RoutesToAI(t *testing.T) {
 	stub := &stubMapper{mapTypeReturns: "AI_HANDLED"}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	got := chain.MapType(TypeInfo{
 		SourceDBType: typemap.DialectPostgres,
@@ -86,7 +86,7 @@ func TestFallbackChain_MapType_RawType_RoutesToAI(t *testing.T) {
 }
 
 func TestFallbackChain_MapType_RawType_NoAI_FailAction(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 
 	got := chain.MapType(TypeInfo{
 		SourceDBType: typemap.DialectPostgres,
@@ -100,7 +100,7 @@ func TestFallbackChain_MapType_RawType_NoAI_FailAction(t *testing.T) {
 }
 
 func TestFallbackChain_MapType_RawType_NoAI_ConservativeText(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionConservativeText)
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionConservativeText, "")
 
 	tests := []struct {
 		target, want string
@@ -126,7 +126,7 @@ func TestFallbackChain_MapType_RawType_NoAI_ConservativeText(t *testing.T) {
 func TestFallbackChain_MapType_DefaultsToFailAction(t *testing.T) {
 	// Empty action string should default to "fail" — not silently
 	// degrade to skip or conservative-text.
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, "")
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, "", "")
 	if chain.action != UnmappedActionFail {
 		t.Errorf("empty action should default to UnmappedActionFail; got %q", chain.action)
 	}
@@ -136,7 +136,7 @@ func TestFallbackChain_MapType_DefaultsToFailAction(t *testing.T) {
 
 func TestFallbackChain_GenerateTableDDL_DeterministicSuccess(t *testing.T) {
 	stub := &stubMapper{}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
@@ -162,7 +162,7 @@ func TestFallbackChain_GenerateTableDDL_DeterministicSuccess(t *testing.T) {
 func TestFallbackChain_GenerateTableDDL_DeterministicFailure_RoutesToAI(t *testing.T) {
 	expectedResp := &TableDDLResponse{CreateTableDDL: "AI_GENERATED_DDL"}
 	stub := &stubMapper{tableDDLReturns: expectedResp}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	// Unsupported source dialect → deterministic returns error → AI fires
 	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
@@ -192,7 +192,7 @@ func TestFallbackChain_GenerateTableDDL_DeterministicFailure_RoutesToAI(t *testi
 func TestFallbackChain_GenerateTableDDL_RawColumn_RoutesToAI(t *testing.T) {
 	expectedResp := &TableDDLResponse{CreateTableDDL: "AI_TABLE_DDL"}
 	stub := &stubMapper{tableDDLReturns: expectedResp}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
@@ -222,7 +222,7 @@ func TestFallbackChain_GenerateTableDDL_RawColumn_NoAI_ErrorsClearly(t *testing.
 	// Same scenario but no AI configured — the chain must error with
 	// a clear message naming the offending columns rather than letting
 	// deterministic emit invalid DDL.
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 
 	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
@@ -252,7 +252,7 @@ func TestFallbackChain_GenerateTableDDL_NoRawColumns_DeterministicPath(t *testin
 	// Sanity check: a fully-mapped table doesn't trigger the Raw-column
 	// gate; deterministic handles it and AI is never called.
 	stub := &stubMapper{}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
@@ -278,7 +278,7 @@ func TestFallbackChain_GenerateTableDDL_NoRawColumns_DeterministicPath(t *testin
 }
 
 func TestFallbackChain_GenerateTableDDL_NoFallback_ErrorPropagates(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: "oracle",
 		TargetDBType: typemap.DialectPostgres,
@@ -293,7 +293,7 @@ func TestFallbackChain_GenerateTableDDL_NoFallback_ErrorPropagates(t *testing.T)
 
 func TestFallbackChain_GenerateFinalizationDDL_RoutesOnErrUnsupportedDDL(t *testing.T) {
 	stub := &stubMapper{finalizationDDLReturns: "AI_INDEX_DDL"}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	// Clustered index → deterministic returns ErrUnsupportedDDL → AI fires
 	got, err := chain.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
@@ -319,7 +319,7 @@ func TestFallbackChain_GenerateFinalizationDDL_OtherErrors_DoNotRoute(t *testing
 	// or "Index field required" — propagate without AI involvement.
 	// AI can't recover from them either; shouldn't waste a round-trip.
 	stub := &stubMapper{finalizationDDLReturns: "AI_DDL"}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	_, err := chain.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
 		Type:         DDLTypeIndex,
@@ -340,7 +340,7 @@ func TestFallbackChain_GenerateFinalizationDDL_OtherErrors_DoNotRoute(t *testing
 }
 
 func TestFallbackChain_GenerateFinalizationDDL_RoutesIndex_NoFallback_ErrorPropagates(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 	_, err := chain.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
 		Type:         DDLTypeIndex,
 		SourceDBType: typemap.DialectMSSQL,
@@ -357,7 +357,7 @@ func TestFallbackChain_GenerateFinalizationDDL_RoutesIndex_NoFallback_ErrorPropa
 
 func TestFallbackChain_GenerateDropTableDDL_AlwaysDeterministic(t *testing.T) {
 	stub := &stubMapper{}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	got, err := chain.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
 		TargetSchema: "public",
@@ -378,7 +378,7 @@ func TestFallbackChain_GenerateDropTableDDL_AlwaysDeterministic(t *testing.T) {
 
 func TestFallbackChain_CanMap_UnionWithFallback(t *testing.T) {
 	stub := &stubMapper{} // CanMap returns true for anything
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
 	if !chain.CanMap("oracle", "snowflake") {
 		t.Error("union with always-true fallback should allow any pair")
@@ -386,7 +386,7 @@ func TestFallbackChain_CanMap_UnionWithFallback(t *testing.T) {
 }
 
 func TestFallbackChain_CanMap_NoFallback_DeterministicOnly(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 
 	if !chain.CanMap(typemap.DialectPostgres, typemap.DialectMSSQL) {
 		t.Error("deterministic should allow PG → MSSQL")
@@ -400,7 +400,7 @@ func TestFallbackChain_SupportedTargets_UnionDedupes(t *testing.T) {
 	stub := &stubMapper{
 		supportedTargetsReturns: []string{typemap.DialectMSSQL, "oracle"},
 	}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail)
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 	got := chain.SupportedTargets()
 
 	want := map[string]bool{
@@ -464,7 +464,7 @@ func withNoAISecrets(t *testing.T) {
 func TestGetTypeMapper_NoAI_ReturnsChainWithNilFallback(t *testing.T) {
 	withNoAISecrets(t)
 
-	m, err := GetTypeMapper(UnmappedActionFail)
+	m, err := GetTypeMapper(UnmappedActionFail, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestGetTypeMapper_AIMapperIsSingleton_NoAICase(t *testing.T) {
 	}
 
 	// Chain's fallback equals what GetAIMapper returns directly.
-	m, _ := GetTypeMapper(UnmappedActionFail)
+	m, _ := GetTypeMapper(UnmappedActionFail, "")
 	chain := m.(*FallbackChain)
 	if chain.fallback != nil {
 		// fallback is typed TypeMapper; only meaningful comparison is via
@@ -526,7 +526,7 @@ func TestGetTypeMapper_AIMapperIsSingleton_NoAICase(t *testing.T) {
 // PR #192. A typo'd action string would have silently emitted empty
 // SQLType; now it warns and falls back to fail semantics.
 func TestHandleUnmapped_UnknownAction_WarnsAndFails(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, "bogus-action")
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, "bogus-action", "")
 
 	got := chain.MapType(TypeInfo{
 		SourceDBType: typemap.DialectPostgres,
@@ -535,5 +535,184 @@ func TestHandleUnmapped_UnknownAction_WarnsAndFails(t *testing.T) {
 	})
 	if got != "" {
 		t.Errorf("unknown action should fall back to empty (fail semantics); got %q", got)
+	}
+}
+
+// ---------- Approx-column routing (#197) ----------
+
+// TestFallbackChain_GenerateTableDDL_ApproxColumn_DefaultDeterministic
+// verifies the default ApproxAction (deterministic) keeps the
+// deterministic path even when approx columns are present. The
+// existing PG-INTERVAL → NVARCHAR(255) approxDDL emission triggers
+// IsApproximate=true, so a PG `interval` column targeting MSSQL is
+// the cleanest test fixture.
+func TestFallbackChain_GenerateTableDDL_ApproxColumn_DefaultDeterministic(t *testing.T) {
+	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_DDL"}}
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionDeterministic)
+
+	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectMSSQL,
+		SourceTable: &Table{
+			Name: "events",
+			Columns: []Column{
+				{Name: "id", DataType: "int4", IsNullable: false},
+				{Name: "duration", DataType: "interval", IsNullable: false}, // approx on MSSQL
+			},
+			PrimaryKey: []string{"id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.CreateTableDDL == "AI_DDL" {
+		t.Error("default ApproxActionDeterministic must NOT route to AI; got AI response")
+	}
+	if stub.tableDDLCalled != 0 {
+		t.Errorf("AI fallback should NOT fire on default action; got %d calls", stub.tableDDLCalled)
+	}
+}
+
+// TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback verifies
+// the opt-in ApproxActionAIFallback routes the entire table to AI
+// when at least one column has an approximate mapping.
+func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback(t *testing.T) {
+	expectedResp := &TableDDLResponse{CreateTableDDL: "AI_HANDLED_APPROX"}
+	stub := &stubMapper{tableDDLReturns: expectedResp}
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionAIFallback)
+
+	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectMSSQL,
+		SourceTable: &Table{
+			Name: "events",
+			Columns: []Column{
+				{Name: "id", DataType: "int4", IsNullable: false},
+				{Name: "duration", DataType: "interval", IsNullable: false}, // approx on MSSQL
+			},
+			PrimaryKey: []string{"id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.CreateTableDDL != "AI_HANDLED_APPROX" {
+		t.Errorf("expected AI fallback to handle approx-bearing table; got %q", resp.CreateTableDDL)
+	}
+	if stub.tableDDLCalled != 1 {
+		t.Errorf("AI fallback should fire exactly once; got %d calls", stub.tableDDLCalled)
+	}
+}
+
+// TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback_NoAI
+// verifies that opting into ai_fallback when no AI is configured
+// silently falls through to deterministic. The user asked for AI
+// but didn't configure it — better to deliver the deterministic
+// result than to fail the migration.
+func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback_NoAI(t *testing.T) {
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, ApproxActionAIFallback)
+
+	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectMSSQL,
+		SourceTable: &Table{
+			Name: "events",
+			Columns: []Column{
+				{Name: "id", DataType: "int4", IsNullable: false},
+				{Name: "duration", DataType: "interval", IsNullable: false},
+			},
+			PrimaryKey: []string{"id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(resp.CreateTableDDL, "CREATE TABLE") {
+		t.Errorf("no-AI configuration with ai_fallback should still emit deterministic DDL; got %q", resp.CreateTableDDL)
+	}
+}
+
+// TestFallbackChain_GenerateTableDDL_NoApproxColumns_NoTelemetry
+// smoke test: clean tables with no approx columns must not trigger
+// the AI route under ai_fallback either.
+func TestFallbackChain_GenerateTableDDL_NoApproxColumns_NoTelemetry(t *testing.T) {
+	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_DDL"}}
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionAIFallback)
+
+	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectMSSQL,
+		SourceTable: &Table{
+			Name: "users",
+			Columns: []Column{
+				{Name: "id", DataType: "int4", IsNullable: false},
+				{Name: "name", DataType: "varchar", IsNullable: false},
+			},
+			PrimaryKey: []string{"id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.CreateTableDDL == "AI_DDL" {
+		t.Error("AI fallback should NOT fire on table with no approx columns")
+	}
+	if stub.tableDDLCalled != 0 {
+		t.Errorf("AI fallback should NOT fire; got %d calls", stub.tableDDLCalled)
+	}
+}
+
+// TestFindApproximateColumns_DetectsKnownApproxMappings is a focused
+// unit test on findApproximateColumns. PG INTERVAL → MSSQL is the
+// cleanest known approxDDL emission site (see internal/typemap/mssql.go).
+func TestFindApproximateColumns_DetectsKnownApproxMappings(t *testing.T) {
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, ApproxActionDeterministic)
+	req := TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectMSSQL,
+		SourceTable: &Table{
+			Columns: []Column{
+				{Name: "id", DataType: "int4"},      // exact
+				{Name: "dur", DataType: "interval"}, // approx
+				{Name: "name", DataType: "varchar"}, // exact
+			},
+		},
+	}
+	got := chain.findApproximateColumns(req)
+	if len(got) != 1 || got[0] != "dur" {
+		t.Errorf("expected [dur]; got %v", got)
+	}
+}
+
+// TestFindApproximateColumns_SkipsRawColumns verifies findApproximateColumns
+// correctly skips Raw columns (handled separately by findRawColumns).
+// PG `inet` is Raw on a non-PG target.
+func TestFindApproximateColumns_SkipsRawColumns(t *testing.T) {
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, ApproxActionDeterministic)
+	req := TableDDLRequest{
+		SourceDBType: typemap.DialectPostgres,
+		TargetDBType: typemap.DialectMSSQL,
+		SourceTable: &Table{
+			Columns: []Column{
+				{Name: "id", DataType: "int4"},
+				{Name: "client_ip", DataType: "inet"}, // Raw on PG
+			},
+		},
+	}
+	got := chain.findApproximateColumns(req)
+	if len(got) != 0 {
+		t.Errorf("Raw columns should not appear in approx list; got %v", got)
+	}
+}
+
+// TestNewFallbackChain_DefaultsApproxActionToDeterministic guards the
+// default behavior — empty string ApproxAction must collapse to
+// ApproxActionDeterministic, not silently leave the field empty
+// (which would skip both branches of the switch in GenerateTableDDL).
+func TestNewFallbackChain_DefaultsApproxActionToDeterministic(t *testing.T) {
+	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
+	if chain.approxAction != ApproxActionDeterministic {
+		t.Errorf("empty approxAction should default to %q; got %q",
+			ApproxActionDeterministic, chain.approxAction)
 	}
 }

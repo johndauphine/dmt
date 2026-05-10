@@ -54,26 +54,57 @@ const (
 	UnmappedActionConservativeText UnmappedAction = "conservative-text"
 )
 
+// ApproxAction selects what the chain does at table-level when at least
+// one column maps deterministically but with IsApproximate=true (a
+// known-lossy mapping — e.g. PG INTERVAL → MSSQL NVARCHAR(255), PG
+// ENUM → VARCHAR(255), JSONB → MySQL JSON). Mirrors the
+// migration.approx_type_action config knob (#197).
+type ApproxAction string
+
+const (
+	// ApproxActionDeterministic keeps the deterministic mapping. The
+	// default — preserves the AI-optional epic's "fast deterministic
+	// path" promise. Users get a one-time INFO log per migration
+	// listing approx columns so they can decide whether to flip the
+	// knob.
+	ApproxActionDeterministic ApproxAction = "deterministic"
+
+	// ApproxActionAIFallback routes any table containing approx columns
+	// through the AI fallback (same path as Raw-bearing tables). AI
+	// sees the whole table and may produce better DDL — at the cost
+	// of an AI call per affected table. Opt-in.
+	ApproxActionAIFallback ApproxAction = "ai_fallback"
+)
+
 // FallbackChain is the decorator that routes between deterministic
 // and AI mappers. The fallback is nil-safe: a chain with no AI mapper
 // is functionally equivalent to the deterministic mapper alone, plus
 // the unmapped-type-action behavior for Raw columns.
 type FallbackChain struct {
-	primary  *DeterministicMapper
-	fallback TypeMapper // typically *AITypeMapper; TypeMapper for testability
-	action   UnmappedAction
+	primary      *DeterministicMapper
+	fallback     TypeMapper // typically *AITypeMapper; TypeMapper for testability
+	action       UnmappedAction
+	approxAction ApproxAction
 }
 
 // NewFallbackChain builds a chain. Pass nil for fallback when AI isn't
 // configured — the chain still works, just without AI routing.
-func NewFallbackChain(primary *DeterministicMapper, fallback TypeMapper, action UnmappedAction) *FallbackChain {
+//
+// approxAction defaults to ApproxActionDeterministic (preserve the
+// existing fast deterministic path for known-lossy mappings); pass
+// ApproxActionAIFallback to opt approx-bearing tables into AI routing.
+func NewFallbackChain(primary *DeterministicMapper, fallback TypeMapper, action UnmappedAction, approxAction ApproxAction) *FallbackChain {
 	if action == "" {
 		action = UnmappedActionFail
 	}
+	if approxAction == "" {
+		approxAction = ApproxActionDeterministic
+	}
 	return &FallbackChain{
-		primary:  primary,
-		fallback: fallback,
-		action:   action,
+		primary:      primary,
+		fallback:     fallback,
+		action:       action,
+		approxAction: approxAction,
 	}
 }
 
@@ -163,6 +194,30 @@ func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLReques
 			req.SourceTable.Name, rawCols, c.action)
 	}
 
+	// #197: optional opt-in routing for approximate (lossy-but-mapped)
+	// columns. The Raw check above handles the "no mapping" case;
+	// this handles the "mapping exists but lossy" case (e.g. PG
+	// INTERVAL → MSSQL NVARCHAR(255)). Default action is
+	// ApproxActionDeterministic — log once per table when approx
+	// columns are present so the user can decide whether to flip
+	// the knob, but don't take action.
+	if approxCols := c.findApproximateColumns(req); len(approxCols) > 0 {
+		if c.approxAction == ApproxActionAIFallback && c.fallback != nil {
+			if tableMapper, ok := c.fallback.(TableTypeMapper); ok {
+				logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback (approx columns: %v)", approxCols)
+				return tableMapper.GenerateTableDDL(ctx, req)
+			}
+		}
+		// Telemetry-only path: deterministic stands but inform the user.
+		// INFO not WARN — approx mappings are intentional fidelity
+		// trade-offs, not errors. Once per table per migration; the
+		// chain has no per-migration state so per-table is the
+		// finest grain available without a bigger refactor.
+		logging.Info("typemap chain: table %q used %d approximate (lossy) deterministic mapping(s) for column(s) %v; "+
+			"set migration.approx_type_action: ai_fallback to route these tables through AI for potentially better DDL",
+			req.SourceTable.Name, len(approxCols), approxCols)
+	}
+
 	resp, err := c.primary.GenerateTableDDL(ctx, req)
 	if err == nil {
 		return resp, nil
@@ -198,6 +253,38 @@ func (c *FallbackChain) findRawColumns(req TableDDLRequest) []string {
 		}
 	}
 	return raw
+}
+
+// findApproximateColumns walks the source table's columns and returns
+// the names of those whose deterministic mapping is non-Raw but
+// IsApproximate (a known-lossy mapping like PG INTERVAL →
+// NVARCHAR(255), JSONB → JSON, ENUM → VARCHAR(255)). Used by
+// GenerateTableDDL to surface lossy mappings so the user can decide
+// whether to enable AI fallback for the affected tables (#197).
+//
+// Skips Raw columns — those are handled by findRawColumns and routed
+// before this gate. Calling this on a Raw-bearing table would double-
+// classify those columns; the caller's order-of-checks avoids that.
+func (c *FallbackChain) findApproximateColumns(req TableDDLRequest) []string {
+	if req.SourceTable == nil {
+		return nil
+	}
+	var approx []string
+	for _, col := range req.SourceTable.Columns {
+		colInfo := typemap.ColumnInfo{
+			UDTName:  col.DataType,
+			DataType: col.DataType,
+		}
+		canonical := typemap.ToCanonical(colInfo, req.SourceDBType)
+		if canonical.Kind == typemap.KindRaw {
+			continue
+		}
+		ddl := typemap.FromCanonical(canonical, req.TargetDBType)
+		if ddl.IsApproximate {
+			approx = append(approx, col.Name)
+		}
+	}
+	return approx
 }
 
 // GenerateFinalizationDDL implements FinalizationDDLMapper. Routes to
@@ -288,11 +375,11 @@ func LogTypeMapperInit(m TypeMapper) {
 	case *FallbackChain:
 		if t.fallback != nil {
 			if ai, ok := t.fallback.(*AITypeMapper); ok {
-				logging.Debug("type mapper: deterministic + AI fallback (provider=%s model=%s, cache=%d)",
-					ai.ProviderName(), ai.Model(), ai.CacheSize())
+				logging.Debug("type mapper: deterministic + AI fallback (provider=%s model=%s, cache=%d, approx=%s)",
+					ai.ProviderName(), ai.Model(), ai.CacheSize(), t.approxAction)
 				return
 			}
-			logging.Debug("type mapper: deterministic + non-AI fallback")
+			logging.Debug("type mapper: deterministic + non-AI fallback (approx=%s)", t.approxAction)
 			return
 		}
 		logging.Debug("type mapper: deterministic only (action=%s, no AI fallback)", t.action)

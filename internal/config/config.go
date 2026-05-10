@@ -285,6 +285,22 @@ type MigrationConfig struct {
 	// Defaults to "fail" via applyDefaults; safer than silently
 	// degrading without a user opt-in. Issue #170.
 	UnmappedTypeAction string `yaml:"unmapped_type_action,omitempty"`
+
+	// ApproxTypeAction controls what the type-mapper FallbackChain does
+	// for columns that map deterministically but with IsApproximate=true
+	// (known-lossy mappings — e.g. PG INTERVAL → MSSQL NVARCHAR(255),
+	// PG ENUM → VARCHAR(255), JSONB → MySQL JSON). Valid values:
+	//   "deterministic"  — keep the deterministic mapping; emit an INFO
+	//                      log naming the affected columns so the user
+	//                      can decide whether to flip the knob (default;
+	//                      preserves the AI-optional fast path)
+	//   "ai_fallback"    — route any table containing approx columns
+	//                      through the AI fallback (only fires when AI
+	//                      is configured; ignored otherwise). Costs an
+	//                      AI call per affected table; AI sees the whole
+	//                      table and may produce better DDL.
+	// Defaults to "deterministic" via applyDefaults. Issue #197.
+	ApproxTypeAction string `yaml:"approx_type_action,omitempty"`
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -636,6 +652,14 @@ func (c *Config) applyDefaults() error {
 		// ("conservative-text", "skip") explicitly. Issue #170.
 		c.Migration.UnmappedTypeAction = "fail"
 	}
+	if c.Migration.ApproxTypeAction == "" {
+		// Default: keep the deterministic mapping for approximate
+		// (lossy) types and emit a one-time INFO log per affected
+		// table. Users opt into AI routing for approx columns
+		// ("ai_fallback") explicitly — preserves the AI-optional
+		// epic's "fast deterministic path" promise. Issue #197.
+		c.Migration.ApproxTypeAction = "deterministic"
+	}
 	if c.Migration.AIAdjust == nil {
 		// Default-enable the rule-based runtime controller (#172).
 		// Belt-and-suspenders fallback in case the secrets layer
@@ -954,6 +978,15 @@ func (c *Config) validate() error {
 		// invalid DDL with no clear cause).
 		return fmt.Errorf("migration.unmapped_type_action must be 'fail', 'skip', or 'conservative-text'; got %q",
 			c.Migration.UnmappedTypeAction)
+	}
+
+	switch c.Migration.ApproxTypeAction {
+	case "", "deterministic", "ai_fallback":
+		// Valid. Same empty-is-OK rule as UnmappedTypeAction; default
+		// is set in applyDefaults. Issue #197.
+	default:
+		return fmt.Errorf("migration.approx_type_action must be 'deterministic' or 'ai_fallback'; got %q",
+			c.Migration.ApproxTypeAction)
 	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml

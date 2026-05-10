@@ -223,9 +223,12 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 	// Get the type mapper. Defaults to deterministic-only when no AI is
 	// configured; returns a deterministic+AI fallback chain when AI is
 	// configured (#170). The unmapped_type_action knob from config
-	// chooses what the chain does for Raw types when no AI is available.
+	// chooses what the chain does for Raw types when no AI is available;
+	// the approx_type_action knob (#197) opts approx-bearing tables
+	// into AI routing for potentially better DDL.
 	action := driver.UnmappedAction(cfg.Migration.UnmappedTypeAction)
-	typeMapper, err := driver.GetTypeMapper(action)
+	approxAction := driver.ApproxAction(cfg.Migration.ApproxTypeAction)
+	typeMapper, err := driver.GetTypeMapper(action, approxAction)
 	if err != nil {
 		sourcePool.Close()
 		return nil, fmt.Errorf("loading type mapper: %w", err)
