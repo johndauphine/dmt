@@ -68,6 +68,11 @@ func GenerateAddForeignKey(table TableInfo, c Constraint, sourceDialect, targetD
 // the same form (composite is just longer column list).
 func GenerateAddUnique(table TableInfo, c Constraint, sourceDialect, targetDialect string) string {
 	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
+	// Plain quoteColumnList: like formatPrimaryKey, GenerateColumnDef's
+	// shouldBoundForUniqueness check has already bounded the column
+	// type to VARCHAR(255) when an unbounded-text column ends up in a
+	// UNIQUE constraint on MySQL — preserving uniqueness semantics, so
+	// no key-prefix is needed in the UNIQUE clause.
 	cols := quoteColumnList(c.Columns, targetDialect)
 
 	return fmt.Sprintf(

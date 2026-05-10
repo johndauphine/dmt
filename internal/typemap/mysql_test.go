@@ -96,15 +96,25 @@ func TestMySQLFromCanonical_Exact(t *testing.T) {
 		{"float", CanonicalType{Kind: KindFloat}, "FLOAT"},
 		{"double", CanonicalType{Kind: KindDouble}, "DOUBLE"},
 		{"varchar_with_length", CanonicalType{Kind: KindVarchar, Length: IntPtr(100)}, "VARCHAR(100)"},
-		{"varchar_no_length", CanonicalType{Kind: KindVarchar}, "VARCHAR(255)"},
-		{"text", CanonicalType{Kind: KindText}, "TEXT"},
+		// Issue #196: nil Length means source was unbounded (e.g. MSSQL
+		// nvarchar(max)). Pre-fix this emitted VARCHAR(255) and silently
+		// truncated wide-text data at write time. LONGTEXT is the only
+		// correct portable target for unbounded source text on MySQL.
+		{"varchar_no_length_to_longtext_196", CanonicalType{Kind: KindVarchar}, "LONGTEXT"},
+		// Issue #196: KindText models unbounded source text; MySQL TEXT
+		// is the *smallest* of four sized text types (64 KB) — wrong
+		// default. LONGTEXT preserves fidelity.
+		{"text_to_longtext_196", CanonicalType{Kind: KindText}, "LONGTEXT"},
 		{"date", CanonicalType{Kind: KindDate}, "DATE"},
 		{"time", CanonicalType{Kind: KindTime}, "TIME"},
 		{"timestamp_to_datetime", CanonicalType{Kind: KindTimestamp}, "DATETIME"},
 		{"timestamp_with_tz_to_datetime", CanonicalType{Kind: KindTimestamp, WithTZ: true}, "DATETIME"},
 		{"uuid_to_char_36", CanonicalType{Kind: KindUUID}, "CHAR(36)"},
 		{"json", CanonicalType{Kind: KindJSON}, "JSON"},
-		{"bytes_no_length", CanonicalType{Kind: KindBytes}, "BLOB"},
+		// Issue #196 parallel: nil Length on KindBytes means unbounded
+		// source bytes (MSSQL varbinary(max)). MySQL BLOB caps at 64 KB;
+		// LONGBLOB is the safe default for unbounded.
+		{"bytes_no_length_to_longblob_196", CanonicalType{Kind: KindBytes}, "LONGBLOB"},
 		{"bytes_with_length", CanonicalType{Kind: KindBytes, Length: IntPtr(64)}, "VARBINARY(64)"},
 		{"decimal_p_s", CanonicalType{Kind: KindDecimal, Precision: IntPtr(10), Scale: IntPtr(2)}, "DECIMAL(10, 2)"},
 		{"raw_passthrough", CanonicalType{Kind: KindRaw, TypeName: "GEOMETRY"}, "GEOMETRY"},
@@ -219,5 +229,102 @@ func TestMySQLFromCanonical_EmptyEnumApproximate(t *testing.T) {
 	}
 	if !got.IsApproximate {
 		t.Error("empty enum fallback should be marked approximate")
+	}
+}
+
+// TestMySQLFromCanonical_UnboundedSourceText_Issue196 is the explicit
+// regression guard for issue #196: an unbounded source text column
+// (MSSQL nvarchar(max)/text/ntext, PG TEXT) must round-trip to
+// MySQL LONGTEXT, not VARCHAR(255) or TEXT. Discovery context: SO2010
+// migration mssql→mysql produced "Error 1406: Data too long for
+// column 'Body' at row 1" because Posts.Body (nvarchar(max), real
+// values up to ~12 MB) was created as VARCHAR(255) on MySQL.
+//
+// The table-driven Exact test above exercises the same canonical-side
+// inputs; this test additionally documents the source-side case
+// (MSSQL nvarchar(max) with CHARACTER_MAXIMUM_LENGTH=-1) that
+// produces the nil-Length canonical, and exercises the full
+// round-trip via mssqlToCanonical → mysqlFromCanonical.
+func TestMySQLFromCanonical_UnboundedSourceText_Issue196(t *testing.T) {
+	cases := []struct {
+		name string
+		col  ColumnInfo
+		want string
+	}{
+		{
+			"mssql_nvarchar_max",
+			ColumnInfo{UDTName: "nvarchar", CharacterMaximumLength: IntPtr(-1)},
+			"LONGTEXT",
+		},
+		{
+			"mssql_varchar_max",
+			ColumnInfo{UDTName: "varchar", CharacterMaximumLength: IntPtr(-1)},
+			"LONGTEXT",
+		},
+		{
+			"mssql_text",
+			ColumnInfo{UDTName: "text"},
+			"LONGTEXT",
+		},
+		{
+			"mssql_ntext",
+			ColumnInfo{UDTName: "ntext"},
+			"LONGTEXT",
+		},
+		// MSSQL varbinary(max) → KindBytes{nil} → LONGBLOB on MySQL
+		// (parallel #196 fix; same bug class for byte columns).
+		{
+			"mssql_varbinary_max",
+			ColumnInfo{UDTName: "varbinary", CharacterMaximumLength: IntPtr(-1)},
+			"LONGBLOB",
+		},
+		{
+			"mssql_image",
+			ColumnInfo{UDTName: "image"},
+			"LONGBLOB",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			canonical := mssqlToCanonical(tc.col)
+			ddl := mysqlFromCanonical(canonical)
+			if ddl.SQLType != tc.want {
+				t.Errorf("mssql %q → MySQL %q, want %q (issue #196 round-trip)",
+					tc.col.UDTName, ddl.SQLType, tc.want)
+			}
+			// Bounded source columns still emit bounded MySQL DDL —
+			// the fix only changes the unbounded default. Exact
+			// (non-approximate) is the right shape: LONGTEXT is the
+			// faithful representation, not a lossy fallback.
+			if ddl.IsApproximate {
+				t.Errorf("LONGTEXT/LONGBLOB for unbounded source should be exact (faithful), not approximate; got warning %q",
+					ddl.Warning)
+			}
+		})
+	}
+}
+
+// TestMySQLFromCanonical_BoundedTextStillBounded is the regression-guard
+// companion to the #196 fix: explicit-length varchar/varbinary columns
+// must continue to emit VARCHAR(N)/VARBINARY(N), not get widened to
+// LONGTEXT/LONGBLOB. Catches a hypothetical over-correction of the
+// #196 fix that would also widen bounded columns.
+func TestMySQLFromCanonical_BoundedTextStillBounded(t *testing.T) {
+	cases := []struct {
+		name string
+		ct   CanonicalType
+		want string
+	}{
+		{"varchar_50", CanonicalType{Kind: KindVarchar, Length: IntPtr(50)}, "VARCHAR(50)"},
+		{"varchar_4000", CanonicalType{Kind: KindVarchar, Length: IntPtr(4000)}, "VARCHAR(4000)"},
+		{"varbinary_128", CanonicalType{Kind: KindBytes, Length: IntPtr(128)}, "VARBINARY(128)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mysqlFromCanonical(tc.ct)
+			if got.SQLType != tc.want {
+				t.Errorf("got %q, want %q (#196 fix must not widen bounded columns)", got.SQLType, tc.want)
+			}
+		})
 	}
 }

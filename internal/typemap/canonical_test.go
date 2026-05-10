@@ -143,10 +143,10 @@ func TestMapDDLType_PG_Array_To_MySQL_Approximate(t *testing.T) {
 	}
 }
 
-// TestMapDDLType_MSSQL_NvarcharMax_RoundTrips — Codex review on PR #185.
-// MSSQL nvarchar(max) survives the full source→canonical→target round
-// trip (and cross-dialect mappings) without producing invalid DDL with
-// the -1 sentinel.
+// TestMapDDLType_MSSQL_NvarcharMax_RoundTrips — originally Codex review
+// on PR #185 (no `NVARCHAR(-1)` from -1 sentinel leaking through);
+// MySQL expectation updated by issue #196 (the prior `VARCHAR(255)`
+// silently truncated source data >255 chars at write time).
 func TestMapDDLType_MSSQL_NvarcharMax_RoundTrips(t *testing.T) {
 	col := ColumnInfo{Name: "body", UDTName: "nvarchar", CharacterMaximumLength: IntPtr(-1)}
 
@@ -156,13 +156,16 @@ func TestMapDDLType_MSSQL_NvarcharMax_RoundTrips(t *testing.T) {
 	if got := MapDDLType(col, DialectMSSQL, DialectPostgres); got.SQLType != "VARCHAR" {
 		t.Errorf("MSSQL → PG: got %q, want VARCHAR (no length)", got.SQLType)
 	}
-	if got := MapDDLType(col, DialectMSSQL, DialectMySQL); got.SQLType != "VARCHAR(255)" {
-		t.Errorf("MSSQL → MySQL: got %q, want VARCHAR(255)", got.SQLType)
+	// #196 fix: unbounded source text → MySQL LONGTEXT, not VARCHAR(255).
+	if got := MapDDLType(col, DialectMSSQL, DialectMySQL); got.SQLType != "LONGTEXT" {
+		t.Errorf("MSSQL → MySQL: got %q, want LONGTEXT (#196)", got.SQLType)
 	}
 }
 
 // TestMapDDLType_MSSQL_VarbinaryMax_RoundTrips — paired with the
 // nvarchar(max) test above; the -1 sentinel applies to varbinary too.
+// MySQL expectation updated by issue #196 parallel fix (BLOB → LONGBLOB
+// for unbounded source bytes; same 64 KB silent-truncation problem).
 func TestMapDDLType_MSSQL_VarbinaryMax_RoundTrips(t *testing.T) {
 	col := ColumnInfo{Name: "blob", UDTName: "varbinary", CharacterMaximumLength: IntPtr(-1)}
 
@@ -172,8 +175,9 @@ func TestMapDDLType_MSSQL_VarbinaryMax_RoundTrips(t *testing.T) {
 	if got := MapDDLType(col, DialectMSSQL, DialectPostgres); got.SQLType != "BYTEA" {
 		t.Errorf("MSSQL → PG: got %q, want BYTEA", got.SQLType)
 	}
-	if got := MapDDLType(col, DialectMSSQL, DialectMySQL); got.SQLType != "BLOB" {
-		t.Errorf("MSSQL → MySQL: got %q, want BLOB", got.SQLType)
+	// #196 parallel fix: unbounded source bytes → MySQL LONGBLOB, not BLOB.
+	if got := MapDDLType(col, DialectMSSQL, DialectMySQL); got.SQLType != "LONGBLOB" {
+		t.Errorf("MSSQL → MySQL: got %q, want LONGBLOB (#196)", got.SQLType)
 	}
 }
 

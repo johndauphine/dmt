@@ -41,7 +41,7 @@ func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) s
 
 	parts := make([]string, 0, len(table.Columns)+1)
 	for _, col := range table.Columns {
-		parts = append(parts, GenerateColumnDef(col, table.Constraints, sourceDialect, targetDialect))
+		parts = append(parts, GenerateColumnDef(col, table.Constraints, table.Indexes, sourceDialect, targetDialect))
 	}
 
 	if pk := primaryKeyConstraint(table.Constraints); pk != nil {
@@ -71,11 +71,14 @@ func primaryKeyConstraint(constraints []Constraint) *Constraint {
 // Multi-column PKs are formatted as CONSTRAINT name PRIMARY KEY (a, b);
 // single-column PKs use the same form for consistency (no special-case
 // "PRIMARY KEY" on the column itself).
+//
+// Plain quoteColumnList is correct here: when a PK column on MySQL
+// would otherwise map to LONGTEXT (issue #196), GenerateColumnDef's
+// shouldBoundForUniqueness check overrides the column type to bounded
+// VARCHAR(255) — preserving uniqueness semantics — so no key-prefix
+// length is needed in this clause.
 func formatPrimaryKey(pk Constraint, targetDialect string) string {
-	cols := make([]string, len(pk.Columns))
-	for i, c := range pk.Columns {
-		cols[i] = QuoteIdentifier(c, targetDialect)
-	}
+	cols := quoteColumnList(pk.Columns, targetDialect)
 	return fmt.Sprintf("    CONSTRAINT %s PRIMARY KEY (%s)",
 		QuoteIdentifier(pk.Name, targetDialect),
 		strings.Join(cols, ", "),

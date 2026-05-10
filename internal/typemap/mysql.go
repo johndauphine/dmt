@@ -125,19 +125,36 @@ func mysqlFromCanonical(ct CanonicalType) DdlType {
 		if ct.Length != nil {
 			return exactDDL(fmt.Sprintf("VARCHAR(%d)", *ct.Length))
 		}
-		return exactDDL("VARCHAR(255)")
+		// Issue #196: nil Length on KindVarchar means the source column
+		// was unbounded (e.g. MSSQL nvarchar(max), PG VARCHAR with no
+		// limit). MySQL has no unbounded VARCHAR — VARCHAR(255) was the
+		// prior default and silently truncated wide-text columns at
+		// write time (Error 1406 "Data too long"). LONGTEXT (4 GB,
+		// stored off-row) is the only correct portable target for
+		// "unbounded source text" on MySQL; row-size budgets sized for
+		// inline VARCHAR don't apply.
+		return exactDDL("LONGTEXT")
 	case KindChar:
 		if ct.Length != nil {
 			return exactDDL(fmt.Sprintf("CHAR(%d)", *ct.Length))
 		}
 		return exactDDL("CHAR(1)")
 	case KindText:
-		return exactDDL("TEXT")
+		// Issue #196: canonical KindText models *unbounded* text per the
+		// IR contract (MSSQL text/ntext, PG text → KindText). MySQL TEXT
+		// is the smallest of the four sized text types (64 KB) and
+		// silently truncates at the boundary. LONGTEXT preserves
+		// fidelity for unbounded source text.
+		return exactDDL("LONGTEXT")
 	case KindBytes:
 		if ct.Length != nil {
 			return exactDDL(fmt.Sprintf("VARBINARY(%d)", *ct.Length))
 		}
-		return exactDDL("BLOB")
+		// Issue #196 (parallel to the text fix): nil Length on KindBytes
+		// means unbounded source bytes (MSSQL varbinary(max)/image, PG
+		// bytea). MySQL BLOB caps at 64 KB; LONGBLOB (4 GB, stored
+		// off-row) is the safe default for unbounded source bytes.
+		return exactDDL("LONGBLOB")
 	case KindDate:
 		return exactDDL("DATE")
 	case KindTime:
@@ -174,7 +191,11 @@ func mysqlFromCanonical(ct CanonicalType) DdlType {
 	case KindRaw:
 		return exactDDL(ct.TypeName)
 	default:
-		return exactDDL("TEXT")
+		// Defensive fallback for any future Kind that's added without
+		// updating this switch. Same #196 rationale as KindText:
+		// LONGTEXT minimizes truncation risk for an unknown Kind whose
+		// width characteristics we don't know yet.
+		return exactDDL("LONGTEXT")
 	}
 }
 
