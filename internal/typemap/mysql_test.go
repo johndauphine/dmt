@@ -7,6 +7,7 @@ package typemap
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -27,13 +28,30 @@ func TestMySQLToCanonical(t *testing.T) {
 			CanonicalType{Kind: KindInteger}},
 		{"varchar_with_length", ColumnInfo{UDTName: "varchar", CharacterMaximumLength: IntPtr(255)},
 			CanonicalType{Kind: KindVarchar, Length: IntPtr(255)}},
-		{"text", ColumnInfo{UDTName: "text"}, CanonicalType{Kind: KindText}},
-		{"longtext", ColumnInfo{UDTName: "longtext"}, CanonicalType{Kind: KindText}},
+		// Issue #206: sized text variants now carry MaxBytes so a
+		// MySQL → MySQL round-trip emits the original tier instead of
+		// widening to LONGTEXT. tinytext=255B, text=64KB-1, mediumtext=16MB-1.
+		{"tinytext_206", ColumnInfo{UDTName: "tinytext"},
+			CanonicalType{Kind: KindText, MaxBytes: Int64Ptr(255)}},
+		{"text_206", ColumnInfo{UDTName: "text"},
+			CanonicalType{Kind: KindText, MaxBytes: Int64Ptr(65_535)}},
+		{"mediumtext_206", ColumnInfo{UDTName: "mediumtext"},
+			CanonicalType{Kind: KindText, MaxBytes: Int64Ptr(16_777_215)}},
+		{"longtext_unbounded", ColumnInfo{UDTName: "longtext"},
+			CanonicalType{Kind: KindText}}, // nil MaxBytes = unbounded tier
 		{"json", ColumnInfo{UDTName: "json"}, CanonicalType{Kind: KindJSON}},
 		{"datetime", ColumnInfo{UDTName: "datetime"},
 			CanonicalType{Kind: KindTimestamp, WithTZ: false}},
 		{"date", ColumnInfo{UDTName: "date"}, CanonicalType{Kind: KindDate}},
-		{"blob", ColumnInfo{UDTName: "blob"}, CanonicalType{Kind: KindBytes}},
+		// Issue #206: same shape for the BLOB family.
+		{"tinyblob_206", ColumnInfo{UDTName: "tinyblob"},
+			CanonicalType{Kind: KindBytes, MaxBytes: Int64Ptr(255)}},
+		{"blob_206", ColumnInfo{UDTName: "blob"},
+			CanonicalType{Kind: KindBytes, MaxBytes: Int64Ptr(65_535)}},
+		{"mediumblob_206", ColumnInfo{UDTName: "mediumblob"},
+			CanonicalType{Kind: KindBytes, MaxBytes: Int64Ptr(16_777_215)}},
+		{"longblob_unbounded", ColumnInfo{UDTName: "longblob"},
+			CanonicalType{Kind: KindBytes}},
 		{"varbinary_with_length", ColumnInfo{UDTName: "varbinary", CharacterMaximumLength: IntPtr(64)},
 			CanonicalType{Kind: KindBytes, Length: IntPtr(64)}},
 		{"year_to_smallint", ColumnInfo{UDTName: "year"}, CanonicalType{Kind: KindSmallInt}},
@@ -326,5 +344,110 @@ func TestMySQLFromCanonical_BoundedTextStillBounded(t *testing.T) {
 				t.Errorf("got %q, want %q (#196 fix must not widen bounded columns)", got.SQLType, tc.want)
 			}
 		})
+	}
+}
+
+// --- Issue #206: text/blob tier preservation -----------------------
+
+// TestMySQLTextTierFor walks the tier picker's full input domain.
+// Boundary values matter: ≤255 → TINYTEXT, ≤65535 → TEXT,
+// ≤16777215 → MEDIUMTEXT, anything larger or nil → LONGTEXT.
+func TestMySQLTextTierFor(t *testing.T) {
+	cases := []struct {
+		name     string
+		maxBytes *int64
+		want     string
+	}{
+		{"nil_unbounded", nil, "LONGTEXT"},
+		{"1_byte", Int64Ptr(1), "TINYTEXT"},
+		{"255_at_tiny_ceiling", Int64Ptr(255), "TINYTEXT"},
+		{"256_just_above_tiny", Int64Ptr(256), "TEXT"},
+		{"65535_at_text_ceiling", Int64Ptr(65_535), "TEXT"},
+		{"65536_just_above_text", Int64Ptr(65_536), "MEDIUMTEXT"},
+		{"16777215_at_medium_ceiling", Int64Ptr(16_777_215), "MEDIUMTEXT"},
+		{"16777216_just_above_medium", Int64Ptr(16_777_216), "LONGTEXT"},
+		{"4_GB", Int64Ptr(4_000_000_000), "LONGTEXT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mysqlTextTierFor(tc.maxBytes); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMySQLBlobTierFor mirrors the text picker for the BLOB family.
+// Same byte caps, BLOB-family emissions.
+func TestMySQLBlobTierFor(t *testing.T) {
+	cases := []struct {
+		name     string
+		maxBytes *int64
+		want     string
+	}{
+		{"nil_unbounded", nil, "LONGBLOB"},
+		{"255_at_tiny_ceiling", Int64Ptr(255), "TINYBLOB"},
+		{"65535_at_blob_ceiling", Int64Ptr(65_535), "BLOB"},
+		{"16777215_at_medium_ceiling", Int64Ptr(16_777_215), "MEDIUMBLOB"},
+		{"16777216_just_above_medium", Int64Ptr(16_777_216), "LONGBLOB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mysqlBlobTierFor(tc.maxBytes); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMySQLTextRoundTrip_PreservesTier is the #206 motivating
+// regression: each MySQL sized text/blob variant must survive the
+// full source → canonical → MySQL round-trip without widening. Was
+// always widening pre-#206 (TINYTEXT → TEXT pre-#196, then → LONGTEXT
+// post-#196 made it worse).
+func TestMySQLTextRoundTrip_PreservesTier(t *testing.T) {
+	cases := []struct{ udt string }{
+		{"tinytext"},
+		{"text"},
+		{"mediumtext"},
+		{"longtext"},
+		{"tinyblob"},
+		{"blob"},
+		{"mediumblob"},
+		{"longblob"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.udt, func(t *testing.T) {
+			canonical := mysqlToCanonical(ColumnInfo{UDTName: tc.udt})
+			ddl := mysqlFromCanonical(canonical)
+			want := strings.ToUpper(tc.udt)
+			if ddl.SQLType != want {
+				t.Errorf("MySQL %q round-trip → %q, want %q (#206)",
+					tc.udt, ddl.SQLType, want)
+			}
+		})
+	}
+}
+
+// TestMySQLTextTierFor_CrossDialectFromMSSQL verifies the #196 win is
+// preserved: MSSQL nvarchar(max) (KindVarchar{Length: nil}) still
+// becomes LONGTEXT on MySQL — that's KindVarchar's path, not KindText,
+// so it's unaffected by the #206 changes. PG TEXT (KindText{nil}) also
+// unchanged. Both go through the unbounded LONGTEXT branch.
+func TestMySQLTextTierFor_CrossDialectFromMSSQL(t *testing.T) {
+	// MSSQL nvarchar(max) → KindVarchar{nil} (handled outside the
+	// KindText switch; verified by TestMySQLFromCanonical_UnboundedSourceText_Issue196)
+	mssqlMax := mssqlToCanonical(ColumnInfo{UDTName: "nvarchar", CharacterMaximumLength: IntPtr(-1)})
+	if mssqlMax.Kind != KindVarchar || mssqlMax.Length != nil {
+		t.Fatalf("MSSQL nvarchar(max) → %+v, want KindVarchar{nil} (the #196 path; #206 must not regress this)", mssqlMax)
+	}
+	// MSSQL text → KindText{nil} (truly unbounded; no MaxBytes hint set
+	// because MSSQL text is deprecated and treated as unbounded).
+	mssqlText := mssqlToCanonical(ColumnInfo{UDTName: "text"})
+	if mssqlText.Kind != KindText || mssqlText.MaxBytes != nil {
+		t.Errorf("MSSQL text → %+v, want KindText{nil MaxBytes} (no source-side capacity hint)", mssqlText)
+	}
+	if got := mysqlFromCanonical(mssqlText).SQLType; got != "LONGTEXT" {
+		t.Errorf("MSSQL text → MySQL → %q, want LONGTEXT (#196 unbounded default preserved)", got)
 	}
 }

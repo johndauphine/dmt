@@ -62,10 +62,39 @@ const (
 type CanonicalType struct {
 	Kind Kind
 
-	Length    *int // Varchar, Char, Bytes — nil = "no length specified"
+	// Length is the source-side declared length. Unit depends on Kind:
+	// characters for KindVarchar / KindChar (matches the SQL standard's
+	// CHARACTER_MAXIMUM_LENGTH); bytes for KindBytes (sizing for
+	// VARBINARY/BINARY columns is byte-defined). nil = "no length
+	// specified," which means LONGTEXT/LONGBLOB on MySQL targets after
+	// the #196 fix.
+	Length *int
 	Precision *int // Decimal — nil = "default precision"
 	Scale     *int // Decimal — nil = "default scale"
 	WithTZ    bool // Time, Timestamp
+
+	// MaxBytes is the source-side capacity in BYTES for KindText /
+	// KindBytes. Used by mysqlFromCanonical to pick the smallest text/
+	// blob tier (TINYTEXT / TEXT / MEDIUMTEXT / LONGTEXT and their BLOB
+	// counterparts) that fits the source's documented capacity, so a
+	// MySQL → MySQL same-dialect round-trip preserves the original
+	// type instead of widening to LONGTEXT/LONGBLOB (#206 — fixes a
+	// pre-existing IR collapse made worse by #196).
+	//
+	// Other dialects' from_canonical paths ignore MaxBytes — PG and
+	// MSSQL each have a single unbounded text type (TEXT and
+	// nvarchar(max) respectively), so there's nothing to tier against.
+	// Round-tripping MySQL TINYTEXT through PG and back loses the size
+	// (PG TEXT becomes KindText{MaxBytes: nil}); acceptable per #206
+	// because multi-hop migrations across dialects with different type
+	// systems are inherently lossy.
+	//
+	// Unit is BYTES (not characters) because MySQL's tier definitions
+	// are byte-defined. KindVarchar's Length stays in characters
+	// (matches the SQL standard's CHARACTER_MAXIMUM_LENGTH semantics).
+	// The unit difference is intentional — same field name across
+	// kinds with different units would be a footgun.
+	MaxBytes *int64 // Text, Bytes — nil = unbounded (LONGTEXT/LONGBLOB tier)
 
 	Values   []string       // Enum
 	Element  *CanonicalType // Array (recursive)
@@ -124,6 +153,10 @@ type ColumnInfo struct {
 // IntPtr is a small helper to construct *int values inline. Used heavily
 // in tests that mirror UVG's #[cfg(test)] blocks.
 func IntPtr(v int) *int { return &v }
+
+// Int64Ptr is the *int64 companion to IntPtr. Used by mysqlToCanonical
+// to set the MaxBytes capacity for sized text/blob variants (#206).
+func Int64Ptr(v int64) *int64 { return &v }
 
 // exactDDL is the constructor for the non-lossy result shape. Used by
 // per-dialect from_canonical implementations.
