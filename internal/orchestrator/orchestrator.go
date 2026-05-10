@@ -220,11 +220,15 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		}, nil
 	}
 
-	// Get AI type mapper from secrets configuration
-	typeMapper, err := driver.GetAITypeMapper()
+	// Get the type mapper. Defaults to deterministic-only when no AI is
+	// configured; returns a deterministic+AI fallback chain when AI is
+	// configured (#170). The unmapped_type_action knob from config
+	// chooses what the chain does for Raw types when no AI is available.
+	action := driver.UnmappedAction(cfg.Migration.UnmappedTypeAction)
+	typeMapper, err := driver.GetTypeMapper(action)
 	if err != nil {
 		sourcePool.Close()
-		return nil, fmt.Errorf("loading AI type mapper: %w", err)
+		return nil, fmt.Errorf("loading type mapper: %w", err)
 	}
 
 	// Create target pool using factory
@@ -670,14 +674,13 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		return nil, fmt.Errorf("building jobs: %w", err)
 	}
 
-	// Create AI error diagnoser if AI is configured
+	// Create AI error diagnoser if AI is configured (#170 — diagnoser
+	// is AI-specific, no deterministic equivalent; silently no-op when
+	// AI isn't available).
 	var errorDiagnoser *driver.AIErrorDiagnoser
-	typeMapper, err := driver.GetAITypeMapper()
-	if err == nil && typeMapper != nil {
-		if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
-			errorDiagnoser = driver.NewAIErrorDiagnoser(aiMapper)
-			logging.Debug("AI error diagnosis enabled")
-		}
+	if aiMapper := driver.GetAIMapper(); aiMapper != nil {
+		errorDiagnoser = driver.NewAIErrorDiagnoser(aiMapper)
+		logging.Debug("AI error diagnosis enabled")
 	}
 
 	// Execute jobs using TransferRunner

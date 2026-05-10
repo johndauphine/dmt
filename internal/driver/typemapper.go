@@ -234,8 +234,48 @@ type DropTableDDLRequest struct {
 	TargetContext *DatabaseContext
 }
 
-// GetAITypeMapper returns the global AI type mapper loaded from secrets.
-// This is the only type mapper available - all type mapping is done via AI.
-func GetAITypeMapper() (TypeMapper, error) {
-	return NewAITypeMapperFromSecrets()
+// GetTypeMapper returns the type mapper for use by drivers + writers.
+// Default behavior since #170:
+//
+//   - When no AI is configured (no ~/.secrets/dmt-config.yaml AI
+//     section, no provider, no API key), returns the deterministic
+//     mapper alone. AI is no longer required for migrations.
+//   - When AI IS configured, returns a FallbackChain that routes
+//     deterministic-first and falls back to the AI mapper for the
+//     narrow cases the deterministic path can't handle (Raw types,
+//     ErrUnsupportedDDL).
+//
+// The unmapped_type_action knob (default "fail") controls what the
+// chain does at column level for Raw types when no AI fallback exists.
+// Threaded through via the action argument; pass UnmappedActionFail
+// to use the safe default.
+func GetTypeMapper(action UnmappedAction) (TypeMapper, error) {
+	primary := NewDeterministicMapper()
+	fallback := tryLoadAIMapper()
+	return NewFallbackChain(primary, fallback, action), nil
+}
+
+// GetAIMapper returns the AI type mapper if AI is configured, or nil
+// when no AI is available. Used by callers that need AI-specific
+// functionality which is conceptually separate from the type-mapping
+// path — runtime monitor (internal/monitor.AIMonitor), error
+// diagnoser (driver.AIErrorDiagnoser), config status display.
+//
+// Returns nil silently when AI isn't configured; callers branch on
+// nil rather than checking errors.
+func GetAIMapper() *AITypeMapper {
+	return tryLoadAIMapper()
+}
+
+// tryLoadAIMapper attempts to construct an AITypeMapper from secrets.
+// Returns nil (no error) when AI isn't configured. Errors during
+// construction are logged and treated as "AI not available" — the
+// deterministic path keeps working.
+func tryLoadAIMapper() *AITypeMapper {
+	mapper, err := NewAITypeMapperFromSecrets()
+	if err != nil {
+		// No-AI is not an error condition; log at debug and continue.
+		return nil
+	}
+	return mapper
 }

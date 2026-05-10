@@ -5,11 +5,10 @@
 // internal/typemap (column-level mapping) and internal/typemap/ddl
 // (full-table assembly + per-constraint DDL).
 //
-// 169c: this PR adds the adapter only. It does NOT change the default
-// type mapper used by the orchestrator or the per-driver writers —
-// they still construct an AITypeMapper via GetAITypeMapper(). Wiring
-// the deterministic mapper as the default with AI fallback for Raw
-// types is #170.
+// History: 169c added the adapter without changing the default
+// type mapper. #170 wires it as the default via GetTypeMapper, with
+// AI as a registered fallback for Raw types and ErrUnsupportedDDL
+// (see typemap_chain.go's FallbackChain).
 //
 // The adapter is stateless. The constructor exists for symmetry with
 // NewAITypeMapper and to give #170's wiring code a stable factory.
