@@ -98,7 +98,7 @@ func TestTune_DriftDetectedBeforeOutlierFilter(t *testing.T) {
 
 	// Drift forces exploration; the planned-grid pick produces a
 	// "exploration: planned grid" reasoning entry (vs. regression-
-	// or history-selected which would mean drift was missed).
+	// selected or smoothed-bins which would mean drift was missed).
 	if out.Reasoning == "" {
 		t.Fatalf("expected exploration reasoning when drift fires, got empty")
 	}

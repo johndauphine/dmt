@@ -94,9 +94,14 @@ type SmartConfigSuggestions struct {
 	// in a follow-up cleanup PR.
 	AISuggestions *AutoTuneOutput
 
-	// Reasoning is the tuning engine's short explanation of any non-baseline
-	// choices, populated from tuning.Output.Reasoning.
+	// Reasoning is the tuning engine's short explanation of the picking
+	// path, populated from tuning.Output.Reasoning. Always non-empty after
+	// the deterministic tuner runs (#202 — silence is not a valid signal).
 	Reasoning string
+
+	// Tier names which selector picked the WAW/ChunkSize values, populated
+	// from tuning.Output.Tier. One of tuning.Tier* constants (#202).
+	Tier string
 
 	// Database tuning recommendations
 	SourceTuning *dbtuning.DatabaseTuning
@@ -489,6 +494,7 @@ func (s *SmartConfigAnalyzer) applyTuningOutput(out tuning.Output) {
 	s.suggestions.MaxRetries = out.MaxRetries
 	s.suggestions.EstimatedMemMB = out.EstimatedMemMB
 	s.suggestions.Reasoning = out.Reasoning
+	s.suggestions.Tier = out.Tier
 }
 
 // pendingTuningSave holds data for deferred tuning history save.

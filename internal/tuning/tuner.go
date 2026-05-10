@@ -15,6 +15,7 @@
 package tuning
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -49,6 +50,18 @@ type Input struct {
 	ExplorationEpsilon float64
 }
 
+// Tier names identify which selector ultimately picked the (WAW,
+// ChunkSize) values on the Output. Used by the orchestrator and the
+// run-history record so a future grep / aggregation can group runs by
+// the tier that drove them, without parsing the freeform Reasoning
+// string. See issue #202.
+const (
+	TierBaseline     = "baseline"
+	TierExploration  = "exploration"
+	TierRegression   = "regression"
+	TierSmoothedBins = "smoothed-bins"
+)
+
 // Output is the complete recommended parameter set. Mirrors the fields
 // the smartconfig analyzer's AutoTuneOutput populates today.
 type Output struct {
@@ -69,9 +82,15 @@ type Output struct {
 
 	EstimatedMemMB int64
 
-	// Reasoning is a short human-readable explanation of any non-baseline
-	// choices — for logging and the run record. Empty when output is pure
-	// baseline.
+	// Tier names which selector picked the WAW/ChunkSize values. One of
+	// the Tier* constants above. Always populated by Tune.
+	Tier string
+
+	// Reasoning is a short human-readable explanation of the picking
+	// path — for logging and the run record. Always populated by Tune;
+	// for baseline-only runs it explains *why* baseline stood (no
+	// history, fetch failed, insufficient rows, etc.) rather than being
+	// empty.
 	Reasoning string
 }
 
@@ -225,6 +244,41 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		}
 	}
 
+	finalizeTierAndReasoning(&out, history, historyAvailable, len(regimeRows), len(rows))
 	applyMemoryClamp(&out, in)
 	return out
+}
+
+// finalizeTierAndReasoning fills in Tier and Reasoning when no selector
+// path picked. Issue #202: silence is not a valid signal — every run
+// must carry the provenance of the (Tier, Reasoning) pair so a reviewer
+// can tell *why* the output looks the way it does, not just *what* it
+// is. Tier defaults to baseline; Reasoning is filled in only when no
+// upstream selector left a note (otherwise we'd clobber a more specific
+// "exploration grid empty" or "smoothed-bins ineligible" message).
+func finalizeTierAndReasoning(out *Output, history HistoryProvider, historyAvailable bool, regimeRows, filteredRows int) {
+	if out.Tier == "" {
+		out.Tier = TierBaseline
+	}
+	if out.Reasoning != "" {
+		return
+	}
+	switch {
+	case history == nil:
+		out.Reasoning = "baseline (no history backend configured)"
+	case !historyAvailable:
+		out.Reasoning = "baseline (history fetch failed — see prior debug log)"
+	case regimeRows == 0:
+		out.Reasoning = "baseline (no comparable history rows after regime filter)"
+	case filteredRows == 0:
+		out.Reasoning = "baseline (no rows survived the outlier filter)"
+	default:
+		// regimeRows > 0 && filteredRows > 0 but no selector picked.
+		// Most likely cause: smoothed-bins had bins but every one was
+		// either retry-rate-excluded or below the minRunsPerBin floor.
+		// applyHistorySelection should set a reason for this; if we're
+		// here, treat as a defensive fallback.
+		out.Reasoning = fmt.Sprintf("baseline (%d filtered rows but no tier picked — possibly all bins below %d-run floor)",
+			filteredRows, minRunsPerBin)
+	}
 }
