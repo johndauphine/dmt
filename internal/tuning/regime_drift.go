@@ -104,8 +104,9 @@ func detectRegimeDrift(rows []HistoryRecord) bool {
 
 	if ratio < driftDownThreshold || ratio > driftUpThreshold {
 		logging.Warn(
-			"tuning: regime drift at (WAW=%d, chunk_size=%d) — recent median %.0f rows/s vs older %.0f rows/s (ratio %.2f outside [%.2f, %.2f]); forcing exploration",
-			currentCell.WAW, currentCell.ChunkSize, recentMed, olderMed, ratio,
+			"tuning: regime drift at (WAW=%d, chunk_size=%d, PR=%d, RAB=%d) — recent median %.0f rows/s vs older %.0f rows/s (ratio %.2f outside [%.2f, %.2f]); forcing exploration",
+			currentCell.WAW, currentCell.ChunkSize, currentCell.ParallelReaders, currentCell.ReadAheadBuffers,
+			recentMed, olderMed, ratio,
 			driftDownThreshold, driftUpThreshold,
 		)
 		return true
@@ -113,10 +114,21 @@ func detectRegimeDrift(rows []HistoryRecord) bool {
 	return false
 }
 
-// configKey identifies a (WAW, ChunkSize) cell. Used both for drift
-// grouping and for "which cell did we last run at?" lookups.
+// configKey identifies a (WAW, ChunkSize, ParallelReaders,
+// ReadAheadBuffers) cell. Used both for drift grouping and for "which
+// cell did we last run at?" lookups.
+//
+// The reader-side axes are part of the key (#219 Codex review): once
+// the tuner started varying ParallelReaders/ReadAheadBuffers, two runs
+// at the same (WAW, ChunkSize) with different reader settings could
+// produce materially different throughput, and a per-pair drift cell
+// would misread the parameter effect as a regime shift. Keying by the
+// full quadruple keeps drift detection comparing like-for-like runs.
 type configKey struct {
-	WAW, ChunkSize int
+	WAW              int
+	ChunkSize        int
+	ParallelReaders  int
+	ReadAheadBuffers int
 }
 
 // mostRecentCell returns the cell of the chronologically latest
@@ -143,18 +155,27 @@ func mostRecentCell(rows []HistoryRecord) (configKey, bool) {
 	if latest == nil {
 		return configKey{}, false
 	}
-	return configKey{latest.WriteAheadWriters, latest.ChunkSize}, true
+	return configKey{
+		WAW:              latest.WriteAheadWriters,
+		ChunkSize:        latest.ChunkSize,
+		ParallelReaders:  latest.ParallelReaders,
+		ReadAheadBuffers: latest.ReadAheadBuffers,
+	}, true
 }
 
-// rowsAtCell filters rows down to those at the given (WAW, ChunkSize)
-// cell. Returns a fresh slice; doesn't mutate the input.
+// rowsAtCell filters rows down to those at the given (WAW, ChunkSize,
+// ParallelReaders, ReadAheadBuffers) cell. Returns a fresh slice;
+// doesn't mutate the input.
 func rowsAtCell(rows []HistoryRecord, cell configKey) []HistoryRecord {
 	out := make([]HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		if r.FinalThroughput <= 0 {
 			continue
 		}
-		if r.WriteAheadWriters == cell.WAW && r.ChunkSize == cell.ChunkSize {
+		if r.WriteAheadWriters == cell.WAW &&
+			r.ChunkSize == cell.ChunkSize &&
+			r.ParallelReaders == cell.ParallelReaders &&
+			r.ReadAheadBuffers == cell.ReadAheadBuffers {
 			out = append(out, r)
 		}
 	}
