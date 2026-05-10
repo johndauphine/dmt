@@ -47,7 +47,7 @@
 // falls through to Rules 3 and 4 normally.
 //
 // The controller is a Go struct; tests construct it directly with
-// synthetic metric traces and call Evaluate() / Apply() to verify
+// synthetic metric traces and call Evaluate() / apply() to verify
 // rule firing without spinning up the ticker goroutine.
 
 package monitor
@@ -138,8 +138,10 @@ const defaultMinChunkSize = 5000
 const controllerCooldown = 90 * time.Second
 
 // memoryPressureThreshold is the memory-percent floor that triggers
-// the chunk-shrink rule. ≥90% means PG (or MSSQL) is close to OOM;
-// shrinking the chunk lets in-flight rows drain faster.
+// the chunk-shrink rule. The Rule 1 condition is `MemoryPercent >
+// memoryPressureThreshold` (strict), so a memory% above 90 (not
+// equal) means PG (or MSSQL) is close to OOM and shrinking the
+// chunk lets in-flight rows drain faster.
 const memoryPressureThreshold = 90.0
 
 // writerAddMemoryInterlockThreshold is the upper bound on memory% for
@@ -531,9 +533,14 @@ func throughputStable(recent []PerformanceSnapshot) bool {
 }
 
 // meanThroughput returns the arithmetic mean of Throughput across the
-// recent slice. Returns 0 on empty input — callers (the #199
-// throughput-aware gate) treat zero as "no baseline yet" and skip
-// the comparison.
+// recent slice. Returns 0 on empty input. Note: 0 is also a legitimate
+// mean for non-empty input (every snapshot has zero throughput, the
+// "writers stalled" case), so callers that need to distinguish
+// "no baseline yet" from "baseline of zero" must track presence
+// separately — the #199 throughput-aware gate uses
+// lastWAWAddThroughputSet for that, with a special case for the
+// zero-baseline branch where the proportional check would otherwise
+// no-op.
 func meanThroughput(recent []PerformanceSnapshot) float64 {
 	if len(recent) == 0 {
 		return 0

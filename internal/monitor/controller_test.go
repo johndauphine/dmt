@@ -771,8 +771,11 @@ func TestController_ChunkSizeChange_ResetsWAWThroughputBaseline(t *testing.T) {
 }
 
 // TestMeanThroughput verifies the helper used by both apply() and the
-// throughput-aware gate. Empty input returns 0 (caller treats as "no
-// baseline yet"); non-empty returns the arithmetic mean.
+// throughput-aware gate. Empty input returns 0; non-empty returns the
+// arithmetic mean (which is also 0 if every snapshot's throughput is
+// 0 — that's a legitimate "stall" baseline, not "no baseline yet".
+// Callers distinguish the two via lastWAWAddThroughputSet, not by
+// inspecting the value.
 func TestMeanThroughput(t *testing.T) {
 	cases := []struct {
 		name        string
