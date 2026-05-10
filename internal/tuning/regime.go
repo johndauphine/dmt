@@ -5,11 +5,21 @@ import "fmt"
 // Regime labels classify how comparable a historical run is to the current
 // one. Selection logic uses these to discount or exclude history rows that
 // ran under materially different conditions (#144).
+//
+// RegimeDifferentWorkload (#198) covers the case where hardware and DB
+// tuning agree but the *workload itself* differs — e.g. yesterday's run
+// migrated a 19M-row dataset and today's is 106M rows. Such rows train the
+// regression on operating points that don't apply, so they're filtered out
+// just like different-hw rows. The label is returned alone (without
+// combining with hw/tuning) because filterByRegime drops any of these
+// outcomes — the combo distinction would only matter for diagnostics, and
+// the deltas slice already carries the per-axis detail.
 const (
 	RegimeSame                 = "same_regime"
 	RegimeDifferentTuning      = "different_tuning"
 	RegimeDifferentHW          = "different_hw"
 	RegimeDifferentHWAndTuning = "different_hw_and_tuning"
+	RegimeDifferentWorkload    = "different_workload"
 	RegimeUnknown              = "unknown"
 )
 
@@ -22,6 +32,19 @@ const hardwareMemoryTolerancePct = 80
 // considered "same" within 10% (so 8000 MB vs 8192 MB doesn't count as a
 // regime change).
 const dbTuningSizeTolerancePct = 10
+
+// workloadRowsToleranceRatio is the max ratio between historical and
+// current TotalRows before the row is treated as different_workload.
+// 3× is loose enough that week-over-week table growth doesn't trip it
+// (a 25% week-over-week grower takes ~5 weeks to exceed 3×); tight enough
+// that a 19M-row vs 106M-row mix-up (the #198 repro: 5.5×) is caught.
+const workloadRowsToleranceRatio = 3.0
+
+// workloadAvgRowBytesToleranceRatio is the equivalent ratio for
+// AvgRowBytes. 2× catches schema swaps (a wide row-size shift signals
+// a different table mix) while still tolerating the natural variance
+// across tables within one dataset.
+const workloadAvgRowBytesToleranceRatio = 2.0
 
 // ClassifyRegime decides which similarity bucket a historical row falls
 // into relative to the current run's host + DB-tuning context. Returns
@@ -79,7 +102,35 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 	addStr("pg_wal_level", history.TargetWALLevel, currentTuning.TargetWALLevel)
 	addSize("mssql_max_server_memory", history.SourceMaxServerMemoryMB, currentTuning.SourceMaxServerMemoryMB, dbTuningSizeTolerancePct)
 
+	// Workload-population check (#198). Rows whose dataset shape differs
+	// materially from the current run are dropped: their throughput-vs-
+	// config surface fits a different operating regime (a 40s migration
+	// is dominated by startup overhead; a 5m migration is dominated by
+	// transfer cost). When workload differs, we return DifferentWorkload
+	// alone — the combo with hw/tuning is intentionally collapsed because
+	// filterByRegime drops any of these outcomes, and the per-axis detail
+	// is preserved in the deltas slice for diagnostics.
+	workloadDiffer := false
+	addRatio := func(label string, hist, curr int64, maxRatio float64) {
+		if hist <= 0 || curr <= 0 {
+			return
+		}
+		lo, hi := hist, curr
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		if float64(hi)/float64(lo) <= maxRatio {
+			return
+		}
+		workloadDiffer = true
+		deltas = append(deltas, fmt.Sprintf("%s: %d→%d", label, hist, curr))
+	}
+	addRatio("total_rows", history.TotalRows, current.TotalRows, workloadRowsToleranceRatio)
+	addRatio("avg_row_bytes", history.AvgRowBytes, current.AvgRowBytes, workloadAvgRowBytesToleranceRatio)
+
 	switch {
+	case workloadDiffer:
+		return RegimeDifferentWorkload, deltas
 	case hwDiffer && tuningDiffer:
 		return RegimeDifferentHWAndTuning, deltas
 	case hwDiffer:

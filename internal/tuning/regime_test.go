@@ -157,6 +157,83 @@ func TestClassifyRegime_DifferentHWAndTuning(t *testing.T) {
 	}
 }
 
+// TestClassifyRegime_WorkloadDiffers covers the #198 workload-population
+// check: identical hardware and DB tuning, but the dataset shape differs
+// materially.
+func TestClassifyRegime_WorkloadDiffers(t *testing.T) {
+	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
+	cases := []struct {
+		name     string
+		hist     HistoryRecord
+		wantSame bool
+	}{
+		// Row-count axis. 3.0× tolerance.
+		// "just inside 3×" uses 34M not the round 100M/3 = 33,333,333: that
+		// integer truncates down so the float ratio comes out as
+		// 3.0000000003, tripping the inclusive (≤) boundary. 34M gives ratio
+		// 2.94 — comfortably within tolerance and verifies the boundary
+		// without depending on float precision.
+		{"rows within 1.5×", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 67_000_000, AvgRowBytes: 1000}, true},
+		{"rows just inside 3×", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 34_000_000, AvgRowBytes: 1000}, true},
+		{"rows beyond 3× (5×)", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 20_000_000, AvgRowBytes: 1000}, false},
+		// Avg-row-bytes axis. 2.0× tolerance.
+		{"avg_row_bytes within 1.5×", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 600}, true},
+		{"avg_row_bytes at 2× exactly", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 500}, true},
+		{"avg_row_bytes beyond 2× (3×)", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 333}, false},
+		// Missing values fall through (don't fire the rule).
+		{"hist rows missing", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 0, AvgRowBytes: 1000}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			label, deltas := ClassifyRegime(tc.hist, current, DBTuning{})
+			isSame := label == RegimeSame
+			if isSame != tc.wantSame {
+				t.Errorf("got label=%q, isSame=%v, wantSame=%v, deltas=%v",
+					label, isSame, tc.wantSame, deltas)
+			}
+			if !tc.wantSame && label != RegimeDifferentWorkload {
+				t.Errorf("workload diff should yield RegimeDifferentWorkload, got %q", label)
+			}
+		})
+	}
+}
+
+// TestClassifyRegime_WorkloadWinsOverHwAndTuning verifies that when
+// workload differs alongside hw and/or tuning, the label collapses to
+// DifferentWorkload — filterByRegime drops all three semantics so the
+// combo distinction would only matter for diagnostics, and the deltas
+// slice still carries each axis's delta.
+func TestClassifyRegime_WorkloadWinsOverHwAndTuning(t *testing.T) {
+	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
+	hist := HistoryRecord{
+		CPUCores:              4,             // hw differs
+		MemoryGB:              48,
+		TotalRows:             10_000_000,    // workload differs (10×)
+		AvgRowBytes:           1000,
+		TargetSharedBuffersMB: 1024,          // tuning differs (vs 8192)
+	}
+	tuning := DBTuning{TargetSharedBuffersMB: 8192}
+	label, deltas := ClassifyRegime(hist, current, tuning)
+	if label != RegimeDifferentWorkload {
+		t.Errorf("got %q, want %q (workload should win)", label, RegimeDifferentWorkload)
+	}
+	if len(deltas) < 3 {
+		t.Errorf("expected ≥3 deltas (hw + tuning + workload); got %d: %v", len(deltas), deltas)
+	}
+}
+
+// TestClassifyRegime_WorkloadDeltaReadable spot-checks the human-readable
+// delta string for the workload axis.
+func TestClassifyRegime_WorkloadDeltaReadable(t *testing.T) {
+	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
+	hist := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 19_000_000, AvgRowBytes: 1000}
+	_, deltas := ClassifyRegime(hist, current, DBTuning{})
+	joined := strings.Join(deltas, "|")
+	if !strings.Contains(joined, "total_rows: 19000000→100000000") {
+		t.Errorf("workload delta missing or malformed: %q", joined)
+	}
+}
+
 // TestClassifyRegime_DeltasAreReadable spot-checks the human-readable
 // delta strings used in diagnostic logging.
 func TestClassifyRegime_DeltasAreReadable(t *testing.T) {
