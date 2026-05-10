@@ -639,33 +639,6 @@ func TestTune_HistoryFetchFailed_FillsBaselineReasoning(t *testing.T) {
 	}
 }
 
-// TestTune_NoComparableRows_FillsBaselineReasoning verifies the
-// regime-filter-drops-everything path. With a 16-core fixture and only
-// 4-core history rows, regime classification labels every row as
-// DifferentHW → filterByRegime returns empty → baseline stands.
-func TestTune_NoComparableRows_FillsBaselineReasoning(t *testing.T) {
-	in := Input{
-		CPUCores: 16, MemoryGB: 48, AvgRowBytes: 500, Platform: "linux",
-		SourceDBType: "mssql", TargetDBType: "postgres",
-		TotalRows: 100_000_000,
-	}
-	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
-	// 4-core history rows on a 16-core current fixture → all RegimeDifferentHW.
-	rows := []HistoryRecord{
-		{CPUCores: 4, MemoryGB: 8, TotalRows: 100_000_000, WriteAheadWriters: 1, FinalThroughput: 500_000},
-		{CPUCores: 4, MemoryGB: 8, TotalRows: 100_000_000, WriteAheadWriters: 2, FinalThroughput: 600_000},
-		{CPUCores: 4, MemoryGB: 8, TotalRows: 100_000_000, WriteAheadWriters: 4, FinalThroughput: 550_000},
-	}
-	out := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
-
-	if out.Tier != TierBaseline {
-		t.Errorf("no-comparable-rows Tier should be %q; got %q", TierBaseline, out.Tier)
-	}
-	if !strings.Contains(out.Reasoning, "no comparable history rows after regime filter") {
-		t.Errorf("Reasoning should mention regime filter dropped everything; got %q", out.Reasoning)
-	}
-}
-
 // TestApplyEpsilonPerturbation_OverridesTierToExploration is the Codex
 // P2 fix from #202 review: a perturbed run's final (WAW, ChunkSize)
 // values came from exploration, not from the upstream selector — so

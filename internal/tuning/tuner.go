@@ -15,7 +15,6 @@
 package tuning
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -244,19 +243,27 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		}
 	}
 
-	finalizeTierAndReasoning(&out, history, historyAvailable, len(regimeRows), len(rows))
+	finalizeTierAndReasoning(&out, history, historyAvailable)
 	applyMemoryClamp(&out, in)
 	return out
 }
 
-// finalizeTierAndReasoning fills in Tier and Reasoning when no selector
-// path picked. Issue #202: silence is not a valid signal — every run
-// must carry the provenance of the (Tier, Reasoning) pair so a reviewer
-// can tell *why* the output looks the way it does, not just *what* it
-// is. Tier defaults to baseline; Reasoning is filled in only when no
-// upstream selector left a note (otherwise we'd clobber a more specific
+// finalizeTierAndReasoning fills in Tier and Reasoning for the cases no
+// selector path covered. Issue #202: silence is not a valid signal —
+// every run must carry the provenance of the (Tier, Reasoning) pair so a
+// reviewer can tell *why* the output looks the way it does. Tier
+// defaults to baseline; Reasoning is filled in only when no upstream
+// selector left a note (otherwise we'd clobber a more specific
 // "exploration grid empty" or "smoothed-bins ineligible" message).
-func finalizeTierAndReasoning(out *Output, history HistoryProvider, historyAvailable bool, regimeRows, filteredRows int) {
+//
+// Reachable Reasoning-empty paths from Tune are limited: when history is
+// available the dispatch always routes to exploration (cold-start
+// bucket) or applyHistorySelection (which now always emits), so the
+// only no-Reasoning case left is when history was unavailable — either
+// nil backend or a failed fetch. Distinguishing those two matters: nil
+// is intentional, fetch error means the SQLite/file backend is broken
+// and the user should investigate.
+func finalizeTierAndReasoning(out *Output, history HistoryProvider, historyAvailable bool) {
 	if out.Tier == "" {
 		out.Tier = TierBaseline
 	}
@@ -268,17 +275,11 @@ func finalizeTierAndReasoning(out *Output, history HistoryProvider, historyAvail
 		out.Reasoning = "baseline (no history backend configured)"
 	case !historyAvailable:
 		out.Reasoning = "baseline (history fetch failed — see prior debug log)"
-	case regimeRows == 0:
-		out.Reasoning = "baseline (no comparable history rows after regime filter)"
-	case filteredRows == 0:
-		out.Reasoning = "baseline (no rows survived the outlier filter)"
 	default:
-		// regimeRows > 0 && filteredRows > 0 but no selector picked.
-		// Most likely cause: smoothed-bins had bins but every one was
-		// either retry-rate-excluded or below the minRunsPerBin floor.
-		// applyHistorySelection should set a reason for this; if we're
-		// here, treat as a defensive fallback.
-		out.Reasoning = fmt.Sprintf("baseline (%d filtered rows but no tier picked — possibly all bins below %d-run floor)",
-			filteredRows, minRunsPerBin)
+		// Defensive: every other path through Tune leaves a Reasoning
+		// note. If we land here, something added a new dispatch branch
+		// without wiring up its reasoning — flag it loudly rather than
+		// silently fall back to "baseline".
+		out.Reasoning = "baseline (unexpected — selector dispatch left no reasoning note; please file a bug)"
 	}
 }
