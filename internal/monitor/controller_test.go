@@ -447,6 +447,359 @@ func TestController_PerKnobCooldown_Independent(t *testing.T) {
 	}
 }
 
+// ---------- #199: Rule 2 memory interlock + throughput-aware add ----------
+
+// TestController_QueueGrew_MemoryInterlock_SuppressesAdd: memory% ≥ 80
+// (but < 90 so Rule 1 doesn't fire) suppresses Rule 2's writer-add even
+// when queue is growing. CPU=80 disables Rule 4 so we can isolate Rule 2.
+func TestController_QueueGrew_MemoryInterlock_SuppressesAdd(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	pushSnapshots(col,
+		snap(85, 80, 5, 0, 500_000, 50000, 2),
+		snap(85, 80, 8, 0, 500_000, 50000, 2),
+		snap(85, 80, 12, 0, 500_000, 50000, 2),
+	)
+	if d := c.Evaluate(time.Now()); d != nil {
+		t.Errorf("memory %% ≥ 80 should suppress writer-add; got %+v", d)
+	}
+}
+
+// TestController_QueueGrew_MemoryJustBelowInterlock_AddsWriter:
+// memory% just under 80 still allows Rule 2 to fire. Pinpoints the
+// boundary between the suppression gate and a normal add.
+func TestController_QueueGrew_MemoryJustBelowInterlock_AddsWriter(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	pushSnapshots(col,
+		snap(79.9, 80, 5, 0, 500_000, 50000, 2),
+		snap(79.9, 80, 8, 0, 500_000, 50000, 2),
+		snap(79.9, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(time.Now())
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Fatalf("memory just under interlock should permit writer-add; got %+v", d)
+	}
+}
+
+// TestController_WAWAdd_ThroughputDidNotImprove_SuppressesNextAdd:
+// after a successful WAW add, if the next evaluation's recent-mean
+// throughput hasn't improved by ≥2%, Rule 2 must NOT fire again.
+// CPU=80 + flat throughput → Rule 4 also doesn't fire.
+func TestController_WAWAdd_ThroughputDidNotImprove_SuppressesNextAdd(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	t0 := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+
+	// Tick 1: queue growing, throughput flat at 500K.
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 2),
+		snap(50, 80, 8, 0, 500_000, 50000, 2),
+		snap(50, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Fatalf("setup: expected first WAW add, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Past the 90s WAW cooldown.
+	t1 := t0.Add(91 * time.Second)
+	// Throughput stayed flat at 500K (no improvement from the writer add).
+	// Queue still growing — would fire again under the old rules.
+	pushSnapshots(col,
+		snap(50, 80, 15, 0, 500_000, 50000, 3),
+		snap(50, 80, 18, 0, 500_000, 50000, 3),
+		snap(50, 80, 22, 0, 500_000, 50000, 3),
+	)
+	if d := c.Evaluate(t1); d != nil {
+		t.Errorf("throughput unchanged after prior WAW add — Rule 2 should suppress; got %+v", d)
+	}
+}
+
+// TestController_WAWAdd_ThroughputImproved_AllowsNextAdd: after a
+// successful WAW add, if recent-mean throughput improved by ≥2%, Rule 2
+// is allowed to fire again on continued queue growth.
+func TestController_WAWAdd_ThroughputImproved_AllowsNextAdd(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	t0 := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+
+	// Tick 1: queue growing, throughput at 500K.
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 2),
+		snap(50, 80, 8, 0, 500_000, 50000, 2),
+		snap(50, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Fatalf("setup: expected first WAW add, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Past cooldown. Throughput jumped to 520K (+4%, well above the 2%
+	// gate). Queue still growing.
+	t1 := t0.Add(91 * time.Second)
+	pushSnapshots(col,
+		snap(50, 80, 15, 0, 520_000, 50000, 3),
+		snap(50, 80, 18, 0, 520_000, 50000, 3),
+		snap(50, 80, 22, 0, 520_000, 50000, 3),
+	)
+	d = c.Evaluate(t1)
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Errorf("throughput improved — Rule 2 should fire again; got %+v", d)
+	}
+}
+
+// TestController_WAWAdd_ZeroBaselineThenStillStalled_SuppressesNextAdd
+// is the third Codex-review case. If the FIRST writer-add happens at
+// throughput=0 (writers stalled before the add), the baseline is
+// recorded as 0 with the "set" flag true. On the next evaluation, if
+// throughput is STILL 0, the gate must suppress — adding more writers
+// during a full stall just stacks them up without progress. The pure
+// proportional check (0 < 0*1.02) wouldn't fire; the gate's zero-case
+// branch handles this explicitly.
+func TestController_WAWAdd_ZeroBaselineThenStillStalled_SuppressesNextAdd(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	t0 := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+
+	// Tick 1: first WAW add at throughput=0 (stalled writers, queue
+	// growing). Baseline is recorded as 0.
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 0, 50000, 2),
+		snap(50, 80, 8, 0, 0, 50000, 2),
+		snap(50, 80, 12, 0, 0, 50000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Fatalf("setup: expected first WAW add (no baseline yet); got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if c.lastWAWAddThroughput != 0 || !c.lastWAWAddThroughputSet {
+		t.Fatalf("setup: baseline should be 0 with set=true; got value=%v set=%v",
+			c.lastWAWAddThroughput, c.lastWAWAddThroughputSet)
+	}
+
+	// Tick 2 (past cooldown): writers still stalled, queue still growing.
+	// The proportional gate (0 < 0*1.02) wouldn't catch this — the zero-
+	// case branch must suppress.
+	t1 := t0.Add(91 * time.Second)
+	pushSnapshots(col,
+		snap(50, 80, 15, 0, 0, 50000, 3),
+		snap(50, 80, 18, 0, 0, 50000, 3),
+		snap(50, 80, 22, 0, 0, 50000, 3),
+	)
+	if d := c.Evaluate(t1); d != nil {
+		t.Errorf("zero baseline + still-zero throughput must suppress; got %+v", d)
+	}
+}
+
+// TestController_FirstWAWAdd_NoBaseline_NotGated: lastWAWAddThroughputSet
+// starts false; the throughput-aware gate must skip the comparison
+// when no baseline exists, so the very first writer-add is never
+// suppressed by it.
+func TestController_FirstWAWAdd_NoBaseline_NotGated(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	// No prior apply has happened — c.lastWAWAddThroughput is 0.
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 2),
+		snap(50, 80, 8, 0, 500_000, 50000, 2),
+		snap(50, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(time.Now())
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Errorf("first WAW add should fire (no baseline yet); got %+v", d)
+	}
+}
+
+// TestController_WAWAdd_StalledWriters_SuppressesNextAdd is the Codex-
+// review case: a prior WAW add set a positive baseline, then writers
+// stall (throughput=0) while queue keeps growing. The throughput-aware
+// gate must suppress the next add — zero is the strongest possible "no
+// improvement" signal, not a reason to skip the comparison.
+func TestController_WAWAdd_StalledWriters_SuppressesNextAdd(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	t0 := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+
+	// Tick 1: WAW add at throughput=500K (baseline).
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 2),
+		snap(50, 80, 8, 0, 500_000, 50000, 2),
+		snap(50, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Fatalf("setup: expected first WAW add, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Past cooldown. Writers stalled (throughput=0). Queue still growing
+	// — under the original buggy guard the gate would skip suppression
+	// and add another writer.
+	t1 := t0.Add(91 * time.Second)
+	pushSnapshots(col,
+		snap(50, 80, 15, 0, 0, 50000, 3),
+		snap(50, 80, 18, 0, 0, 50000, 3),
+		snap(50, 80, 22, 0, 0, 50000, 3),
+	)
+	if d := c.Evaluate(t1); d != nil {
+		t.Errorf("stalled writers (throughput=0) — Rule 2 should suppress; got %+v", d)
+	}
+}
+
+// TestController_WAWDecrease_ClearsThroughputBaseline is the second
+// Codex-review case (initial fix) plus the follow-up: a Rule 3 fire
+// (error back-off) decreases WAW. Two correctness requirements:
+//   - The decrease must NOT set a new baseline (it isn't an add to
+//     validate).
+//   - The decrease must CLEAR any prior baseline (the WAW count
+//     just changed, so prior-add throughput is no longer comparable
+//     and carrying it forward could suppress a legitimate later
+//     recovery re-add indefinitely).
+//
+// Test sequence: prior add sets baseline=500K; errors trigger Rule 3
+// backoff at the same throughput; baseline must be cleared (not
+// preserved at 500K). Verifies a subsequent recovery add isn't
+// suppressed by the stale 500K.
+func TestController_WAWDecrease_ClearsThroughputBaseline(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	t0 := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+
+	// Tick 1: prior Rule 2 add sets baseline=500K (WAW 2→3).
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 2),
+		snap(50, 80, 8, 0, 500_000, 50000, 2),
+		snap(50, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.Knob != "write_ahead_writers" || d.NewValue <= d.PreviousValue {
+		t.Fatalf("setup tick 1: expected WAW add, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply tick 1: %v", err)
+	}
+	if c.lastWAWAddThroughput == 0 {
+		t.Fatalf("setup: prior WAW add should have set baseline")
+	}
+	priorBaseline := c.lastWAWAddThroughput
+
+	// Tick 2 (past cooldown): errors arrive → Rule 3 fires (WAW 3 → 2).
+	// Baseline must be cleared, not preserved.
+	t1 := t0.Add(91 * time.Second)
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 3),
+		snap(50, 80, 5, 5, 500_000, 50000, 3),
+	)
+	d = c.Evaluate(t1)
+	if d == nil || d.Knob != "write_ahead_writers" || d.NewValue >= d.PreviousValue {
+		t.Fatalf("setup tick 2: expected Rule 3 decrease, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply tick 2: %v", err)
+	}
+	if c.lastWAWAddThroughput != 0 || c.lastWAWAddThroughputSet {
+		t.Errorf("WAW decrease should CLEAR baseline (was %v); got value=%v set=%v",
+			priorBaseline, c.lastWAWAddThroughput, c.lastWAWAddThroughputSet)
+	}
+
+	// Tick 3 (past cooldown): errors clear, queue grows. Recovery add
+	// must NOT be suppressed by the stale 500K baseline. Throughput at
+	// the same 500K — without the clear, comparison would be
+	// 500K < 500K*1.02=510K → suppress, blocking recovery.
+	t2 := t1.Add(91 * time.Second)
+	pushSnapshots(col,
+		snap(50, 80, 8, 5, 500_000, 50000, 2),
+		snap(50, 80, 12, 5, 500_000, 50000, 2),
+		snap(50, 80, 18, 5, 500_000, 50000, 2),
+	)
+	d = c.Evaluate(t2)
+	if d == nil || d.Knob != "write_ahead_writers" || d.NewValue <= d.PreviousValue {
+		t.Errorf("recovery add post-backoff should not be suppressed by stale baseline; got %+v", d)
+	}
+}
+
+// TestController_ChunkSizeChange_ResetsWAWThroughputBaseline: a
+// chunk_size adjustment alters the throughput surface, so the prior
+// WAW-add baseline is no longer comparable. After a chunk_size apply,
+// the next WAW add should NOT be suppressed by a stale baseline.
+func TestController_ChunkSizeChange_ResetsWAWThroughputBaseline(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	t0 := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+
+	// Tick 1: WAW add at throughput=500K (sets baseline).
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50000, 2),
+		snap(50, 80, 8, 0, 500_000, 50000, 2),
+		snap(50, 80, 12, 0, 500_000, 50000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.Knob != "write_ahead_writers" {
+		t.Fatalf("setup tick 1: expected WAW add, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply tick 1: %v", err)
+	}
+	if c.lastWAWAddThroughput == 0 {
+		t.Fatalf("setup: lastWAWAddThroughput should be set after WAW apply")
+	}
+
+	// Tick 2 (past WAW cooldown): memory pressure → chunk_size shrink.
+	// This should reset lastWAWAddThroughput to 0.
+	t1 := t0.Add(91 * time.Second)
+	pushSnapshots(col, snap(95, 80, 5, 0, 500_000, 50000, 3))
+	d = c.Evaluate(t1)
+	if d == nil || d.Knob != "chunk_size" {
+		t.Fatalf("setup tick 2: expected chunk_size shrink, got %+v", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply tick 2: %v", err)
+	}
+	if c.lastWAWAddThroughput != 0 || c.lastWAWAddThroughputSet {
+		t.Errorf("chunk_size apply should reset WAW throughput baseline; got value=%v set=%v",
+			c.lastWAWAddThroughput, c.lastWAWAddThroughputSet)
+	}
+}
+
+// TestMeanThroughput verifies the helper used by both apply() and the
+// throughput-aware gate. Empty input returns 0; non-empty returns the
+// arithmetic mean (which is also 0 if every snapshot's throughput is
+// 0 — that's a legitimate "stall" baseline, not "no baseline yet".
+// Callers distinguish the two via lastWAWAddThroughputSet, not by
+// inspecting the value.
+func TestMeanThroughput(t *testing.T) {
+	cases := []struct {
+		name        string
+		throughputs []float64
+		want        float64
+	}{
+		{"empty", nil, 0},
+		{"single", []float64{500_000}, 500_000},
+		{"three", []float64{400_000, 500_000, 600_000}, 500_000},
+		{"includes zero", []float64{0, 500_000}, 250_000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snaps := make([]PerformanceSnapshot, len(tc.throughputs))
+			for i, v := range tc.throughputs {
+				snaps[i].Throughput = v
+			}
+			if got := meanThroughput(snaps); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // ---------- Helper functions ----------
 
 func TestQueueGrew_StrictMonotonic(t *testing.T) {
