@@ -279,7 +279,7 @@ func TestPredictionInterval_BracketsPrediction(t *testing.T) {
 		t.Fatalf("fitRegression: %v", err)
 	}
 	pred := m.Predict(2, 25_000_000, "mssql", "postgres", "", 500)
-	low, high := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
+	low, high, _ := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
 	if !(low <= pred && pred <= high) {
 		t.Errorf("predicted %.0f not bracketed by CI [%.0f, %.0f]", pred, low, high)
 	}
@@ -312,7 +312,7 @@ func TestPredictionInterval_TightFitNarrowCI(t *testing.T) {
 		t.Fatalf("fitRegression: %v", err)
 	}
 	pred := m.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
-	low, high := m.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	low, high, _ := m.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
 	width := high - low
 	relWidth := width / pred
 	if relWidth > 0.10 {
@@ -349,13 +349,13 @@ func TestPredictionInterval_NoisyFitWideCI(t *testing.T) {
 	// Noiseless: very narrow CI.
 	mClean, _ := fitRegression(mkRows(0))
 	predClean := mClean.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
-	lowC, highC := mClean.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	lowC, highC, _ := mClean.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
 	widthClean := (highC - lowC) / predClean
 
 	// Noisy: noise amplitude 10000× compounds to ±500K throughput jitter.
 	mNoisy, _ := fitRegression(mkRows(10_000))
 	predNoisy := mNoisy.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
-	lowN, highN := mNoisy.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	lowN, highN, _ := mNoisy.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
 	widthNoisy := (highN - lowN) / predNoisy
 
 	if widthNoisy <= widthClean*5 {
@@ -388,11 +388,9 @@ func TestPredictionInterval_DegenerateDof_EmitsNA(t *testing.T) {
 		t.Fatalf("fitRegression: %v", err)
 	}
 	m.sigmaSq = nil // simulate degenerate dof
-	pred := m.Predict(2, 25_000_000, "mssql", "postgres", "", 500)
-	low, high := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
-	if low != pred || high != pred {
-		t.Errorf("degenerate sigmaSq should return (pred, pred); got pred=%.0f, low=%.0f, high=%.0f",
-			pred, low, high)
+	low, high, ok := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
+	if ok {
+		t.Errorf("degenerate sigmaSq should return ok=false; got ok=true, low=%.0f, high=%.0f", low, high)
 	}
 }
 

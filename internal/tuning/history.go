@@ -199,16 +199,18 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	out.Tier = TierRegression
 
 	// Fit-quality signals (#216): R² (model-level) + 95% prediction
-	// interval at the picked point (point-level). Both nil when the
-	// model couldn't compute them — emit "N/A" to keep the format
-	// consistent without lying about confidence.
+	// interval at the picked point (point-level). Both nil/!ok when
+	// the model couldn't compute them — emit "N/A" to keep the format
+	// consistent without lying about confidence. PredictionInterval's
+	// explicit ok return distinguishes "couldn't compute" from
+	// "computed a legitimately zero-width interval" (Codex review on
+	// PR #217 — the prior `low != high` sentinel was ambiguous).
 	r2Str := "N/A"
 	if model.r2 != nil {
 		r2Str = fmt.Sprintf("%.2f", *model.r2)
 	}
-	low, high := model.PredictionInterval(pickedWAW, pickedCSBytes, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
 	ciStr := "N/A"
-	if low != high {
+	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, in.SourceDBType, in.TargetDBType, in.TargetMode, avg); ok {
 		ciStr = formatThroughputRange(low, high)
 	}
 

@@ -113,20 +113,25 @@ type regressionModel struct {
 //
 //	ŷ ± t_{0.975, n-p} × σ̂ × √(1 + x*ᵀ (XᵀX + λI)⁻¹ x*)
 //
-// Returns (predicted, predicted) when the model can't compute a valid
-// interval — degenerate dof (nObs ≤ nFeat), missing residual variance,
-// or singular xtxInverse. Caller should treat low == high as "N/A" and
-// emit a corresponding marker in the reasoning string.
+// Returns ok=false when the model can't compute a valid interval —
+// degenerate dof (nObs ≤ nFeat), missing residual variance, or
+// singular xtxInverse. Caller should emit "N/A" in that case rather
+// than treating low/high as meaningful.
+//
+// Codex review on PR #217 caught the prior "low == high → N/A"
+// sentinel as ambiguous: a perfect fit (σ̂² == 0) can legitimately
+// produce a zero-width interval, which is meaningful (high model
+// confidence) — collapsing it to "N/A" would hide that signal.
 //
 // Complement to R²: R² says how well the model fits its training data
 // (model-level signal); the prediction interval says how uncertain the
 // prediction at THIS specific point is (point-level signal). Tight CI
 // at a point in a sparsely-trained region is mathematically rare — the
 // (XᵀX)⁻¹ leverage term grows when x* is far from training-row centers.
-func (m *regressionModel) PredictionInterval(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) (low, high float64) {
+func (m *regressionModel) PredictionInterval(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) (low, high float64, ok bool) {
 	pred := m.Predict(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
 	if m.sigmaSq == nil || m.xtxInverse == nil {
-		return pred, pred
+		return 0, 0, false
 	}
 	xStar := m.featureVector(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
 	var leverage mat.VecDense
@@ -138,14 +143,15 @@ func (m *regressionModel) PredictionInterval(waw int, csBytes int64, sourceDB, t
 	}
 	se := math.Sqrt(*m.sigmaSq * (1 + quad))
 	tCrit := tCritical(m.nObs - m.nFeat)
-	return pred - tCrit*se, pred + tCrit*se
+	return pred - tCrit*se, pred + tCrit*se, true
 }
 
 // featureVector builds the standardized feature vector x* for a
 // prediction candidate, in the same column layout fitRegression used
-// to build the design matrix X. Used by both Predict (via inline
-// expansion) and PredictionInterval (via this helper). Kept separate
-// from Predict so the two paths can't drift out of sync.
+// to build the design matrix X. Used by both Predict (which dots it
+// with β to get ŷ) and PredictionInterval (which uses it for both
+// ŷ and the leverage term). Single source of truth so the two paths
+// can't drift out of sync if the feature layout ever changes.
 func (m *regressionModel) featureVector(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) *mat.VecDense {
 	wz := standardize(float64(waw), m.wawMean, m.wawStd)
 	cz := standardize(float64(csBytes), m.csMean, m.csStd)
@@ -395,31 +401,14 @@ func computeFitQuality(m *regressionModel, X *mat.Dense, y *mat.VecDense, ridgeX
 // avg_row_bytes). Pair and mode the model didn't see during training
 // contribute zero (the categorical features are absent); the prediction
 // then collapses to the numeric-feature surface plus the intercept.
+//
+// Uses the same featureVector helper as PredictionInterval so the two
+// paths share one feature-construction layout (Codex review on PR #217
+// caught the duplication). The dot product β·x* is the prediction.
 func (m *regressionModel) Predict(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) float64 {
-	wz := standardize(float64(waw), m.wawMean, m.wawStd)
-	cz := standardize(float64(csBytes), m.csMean, m.csStd)
-	laz := standardize(math.Log(math.Max(1, float64(avgRowBytes))), m.logAvgMean, m.logAvgStd)
-
-	pred := m.beta[0]           // intercept
-	pred += m.beta[1] * wz      // waw
-	pred += m.beta[2] * wz * wz // waw²
-	pred += m.beta[3] * cz      // cs
-	pred += m.beta[4] * cz * cz // cs²
-	pred += m.beta[5] * laz     // log(avg)
-
-	for j, p := range m.pairs {
-		if p.source == sourceDB && p.target == targetDB {
-			pred += m.beta[6+j]
-			break
-		}
-	}
-	for j, mm := range m.modes {
-		if mm == mode {
-			pred += m.beta[6+len(m.pairs)+j]
-			break
-		}
-	}
-	return pred
+	x := m.featureVector(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
+	betaVec := mat.NewVecDense(m.nFeat, m.beta)
+	return mat.Dot(betaVec, x)
 }
 
 // distinctPairs returns the set of (source, target) pairs seen in rows,
