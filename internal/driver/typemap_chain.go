@@ -90,15 +90,28 @@ type FallbackChain struct {
 // NewFallbackChain builds a chain. Pass nil for fallback when AI isn't
 // configured — the chain still works, just without AI routing.
 //
-// approxAction defaults to ApproxActionDeterministic (preserve the
-// existing fast deterministic path for known-lossy mappings); pass
-// ApproxActionAIFallback to opt approx-bearing tables into AI routing.
+// approxAction defaults to:
+//   - ApproxActionAIFallback when an AI fallback is available (#209 —
+//     consistent with the rest of the codebase: Raw / table-DDL-error /
+//     finalization-error / error-diagnosis paths all default-on when
+//     AI is configured. Configuring AI is an implicit opt-in to AI
+//     features; users opt out by setting the knob explicitly.)
+//   - ApproxActionDeterministic when no AI fallback is available
+//     (no AI to route to → can't use it).
+//
+// Pass an explicit ApproxAction to override (still respected — users
+// who want deterministic-on-AI-configured can set
+// migration.approx_type_action: deterministic in their config).
 func NewFallbackChain(primary *DeterministicMapper, fallback TypeMapper, action UnmappedAction, approxAction ApproxAction) *FallbackChain {
 	if action == "" {
 		action = UnmappedActionFail
 	}
 	if approxAction == "" {
-		approxAction = ApproxActionDeterministic
+		if fallback != nil {
+			approxAction = ApproxActionAIFallback
+		} else {
+			approxAction = ApproxActionDeterministic
+		}
 	}
 	return &FallbackChain{
 		primary:      primary,

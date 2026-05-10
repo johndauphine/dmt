@@ -705,14 +705,41 @@ func TestFindApproximateColumns_SkipsRawColumns(t *testing.T) {
 	}
 }
 
-// TestNewFallbackChain_DefaultsApproxActionToDeterministic guards the
-// default behavior — empty string ApproxAction must collapse to
-// ApproxActionDeterministic, not silently leave the field empty
-// (which would skip both branches of the switch in GenerateTableDDL).
-func TestNewFallbackChain_DefaultsApproxActionToDeterministic(t *testing.T) {
+// TestNewFallbackChain_DefaultsApproxActionToDeterministic_NoAI is the
+// baseline: with no AI fallback available, empty ApproxAction must
+// collapse to ApproxActionDeterministic. There's no AI to route to.
+func TestNewFallbackChain_DefaultsApproxActionToDeterministic_NoAI(t *testing.T) {
 	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 	if chain.approxAction != ApproxActionDeterministic {
-		t.Errorf("empty approxAction should default to %q; got %q",
+		t.Errorf("empty approxAction with nil fallback should default to %q; got %q",
 			ApproxActionDeterministic, chain.approxAction)
+	}
+}
+
+// TestNewFallbackChain_DefaultsApproxActionToAIFallback_WhenAIAvailable
+// is the #209 fix: when AI IS available, empty ApproxAction collapses
+// to ApproxActionAIFallback (implicit opt-in — consistent with how
+// Raw, table-DDL-error, finalization-error, and error-diagnosis all
+// default-on when AI is configured). The user opted into AI by
+// configuring it; they shouldn't also need to set N more knobs.
+func TestNewFallbackChain_DefaultsApproxActionToAIFallback_WhenAIAvailable(t *testing.T) {
+	stub := &stubMapper{}
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
+	if chain.approxAction != ApproxActionAIFallback {
+		t.Errorf("empty approxAction with non-nil fallback should default to %q (#209); got %q",
+			ApproxActionAIFallback, chain.approxAction)
+	}
+}
+
+// TestNewFallbackChain_ExplicitDeterministicRespected_WhenAIAvailable
+// is the #209 opt-out path: a user with AI configured who explicitly
+// sets approx_type_action: deterministic still gets deterministic.
+// Default is smarter; explicit values are still respected.
+func TestNewFallbackChain_ExplicitDeterministicRespected_WhenAIAvailable(t *testing.T) {
+	stub := &stubMapper{}
+	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionDeterministic)
+	if chain.approxAction != ApproxActionDeterministic {
+		t.Errorf("explicit ApproxActionDeterministic must be respected even with AI available; got %q",
+			chain.approxAction)
 	}
 }
