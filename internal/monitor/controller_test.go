@@ -82,6 +82,40 @@ func TestController_MemoryPressure_ShrinksChunkSize(t *testing.T) {
 	}
 }
 
+// TestController_MemoryPressure_FlooredAtMinChunkSize — Copilot review
+// on PR #194. Without a floor, sustained memory pressure could
+// shrink chunk_size all the way to 1, where per-row overhead
+// dominates and migrations crawl. Default floor is 5000 (matching
+// the old AI adjuster); this test pins that we don't go below it
+// even when the shrink-factor would normally take us further.
+func TestController_MemoryPressure_FlooredAtMinChunkSize(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	// Already-small chunk_size (6000); shrink-factor 0.75 would
+	// take it to 4500, below the default floor of 5000.
+	pushSnapshots(col, snap(95.0, 30, 0, 0, 500_000, 6000, 2))
+
+	d := c.Evaluate(time.Now())
+	if d == nil {
+		t.Fatal("expected a Decision; got nil")
+	}
+	if d.NewValue != defaultMinChunkSize {
+		t.Errorf("new chunk_size: got %d, want floor at %d", d.NewValue, defaultMinChunkSize)
+	}
+}
+
+// TestController_MemoryPressure_AlreadyAtFloor_NoFire — once we're
+// at the floor, the rule has nothing to do. NewValue would equal
+// PreviousValue; Evaluate should return nil rather than emit a
+// no-op Decision.
+func TestController_MemoryPressure_AlreadyAtFloor_NoFire(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	pushSnapshots(col, snap(95.0, 30, 0, 0, 500_000, defaultMinChunkSize, 2))
+
+	if d := c.Evaluate(time.Now()); d != nil {
+		t.Errorf("at floor — should not emit no-op Decision; got %+v", d)
+	}
+}
+
 func TestController_MemoryBelowThreshold_NoFire(t *testing.T) {
 	c, col, _ := newTestController(t, ControllerOptions{})
 	pushSnapshots(col, snap(85.0, 30, 0, 0, 500_000, 50000, 2)) // 85% < 90%
@@ -310,6 +344,27 @@ func TestController_ChunkGrowClampedByMaxChunkSize(t *testing.T) {
 	}
 }
 
+// TestController_ChunkGrow_FromSmallValue_AlwaysIncreases — Copilot
+// review on PR #194. With int truncation, small chunk_size × 1.10
+// could round down to the same value, never recovering. growChunk
+// rounds half-up AND guarantees +1 minimum so growth always
+// happens. Test: starting at chunk_size=10, we should see at least 11.
+func TestController_ChunkGrow_FromSmallValue_AlwaysIncreases(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	pushSnapshots(col,
+		snap(50, 30, 0, 0, 500_000, 10, 2),
+		snap(50, 30, 0, 0, 500_000, 10, 2),
+		snap(50, 30, 0, 0, 500_000, 10, 2),
+	)
+	d := c.Evaluate(time.Now())
+	if d == nil {
+		t.Fatal("expected a Decision; got nil")
+	}
+	if d.NewValue <= 10 {
+		t.Errorf("growChunk(10, 1.10) must increase, not stay at 10; got %d (#194 regression)", d.NewValue)
+	}
+}
+
 // ---------- Rule priority ----------
 
 func TestController_RulePriority_MemoryWinsOverQueue(t *testing.T) {
@@ -445,24 +500,90 @@ func TestThroughputStable_Detection(t *testing.T) {
 	}
 }
 
-func TestScaleClampedChunk(t *testing.T) {
+func TestShrinkChunk(t *testing.T) {
 	cases := []struct {
-		cur, max int
-		factor   float64
-		want     int
+		name              string
+		cur, minChunkSize int
+		factor            float64
+		want              int
 	}{
-		{1000, 0, 0.75, 750},
-		{1000, 800, 0.75, 750}, // factor result < cap, no clamp
-		{1000, 0, 1.10, 1100},
-		{1000, 1050, 1.10, 1050}, // factor result > cap → clamp
-		{1, 0, 0.75, 1},          // floor at 1
-		{0, 0, 0.75, 1},          // floor at 1 from any small value
+		{"basic_shrink", 10000, 0, 0.75, 7500},
+		{"floored_at_default_when_no_min_set", 10000, 5000, 0.75, 7500},
+		{"hits_floor", 6000, 5000, 0.75, 5000},
+		{"defensive_floor_at_1_when_min_zero", 1, 0, 0.75, 1},
 	}
 	for _, tc := range cases {
-		got := scaleClampedChunk(tc.cur, tc.factor, tc.max)
-		if got != tc.want {
-			t.Errorf("scaleClampedChunk(cur=%d, factor=%.2f, max=%d): got %d, want %d",
-				tc.cur, tc.factor, tc.max, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shrinkChunk(tc.cur, tc.factor, tc.minChunkSize); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
+
+func TestGrowChunk(t *testing.T) {
+	cases := []struct {
+		name         string
+		cur          int
+		factor       float64
+		maxChunkSize int
+		want         int
+	}{
+		{"basic_grow", 1000, 1.10, 0, 1100},
+		{"capped", 1000, 1.10, 1050, 1050},
+		{"small_value_rounds_up_min_plus_one", 10, 1.10, 0, 11}, // 10×1.10 = 11 exactly with rounding
+		{"min_increment_guard_at_cur_1", 1, 1.10, 0, 2},          // (1×1.10)+0.5 = 1.6, int = 1; guard kicks → 2
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := growChunk(tc.cur, tc.factor, tc.maxChunkSize); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestController_Apply_FailedTunerUpdate_NoCooldown — Copilot review
+// on PR #194. If tuner.Update fails, the cooldown deadline must NOT
+// be set, otherwise the knob is silently locked out for 90s
+// despite no actual change taking effect.
+func TestController_Apply_FailedTunerUpdate_NoCooldown(t *testing.T) {
+	c, _, _ := newTestController(t, ControllerOptions{})
+	c.tuner = &failingTuner{} // override with one that always errors
+	c.SetClock(fixedClock(time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)))
+
+	d := &Decision{Knob: "chunk_size", PreviousValue: 50000, NewValue: 37500}
+	if err := c.apply(d); err == nil {
+		t.Fatal("expected error from failingTuner.Update")
+	}
+	// Cooldown deadline should still be the zero value — apply()
+	// only sets cooldown after Update succeeds.
+	if !c.chunkSizeCooldownUntil.IsZero() {
+		t.Errorf("cooldown should not be set when Update fails; got %v (#194 regression)", c.chunkSizeCooldownUntil)
+	}
+}
+
+// failingTuner is a stub that errors on Update; everything else
+// satisfies the interface but is unused in the apply-error test.
+type failingTuner struct{}
+
+func (failingTuner) Snapshot() transfer.RuntimeSnapshot { return transfer.RuntimeSnapshot{} }
+func (failingTuner) Update(transfer.RuntimeUpdate) error {
+	return errFailingTuner
+}
+func (failingTuner) TableChunkSize(string) (int, bool)       { return 0, false }
+func (failingTuner) SetTableChunkSize(string, int)           {}
+func (failingTuner) TableBatchSize(string) (int, bool)       { return 0, false }
+func (failingTuner) SetTableBatchSize(string, int)           {}
+func (failingTuner) ReportActiveJobs(int)                    {}
+func (failingTuner) ReportQueueDepth(int)                    {}
+func (failingTuner) ReportError()                            {}
+func (failingTuner) ReportChunkRetry()                       {}
+func (failingTuner) ReportTransferTime(int64, int64, int64, int64) {}
+func (failingTuner) Metrics() transfer.RuntimeMetrics        { return transfer.RuntimeMetrics{} }
+
+var errFailingTuner = errSentinel("tuner failed")
+
+type errSentinel string
+
+func (e errSentinel) Error() string { return string(e) }

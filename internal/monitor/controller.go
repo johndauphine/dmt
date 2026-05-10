@@ -55,9 +55,9 @@ type Controller struct {
 	chunkSizeCooldownUntil  time.Time
 	writeAheadCooldownUntil time.Time
 
-	// Caps on parameters. Zero values mean "no cap" (use defensive
-	// defaults: max WAW = 8, max chunk_size = unlimited).
+	// Caps + floors on parameters. Defaults applied in NewController.
 	maxChunkSize int
+	minChunkSize int
 	maxWAW       int
 
 	// nowFn is the clock — overridable in tests via NewController's
@@ -74,6 +74,14 @@ type ControllerOptions struct {
 	// unlimited.
 	MaxChunkSize int
 
+	// MinChunkSize floors the chunk_size knob's shrink rule.
+	// Without a floor, sustained memory pressure could shrink
+	// chunk_size all the way to 1, where per-row overhead dominates
+	// and migrations crawl. The old AI adjuster floored at 5000;
+	// preserved as the default here. Zero falls back to
+	// defaultMinChunkSize (Copilot review on PR #194).
+	MinChunkSize int
+
 	// MaxWAW caps the write_ahead_writers knob's growth rule. Zero
 	// falls back to defaultMaxWAW (8) — high enough that real
 	// workloads rarely hit the cap, low enough that runaway
@@ -86,6 +94,12 @@ type ControllerOptions struct {
 // parallel-write workloads peak well below 8 and additional writers
 // just add contention.
 const defaultMaxWAW = 8
+
+// defaultMinChunkSize is the floor for the memory-pressure shrink
+// rule when ControllerOptions doesn't set one. Below 5000 rows per
+// chunk, per-row overhead dominates and throughput degrades sharply.
+// Matches the old AI adjuster's floor (Copilot review on PR #194).
+const defaultMinChunkSize = 5000
 
 // controllerCooldown is the per-knob hysteresis window. The same
 // 90s the AI loop used; preserved intentionally so the controller
@@ -138,11 +152,15 @@ func NewController(tuner transfer.RuntimeTuner, collector *MetricsCollector, int
 	if opts.MaxWAW == 0 {
 		opts.MaxWAW = defaultMaxWAW
 	}
+	if opts.MinChunkSize == 0 {
+		opts.MinChunkSize = defaultMinChunkSize
+	}
 	return &Controller{
 		tuner:        tuner,
 		collector:    collector,
 		interval:     interval,
 		maxChunkSize: opts.MaxChunkSize,
+		minChunkSize: opts.MinChunkSize,
 		maxWAW:       opts.MaxWAW,
 		nowFn:        time.Now,
 	}
@@ -155,16 +173,21 @@ func (c *Controller) SetClock(now func() time.Time) {
 	c.nowFn = now
 }
 
-// Start runs the controller's tick loop. Mirrors AIMonitor.Start so
-// the wiring layer (transfer_runner) can swap implementations
-// without further surgery in #172b.
+// Start runs the controller's tick loop AND spawns the collector
+// goroutine — drop-in replacement for AIMonitor.Start so wiring
+// (transfer_runner) is a one-line swap in 172b.
 //
-// The collector should be started separately (typically by the same
-// caller, in a sibling goroutine) so the ticker fires against
-// already-populated metrics.
+// The collector goroutine is started here (not by the caller) so
+// the contract is "construct + Start = working monitor." Mirrors
+// AIMonitor.Start which has the same shape (Copilot review on PR
+// #194 — earlier draft documented "collector started separately"
+// but didn't enforce it, leading to silent no-ticks if the caller
+// forgot).
 func (c *Controller) Start(ctx context.Context) {
-	logging.Debug("rule controller started (interval=%v, max_waw=%d, max_chunk_size=%d)",
-		c.interval, c.maxWAW, c.maxChunkSize)
+	logging.Debug("rule controller started (interval=%v, max_waw=%d, max_chunk_size=%d, min_chunk_size=%d)",
+		c.interval, c.maxWAW, c.maxChunkSize, c.minChunkSize)
+
+	go c.collector.Start(ctx)
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
@@ -224,8 +247,8 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 
 	// Rule 1: memory pressure → shrink chunk_size.
 	if latest.MemoryPercent > memoryPressureThreshold && c.knobReady("chunk_size", now) {
-		next := scaleClampedChunk(cur.ChunkSize, chunkShrinkFactor, c.maxChunkSize)
-		if next != cur.ChunkSize {
+		next := shrinkChunk(cur.ChunkSize, chunkShrinkFactor, c.minChunkSize)
+		if next < cur.ChunkSize {
 			return &Decision{
 				Knob:          "chunk_size",
 				PreviousValue: cur.ChunkSize,
@@ -284,7 +307,7 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 
 	// Rule 4: idle CPU + stable throughput → grow chunk_size.
 	if latest.CPUPercent < idleCPUThreshold && c.knobReady("chunk_size", now) && throughputStable(recent) {
-		next := scaleClampedChunk(cur.ChunkSize, chunkGrowFactor, c.maxChunkSize)
+		next := growChunk(cur.ChunkSize, chunkGrowFactor, c.maxChunkSize)
 		if next > cur.ChunkSize {
 			return &Decision{
 				Knob:          "chunk_size",
@@ -302,21 +325,30 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 }
 
 // apply persists the decision via the tuner and starts the per-knob
-// cooldown. Returns the tuner's error verbatim so callers can log
-// it; the caller is the production tick() and the test harness.
+// cooldown. Cooldown is set ONLY after the tuner update succeeds —
+// without that ordering, a failed Update would leave the knob in
+// cooldown for 90s, suppressing retries even though no change took
+// effect (Copilot review on PR #194).
 func (c *Controller) apply(d *Decision) error {
 	update := transfer.RuntimeUpdate{}
 	switch d.Knob {
 	case "chunk_size":
 		update.ChunkSize = &d.NewValue
-		c.chunkSizeCooldownUntil = c.nowFn().Add(controllerCooldown)
 	case "write_ahead_writers":
 		update.WriteAheadWriters = &d.NewValue
-		c.writeAheadCooldownUntil = c.nowFn().Add(controllerCooldown)
 	default:
 		return fmt.Errorf("unknown knob %q", d.Knob)
 	}
-	return c.tuner.Update(update)
+	if err := c.tuner.Update(update); err != nil {
+		return err
+	}
+	switch d.Knob {
+	case "chunk_size":
+		c.chunkSizeCooldownUntil = c.nowFn().Add(controllerCooldown)
+	case "write_ahead_writers":
+		c.writeAheadCooldownUntil = c.nowFn().Add(controllerCooldown)
+	}
+	return nil
 }
 
 // knobReady returns true when the named knob is past its cooldown
@@ -406,13 +438,32 @@ func newErrorsSinceLast(recent []PerformanceSnapshot) int {
 	return delta
 }
 
-// scaleClampedChunk multiplies cur by factor and clamps the result
-// to [1, maxChunkSize]. maxChunkSize == 0 means no upper bound (the
-// driver-layer HardChunkLimit isn't always known to the controller).
-func scaleClampedChunk(cur int, factor float64, maxChunkSize int) int {
+// shrinkChunk multiplies cur by factor (0 < factor < 1) and floors
+// the result at minChunkSize. Truncation toward zero on the multiply
+// is fine here — for shrink we'd rather over-shrink slightly than
+// undershrink. minChunkSize=0 falls back to a defensive 1.
+func shrinkChunk(cur int, factor float64, minChunkSize int) int {
+	if minChunkSize <= 0 {
+		minChunkSize = 1
+	}
 	scaled := int(float64(cur) * factor)
-	if scaled < 1 {
-		scaled = 1
+	if scaled < minChunkSize {
+		scaled = minChunkSize
+	}
+	return scaled
+}
+
+// growChunk multiplies cur by factor (factor > 1) and caps the
+// result at maxChunkSize. Rounds UP rather than truncating so a
+// small `cur × 1.10` doesn't stay at the original value (Copilot
+// review on PR #194 — int truncation could pin chunk_size at 1).
+// Guarantees at least +1 when growth would otherwise round to a
+// no-op. maxChunkSize=0 means uncapped (the driver-layer
+// HardChunkLimit isn't always known to the controller).
+func growChunk(cur int, factor float64, maxChunkSize int) int {
+	scaled := int(float64(cur)*factor + 0.5) // round half up
+	if scaled <= cur {
+		scaled = cur + 1
 	}
 	if maxChunkSize > 0 && scaled > maxChunkSize {
 		scaled = maxChunkSize
