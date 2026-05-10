@@ -52,6 +52,7 @@ func TestFitRegression_RecoversLinearTrend(t *testing.T) {
 	maxResidual := 0.0
 	for _, r := range rows {
 		pred := m.Predict(r.WriteAheadWriters, int64(r.ChunkSize)*r.AvgRowBytes,
+			r.ParallelReaders, r.ReadAheadBuffers,
 			r.SourceDBType, r.TargetDBType, "", r.AvgRowBytes)
 		resid := math.Abs(pred - r.FinalThroughput)
 		if resid > maxResidual {
@@ -94,7 +95,7 @@ func TestFitRegression_RecoversQuadraticPeak(t *testing.T) {
 	bestWAW := 0
 	bestPred := math.Inf(-1)
 	for waw := 1; waw <= 6; waw++ {
-		pred := m.Predict(waw, 50000*500, "mssql", "postgres", "", 500)
+		pred := m.Predict(waw, 50000*500, 0, 0, "mssql", "postgres", "", 500)
 		if pred > bestPred {
 			bestPred = pred
 			bestWAW = waw
@@ -126,7 +127,7 @@ func TestFitRegression_ConstantFeatureSurvives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fitRegression: %v", err)
 	}
-	pred := m.Predict(2, 50000*500, "mssql", "postgres", "", 500)
+	pred := m.Predict(2, 50000*500, 0, 0, "mssql", "postgres", "", 500)
 	if math.IsNaN(pred) || math.IsInf(pred, 0) {
 		t.Errorf("constant-feature fit produced %v; expected finite", pred)
 	}
@@ -278,8 +279,8 @@ func TestPredictionInterval_BracketsPrediction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fitRegression: %v", err)
 	}
-	pred := m.Predict(2, 25_000_000, "mssql", "postgres", "", 500)
-	low, high, _ := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
+	pred := m.Predict(2, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
+	low, high, _ := m.PredictionInterval(2, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
 	if !(low <= pred && pred <= high) {
 		t.Errorf("predicted %.0f not bracketed by CI [%.0f, %.0f]", pred, low, high)
 	}
@@ -311,8 +312,8 @@ func TestPredictionInterval_TightFitNarrowCI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fitRegression: %v", err)
 	}
-	pred := m.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
-	low, high, _ := m.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	pred := m.Predict(4, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
+	low, high, _ := m.PredictionInterval(4, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
 	width := high - low
 	relWidth := width / pred
 	if relWidth > 0.10 {
@@ -348,14 +349,14 @@ func TestPredictionInterval_NoisyFitWideCI(t *testing.T) {
 
 	// Noiseless: very narrow CI.
 	mClean, _ := fitRegression(mkRows(0))
-	predClean := mClean.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
-	lowC, highC, _ := mClean.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	predClean := mClean.Predict(4, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
+	lowC, highC, _ := mClean.PredictionInterval(4, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
 	widthClean := (highC - lowC) / predClean
 
 	// Noisy: noise amplitude 10000× compounds to ±500K throughput jitter.
 	mNoisy, _ := fitRegression(mkRows(10_000))
-	predNoisy := mNoisy.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
-	lowN, highN, _ := mNoisy.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	predNoisy := mNoisy.Predict(4, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
+	lowN, highN, _ := mNoisy.PredictionInterval(4, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
 	widthNoisy := (highN - lowN) / predNoisy
 
 	if widthNoisy <= widthClean*5 {
@@ -388,9 +389,122 @@ func TestPredictionInterval_DegenerateDof_EmitsNA(t *testing.T) {
 		t.Fatalf("fitRegression: %v", err)
 	}
 	m.sigmaSq = nil // simulate degenerate dof
-	low, high, ok := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
+	low, high, ok := m.PredictionInterval(2, 25_000_000, 0, 0, "mssql", "postgres", "", 500)
 	if ok {
 		t.Errorf("degenerate sigmaSq should return ok=false; got ok=true, low=%.0f, high=%.0f", low, high)
+	}
+}
+
+// TestFitRegression_RecoversPRGradient (#219) builds a dataset where
+// throughput depends linearly on parallel_readers with WAW + CS held
+// constant. The model must (a) fit without errors on the new feature
+// columns and (b) predict higher throughput at PR=4 than at PR=2.
+//
+// This is the smallest end-to-end check that the new reader-side
+// features actually contribute signal — pre-#219 the model dropped
+// these axes on the floor, so this test would not have been writable.
+func TestFitRegression_RecoversPRGradient(t *testing.T) {
+	// throughput = 200 + 100·PR (plus tiny WAW noise so the WAW columns
+	// don't collapse to a zero-variance fit). 32 rows: 16 at PR=2,
+	// 16 at PR=4, balanced across WAW={1,2,3,4} for stability.
+	rows := make([]HistoryRecord, 0, 32)
+	for _, pr := range []int{2, 4} {
+		for i := 0; i < 16; i++ {
+			waw := (i % 4) + 1
+			rows = append(rows, HistoryRecord{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				WriteAheadWriters: waw,
+				ChunkSize:         50000,
+				AvgRowBytes:       500,
+				ParallelReaders:   pr,
+				ReadAheadBuffers:  4,
+				FinalThroughput:   200.0 + 100.0*float64(pr) + 0.1*float64(waw),
+				CPUCores:          16, MemoryGB: 48,
+			})
+		}
+	}
+
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+
+	pred2 := m.Predict(2, 50000*500, 2, 4, "mssql", "postgres", "", 500)
+	pred4 := m.Predict(2, 50000*500, 4, 4, "mssql", "postgres", "", 500)
+
+	// True slope is +100/unit-PR; predicted gap should be in that
+	// ballpark (ridge shrinks it slightly, quadratic WAW terms absorb
+	// nothing here since WAW is balanced across both PR groups).
+	gap := pred4 - pred2
+	if gap < 150 {
+		t.Errorf("PR gradient not recovered: pred(PR=4)-pred(PR=2)=%.1f, want >=150 (true=200)", gap)
+	}
+}
+
+// TestFitRegression_RecoversRABGradient is the read_ahead_buffers
+// counterpart of TestFitRegression_RecoversPRGradient (#219).
+func TestFitRegression_RecoversRABGradient(t *testing.T) {
+	// throughput = 200 + 25·RAB + waw noise. 32 rows balanced.
+	rows := make([]HistoryRecord, 0, 32)
+	for _, rab := range []int{4, 8} {
+		for i := 0; i < 16; i++ {
+			waw := (i % 4) + 1
+			rows = append(rows, HistoryRecord{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				WriteAheadWriters: waw,
+				ChunkSize:         50000,
+				AvgRowBytes:       500,
+				ParallelReaders:   2,
+				ReadAheadBuffers:  rab,
+				FinalThroughput:   200.0 + 25.0*float64(rab) + 0.1*float64(waw),
+				CPUCores:          16, MemoryGB: 48,
+			})
+		}
+	}
+
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+
+	pred4 := m.Predict(2, 50000*500, 2, 4, "mssql", "postgres", "", 500)
+	pred8 := m.Predict(2, 50000*500, 2, 8, "mssql", "postgres", "", 500)
+
+	// True slope is +25/unit-RAB; gap from RAB=4 to RAB=8 = 100.
+	gap := pred8 - pred4
+	if gap < 75 {
+		t.Errorf("RAB gradient not recovered: pred(RAB=8)-pred(RAB=4)=%.1f, want >=75 (true=100)", gap)
+	}
+}
+
+// TestFitRegression_ConstantPRRABSurvives covers the std=0 edge for
+// the new features (#219). When every row has PR=2 RAB=4, the new
+// pr_z / rab_z columns are constant and the standardize() path must
+// not produce NaN — stddevSafe returns 1, keeping the column at z=0.
+func TestFitRegression_ConstantPRRABSurvives(t *testing.T) {
+	rows := make([]HistoryRecord, 30)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: (i % 6) + 1,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			ParallelReaders:   2, // constant
+			ReadAheadBuffers:  4, // constant
+			FinalThroughput:   600_000 + float64(i),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	pred := m.Predict(2, 50000*500, 2, 4, "mssql", "postgres", "", 500)
+	if math.IsNaN(pred) || math.IsInf(pred, 0) {
+		t.Errorf("constant PR/RAB fit produced %v; expected finite", pred)
 	}
 }
 

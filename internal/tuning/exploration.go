@@ -29,13 +29,36 @@ import (
 // regression takes over.
 const explorationGridRuns = 6
 
+// perturbPRMax / perturbRABMax / perturbRABMin bound the ε-perturbation
+// directions for parallel_readers and read_ahead_buffers (#219). The
+// caps are chosen wide enough that the perturbation actually leaves the
+// reader-grid envelope ({2,4} × {4,8}) occasionally — that's the point;
+// ε-perturbation should be willing to probe further than the planned
+// grid did — but tight enough that a runaway scale-up doesn't pile
+// reader-side connections onto a host whose connection budget can't
+// absorb them.
+const (
+	perturbPRMax  = 8
+	perturbRABMax = 16
+	perturbRABMin = 2
+)
+
 // gridCandidate is one (WAW × CS_BYTES_FRACTION) probe point on the
-// planned grid. The fraction is multiplied by the per-target
+// outer grid. The fraction is multiplied by the per-target
 // OptimumBulkChunkBytes (with the conservative 10 MB fallback for
 // unmeasured targets) to derive the actual chunk-byte target.
 type gridCandidate struct {
 	WAW        int
 	CSFraction float64
+}
+
+// readerCandidate is one (parallel_readers, read_ahead_buffers) probe
+// point on the inner grid (#219). Attached to outer cells via bucketCount
+// modulo so the cold-start phase visits all 4 inner combos within its
+// first 4 runs even when explorationGridRuns is small.
+type readerCandidate struct {
+	ParallelReaders  int
+	ReadAheadBuffers int
 }
 
 // explorationGrid is the planned-grid menu. WAW values from the issue
@@ -51,6 +74,18 @@ var explorationGrid = []gridCandidate{
 	{WAW: 2, CSFraction: fullOptimumFraction},
 	{WAW: 3, CSFraction: fullOptimumFraction},
 	{WAW: maxWAWForGrid, CSFraction: fullOptimumFraction},
+}
+
+// readerGrid is the inner 2×2 menu over (parallel_readers,
+// read_ahead_buffers). Values picked to bracket the baseline (PR=2,
+// RAB=4) — small enough that doubling stays within the typical 8-16
+// GB host's connection budget, large enough that the regression can
+// actually distinguish them from baseline.
+var readerGrid = []readerCandidate{
+	{ParallelReaders: 2, ReadAheadBuffers: 4},
+	{ParallelReaders: 2, ReadAheadBuffers: 8},
+	{ParallelReaders: 4, ReadAheadBuffers: 4},
+	{ParallelReaders: 4, ReadAheadBuffers: 8},
 }
 
 // shouldExplore returns true when this run should pick from the planned
@@ -85,10 +120,20 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 	// length. Scan forward through every candidate; pick the first that
 	// passes the filters. This way a forced --explore on a bucket past
 	// the cold-start window still gets a deterministic next-probe.
+	//
+	// Inner cell (#219) is keyed off the same bucketCount+i index modulo
+	// the reader-grid length, so each step on the outer grid also advances
+	// the inner grid. With outer=8 and inner=4, the first 4 cold-start
+	// runs cycle through every reader combo paired with distinct outer
+	// cells; the next 4 repeat the inner combos against the second half
+	// of the outer grid, giving 2-way coverage of (outer × inner) by run 8.
 	n := len(explorationGrid)
+	rn := len(readerGrid)
 	for i := 0; i < n; i++ {
 		idx := (bucketCount + i) % n
 		cand := explorationGrid[idx]
+		readerIdx := (bucketCount + i) % rn
+		reader := readerGrid[readerIdx]
 		csBytes := int64(cand.CSFraction * float64(optimumBytes))
 		csRows := int(csBytes / avg)
 		if csRows < 1 {
@@ -99,6 +144,8 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 		}
 		out.WriteAheadWriters = cand.WAW
 		out.ChunkSize = csRows
+		out.ParallelReaders = reader.ParallelReaders
+		out.ReadAheadBuffers = reader.ReadAheadBuffers
 		out.Tier = TierExploration
 		// Label the run within the cold-start window when we're in it;
 		// for forced-explore on a bucket past K runs, just report the
@@ -108,8 +155,8 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 			runLabel = fmt.Sprintf("run %d/%d", bucketCount+1, explorationGridRuns)
 		}
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"exploration: planned grid %s (WAW=%d, CS=%.1f×optimum=%.1fMB)",
-			runLabel, cand.WAW, cand.CSFraction, float64(csBytes)/1024/1024,
+			"exploration: planned grid %s (WAW=%d, CS=%.1f×optimum=%.1fMB, PR=%d, RAB=%d)",
+			runLabel, cand.WAW, cand.CSFraction, float64(csBytes)/1024/1024, reader.ParallelReaders, reader.ReadAheadBuffers,
 		)
 		return
 	}
@@ -140,23 +187,27 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 	return rand.Float64() < epsilon
 }
 
-// applyEpsilonPerturbation nudges the picked (WAW, ChunkSize) by one
-// step in a randomly-chosen direction. The nudge is bounded by the WAW
-// grid and HardChunkLimit; if the chosen direction would violate a
-// bound, falls through to the next direction so we always generate
-// *some* variance.
+// applyEpsilonPerturbation nudges the picked (WAW, ChunkSize, PR, RAB)
+// by one step in a randomly-chosen direction. The nudge is bounded by
+// the WAW grid, HardChunkLimit, and the reader-grid caps; if the chosen
+// direction would violate a bound, falls through to the next direction
+// so we always generate *some* variance.
 //
 // Historical-retry exclusions are intentionally NOT applied (same
 // reasoning as applyGridExploration — #186). ε-perturbation is an
 // exploration mechanism; its job is to occasionally probe non-argmax
 // points so the regression's training data stays representative.
 //
-// Picks one of four directions:
+// Picks one of eight directions:
 //
 //	WAW + 1   (capped at maxWAWForGrid)
 //	WAW − 1   (floored at 1)
 //	CS × 1.5  (capped at HardChunkLimit if set)
 //	CS × 0.67 (floored at 1 row)
+//	PR × 2    (capped at perturbPRMax)              #219
+//	PR ÷ 2    (floored at 1)                        #219
+//	RAB × 2   (capped at perturbRABMax)             #219
+//	RAB ÷ 2   (floored at perturbRABMin)            #219
 func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 	type direction struct {
 		name  string
@@ -199,6 +250,38 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 				return false
 			}
 			o.ChunkSize = next
+			return true
+		}},
+		{"PR×2", func(o *Output) bool {
+			next := o.ParallelReaders * 2
+			if next > perturbPRMax || next == o.ParallelReaders {
+				return false
+			}
+			o.ParallelReaders = next
+			return true
+		}},
+		{"PR÷2", func(o *Output) bool {
+			next := o.ParallelReaders / 2
+			if next < 1 || next == o.ParallelReaders {
+				return false
+			}
+			o.ParallelReaders = next
+			return true
+		}},
+		{"RAB×2", func(o *Output) bool {
+			next := o.ReadAheadBuffers * 2
+			if next > perturbRABMax || next == o.ReadAheadBuffers {
+				return false
+			}
+			o.ReadAheadBuffers = next
+			return true
+		}},
+		{"RAB÷2", func(o *Output) bool {
+			next := o.ReadAheadBuffers / 2
+			if next < perturbRABMin || next == o.ReadAheadBuffers {
+				return false
+			}
+			o.ReadAheadBuffers = next
 			return true
 		}},
 	}

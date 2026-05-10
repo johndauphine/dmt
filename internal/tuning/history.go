@@ -177,7 +177,7 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	}
 
 	skip := wawsWithHighRetryRate(rows)
-	pickedWAW, pickedCSBytes, predicted, ok := argmaxRegression(model, in, profile, skip)
+	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, skip)
 	if !ok {
 		out.Reasoning = appendReasoning(out.Reasoning,
 			"regression skipped: every grid candidate filtered (retry-rate exclusions: %v, HardChunkLimit=%d)",
@@ -196,6 +196,8 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	}
 	out.WriteAheadWriters = pickedWAW
 	out.ChunkSize = csRows
+	out.ParallelReaders = pickedPR
+	out.ReadAheadBuffers = pickedRAB
 	out.Tier = TierRegression
 
 	// Fit-quality signals (#216): R² (model-level) + 95% prediction
@@ -210,13 +212,13 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 		r2Str = fmt.Sprintf("%.2f", *model.r2)
 	}
 	ciStr := "N/A"
-	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, in.SourceDBType, in.TargetDBType, in.TargetMode, avg); ok {
+	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, avg); ok {
 		ciStr = formatThroughputRange(low, high)
 	}
 
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB) over %d filtered rows; predicted %.0f rows/s [95%% CI: %s]; R²=%s",
-		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, len(rows), predicted, ciStr, r2Str,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows; predicted %.0f rows/s [95%% CI: %s]; R²=%s",
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), predicted, ciStr, r2Str,
 	)
 	return true
 }
@@ -255,13 +257,17 @@ func sortedKeys(m map[int]bool) []int {
 	return out
 }
 
-// argmaxRegression walks the small (WAW, CS_BYTES) grid and returns the
-// candidate with the highest predicted throughput, subject to the
-// retry-rate exclusion (skip WAWs whose historical retry rate clears
+// argmaxRegression walks the small (WAW × CS_BYTES × PR × RAB) grid and
+// returns the candidate with the highest predicted throughput, subject to
+// the retry-rate exclusion (skip WAWs whose historical retry rate clears
 // retryRateExclusionThreshold over ≥minRunsForRetryExclusion runs) and
 // HardChunkLimit (skip CS values above the protocol cap). Returns
 // ok=false when every grid point is filtered out.
-func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, skip map[int]bool) (waw int, csBytes int64, predicted float64, ok bool) {
+//
+// The PR and RAB grids match the exploration inner grid ({2,4} × {4,8})
+// so argmax only picks values the planned grid actually probes — avoids
+// the extrapolation that drove #218's astronomical CI.
+func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, skip map[int]bool) (waw int, csBytes int64, parallelReaders, readAheadBuffers int, predicted float64, ok bool) {
 	const fallbackBytes int64 = 10_000_000
 	optimumBytes := profile.OptimumBulkChunkBytes
 	if optimumBytes <= 0 {
@@ -278,6 +284,7 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 
 	bestWAW := -1
 	var bestCSBytes int64
+	var bestPR, bestRAB int
 	bestPred := math.Inf(-1)
 
 	for w := 1; w <= maxWAWForGrid; w++ {
@@ -289,18 +296,22 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 				continue
 			}
-			pred := model.Predict(w, cs, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
-			if pred > bestPred {
-				bestPred = pred
-				bestWAW = w
-				bestCSBytes = cs
+			for _, reader := range readerGrid {
+				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
+				if pred > bestPred {
+					bestPred = pred
+					bestWAW = w
+					bestCSBytes = cs
+					bestPR = reader.ParallelReaders
+					bestRAB = reader.ReadAheadBuffers
+				}
 			}
 		}
 	}
 	if bestWAW < 0 {
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, 0, false
 	}
-	return bestWAW, bestCSBytes, bestPred, true
+	return bestWAW, bestCSBytes, bestPR, bestRAB, bestPred, true
 }
 
 // wawsWithHighRetryRate returns the set of WAW values that the SELECTION

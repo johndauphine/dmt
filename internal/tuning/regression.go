@@ -17,16 +17,20 @@ import (
 //	           + β₁·waw_z + β₂·waw_z²
 //	           + β₃·cs_z  + β₄·cs_z²
 //	           + β₅·logAvgRowBytes_z
+//	           + β₆·pr_z  + β₇·rab_z      (#219 — reader-side linear features)
 //	           + Σ γᵢ · pair_i        (one-hot for each (source,target) pair seen)
 //	           + Σ δⱼ · mode_j        (one-hot for each target_mode seen)
 //	           + ε
 //
-// The three numeric features (waw, chunk_size_bytes, log(avg_row_bytes))
-// are standardized to mean=0/std=1 from the training data so the OLS
-// solve doesn't get ill-conditioned by the cs_bytes vs waw scale gap
-// (cs_bytes ≈ 1e7, waw ≈ 1-8). Categorical features are one-hot encoded
-// with NO baseline-dropped category — the intercept absorbs the baseline
-// which the QR solve handles.
+// The numeric features (waw, chunk_size_bytes, log(avg_row_bytes),
+// parallel_readers, read_ahead_buffers) are standardized to mean=0/std=1
+// from the training data so the OLS solve doesn't get ill-conditioned by
+// the cs_bytes vs waw scale gap (cs_bytes ≈ 1e7, waw ≈ 1-8). PR and RAB
+// enter linearly only — the planned exploration grid (#219) probes them
+// at just two values each ({2,4} and {4,8}), so a quadratic term would be
+// perfectly collinear with the linear one. Categorical features are
+// one-hot encoded with NO baseline-dropped category — the intercept
+// absorbs the baseline which the ridge solve handles.
 //
 // The model is trained on rows the caller filters (regime + outliers +
 // RULE 1) so the regression sees only "comparable" past runs. PR2 wires
@@ -45,9 +49,10 @@ import (
 
 // minRowsForRegression is the floor below which fitRegression refuses
 // to solve. p features need at least p+1 observations in principle; in
-// practice we want enough data that coefficients aren't pure noise. The
-// largest model we'd build here has ~5 numeric + 9 pairs + 2 modes = 16
-// features; require 30 rows so there's headroom.
+// practice we want enough data that coefficients aren't pure noise. After
+// #219 added pr_z + rab_z the largest model has ~7 numeric + 9 pairs +
+// 2 modes = 18 features; 30 rows still gives a dof of ≥12, enough for
+// the t-critical lookup to stay in well-tabled territory.
 const minRowsForRegression = 30
 
 // halfOptimumFraction and fullOptimumFraction set the chunk-byte grid
@@ -82,6 +87,8 @@ type regressionModel struct {
 	wawMean, wawStd       float64
 	csMean, csStd         float64
 	logAvgMean, logAvgStd float64
+	prMean, prStd         float64 // parallel_readers (#219)
+	rabMean, rabStd       float64 // read_ahead_buffers (#219)
 
 	beta []float64 // one coefficient per feature column, in column order
 
@@ -128,12 +135,12 @@ type regressionModel struct {
 // prediction at THIS specific point is (point-level signal). Tight CI
 // at a point in a sparsely-trained region is mathematically rare — the
 // (XᵀX)⁻¹ leverage term grows when x* is far from training-row centers.
-func (m *regressionModel) PredictionInterval(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) (low, high float64, ok bool) {
-	pred := m.Predict(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
+func (m *regressionModel) PredictionInterval(waw int, csBytes int64, parallelReaders, readAheadBuffers int, sourceDB, targetDB, mode string, avgRowBytes int64) (low, high float64, ok bool) {
+	pred := m.Predict(waw, csBytes, parallelReaders, readAheadBuffers, sourceDB, targetDB, mode, avgRowBytes)
 	if m.sigmaSq == nil || m.xtxInverse == nil {
 		return 0, 0, false
 	}
-	xStar := m.featureVector(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
+	xStar := m.featureVector(waw, csBytes, parallelReaders, readAheadBuffers, sourceDB, targetDB, mode, avgRowBytes)
 	var leverage mat.VecDense
 	leverage.MulVec(m.xtxInverse, xStar)
 	quad := mat.Dot(xStar, &leverage)
@@ -152,10 +159,12 @@ func (m *regressionModel) PredictionInterval(waw int, csBytes int64, sourceDB, t
 // with β to get ŷ) and PredictionInterval (which uses it for both
 // ŷ and the leverage term). Single source of truth so the two paths
 // can't drift out of sync if the feature layout ever changes.
-func (m *regressionModel) featureVector(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) *mat.VecDense {
+func (m *regressionModel) featureVector(waw int, csBytes int64, parallelReaders, readAheadBuffers int, sourceDB, targetDB, mode string, avgRowBytes int64) *mat.VecDense {
 	wz := standardize(float64(waw), m.wawMean, m.wawStd)
 	cz := standardize(float64(csBytes), m.csMean, m.csStd)
 	laz := standardize(math.Log(math.Max(1, float64(avgRowBytes))), m.logAvgMean, m.logAvgStd)
+	prz := standardize(float64(parallelReaders), m.prMean, m.prStd)
+	rabz := standardize(float64(readAheadBuffers), m.rabMean, m.rabStd)
 
 	x := mat.NewVecDense(m.nFeat, nil)
 	x.SetVec(0, 1) // intercept
@@ -164,16 +173,18 @@ func (m *regressionModel) featureVector(waw int, csBytes int64, sourceDB, target
 	x.SetVec(3, cz)
 	x.SetVec(4, cz*cz)
 	x.SetVec(5, laz)
+	x.SetVec(6, prz)
+	x.SetVec(7, rabz)
 
 	for j, p := range m.pairs {
 		if p.source == sourceDB && p.target == targetDB {
-			x.SetVec(6+j, 1)
+			x.SetVec(8+j, 1)
 			break
 		}
 	}
 	for j, mm := range m.modes {
 		if mm == mode {
-			x.SetVec(6+len(m.pairs)+j, 1)
+			x.SetVec(8+len(m.pairs)+j, 1)
 			break
 		}
 	}
@@ -241,26 +252,36 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	modes := distinctModes(rows)
 
 	// First pass: numeric feature stats for standardization.
-	var wawSum, csSum, logAvgSum float64
-	var wawSqSum, csSqSum, logAvgSqSum float64
+	var wawSum, csSum, logAvgSum, prSum, rabSum float64
+	var wawSqSum, csSqSum, logAvgSqSum, prSqSum, rabSqSum float64
 	for _, r := range rows {
 		w := float64(r.WriteAheadWriters)
 		c := float64(int64(r.ChunkSize) * safeAvgRowBytes(r.AvgRowBytes)) // CS in bytes
 		la := math.Log(float64(safeAvgRowBytes(r.AvgRowBytes)))
+		pr := float64(r.ParallelReaders)
+		rab := float64(r.ReadAheadBuffers)
 		wawSum += w
 		csSum += c
 		logAvgSum += la
+		prSum += pr
+		rabSum += rab
 		wawSqSum += w * w
 		csSqSum += c * c
 		logAvgSqSum += la * la
+		prSqSum += pr * pr
+		rabSqSum += rab * rab
 	}
 	n := float64(len(rows))
 	wawMean := wawSum / n
 	csMean := csSum / n
 	logAvgMean := logAvgSum / n
+	prMean := prSum / n
+	rabMean := rabSum / n
 	wawStd := stddevSafe(wawSqSum, wawMean, n)
 	csStd := stddevSafe(csSqSum, csMean, n)
 	logAvgStd := stddevSafe(logAvgSqSum, logAvgMean, n)
+	prStd := stddevSafe(prSqSum, prMean, n)
+	rabStd := stddevSafe(rabSqSum, rabMean, n)
 
 	// Build the design matrix. Column layout:
 	//   [0]            intercept (always 1)
@@ -269,9 +290,11 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	//   [3] cs_z
 	//   [4] cs_z²
 	//   [5] logAvg_z
-	//   [6 .. 6+|pairs|-1]    one-hot per pair
-	//   [6+|pairs| .. ]       one-hot per mode
-	nFeat := 6 + len(pairs) + len(modes)
+	//   [6] pr_z                                 (#219)
+	//   [7] rab_z                                (#219)
+	//   [8 .. 8+|pairs|-1]    one-hot per pair
+	//   [8+|pairs| .. ]       one-hot per mode
+	nFeat := 8 + len(pairs) + len(modes)
 	X := mat.NewDense(len(rows), nFeat, nil)
 	y := mat.NewVecDense(len(rows), nil)
 
@@ -279,6 +302,8 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 		wz := standardize(float64(r.WriteAheadWriters), wawMean, wawStd)
 		cz := standardize(float64(int64(r.ChunkSize)*safeAvgRowBytes(r.AvgRowBytes)), csMean, csStd)
 		laz := standardize(math.Log(float64(safeAvgRowBytes(r.AvgRowBytes))), logAvgMean, logAvgStd)
+		prz := standardize(float64(r.ParallelReaders), prMean, prStd)
+		rabz := standardize(float64(r.ReadAheadBuffers), rabMean, rabStd)
 
 		X.Set(i, 0, 1)
 		X.Set(i, 1, wz)
@@ -286,11 +311,13 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 		X.Set(i, 3, cz)
 		X.Set(i, 4, cz*cz)
 		X.Set(i, 5, laz)
+		X.Set(i, 6, prz)
+		X.Set(i, 7, rabz)
 
 		// One-hot pair
 		for j, p := range pairs {
 			if p.source == r.SourceDBType && p.target == r.TargetDBType {
-				X.Set(i, 6+j, 1)
+				X.Set(i, 8+j, 1)
 				break
 			}
 		}
@@ -328,6 +355,10 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 		csStd:      csStd,
 		logAvgMean: logAvgMean,
 		logAvgStd:  logAvgStd,
+		prMean:     prMean,
+		prStd:      prStd,
+		rabMean:    rabMean,
+		rabStd:     rabStd,
 		beta:       betaSlice,
 		nObs:       len(rows),
 		nFeat:      nFeat,
@@ -405,8 +436,8 @@ func computeFitQuality(m *regressionModel, X *mat.Dense, y *mat.VecDense, ridgeX
 // Uses the same featureVector helper as PredictionInterval so the two
 // paths share one feature-construction layout (Codex review on PR #217
 // caught the duplication). The dot product β·x* is the prediction.
-func (m *regressionModel) Predict(waw int, csBytes int64, sourceDB, targetDB, mode string, avgRowBytes int64) float64 {
-	x := m.featureVector(waw, csBytes, sourceDB, targetDB, mode, avgRowBytes)
+func (m *regressionModel) Predict(waw int, csBytes int64, parallelReaders, readAheadBuffers int, sourceDB, targetDB, mode string, avgRowBytes int64) float64 {
+	x := m.featureVector(waw, csBytes, parallelReaders, readAheadBuffers, sourceDB, targetDB, mode, avgRowBytes)
 	betaVec := mat.NewVecDense(m.nFeat, m.beta)
 	return mat.Dot(betaVec, x)
 }

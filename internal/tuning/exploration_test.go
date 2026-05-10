@@ -63,6 +63,80 @@ func TestApplyGridExploration_RotatesByBucketCount(t *testing.T) {
 	}
 }
 
+// TestApplyGridExploration_CoversReaderGrid (#219) verifies the inner
+// (PR, RAB) grid is exercised during cold-start. With explorationGridRuns=6
+// and len(readerGrid)=4, the first 4 cold-start runs must cycle through
+// every reader combo; after 6 runs we've seen all 4 inner combos at
+// least once.
+func TestApplyGridExploration_CoversReaderGrid(t *testing.T) {
+	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	seen := map[readerCandidate]bool{}
+	for i := 0; i < explorationGridRuns; i++ {
+		out := baseline(in, profile)
+		applyGridExploration(&out, in, profile, i)
+		seen[readerCandidate{ParallelReaders: out.ParallelReaders, ReadAheadBuffers: out.ReadAheadBuffers}] = true
+	}
+	if len(seen) != len(readerGrid) {
+		t.Errorf("over %d cold-start runs the inner grid covered only %d of %d (PR, RAB) cells; expected full coverage",
+			explorationGridRuns, len(seen), len(readerGrid))
+	}
+}
+
+// TestApplyGridExploration_SetsReaderFields (#219) — every grid pick
+// must produce non-zero PR and RAB. Pre-fix the exploration left both
+// at whatever the baseline produced (PR=2, RAB=4); after #219 it must
+// be ones the inner grid actually picked.
+func TestApplyGridExploration_SetsReaderFields(t *testing.T) {
+	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	for i := 0; i < explorationGridRuns; i++ {
+		out := baseline(in, profile)
+		applyGridExploration(&out, in, profile, i)
+		if out.ParallelReaders < 1 || out.ReadAheadBuffers < 1 {
+			t.Errorf("bucketCount=%d: grid pick produced invalid (PR=%d, RAB=%d); expected positives",
+				i, out.ParallelReaders, out.ReadAheadBuffers)
+		}
+		// Reasoning string must surface the picked PR/RAB so users can
+		// see why this run differs from baseline.
+		if !strings.Contains(out.Reasoning, "PR=") || !strings.Contains(out.Reasoning, "RAB=") {
+			t.Errorf("bucketCount=%d: Reasoning missing PR/RAB tags; got %q", i, out.Reasoning)
+		}
+	}
+}
+
+// TestApplyEpsilonPerturbation_CanNudgeReaderAxes (#219) — verifies the
+// perturbation set actually includes PR/RAB directions. With WAW and CS
+// at the grid's edges the only available nudges should be on the reader
+// axes; the perturbed output must show a change there.
+func TestApplyEpsilonPerturbation_CanNudgeReaderAxes(t *testing.T) {
+	profile := DriverProfile{HardChunkLimit: 50_000}
+
+	// Seed many trials; with 8 directions and 4 reader-side ones, ~50%
+	// of trials nudge PR or RAB. Probability all 100 are non-reader is
+	// 0.5^100 ≈ 8e-31 — effectively zero. If we never see a reader
+	// nudge, the directions aren't wired.
+	sawReaderNudge := false
+	for trial := 0; trial < 100; trial++ {
+		out := Output{
+			WriteAheadWriters: 2,
+			ChunkSize:         50_000,
+			ParallelReaders:   2,
+			ReadAheadBuffers:  4,
+		}
+		applyEpsilonPerturbation(&out, profile)
+		if out.ParallelReaders != 2 || out.ReadAheadBuffers != 4 {
+			sawReaderNudge = true
+			break
+		}
+	}
+	if !sawReaderNudge {
+		t.Errorf("100 perturbation trials never nudged PR or RAB; reader-side directions appear absent")
+	}
+}
+
 // TestApplyGridExploration_IgnoresHistoricalRetries — issue #186
 // regression guard. Exploration probes every WAW in the planned grid
 // regardless of historical retries, since exploration's purpose is

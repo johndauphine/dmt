@@ -458,6 +458,8 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			Workers:                 r.Workers,
 			ChunkSize:               r.ChunkSize,
 			WriteAheadWriters:       r.WriteAheadWriters,
+			ParallelReaders:         r.ParallelReaders,
+			ReadAheadBuffers:        r.ReadAheadBuffers,
 			AvgRowBytes:             r.AvgRowSizeBytes,
 			TotalRows:               r.TotalRows,
 			FinalThroughput:         r.FinalThroughput,
