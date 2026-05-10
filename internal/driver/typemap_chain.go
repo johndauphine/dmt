@@ -231,6 +231,14 @@ func (c *FallbackChain) GenerateDropTableDDL(ctx context.Context, req DropTableD
 // handleUnmapped implements the unmapped_type_action knob for column-
 // level Raw types when no AI fallback is configured. Returns the
 // SQL type string the chain emits in lieu of the missing mapping.
+//
+// The default (unknown action) case warns and falls back to fail
+// semantics rather than silently emitting empty — without this guard,
+// a config typo would silently produce invalid DDL with no visible
+// cause (Copilot review on PR #192). Note: config validation
+// (config.validate) also rejects unknown actions at load time, so
+// this default branch should only fire if the chain is constructed
+// programmatically with an unrecognized action string.
 func (c *FallbackChain) handleUnmapped(info TypeInfo) string {
 	switch c.action {
 	case UnmappedActionConservativeText:
@@ -245,6 +253,8 @@ func (c *FallbackChain) handleUnmapped(info TypeInfo) string {
 			info.DataType, info.TargetDBType, c.action)
 		return ""
 	default:
+		logging.Warn("typemap chain: unknown UnmappedAction %q — treating as fail; check config.migration.unmapped_type_action",
+			c.action)
 		return ""
 	}
 }

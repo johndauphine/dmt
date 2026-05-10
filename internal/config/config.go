@@ -919,6 +919,21 @@ func (c *Config) validate() error {
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
+	switch c.Migration.UnmappedTypeAction {
+	case "", "fail", "skip", "conservative-text":
+		// Valid. Empty is allowed because applyDefaults sets it to
+		// "fail" before validate runs in the normal load path; tests
+		// that construct a Config directly and call validate may
+		// leave it empty and that's OK.
+	default:
+		// Non-empty value that doesn't match is a user typo.
+		// Fail loudly rather than silently misbehave (Copilot review
+		// on PR #192 — without this, a typo'd action would default
+		// to empty SQLType in the chain's handleUnmapped and produce
+		// invalid DDL with no clear cause).
+		return fmt.Errorf("migration.unmapped_type_action must be 'fail', 'skip', or 'conservative-text'; got %q",
+			c.Migration.UnmappedTypeAction)
+	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 

@@ -1,6 +1,13 @@
 package driver
 
-import "context"
+import (
+	"context"
+	"errors"
+	"sync"
+
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/secrets"
+)
 
 // TypeMapper handles data type conversions between databases.
 type TypeMapper interface {
@@ -249,10 +256,25 @@ type DropTableDDLRequest struct {
 // chain does at column level for Raw types when no AI fallback exists.
 // Threaded through via the action argument; pass UnmappedActionFail
 // to use the safe default.
+//
+// Both this function and GetAIMapper share a single underlying AI
+// mapper instance (cached via sync.Once) so the on-disk type cache
+// at ~/.dmt/type-cache.json doesn't get loaded twice or written
+// concurrently from two AITypeMapper instances (Copilot review on
+// PR #192).
 func GetTypeMapper(action UnmappedAction) (TypeMapper, error) {
 	primary := NewDeterministicMapper()
-	fallback := tryLoadAIMapper()
-	return NewFallbackChain(primary, fallback, action), nil
+	// Avoid Go's typed-nil-into-interface trap: assigning a
+	// (*AITypeMapper)(nil) directly to the TypeMapper interface
+	// parameter would produce a non-nil interface with a nil
+	// underlying value, and every `c.fallback != nil` check in the
+	// chain would silently pass — eventually crashing on a Raw type
+	// with a nil-pointer-deref. Pass nil interface explicitly when
+	// the AI mapper isn't available.
+	if ai := loadCachedAIMapper(); ai != nil {
+		return NewFallbackChain(primary, ai, action), nil
+	}
+	return NewFallbackChain(primary, nil, action), nil
 }
 
 // GetAIMapper returns the AI type mapper if AI is configured, or nil
@@ -262,20 +284,60 @@ func GetTypeMapper(action UnmappedAction) (TypeMapper, error) {
 // diagnoser (driver.AIErrorDiagnoser), config status display.
 //
 // Returns nil silently when AI isn't configured; callers branch on
-// nil rather than checking errors.
+// nil rather than checking errors. Returns the SAME instance as
+// GetTypeMapper's fallback (singleton — see GetTypeMapper doc).
 func GetAIMapper() *AITypeMapper {
-	return tryLoadAIMapper()
+	return loadCachedAIMapper()
+}
+
+// loadCachedAIMapper memoizes the AI mapper construction so the chain
+// and standalone callers share a single instance. Without this, both
+// would hold their own AITypeMapper, both would load the on-disk
+// type cache, and concurrent cache writes from the two instances
+// could lose entries (Copilot review on PR #192).
+var (
+	cachedAIMapper     *AITypeMapper
+	cachedAIMapperOnce sync.Once
+)
+
+func loadCachedAIMapper() *AITypeMapper {
+	cachedAIMapperOnce.Do(func() {
+		cachedAIMapper = tryLoadAIMapper()
+	})
+	return cachedAIMapper
+}
+
+// resetCachedAIMapper clears the singleton — used by tests to force
+// re-evaluation after manipulating DMT_SECRETS_FILE / secrets.Reset().
+// Not exported; tests in this package use it directly.
+func resetCachedAIMapper() {
+	cachedAIMapper = nil
+	cachedAIMapperOnce = sync.Once{}
 }
 
 // tryLoadAIMapper attempts to construct an AITypeMapper from secrets.
-// Returns nil (no error) when AI isn't configured. Errors during
-// construction are logged and treated as "AI not available" — the
-// deterministic path keeps working.
+// Returns nil for both "AI not configured" and "AI configured but
+// failed to load," with different log behavior:
+//
+//   - SecretsNotFoundError (no ~/.secrets/dmt-config.yaml file at
+//     all, or DMT_SECRETS_FILE points at a missing path) — silent;
+//     this is the expected state when running without AI configured.
+//   - Any other error (insecure file permissions, YAML parse error,
+//     misconfigured provider, missing API key for a configured
+//     provider) — logged at WARN with the full error so users can
+//     act on actionable failures rather than silently losing AI
+//     fallback (Copilot review on PR #192).
 func tryLoadAIMapper() *AITypeMapper {
 	mapper, err := NewAITypeMapperFromSecrets()
-	if err != nil {
-		// No-AI is not an error condition; log at debug and continue.
+	if err == nil {
+		return mapper
+	}
+	var notFound *secrets.SecretsNotFoundError
+	if errors.As(err, &notFound) {
+		// Expected when running without AI; debug-log only.
+		logging.Debug("typemap: no secrets file at %s, AI fallback disabled", notFound.Path)
 		return nil
 	}
-	return mapper
+	logging.Warn("typemap: failed to load AI mapper (AI fallback disabled): %v", err)
+	return nil
 }
