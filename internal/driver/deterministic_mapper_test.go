@@ -6,6 +6,7 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -239,6 +240,51 @@ func TestDeterministicMapper_GenerateFinalizationDDL_UniqueIndex(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "CREATE UNIQUE INDEX") {
 		t.Errorf("expected CREATE UNIQUE INDEX prefix; got:\n%s", got)
+	}
+}
+
+// TestDeterministicMapper_GenerateFinalizationDDL_UnsupportedIndexFeatures
+// — Codex review on PR #190. Without this guard, indexes with vendor-
+// specific features (MSSQL clustered, covering, filtered) were silently
+// emitted as plain btree, dropping the user's specified behavior. The
+// adapter must instead return ErrUnsupportedDDL so the wiring layer
+// (#170) routes to AI fallback.
+func TestDeterministicMapper_GenerateFinalizationDDL_UnsupportedIndexFeatures(t *testing.T) {
+	cases := []struct {
+		name string
+		idx  *Index
+	}{
+		{
+			"clustered_index",
+			&Index{Name: "ci_t", Columns: []string{"id"}, IsClustered: true},
+		},
+		{
+			"covering_index",
+			&Index{Name: "covi_t", Columns: []string{"a"}, IncludeCols: []string{"b", "c"}},
+		},
+		{
+			"filtered_index",
+			&Index{Name: "fi_t", Columns: []string{"id"}, Filter: "deleted_at IS NULL"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewDeterministicMapper()
+			_, err := m.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
+				Type:         DDLTypeIndex,
+				SourceDBType: typemap.DialectMSSQL,
+				TargetDBType: typemap.DialectMSSQL,
+				Table:        &Table{Name: "t"},
+				TargetSchema: "dbo",
+				Index:        tc.idx,
+			})
+			if err == nil {
+				t.Fatalf("%s: expected ErrUnsupportedDDL; got nil error and emitted DDL — silent feature drop (#190 regression)", tc.name)
+			}
+			if !errors.Is(err, ErrUnsupportedDDL) {
+				t.Errorf("%s: expected errors.Is(err, ErrUnsupportedDDL) to match; got %v", tc.name, err)
+			}
+		})
 	}
 }
 

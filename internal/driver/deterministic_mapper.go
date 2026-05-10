@@ -18,11 +18,26 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
 )
+
+// ErrUnsupportedDDL signals that the deterministic mapper cannot
+// faithfully emit DDL for the given input. The wiring layer (#170)
+// is expected to recognize this sentinel via errors.Is and route
+// the request to AI fallback rather than treat the deterministic
+// path as authoritative.
+//
+// Without this sentinel, the adapter would silently emit DDL that
+// drops vendor-specific features the source had requested — Codex
+// review on PR #190 caught this for MSSQL clustered / covering /
+// filtered indexes, where the adapter dropped the metadata and
+// emitted plain btree CREATE INDEX. The wiring layer must instead
+// see the unsupported case so it can route to AI.
+var ErrUnsupportedDDL = errors.New("deterministic mapper: vendor-specific feature not supported by deterministic path")
 
 // DeterministicMapper implements TypeMapper, TableTypeMapper,
 // FinalizationDDLMapper, and TableDropDDLMapper using the internal
@@ -120,6 +135,14 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 	case DDLTypeIndex:
 		if req.Index == nil {
 			return "", fmt.Errorf("DDLTypeIndex requires Index field")
+		}
+		// Refuse to silently emit a plain CREATE INDEX when the source
+		// index uses vendor-specific features (clustered, covering,
+		// filtered) — those need AI fallback. Returning the sentinel
+		// rather than emitting incomplete DDL is the contract the
+		// wiring layer relies on (Codex review on PR #190).
+		if reason := unsupportedIndexFeature(*req.Index); reason != "" {
+			return "", fmt.Errorf("index %q: %w (%s)", req.Index.Name, ErrUnsupportedDDL, reason)
 		}
 		return ddl.GenerateIndex(tbl, driverIndexToDDL(*req.Index), req.SourceDBType, req.TargetDBType), nil
 
@@ -252,17 +275,42 @@ func driverTableToDDL(t *Table, targetSchema string) ddl.TableInfo {
 	}
 }
 
-// driverIndexToDDL projects driver.Index to ddl.Index. dmt's
-// IsClustered / IncludeCols / Filter fields are dropped — they're
-// vendor-specific (MSSQL clustered indexes, MSSQL covering indexes,
-// MSSQL filtered indexes) and the deterministic emitter doesn't
-// support them. Wiring routes those to AI fallback (#170).
+// driverIndexToDDL projects driver.Index to ddl.Index. The
+// IsClustered / IncludeCols / Filter fields are NOT projected —
+// they're vendor-specific (MSSQL clustered, MSSQL covering, MSSQL
+// filtered) and the deterministic emitter doesn't support them.
+// Callers MUST guard with unsupportedIndexFeature first; this
+// projection is only safe when no vendor features are set.
 func driverIndexToDDL(idx Index) ddl.Index {
 	return ddl.Index{
 		Name:     idx.Name,
 		IsUnique: idx.IsUnique,
 		Columns:  idx.Columns,
 	}
+}
+
+// unsupportedIndexFeature returns a non-empty reason string when the
+// index has metadata the deterministic emitter can't faithfully
+// represent. Empty string means the index can be emitted as a plain
+// (UNIQUE) btree CREATE INDEX without losing user intent.
+//
+// Today's vendor-specific features are all MSSQL-flavored — clustered
+// indexes, covering indexes (INCLUDE clause), and filtered indexes
+// (WHERE clause). PG 11+ also supports INCLUDE and WHERE on btree
+// indexes; if a future PG reader populates IncludeCols/Filter for PG
+// targets, the same routing applies (the deterministic emitter still
+// doesn't handle them).
+func unsupportedIndexFeature(idx Index) string {
+	if idx.IsClustered {
+		return "clustered indexes need AI"
+	}
+	if len(idx.IncludeCols) > 0 {
+		return fmt.Sprintf("covering index with %d INCLUDE column(s) needs AI", len(idx.IncludeCols))
+	}
+	if idx.Filter != "" {
+		return "filtered index (WHERE clause) needs AI"
+	}
+	return ""
 }
 
 // driverFKToConstraint projects driver.ForeignKey to a
