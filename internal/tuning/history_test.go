@@ -33,11 +33,13 @@ func TestSelectWAW_PicksHighestShrunkMean(t *testing.T) {
 // when its retry rate clears retryRateExclusionThreshold — the rule
 // is "high retry rate excluded," not "any retry excluded" (#186).
 func TestSelectWAW_HighRetryRateExcluded(t *testing.T) {
+	// WAW=2 has 30% retry rate AND below-median throughput (400K is
+	// below the median of [400K, 500K, 600K] = 500K) — both gates of
+	// the throughput-aware filter (#204) fire → excluded → WAW=4 wins.
 	bins := []wawBin{
 		{WAW: 1, TotalRuns: 10, MeanThroughput: 500_000},
-		// 3/10 = 30% retry rate, > 15% threshold → excluded
-		{WAW: 2, TotalRuns: 10, MeanThroughput: 800_000, RunsWithRetries: 3},
-		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000}, // wins
+		{WAW: 2, TotalRuns: 10, MeanThroughput: 400_000, RunsWithRetries: 3}, // excluded
+		{WAW: 4, TotalRuns: 10, MeanThroughput: 600_000},                     // wins
 	}
 	got, _, ok := selectWAW(bins)
 	if !ok || got != 4 {
@@ -64,18 +66,22 @@ func TestSelectWAW_LowRetryRateNotExcluded(t *testing.T) {
 	}
 }
 
-// TestSelectWAW_AllBinsRateExcluded returns ok=false so the caller falls
-// back to baseline. Both bins clear the retry-rate threshold.
-func TestSelectWAW_AllBinsRateExcluded(t *testing.T) {
+// TestSelectWAW_HighRetryAboveMedianKept (#204 — replaces the former
+// "AllBinsRateExcluded" test, whose contract is now mathematically
+// unreachable: with the throughput gate, at least one eligible bin is
+// always at-or-above its own median, so retry-rate alone can never
+// exclude every bin). Two bins both clear the retry-rate threshold;
+// the higher-throughput one is at-or-above median and stays eligible.
+func TestSelectWAW_HighRetryAboveMedianKept(t *testing.T) {
 	bins := []wawBin{
-		// 2/5 = 40% retry rate, well above threshold
+		// 40% retry rate AND below median (500K < 700K) → excluded
 		{WAW: 1, TotalRuns: 5, MeanThroughput: 500_000, RunsWithRetries: 2},
-		// 3/5 = 60% retry rate
+		// 60% retry rate but at median (700K NOT < 700K) → kept → wins
 		{WAW: 2, TotalRuns: 5, MeanThroughput: 700_000, RunsWithRetries: 3},
 	}
-	_, _, ok := selectWAW(bins)
-	if ok {
-		t.Error("ok should be false when every bin clears the retry-rate threshold")
+	got, _, ok := selectWAW(bins)
+	if !ok || got != 2 {
+		t.Errorf("got (%d, %v), want (2, true) — high-retry above median must stay eligible (#204)", got, ok)
 	}
 }
 
@@ -132,6 +138,148 @@ func TestSelectWAW_BelowThresholdReturnsFalse(t *testing.T) {
 	_, _, ok := selectWAW(bins)
 	if ok {
 		t.Error("ok should be false when no bin clears minRunsPerBin")
+	}
+}
+
+// --- Issue #204: throughput-aware retry filter tests ---------------
+
+// TestSelectWAW_HighRetryHighThroughputKept_SO2013Fixture is the direct
+// repro from the SO2013 sweep that motivated #204: a single eligible
+// WAW with high retry rate (55%) but the only bin past the floor —
+// median equals its own mean, so the strict-less-than throughput gate
+// keeps it eligible. Pre-#204 this WAW would have been excluded on
+// retry rate alone, dropping the tuner to baseline.
+func TestSelectWAW_HighRetryHighThroughputKept_SO2013Fixture(t *testing.T) {
+	bins := []wawBin{
+		// Single eligible bin: 9 runs, 5 retries → 55%. Other "bins"
+		// below floor and not even computed into median.
+		{WAW: 1, TotalRuns: 9, MeanThroughput: 950_000, RunsWithRetries: 5},
+		{WAW: 2, TotalRuns: 1, MeanThroughput: 800_000},
+		{WAW: 8, TotalRuns: 1, MeanThroughput: 750_000},
+	}
+	got, _, ok := selectWAW(bins)
+	if !ok || got != 1 {
+		t.Errorf("got (%d, %v), want (1, true) — single eligible WAW must stay eligible "+
+			"even at 55%% retry rate (#204; SO2013 sweep regression guard)", got, ok)
+	}
+}
+
+// TestIsHighRetryRateBin_RequiresBothGates verifies the gate logic
+// table directly: rate-only OR throughput-only triggers must NOT
+// exclude; only rate AND below-median together do.
+func TestIsHighRetryRateBin_RequiresBothGates(t *testing.T) {
+	median := 700_000.0
+	cases := []struct {
+		name     string
+		bin      wawBin
+		excluded bool
+	}{
+		{
+			"high_rate_above_median_kept",
+			wawBin{TotalRuns: 10, RunsWithRetries: 8, MeanThroughput: 800_000},
+			false,
+		},
+		{
+			"high_rate_below_median_excluded",
+			wawBin{TotalRuns: 10, RunsWithRetries: 8, MeanThroughput: 600_000},
+			true,
+		},
+		{
+			"low_rate_below_median_kept",
+			wawBin{TotalRuns: 10, RunsWithRetries: 1, MeanThroughput: 600_000},
+			false,
+		},
+		{
+			"low_rate_above_median_kept",
+			wawBin{TotalRuns: 10, RunsWithRetries: 1, MeanThroughput: 800_000},
+			false,
+		},
+		{
+			"at_median_high_rate_kept_preservation_bias",
+			wawBin{TotalRuns: 10, RunsWithRetries: 8, MeanThroughput: 700_000},
+			false,
+		},
+		{
+			"sparse_high_rate_floored_out",
+			wawBin{TotalRuns: 2, RunsWithRetries: 2, MeanThroughput: 100_000},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isHighRetryRateBin(tc.bin, median)
+			if got != tc.excluded {
+				t.Errorf("got %v, want %v (rate=%.2f, mean=%.0f, median=%.0f)",
+					got, tc.excluded,
+					float64(tc.bin.RunsWithRetries)/float64(tc.bin.TotalRuns),
+					tc.bin.MeanThroughput, median)
+			}
+		})
+	}
+}
+
+// TestBinMedianThroughput_FloorEligibility verifies sparse bins (below
+// minRunsForRetryExclusion) don't drag the median around. A 1-run
+// outlier shouldn't shift the median computed from the eligible cohort.
+func TestBinMedianThroughput_FloorEligibility(t *testing.T) {
+	bins := []wawBin{
+		{WAW: 1, TotalRuns: 5, MeanThroughput: 500_000},
+		{WAW: 2, TotalRuns: 5, MeanThroughput: 700_000},
+		{WAW: 4, TotalRuns: 5, MeanThroughput: 900_000},
+		// Below floor — must not contribute to median.
+		{WAW: 8, TotalRuns: 1, MeanThroughput: 5_000_000},
+	}
+	got := binMedianThroughput(bins)
+	// Sorted eligible means [500K, 700K, 900K] → upper-middle = 700K.
+	want := 700_000.0
+	if got != want {
+		t.Errorf("got %.0f, want %.0f (sparse 5M-rows/s outlier must not contribute)", got, want)
+	}
+}
+
+// TestBinMedianThroughput_NoEligibleBins returns 0 when every bin is
+// below the eligibility floor. Caller-side: with median=0, the
+// throughput-< gate never fires, but neither does the rate gate
+// (also floored), so isHighRetryRateBin uniformly returns false.
+func TestBinMedianThroughput_NoEligibleBins(t *testing.T) {
+	bins := []wawBin{
+		{WAW: 1, TotalRuns: 1, MeanThroughput: 500_000},
+		{WAW: 2, TotalRuns: 2, MeanThroughput: 700_000},
+	}
+	got := binMedianThroughput(bins)
+	if got != 0 {
+		t.Errorf("got %.0f, want 0 (no eligible bins)", got)
+	}
+}
+
+// TestWawsWithHighRetryRate_ThroughputAware exercises the row-level
+// path used by argmaxRegression. Mirrors TestIsHighRetryRateBin_*
+// but operates on raw rows so the regression code path gets coverage.
+func TestWawsWithHighRetryRate_ThroughputAware(t *testing.T) {
+	// 4 WAWs, each with 5 runs:
+	//   WAW=1: clean, mean 800K
+	//   WAW=2: 80% retries, mean 900K (above median → KEPT)
+	//   WAW=4: 80% retries, mean 400K (below median → EXCLUDED)
+	//   WAW=8: clean, mean 600K
+	// Eligible means [400K, 600K, 800K, 900K] → median upper-middle = 800K.
+	mk := func(waw int, retries int, thr float64) HistoryRecord {
+		return HistoryRecord{WriteAheadWriters: waw, ChunkRetryCount: retries, FinalThroughput: thr}
+	}
+	rows := []HistoryRecord{
+		mk(1, 0, 800_000), mk(1, 0, 800_000), mk(1, 0, 800_000), mk(1, 0, 800_000), mk(1, 0, 800_000),
+		mk(2, 1, 900_000), mk(2, 1, 900_000), mk(2, 1, 900_000), mk(2, 1, 900_000), mk(2, 0, 900_000),
+		mk(4, 1, 400_000), mk(4, 1, 400_000), mk(4, 1, 400_000), mk(4, 1, 400_000), mk(4, 0, 400_000),
+		mk(8, 0, 600_000), mk(8, 0, 600_000), mk(8, 0, 600_000), mk(8, 0, 600_000), mk(8, 0, 600_000),
+	}
+	got := wawsWithHighRetryRate(rows)
+	if got[2] {
+		t.Error("WAW=2 must NOT be excluded (high retry rate but above-median throughput; #204)")
+	}
+	if !got[4] {
+		t.Error("WAW=4 must be excluded (high retry rate AND below-median throughput)")
+	}
+	if got[1] || got[8] {
+		t.Errorf("clean WAWs (1, 8) must not be excluded; got map: %v", got)
 	}
 }
 
@@ -224,16 +372,18 @@ func TestApplyHistory_EndToEnd(t *testing.T) {
 		t.Fatalf("baseline WAW should be 2, got %d (test fixture broken)", out.WriteAheadWriters)
 	}
 
-	// History: WAW=1 has clean runs at 700K, WAW=2 has 3/3 = 100%
-	// retry rate (well above threshold, ≥ minRunsForRetryExclusion →
-	// excluded), WAW=4 has clean runs at 600K. WAW=1 should win.
+	// History: WAW=1 has clean runs at 700K (highest), WAW=2 has 3/3 =
+	// 100% retry rate AND below-median throughput at 500K (well below
+	// the median of [500K, 610K, 700K] = 610K) → both gates of the
+	// throughput-aware filter (#204) fire → excluded. WAW=4 has clean
+	// runs at 610K. WAW=1 (700K, clean) should win.
 	history := &stubHistory{rows: []HistoryRecord{
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 700_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 720_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 680_000},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 750_000, ChunkRetryCount: 2},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 720_000, ChunkRetryCount: 1},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 760_000, ChunkRetryCount: 3},
+		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 510_000, ChunkRetryCount: 2},
+		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 490_000, ChunkRetryCount: 1},
+		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 500_000, ChunkRetryCount: 3},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 600_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 620_000},
 		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 610_000},
@@ -324,16 +474,21 @@ func TestTune_NilHistory(t *testing.T) {
 	}
 }
 
-// TestApplyHistory_AllBinsRateExcluded falls back to baseline when every
-// bin has a retry rate above the threshold over enough samples to fire.
-func TestApplyHistory_AllBinsRateExcluded(t *testing.T) {
+// TestApplyHistory_HighRetryAboveMedianStillSelected (#204 — replaces
+// the former AllBinsRateExcluded test, whose contract is now
+// mathematically unreachable). When two bins both clear the retry-rate
+// threshold but neither is below the eligible-bin median, the
+// throughput-aware filter excludes neither — the higher-throughput
+// bin wins normally instead of falling to baseline.
+func TestApplyHistory_HighRetryAboveMedianStillSelected(t *testing.T) {
 	in := Input{CPUCores: 16, MemoryGB: 48, SourceDBType: "mssql", TargetDBType: "postgres"}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2}
 	out := baseline(in, profile)
-	originalWAW := out.WriteAheadWriters
 
-	// 4 runs each at WAW=1 and WAW=2; 3 of 4 retried in each → 75%
-	// retry rate, above the 15% threshold, ≥ minRunsForRetryExclusion.
+	// 4 runs each at WAW=1 and WAW=2; 3 of 4 retried in each (75%).
+	// Both clear the rate threshold, but with only 2 bins the median is
+	// the upper-middle (WAW=2's 615K). WAW=2 is at-median (NOT excluded);
+	// WAW=1 is below median AND high retry → excluded. WAW=2 wins.
 	makeRow := func(waw, retries int, thru float64) HistoryRecord {
 		return HistoryRecord{
 			CPUCores: 16, MemoryGB: 48,
@@ -343,14 +498,14 @@ func TestApplyHistory_AllBinsRateExcluded(t *testing.T) {
 		}
 	}
 	history := &stubHistory{rows: []HistoryRecord{
-		makeRow(1, 1, 700_000), makeRow(1, 1, 690_000), makeRow(1, 1, 710_000), makeRow(1, 0, 720_000),
+		makeRow(1, 1, 500_000), makeRow(1, 1, 490_000), makeRow(1, 1, 510_000), makeRow(1, 0, 500_000),
 		makeRow(2, 2, 600_000), makeRow(2, 1, 610_000), makeRow(2, 1, 620_000), makeRow(2, 0, 605_000),
 	}}
 	applyHistory(&out, in, profile, history, DBTuning{})
 
-	if out.WriteAheadWriters != originalWAW {
-		t.Errorf("WAW should remain at baseline %d when every bin clears the retry-rate threshold; got %d",
-			originalWAW, out.WriteAheadWriters)
+	if out.WriteAheadWriters != 2 {
+		t.Errorf("WAW should be 2 (above-median high-retry kept; below-median high-retry excluded); got %d",
+			out.WriteAheadWriters)
 	}
 }
 
@@ -419,16 +574,24 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	out := baseline(in, profile)
 
-	// 60 rows. WAW=4 has high throughput AND one retry; should be skipped.
-	// WAW=2 has clean runs at lower throughput but is the next best.
+	// 60 rows. WAW=4 has 100% retry rate AND below-median throughput;
+	// both gates of the throughput-aware filter (#204) fire → excluded.
+	// Per-WAW means are 600K + 100K·waw, with WAW=4 overridden to 200K:
+	//   WAW=1..6 → [700K, 800K, 900K, 200K, 1.1M, 1.2M]
+	//   sorted   → [200K, 700K, 800K, 900K, 1.1M, 1.2M]
+	//   median   = upper-middle (len/2 = 3) = 900K
+	// WAW=4's 200K < 900K → excluded. Pre-#204 test had WAW=4 at 1.2M
+	// (above any median) and the retry-rate-only filter still excluded
+	// it; post-#204 we need WAW=4 to actually be a bad config to be
+	// filtered.
 	rows := make([]HistoryRecord, 60)
 	for i := range rows {
 		waw := (i % 6) + 1
-		thru := 600_000.0 + 100.0*float64(waw)
+		thru := 600_000.0 + 100_000.0*float64(waw)
 		retries := 0
 		if waw == 4 {
-			thru = 1_200_000 // best mean, but...
-			retries = 1      // ...100% retry rate (10/10) → excluded
+			thru = 200_000 // worst mean AND...
+			retries = 1    // ...100% retry rate (10/10) → both gates fire
 		}
 		rows[i] = HistoryRecord{
 			SourceDBType:      "mssql",
@@ -447,7 +610,7 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 	applyHistory(&out, in, profile, history, DBTuning{})
 
 	if out.WriteAheadWriters == 4 {
-		t.Error("retry-rate filter should have excluded WAW=4 (100% historical retry rate)")
+		t.Error("retry-rate + below-median filter should have excluded WAW=4 (100% retry rate, lowest throughput)")
 	}
 	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxWAWForGrid {
 		t.Errorf("picked WAW=%d outside valid grid [1..%d]", out.WriteAheadWriters, maxWAWForGrid)

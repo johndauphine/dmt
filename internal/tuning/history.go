@@ -265,10 +265,21 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 	return bestWAW, bestCSBytes, bestPred, true
 }
 
-// wawsWithHighRetryRate returns the set of WAW values whose historical
-// retry rate exceeds retryRateExclusionThreshold once we have at least
-// minRunsForRetryExclusion samples. Used by the SELECTION paths only
-// (smoothed bins via selectWAW, regression via argmaxRegression).
+// wawsWithHighRetryRate returns the set of WAW values that the SELECTION
+// paths (smoothed bins via selectWAW, regression via argmaxRegression)
+// should refuse to recommend. A WAW is excluded when BOTH gates fire:
+//
+//  1. Retry rate > retryRateExclusionThreshold (with ≥ minRunsForRetryExclusion samples), AND
+//  2. Mean throughput < median throughput across all eligible WAWs.
+//
+// The throughput gate (#204) prevents the filter from punishing
+// retry-tolerant workloads where high retry rates coexist with
+// best-in-class throughput (e.g. PG-bottlenecked SO2013 workloads
+// where lock contention drives retries upward without hurting
+// throughput). Without it, a 55%-retry WAW=1 delivering 1M rows/s
+// gets excluded the same as a 55%-retry WAW=2 delivering 200K — the
+// signal "retries hurt throughput" was conflated with "retries
+// happened at all."
 //
 // Replaces the original "any retry → permanent exclusion" filter
 // (issue #186): a single transient retry no longer poisons a WAW
@@ -276,29 +287,66 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 // tuner from re-examining historically-flagged WAWs once exploration
 // has gathered fresh data.
 func wawsWithHighRetryRate(rows []HistoryRecord) map[int]bool {
-	type counter struct{ runs, retried int }
-	c := map[int]*counter{}
+	type stats struct {
+		runs    int
+		retried int
+		thrSum  float64
+	}
+	c := map[int]*stats{}
 	for _, r := range rows {
-		cnt := c[r.WriteAheadWriters]
-		if cnt == nil {
-			cnt = &counter{}
-			c[r.WriteAheadWriters] = cnt
+		s := c[r.WriteAheadWriters]
+		if s == nil {
+			s = &stats{}
+			c[r.WriteAheadWriters] = s
 		}
-		cnt.runs++
+		s.runs++
+		s.thrSum += r.FinalThroughput
 		if r.ChunkRetryCount > 0 {
-			cnt.retried++
+			s.retried++
 		}
 	}
-	out := map[int]bool{}
-	for waw, cnt := range c {
-		if cnt.runs < minRunsForRetryExclusion {
+
+	// Pre-compute median across WAWs with enough samples — sparse WAWs
+	// (below the floor) shouldn't drag the median around.
+	eligibleMeans := make([]float64, 0, len(c))
+	for _, s := range c {
+		if s.runs < minRunsForRetryExclusion {
 			continue
 		}
-		if float64(cnt.retried)/float64(cnt.runs) > retryRateExclusionThreshold {
+		eligibleMeans = append(eligibleMeans, s.thrSum/float64(s.runs))
+	}
+	median := medianOfFloats(eligibleMeans)
+
+	out := map[int]bool{}
+	for waw, s := range c {
+		if s.runs < minRunsForRetryExclusion {
+			continue
+		}
+		mean := s.thrSum / float64(s.runs)
+		rate := float64(s.retried) / float64(s.runs)
+		// Strict less-than is intentional: a WAW exactly at the median
+		// stays eligible (preservation-over-exclusion bias, matters
+		// when there's only one eligible WAW so median == its own mean).
+		if rate > retryRateExclusionThreshold && mean < median {
 			out[waw] = true
 		}
 	}
 	return out
+}
+
+// medianOfFloats returns the upper-middle element of v after sorting.
+// Matches the convention in filterOutliers (`throughputs[len/2]`) so
+// median calculations across the package are consistent. Returns 0 for
+// empty input — callers should treat that as "no median, nothing to
+// compare against" (the throughput gate effectively never fires).
+func medianOfFloats(v []float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	sorted := make([]float64, len(v))
+	copy(sorted, v)
+	sort.Float64s(sorted)
+	return sorted[len(sorted)/2]
 }
 
 // filterByRegime keeps rows that ran on comparable hardware. Same regime
@@ -432,12 +480,15 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 	}
 	globalMean := total / float64(totalN)
 
+	// Median throughput across eligible bins (#204 — gates the retry-rate
+	// filter so high-retry-but-also-high-throughput WAWs aren't excluded).
+	median := binMedianThroughput(bins)
+
 	bestWAW := -1
 	bestShrunk := -1.0
 	for _, b := range bins {
-		if isHighRetryRateBin(b) {
-			continue // retry-rate exclusion (issue #186 — replaces the
-			// any-retry hard rule)
+		if isHighRetryRateBin(b, median) {
+			continue // retry-rate AND below-median throughput (issue #204)
 		}
 		if b.TotalRuns < minRunsPerBin {
 			continue // not enough evidence to override baseline
@@ -456,13 +507,14 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 }
 
 // countEligibleBins returns the count of bins selectWAW would actually
-// consider — below the retry-rate threshold AND with enough runs to
-// clear the minRunsPerBin floor. Used in the reasoning string so a
-// reviewer can see how thin the basis was.
+// consider — passes both gates of isHighRetryRateBin AND has enough
+// runs to clear the minRunsPerBin floor. Used in the reasoning string
+// so a reviewer can see how thin the basis was.
 func countEligibleBins(bins []wawBin) int {
+	median := binMedianThroughput(bins)
 	n := 0
 	for _, b := range bins {
-		if !isHighRetryRateBin(b) && b.TotalRuns >= minRunsPerBin {
+		if !isHighRetryRateBin(b, median) && b.TotalRuns >= minRunsPerBin {
 			n++
 		}
 	}
@@ -471,13 +523,41 @@ func countEligibleBins(bins []wawBin) int {
 
 // isHighRetryRateBin is the bin-level mirror of wawsWithHighRetryRate.
 // Returns true when the bin has enough samples AND its retry rate
-// exceeds the threshold. Below the sample-count floor it returns false
-// (insufficient evidence to exclude — let exploration probe more).
-func isHighRetryRateBin(b wawBin) bool {
+// exceeds the threshold AND its mean throughput is below medianThr.
+// The throughput gate (#204) keeps the filter from punishing
+// retry-tolerant workloads where retries coexist with high throughput.
+//
+// Below the sample-count floor returns false (insufficient evidence to
+// exclude — let exploration probe more). Strict less-than on
+// throughput is intentional: a bin exactly at the median stays
+// eligible (preservation bias for the single-eligible-bin case where
+// median equals the bin's own mean).
+func isHighRetryRateBin(b wawBin, medianThr float64) bool {
 	if b.TotalRuns < minRunsForRetryExclusion {
 		return false
 	}
-	return float64(b.RunsWithRetries)/float64(b.TotalRuns) > retryRateExclusionThreshold
+	rate := float64(b.RunsWithRetries) / float64(b.TotalRuns)
+	if rate <= retryRateExclusionThreshold {
+		return false
+	}
+	return b.MeanThroughput < medianThr
+}
+
+// binMedianThroughput returns the median MeanThroughput across bins
+// with at least minRunsForRetryExclusion samples. Mirrors the eligibility
+// floor wawsWithHighRetryRate uses on raw rows so both paths compute
+// median over the same cohort. Returns 0 when no bin clears the floor
+// (in that case the throughput gate effectively never fires — but
+// neither does the rate gate, so isHighRetryRateBin returns false
+// uniformly).
+func binMedianThroughput(bins []wawBin) float64 {
+	eligible := make([]float64, 0, len(bins))
+	for _, b := range bins {
+		if b.TotalRuns >= minRunsForRetryExclusion {
+			eligible = append(eligible, b.MeanThroughput)
+		}
+	}
+	return medianOfFloats(eligible)
 }
 
 // appendReasoning concatenates a new structured reason onto the existing
