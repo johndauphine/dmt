@@ -31,7 +31,7 @@ import (
 // shaped; MSSQL IDENTITY(s, i) is suffix-shaped; MySQL AUTO_INCREMENT
 // is suffix-shaped). NOT NULL is suppressed for auto-increment PKs
 // since the type-form already implies it.
-func GenerateColumnDef(col Column, constraints []Constraint, sourceDialect, targetDialect string) string {
+func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, sourceDialect, targetDialect string) string {
 	quoted := QuoteIdentifier(col.Name, targetDialect)
 	isAuto := isAutoIncrementColumn(col, sourceDialect)
 	isPK := isPrimaryKeyColumn(col.Name, constraints)
@@ -40,6 +40,35 @@ func GenerateColumnDef(col Column, constraints []Constraint, sourceDialect, targ
 	isBoolean := canonical.Kind == typemap.KindBoolean
 
 	typeStr := columnTypeString(col, canonical, sourceDialect, targetDialect, isAuto)
+	// Issue #196 / Codex P2 review on PR #207: when an unbounded-text
+	// column participates in any uniqueness-enforcing structure on
+	// MySQL — PRIMARY KEY, UNIQUE constraint, or unique INDEX — the
+	// LONGTEXT widening would either fail at CREATE TABLE (TEXT/BLOB
+	// can't be in a key without a prefix) or silently weaken
+	// uniqueness (a 255-byte prefix index considers two values that
+	// differ past byte 255 as duplicates — wrong vs source semantics).
+	// Override the column type to bounded VARCHAR/VARBINARY(255) for
+	// these columns: matches the prior pre-#196 emission for the
+	// specific keyed columns, preserves uniqueness semantics, and
+	// common non-keyed columns still get the LONGTEXT fidelity win.
+	//
+	// indexes is needed alongside constraints because the driver
+	// adapter (driverTableToDDL) projects most source uniqueness as
+	// Index{IsUnique:true} rather than ConstraintUnique — only PK is
+	// synthesized as a Constraint. Without checking indexes, real
+	// migrations from PG/MSSQL with UNIQUE on unbounded text would
+	// silently fail at CREATE TABLE on MySQL (Codex review on PR #207).
+	if shouldBoundForUniqueness(canonical, constraints, indexes, col.Name, targetDialect) {
+		// Pick the binary or text bounded type based on the source
+		// column's nature — KindBytes must NOT go through VARCHAR
+		// (text encoding would corrupt arbitrary byte values), Codex
+		// review on PR #207.
+		if canonical.Kind == typemap.KindBytes {
+			typeStr = "VARBINARY(255)"
+		} else {
+			typeStr = "VARCHAR(255)"
+		}
+	}
 
 	parts := []string{fmt.Sprintf("    %s %s", quoted, typeStr)}
 
@@ -50,7 +79,7 @@ func GenerateColumnDef(col Column, constraints []Constraint, sourceDialect, targ
 	if !isAuto && col.ColumnDefault != "" {
 		expr := FormatDDLDefault(col.ColumnDefault, sourceDialect, targetDialect, isBoolean)
 		if expr != "" {
-			parts = append(parts, "DEFAULT "+expr)
+			parts = append(parts, formatDefaultClause(expr, typeStr, targetDialect))
 		}
 	}
 
@@ -67,6 +96,22 @@ func GenerateColumnDef(col Column, constraints []Constraint, sourceDialect, targ
 	}
 
 	return strings.Join(parts, " ")
+}
+
+// formatDefaultClause emits the `DEFAULT <expr>` clause, wrapping the
+// expression in parens for MySQL TEXT/BLOB targets. MySQL <8.0.13
+// rejects ordinary defaults on TEXT/BLOB entirely; 8.0.13+ accepts
+// them only inside parens (DEFAULT (expr) syntax) — issue #196's
+// LONGTEXT widening would otherwise produce DDL like
+// `LONGTEXT DEFAULT 'foo'` that fails at CREATE TABLE on every
+// MySQL version. dmt targets MySQL 8.0.13+ for this feature; older
+// MySQL gets a clear CREATE TABLE error rather than silent
+// truncation. (Codex review on PR #207.)
+func formatDefaultClause(expr, targetType, targetDialect string) string {
+	if targetDialect == DialectMySQL && needsMySQLKeyPrefix(targetType) {
+		return "DEFAULT (" + expr + ")"
+	}
+	return "DEFAULT " + expr
 }
 
 // columnTypeString returns the type string for the column. Auto-

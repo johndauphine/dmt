@@ -18,7 +18,7 @@ func TestGenerateColumnDef_BasicInteger_PG(t *testing.T) {
 		UDTName:    "int4",
 		IsNullable: false,
 	}
-	got := GenerateColumnDef(col, nil, DialectPostgres, DialectPostgres)
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectPostgres)
 	if got != `    "id" INTEGER NOT NULL` {
 		t.Errorf("got %q", got)
 	}
@@ -32,7 +32,7 @@ func TestGenerateColumnDef_VarcharWithLength_PG_to_MySQL(t *testing.T) {
 		CharacterMaximumLength: &length,
 		IsNullable:             false,
 	}
-	got := GenerateColumnDef(col, nil, DialectPostgres, DialectMySQL)
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectMySQL)
 	if got != "    `name` VARCHAR(100) NOT NULL" {
 		t.Errorf("got %q", got)
 	}
@@ -44,8 +44,11 @@ func TestGenerateColumnDef_NullableText_PG_to_MySQL(t *testing.T) {
 		UDTName:    "text",
 		IsNullable: true,
 	}
-	got := GenerateColumnDef(col, nil, DialectPostgres, DialectMySQL)
-	if got != "    `bio` TEXT" {
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectMySQL)
+	// Issue #196: PG TEXT (unbounded) → MySQL LONGTEXT (4 GB), not the
+	// 64 KB MySQL TEXT type. Pre-fix this would have silently truncated
+	// PG text columns wider than 64 KB at write time.
+	if got != "    `bio` LONGTEXT" {
 		t.Errorf("got %q", got)
 	}
 }
@@ -59,7 +62,7 @@ func TestGenerateColumnDef_NumericWithPrecision_PG_to_PG(t *testing.T) {
 		NumericScale:     &scale,
 		IsNullable:       false,
 	}
-	got := GenerateColumnDef(col, nil, DialectPostgres, DialectPostgres)
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectPostgres)
 	if got != `    "price" NUMERIC(10, 2) NOT NULL` {
 		t.Errorf("got %q", got)
 	}
@@ -72,7 +75,7 @@ func TestGenerateColumnDef_DefaultExpression(t *testing.T) {
 		ColumnDefault: "now()",
 		IsNullable:    false,
 	}
-	got := GenerateColumnDef(col, nil, DialectPostgres, DialectMySQL)
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectMySQL)
 	if !strings.Contains(got, "DEFAULT CURRENT_TIMESTAMP") {
 		t.Errorf("expected MySQL DEFAULT CURRENT_TIMESTAMP, got %q", got)
 	}
@@ -86,7 +89,7 @@ func TestGenerateColumnDef_BooleanDefault_PG_to_MSSQL(t *testing.T) {
 		ColumnDefault: "true",
 		IsNullable:    false,
 	}
-	got := GenerateColumnDef(col, nil, DialectPostgres, DialectMSSQL)
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectMSSQL)
 	if !strings.Contains(got, "DEFAULT 1") {
 		t.Errorf("expected DEFAULT 1, got %q", got)
 	}
@@ -105,7 +108,7 @@ func TestGenerateColumnDef_AutoIncrementPK_PG(t *testing.T) {
 		IsNullable: false,
 	}
 	pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectPostgres, DialectPostgres)
+	got := GenerateColumnDef(col, pk, nil, DialectPostgres, DialectPostgres)
 	if !strings.Contains(got, "SERIAL") {
 		t.Errorf("expected SERIAL type, got %q", got)
 	}
@@ -122,7 +125,7 @@ func TestGenerateColumnDef_AutoIncrementPK_BIGSERIAL(t *testing.T) {
 		IsNullable: false,
 	}
 	pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectPostgres, DialectPostgres)
+	got := GenerateColumnDef(col, pk, nil, DialectPostgres, DialectPostgres)
 	if !strings.Contains(got, "BIGSERIAL") {
 		t.Errorf("expected BIGSERIAL type, got %q", got)
 	}
@@ -151,7 +154,7 @@ func TestGenerateColumnDef_AutoIncrementPK_SMALLSERIAL(t *testing.T) {
 				IsNullable: false,
 			}
 			pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-			got := GenerateColumnDef(col, pk, tc.source, DialectPostgres)
+			got := GenerateColumnDef(col, pk, nil, tc.source, DialectPostgres)
 			if !strings.Contains(got, "SMALLSERIAL") {
 				t.Errorf("expected SMALLSERIAL (got widened to %q) — #188 regression", got)
 			}
@@ -171,7 +174,7 @@ func TestGenerateColumnDef_AutoIncrementPK_MySQL(t *testing.T) {
 		IsNullable: false,
 	}
 	pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectPostgres, DialectMySQL)
+	got := GenerateColumnDef(col, pk, nil, DialectPostgres, DialectMySQL)
 	if !strings.Contains(got, "AUTO_INCREMENT") {
 		t.Errorf("expected AUTO_INCREMENT suffix, got %q", got)
 	}
@@ -189,7 +192,7 @@ func TestGenerateColumnDef_AutoIncrementPK_MSSQL_DefaultSeed(t *testing.T) {
 		IsNullable: false,
 	}
 	pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectPostgres, DialectMSSQL)
+	got := GenerateColumnDef(col, pk, nil, DialectPostgres, DialectMSSQL)
 	if !strings.Contains(got, "IDENTITY(1, 1)") {
 		t.Errorf("expected IDENTITY(1, 1), got %q", got)
 	}
@@ -204,7 +207,7 @@ func TestGenerateColumnDef_AutoIncrementPK_MSSQL_CustomSeed(t *testing.T) {
 		IsNullable: false,
 	}
 	pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectPostgres, DialectMSSQL)
+	got := GenerateColumnDef(col, pk, nil, DialectPostgres, DialectMSSQL)
 	if !strings.Contains(got, "IDENTITY(100, 10)") {
 		t.Errorf("expected IDENTITY(100, 10), got %q", got)
 	}
@@ -220,7 +223,7 @@ func TestGenerateColumnDef_PGSerialFromNextval(t *testing.T) {
 		IsNullable:    false,
 	}
 	pk := []Constraint{{Name: "pk_users", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectPostgres, DialectPostgres)
+	got := GenerateColumnDef(col, pk, nil, DialectPostgres, DialectPostgres)
 	if !strings.Contains(got, "SERIAL") {
 		t.Errorf("expected SERIAL (nextval-detected), got %q", got)
 	}
@@ -240,7 +243,7 @@ func TestGenerateColumnDef_MySQLAutoincrementFlag(t *testing.T) {
 		IsNullable:    false,
 	}
 	pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
-	got := GenerateColumnDef(col, pk, DialectMySQL, DialectMySQL)
+	got := GenerateColumnDef(col, pk, nil, DialectMySQL, DialectMySQL)
 	if !strings.Contains(got, "AUTO_INCREMENT") {
 		t.Errorf("expected AUTO_INCREMENT suffix, got %q", got)
 	}
@@ -254,13 +257,13 @@ func TestGenerateColumnDef_MySQLInlineComment(t *testing.T) {
 		IsNullable: false,
 		Comment:    "user's display name",
 	}
-	got := GenerateColumnDef(col, nil, DialectMySQL, DialectMySQL)
+	got := GenerateColumnDef(col, nil, nil, DialectMySQL, DialectMySQL)
 	if !strings.Contains(got, "COMMENT 'user''s display name'") {
 		t.Errorf("expected escaped MySQL inline comment, got %q", got)
 	}
 
 	// Non-MySQL targets must NOT inline comments
-	got = GenerateColumnDef(col, nil, DialectMySQL, DialectPostgres)
+	got = GenerateColumnDef(col, nil, nil, DialectMySQL, DialectPostgres)
 	if strings.Contains(got, "COMMENT") {
 		t.Errorf("PG target should not inline comments; got %q", got)
 	}
@@ -282,6 +285,71 @@ func TestIsPrimaryKeyColumn_CompositePK(t *testing.T) {
 		t.Error("created_at should NOT be in PK")
 	}
 }
+
+// TestGenerateColumnDef_PG_VarcharWithDefault_to_MySQL_WrapsDefaultExpr
+// is the Codex P2 #2 regression guard from PR #207. Pre-fix, the #196
+// LONGTEXT widening would have produced `LONGTEXT DEFAULT 'foo'` which
+// fails on every MySQL version (MySQL <8.0.13 rejects defaults on
+// TEXT/BLOB entirely; 8.0.13+ requires DEFAULT (expr) parens). Post-
+// fix, the default is wrapped as `DEFAULT ('foo')` for MySQL TEXT/BLOB
+// columns, matching the 8.0.13+ syntax. Older MySQL gets a clear
+// CREATE TABLE error rather than silent truncation, which is the
+// right trade.
+func TestGenerateColumnDef_PG_VarcharWithDefault_to_MySQL_WrapsDefaultExpr(t *testing.T) {
+	col := Column{
+		Name:          "tag",
+		UDTName:       "varchar", // PG unbounded varchar
+		IsNullable:    true,
+		ColumnDefault: "'unknown'::character varying",
+	}
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectMySQL)
+	want := "    `tag` LONGTEXT DEFAULT ('unknown')"
+	if got != want {
+		t.Errorf("got %q\nwant %q", got, want)
+	}
+}
+
+// TestGenerateColumnDef_PG_VarcharWithDefault_to_PG_NoWrap is the
+// belt-and-suspenders companion: MySQL-only DEFAULT (expr) wrapping
+// must NOT leak to PG targets. PG accepts `DEFAULT 'literal'` on
+// VARCHAR (and would reject the unnecessary parens for a literal in
+// some contexts), so the wrap is strictly MySQL-target-only.
+func TestGenerateColumnDef_PG_VarcharWithDefault_to_PG_NoWrap(t *testing.T) {
+	col := Column{
+		Name:          "tag",
+		UDTName:       "varchar",
+		IsNullable:    true,
+		ColumnDefault: "'unknown'::character varying",
+	}
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectPostgres)
+	if got != `    "tag" VARCHAR DEFAULT 'unknown'` {
+		t.Errorf("got %q (PG target should not wrap defaults in parens)", got)
+	}
+}
+
+// TestGenerateColumnDef_PG_VarcharBoundedWithDefault_to_MySQL_NoWrap
+// guards against over-eager wrapping: a bounded VARCHAR(N) on MySQL
+// is NOT a TEXT/BLOB type and should still emit `DEFAULT 'literal'`
+// without parens. Catches a hypothetical regression of formatDefaultClause
+// that would wrap defaults on every MySQL column.
+func TestGenerateColumnDef_PG_VarcharBoundedWithDefault_to_MySQL_NoWrap(t *testing.T) {
+	col := Column{
+		Name:                   "tag",
+		UDTName:                "varchar",
+		CharacterMaximumLength: intPtrCol(100),
+		IsNullable:             true,
+		ColumnDefault:          "'unknown'::character varying",
+	}
+	got := GenerateColumnDef(col, nil, nil, DialectPostgres, DialectMySQL)
+	want := "    `tag` VARCHAR(100) DEFAULT 'unknown'"
+	if got != want {
+		t.Errorf("got %q\nwant %q (bounded VARCHAR must not wrap default in parens)", got, want)
+	}
+}
+
+// intPtrCol is a local helper to keep the test self-contained
+// (column_test.go doesn't have an intPtr at file scope).
+func intPtrCol(v int) *int { return &v }
 
 func TestIsAutoIncrementColumn_AllVariants(t *testing.T) {
 	// Identity (PG / MSSQL)

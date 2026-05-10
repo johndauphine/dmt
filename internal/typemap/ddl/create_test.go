@@ -34,7 +34,8 @@ func TestGenerateCreateTable_PG_to_MySQL(t *testing.T) {
 		"CREATE TABLE `users`",
 		"`id` INT NOT NULL",
 		"`name` VARCHAR(100) NOT NULL",
-		"`bio` TEXT",
+		// Issue #196: PG TEXT (unbounded) → MySQL LONGTEXT, not TEXT.
+		"`bio` LONGTEXT",
 		"CONSTRAINT `pk_users` PRIMARY KEY (`id`)",
 	} {
 		if !strings.Contains(ddl, want) {
@@ -189,6 +190,135 @@ func TestGenerateCreateTable_SchemaPrefix(t *testing.T) {
 	ddl := GenerateCreateTable(table, typemap.DialectPostgres, typemap.DialectPostgres)
 	if !strings.Contains(ddl, `CREATE TABLE "inventory"."items"`) {
 		t.Errorf("should preserve non-default schema; got:\n%s", ddl)
+	}
+}
+
+// TestGenerateCreateTable_PG_VarcharPK_to_MySQL_BoundsColumn is the
+// Codex P2 #1+#3 regression guard from PR #207. Pre-fix, the #196
+// LONGTEXT widening would have produced `LONGTEXT PRIMARY KEY` which
+// MySQL rejects. The first fix attempt added a `(255)` key prefix,
+// which Codex correctly flagged as a uniqueness-semantics violation
+// (two values that differ past byte 255 would be treated as
+// duplicates). Final fix: the column TYPE itself is bounded to
+// VARCHAR(255) when an unbounded-text column ends up in a PK or
+// UNIQUE constraint on MySQL — matches the prior pre-#196 emission
+// for these specific columns, preserves uniqueness semantics, and
+// the common non-keyed columns still get the LONGTEXT win.
+func TestGenerateCreateTable_PG_VarcharPK_to_MySQL_BoundsColumn(t *testing.T) {
+	table := TableInfo{
+		Name: "items",
+		Columns: []Column{
+			// PG `varchar PRIMARY KEY` (no length): the rare case that
+			// triggers the post-#196 regression Codex caught.
+			{Name: "id", UDTName: "varchar", IsNullable: false},
+			{Name: "name", UDTName: "varchar", CharacterMaximumLength: intPtr(100), IsNullable: false},
+			// A non-keyed unbounded varchar must still get LONGTEXT —
+			// the override only fires for PK/UNIQUE columns.
+			{Name: "bio", UDTName: "varchar", IsNullable: true},
+		},
+		Constraints: []Constraint{
+			{Name: "pk_items", Type: ConstraintPrimaryKey, Columns: []string{"id"}},
+		},
+	}
+
+	ddl := GenerateCreateTable(table, typemap.DialectPostgres, typemap.DialectMySQL)
+
+	// PK column: bounded to VARCHAR(255) for uniqueness preservation.
+	if !strings.Contains(ddl, "`id` VARCHAR(255) NOT NULL") {
+		t.Errorf("expected `id VARCHAR(255)` for unbounded-varchar PK column; got:\n%s", ddl)
+	}
+	// PK clause: plain column ref, no prefix length needed.
+	if !strings.Contains(ddl, "PRIMARY KEY (`id`)") {
+		t.Errorf("expected plain `PRIMARY KEY (id)` (no prefix); got:\n%s", ddl)
+	}
+	if strings.Contains(ddl, "`id`(255)") {
+		t.Errorf("PK should NOT use prefix (uniqueness-semantics issue); got:\n%s", ddl)
+	}
+	// Non-keyed unbounded varchar: full LONGTEXT (data fidelity preserved).
+	if !strings.Contains(ddl, "`bio` LONGTEXT") {
+		t.Errorf("expected `bio LONGTEXT` for non-keyed unbounded varchar; got:\n%s", ddl)
+	}
+}
+
+// TestGenerateCreateTable_PG_VarcharUnique_to_MySQL_BoundsColumn — same
+// override applies for UNIQUE constraints, not just PK.
+func TestGenerateCreateTable_PG_VarcharUnique_to_MySQL_BoundsColumn(t *testing.T) {
+	table := TableInfo{
+		Name: "items",
+		Columns: []Column{
+			{Name: "id", UDTName: "int4", IsNullable: false},
+			{Name: "slug", UDTName: "varchar", IsNullable: false},
+		},
+		Constraints: []Constraint{
+			{Name: "pk_items", Type: ConstraintPrimaryKey, Columns: []string{"id"}},
+			{Name: "uq_slug", Type: ConstraintUnique, Columns: []string{"slug"}},
+		},
+	}
+
+	ddl := GenerateCreateTable(table, typemap.DialectPostgres, typemap.DialectMySQL)
+
+	if !strings.Contains(ddl, "`slug` VARCHAR(255) NOT NULL") {
+		t.Errorf("UNIQUE column should be bounded to VARCHAR(255); got:\n%s", ddl)
+	}
+}
+
+// TestGenerateCreateTable_PG_VarcharUniqueIndex_to_MySQL_BoundsColumn
+// is the Codex P2 #5 regression guard from PR #207. The driver adapter
+// (driverTableToDDL) only synthesizes a Constraint for PRIMARY KEY;
+// other source uniqueness — UNIQUE constraints from the source schema
+// — comes through as Index{IsUnique:true}. Without checking indexes
+// in shouldBoundForUniqueness, real PG/MSSQL → MySQL migrations of
+// schemas with UNIQUE on unbounded text would silently fail at
+// CREATE TABLE / CREATE INDEX time.
+func TestGenerateCreateTable_PG_VarcharUniqueIndex_to_MySQL_BoundsColumn(t *testing.T) {
+	table := TableInfo{
+		Name: "items",
+		Columns: []Column{
+			{Name: "id", UDTName: "int4", IsNullable: false},
+			{Name: "slug", UDTName: "varchar", IsNullable: false},
+		},
+		Constraints: []Constraint{
+			{Name: "pk_items", Type: ConstraintPrimaryKey, Columns: []string{"id"}},
+		},
+		// Driver-adapter shape: UNIQUE represented as a unique INDEX,
+		// not a constraint. shouldBoundForUniqueness must catch this.
+		Indexes: []Index{
+			{Name: "uq_slug", IsUnique: true, Columns: []string{"slug"}},
+		},
+	}
+
+	ddl := GenerateCreateTable(table, typemap.DialectPostgres, typemap.DialectMySQL)
+
+	if !strings.Contains(ddl, "`slug` VARCHAR(255) NOT NULL") {
+		t.Errorf("column under unique INDEX should bound to VARCHAR(255); got:\n%s", ddl)
+	}
+}
+
+// TestGenerateCreateTable_MSSQL_VarbinaryMaxPK_to_MySQL_BoundsToVarbinary
+// is the Codex P2 #4 regression guard from PR #207. KindBytes columns
+// in a PK/UNIQUE must bound to VARBINARY(255), NOT VARCHAR(255) —
+// text encoding would corrupt arbitrary byte values.
+func TestGenerateCreateTable_MSSQL_VarbinaryMaxPK_to_MySQL_BoundsToVarbinary(t *testing.T) {
+	maxLen := -1
+	table := TableInfo{
+		Name: "blobs",
+		Columns: []Column{
+			// MSSQL varbinary(max) PK — the rare case Codex flagged.
+			{Name: "fingerprint", UDTName: "varbinary", CharacterMaximumLength: &maxLen, IsNullable: false},
+			{Name: "label", UDTName: "varchar", CharacterMaximumLength: intPtr(50)},
+		},
+		Constraints: []Constraint{
+			{Name: "pk_blobs", Type: ConstraintPrimaryKey, Columns: []string{"fingerprint"}},
+		},
+	}
+
+	ddl := GenerateCreateTable(table, typemap.DialectMSSQL, typemap.DialectMySQL)
+
+	if !strings.Contains(ddl, "`fingerprint` VARBINARY(255) NOT NULL") {
+		t.Errorf("KindBytes PK should bound to VARBINARY(255), NOT VARCHAR; got:\n%s", ddl)
+	}
+	if strings.Contains(ddl, "`fingerprint` VARCHAR") {
+		t.Errorf("KindBytes PK must not become a text column; got:\n%s", ddl)
 	}
 }
 

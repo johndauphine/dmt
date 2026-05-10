@@ -37,7 +37,25 @@ func GenerateIndex(table TableInfo, idx Index, sourceDialect, targetDialect stri
 	}
 
 	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
-	cols := quoteColumnList(idx.Columns, targetDialect)
+	// Non-unique INDEX on a TEXT/BLOB column on MySQL gets a (255) key
+	// prefix — semantics-preserving (indexes are lookup-only). UNIQUE
+	// INDEX on a TEXT/BLOB column does NOT get a prefix because the
+	// prefix would silently weaken uniqueness (Codex P2 on PR #207);
+	// emitting plain column refs causes MySQL to reject the CREATE
+	// INDEX with a clear "used in key specification without a key
+	// length" error, which is the right loud failure. PK/UNIQUE
+	// CONSTRAINTS on the same shape are handled upstream by
+	// shouldBoundForUniqueness in column.go (column type bounded to
+	// VARCHAR(255)). Unique INDEX outside of a UNIQUE constraint is the
+	// rare case where the source schema author chose unique-via-INDEX
+	// rather than unique-via-CONSTRAINT — separate follow-up if it
+	// shows up in real workloads.
+	var cols []string
+	if idx.IsUnique {
+		cols = quoteColumnList(idx.Columns, targetDialect)
+	} else {
+		cols = keyColumnRefs(idx.Columns, table.Columns, sourceDialect, targetDialect)
+	}
 
 	return fmt.Sprintf(
 		"CREATE %sINDEX %s ON %s (%s);",
