@@ -140,10 +140,14 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		collector := monitor.NewMetricsCollector(tuner, adjustInterval)
 		runtimeMonitor = monitor.NewController(tuner, collector, adjustInterval, monitor.ControllerOptions{
 			// MaxChunkSize / MinChunkSize / MaxWAW left at defaults.
-			// Driver-level HardChunkLimit (#166) backstops chunk-size
-			// growth via the writer's own packet caps; the controller's
-			// 5000-row floor on chunk-shrink is the only safety floor
-			// the controller itself enforces.
+			// Defaults: MaxChunkSize=0 (uncapped — current driver
+			// HardChunkLimit implementations all return 0 today, so
+			// there's nothing useful to plumb), MinChunkSize=5000
+			// (memory-pressure floor), MaxWAW=8. The
+			// RuleWriteErrorAdjuster constructed below catches the
+			// common chunk-size-too-big failure modes (MySQL
+			// placeholder cap, MSSQL parameter cap) by halving on
+			// write error rather than relying on a static cap.
 		})
 
 		monitorCtx, cancelMonitor := context.WithCancel(ctx)
@@ -332,7 +336,9 @@ loop:
 
 // executeJob runs a single job with retry logic.
 func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) {
-	// Report active job metrics for AI monitoring
+	// Report active job metrics for runtime monitoring (the rule-based
+	// controller's queue-growth and throughput-stable rules read these
+	// via the MetricsCollector + tuner.Metrics()).
 	if tuner != nil {
 		tuner.ReportActiveJobs(1)
 		defer tuner.ReportActiveJobs(-1)
@@ -370,13 +376,15 @@ retryLoop:
 			}
 		}
 
-		// Per-write-error chunk-size adjustment was an AI-only path
-		// (#172b removed it along with AIAdjuster). The rule-based
-		// controller addresses chunk-size oscillation via its periodic
-		// memory-pressure rule + the driver-level HardChunkLimit
-		// backstop. Errors flow into the tuner's ErrorCount counter
-		// (line above) and trigger the controller's WAW back-off rule.
-		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner)
+		// Per-write-error chunk-size adjuster — deterministic
+		// replacement for the AI-driven path removed in PR #195.
+		// Halves chunk_size when the write error matches a known
+		// structural-limit pattern (MySQL "too many placeholders",
+		// MSSQL 2100-parameter cap, max_allowed_packet); returns 0
+		// (no adjustment) for other errors so transient failures fall
+		// through to the normal retry logic.
+		writeErrAdjuster := monitor.NewRuleWriteErrorAdjuster()
+		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner, writeErrAdjuster)
 		if err == nil {
 			break
 		}
