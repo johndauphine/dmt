@@ -145,22 +145,21 @@ func TestDetectRegimeDrift_DriftAtRecentCellFires(t *testing.T) {
 // that drifted in the past is irrelevant — the system is no longer
 // using that config.
 func TestDetectRegimeDrift_StaleCellDriftIgnored(t *testing.T) {
-	rows := append(
-		// (WAW=2, CS=50000): drifted in the past, 9 runs, EARLIER timestamps
-		makeFixedConfigRuns(2, 50000, []float64{
-			1_000_000, 1_050_000, 980_000,
-			1_020_000, 1_010_000, 990_000,
-			400_000, 420_000, 380_000,
-		}),
-		// (WAW=3, CS=49115): stable, 6 runs, but starts at the same
-		// base time. Need to bump these timestamps later than the WAW=2
-		// group so this becomes the most-recent cell.
-		makeFixedConfigRuns(3, 49115, []float64{
-			800_000, 810_000, 790_000, 805_000, 795_000, 800_000,
-		})...,
-	)
-	// Push the WAW=3 group's timestamps after the WAW=2 group's latest.
-	for i := 9; i < len(rows); i++ {
+	// (WAW=2, CS=50000): drifted in the past, EARLIER timestamps.
+	staleGroup := makeFixedConfigRuns(2, 50000, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		400_000, 420_000, 380_000,
+	})
+	// (WAW=3, CS=49115): stable, but starts at the same base time as
+	// staleGroup. Bump these timestamps so this becomes the most-recent
+	// cell. Capture the boundary explicitly rather than hard-coding 9.
+	currentGroup := makeFixedConfigRuns(3, 49115, []float64{
+		800_000, 810_000, 790_000, 805_000, 795_000, 800_000,
+	})
+	staleEnd := len(staleGroup)
+	rows := append(staleGroup, currentGroup...)
+	for i := staleEnd; i < len(rows); i++ {
 		rows[i].Timestamp = rows[i].Timestamp.Add(24 * time.Hour)
 	}
 

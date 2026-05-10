@@ -34,16 +34,19 @@ const driftRecentN = 3
 const driftMinAtConfig = 6
 
 // driftDownThreshold and driftUpThreshold bound the recent-vs-older
-// median ratio considered "stable." A ratio outside this band triggers
-// drift and forces exploration on the next run.
+// median ratio considered "stable." A ratio strictly outside this
+// band (ratio < driftDownThreshold OR ratio > driftUpThreshold)
+// triggers drift and forces exploration on the next run. The
+// boundary values themselves are stable; only ratios past them fire.
 //
 // The bounds were originally [0.70, 1.30] but #184 measured ~2.5×
 // within-bin variance on identical configurations (PG cache state,
 // host scheduling, Docker fsync cadence as the dominant noise sources)
 // — far wider than ±30%. The original threshold fired on essentially
 // every run, starving the regression tier. Widening to [0.50, 1.50]
-// keeps real regime changes (50% throughput drops, ~2× speedups) in
-// the firing zone while letting natural measurement noise pass through.
+// keeps real regime changes (more than 50% throughput drops, more
+// than ~2× speedups) in the firing zone while letting natural
+// measurement noise pass through.
 const (
 	driftDownThreshold = 0.50
 	driftUpThreshold   = 1.50
