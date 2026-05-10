@@ -108,15 +108,22 @@ func TestTune_DriftDetectedBeforeOutlierFilter(t *testing.T) {
 	}
 }
 
-// TestDetectRegimeDrift_PerConfigGrouping: drift at one config doesn't
-// require drift at others — single shifted config is enough.
-func TestDetectRegimeDrift_PerConfigGrouping(t *testing.T) {
+// TestDetectRegimeDrift_DriftAtRecentCellFires: when the most recent
+// run's cell is the one showing drift, the detector fires.
+//
+// Renamed from PerConfigGrouping after #184 narrowed drift detection
+// to the most-recent cell only. Both groups in this test start with
+// the same base timestamp, but the WAW=2 group has 9 runs (vs 6 for
+// WAW=1), so its latest timestamp wins → most-recent cell is WAW=2.
+// Drift at WAW=2 fires.
+func TestDetectRegimeDrift_DriftAtRecentCellFires(t *testing.T) {
 	rows := append(
-		// (WAW=1, CS=50000): stable
+		// (WAW=1, CS=50000): stable, 6 runs
 		makeFixedConfigRuns(1, 50000, []float64{
 			500_000, 510_000, 490_000, 505_000, 495_000, 500_000,
 		}),
-		// (WAW=2, CS=50000): drifted (recent half of older)
+		// (WAW=2, CS=50000): drifted (recent half of older), 9 runs —
+		// latest timestamp is here, so this is the "current" cell.
 		makeFixedConfigRuns(2, 50000, []float64{
 			1_000_000, 1_050_000, 980_000,
 			1_020_000, 1_010_000, 990_000,
@@ -124,7 +131,101 @@ func TestDetectRegimeDrift_PerConfigGrouping(t *testing.T) {
 		})...,
 	)
 	if !detectRegimeDrift(rows) {
-		t.Error("drift at one config should fire, even when others are stable")
+		t.Error("drift at the most recently used cell should fire")
+	}
+}
+
+// TestDetectRegimeDrift_StaleCellDriftIgnored — #184 regression guard.
+// Old behavior: drift at ANY cell with enough runs would fire,
+// including stale cells the system moved on from. Result: every
+// subsequent run hit drift on the stale cell and was forced into
+// exploration, starving the regression tier.
+//
+// New behavior: only the most-recent cell is checked. A stale cell
+// that drifted in the past is irrelevant — the system is no longer
+// using that config.
+func TestDetectRegimeDrift_StaleCellDriftIgnored(t *testing.T) {
+	// (WAW=2, CS=50000): drifted in the past, EARLIER timestamps.
+	staleGroup := makeFixedConfigRuns(2, 50000, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		400_000, 420_000, 380_000,
+	})
+	// (WAW=3, CS=49115): stable, but starts at the same base time as
+	// staleGroup. Bump these timestamps so this becomes the most-recent
+	// cell. Capture the boundary explicitly rather than hard-coding 9.
+	currentGroup := makeFixedConfigRuns(3, 49115, []float64{
+		800_000, 810_000, 790_000, 805_000, 795_000, 800_000,
+	})
+	staleEnd := len(staleGroup)
+	rows := append(staleGroup, currentGroup...)
+	for i := staleEnd; i < len(rows); i++ {
+		rows[i].Timestamp = rows[i].Timestamp.Add(24 * time.Hour)
+	}
+
+	if detectRegimeDrift(rows) {
+		t.Error("stale cell drift should NOT fire — system has moved on (#184 regression)")
+	}
+}
+
+// TestDetectRegimeDrift_WiderThresholdTolerantOfNoise — #184 fix part A.
+// Old [0.70, 1.30] threshold fired on every run because real-world
+// within-bin variance is ~2.5×. The new [0.50, 1.50] band tolerates
+// up to 50% recent-vs-older shifts without firing. This test pins
+// that a 1.4× shift (well within real noise) no longer fires.
+func TestDetectRegimeDrift_WiderThresholdTolerantOfNoise(t *testing.T) {
+	rows := makeFixedConfigRuns(2, 50000, []float64{
+		700_000, 720_000, 680_000, // older median ≈ 700K
+		710_000, 690_000, 705_000,
+		980_000, 1_000_000, 990_000, // recent median ≈ 990K, ratio ≈ 1.4
+	})
+	if detectRegimeDrift(rows) {
+		t.Error("1.4× shift is within the [0.50, 1.50] band; should NOT fire (#184 fix)")
+	}
+}
+
+// TestDetectRegimeDrift_IgnoresIncompleteLatestRow — Codex review on
+// PR #184. If the newest history row is incomplete (FinalThroughput
+// <= 0, e.g. a crashed migration or NULL surfaced as 0 from the
+// checkpoint backend), `mostRecentCell` must skip it and pick the
+// most recent COMPLETED row's cell. Otherwise drift would route to a
+// "phantom" cell that immediately gets filtered out by rowsAtCell.
+func TestDetectRegimeDrift_IgnoresIncompleteLatestRow(t *testing.T) {
+	// Drift at WAW=2/CS=50000 across 9 completed runs. Then a 10th
+	// row appended at WAW=99/CS=99 (a "phantom" cell representing a
+	// crashed run) with FinalThroughput=0, timestamp later than all
+	// completed rows. Without the fix, mostRecentCell returns the
+	// phantom cell, rowsAtCell finds 0 completed rows there, drift
+	// returns false → genuine drift at WAW=2 missed.
+	rows := makeFixedConfigRuns(2, 50000, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		400_000, 420_000, 380_000,
+	})
+	rows = append(rows, HistoryRecord{
+		Timestamp:         rows[len(rows)-1].Timestamp.Add(time.Hour),
+		WriteAheadWriters: 99,
+		ChunkSize:         99,
+		FinalThroughput:   0, // crashed / in-progress
+		CPUCores:          16, MemoryGB: 48,
+	})
+
+	if !detectRegimeDrift(rows) {
+		t.Error("incomplete latest row should be ignored; drift at the most recent COMPLETED cell must still fire (#184 Codex regression)")
+	}
+}
+
+// TestDetectRegimeDrift_WidenedThresholdStillFiresAtTwoX — sanity guard
+// that widening to [0.50, 1.50] still catches genuine regime changes.
+// A 2× shift in either direction must still fire.
+func TestDetectRegimeDrift_WidenedThresholdStillFiresAtTwoX(t *testing.T) {
+	rows := makeFixedConfigRuns(2, 50000, []float64{
+		500_000, 510_000, 490_000,
+		505_000, 495_000, 500_000,
+		1_000_000, 1_020_000, 1_050_000, // recent ~2× older
+	})
+	if !detectRegimeDrift(rows) {
+		t.Error("2× shift exceeds 1.50 upper bound; should still fire")
 	}
 }
 

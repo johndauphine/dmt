@@ -33,19 +33,39 @@ const driftRecentN = 3
 // per-config data to distinguish drift from noise.
 const driftMinAtConfig = 6
 
-// driftDownThreshold and driftUpThreshold are the asymmetric bounds.
-// Recent throughput dropping to <70% of the older median triggers
-// drift; rising to >130% also triggers (could mean upstream got faster
-// — the regression's old fits are too pessimistic).
+// driftDownThreshold and driftUpThreshold bound the recent-vs-older
+// median ratio considered "stable." A ratio strictly outside this
+// band (ratio < driftDownThreshold OR ratio > driftUpThreshold)
+// triggers drift and forces exploration on the next run. The
+// boundary values themselves are stable; only ratios past them fire.
+//
+// The bounds were originally [0.70, 1.30] but #184 measured ~2.5×
+// within-bin variance on identical configurations (PG cache state,
+// host scheduling, Docker fsync cadence as the dominant noise sources)
+// — far wider than ±30%. The original threshold fired on essentially
+// every run, starving the regression tier. Widening to [0.50, 1.50]
+// keeps real regime changes (more than 50% throughput drops, more
+// than ~2× speedups) in the firing zone while letting natural
+// measurement noise pass through.
 const (
-	driftDownThreshold = 0.70
-	driftUpThreshold   = 1.30
+	driftDownThreshold = 0.50
+	driftUpThreshold   = 1.50
 )
 
-// detectRegimeDrift returns true when at least one (WAW, CS) config in
-// the rows shows a recent-vs-older throughput median ratio outside
-// [driftDownThreshold, driftUpThreshold]. Logs a warning when drift
-// fires so the user sees why the next run went into exploration mode.
+// detectRegimeDrift returns true when the (WAW, CS) config of the
+// MOST RECENTLY USED run shows a recent-vs-older throughput median
+// ratio outside [driftDownThreshold, driftUpThreshold]. Logs a warning
+// when drift fires so the user sees why the next run went into
+// exploration mode.
+//
+// History scope: only the cell of the most recent run is checked, not
+// every cell with enough samples (#184 fix). Without this restriction,
+// any cell that drifted in the past would re-fire drift on every
+// subsequent run forever — even when the system has moved on to a
+// different (more stable) cell. By scoping drift detection to "the
+// cell that's actually in use right now," a single drift firing
+// produces one exploration probe and the regression tier resumes on
+// the next run unless the new cell ALSO drifts.
 //
 // rows must be the post-regime, post-outlier filtered set the rest of
 // applyHistory operates on. Order doesn't matter — this function sorts
@@ -55,46 +75,90 @@ func detectRegimeDrift(rows []HistoryRecord) bool {
 		return false
 	}
 
-	type configKey struct {
-		WAW, ChunkSize int
+	currentCell, ok := mostRecentCell(rows)
+	if !ok {
+		return false
 	}
-	groups := map[configKey][]HistoryRecord{}
+
+	atCell := rowsAtCell(rows, currentCell)
+	if len(atCell) < driftMinAtConfig {
+		// Current cell hasn't accumulated enough runs to distinguish
+		// drift from noise.
+		return false
+	}
+
+	// Sort by timestamp ascending so the last driftRecentN entries
+	// are the chronologically most recent.
+	sort.Slice(atCell, func(i, j int) bool {
+		return atCell[i].Timestamp.Before(atCell[j].Timestamp)
+	})
+	recent := atCell[len(atCell)-driftRecentN:]
+	older := atCell[:len(atCell)-driftRecentN]
+
+	recentMed := medianThroughput(recent)
+	olderMed := medianThroughput(older)
+	if olderMed <= 0 {
+		return false
+	}
+	ratio := recentMed / olderMed
+
+	if ratio < driftDownThreshold || ratio > driftUpThreshold {
+		logging.Warn(
+			"tuning: regime drift at (WAW=%d, chunk_size=%d) — recent median %.0f rows/s vs older %.0f rows/s (ratio %.2f outside [%.2f, %.2f]); forcing exploration",
+			currentCell.WAW, currentCell.ChunkSize, recentMed, olderMed, ratio,
+			driftDownThreshold, driftUpThreshold,
+		)
+		return true
+	}
+	return false
+}
+
+// configKey identifies a (WAW, ChunkSize) cell. Used both for drift
+// grouping and for "which cell did we last run at?" lookups.
+type configKey struct {
+	WAW, ChunkSize int
+}
+
+// mostRecentCell returns the cell of the chronologically latest
+// COMPLETED run in rows (one with positive FinalThroughput). Skips
+// incomplete rows — a crashed mid-run or an in-progress migration
+// surfaces as FinalThroughput <= 0 from the checkpoint backend, and
+// using it as the current cell would route drift detection to a
+// "phantom" cell (rowsAtCell drops the incomplete row, often leaving
+// too few samples for drift to fire on the genuinely-current cell).
+//
+// Returns ok=false when no completed rows exist (Codex review on
+// PR #184 — match the rest of the tuning filters which all skip
+// incomplete rows).
+func mostRecentCell(rows []HistoryRecord) (configKey, bool) {
+	var latest *HistoryRecord
+	for i := range rows {
+		if rows[i].FinalThroughput <= 0 {
+			continue
+		}
+		if latest == nil || rows[i].Timestamp.After(latest.Timestamp) {
+			latest = &rows[i]
+		}
+	}
+	if latest == nil {
+		return configKey{}, false
+	}
+	return configKey{latest.WriteAheadWriters, latest.ChunkSize}, true
+}
+
+// rowsAtCell filters rows down to those at the given (WAW, ChunkSize)
+// cell. Returns a fresh slice; doesn't mutate the input.
+func rowsAtCell(rows []HistoryRecord, cell configKey) []HistoryRecord {
+	out := make([]HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		if r.FinalThroughput <= 0 {
 			continue
 		}
-		k := configKey{r.WriteAheadWriters, r.ChunkSize}
-		groups[k] = append(groups[k], r)
-	}
-
-	for k, g := range groups {
-		if len(g) < driftMinAtConfig {
-			continue
-		}
-		// Sort by timestamp ascending so the last driftRecentN entries
-		// are the chronologically most recent.
-		sort.Slice(g, func(i, j int) bool {
-			return g[i].Timestamp.Before(g[j].Timestamp)
-		})
-		recent := g[len(g)-driftRecentN:]
-		older := g[:len(g)-driftRecentN]
-
-		recentMed := medianThroughput(recent)
-		olderMed := medianThroughput(older)
-		if olderMed <= 0 {
-			continue
-		}
-		ratio := recentMed / olderMed
-
-		if ratio < driftDownThreshold || ratio > driftUpThreshold {
-			logging.Warn(
-				"tuning: regime drift at (WAW=%d, chunk_size=%d) — recent median %.0f rows/s vs older %.0f rows/s (ratio %.2f outside [%.2f, %.2f]); forcing exploration",
-				k.WAW, k.ChunkSize, recentMed, olderMed, ratio, driftDownThreshold, driftUpThreshold,
-			)
-			return true
+		if r.WriteAheadWriters == cell.WAW && r.ChunkSize == cell.ChunkSize {
+			out = append(out, r)
 		}
 	}
-	return false
+	return out
 }
 
 func medianThroughput(rows []HistoryRecord) float64 {
