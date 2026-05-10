@@ -530,3 +530,33 @@ func TestApplyHistory_OutOfRegimeRowsDropped(t *testing.T) {
 			originalWAW, out.WriteAheadWriters)
 	}
 }
+
+// TestApplyHistory_DifferentWorkloadRowsDropped is the #198 integration
+// test: rows with TotalRows beyond tolerance must be excluded by
+// filterByRegime before they reach selection. Mirrors the hw-different
+// case above but exercises the workload axis.
+func TestApplyHistory_DifferentWorkloadRowsDropped(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		TotalRows:   100_000_000,
+		AvgRowBytes: 1000,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2}
+	out := baseline(in, profile)
+	originalWAW := out.WriteAheadWriters
+
+	// Same hw + tuning, but rows from a 10× smaller dataset (the #198 repro
+	// shape: yesterday's 19M-row sweep mixed with today's 106M-row sweep).
+	// After filter, no rows survive → baseline stands.
+	history := &stubHistory{rows: []HistoryRecord{
+		{CPUCores: 16, MemoryGB: 48, TotalRows: 10_000_000, AvgRowBytes: 1000, WriteAheadWriters: 1, FinalThroughput: 1_000_000},
+		{CPUCores: 16, MemoryGB: 48, TotalRows: 10_000_000, AvgRowBytes: 1000, WriteAheadWriters: 4, FinalThroughput: 900_000},
+	}}
+	applyHistory(&out, in, profile, history, DBTuning{})
+
+	if out.WriteAheadWriters != originalWAW {
+		t.Errorf("WAW should remain at baseline %d when all history rows are workload-different; got %d",
+			originalWAW, out.WriteAheadWriters)
+	}
+}
