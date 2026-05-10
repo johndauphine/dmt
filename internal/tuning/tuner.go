@@ -123,6 +123,14 @@ type HistoryRecord struct {
 	// quadratic CS feature.
 	AvgRowBytes int64
 
+	// TotalRows is the row count of the dataset this run migrated.
+	// Used by ClassifyRegime (#198) to drop rows from datasets materially
+	// different in size from the current run — without this filter, a
+	// 19M-row dataset and a 106M-row dataset classify as the same regime,
+	// contaminating the regression's training set with rows from a
+	// different operating point.
+	TotalRows int64
+
 	// What happened
 	FinalThroughput float64
 	ChunkRetryCount int
