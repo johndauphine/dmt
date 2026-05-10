@@ -208,14 +208,27 @@ func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLReques
 				return tableMapper.GenerateTableDDL(ctx, req)
 			}
 		}
-		// Telemetry-only path: deterministic stands but inform the user.
-		// INFO not WARN — approx mappings are intentional fidelity
-		// trade-offs, not errors. Once per table per migration; the
-		// chain has no per-migration state so per-table is the
+		// Telemetry-only path: deterministic stands but inform the
+		// user. INFO not WARN — approx mappings are intentional
+		// fidelity trade-offs, not errors. Once per table per migration;
+		// the chain has no per-migration state so per-table is the
 		// finest grain available without a bigger refactor.
-		logging.Info("typemap chain: table %q used %d approximate (lossy) deterministic mapping(s) for column(s) %v; "+
-			"set migration.approx_type_action: ai_fallback to route these tables through AI for potentially better DDL",
-			req.SourceTable.Name, len(approxCols), approxCols)
+		//
+		// The message changes based on whether the user already opted
+		// in: telling someone with ai_fallback set to "set the knob"
+		// is misleading — they did set it, but AI wasn't available
+		// (no provider configured, or the AI mapper doesn't implement
+		// TableTypeMapper). Distinguish the two cases (Copilot review
+		// on PR #208).
+		if c.approxAction == ApproxActionAIFallback {
+			logging.Info("typemap chain: table %q used %d approximate (lossy) deterministic mapping(s) for column(s) %v; "+
+				"approx_type_action=ai_fallback was requested but no AI fallback is available (provider not configured or mapper doesn't support table-level routing) — used deterministic mapping",
+				req.SourceTable.Name, len(approxCols), approxCols)
+		} else {
+			logging.Info("typemap chain: table %q used %d approximate (lossy) deterministic mapping(s) for column(s) %v; "+
+				"set migration.approx_type_action: ai_fallback to route these tables through AI for potentially better DDL",
+				req.SourceTable.Name, len(approxCols), approxCols)
+		}
 	}
 
 	resp, err := c.primary.GenerateTableDDL(ctx, req)
@@ -265,16 +278,21 @@ func (c *FallbackChain) findRawColumns(req TableDDLRequest) []string {
 // Skips Raw columns — those are handled by findRawColumns and routed
 // before this gate. Calling this on a Raw-bearing table would double-
 // classify those columns; the caller's order-of-checks avoids that.
+//
+// Populates the same ColumnInfo fields that the actual deterministic
+// mapper sees (length/precision/scale) so the pre-scan's IsApproximate
+// verdict matches what GenerateColumnDef would emit at DDL time. A
+// shallow ColumnInfo would diverge for length-sensitive types — e.g. a
+// `varchar(100)` column would be misclassified as nil-Length and emit
+// LONGTEXT instead of VARCHAR(100), giving a different IsApproximate
+// reading than the real mapper. Copilot review on PR #208.
 func (c *FallbackChain) findApproximateColumns(req TableDDLRequest) []string {
 	if req.SourceTable == nil {
 		return nil
 	}
 	var approx []string
 	for _, col := range req.SourceTable.Columns {
-		colInfo := typemap.ColumnInfo{
-			UDTName:  col.DataType,
-			DataType: col.DataType,
-		}
+		colInfo := driverColumnToTypemapColumnInfo(col)
 		canonical := typemap.ToCanonical(colInfo, req.SourceDBType)
 		if canonical.Kind == typemap.KindRaw {
 			continue
@@ -285,6 +303,21 @@ func (c *FallbackChain) findApproximateColumns(req TableDDLRequest) []string {
 		}
 	}
 	return approx
+}
+
+// driverColumnToTypemapColumnInfo projects a driver.Column into the
+// typemap.ColumnInfo shape used by ToCanonical. Mirrors the field
+// population in typeInfoToTypemapColumn / driverColumnToDDL so any
+// helper that needs to ask "what would the deterministic mapper do
+// with this column?" gets the same answer those production paths do.
+func driverColumnToTypemapColumnInfo(col Column) typemap.ColumnInfo {
+	return typemap.ColumnInfo{
+		UDTName:                col.DataType,
+		DataType:               col.DataType,
+		CharacterMaximumLength: nullableInt(col.MaxLength),
+		NumericPrecision:       nullableInt(col.Precision),
+		NumericScale:           nullableInt(col.Scale),
+	}
 }
 
 // GenerateFinalizationDDL implements FinalizationDDLMapper. Routes to
