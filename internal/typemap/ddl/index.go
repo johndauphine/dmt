@@ -37,19 +37,21 @@ func GenerateIndex(table TableInfo, idx Index, sourceDialect, targetDialect stri
 	}
 
 	tableName := QualifiedTableName(table.Schema, table.Name, targetDialect)
-	// Non-unique INDEX on a TEXT/BLOB column on MySQL gets a (255) key
-	// prefix — semantics-preserving (indexes are lookup-only). UNIQUE
-	// INDEX on a TEXT/BLOB column does NOT get a prefix because the
-	// prefix would silently weaken uniqueness (Codex P2 on PR #207);
-	// emitting plain column refs causes MySQL to reject the CREATE
-	// INDEX with a clear "used in key specification without a key
-	// length" error, which is the right loud failure. PK/UNIQUE
-	// CONSTRAINTS on the same shape are handled upstream by
-	// shouldBoundForUniqueness in column.go (column type bounded to
-	// VARCHAR(255)). Unique INDEX outside of a UNIQUE constraint is the
-	// rare case where the source schema author chose unique-via-INDEX
-	// rather than unique-via-CONSTRAINT — separate follow-up if it
-	// shows up in real workloads.
+	// MySQL key-prefix handling for TEXT/BLOB columns differs by index
+	// uniqueness:
+	//
+	//   - Non-unique INDEX: append (255) prefix to the column ref —
+	//     semantics-preserving (indexes are lookup-only).
+	//   - UNIQUE INDEX: emit plain column refs, no prefix. The column
+	//     type was already bounded to VARCHAR/VARBINARY(255) by
+	//     shouldBoundForUniqueness in column.go (which now checks
+	//     unique indexes too — Codex P2 #5 on PR #207), so the
+	//     CREATE UNIQUE INDEX succeeds without needing a prefix.
+	//     If a unique index ever reaches here with the column type
+	//     still LONGTEXT/LONGBLOB (shouldn't happen via the normal
+	//     CREATE TABLE path), MySQL will fail loudly with "used in
+	//     key specification without a key length" — the correct loud
+	//     failure for an unhandled edge case.
 	var cols []string
 	if idx.IsUnique {
 		cols = quoteColumnList(idx.Columns, targetDialect)

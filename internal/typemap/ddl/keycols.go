@@ -1,18 +1,25 @@
-// Key-column reference helpers for MySQL targets.
+// Helpers for the issue #196 LONGTEXT/LONGBLOB fix on MySQL targets.
 //
-// MySQL rejects PRIMARY KEY / UNIQUE / INDEX clauses on TEXT/BLOB
-// columns without an explicit key prefix length. Issue #196 widened
-// unbounded source varchar/text/varbinary to LONGTEXT/LONGBLOB on
-// MySQL to preserve data fidelity (was silently truncating to 255
-// chars), which surfaced this constraint for any source schema with
-// keys on unbounded text columns (rare but possible — e.g., PG
-// `varchar PRIMARY KEY` without a length).
+// Two distinct strategies handle MySQL's restriction that TEXT/BLOB
+// columns can't appear in keys without a prefix length:
 //
-// keyColumnRefs / formatKeyColumnRef append a `(255)` prefix length
-// to the column reference inside a key clause when the column maps
-// to a TEXT/BLOB-family type on MySQL. The 255-byte prefix matches
-// the prior `VARCHAR(255)` emission, so existing data that fit
-// pre-#196 is still indexable post-#196 (Codex review on PR #207).
+//  1. PRIMARY KEY / UNIQUE constraints / unique INDEX:
+//     `shouldBoundForUniqueness` overrides the COLUMN TYPE itself to
+//     bounded VARCHAR/VARBINARY(255). Used by GenerateColumnDef.
+//     Preserves uniqueness semantics — a 255-byte prefix on a UNIQUE
+//     index would silently weaken uniqueness (two values that differ
+//     past byte 255 would conflict), which is worse than truncation.
+//
+//  2. Non-unique INDEX:
+//     `keyColumnRefs` / `formatKeyColumnRef` append a `(255)` prefix
+//     length to the column reference INSIDE the index clause. The
+//     column type stays LONGTEXT (data fidelity preserved); only the
+//     index uses the prefix. Indexes are lookup-only — semantics are
+//     preserved. Used only by GenerateIndex for non-unique indexes.
+//
+// Codex review on PR #207 surfaced both strategies; the file header
+// originally claimed `keyColumnRefs` was used for PK/UNIQUE too — that
+// claim was wrong, the actual call sites are non-unique INDEX only.
 
 package ddl
 
@@ -23,17 +30,23 @@ import (
 	"github.com/johndauphine/dmt/internal/typemap"
 )
 
-// mysqlKeyPrefixLength is the byte prefix length used for MySQL keys
-// on TEXT/BLOB columns. 255 is the safe default — under InnoDB's
-// 3072-byte limit even for utf8mb4 (255×4 = 1020 bytes) and matches
-// the prior bounded VARCHAR(255) width so existing data remains
-// indexable.
+// mysqlKeyPrefixLength is the prefix length used for non-unique
+// INDEX clauses on MySQL TEXT/BLOB columns. The unit MySQL applies is
+// **characters** for non-binary text types (TEXT/LONGTEXT/etc.) and
+// **bytes** for BLOB/LONGBLOB — 255 in both cases. The character/byte
+// distinction matters under utf8mb4 (4 bytes per character); 255
+// chars = 1020 bytes is well under InnoDB's 3072-byte index-key
+// limit (default page size). Matches the prior bounded VARCHAR(255)
+// width so existing data that fit pre-#196 remains indexable.
 const mysqlKeyPrefixLength = 255
 
-// keyColumnRefs returns the column references to use inside a key
-// clause (PRIMARY KEY, UNIQUE, INDEX). On MySQL targets, columns
-// whose mapped type is in the TEXT/BLOB family get a (255) key prefix
-// appended; on other targets returns plain quoted names.
+// keyColumnRefs returns the column references to use inside a
+// non-unique INDEX clause on MySQL. Columns whose mapped type is in
+// the TEXT/BLOB family get a (255) key prefix appended; on other
+// dialects (or when the type doesn't need a prefix) returns plain
+// quoted names. PRIMARY KEY / UNIQUE callers use a different
+// strategy (column-type bounding via shouldBoundForUniqueness in
+// column.go) — see this file's package comment for why.
 func keyColumnRefs(colNames []string, columns []Column, sourceDialect, targetDialect string) []string {
 	out := make([]string, len(colNames))
 	for i, name := range colNames {
@@ -83,24 +96,29 @@ func needsMySQLKeyPrefix(targetType string) bool {
 }
 
 // shouldBoundForUniqueness reports whether a column needs to be emitted
-// as bounded VARCHAR(255) on a MySQL target instead of LONGTEXT/LONGBLOB
-// because it participates in a PRIMARY KEY or UNIQUE constraint.
+// as bounded VARCHAR/VARBINARY(255) on a MySQL target instead of
+// LONGTEXT/LONGBLOB because it participates in a PRIMARY KEY constraint,
+// a UNIQUE constraint, OR a unique INDEX (the driver adapter
+// `driverTableToDDL` projects most source uniqueness as
+// `Index{IsUnique:true}` rather than `ConstraintUnique` — only PK is
+// synthesized as a Constraint, so checking constraints alone misses
+// real-world UNIQUE structures).
 //
-// The 255-byte prefix workaround in non-unique INDEX is fine (indexes
-// are lookup-only, semantics-preserving) but on PK/UNIQUE it would
-// silently weaken uniqueness — two values that differ past byte 255
-// would conflict on insert (reject valid source data) or, worse, be
-// treated as duplicates after the migration completes (correctness
-// violation). Bounded VARCHAR(255) on the column itself avoids both
-// failure modes.
+// The 255-byte/char prefix workaround used by non-unique INDEX is fine
+// (indexes are lookup-only, semantics-preserving) but on any
+// uniqueness-enforcing structure it would silently weaken uniqueness —
+// two values that differ past byte 255 would conflict on insert
+// (reject valid source data) or, worse, be treated as duplicates after
+// the migration completes (correctness violation). Bounded
+// VARCHAR/VARBINARY(255) on the column itself avoids both failure modes.
 //
 // Trade-off: the column truncates source values >255 chars. This is a
-// regression *for keyed unbounded-text columns specifically*, restoring
-// the pre-#196 emission for that narrow case. Common non-keyed
+// regression *for unbounded-text columns under uniqueness specifically*,
+// restoring the pre-#196 emission for that narrow case. Common non-keyed
 // unbounded text (e.g., Posts.Body) still gets the LONGTEXT fidelity
-// win. Source schemas with PK/UNIQUE on unbounded text are rare; PRs
-// that need full fidelity for keyed-text columns should add a length
-// constraint to the source column.
+// win. Source schemas with PK/UNIQUE/unique-INDEX on unbounded text
+// are rare; users who need full fidelity for keyed-text columns should
+// add a length constraint to the source column.
 //
 // Codex review on PR #207 (post-#196 follow-up).
 func shouldBoundForUniqueness(canonical typemap.CanonicalType, constraints []Constraint, indexes []Index, colName, targetDialect string) bool {
