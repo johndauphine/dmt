@@ -50,10 +50,11 @@ type Input struct {
 }
 
 // Tier names identify which selector ultimately picked the (WAW,
-// ChunkSize) values on the Output. Used by the orchestrator and the
-// run-history record so a future grep / aggregation can group runs by
-// the tier that drove them, without parsing the freeform Reasoning
-// string. See issue #202.
+// ChunkSize) values on the Output. Logged by the orchestrator on every
+// run so a reader can group runs by the tier that drove them without
+// parsing the freeform Reasoning string. Not persisted to the
+// ai_tuning_history schema yet — only Reasoning is (as ai_reasoning).
+// Adding a tier column is tracked separately as out-of-scope on #202.
 const (
 	TierBaseline     = "baseline"
 	TierExploration  = "exploration"

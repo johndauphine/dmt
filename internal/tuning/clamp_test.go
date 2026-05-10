@@ -129,6 +129,7 @@ func TestApplyMemoryClamp_ShrinksWhenOverBudget(t *testing.T) {
 		ReadAheadBuffers:  4,
 		WriteAheadWriters: 2,
 		ChunkSize:         1_000_000,
+		Reasoning:         "regression-selected WAW=2, chunk_size=1000000",
 	}
 	in := Input{AvgRowBytes: 500, MaxMemoryMB: 1024}
 	applyMemoryClamp(&out, in)
@@ -138,6 +139,32 @@ func TestApplyMemoryClamp_ShrinksWhenOverBudget(t *testing.T) {
 	// Verify it's at-or-under the budget after clamp
 	if out.EstimatedMemMB > 1024 {
 		t.Errorf("EstimatedMemMB should fit within 1024 MB budget; got %d MB", out.EstimatedMemMB)
+	}
+	// Reasoning chain must record the clamp so the persisted text matches
+	// the final out.ChunkSize (Copilot review on PR #203).
+	if !strings.Contains(out.Reasoning, "memory clamp") {
+		t.Errorf("Reasoning should record the clamp; got %q", out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Reasoning should preserve the upstream selector note; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyMemoryClamp_NoReasoningWhenNoClamp verifies the clamp note is
+// only appended when ChunkSize actually shrinks. A within-budget run
+// must not get a misleading "memory clamp:" entry on its Reasoning.
+func TestApplyMemoryClamp_NoReasoningWhenNoClamp(t *testing.T) {
+	out := Output{
+		Workers:           4,
+		ReadAheadBuffers:  2,
+		WriteAheadWriters: 1,
+		ChunkSize:         10_000,
+		Reasoning:         "smoothed-bins kept WAW=1",
+	}
+	in := Input{AvgRowBytes: 500, MaxMemoryMB: 8_000}
+	applyMemoryClamp(&out, in)
+	if strings.Contains(out.Reasoning, "memory clamp") {
+		t.Errorf("Reasoning must not mention clamp on within-budget run; got %q", out.Reasoning)
 	}
 }
 
