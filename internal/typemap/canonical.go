@@ -62,7 +62,13 @@ const (
 type CanonicalType struct {
 	Kind Kind
 
-	Length    *int // Varchar, Char, Bytes — nil = "no length specified" (characters)
+	// Length is the source-side declared length. Unit depends on Kind:
+	// characters for KindVarchar / KindChar (matches the SQL standard's
+	// CHARACTER_MAXIMUM_LENGTH); bytes for KindBytes (sizing for
+	// VARBINARY/BINARY columns is byte-defined). nil = "no length
+	// specified," which means LONGTEXT/LONGBLOB on MySQL targets after
+	// the #196 fix.
+	Length *int
 	Precision *int // Decimal — nil = "default precision"
 	Scale     *int // Decimal — nil = "default scale"
 	WithTZ    bool // Time, Timestamp
