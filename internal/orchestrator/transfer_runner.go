@@ -136,67 +136,64 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		}
 	}
 	if aiAdjustEnabled {
-		typeMapper, err := driver.GetAITypeMapper()
-		if err == nil && typeMapper != nil {
-			// Type-assert to AITypeMapper
-			if aiMapper, ok := typeMapper.(*driver.AITypeMapper); ok {
-				aiMonitor = monitor.NewAIMonitor(tuner, aiMapper, aiAdjustInterval)
+		// AI runtime monitor is AI-specific (no deterministic
+		// equivalent today; rule-based controller is #172). Silently
+		// no-ops when AI isn't configured (#170).
+		if aiMapper := driver.GetAIMapper(); aiMapper != nil {
+			aiMonitor = monitor.NewAIMonitor(tuner, aiMapper, aiAdjustInterval)
 
-				// Set connection limits from config for AI guardrails
-				aiMonitor.SetConnectionLimits(
-					r.config.Migration.MaxSourceConnections,
-					r.config.Migration.MaxTargetConnections,
-				)
+			// Set connection limits from config for AI guardrails
+			aiMonitor.SetConnectionLimits(
+				r.config.Migration.MaxSourceConnections,
+				r.config.Migration.MaxTargetConnections,
+			)
 
-				// Set migration mode so AI knows drop_recreate vs upsert
-				aiMonitor.SetTargetMode(r.config.Migration.TargetMode)
+			// Set migration mode so AI knows drop_recreate vs upsert
+			aiMonitor.SetTargetMode(r.config.Migration.TargetMode)
 
-				// Set state backend for persistent history
-				aiMonitor.SetStateBackend(r.state, runID)
+			// Set state backend for persistent history
+			aiMonitor.SetStateBackend(r.state, runID)
 
-				// Set total rows so adjuster skips adjustments near completion
-				aiMonitor.SetTotalRows(totalRows)
+			// Set total rows so adjuster skips adjustments near completion
+			aiMonitor.SetTotalRows(totalRows)
 
-				// Set live pool stats callback
-				aiMonitor.SetPoolStatsFunc(func() (stats.PoolStats, stats.PoolStats) {
-					return r.sourcePool.PoolStats(), r.targetPool.PoolStats()
-				})
+			// Set live pool stats callback
+			aiMonitor.SetPoolStatsFunc(func() (stats.PoolStats, stats.PoolStats) {
+				return r.sourcePool.PoolStats(), r.targetPool.PoolStats()
+			})
 
-				// Set progress tracker for table-level completion
-				aiMonitor.SetProgressTracker(r.progress)
+			// Set progress tracker for table-level completion
+			aiMonitor.SetProgressTracker(r.progress)
 
-				// Compute and set table summary for data profile context
-				var totalTableRows int64
-				var rowsWithSize int64
-				var weightedRowBytes int64
-				for _, t := range tables {
-					totalTableRows += t.RowCount
-					if t.EstimatedRowSize > 0 {
-						rowsWithSize += t.RowCount
-						weightedRowBytes += t.RowCount * t.EstimatedRowSize
-					}
+			// Compute and set table summary for data profile context
+			var totalTableRows int64
+			var rowsWithSize int64
+			var weightedRowBytes int64
+			for _, t := range tables {
+				totalTableRows += t.RowCount
+				if t.EstimatedRowSize > 0 {
+					rowsWithSize += t.RowCount
+					weightedRowBytes += t.RowCount * t.EstimatedRowSize
 				}
-				var avgRowBytes int64
-				if rowsWithSize > 0 && weightedRowBytes > 0 {
-					avgRowBytes = weightedRowBytes / rowsWithSize
-				}
-				aiMonitor.SetTableSummary(monitor.TableSummary{
-					TotalTables: len(tables),
-					TotalRows:   totalTableRows,
-					AvgRowBytes: avgRowBytes,
-				})
-
-				// Start monitoring in background
-				monitorCtx, cancelMonitor := context.WithCancel(ctx)
-				defer cancelMonitor()
-				go aiMonitor.Start(monitorCtx)
-
-				logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", aiAdjustInterval)
-			} else {
-				logging.Debug("AI adjustment requested but type assertion failed")
 			}
+			var avgRowBytes int64
+			if rowsWithSize > 0 && weightedRowBytes > 0 {
+				avgRowBytes = weightedRowBytes / rowsWithSize
+			}
+			aiMonitor.SetTableSummary(monitor.TableSummary{
+				TotalTables: len(tables),
+				TotalRows:   totalTableRows,
+				AvgRowBytes: avgRowBytes,
+			})
+
+			// Start monitoring in background
+			monitorCtx, cancelMonitor := context.WithCancel(ctx)
+			defer cancelMonitor()
+			go aiMonitor.Start(monitorCtx)
+
+			logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", aiAdjustInterval)
 		} else {
-			logging.Debug("AI adjustment requested but AI not configured: %v", err)
+			logging.Debug("AI adjustment requested but AI is not configured")
 		}
 	}
 

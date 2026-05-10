@@ -80,14 +80,10 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper interface for table-level DDL generation")
 	}
 
-	// Log AI mapper initialization
-	if aiMapper, ok := opts.TypeMapper.(*driver.AITypeMapper); ok {
-		logging.Debug("AI Table-Level Type Mapping enabled (provider: %s, model: %s)",
-			aiMapper.ProviderName(), aiMapper.Model())
-		if aiMapper.CacheSize() > 0 {
-			logging.Debug("Loaded %d cached AI type mappings", aiMapper.CacheSize())
-		}
-	}
+	// Log mapper initialization. Type-switch to surface which mapper
+	// is in use — useful for debugging when AI fallback is/isn't
+	// firing (#170).
+	driver.LogTypeMapperInit(opts.TypeMapper)
 
 	// Check if type mapper also implements finalization DDL mapper
 	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
@@ -580,7 +576,6 @@ func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk
 	_, err = w.db.ExecContext(ctx, ddl)
 	return err
 }
-
 
 // WriteBatch writes a batch of rows using TDS bulk copy.
 func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {

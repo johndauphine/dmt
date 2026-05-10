@@ -258,6 +258,22 @@ type MigrationConfig struct {
 	// "balanced" (0.15, also the default for empty), "high" (0.25). PR2
 	// #179 reads this; unknown values fall back to "balanced".
 	ExploreMode string `yaml:"explore_mode,omitempty"`
+
+	// UnmappedTypeAction controls what the type-mapper FallbackChain
+	// does for vendor-specific column types (PG inet/cidr/macaddr,
+	// MSSQL hierarchyid, etc.) when no AI fallback is configured.
+	// Valid values:
+	//   "fail"               — emit empty SQL type so DDL emission
+	//                          fails visibly (the safe default)
+	//   "skip"               — emit empty (same effect today; future
+	//                          writer changes can interpret as skip)
+	//   "conservative-text"  — emit the target's most-permissive text
+	//                          type (NVARCHAR(MAX) on MSSQL,
+	//                          LONGTEXT on MySQL, TEXT on PG); lossy
+	//                          but lets the migration progress
+	// Defaults to "fail" via applyDefaults; safer than silently
+	// degrading without a user opt-in. Issue #170.
+	UnmappedTypeAction string `yaml:"unmapped_type_action,omitempty"`
 }
 
 // LoadOptions controls configuration loading behavior.
@@ -603,6 +619,12 @@ func (c *Config) applyDefaults() error {
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
+	if c.Migration.UnmappedTypeAction == "" {
+		// Default: fail visibly when an unmapped type appears and no AI
+		// fallback is configured. Users opt into degraded modes
+		// ("conservative-text", "skip") explicitly. Issue #170.
+		c.Migration.UnmappedTypeAction = "fail"
+	}
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
@@ -896,6 +918,21 @@ func (c *Config) validate() error {
 	// Validate migration settings
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
+	}
+	switch c.Migration.UnmappedTypeAction {
+	case "", "fail", "skip", "conservative-text":
+		// Valid. Empty is allowed because applyDefaults sets it to
+		// "fail" before validate runs in the normal load path; tests
+		// that construct a Config directly and call validate may
+		// leave it empty and that's OK.
+	default:
+		// Non-empty value that doesn't match is a user typo.
+		// Fail loudly rather than silently misbehave (Copilot review
+		// on PR #192 — without this, a typo'd action would default
+		// to empty SQLType in the chain's handleUnmapped and produce
+		// invalid DDL with no clear cause).
+		return fmt.Errorf("migration.unmapped_type_action must be 'fail', 'skip', or 'conservative-text'; got %q",
+			c.Migration.UnmappedTypeAction)
 	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
@@ -1421,11 +1458,13 @@ func (c *Config) DebugDump() string {
 			} else {
 				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
 			}
-			// AI features status - check each feature separately
-			if typeMapper, err := driver.GetAITypeMapper(); err == nil && typeMapper != nil {
-				b.WriteString("  Type Mapping: enabled\n")
+			// AI features status - check each feature separately.
+			// Type mapping always works (deterministic since #170);
+			// the AI mapper is now optional fallback for Raw types only.
+			if driver.GetAIMapper() != nil {
+				b.WriteString("  Type Mapping: deterministic + AI fallback for Raw types\n")
 			} else {
-				b.WriteString("  Type Mapping: disabled\n")
+				b.WriteString("  Type Mapping: deterministic only (no AI fallback)\n")
 			}
 			if diagnoser := driver.GetAIErrorDiagnoser(); diagnoser != nil {
 				b.WriteString("  Error Diagnosis: enabled\n")

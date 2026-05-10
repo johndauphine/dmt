@@ -5,11 +5,10 @@
 // internal/typemap (column-level mapping) and internal/typemap/ddl
 // (full-table assembly + per-constraint DDL).
 //
-// 169c: this PR adds the adapter only. It does NOT change the default
-// type mapper used by the orchestrator or the per-driver writers —
-// they still construct an AITypeMapper via GetAITypeMapper(). Wiring
-// the deterministic mapper as the default with AI fallback for Raw
-// types is #170.
+// History: 169c added the adapter without changing the default
+// type mapper. #170 wires it as the default via GetTypeMapper, with
+// AI as a registered fallback for Raw types and ErrUnsupportedDDL
+// (see typemap_chain.go's FallbackChain).
 //
 // The adapter is stateless. The constructor exists for symmetry with
 // NewAITypeMapper and to give #170's wiring code a stable factory.
@@ -21,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/johndauphine/dmt/internal/ident"
 	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
 )
@@ -100,7 +100,7 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 			req.SourceDBType, req.TargetDBType)
 	}
 
-	tbl := driverTableToDDL(req.SourceTable, req.TargetSchema)
+	tbl := driverTableToDDL(req.SourceTable, req.TargetSchema, req.TargetDBType)
 	createDDL := ddl.GenerateCreateTable(tbl, req.SourceDBType, req.TargetDBType)
 
 	columnTypes := make(map[string]string, len(req.SourceTable.Columns))
@@ -135,7 +135,7 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 			req.SourceDBType, req.TargetDBType)
 	}
 
-	tbl := driverTableToDDL(req.Table, req.TargetSchema)
+	tbl := driverTableToDDL(req.Table, req.TargetSchema, req.TargetDBType)
 
 	switch req.Type {
 	case DDLTypeIndex:
@@ -150,19 +150,19 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 		if reason := unsupportedIndexFeature(*req.Index); reason != "" {
 			return "", fmt.Errorf("index %q: %w (%s)", req.Index.Name, ErrUnsupportedDDL, reason)
 		}
-		return ddl.GenerateIndex(tbl, driverIndexToDDL(*req.Index), req.SourceDBType, req.TargetDBType), nil
+		return ddl.GenerateIndex(tbl, driverIndexToDDL(*req.Index, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
 
 	case DDLTypeForeignKey:
 		if req.ForeignKey == nil {
 			return "", fmt.Errorf("DDLTypeForeignKey requires ForeignKey field")
 		}
-		return ddl.GenerateAddForeignKey(tbl, driverFKToConstraint(*req.ForeignKey), req.SourceDBType, req.TargetDBType), nil
+		return ddl.GenerateAddForeignKey(tbl, driverFKToConstraint(*req.ForeignKey, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
 
 	case DDLTypeCheckConstraint:
 		if req.CheckConstraint == nil {
 			return "", fmt.Errorf("DDLTypeCheckConstraint requires CheckConstraint field")
 		}
-		return ddl.GenerateAddCheck(tbl, driverCheckToConstraint(*req.CheckConstraint), req.SourceDBType, req.TargetDBType), nil
+		return ddl.GenerateAddCheck(tbl, driverCheckToConstraint(*req.CheckConstraint, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
 
 	case DDLTypeDropTable:
 		return generateDropTable(req.TargetSchema, req.Table.Name, req.TargetDBType), nil
@@ -213,6 +213,16 @@ func isSupportedDialect(dialect string) bool {
 // suppression rules: PG's session search_path always puts the default
 // schema first, and MySQL has no schema distinct from the database.
 func generateDropTable(schema, tableName, targetDialect string) string {
+	// Sanitize the table name for PG targets so DROP matches the
+	// case-folded name the rest of dmt's PG flow uses (Writer.
+	// CreatePrimaryKey, FK creation, etc. all sanitize via
+	// ident.SanitizePG). Without this, DROP looks for "LinkTypes"
+	// (case-preserved by quoting) while CREATE / INSERT use
+	// "linktypes" (lowercased) and the operations target different
+	// rows in pg_class.
+	tableName = sanitizeForTarget(tableName, targetDialect)
+	schema = sanitizeForTarget(schema, targetDialect)
+
 	if targetDialect == typemap.DialectMSSQL && schema != "" {
 		// Always qualify on MSSQL — see function doc.
 		return fmt.Sprintf("DROP TABLE IF EXISTS %s.%s;",
@@ -222,6 +232,24 @@ func generateDropTable(schema, tableName, targetDialect string) string {
 	}
 	qname := ddl.QualifiedTableName(schema, tableName, targetDialect)
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", qname)
+}
+
+// sanitizeForTarget runs the target-dialect's identifier sanitization.
+// Postgres folds unquoted identifiers to lowercase, and the rest of
+// dmt's PG writer code (CreatePrimaryKey, FK creation, etc.) sanitizes
+// via ident.SanitizePG before emitting DDL. The deterministic typemap
+// adapter MUST do the same on PG targets or the CREATE TABLE name
+// (case-preserved by quoting) won't match what later phases look up.
+//
+// MSSQL is case-insensitive natively, so its identifier resolution
+// works whether quoted or not — no sanitization needed. MySQL is
+// case-sensitive on Linux but typically table names match source
+// casing; pass through.
+func sanitizeForTarget(name, targetDialect string) string {
+	if targetDialect == typemap.DialectPostgres {
+		return ident.SanitizePG(name)
+	}
+	return name
 }
 
 // typeInfoToTypemapColumn projects a TypeInfo (column-level request)
@@ -253,9 +281,14 @@ func typeInfoToTypemapColumn(info TypeInfo) typemap.ColumnInfo {
 // doesn't carry the default — those columns will emit as plain INT
 // with no auto-increment. Acceptable today; #170's AI fallback can
 // pick up the legacy-serial case if it matters in practice.
-func driverColumnToDDL(col Column) ddl.Column {
+//
+// Column name is sanitized for PG targets (lowercase) to match the
+// rest of dmt's PG flow which uses ident.SanitizePG. Without this,
+// CREATE TABLE column "CreatedAt" would survive case-preserved while
+// later INSERT / index code looks up "createdat" — mismatch.
+func driverColumnToDDL(col Column, targetDialect string) ddl.Column {
 	return ddl.Column{
-		Name:                   col.Name,
+		Name:                   sanitizeForTarget(col.Name, targetDialect),
 		UDTName:                col.DataType,
 		DataType:               col.DataType,
 		CharacterMaximumLength: nullableInt(col.MaxLength),
@@ -275,33 +308,44 @@ func driverColumnToDDL(col Column) ddl.Column {
 // will show the synthesized name, not the source's PK name (Copilot
 // review on PR #190).
 //
+// targetDialect drives identifier sanitization: PG targets get
+// lowercased identifiers via ident.SanitizePG so the emitted CREATE
+// TABLE matches the case-folded names the rest of dmt's PG flow
+// (Writer.CreatePrimaryKey, FK creation, INSERT) uses.
+//
 // Indexes are passed through; FK and CHECK constraints are NOT
 // included on the TableInfo because GenerateCreateTable emits PK only
 // per dmt's contract — the orchestrator handles FK / CHECK in the
 // finalize phase via GenerateFinalizationDDL.
-func driverTableToDDL(t *Table, targetSchema string) ddl.TableInfo {
+func driverTableToDDL(t *Table, targetSchema, targetDialect string) ddl.TableInfo {
 	columns := make([]ddl.Column, len(t.Columns))
 	for i, c := range t.Columns {
-		columns[i] = driverColumnToDDL(c)
+		columns[i] = driverColumnToDDL(c, targetDialect)
 	}
+
+	tableName := sanitizeForTarget(t.Name, targetDialect)
 
 	var constraints []ddl.Constraint
 	if len(t.PrimaryKey) > 0 {
+		pkColumns := make([]string, len(t.PrimaryKey))
+		for i, col := range t.PrimaryKey {
+			pkColumns[i] = sanitizeForTarget(col, targetDialect)
+		}
 		constraints = append(constraints, ddl.Constraint{
-			Name:    "pk_" + t.Name,
+			Name:    "pk_" + tableName,
 			Type:    ddl.ConstraintPrimaryKey,
-			Columns: t.PrimaryKey,
+			Columns: pkColumns,
 		})
 	}
 
 	indexes := make([]ddl.Index, len(t.Indexes))
 	for i, idx := range t.Indexes {
-		indexes[i] = driverIndexToDDL(idx)
+		indexes[i] = driverIndexToDDL(idx, targetDialect)
 	}
 
 	return ddl.TableInfo{
-		Schema:      targetSchema,
-		Name:        t.Name,
+		Schema:      sanitizeForTarget(targetSchema, targetDialect),
+		Name:        tableName,
 		Columns:     columns,
 		Constraints: constraints,
 		Indexes:     indexes,
@@ -314,11 +358,18 @@ func driverTableToDDL(t *Table, targetSchema string) ddl.TableInfo {
 // filtered) and the deterministic emitter doesn't support them.
 // Callers MUST guard with unsupportedIndexFeature first; this
 // projection is only safe when no vendor features are set.
-func driverIndexToDDL(idx Index) ddl.Index {
+//
+// Index name and columns are sanitized for PG targets to match the
+// rest of dmt's PG flow.
+func driverIndexToDDL(idx Index, targetDialect string) ddl.Index {
+	cols := make([]string, len(idx.Columns))
+	for i, c := range idx.Columns {
+		cols[i] = sanitizeForTarget(c, targetDialect)
+	}
 	return ddl.Index{
-		Name:     idx.Name,
+		Name:     sanitizeForTarget(idx.Name, targetDialect),
 		IsUnique: idx.IsUnique,
-		Columns:  idx.Columns,
+		Columns:  cols,
 	}
 }
 
@@ -351,15 +402,26 @@ func unsupportedIndexFeature(idx Index) string {
 // OnUpdate strings flow through to ddl which applies the
 // cross-dialect translation rules (NO ACTION suppressed always,
 // RESTRICT suppressed for MSSQL — see #189's Codex-fix).
-func driverFKToConstraint(fk ForeignKey) ddl.Constraint {
+//
+// Constraint name + columns + referenced table/columns are sanitized
+// for PG targets to match the rest of dmt's PG flow.
+func driverFKToConstraint(fk ForeignKey, targetDialect string) ddl.Constraint {
+	cols := make([]string, len(fk.Columns))
+	for i, c := range fk.Columns {
+		cols[i] = sanitizeForTarget(c, targetDialect)
+	}
+	refCols := make([]string, len(fk.RefColumns))
+	for i, c := range fk.RefColumns {
+		refCols[i] = sanitizeForTarget(c, targetDialect)
+	}
 	return ddl.Constraint{
-		Name:    fk.Name,
+		Name:    sanitizeForTarget(fk.Name, targetDialect),
 		Type:    ddl.ConstraintForeignKey,
-		Columns: fk.Columns,
+		Columns: cols,
 		ForeignKey: &ddl.ForeignKey{
-			RefSchema:  fk.RefSchema,
-			RefTable:   fk.RefTable,
-			RefColumns: fk.RefColumns,
+			RefSchema:  sanitizeForTarget(fk.RefSchema, targetDialect),
+			RefTable:   sanitizeForTarget(fk.RefTable, targetDialect),
+			RefColumns: refCols,
 			DeleteRule: fk.OnDelete,
 			UpdateRule: fk.OnUpdate,
 		},
@@ -370,9 +432,12 @@ func driverFKToConstraint(fk ForeignKey) ddl.Constraint {
 // ddl.Constraint of type ConstraintCheck. The expression passes
 // through verbatim — cross-dialect translation of CHECK expressions
 // (vendor functions, type casts) is the AI fallback's job.
-func driverCheckToConstraint(c CheckConstraint) ddl.Constraint {
+//
+// Constraint name is sanitized; the expression itself is NOT
+// touched (it's already SQL, sanitization could break it).
+func driverCheckToConstraint(c CheckConstraint, targetDialect string) ddl.Constraint {
 	return ddl.Constraint{
-		Name:            c.Name,
+		Name:            sanitizeForTarget(c.Name, targetDialect),
 		Type:            ddl.ConstraintCheck,
 		CheckExpression: c.Definition,
 	}

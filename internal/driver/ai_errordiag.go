@@ -90,13 +90,11 @@ func getGlobalDiagnoser() *AIErrorDiagnoser {
 		return globalDiagnoser
 	}
 
-	// Try to create a new diagnoser
-	typeMapper, err := GetAITypeMapper()
-	if err != nil {
-		return nil
-	}
-	aiMapper, ok := typeMapper.(*AITypeMapper)
-	if !ok || aiMapper == nil {
+	// Try to create a new diagnoser. AI is optional now (#170) — when
+	// not configured, no diagnoser exists and error diagnosis silently
+	// no-ops. Callers should already handle the nil-diagnoser case.
+	aiMapper := GetAIMapper()
+	if aiMapper == nil {
 		return nil
 	}
 

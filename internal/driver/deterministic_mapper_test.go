@@ -536,7 +536,7 @@ func TestDeterministicMapper_GenerateTableDDL_TargetSchemaPreservedAcrossSourceD
 	m := NewDeterministicMapper()
 	table := &Table{
 		Schema: "myapp", Name: "users",
-		Columns: []Column{{Name: "id", DataType: "int", IsNullable: false}},
+		Columns:    []Column{{Name: "id", DataType: "int", IsNullable: false}},
 		PrimaryKey: []string{"id"},
 	}
 	resp, err := m.GenerateTableDDL(context.Background(), TableDDLRequest{
@@ -563,7 +563,7 @@ func TestDriverColumnToDDL_PreservesFields(t *testing.T) {
 		Precision: 0, Scale: 0,
 		IsNullable: false, IsIdentity: false,
 	}
-	got := driverColumnToDDL(col)
+	got := driverColumnToDDL(col, typemap.DialectPostgres)
 
 	if got.Name != "email" || got.UDTName != "varchar" || got.DataType != "varchar" {
 		t.Errorf("name/udt/datatype: %+v", got)
@@ -592,14 +592,14 @@ func TestNullableInt_ZeroIsNil(t *testing.T) {
 
 func TestDriverTableToDDL_SynthesizesPKName(t *testing.T) {
 	// dmt's reader stores PK as a column-name list with no constraint
-	// name. The adapter synthesizes "pk_<table>" matching PG's default
-	// naming convention.
+	// name. The adapter synthesizes "pk_<table>" using the (sanitized)
+	// table name.
 	t1 := &Table{
 		Name:       "users",
 		Columns:    []Column{{Name: "id", DataType: "int4"}},
 		PrimaryKey: []string{"id"},
 	}
-	got := driverTableToDDL(t1, "public")
+	got := driverTableToDDL(t1, "public", typemap.DialectPostgres)
 	if len(got.Constraints) != 1 {
 		t.Fatalf("expected 1 PK constraint; got %d", len(got.Constraints))
 	}
@@ -611,12 +611,62 @@ func TestDriverTableToDDL_SynthesizesPKName(t *testing.T) {
 	}
 }
 
+// TestDriverTableToDDL_PG_SanitizesIdentifiers — regression guard for
+// the case-mismatch issue caught when running SO2010 mssql→pg on PR
+// #192. The deterministic emitter MUST lowercase identifiers when
+// targeting PG so the CREATE TABLE name matches what the rest of
+// dmt's PG flow (Writer.CreatePrimaryKey, FK creation, INSERT) uses
+// after running ident.SanitizePG.
+func TestDriverTableToDDL_PG_SanitizesIdentifiers(t *testing.T) {
+	t1 := &Table{
+		Schema:     "dbo",
+		Name:       "LinkTypes",
+		Columns:    []Column{{Name: "Id", DataType: "int"}, {Name: "Name", DataType: "nvarchar", MaxLength: 50}},
+		PrimaryKey: []string{"Id"},
+	}
+	got := driverTableToDDL(t1, "public", typemap.DialectPostgres)
+
+	if got.Name != "linktypes" {
+		t.Errorf("table name: got %q, want lowercased linktypes", got.Name)
+	}
+	for _, col := range got.Columns {
+		if col.Name != "id" && col.Name != "name" {
+			t.Errorf("column name not lowercased: %q", col.Name)
+		}
+	}
+	if got.Constraints[0].Name != "pk_linktypes" {
+		t.Errorf("PK constraint name: got %q, want pk_linktypes", got.Constraints[0].Name)
+	}
+	if got.Constraints[0].Columns[0] != "id" {
+		t.Errorf("PK column: got %q, want lowercased id", got.Constraints[0].Columns[0])
+	}
+}
+
+// TestDriverTableToDDL_NonPG_PreservesIdentifiers — sanity guard that
+// the sanitization only applies to PG targets. MSSQL is case-
+// insensitive natively; preserving source casing is correct.
+func TestDriverTableToDDL_NonPG_PreservesIdentifiers(t *testing.T) {
+	t1 := &Table{
+		Name:       "LinkTypes",
+		Columns:    []Column{{Name: "Id", DataType: "int"}},
+		PrimaryKey: []string{"Id"},
+	}
+	got := driverTableToDDL(t1, "dbo", typemap.DialectMSSQL)
+
+	if got.Name != "LinkTypes" {
+		t.Errorf("MSSQL target should preserve case; got %q", got.Name)
+	}
+	if got.Columns[0].Name != "Id" {
+		t.Errorf("MSSQL target should preserve column case; got %q", got.Columns[0].Name)
+	}
+}
+
 func TestDriverTableToDDL_NoPK_NoConstraint(t *testing.T) {
 	t1 := &Table{
 		Name:    "audit_log",
 		Columns: []Column{{Name: "ts", DataType: "timestamptz"}},
 	}
-	got := driverTableToDDL(t1, "public")
+	got := driverTableToDDL(t1, "public", typemap.DialectPostgres)
 	if len(got.Constraints) != 0 {
 		t.Errorf("table with no PK should produce no constraints; got %d", len(got.Constraints))
 	}
