@@ -125,9 +125,10 @@ const throughputStabilityRange = 0.10
 
 // queueGrowthLookback is the number of ticks the controller looks
 // back when checking "queue_depth grew for N consecutive ticks."
-// Three ticks at the 30s default tick = 90s of sustained growth
+// Three ticks at the 5s default tick = 15s of sustained growth
 // before the controller intervenes — long enough that one stalled
-// chunk doesn't trigger a writer add.
+// chunk doesn't trigger a writer add, short enough that real
+// queue pressure gets a response within typical migration runtimes.
 const queueGrowthLookback = 3
 
 // throughputStabilityLookback is the equivalent for the

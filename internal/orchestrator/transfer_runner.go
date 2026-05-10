@@ -127,7 +127,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	// applies adjustments per a fixed rule set; no LLM round-trip.
 	var runtimeMonitor *monitor.Controller
 	adjustEnabled := false
-	adjustInterval := 30 * time.Second
+	adjustInterval := 5 * time.Second
 	if r.config.Migration.AIAdjust != nil {
 		adjustEnabled = *r.config.Migration.AIAdjust
 	}
@@ -150,7 +150,32 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		defer cancelMonitor()
 		go runtimeMonitor.Start(monitorCtx)
 
-		logging.Debug("rule-based runtime adjustment enabled (interval: %v)", adjustInterval)
+		// Push live row counts to the collector at sub-tick frequency.
+		// Without this, the collector only sees row updates after each
+		// job completes — for long single-table jobs, throughput
+		// snapshots stay at 0/unchanged for the whole job and the
+		// throughput-stable rule can never fire (Codex review on PR
+		// #195). Polling at adjustInterval/3 means the collector has
+		// at least 3 fresh row-count samples per controller tick.
+		rowPollInterval := adjustInterval / 3
+		if rowPollInterval < 1*time.Second {
+			rowPollInterval = 1 * time.Second
+		}
+		go func() {
+			t := time.NewTicker(rowPollInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					runtimeMonitor.UpdateRowsProcessed(r.progress.Current())
+				case <-monitorCtx.Done():
+					return
+				}
+			}
+		}()
+
+		logging.Debug("rule-based runtime adjustment enabled (interval: %v, row poll: %v)",
+			adjustInterval, rowPollInterval)
 	}
 
 	// Execute jobs with worker pool

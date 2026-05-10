@@ -110,20 +110,20 @@ var KnownProviders = map[string]struct {
 	Type       ProviderType
 	DefaultURL string
 }{
-	"anthropic":   {ProviderTypeCloud, "https://api.anthropic.com"},
-	"openai":   {ProviderTypeCloud, "https://api.openai.com"},
-	"gemini":   {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
-	"ollama":   {ProviderTypeLocal, "http://localhost:11434"},
-	"lmstudio": {ProviderTypeLocal, "http://localhost:1234"},
+	"anthropic": {ProviderTypeCloud, "https://api.anthropic.com"},
+	"openai":    {ProviderTypeCloud, "https://api.openai.com"},
+	"gemini":    {ProviderTypeCloud, "https://generativelanguage.googleapis.com"},
+	"ollama":    {ProviderTypeLocal, "http://localhost:11434"},
+	"lmstudio":  {ProviderTypeLocal, "http://localhost:1234"},
 }
 
 // DefaultModels maps providers to their default models
 var DefaultModels = map[string]string{
-	"anthropic":   "claude-haiku-4-5-20251001",
-	"openai":   "gpt-4o",
-	"gemini":   "gemini-2.0-flash",
-	"ollama":   "llama3",
-	"lmstudio": "local-model",
+	"anthropic": "claude-haiku-4-5-20251001",
+	"openai":    "gpt-4o",
+	"gemini":    "gemini-2.0-flash",
+	"ollama":    "llama3",
+	"lmstudio":  "local-model",
 }
 
 var (
@@ -417,18 +417,26 @@ func (c *Config) GetMasterKey() string {
 func (c *Config) GetMigrationDefaults() *MigrationDefaults {
 	defaults := c.MigrationDefaults
 
-	// Apply smart defaults for AI adjust:
-	// If ai_adjust wasn't explicitly set (nil pointer),
-	// enable it by default when an AI provider is configured
+	// Apply smart defaults for runtime adjust:
+	// If ai_adjust wasn't explicitly set (nil pointer), enable it by
+	// default. Pre-#172 this was gated on an AI provider being
+	// configured (the AI runtime monitor needed an LLM); post-#172
+	// the rule-based controller runs without any AI dependency, so
+	// the default-enable is unconditional.
+	//
+	// The yaml field name `ai_adjust` is preserved for config
+	// backward compat; behavior is now rule-based regardless of
+	// AI configuration (Codex review on PR #195).
 	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
-		// Neither ai_adjust nor ai_adjust_interval was set - apply default
-		if provider, _, err := c.GetDefaultProvider(); err == nil && provider != nil {
-			if provider.APIKey != "" || provider.BaseURL != "" {
-				aiAdjust := true
-				defaults.AIAdjust = &aiAdjust
-				defaults.AIAdjustInterval = "30s"
-			}
-		}
+		aiAdjust := true
+		defaults.AIAdjust = &aiAdjust
+		// 5s tick is appropriate for the rule-based controller — near-
+		// zero per-tick cost (no LLM round-trip) so we can poll at
+		// fine resolution. Gives 3-tick rules (queue growth, throughput
+		// stability) ~15s of accumulated history, which fits within
+		// short migration runtimes (18-27s for SO2010). Pre-#172 the
+		// default was 30s, gated on AI-call latency budget.
+		defaults.AIAdjustInterval = "5s"
 	}
 
 	return &defaults

@@ -636,6 +636,16 @@ func (c *Config) applyDefaults() error {
 		// ("conservative-text", "skip") explicitly. Issue #170.
 		c.Migration.UnmappedTypeAction = "fail"
 	}
+	if c.Migration.AIAdjust == nil {
+		// Default-enable the rule-based runtime controller (#172).
+		// Belt-and-suspenders fallback in case the secrets layer
+		// didn't populate it (e.g., no secrets file at all). The
+		// controller has no AI dependency post-#172, so default-on is
+		// the right behavior even in no-AI environments (Codex review
+		// on PR #195).
+		v := true
+		c.Migration.AIAdjust = &v
+	}
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
