@@ -20,6 +20,8 @@
 package ddl
 
 import (
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -60,21 +62,28 @@ func stripSourceSyntax(expr, sourceDialect string) string {
 	}
 }
 
-// stripPostgresTypecast removes ::TYPE casts from a default expression.
-// Postgres reports DEFAULT 0 as "0::integer" and DEFAULT 'hello' as
-// "'hello'::character varying" — the cast metadata is the type system's
-// concern, not the value's.
+// stripPostgresTypecast removes ::TYPE casts from a default expression
+// recursively, peeling stacked casts like "'hello'::varchar::text"
+// down to the bare value "'hello'". Postgres reports DEFAULT 0 as
+// "0::integer" and DEFAULT 'hello' as "'hello'::character varying";
+// stacked casts appear when a default expression itself involves a
+// cast inside another cast, and they MUST all be stripped — leaving
+// even one ::TYPE in the value would break MSSQL/MySQL emission since
+// the :: cast syntax is PG-specific (Copilot review on PR #188).
 //
-// The implementation finds the LAST :: that's not inside quotes or
-// parens (so we don't strip a :: inside a function call's argument)
-// and trims everything from that position on. Mirrors UVG's
-// find_typecast_pos byte-walk.
+// Each pass finds the LAST :: outside quotes and parens (so we don't
+// touch a :: inside a function call's argument like
+// "nextval('seq'::regclass)") and trims from there. Loops until no
+// more outer casts remain.
 func stripPostgresTypecast(expr string) string {
-	pos := findTypecastPos(expr)
-	if pos < 0 {
-		return strings.TrimSpace(expr)
+	s := strings.TrimSpace(expr)
+	for {
+		pos := findTypecastPos(s)
+		if pos < 0 {
+			return s
+		}
+		s = strings.TrimSpace(s[:pos])
 	}
-	return strings.TrimSpace(expr[:pos])
 }
 
 // findTypecastPos walks the expression byte-by-byte, tracking quote and
@@ -199,10 +208,13 @@ func translateDefaultFunction(expr, targetDialect string) string {
 	lower := strings.ToLower(strings.TrimSpace(expr))
 
 	if isCurrentTimestampSynonym(lower) {
+		// Per issue #169 translation table: PG and MySQL both use the
+		// SQL-standard CURRENT_TIMESTAMP; MSSQL uses GETDATE(). The
+		// older UVG port returned now() for PG — both are valid PG
+		// syntax, but CURRENT_TIMESTAMP is portable and matches the
+		// documented translation table (Copilot review on PR #188).
 		switch targetDialect {
-		case DialectPostgres:
-			return "now()"
-		case DialectMySQL:
+		case DialectPostgres, DialectMySQL:
 			return "CURRENT_TIMESTAMP"
 		case DialectMSSQL:
 			return "GETDATE()"
@@ -289,28 +301,23 @@ func isUnquotedKeywordDefault(s string) bool {
 }
 
 // isNumericLiteral returns true when s parses as a finite number. Used
-// to skip quoting for integer / decimal defaults (DEFAULT 0, DEFAULT
-// 3.14). Sign is allowed.
+// to skip quoting for integer / decimal defaults (DEFAULT 0,
+// DEFAULT 3.14). Defers to strconv.ParseFloat so malformed exponent
+// forms like "1e" or "1e+" are correctly rejected — the byte-walk
+// version originally here accepted them and would have skipped quoting,
+// emitting invalid SQL (Copilot review on PR #188).
 func isNumericLiteral(s string) bool {
 	if s == "" {
 		return false
 	}
-	hasDigit := false
-	hasDot := false
-	hasExp := false
-	for i, ch := range s {
-		switch {
-		case ch >= '0' && ch <= '9':
-			hasDigit = true
-		case ch == '.' && !hasDot && !hasExp:
-			hasDot = true
-		case (ch == 'e' || ch == 'E') && hasDigit && !hasExp:
-			hasExp = true
-		case (ch == '+' || ch == '-') && (i == 0 || s[i-1] == 'e' || s[i-1] == 'E'):
-			// signed prefix or exponent sign
-		default:
-			return false
-		}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return false
 	}
-	return hasDigit
+	// strconv.ParseFloat accepts "Inf" / "NaN" — those aren't valid
+	// SQL numeric defaults, so reject them explicitly.
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return false
+	}
+	return true
 }

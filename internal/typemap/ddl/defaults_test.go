@@ -26,6 +26,67 @@ func TestStripPostgresTypecast(t *testing.T) {
 	}
 }
 
+// TestStripPostgresTypecast_StackedCasts — Copilot review on PR #188.
+// Original implementation stripped only the outermost ::TYPE in one
+// pass; "'hello'::varchar::text" became "'hello'::varchar" with the
+// inner cast still on it, which would break MSSQL/MySQL emission
+// (the :: cast syntax is PG-specific). Now strips recursively until
+// no more outer casts remain.
+func TestStripPostgresTypecast_StackedCasts(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"'hello'::varchar::text", "'hello'"},
+		{"0::integer::bigint", "0"},
+		{"'a'::text::varchar::char", "'a'"},
+		// Inner :: inside a function arg still survives across recursion
+		{"nextval('seq'::regclass)::bigint", "nextval('seq'::regclass)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := stripPostgresTypecast(tc.input); got != tc.want {
+				t.Errorf("got %q, want %q (#188 recursive-strip regression)", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsNumericLiteral_RejectsMalformed — Copilot review on PR #188.
+// Original byte-walk implementation accepted invalid forms like "1e"
+// and "1e+" (digits followed by exponent marker but no exponent
+// digits). ensureDefaultQuoting would then skip quoting on those,
+// emitting invalid SQL. Now defers to strconv.ParseFloat which
+// rejects them.
+func TestIsNumericLiteral_RejectsMalformed(t *testing.T) {
+	rejected := []string{"1e", "1e+", "1e-", "e10", ".", "+", "-", ""}
+	for _, s := range rejected {
+		t.Run("rejects_"+s, func(t *testing.T) {
+			if isNumericLiteral(s) {
+				t.Errorf("%q should NOT be a valid numeric literal (#188 regression)", s)
+			}
+		})
+	}
+
+	// Inf/NaN are valid float64 from strconv.ParseFloat but not valid
+	// SQL numeric defaults — must also be rejected.
+	for _, s := range []string{"Inf", "+Inf", "-Inf", "NaN"} {
+		t.Run("rejects_"+s, func(t *testing.T) {
+			if isNumericLiteral(s) {
+				t.Errorf("%q should NOT be a valid numeric literal", s)
+			}
+		})
+	}
+
+	accepted := []string{"0", "1", "-1", "3.14", "-3.14", "1e10", "1.5e-10", "+42"}
+	for _, s := range accepted {
+		t.Run("accepts_"+s, func(t *testing.T) {
+			if !isNumericLiteral(s) {
+				t.Errorf("%q should be a valid numeric literal", s)
+			}
+		})
+	}
+}
+
 func TestStripMSSQLParens(t *testing.T) {
 	tests := []struct {
 		input, want string
@@ -70,14 +131,24 @@ func TestStripMSSQLParens_DoesNotOverStrip(t *testing.T) {
 	}
 }
 
+// TestTranslateDefaultFunction_CurrentTimestamp covers the issue #169
+// translation table (PG and MySQL → CURRENT_TIMESTAMP, MSSQL →
+// GETDATE()). Both PG and MySQL use the SQL-standard form for
+// portability; MSSQL uses GETDATE() because the standard form isn't
+// recognized as the "default current time" sentinel by all MSSQL
+// versions. Earlier UVG-derived behavior emitted now() for PG —
+// updated per Copilot review on PR #188.
 func TestTranslateDefaultFunction_CurrentTimestamp(t *testing.T) {
 	tests := []struct {
 		input, target, want string
 	}{
 		{"now()", DialectMySQL, "CURRENT_TIMESTAMP"},
-		{"GETDATE()", DialectPostgres, "now()"},
+		{"now()", DialectPostgres, "CURRENT_TIMESTAMP"},
+		{"GETDATE()", DialectPostgres, "CURRENT_TIMESTAMP"},
+		{"GETDATE()", DialectMySQL, "CURRENT_TIMESTAMP"},
 		{"CURRENT_TIMESTAMP", DialectMSSQL, "GETDATE()"},
-		{"sysdatetime()", DialectPostgres, "now()"},
+		{"CURRENT_TIMESTAMP", DialectPostgres, "CURRENT_TIMESTAMP"},
+		{"sysdatetime()", DialectPostgres, "CURRENT_TIMESTAMP"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.input+"_to_"+tc.target, func(t *testing.T) {
@@ -186,9 +257,10 @@ func TestFormatDDLDefault_FunctionTranslation(t *testing.T) {
 	if got := FormatDDLDefault("now()", DialectPostgres, DialectMySQL, false); got != "CURRENT_TIMESTAMP" {
 		t.Errorf("got %q, want CURRENT_TIMESTAMP", got)
 	}
-	// MSSQL ((getdate())) → PG now() — strip parens, translate function
-	if got := FormatDDLDefault("(getdate())", DialectMSSQL, DialectPostgres, false); got != "now()" {
-		t.Errorf("got %q, want now()", got)
+	// MSSQL ((getdate())) → PG CURRENT_TIMESTAMP — strip parens, translate
+	// function (per #169 translation table).
+	if got := FormatDDLDefault("(getdate())", DialectMSSQL, DialectPostgres, false); got != "CURRENT_TIMESTAMP" {
+		t.Errorf("got %q, want CURRENT_TIMESTAMP", got)
 	}
 }
 

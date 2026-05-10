@@ -5,15 +5,21 @@
 
 package ddl
 
-import "strings"
+import (
+	"strings"
 
-// Dialect names. Match dmt's canonical driver names from
-// internal/driver, kept here as string constants so internal/typemap/ddl
-// stays import-cycle-clean from the driver package.
+	"github.com/johndauphine/dmt/internal/typemap"
+)
+
+// Dialect names. Re-exported from internal/typemap to give the ddl
+// subpackage a single self-contained import surface (callers can use
+// ddl.DialectPostgres without separately importing typemap), while
+// keeping the actual string values in one place to prevent drift
+// (Copilot review on PR #188).
 const (
-	DialectPostgres = "postgres"
-	DialectMSSQL    = "mssql"
-	DialectMySQL    = "mysql"
+	DialectPostgres = typemap.DialectPostgres
+	DialectMSSQL    = typemap.DialectMSSQL
+	DialectMySQL    = typemap.DialectMySQL
 )
 
 // QuoteIdentifier wraps an identifier in the target dialect's quoting

@@ -39,7 +39,7 @@ func GenerateColumnDef(col Column, constraints []Constraint, sourceDialect, targ
 	canonical := typemap.ToCanonical(toTypemapColumn(col), sourceDialect)
 	isBoolean := canonical.Kind == typemap.KindBoolean
 
-	typeStr := columnTypeString(col, canonical, sourceDialect, targetDialect, isAuto, isPK)
+	typeStr := columnTypeString(col, canonical, sourceDialect, targetDialect, isAuto)
 
 	parts := []string{fmt.Sprintf("    %s %s", quoted, typeStr)}
 
@@ -73,9 +73,9 @@ func GenerateColumnDef(col Column, constraints []Constraint, sourceDialect, targ
 // increment columns have dialect-specific type handling (PG returns
 // SERIAL / BIGSERIAL which embeds the type); everything else delegates
 // to the canonical type mapper from #168.
-func columnTypeString(col Column, canonical typemap.CanonicalType, sourceDialect, targetDialect string, isAuto, isPK bool) string {
+func columnTypeString(col Column, canonical typemap.CanonicalType, sourceDialect, targetDialect string, isAuto bool) string {
 	if isAuto {
-		return autoIncrementType(col, sourceDialect, targetDialect, isPK)
+		return autoIncrementType(col, sourceDialect, targetDialect)
 	}
 	return typemap.FromCanonical(canonical, targetDialect).SQLType
 }
@@ -91,7 +91,7 @@ func columnTypeString(col Column, canonical typemap.CanonicalType, sourceDialect
 // which would silently widen the column to INTEGER — Codex review on
 // PR #188). BIG > SMALL match order so an int8 with "SMALL" nowhere in
 // its name still wins BIGSERIAL on the BIG check.
-func autoIncrementType(col Column, sourceDialect, targetDialect string, isPK bool) string {
+func autoIncrementType(col Column, sourceDialect, targetDialect string) string {
 	baseType := typemap.MapDDLType(toTypemapColumn(col), sourceDialect, targetDialect).SQLType
 
 	if targetDialect == DialectPostgres {
