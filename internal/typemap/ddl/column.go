@@ -81,18 +81,28 @@ func columnTypeString(col Column, canonical typemap.CanonicalType, sourceDialect
 }
 
 // autoIncrementType returns the type string for an auto-increment
-// column, possibly overriding the base type. Postgres uses
-// SERIAL / BIGSERIAL which is a shorthand for INTEGER / BIGINT plus a
-// sequence — the type field carries the auto-increment-ness rather
-// than a separate suffix.
+// column, possibly overriding the base type. Postgres uses the SERIAL
+// family (SMALLSERIAL / SERIAL / BIGSERIAL) which is shorthand for
+// SMALLINT / INTEGER / BIGINT plus a sequence — the type field carries
+// the auto-increment-ness rather than a separate suffix.
+//
+// Picks the SERIAL-family member that matches the canonical type's
+// width: a SMALLINT identity column maps to SMALLSERIAL (not SERIAL,
+// which would silently widen the column to INTEGER — Codex review on
+// PR #188). BIG > SMALL match order so an int8 with "SMALL" nowhere in
+// its name still wins BIGSERIAL on the BIG check.
 func autoIncrementType(col Column, sourceDialect, targetDialect string, isPK bool) string {
 	baseType := typemap.MapDDLType(toTypemapColumn(col), sourceDialect, targetDialect).SQLType
 
 	if targetDialect == DialectPostgres {
-		if strings.Contains(baseType, "BIG") {
+		switch {
+		case strings.Contains(baseType, "BIG"):
 			return "BIGSERIAL"
+		case strings.Contains(baseType, "SMALL"):
+			return "SMALLSERIAL"
+		default:
+			return "SERIAL"
 		}
-		return "SERIAL"
 	}
 	return baseType
 }

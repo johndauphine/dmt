@@ -111,15 +111,54 @@ func findTypecastPos(expr string) int {
 // prefix on Unicode string literals ("(N'hello')" → "'hello'"). MSSQL's
 // information_schema returns defaults in this decorated form even
 // though the source DDL didn't necessarily write them that way.
+//
+// Critical: only strip an outer pair when it actually encloses the
+// ENTIRE remaining expression, not just when the string starts with `(`
+// and ends with `)`. Without that check, "((1)+(2))" would over-strip
+// to "1)+(2" — the first inner ')' rebalances the depth before the
+// final '(' on the right side (Codex review on PR #188). Quote state is
+// tracked so a `)` inside a string literal doesn't fool the depth
+// counter.
 func stripMSSQLParens(expr string) string {
 	s := strings.TrimSpace(expr)
-	for len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+	for outerParensWrapWhole(s) {
 		s = s[1 : len(s)-1]
 	}
 	if strings.HasPrefix(s, "N'") || strings.HasPrefix(s, `N"`) {
 		s = s[1:]
 	}
 	return strings.TrimSpace(s)
+}
+
+// outerParensWrapWhole returns true when s starts with '(' and the
+// matching ')' for that opening paren is the final character. Walks
+// paren depth + quote state byte-by-byte; the matching close drops
+// depth back to zero — if that happens before the end, the outer pair
+// does NOT enclose the whole expression and stripping would corrupt it.
+func outerParensWrapWhole(s string) bool {
+	if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+		return false
+	}
+	inQuote := false
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '\'':
+			inQuote = !inQuote
+		case ch == '(' && !inQuote:
+			depth++
+		case ch == ')' && !inQuote:
+			depth--
+			// If depth hit zero before the last char, the outer '(' was
+			// already closed — the trailing ')' belongs to a different
+			// pair. Stripping would merge two unrelated parts.
+			if depth == 0 && i != len(s)-1 {
+				return false
+			}
+		}
+	}
+	return depth == 0
 }
 
 // translateBooleanLiteral handles the 0/1 ↔ true/false translation for

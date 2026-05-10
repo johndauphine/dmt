@@ -38,32 +38,34 @@ func QuoteIdentifier(name, dialect string) string {
 }
 
 // QualifiedTableName returns the schema-qualified table name for the
-// target dialect, suppressing the schema when it matches the target's
-// default. Mirrors UVG's qualified_table_name with one notable behavior
-// from the original: cross-dialect default schemas (PG "public", MSSQL
-// "dbo", SQLite "main") are also suppressed when the target is a
-// different dialect — the target writes into ITS default schema rather
-// than re-emitting the source's default schema name.
+// target dialect, suppressing the schema prefix when it would be
+// redundant or wrong:
 //
-// MySQL is a special case: its "schema" is the database name, which is
-// always set at connection time. The schema prefix is unconditionally
-// suppressed for MySQL targets.
-func QualifiedTableName(schema, table, dialect string) string {
-	if schema == "" || schema == defaultSchema(dialect) {
-		return QuoteIdentifier(table, dialect)
+//   - empty schema, or schema matches the TARGET's default → suppress
+//   - schema matches the SOURCE dialect's default → suppress (cross-
+//     dialect default mapping: PG "public" → MSSQL writes into "dbo",
+//     not into a literal "public" schema)
+//   - MySQL target, always → suppress (MySQL's "schema" is the database
+//     name, always set at connection time)
+//
+// The sourceDialect parameter is required for the second rule: without
+// it, a real user-defined PG schema named "dbo" (or MSSQL schema named
+// "public") would be silently suppressed and tables would merge into
+// the target's default schema (Codex review on PR #188).
+func QualifiedTableName(schema, table, sourceDialect, targetDialect string) string {
+	if schema == "" || schema == defaultSchema(targetDialect) {
+		return QuoteIdentifier(table, targetDialect)
 	}
 
-	// Cross-dialect default schemas — the source's default name doesn't
-	// belong in the target DDL; the target uses its own default.
-	if isSourceDefaultSchema(schema) {
-		return QuoteIdentifier(table, dialect)
+	if schema == defaultSchema(sourceDialect) {
+		return QuoteIdentifier(table, targetDialect)
 	}
 
-	if dialect == DialectMySQL {
-		return QuoteIdentifier(table, dialect)
+	if targetDialect == DialectMySQL {
+		return QuoteIdentifier(table, targetDialect)
 	}
 
-	return QuoteIdentifier(schema, dialect) + "." + QuoteIdentifier(table, dialect)
+	return QuoteIdentifier(schema, targetDialect) + "." + QuoteIdentifier(table, targetDialect)
 }
 
 // defaultSchema returns the dialect's default schema name (the one
@@ -82,9 +84,3 @@ func defaultSchema(dialect string) string {
 	}
 }
 
-// isSourceDefaultSchema returns true for any of the three dialects'
-// default schema names. Used by QualifiedTableName to suppress the
-// source default schema when emitting cross-dialect DDL.
-func isSourceDefaultSchema(schema string) bool {
-	return schema == "public" || schema == "dbo" || schema == "main"
-}

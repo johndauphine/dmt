@@ -128,6 +128,40 @@ func TestGenerateColumnDef_AutoIncrementPK_BIGSERIAL(t *testing.T) {
 	}
 }
 
+// TestGenerateColumnDef_AutoIncrementPK_SMALLSERIAL — Codex review on
+// PR #188. A smallint auto-increment column must map to SMALLSERIAL,
+// not SERIAL — the latter silently widens the column from 2 bytes to
+// 4 bytes. Affects both PG smallserial sources and MSSQL smallint
+// IDENTITY sources.
+func TestGenerateColumnDef_AutoIncrementPK_SMALLSERIAL(t *testing.T) {
+	cases := []struct {
+		name    string
+		udtName string
+		source  string
+	}{
+		{"pg_smallint_identity", "int2", DialectPostgres},
+		{"mssql_smallint_identity", "smallint", DialectMSSQL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			col := Column{
+				Name:       "id",
+				UDTName:    tc.udtName,
+				IsIdentity: true,
+				IsNullable: false,
+			}
+			pk := []Constraint{{Name: "pk_t", Type: ConstraintPrimaryKey, Columns: []string{"id"}}}
+			got := GenerateColumnDef(col, pk, tc.source, DialectPostgres)
+			if !strings.Contains(got, "SMALLSERIAL") {
+				t.Errorf("expected SMALLSERIAL (got widened to %q) — #188 regression", got)
+			}
+			if strings.Contains(got, " SERIAL ") || strings.HasSuffix(got, " SERIAL") {
+				t.Errorf("emitted plain SERIAL instead of SMALLSERIAL: %q", got)
+			}
+		})
+	}
+}
+
 func TestGenerateColumnDef_AutoIncrementPK_MySQL(t *testing.T) {
 	// MySQL: type stays INT, AUTO_INCREMENT goes as suffix.
 	col := Column{

@@ -45,6 +45,31 @@ func TestStripMSSQLParens(t *testing.T) {
 	}
 }
 
+// TestStripMSSQLParens_DoesNotOverStrip — Codex review on PR #188.
+// Original implementation looped while s starts with '(' and ends
+// with ')', without checking that the outer pair actually wraps the
+// whole expression. "((1)+(2))" stripped to "(1)+(2)" then to
+// "1)+(2" — invalid. Now: only strip when the outer parens enclose
+// everything (paren-depth scan with quote tracking).
+func TestStripMSSQLParens_DoesNotOverStrip(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"((1)+(2))", "(1)+(2)"},                  // outer wraps, but inner pair doesn't span — strip once only
+		{"((1)+(2)+(3))", "(1)+(2)+(3)"},          // same shape, three terms
+		{"(a)+(b)", "(a)+(b)"},                    // no outer wrapping — leave alone
+		{"((((0))))", "0"},                        // multiple safe layers — strip all
+		{"('a)b')", "'a)b'"},                      // ')' inside quoted literal must not confuse depth tracking
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := stripMSSQLParens(tc.input); got != tc.want {
+				t.Errorf("got %q, want %q (#188 regression)", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTranslateDefaultFunction_CurrentTimestamp(t *testing.T) {
 	tests := []struct {
 		input, target, want string
