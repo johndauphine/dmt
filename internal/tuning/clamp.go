@@ -97,8 +97,18 @@ func applyMemoryClamp(out *Output, in Input) {
 			out.WriteAheadWriters,
 			avg,
 		)
-		if safe > 0 {
+		if safe > 0 && int(safe) < out.ChunkSize {
+			// Append a clamp note so the Reasoning string matches the
+			// final out.ChunkSize. Pre-#202, the selector reasoning
+			// could say "regression-selected ... chunk_size=43630"
+			// while the final value silently dropped to a smaller
+			// memory-safe figure (Copilot review on PR #203).
+			oldCS := out.ChunkSize
 			out.ChunkSize = int(safe)
+			out.Reasoning = appendReasoning(out.Reasoning,
+				"memory clamp: chunk_size %d → %d rows (budget %d MB)",
+				oldCS, out.ChunkSize, budgetMB,
+			)
 		}
 	}
 

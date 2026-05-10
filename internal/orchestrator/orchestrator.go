@@ -779,11 +779,12 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	} else {
 		logging.Info("Tuning: no changes (recommendation matches current config)")
 	}
-	// Log the tuner's reasoning when it deviated from baseline.
+	// Always log the tuner's reasoning. The deterministic tuner
+	// guarantees a non-empty Reasoning + Tier on every run (#202 — silence
+	// hid which tier picked when the value matched the baseline anchor).
 	// sanitizeForLog guards against multi-line content breaking log parsers.
-	if suggestions.Reasoning != "" {
-		logging.Info("Tuning reasoning: %s", sanitizeForLog(suggestions.Reasoning))
-	}
+	logging.Info("Tuning reasoning [%s]: %s",
+		suggestions.Tier, sanitizeForLog(suggestions.Reasoning))
 
 	// Save tuning history with actual params used (after user overrides).
 	// `tuning` was captured earlier so the smartconfig prompt could classify

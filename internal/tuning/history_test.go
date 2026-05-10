@@ -245,8 +245,8 @@ func TestApplyHistory_EndToEnd(t *testing.T) {
 		t.Errorf("WAW: got %d, want 1 (retry-rate filter should exclude WAW=2; WAW=1 has higher mean than WAW=4)",
 			out.WriteAheadWriters)
 	}
-	if !strings.Contains(out.Reasoning, "history-selected WAW=1") {
-		t.Errorf("Reasoning should record the selection; got %q", out.Reasoning)
+	if !strings.Contains(out.Reasoning, "smoothed-bins selected WAW=1") {
+		t.Errorf("Reasoning should record the smoothed-bins selection; got %q", out.Reasoning)
 	}
 }
 
@@ -560,3 +560,117 @@ func TestApplyHistory_DifferentWorkloadRowsDropped(t *testing.T) {
 			originalWAW, out.WriteAheadWriters)
 	}
 }
+
+// --- Issue #202: tier + always-emit-reasoning tests ----------------
+
+// TestApplyHistory_SmoothedBinsReasoningEmittedWhenPickMatchesBaseline
+// is the direct repro of the silence bug: pre-#202, smoothed-bins only
+// appended Reasoning when it changed WriteAheadWriters. When the picked
+// WAW matched what baseline already set, the user got "Tuning applied
+// N parameter(s)" with no reasoning line at all (orchestrator gated on
+// non-empty Reasoning). Post-fix the reasoning must appear with the
+// "kept" verb, and Tier must be TierSmoothedBins.
+func TestApplyHistory_SmoothedBinsReasoningEmittedWhenPickMatchesBaseline(t *testing.T) {
+	in := Input{CPUCores: 16, MemoryGB: 48, SourceDBType: "mssql", TargetDBType: "postgres"}
+	// Baseline pins WAW=1 for this profile (postgres scales-with-cores
+	// off in the synthetic profile), and history's best bin also picks
+	// WAW=1. The pick equals out.WriteAheadWriters → was the silence case.
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 1}
+	out := baseline(in, profile)
+	if out.WriteAheadWriters != 1 {
+		t.Fatalf("baseline WAW should be 1 for this fixture, got %d", out.WriteAheadWriters)
+	}
+
+	rows := make([]HistoryRecord, 0, 6)
+	for i := 0; i < 6; i++ {
+		rows = append(rows, HistoryRecord{
+			CPUCores: 16, MemoryGB: 48,
+			WriteAheadWriters: 1,
+			FinalThroughput:   700_000 + float64(i*1_000),
+		})
+	}
+	applyHistory(&out, in, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	if out.WriteAheadWriters != 1 {
+		t.Errorf("WAW should remain 1 (smoothed-bins agrees with baseline); got %d", out.WriteAheadWriters)
+	}
+	if out.Tier != TierSmoothedBins {
+		t.Errorf("Tier should be %q when smoothed-bins picks; got %q", TierSmoothedBins, out.Tier)
+	}
+	if !strings.Contains(out.Reasoning, "smoothed-bins kept WAW=1") {
+		t.Errorf("Reasoning should record smoothed-bins kept the baseline; got %q", out.Reasoning)
+	}
+}
+
+// TestTune_NilHistory_FillsBaselineReasoning verifies the pure-baseline
+// case carries an explanatory Reasoning + Tier=TierBaseline. Pre-#202
+// this path returned an empty Reasoning, which the orchestrator's
+// non-empty guard then dropped from the log entirely.
+func TestTune_NilHistory_FillsBaselineReasoning(t *testing.T) {
+	in := Input{CPUCores: 8, AvgRowBytes: 500, Platform: "linux"}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := Tune(in, profile, nil, DBTuning{})
+
+	if out.Tier != TierBaseline {
+		t.Errorf("nil-history Tier should be %q; got %q", TierBaseline, out.Tier)
+	}
+	if !strings.Contains(out.Reasoning, "no history backend") {
+		t.Errorf("nil-history Reasoning should mention the missing backend; got %q", out.Reasoning)
+	}
+}
+
+// TestTune_HistoryFetchFailed_FillsBaselineReasoning verifies the
+// fetch-error path also carries an explanatory Reasoning. Distinguishing
+// this from "no backend configured" matters: nil backend is intentional,
+// fetch error means the SQLite/file backend is broken and the user
+// should investigate.
+func TestTune_HistoryFetchFailed_FillsBaselineReasoning(t *testing.T) {
+	in := Input{CPUCores: 8, AvgRowBytes: 500, Platform: "linux", SourceDBType: "mssql", TargetDBType: "postgres"}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	failing := &stubHistory{err: errStubFetchFailed}
+
+	out := Tune(in, profile, failing, DBTuning{})
+
+	if out.Tier != TierBaseline {
+		t.Errorf("fetch-failed Tier should be %q; got %q", TierBaseline, out.Tier)
+	}
+	if !strings.Contains(out.Reasoning, "history fetch failed") {
+		t.Errorf("fetch-failed Reasoning should mention the failure; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyEpsilonPerturbation_OverridesTierToExploration is the Codex
+// P2 fix from #202 review: a perturbed run's final (WAW, ChunkSize)
+// values came from exploration, not from the upstream selector — so
+// Tier must be TierExploration regardless of which selector ran first.
+// The Reasoning chain still preserves the upstream tier's note so the
+// provenance is visible.
+func TestApplyEpsilonPerturbation_OverridesTierToExploration(t *testing.T) {
+	out := &Output{
+		WriteAheadWriters: 4,
+		ChunkSize:         50_000,
+		Tier:              TierRegression,
+		Reasoning:         "regression-selected WAW=4, chunk_size=50000",
+	}
+	profile := DriverProfile{Name: "postgres"}
+	applyEpsilonPerturbation(out, profile)
+
+	if out.Tier != TierExploration {
+		t.Errorf("ε-perturbation should override Tier to %q (upstream regression's pick was nudged); got %q",
+			TierExploration, out.Tier)
+	}
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Reasoning chain should still preserve the upstream regression note; got %q", out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "ε-perturbation") {
+		t.Errorf("Reasoning should record the ε-perturbation; got %q", out.Reasoning)
+	}
+}
+
+// errStubFetchFailed is a sentinel error for the fetch-failed test —
+// keeps the test free of the errors package import.
+var errStubFetchFailed = stubError("simulated fetch failure")
+
+type stubError string
+
+func (e stubError) Error() string { return string(e) }

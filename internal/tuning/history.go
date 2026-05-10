@@ -113,34 +113,47 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 
 	// Regression tier first — when the row count clears the floor and the
 	// fit succeeds, the model picks both WAW and chunk_size from the
-	// per-target grid.
+	// per-target grid. On any failure (fit error, empty grid) the
+	// regression's skip reason is appended to Reasoning so the
+	// fall-through to smoothed-bins is visible to the user — silence
+	// would hide why regression was tried but didn't pick (#202).
 	if len(rows) >= minRowsForRegression {
 		if applyHistoryRegression(out, in, profile, rows) {
 			return
 		}
-		// Fit failed (singular even with ridge, or some other numerical
-		// edge) — fall through to smoothed bins. Reasoning will reflect
-		// whichever tier actually picked.
 	}
 
 	// Smoothed-bins tier (PR1 path). Picks WAW only; chunk_size stays at
 	// the baseline anchor from chunkRowsFromProfile.
 	bins := aggregateByWAW(rows)
 	if len(bins) == 0 {
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"smoothed-bins skipped: no bins after aggregation (zero throughput rows only)",
+		)
 		return
 	}
 
 	picked, pickedMean, ok := selectWAW(bins)
 	if !ok {
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"smoothed-bins skipped: every bin filtered (retry-rate ≥%.0f%% or below ≥%d-run floor)",
+			retryRateExclusionThreshold*100, minRunsPerBin,
+		)
 		return
 	}
-	if picked != out.WriteAheadWriters {
-		out.WriteAheadWriters = picked
-		out.Reasoning = appendReasoning(out.Reasoning,
-			"history-selected WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after retry-rate, regime, outlier, and ≥%d-run threshold filters)",
-			picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
-		)
+	// Always emit reasoning even when the pick equals the existing WAW —
+	// silence is exactly the observability gap from #202. The user needs
+	// to see *which* tier picked, not just whether the value changed.
+	verb := "selected"
+	if picked == out.WriteAheadWriters {
+		verb = "kept"
 	}
+	out.WriteAheadWriters = picked
+	out.Tier = TierSmoothedBins
+	out.Reasoning = appendReasoning(out.Reasoning,
+		"smoothed-bins %s WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after retry-rate, regime, outlier, and ≥%d-run threshold filters)",
+		verb, picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
+	)
 }
 
 // applyHistoryRegression fits the quadratic model to the filtered rows
@@ -153,17 +166,26 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) bool {
 	model, err := fitRegression(rows)
 	if err != nil {
+		// Promote from DEBUG to a Reasoning append so the user can see
+		// regression was tried and skipped, not just silently bypassed
+		// (#202). DEBUG log retained for the underlying error detail.
 		logging.Debug("tuning: regression fit failed (%v) — falling through to smoothed bins", err)
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"regression skipped: fit failed (%v)", err,
+		)
 		return false
 	}
 
 	skip := wawsWithHighRetryRate(rows)
 	pickedWAW, pickedCSBytes, predicted, ok := argmaxRegression(model, in, profile, skip)
 	if !ok {
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"regression skipped: every grid candidate filtered (retry-rate exclusions: %v, HardChunkLimit=%d)",
+			sortedKeys(skip), profile.HardChunkLimit,
+		)
 		return false
 	}
 
-	out.WriteAheadWriters = pickedWAW
 	avg := in.AvgRowBytes
 	if avg <= 0 {
 		avg = 500
@@ -172,12 +194,27 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	if csRows < 1 {
 		csRows = 1 // mirror chunkRowsFromProfile's floor (Copilot PR #183 review)
 	}
+	out.WriteAheadWriters = pickedWAW
 	out.ChunkSize = csRows
+	out.Tier = TierRegression
 	out.Reasoning = appendReasoning(out.Reasoning,
 		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB) over %d filtered rows; predicted %.0f rows/s",
 		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, len(rows), predicted,
 	)
 	return true
+}
+
+// sortedKeys returns the int keys of m sorted ascending. Used by the
+// regression-skipped reasoning so the retry-rate exclusion list logs
+// deterministically (map iteration order would otherwise vary across
+// runs and make log diffs noisy).
+func sortedKeys(m map[int]bool) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // argmaxRegression walks the small (WAW, CS_BYTES) grid and returns the

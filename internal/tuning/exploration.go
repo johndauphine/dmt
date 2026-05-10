@@ -99,6 +99,7 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 		}
 		out.WriteAheadWriters = cand.WAW
 		out.ChunkSize = csRows
+		out.Tier = TierExploration
 		// Label the run within the cold-start window when we're in it;
 		// for forced-explore on a bucket past K runs, just report the
 		// grid-cell index so we don't print "run 42/6" (Copilot review).
@@ -116,7 +117,12 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 	// caller's memory clamp still runs; this is the safest fallback when
 	// HardChunkLimit eliminates every probe (the historical-retry skip
 	// was removed for #186, so HardChunkLimit is now the only way the
-	// grid empties).
+	// grid empties). Note the fallthrough so finalizeTierAndReasoning
+	// doesn't have to invent a reason for this specific case.
+	out.Reasoning = appendReasoning(out.Reasoning,
+		"exploration: every planned-grid candidate filtered (HardChunkLimit=%d) — baseline kept",
+		profile.HardChunkLimit,
+	)
 }
 
 // shouldEpsilonPerturb returns true with probability ε. Uses the global
@@ -200,6 +206,14 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 	order := rand.Perm(len(dirs))
 	for _, idx := range order {
 		if dirs[idx].apply(out) {
+			// A successful nudge means the *final* (WAW, ChunkSize)
+			// values came from exploration, not from the upstream
+			// selector — overwrite Tier so the tier tag matches what
+			// actually shipped to the migration (Codex review on #202).
+			// The chained Reasoning preserves the upstream tier's
+			// note ("regression-selected ... ; ε-perturbation X applied")
+			// so no provenance is lost.
+			out.Tier = TierExploration
 			out.Reasoning = appendReasoning(out.Reasoning, "ε-perturbation %s applied", dirs[idx].name)
 			return
 		}
