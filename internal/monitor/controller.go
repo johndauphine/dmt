@@ -254,8 +254,20 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 		}
 	}
 
-	// Rule 3: any errors observed → back off parallelism.
-	if latest.ErrorCount > 0 && c.knobReady("write_ahead_writers", now) {
+	// Rule 3: NEW errors since last tick → back off parallelism.
+	//
+	// ErrorCount is the cumulative-since-run-start count from the
+	// runtime tuner. A naive `latest.ErrorCount > 0` check would
+	// re-fire the back-off rule every cooldown window after a single
+	// historical failure, eventually pinning WAW at 1 even when no
+	// new errors are occurring (Codex review on PR #194). Compare
+	// to the prior snapshot to detect NEW errors in the tick window
+	// instead.
+	//
+	// On the first tick (no prior snapshot), the rule doesn't fire
+	// — there's no baseline to delta against. The next tick will
+	// have a baseline.
+	if newErrors := newErrorsSinceLast(recent); newErrors > 0 && c.knobReady("write_ahead_writers", now) {
 		next := cur.WriteAheadWriters - 1
 		if next >= 1 {
 			return &Decision{
@@ -263,8 +275,8 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 				PreviousValue: cur.WriteAheadWriters,
 				NewValue:      next,
 				Reasoning: fmt.Sprintf(
-					"%d error(s) observed — backing off writers (%d → %d)",
-					latest.ErrorCount, cur.WriteAheadWriters, next,
+					"%d new error(s) since last tick — backing off writers (%d → %d)",
+					newErrors, cur.WriteAheadWriters, next,
 				),
 			}
 		}
@@ -367,6 +379,31 @@ func throughputStable(recent []PerformanceSnapshot) bool {
 		return false
 	}
 	return (max-min)/avg <= throughputStabilityRange
+}
+
+// newErrorsSinceLast returns the count of errors that occurred between
+// the second-most-recent and most-recent snapshots (i.e., new errors
+// in the latest tick window). Returns 0 when there are fewer than 2
+// snapshots — no baseline to compare against, so we don't fire the
+// back-off rule on the first tick.
+//
+// Codex review on PR #194: ErrorCount is cumulative, so the original
+// `latest.ErrorCount > 0` check would re-fire on every tick after
+// any historical failure. This delta-based check fires only on NEW
+// errors, which is the actual control signal we want.
+func newErrorsSinceLast(recent []PerformanceSnapshot) int {
+	if len(recent) < 2 {
+		return 0
+	}
+	latest := recent[len(recent)-1]
+	prev := recent[len(recent)-2]
+	delta := latest.ErrorCount - prev.ErrorCount
+	if delta < 0 {
+		// Defensive: shouldn't happen since ErrorCount is monotonic
+		// per the tuner's atomic counter. Treat negative as zero.
+		return 0
+	}
+	return delta
 }
 
 // scaleClampedChunk multiplies cur by factor and clamps the result

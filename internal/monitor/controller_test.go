@@ -160,12 +160,15 @@ func TestController_QueueGrewAtCap_FallsThroughToGrowChunk(t *testing.T) {
 	}
 }
 
-// ---------- Rule 3: errors → back off writers ----------
+// ---------- Rule 3: NEW errors → back off writers ----------
 
-func TestController_Errors_ReducesWAW(t *testing.T) {
+func TestController_NewErrors_ReducesWAW(t *testing.T) {
 	c, col, _ := newTestController(t, ControllerOptions{})
-	pushSnapshots(col, snap(50, 30, 0, 3, 500_000, 50000, 4))
-
+	// Two snapshots: prior shows 0 errors, latest shows 3 → delta=3.
+	pushSnapshots(col,
+		snap(50, 80, 0, 0, 500_000, 50000, 4),
+		snap(50, 80, 0, 3, 500_000, 50000, 4),
+	)
 	d := c.Evaluate(time.Now())
 	if d == nil {
 		t.Fatal("expected a Decision; got nil")
@@ -178,12 +181,70 @@ func TestController_Errors_ReducesWAW(t *testing.T) {
 	}
 }
 
-func TestController_ErrorsButWAW1_NoFire(t *testing.T) {
+// TestController_StaleErrors_NoFire — Codex P2 regression on PR #194.
+// ErrorCount is cumulative; a naive `latest.ErrorCount > 0` check
+// would fire the back-off rule on every cooldown after a single
+// historical failure, pinning WAW at 1. The fix uses a delta against
+// the previous snapshot, so unchanged cumulative counts don't fire.
+func TestController_StaleErrors_NoFire(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	// Both snapshots show ErrorCount=3 — no NEW errors since last tick.
+	pushSnapshots(col,
+		snap(50, 80, 0, 3, 500_000, 50000, 4),
+		snap(50, 80, 0, 3, 500_000, 50000, 4),
+	)
+	if d := c.Evaluate(time.Now()); d != nil {
+		t.Errorf("stale cumulative error count should not fire back-off; got %+v (#194 regression)", d)
+	}
+}
+
+func TestController_NewErrorsButWAW1_NoFire(t *testing.T) {
 	// WAW already at floor — can't go lower.
 	c, col, _ := newTestController(t, ControllerOptions{})
-	pushSnapshots(col, snap(50, 30, 0, 3, 500_000, 50000, 1))
+	pushSnapshots(col,
+		snap(50, 80, 0, 0, 500_000, 50000, 1),
+		snap(50, 80, 0, 3, 500_000, 50000, 1),
+	)
 	if d := c.Evaluate(time.Now()); d != nil {
-		t.Errorf("WAW=1 + errors should not fire (floor reached); got %+v", d)
+		t.Errorf("WAW=1 + new errors should not fire (floor reached); got %+v", d)
+	}
+}
+
+// TestController_FirstTick_NoFireOnErrors — boundary case: with only
+// one snapshot, there's no prior to delta against, so the rule
+// shouldn't fire even if ErrorCount > 0. Next tick has a baseline.
+func TestController_FirstTick_NoFireOnErrors(t *testing.T) {
+	c, col, _ := newTestController(t, ControllerOptions{})
+	pushSnapshots(col, snap(50, 80, 0, 5, 500_000, 50000, 4))
+	if d := c.Evaluate(time.Now()); d != nil {
+		t.Errorf("single snapshot should not fire error rule (no baseline); got %+v", d)
+	}
+}
+
+func TestNewErrorsSinceLast(t *testing.T) {
+	cases := []struct {
+		name     string
+		errCount []int // per-snapshot ErrorCount
+		want     int
+	}{
+		{"no_history", nil, 0},
+		{"single_snapshot", []int{5}, 0},
+		{"no_change", []int{3, 3}, 0},
+		{"single_new_error", []int{0, 1}, 1},
+		{"three_new_errors", []int{2, 5}, 3},
+		{"three_history_window_takes_last_two", []int{0, 2, 5}, 3},
+		{"defensive_decrease_returns_zero", []int{5, 3}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snaps := make([]PerformanceSnapshot, len(tc.errCount))
+			for i, n := range tc.errCount {
+				snaps[i].ErrorCount = n
+			}
+			if got := newErrorsSinceLast(snaps); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
