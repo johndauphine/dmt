@@ -125,9 +125,10 @@ const throughputStabilityRange = 0.10
 
 // queueGrowthLookback is the number of ticks the controller looks
 // back when checking "queue_depth grew for N consecutive ticks."
-// Three ticks at the 30s default tick = 90s of sustained growth
+// Three ticks at the 5s default tick = 15s of sustained growth
 // before the controller intervenes — long enough that one stalled
-// chunk doesn't trigger a writer add.
+// chunk doesn't trigger a writer add, short enough that real
+// queue pressure gets a response within typical migration runtimes.
 const queueGrowthLookback = 3
 
 // throughputStabilityLookback is the equivalent for the
@@ -171,6 +172,14 @@ func NewController(tuner transfer.RuntimeTuner, collector *MetricsCollector, int
 // need it.
 func (c *Controller) SetClock(now func() time.Time) {
 	c.nowFn = now
+}
+
+// UpdateRowsProcessed forwards the live row count to the underlying
+// MetricsCollector. Mirrors AIMonitor.UpdateRowsProcessed so the
+// transfer runner can update rows processed without knowing which
+// monitor implementation is in use.
+func (c *Controller) UpdateRowsProcessed(count int64) {
+	c.collector.UpdateRowCount(count)
 }
 
 // Start runs the controller's tick loop AND spawns the collector

@@ -17,7 +17,6 @@ import (
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
-	"github.com/johndauphine/dmt/internal/stats"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
 
@@ -120,85 +119,71 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
 	})
 
-	// Setup AI-driven monitoring if enabled. Precedence is now handled
-	// entirely in the config layer (applyGlobalDefaults inherits secrets
-	// defaults into Migration when unset, then the AI auto-enable site fills
-	// in the final default). This site just reads the resolved values.
-	var aiMonitor *monitor.AIMonitor
-	aiAdjustEnabled := false
-	aiAdjustInterval := 30 * time.Second
+	// Setup runtime parameter adjustment via the rule-based controller
+	// (#172). Replaced the AI-driven monitor in PR 172b — same lifecycle
+	// shape, same migration.ai_adjust config knob (kept for config
+	// backward compat; no longer requires AI configured). The controller
+	// reads the same MetricsCollector + tuner the AI loop used and
+	// applies adjustments per a fixed rule set; no LLM round-trip.
+	var runtimeMonitor *monitor.Controller
+	adjustEnabled := false
+	adjustInterval := 5 * time.Second
 	if r.config.Migration.AIAdjust != nil {
-		aiAdjustEnabled = *r.config.Migration.AIAdjust
+		adjustEnabled = *r.config.Migration.AIAdjust
 	}
 	if r.config.Migration.AIAdjustInterval != "" {
 		if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
-			aiAdjustInterval = d
+			adjustInterval = d
 		}
 	}
-	if aiAdjustEnabled {
-		// AI runtime monitor is AI-specific (no deterministic
-		// equivalent today; rule-based controller is #172). Silently
-		// no-ops when AI isn't configured (#170).
-		if aiMapper := driver.GetAIMapper(); aiMapper != nil {
-			aiMonitor = monitor.NewAIMonitor(tuner, aiMapper, aiAdjustInterval)
+	if adjustEnabled {
+		collector := monitor.NewMetricsCollector(tuner, adjustInterval)
+		runtimeMonitor = monitor.NewController(tuner, collector, adjustInterval, monitor.ControllerOptions{
+			// MaxChunkSize / MinChunkSize / MaxWAW left at defaults.
+			// Defaults: MaxChunkSize=0 (uncapped — current driver
+			// HardChunkLimit implementations all return 0 today, so
+			// there's nothing useful to plumb), MinChunkSize=5000
+			// (memory-pressure floor), MaxWAW=8. The
+			// RuleWriteErrorAdjuster constructed below catches the
+			// common chunk-size-too-big failure modes (MySQL
+			// placeholder cap, MSSQL parameter cap) by halving on
+			// write error rather than relying on a static cap.
+		})
 
-			// Set connection limits from config for AI guardrails
-			aiMonitor.SetConnectionLimits(
-				r.config.Migration.MaxSourceConnections,
-				r.config.Migration.MaxTargetConnections,
-			)
+		monitorCtx, cancelMonitor := context.WithCancel(ctx)
+		defer cancelMonitor()
+		go runtimeMonitor.Start(monitorCtx)
 
-			// Set migration mode so AI knows drop_recreate vs upsert
-			aiMonitor.SetTargetMode(r.config.Migration.TargetMode)
-
-			// Set state backend for persistent history
-			aiMonitor.SetStateBackend(r.state, runID)
-
-			// Set total rows so adjuster skips adjustments near completion
-			aiMonitor.SetTotalRows(totalRows)
-
-			// Set live pool stats callback
-			aiMonitor.SetPoolStatsFunc(func() (stats.PoolStats, stats.PoolStats) {
-				return r.sourcePool.PoolStats(), r.targetPool.PoolStats()
-			})
-
-			// Set progress tracker for table-level completion
-			aiMonitor.SetProgressTracker(r.progress)
-
-			// Compute and set table summary for data profile context
-			var totalTableRows int64
-			var rowsWithSize int64
-			var weightedRowBytes int64
-			for _, t := range tables {
-				totalTableRows += t.RowCount
-				if t.EstimatedRowSize > 0 {
-					rowsWithSize += t.RowCount
-					weightedRowBytes += t.RowCount * t.EstimatedRowSize
+		// Push live row counts to the collector at sub-tick frequency.
+		// Without this, the collector only sees row updates after each
+		// job completes — for long single-table jobs, throughput
+		// snapshots stay at 0/unchanged for the whole job and the
+		// throughput-stable rule can never fire (Codex review on PR
+		// #195). Polling at adjustInterval/3 means the collector has
+		// at least 3 fresh row-count samples per controller tick.
+		rowPollInterval := adjustInterval / 3
+		if rowPollInterval < 1*time.Second {
+			rowPollInterval = 1 * time.Second
+		}
+		go func() {
+			t := time.NewTicker(rowPollInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					runtimeMonitor.UpdateRowsProcessed(r.progress.Current())
+				case <-monitorCtx.Done():
+					return
 				}
 			}
-			var avgRowBytes int64
-			if rowsWithSize > 0 && weightedRowBytes > 0 {
-				avgRowBytes = weightedRowBytes / rowsWithSize
-			}
-			aiMonitor.SetTableSummary(monitor.TableSummary{
-				TotalTables: len(tables),
-				TotalRows:   totalTableRows,
-				AvgRowBytes: avgRowBytes,
-			})
+		}()
 
-			// Start monitoring in background
-			monitorCtx, cancelMonitor := context.WithCancel(ctx)
-			defer cancelMonitor()
-			go aiMonitor.Start(monitorCtx)
-
-			logging.Debug("AI-driven parameter adjustment enabled (interval: %v)", aiAdjustInterval)
-		} else {
-			logging.Debug("AI adjustment requested but AI is not configured")
-		}
+		logging.Debug("rule-based runtime adjustment enabled (interval: %v, row poll: %v)",
+			adjustInterval, rowPollInterval)
 	}
 
 	// Execute jobs with worker pool
-	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, aiMonitor, tuner)
+	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, runtimeMonitor, tuner)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +257,7 @@ func (r *TransferRunner) preTruncateIfNeeded(ctx context.Context, jobs []transfe
 // For partitioned tables, first partitions are processed before remaining partitions
 // to prevent race conditions in partition cleanup logic during idempotent retries.
 // Note: Table truncation is handled upfront by preTruncateIfNeeded, not by partitions.
-func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) ([]TableFailure, error) {
+func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) ([]TableFailure, error) {
 	// Separate jobs into two phases:
 	// - Phase 1: Non-partitioned jobs + first partitions (no dependencies)
 	// - Phase 2: Remaining partitions (wait for first partitions to establish cleanup boundaries)
@@ -298,7 +283,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 	// Phase 1: Process non-partitioned jobs and first partitions
 	// These can run in parallel since they're for different tables or establish cleanup boundaries
 	if len(firstPhaseJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, aiMonitor, tuner); err != nil {
+		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner); err != nil {
 			close(errCh)
 			return nil, err
 		}
@@ -306,7 +291,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 
 	// Phase 2: Process remaining partitions (after first partitions complete)
 	if len(remainingJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, aiMonitor, tuner); err != nil {
+		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner); err != nil {
 			close(errCh)
 			return nil, err
 		}
@@ -319,7 +304,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 }
 
 // executeJobBatch runs a batch of jobs with the worker pool.
-func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) error {
+func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) error {
 	sem := make(chan struct{}, r.config.Migration.Workers)
 	var wg sync.WaitGroup
 	var ctxErr error
@@ -338,7 +323,7 @@ loop:
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, aiMonitor, tuner)
+			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, runtimeMonitor, tuner)
 		}(job)
 	}
 
@@ -350,8 +335,10 @@ loop:
 }
 
 // executeJob runs a single job with retry logic.
-func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, aiMonitor *monitor.AIMonitor, tuner transfer.RuntimeTuner) {
-	// Report active job metrics for AI monitoring
+func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) {
+	// Report active job metrics for runtime monitoring (the rule-based
+	// controller's queue-growth and throughput-stable rules read these
+	// via the MetricsCollector + tuner.Metrics()).
 	if tuner != nil {
 		tuner.ReportActiveJobs(1)
 		defer tuner.ReportActiveJobs(-1)
@@ -389,11 +376,15 @@ retryLoop:
 			}
 		}
 
-		if aiMonitor != nil {
-			stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner, aiMonitor.Adjuster())
-		} else {
-			stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner)
-		}
+		// Per-write-error chunk-size adjuster — deterministic
+		// replacement for the AI-driven path removed in PR #195.
+		// Halves chunk_size when the write error matches a known
+		// structural-limit pattern (MySQL "too many placeholders",
+		// MSSQL 2100-parameter cap, max_allowed_packet); returns 0
+		// (no adjustment) for other errors so transient failures fall
+		// through to the normal retry logic.
+		writeErrAdjuster := monitor.NewRuleWriteErrorAdjuster()
+		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner, writeErrAdjuster)
 		if err == nil {
 			break
 		}
@@ -441,9 +432,10 @@ retryLoop:
 				stats.Rows,
 			)
 		}
-		// Update row counter for AI monitoring
-		if aiMonitor != nil {
-			aiMonitor.UpdateRowsProcessed(r.progress.Current())
+		// Forward row count to the runtime monitor's collector so
+		// the controller's throughput-stable rule has fresh data.
+		if runtimeMonitor != nil {
+			runtimeMonitor.UpdateRowsProcessed(r.progress.Current())
 		}
 	}
 	ts.jobsComplete++

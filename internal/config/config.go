@@ -239,12 +239,23 @@ type MigrationConfig struct {
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
 	DateUpdatedColumns []string `yaml:"date_updated_columns"` // Column names to check for last-modified date (tries each in order)
-	// AI-driven real-time parameter adjustment.
-	// AIAdjust is *bool so the parser can distinguish "user explicitly set false"
-	// from "field unset" (which inherits the secrets default). A plain bool would
-	// silently revert false → true at the auto-enable step (issue #149).
-	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"` // Enable AI-driven parameter adjustment during migration (default: true when AI configured)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"`  // How often AI evaluates metrics (default: 30s)
+	// Real-time parameter adjustment via the rule-based runtime
+	// controller (#172 of the AI-optional epic).
+	//
+	// The field is named AIAdjust for backward compatibility with
+	// existing user configs — pre-#172 it controlled the AI-driven
+	// runtime monitor; post-#172 it controls the deterministic
+	// rule-based controller (no AI dependency, no LLM round-trip).
+	// Users with `ai_adjust: true` in YAML automatically get the new
+	// controller; the knob's behavior changed but its name + default
+	// are preserved.
+	//
+	// AIAdjust is *bool so the parser can distinguish "user explicitly
+	// set false" from "field unset" (which inherits the secrets
+	// default). A plain bool would silently revert false → true at the
+	// auto-enable step (issue #149).
+	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"` // Enable rule-based runtime parameter adjustment during migration (default: true)
+	AIAdjustInterval string `yaml:"ai_adjust_interval"`  // How often the controller evaluates metrics (default: 5s)
 
 	// Explore forces an exploration probe on this run instead of the
 	// tuner's argmax pick (PR2 #179 wires the actual exploration policy;
@@ -624,6 +635,16 @@ func (c *Config) applyDefaults() error {
 		// fallback is configured. Users opt into degraded modes
 		// ("conservative-text", "skip") explicitly. Issue #170.
 		c.Migration.UnmappedTypeAction = "fail"
+	}
+	if c.Migration.AIAdjust == nil {
+		// Default-enable the rule-based runtime controller (#172).
+		// Belt-and-suspenders fallback in case the secrets layer
+		// didn't populate it (e.g., no secrets file at all). The
+		// controller has no AI dependency post-#172, so default-on is
+		// the right behavior even in no-AI environments (Codex review
+		// on PR #195).
+		v := true
+		c.Migration.AIAdjust = &v
 	}
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
