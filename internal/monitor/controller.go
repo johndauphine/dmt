@@ -11,7 +11,9 @@
 //	IF memory_pct > 90:
 //	    chunk_size *= 0.75   (back off under memory pressure)
 //
-//	ELIF queue_depth grew for 3 consecutive ticks:
+//	ELIF queue_depth grew for 3 consecutive ticks
+//	   AND memory_pct < 80                       (#199 interlock)
+//	   AND prior writer-add improved throughput  (#199 throughput-aware):
 //	    write_ahead_writers += 1   (consumer is the bottleneck —
 //	                                add a writer to drain the queue)
 //
@@ -26,6 +28,23 @@
 // write_ahead_writers cool down independently). Within a knob's
 // cooldown window, that knob's rules don't fire — the other knob's
 // rules can still fire if their cooldown has expired.
+//
+// Rule 2 has two extra suppression gates added after #199:
+//   - Memory interlock: if memory% ≥ 80, adding a writer compounds
+//     pressure on the target DB. Rule 1's 90% threshold targets
+//     OOM-imminent; the 80% interlock is the broader "PG is already
+//     swamped" guard that spans the gap between Rule 1 and a healthy
+//     baseline.
+//   - Throughput-aware: after a writer-add, if the recent mean
+//     throughput hasn't improved by ≥2%, the writer didn't help —
+//     the bottleneck is somewhere else (PG WAL flush, disk I/O,
+//     etc.). Don't add another. Reset on rule fires that change
+//     other knobs, since chunk_size changes invalidate the prior
+//     baseline.
+//
+// Both gates are SUPPRESS-only — they don't fire a rule of their
+// own, they just decline Rule 2's add. When suppressed, control
+// falls through to Rules 3 and 4 normally.
 //
 // The controller is a Go struct; tests construct it directly with
 // synthetic metric traces and call Evaluate() / Apply() to verify
@@ -54,6 +73,17 @@ type Controller struct {
 	// is suppressed until time.Now() >= the deadline.
 	chunkSizeCooldownUntil  time.Time
 	writeAheadCooldownUntil time.Time
+
+	// lastWAWAddThroughput is the recent-window mean throughput captured
+	// at the moment of the most recent successful write_ahead_writers add
+	// (#199 throughput-aware gate). lastWAWAddThroughputSet is the
+	// "has baseline" flag — needed because zero is a valid baseline
+	// (writers stalled at the moment of the prior add). Without the
+	// flag, treating zero as "no baseline" would let stack-of-adds
+	// proceed during a full stall (Codex review on PR #201, second
+	// round).
+	lastWAWAddThroughput    float64
+	lastWAWAddThroughputSet bool
 
 	// Caps + floors on parameters. Defaults applied in NewController.
 	maxChunkSize int
@@ -111,6 +141,23 @@ const controllerCooldown = 90 * time.Second
 // the chunk-shrink rule. ≥90% means PG (or MSSQL) is close to OOM;
 // shrinking the chunk lets in-flight rows drain faster.
 const memoryPressureThreshold = 90.0
+
+// writerAddMemoryInterlockThreshold is the upper bound on memory% for
+// Rule 2 to fire (#199). Rule 1's chunk-shrink threshold is 90% (OOM-
+// imminent); this 80% gate suppresses writer-adds in the broader
+// "target DB is already under pressure" zone where a new writer would
+// compound memory contention without draining the queue. Set lower
+// than memoryPressureThreshold so the gate fires before Rule 1 does.
+const writerAddMemoryInterlockThreshold = 80.0
+
+// writerAddMinImprovementRatio is the minimum throughput improvement
+// the throughput-aware gate (#199) requires before allowing another
+// Rule 2 fire. 1.02 = +2%; ratios at or below this means the prior
+// writer-add didn't deliver, so adding another isn't likely to either.
+// 2% is loose enough that tick-to-tick noise doesn't suppress a real
+// payoff but tight enough to catch the "throughput flat after add"
+// failure mode observed in the #199 sweep.
+const writerAddMinImprovementRatio = 1.02
 
 // idleCPUThreshold below which the chunk-grow rule is allowed to
 // fire. CPU < 50% means we have room to do more work per chunk
@@ -271,17 +318,53 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	}
 
 	// Rule 2: queue depth grew for N consecutive ticks → add a writer.
+	// Two suppression gates added in #199:
+	//   - Memory interlock: don't add a writer when memory% is already
+	//     in the "swamped" zone (≥80, below Rule 1's 90% OOM threshold).
+	//   - Throughput-aware: if the prior writer-add didn't improve the
+	//     recent-window mean throughput by ≥2%, the writer-side wasn't
+	//     the bottleneck — don't add another.
+	// Both gates are skip-only — when either fires, control falls through
+	// to Rules 3 and 4 normally.
 	if c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
-		next := cur.WriteAheadWriters + 1
-		if next <= c.maxWAW {
-			return &Decision{
-				Knob:          "write_ahead_writers",
-				PreviousValue: cur.WriteAheadWriters,
-				NewValue:      next,
-				Reasoning: fmt.Sprintf(
-					"queue_depth grew for %d consecutive ticks — adding writer (%d → %d)",
-					queueGrowthLookback, cur.WriteAheadWriters, next,
-				),
+		suppressed := false
+		if latest.MemoryPercent >= writerAddMemoryInterlockThreshold {
+			suppressed = true
+		}
+		if !suppressed && c.lastWAWAddThroughputSet {
+			// `recent` is guaranteed non-empty here — Evaluate returns
+			// early when the metrics window is empty. So meanThroughput
+			// returns the actual mean (possibly 0 if every recent
+			// snapshot has zero throughput, which is the strongest
+			// possible "writers are stalled" signal — the gate must
+			// suppress in that case, not skip it.)
+			currentMean := meanThroughput(recent)
+			switch {
+			case c.lastWAWAddThroughput == 0:
+				// Prior add happened during a stall (baseline=0). Any
+				// positive throughput counts as improvement; continued
+				// zero is no improvement and must be suppressed.
+				// Special case because the proportional check below
+				// (0 < 0*1.02 = 0) wouldn't fire on continued zero.
+				if currentMean == 0 {
+					suppressed = true
+				}
+			case currentMean < c.lastWAWAddThroughput*writerAddMinImprovementRatio:
+				suppressed = true
+			}
+		}
+		if !suppressed {
+			next := cur.WriteAheadWriters + 1
+			if next <= c.maxWAW {
+				return &Decision{
+					Knob:          "write_ahead_writers",
+					PreviousValue: cur.WriteAheadWriters,
+					NewValue:      next,
+					Reasoning: fmt.Sprintf(
+						"queue_depth grew for %d consecutive ticks — adding writer (%d → %d)",
+						queueGrowthLookback, cur.WriteAheadWriters, next,
+					),
+				}
 			}
 		}
 	}
@@ -354,8 +437,33 @@ func (c *Controller) apply(d *Decision) error {
 	switch d.Knob {
 	case "chunk_size":
 		c.chunkSizeCooldownUntil = c.nowFn().Add(controllerCooldown)
+		// Reset the WAW throughput-aware baseline (#199): chunk-size
+		// changes alter the throughput surface, so prior WAW-add
+		// throughput isn't comparable. Treating the next WAW add as
+		// the first one (un-gated) is the safe default — the alternative
+		// is to keep a stale baseline that suppresses legit adds.
+		c.lastWAWAddThroughput = 0
+		c.lastWAWAddThroughputSet = false
 	case "write_ahead_writers":
 		c.writeAheadCooldownUntil = c.nowFn().Add(controllerCooldown)
+		// #199 throughput-aware gate (Codex review on PR #201):
+		//   - Increase (Rule 2 add): snapshot the recent-window mean
+		//     throughput so the next Rule 2 evaluation can verify
+		//     this add actually delivered.
+		//   - Decrease (Rule 3 error back-off): CLEAR the baseline.
+		//     The WAW count just changed under us, so the prior-add
+		//     throughput is no longer comparable; carrying it forward
+		//     would gate a recovery re-add against a stale "post-add"
+		//     reading and could suppress the recovery indefinitely.
+		// Use the same lookback window Evaluate uses for queueGrew so
+		// the comparison is apples-to-apples.
+		if d.NewValue > d.PreviousValue {
+			c.lastWAWAddThroughput = meanThroughput(c.collector.GetRecentMetrics(queueGrowthLookback))
+			c.lastWAWAddThroughputSet = true
+		} else {
+			c.lastWAWAddThroughput = 0
+			c.lastWAWAddThroughputSet = false
+		}
 	}
 	return nil
 }
@@ -420,6 +528,21 @@ func throughputStable(recent []PerformanceSnapshot) bool {
 		return false
 	}
 	return (max-min)/avg <= throughputStabilityRange
+}
+
+// meanThroughput returns the arithmetic mean of Throughput across the
+// recent slice. Returns 0 on empty input — callers (the #199
+// throughput-aware gate) treat zero as "no baseline yet" and skip
+// the comparison.
+func meanThroughput(recent []PerformanceSnapshot) float64 {
+	if len(recent) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, s := range recent {
+		sum += s.Throughput
+	}
+	return sum / float64(len(recent))
 }
 
 // newErrorsSinceLast returns the count of errors that occurred between
