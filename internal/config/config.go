@@ -291,15 +291,19 @@ type MigrationConfig struct {
 	// (known-lossy mappings — e.g. PG INTERVAL → MSSQL NVARCHAR(255),
 	// PG ENUM → VARCHAR(255), JSONB → MySQL JSON). Valid values:
 	//   "deterministic"  — keep the deterministic mapping; emit an INFO
-	//                      log naming the affected columns so the user
-	//                      can decide whether to flip the knob (default;
-	//                      preserves the AI-optional fast path)
+	//                      log naming the affected columns
 	//   "ai_fallback"    — route any table containing approx columns
 	//                      through the AI fallback (only fires when AI
 	//                      is configured; ignored otherwise). Costs an
-	//                      AI call per affected table; AI sees the whole
-	//                      table and may produce better DDL.
-	// Defaults to "deterministic" via applyDefaults. Issue #197.
+	//                      AI call per affected table.
+	// Default depends on AI availability at runtime (issue #209): when
+	// AI is configured, defaults to "ai_fallback" (consistent with how
+	// Raw / table-DDL-error / finalization-error / error-diagnosis paths
+	// already default-on when AI is available — configuring AI is an
+	// implicit opt-in). When AI is NOT configured, defaults to
+	// "deterministic" (no AI to route to). Users who want
+	// "deterministic" with AI configured can set the field explicitly.
+	// Issues #197, #209.
 	ApproxTypeAction string `yaml:"approx_type_action,omitempty"`
 }
 
@@ -652,14 +656,14 @@ func (c *Config) applyDefaults() error {
 		// ("conservative-text", "skip") explicitly. Issue #170.
 		c.Migration.UnmappedTypeAction = "fail"
 	}
-	if c.Migration.ApproxTypeAction == "" {
-		// Default: keep the deterministic mapping for approximate
-		// (lossy) types and emit a one-time INFO log per affected
-		// table. Users opt into AI routing for approx columns
-		// ("ai_fallback") explicitly — preserves the AI-optional
-		// epic's "fast deterministic path" promise. Issue #197.
-		c.Migration.ApproxTypeAction = "deterministic"
-	}
+	// ApproxTypeAction default is intentionally NOT set here — issue
+	// #209. NewFallbackChain in internal/driver fills it in based on
+	// whether AI is available at runtime: ai_fallback when AI is
+	// configured (implicit opt-in, consistent with how Raw / table-
+	// DDL-error / finalization-error / error-diagnosis already work),
+	// deterministic when AI isn't configured. Users who want the
+	// pre-#209 behavior can set approx_type_action: deterministic
+	// explicitly in their YAML.
 	if c.Migration.AIAdjust == nil {
 		// Default-enable the rule-based runtime controller (#172).
 		// Belt-and-suspenders fallback in case the secrets layer
@@ -982,8 +986,11 @@ func (c *Config) validate() error {
 
 	switch c.Migration.ApproxTypeAction {
 	case "", "deterministic", "ai_fallback":
-		// Valid. Same empty-is-OK rule as UnmappedTypeAction; default
-		// is set in applyDefaults. Issue #197.
+		// Valid. Empty intentionally falls through to NewFallbackChain
+		// (#209) which picks ai_fallback when AI is configured,
+		// deterministic when AI isn't — config doesn't know about AI
+		// availability, the chain does. Explicit values override that
+		// runtime decision. Issues #197, #209.
 	default:
 		return fmt.Errorf("migration.approx_type_action must be 'deterministic' or 'ai_fallback'; got %q",
 			c.Migration.ApproxTypeAction)
