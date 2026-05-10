@@ -159,3 +159,259 @@ func TestFitRegression_DistinctPairsAreOrdered(t *testing.T) {
 		}
 	}
 }
+
+// --- Issue #216: R² + 95% prediction interval ---
+
+// TestFitRegression_R2_PerfectFitNearOne — a noiseless quadratic
+// fixture should produce R² close to 1 (the model's surface IS the
+// quadratic that generated the data, modulo the standardization).
+func TestFitRegression_R2_PerfectFitNearOne(t *testing.T) {
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		dev := waw - 4
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   1000.0 - 50.0*float64(dev*dev),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	if m.r2 == nil {
+		t.Fatal("R² nil on a noiseless quadratic; expected near 1.0")
+	}
+	if *m.r2 < 0.95 {
+		t.Errorf("R² = %.3f on noiseless quadratic, want > 0.95", *m.r2)
+	}
+}
+
+// TestFitRegression_R2_NoiseFitNearZero — uncorrelated noise (random
+// throughput, no relationship to features) should yield R² ≈ 0.
+// Uses a deterministic seed-equivalent generator so the test is stable.
+func TestFitRegression_R2_NoiseFitNearZero(t *testing.T) {
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		// Pseudo-random throughput uncorrelated with WAW — modular hash
+		// of i gives a deterministic but non-systematic value.
+		throughput := 500_000.0 + float64((i*7919)%200_000)
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: (i % 6) + 1,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   throughput,
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	if m.r2 == nil {
+		t.Fatal("R² nil on noise fixture; expected near 0")
+	}
+	// Noise → low R². Allow some slack since the WAW one-hot interaction
+	// might pick up modest patterns by chance.
+	if *m.r2 > 0.30 {
+		t.Errorf("R² = %.3f on uncorrelated noise, want < 0.30 (model is overfitting noise)", *m.r2)
+	}
+}
+
+// TestFitRegression_R2_PartialFit — a fit on dominant-feature-with-noise
+// should produce R² in the (0, 1) range. Throughput is mostly explained
+// by WAW (the quadratic catches it), with noise on top.
+func TestFitRegression_R2_PartialFit(t *testing.T) {
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		dev := waw - 4
+		signal := 1000.0 - 50.0*float64(dev*dev)
+		noise := float64((i*7919)%100) - 50 // ±50 around signal
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   signal + noise,
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	if m.r2 == nil {
+		t.Fatal("R² nil on partial-fit fixture")
+	}
+	if *m.r2 <= 0.0 || *m.r2 >= 1.0 {
+		t.Errorf("R² = %.3f on partial-signal fixture, want in (0, 1)", *m.r2)
+	}
+}
+
+// TestPredictionInterval_BracketsPrediction — the 95% prediction
+// interval must contain the point estimate and have non-zero width on
+// any non-degenerate fit. The simplest correctness invariant.
+func TestPredictionInterval_BracketsPrediction(t *testing.T) {
+	rows := make([]HistoryRecord, 30)
+	for i := range rows {
+		waw := (i % 6) + 1
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   500_000.0 + float64(waw*100_000) + float64((i*7919)%50_000),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	pred := m.Predict(2, 25_000_000, "mssql", "postgres", "", 500)
+	low, high, _ := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
+	if !(low <= pred && pred <= high) {
+		t.Errorf("predicted %.0f not bracketed by CI [%.0f, %.0f]", pred, low, high)
+	}
+	if high-low <= 0 {
+		t.Errorf("CI width = %.2f, want > 0 on a non-degenerate fit", high-low)
+	}
+}
+
+// TestPredictionInterval_TightFitNarrowCI — a noiseless quadratic fit
+// should produce a tight CI relative to the prediction (< 10% of the
+// point estimate at the well-trained center of the data). The leverage
+// term is small there because the design matrix has many similar rows.
+func TestPredictionInterval_TightFitNarrowCI(t *testing.T) {
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		dev := waw - 4
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   1_000_000.0 - 50_000.0*float64(dev*dev),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	pred := m.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
+	low, high, _ := m.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	width := high - low
+	relWidth := width / pred
+	if relWidth > 0.10 {
+		t.Errorf("CI width / prediction = %.3f on noiseless fit, want < 0.10 (CI=[%.0f, %.0f], pred=%.0f)",
+			relWidth, low, high, pred)
+	}
+}
+
+// TestPredictionInterval_NoisyFitWideCI — a fit on noisy data should
+// produce a wider CI than a noiseless fit with the same structure.
+// Compares relative widths rather than absolute (different data scales
+// would otherwise dominate).
+func TestPredictionInterval_NoisyFitWideCI(t *testing.T) {
+	mkRows := func(noiseAmplitude float64) []HistoryRecord {
+		rows := make([]HistoryRecord, 60)
+		for i := range rows {
+			waw := (i % 6) + 1
+			dev := waw - 4
+			signal := 1_000_000.0 - 50_000.0*float64(dev*dev)
+			noise := noiseAmplitude * (float64((i*7919)%100) - 50) // ±50 × amp
+			rows[i] = HistoryRecord{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				WriteAheadWriters: waw,
+				ChunkSize:         50000,
+				AvgRowBytes:       500,
+				FinalThroughput:   signal + noise,
+				CPUCores:          16, MemoryGB: 48,
+			}
+		}
+		return rows
+	}
+
+	// Noiseless: very narrow CI.
+	mClean, _ := fitRegression(mkRows(0))
+	predClean := mClean.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
+	lowC, highC, _ := mClean.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	widthClean := (highC - lowC) / predClean
+
+	// Noisy: noise amplitude 10000× compounds to ±500K throughput jitter.
+	mNoisy, _ := fitRegression(mkRows(10_000))
+	predNoisy := mNoisy.Predict(4, 25_000_000, "mssql", "postgres", "", 500)
+	lowN, highN, _ := mNoisy.PredictionInterval(4, 25_000_000, "mssql", "postgres", "", 500)
+	widthNoisy := (highN - lowN) / predNoisy
+
+	if widthNoisy <= widthClean*5 {
+		t.Errorf("noisy CI relative width %.3f should be much wider than clean %.3f (noise scale 10000x)",
+			widthNoisy, widthClean)
+	}
+}
+
+// TestPredictionInterval_DegenerateDof_EmitsNA — when the model has no
+// residual variance computed (sigmaSq nil), PredictionInterval must
+// return (pred, pred) so the caller can emit "N/A" rather than NaN/Inf.
+// This is a safety test for the degenerate path.
+func TestPredictionInterval_DegenerateDof_EmitsNA(t *testing.T) {
+	// Build a valid model first, then null out sigmaSq to simulate the
+	// degenerate-dof path.
+	rows := make([]HistoryRecord, 30)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: (i % 6) + 1,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   500_000.0 + float64(i*1000),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+	m.sigmaSq = nil // simulate degenerate dof
+	low, high, ok := m.PredictionInterval(2, 25_000_000, "mssql", "postgres", "", 500)
+	if ok {
+		t.Errorf("degenerate sigmaSq should return ok=false; got ok=true, low=%.0f, high=%.0f", low, high)
+	}
+}
+
+// TestTCritical_TableValuesMonotone verifies the t-critical lookup is
+// monotonically decreasing with dof in the documented domain (dof ≥ 5)
+// and converges to the normal-approximation 1.96 for large dof.
+//
+// dof < 1 returns 1.96 as a degenerate-marker — caller is expected to
+// have already routed through the "N/A" path before invoking. This
+// test skips that edge case and validates the meaningful range.
+func TestTCritical_TableValuesMonotone(t *testing.T) {
+	dofs := []int{5, 10, 20, 30, 50, 100, 200}
+	prev := math.Inf(1)
+	for _, d := range dofs {
+		got := tCritical(d)
+		if got >= prev {
+			t.Errorf("tCritical(%d)=%.2f not strictly less than previous %.2f (table not monotone)", d, got, prev)
+		}
+		prev = got
+	}
+	if tCritical(1000) != 1.96 {
+		t.Errorf("tCritical(1000)=%.2f, want 1.96 (normal approximation for large dof)", tCritical(1000))
+	}
+}
