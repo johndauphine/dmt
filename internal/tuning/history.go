@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/johndauphine/dmt/internal/logging"
 )
@@ -176,12 +177,12 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 		return false
 	}
 
-	skip := wawsWithHighRetryRate(rows)
-	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, skip)
+	cellSkip := cellsWithHighRetryRate(rows)
+	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, cellSkip)
 	if !ok {
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"regression skipped: every grid candidate filtered (retry-rate exclusions: %v, HardChunkLimit=%d)",
-			sortedKeys(skip), profile.HardChunkLimit,
+			"regression skipped: every grid candidate filtered (retry-rate exclusions: %s, HardChunkLimit=%d)",
+			formatRetryCellSkips(cellSkip), profile.HardChunkLimit,
 		)
 		return false
 	}
@@ -259,7 +260,7 @@ func sortedKeys(m map[int]bool) []int {
 
 // argmaxRegression walks the small (WAW × CS_BYTES × PR × RAB) grid and
 // returns the candidate with the highest predicted throughput, subject to
-// the retry-rate exclusion (skip WAWs whose historical retry rate clears
+// the retry-rate exclusion (skip cells whose historical retry rate clears
 // retryRateExclusionThreshold over ≥minRunsForRetryExclusion runs) and
 // HardChunkLimit (skip CS values above the protocol cap). Returns
 // ok=false when every grid point is filtered out.
@@ -267,7 +268,13 @@ func sortedKeys(m map[int]bool) []int {
 // The PR and RAB grids match the exploration inner grid ({2,4} × {4,8})
 // so argmax only picks values the planned grid actually probes — avoids
 // the extrapolation that drove #218's astronomical CI.
-func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, skip map[int]bool) (waw int, csBytes int64, parallelReaders, readAheadBuffers int, predicted float64, ok bool) {
+//
+// cellSkip is keyed by (WAW, ParallelReaders, ReadAheadBuffers) rather
+// than WAW alone (Codex review on #219): a reader-induced retry pattern
+// at one (PR, RAB) combo no longer bans the whole WAW — other reader
+// combos at the same WAW remain selectable if their historical retry
+// record is clean.
+func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, cellSkip map[retryCellKey]bool) (waw int, csBytes int64, parallelReaders, readAheadBuffers int, predicted float64, ok bool) {
 	const fallbackBytes int64 = 10_000_000
 	optimumBytes := profile.OptimumBulkChunkBytes
 	if optimumBytes <= 0 {
@@ -288,15 +295,15 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 	bestPred := math.Inf(-1)
 
 	for w := 1; w <= maxWAWForGrid; w++ {
-		if skip[w] {
-			continue
-		}
 		for _, cs := range csCandidates {
 			csRows := int(cs / avg)
 			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 				continue
 			}
 			for _, reader := range readerGrid {
+				if cellSkip[retryCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
+					continue
+				}
 				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
 				if pred > bestPred {
 					bestPred = pred
@@ -312,6 +319,108 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, s
 		return 0, 0, 0, 0, 0, false
 	}
 	return bestWAW, bestCSBytes, bestPR, bestRAB, bestPred, true
+}
+
+// retryCellKey identifies a (WriteAheadWriters, ParallelReaders,
+// ReadAheadBuffers) cell for the regression-tier retry-rate exclusion
+// (#219 Codex review). Chunk_size is intentionally NOT part of the key
+// — retry counts are driven by the writer/reader concurrency interplay
+// (waw, pr, rab) far more than by the per-batch row count, and the
+// existing wawsWithHighRetryRate aggregator already disregarded CS for
+// the same reason. Keeping CS out of the key also keeps the per-cell
+// sample count high enough that minRunsForRetryExclusion fires.
+type retryCellKey struct {
+	WAW              int
+	ParallelReaders  int
+	ReadAheadBuffers int
+}
+
+// cellsWithHighRetryRate is the regression-tier counterpart of
+// wawsWithHighRetryRate, aggregating retry stats by the full (WAW, PR,
+// RAB) cell instead of WAW alone. argmaxRegression uses this so that a
+// retry pattern at one reader combo (e.g. PR=4/RAB=8) doesn't ban the
+// other reader combos at the same WAW from selection.
+//
+// Same gates as wawsWithHighRetryRate: (1) retry rate above
+// retryRateExclusionThreshold over ≥minRunsForRetryExclusion runs at
+// that cell, AND (2) mean throughput below the median across all
+// eligible cells. Below-floor cells (insufficient samples) are
+// neither excluded nor used in the median — they remain selectable
+// because there's not enough evidence yet to flag them.
+func cellsWithHighRetryRate(rows []HistoryRecord) map[retryCellKey]bool {
+	type stats struct {
+		runs    int
+		retried int
+		thrSum  float64
+	}
+	c := map[retryCellKey]*stats{}
+	for _, r := range rows {
+		k := retryCellKey{
+			WAW:              r.WriteAheadWriters,
+			ParallelReaders:  r.ParallelReaders,
+			ReadAheadBuffers: r.ReadAheadBuffers,
+		}
+		s := c[k]
+		if s == nil {
+			s = &stats{}
+			c[k] = s
+		}
+		s.runs++
+		s.thrSum += r.FinalThroughput
+		if r.ChunkRetryCount > 0 {
+			s.retried++
+		}
+	}
+
+	eligibleMeans := make([]float64, 0, len(c))
+	for _, s := range c {
+		if s.runs < minRunsForRetryExclusion {
+			continue
+		}
+		eligibleMeans = append(eligibleMeans, s.thrSum/float64(s.runs))
+	}
+	median := medianOfFloats(eligibleMeans)
+
+	out := map[retryCellKey]bool{}
+	for k, s := range c {
+		if s.runs < minRunsForRetryExclusion {
+			continue
+		}
+		mean := s.thrSum / float64(s.runs)
+		rate := float64(s.retried) / float64(s.runs)
+		if rate > retryRateExclusionThreshold && mean < median {
+			out[k] = true
+		}
+	}
+	return out
+}
+
+// formatRetryCellSkips renders a retryCellKey set deterministically for
+// the regression-skipped reasoning message. Keys sort first by WAW,
+// then PR, then RAB so log diffs stay stable across runs (map iteration
+// order would otherwise vary).
+func formatRetryCellSkips(m map[retryCellKey]bool) string {
+	if len(m) == 0 {
+		return "none"
+	}
+	keys := make([]retryCellKey, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].WAW != keys[j].WAW {
+			return keys[i].WAW < keys[j].WAW
+		}
+		if keys[i].ParallelReaders != keys[j].ParallelReaders {
+			return keys[i].ParallelReaders < keys[j].ParallelReaders
+		}
+		return keys[i].ReadAheadBuffers < keys[j].ReadAheadBuffers
+	})
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("WAW=%d/PR=%d/RAB=%d", k.WAW, k.ParallelReaders, k.ReadAheadBuffers))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 // wawsWithHighRetryRate returns the set of WAW values that the SELECTION

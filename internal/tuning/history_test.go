@@ -283,6 +283,88 @@ func TestWawsWithHighRetryRate_ThroughputAware(t *testing.T) {
 	}
 }
 
+// TestCellsWithHighRetryRate_PerCellNotPerWAW (#219, codex review)
+// pins the bug Codex flagged on the original #219 commit: WAW-level
+// retry exclusion would ban an entire WAW value based on retries seen
+// at a single bad reader combo, even if a different reader combo at
+// the same WAW had a clean record. The fix is per-cell aggregation
+// keyed by (WAW, PR, RAB).
+//
+// Setup: WAW=2 has 10 runs at PR=4/RAB=8 with 80% retries and below-
+// median throughput (bad reader combo) AND 10 runs at PR=2/RAB=4 with
+// 0 retries and above-median throughput (clean combo). Expectation:
+// only the bad-combo cell appears in the skip map; the clean cell
+// remains selectable.
+func TestCellsWithHighRetryRate_PerCellNotPerWAW(t *testing.T) {
+	mk := func(waw, pr, rab int, retries int, thr float64) HistoryRecord {
+		return HistoryRecord{
+			WriteAheadWriters: waw,
+			ParallelReaders:   pr,
+			ReadAheadBuffers:  rab,
+			ChunkRetryCount:   retries,
+			FinalThroughput:   thr,
+		}
+	}
+	// WAW=1 clean cell at 800K → eligible, median anchor.
+	// WAW=2/PR=4/RAB=8 bad cell at 400K with retries → excluded.
+	// WAW=2/PR=2/RAB=4 clean cell at 900K → kept.
+	// WAW=4 clean cell at 600K → kept.
+	rows := []HistoryRecord{}
+	for i := 0; i < 10; i++ {
+		rows = append(rows, mk(1, 2, 4, 0, 800_000))
+		rows = append(rows, mk(2, 4, 8, 1, 400_000)) // bad combo, retries
+		rows = append(rows, mk(2, 2, 4, 0, 900_000)) // clean combo at same WAW
+		rows = append(rows, mk(4, 2, 4, 0, 600_000))
+	}
+
+	got := cellsWithHighRetryRate(rows)
+
+	badCell := retryCellKey{WAW: 2, ParallelReaders: 4, ReadAheadBuffers: 8}
+	cleanCell := retryCellKey{WAW: 2, ParallelReaders: 2, ReadAheadBuffers: 4}
+
+	if !got[badCell] {
+		t.Errorf("bad combo (WAW=2/PR=4/RAB=8) with 100%% retries should be excluded; got %v", got)
+	}
+	if got[cleanCell] {
+		t.Errorf("clean combo (WAW=2/PR=2/RAB=4) at same WAW must NOT be excluded — that was Codex's bug (#219 review)")
+	}
+	if got[retryCellKey{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}] {
+		t.Errorf("clean WAW=1 cell must not be excluded; got %v", got)
+	}
+	if got[retryCellKey{WAW: 4, ParallelReaders: 2, ReadAheadBuffers: 4}] {
+		t.Errorf("clean WAW=4 cell must not be excluded; got %v", got)
+	}
+}
+
+// TestFormatRetryCellSkips_DeterministicOrder pins that the reasoning
+// log format sorts cell keys so log diffs aren't churned by map
+// iteration order.
+func TestFormatRetryCellSkips_DeterministicOrder(t *testing.T) {
+	m := map[retryCellKey]bool{
+		{WAW: 4, ParallelReaders: 2, ReadAheadBuffers: 4}: true,
+		{WAW: 1, ParallelReaders: 4, ReadAheadBuffers: 8}: true,
+		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true,
+		{WAW: 2, ParallelReaders: 4, ReadAheadBuffers: 4}: true,
+	}
+	want := "[WAW=1/PR=2/RAB=4, WAW=1/PR=4/RAB=8, WAW=2/PR=4/RAB=4, WAW=4/PR=2/RAB=4]"
+	got := formatRetryCellSkips(m)
+	if got != want {
+		t.Errorf("formatRetryCellSkips ordering wrong:\n got=%s\nwant=%s", got, want)
+	}
+}
+
+// TestFormatRetryCellSkips_EmptyMapEmitsNone documents the empty-map
+// rendering — readers of the reasoning string should see "none" rather
+// than "[]" so the log line is unambiguous.
+func TestFormatRetryCellSkips_EmptyMapEmitsNone(t *testing.T) {
+	if got := formatRetryCellSkips(nil); got != "none" {
+		t.Errorf("formatRetryCellSkips(nil)=%q, want %q", got, "none")
+	}
+	if got := formatRetryCellSkips(map[retryCellKey]bool{}); got != "none" {
+		t.Errorf("formatRetryCellSkips({})=%q, want %q", got, "none")
+	}
+}
+
 // TestAggregateByWAW groups records and ignores zero-throughput rows
 // (incomplete runs).
 func TestAggregateByWAW(t *testing.T) {
