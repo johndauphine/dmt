@@ -1,9 +1,10 @@
 // Package errordiag provides deterministic, regex-matched diagnoses for
 // common database errors emitted during migrations. Each registered
 // driver contributes a catalog of patterns; Lookup returns the first
-// match for a given error message. Callers that need richer analysis
-// can fall back to the AI diagnoser in the parent driver package
-// when Lookup returns no match.
+// match for a given error message. On a miss the parent driver
+// package emits a "no diagnosis available" stub — there is no AI
+// fallback (#173: error messages routinely contain row data, so
+// shipping them to a third-party LLM was deemed a non-starter).
 //
 // This package intentionally does not import the parent driver package
 // to avoid an import cycle. The parent package adapts the local

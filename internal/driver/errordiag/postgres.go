@@ -185,8 +185,8 @@ var postgresPatterns = []Pattern{
 				Cause: fmt.Sprintf("The migration user lacks privileges on schema %q.", schema),
 				Suggestions: []string{
 					fmt.Sprintf("Grant the required privileges:  GRANT USAGE, CREATE ON SCHEMA %q TO <migration_user>;", schema),
-					"See docs/PRIVILEGES.md for the full minimum-privilege list per driver and mode (#232).",
-					"Run `dmt preflight` (#228) to surface privilege gaps before the migration starts.",
+					"For drop_recreate mode you typically also need CREATE on the schema and ALL on tables you create.",
+					"For upsert mode the read/write set is narrower — SELECT/INSERT/UPDATE on the specific tables suffices.",
 				},
 				Confidence: "high",
 				Category:   "permission",
@@ -203,7 +203,7 @@ var postgresPatterns = []Pattern{
 				Suggestions: []string{
 					fmt.Sprintf("Grant the appropriate privileges:  GRANT SELECT, INSERT, UPDATE ON TABLE %q TO <migration_user>;", table),
 					"For drop_recreate mode you also need DROP and CREATE on the table's schema.",
-					"See docs/PRIVILEGES.md for the full minimum-privilege list (#232).",
+					"For source roles, GRANT SELECT on the relevant schemas + USAGE on the schema itself is the typical minimum.",
 				},
 				Confidence: "high",
 				Category:   "permission",

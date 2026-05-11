@@ -2,7 +2,11 @@ package driver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/johndauphine/dmt/internal/driver/errordiag"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -54,12 +58,17 @@ func DiagnoseError(ctx context.Context, errCtx *ErrorContext) *ErrorDiagnosis {
 		return diag
 	}
 
-	// Catalog growth signal: log the first 80 chars of any unmatched error
-	// so a maintainer reviewing the logs (or, after #176, scanning the
-	// telemetry counter) can decide which patterns to add to the catalog.
-	logging.Debug("error diagnosis: no deterministic pattern for driver=%q msg=%q",
-		Canonicalize(errCtx.TargetDBType), truncateForFingerprint(errCtx.ErrorMessage, 80))
-	// TODO(#176): record observability event {surface: "errordiag", source: "unmatched", fingerprint}.
+	// Catalog growth signal. We log a SHA-256 hash (stable identifier
+	// for "this exact error showed up N times") plus a scrubbed prefix
+	// (everything up to the first quote / colon-data / newline, since
+	// those are where real DB drivers put row content like emails, IDs,
+	// and DETAIL clauses). This keeps the catalog-growth signal alive
+	// without re-introducing the PII-egress problem that motivated
+	// removing the AI path in this PR.
+	prefix, hash := errorFingerprint(errCtx.ErrorMessage)
+	logging.Debug("error diagnosis: no deterministic pattern for driver=%q prefix=%q hash=%s",
+		Canonicalize(errCtx.TargetDBType), prefix, hash)
+	// TODO(#176): record observability event {surface: "errordiag", source: "unmatched", hash, prefix}.
 
 	return noDiagnosisAvailable()
 }
@@ -101,12 +110,55 @@ func noDiagnosisAvailable() *ErrorDiagnosis {
 	}
 }
 
-// truncateForFingerprint returns a length-bounded version of s suitable
-// for inclusion in a log fingerprint. Short and stable; the goal is a
-// human-readable hint, not a cryptographic identifier.
-func truncateForFingerprint(s string, max int) string {
-	if len(s) <= max {
+// errorFingerprint returns a (prefix, hash) pair suitable for logging
+// an unmatched error without leaking row content. The prefix is the
+// leading structural phrase (everything before the first quote, colon,
+// or newline — the load-bearing parts DB drivers use to put row
+// values, DETAIL clauses, and quoted identifiers) rune-truncated to a
+// short bound. The hash is a SHA-256 hex prefix over the full message,
+// stable across runs so a maintainer can count "we saw this exact
+// error N times this week" without preserving the message text.
+const errorPrefixMaxRunes = 60
+
+func errorFingerprint(msg string) (prefix string, hash string) {
+	sum := sha256.Sum256([]byte(msg))
+	hash = hex.EncodeToString(sum[:8])
+
+	// First line only — DB drivers put DETAIL on subsequent lines.
+	if i := strings.IndexByte(msg, '\n'); i >= 0 {
+		msg = msg[:i]
+	}
+	// Strip from the first quote (single or double) onward — that's
+	// where constraint names, table identifiers, and row values live.
+	if i := strings.IndexAny(msg, "\"'`"); i >= 0 {
+		msg = msg[:i]
+	}
+	// Strip from "value: <X>" / "data type X" colons onward where the
+	// value would otherwise follow.
+	if i := strings.IndexByte(msg, ':'); i >= 0 {
+		// Keep prefixes like "pq:" / "Error 1062:" / "mssql:" by
+		// permitting an early colon, but drop later ones.
+		if i > 12 {
+			msg = msg[:i]
+		}
+	}
+	prefix = truncateRunes(strings.TrimSpace(msg), errorPrefixMaxRunes)
+	return prefix, hash
+}
+
+// truncateRunes returns s if it fits in max runes; otherwise the
+// rune-aligned prefix followed by an ellipsis. Safe against splitting
+// a multi-byte UTF-8 codepoint.
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	n := 0
+	for i := range s {
+		if n == max {
+			return s[:i] + "…"
+		}
+		n++
+	}
+	return s
 }

@@ -322,8 +322,8 @@ var mssqlPatterns = []Pattern{
 				Cause: fmt.Sprintf("Migration user lacks the required permission on %q.", object),
 				Suggestions: []string{
 					"Grant the appropriate permission (the exact verb is in the error message).",
-					"For drop_recreate the user needs CREATE, DROP, INSERT, ALTER on the schema.",
-					"See docs/PRIVILEGES.md for the minimum-privilege list per driver (#232).",
+					"For drop_recreate the user needs CREATE, DROP, INSERT, ALTER on the schema (db_ddladmin + db_datawriter typically covers it).",
+					"For source roles, db_datareader on the source database is usually sufficient.",
 				},
 				Confidence: "high",
 				Category:   "permission",

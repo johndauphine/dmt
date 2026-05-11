@@ -178,7 +178,8 @@ var mysqlPatterns = []Pattern{
 				Cause: fmt.Sprintf("Operation requires %s, which the migration user lacks.", m[1]),
 				Suggestions: []string{
 					fmt.Sprintf("Grant the privilege: GRANT %s ON <db>.* TO <user>; FLUSH PRIVILEGES;", m[1]),
-					"See docs/PRIVILEGES.md for the minimum-privilege list per driver and mode (#232).",
+					"For drop_recreate mode the typical minimum is ALL PRIVILEGES on the target database; SUPER is rarely required.",
+					"For source roles, SELECT on the source database plus PROCESS (for visibility into system metadata) is usually enough.",
 				},
 				Confidence: "high",
 				Category:   "permission",
