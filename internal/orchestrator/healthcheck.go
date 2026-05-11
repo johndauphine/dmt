@@ -229,9 +229,19 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	// this, records saved via analyze would have empty identity and
 	// fail to match Tier 1 lookups — wasting otherwise-valid training
 	// data (Codex review on PR #218).
+	//
+	// The source schema comes from the `schema` parameter that the
+	// caller passed to Analyze — that's what actually gets analyzed,
+	// so it's the right value to persist on the identity tuple. Fall
+	// back to cfg.Source.Schema only when the caller passed an empty
+	// string (Copilot review on PR #223).
+	sourceSchema := schema
+	if sourceSchema == "" {
+		sourceSchema = o.config.Source.Schema
+	}
 	analyzer.SetWorkloadIdentity(
 		o.config.Source.Host, o.config.Source.Port,
-		o.config.Source.Database, o.config.Source.Schema,
+		o.config.Source.Database, sourceSchema,
 		o.config.Target.Host, o.config.Target.Port,
 		o.config.Target.Database, o.config.Target.Schema,
 	)

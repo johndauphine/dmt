@@ -168,7 +168,12 @@ func minInt(a, b int) int {
 // equality lookup. Hosts and database names are required; schemas may
 // legitimately be empty for drivers that don't expose them (MySQL has
 // no schema concept distinct from database). Ports are required because
-// SQLite NULL ≠ 0 in equality, so a missing port would prevent matches.
+// SQL NULL ports scan as Go's zero value (0) in the SQLite reader, so
+// a missing port would make "unset" indistinguishable from "actual 0"
+// — both would then match pre-#215 rows whose ports also scanned as 0
+// from NULL. Requiring non-zero ports here keeps the Tier 1 comparison
+// honest about which rows it intends to match (Copilot review on
+// PR #223).
 //
 // Returns false on missing required fields → caller skips Tier 1 and
 // falls through to the Tier 2 / Tier 3 path (regime filter or baseline).
