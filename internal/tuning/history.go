@@ -126,7 +126,30 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 
 	// Smoothed-bins tier (PR1 path). Picks WAW only; chunk_size stays at
 	// the baseline anchor from chunkRowsFromProfile.
-	bins := aggregateByWAW(rows)
+	//
+	// Pre-#219 every history row used the same reader settings (PR=2,
+	// RAB=4) because the exploration grid never varied them, so the WAW
+	// bin was inherently apples-to-apples. After #219 the same WAW can
+	// have history runs at multiple (PR, RAB) combos. Aggregating those
+	// into one WAW bin contaminates retry rates and throughput means
+	// (codex review on #219): a bad reader combo's retries could ban a
+	// WAW that's actually clean at the current run's reader settings.
+	//
+	// Fix: filter rows to those matching the output's reader settings
+	// (set by baseline above) before binning. The smoothed-bins tier
+	// is "what's the best WAW *for this reader configuration*". Rows at
+	// other PR/RAB combos are kept in the dataset for the regression
+	// tier (above), which can model the reader axes; they just don't
+	// belong in a comparison that ignores them.
+	binsRows := rowsAtReaderSettings(rows, out.ParallelReaders, out.ReadAheadBuffers)
+	if len(binsRows) == 0 {
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"smoothed-bins skipped: no rows match current reader settings (PR=%d, RAB=%d) — exploration will gather them",
+			out.ParallelReaders, out.ReadAheadBuffers,
+		)
+		return
+	}
+	bins := aggregateByWAW(binsRows)
 	if len(bins) == 0 {
 		out.Reasoning = appendReasoning(out.Reasoning,
 			"smoothed-bins skipped: no bins after aggregation (zero throughput rows only)",
@@ -152,9 +175,30 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 	out.WriteAheadWriters = picked
 	out.Tier = TierSmoothedBins
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"smoothed-bins %s WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after retry-rate, regime, outlier, and ≥%d-run threshold filters)",
-		verb, picked, pickedMean, countEligibleBins(bins), minRunsPerBin,
+		"smoothed-bins %s WAW=%d (shrunk mean %.0f rows/s; %d bins eligible after reader=PR%d/RAB%d, retry-rate, regime, outlier, and ≥%d-run threshold filters)",
+		verb, picked, pickedMean, countEligibleBins(bins), out.ParallelReaders, out.ReadAheadBuffers, minRunsPerBin,
 	)
+}
+
+// rowsAtReaderSettings filters rows to those matching the given
+// (parallel_readers, read_ahead_buffers) (#219 codex review pass 3).
+// Used by the smoothed-bins tier so the per-WAW comparison is
+// apples-to-apples — a bad reader combo's retries don't contaminate
+// the WAW bin for the current run's reader configuration.
+//
+// Rows with FinalThroughput <= 0 are dropped (matches the convention
+// in the rest of the tuning filters — incomplete runs aren't evidence).
+func rowsAtReaderSettings(rows []HistoryRecord, pr, rab int) []HistoryRecord {
+	out := make([]HistoryRecord, 0, len(rows))
+	for _, r := range rows {
+		if r.FinalThroughput <= 0 {
+			continue
+		}
+		if r.ParallelReaders == pr && r.ReadAheadBuffers == rab {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // applyHistoryRegression fits the quadratic model to the filtered rows
