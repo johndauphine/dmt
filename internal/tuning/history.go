@@ -222,11 +222,12 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	}
 
 	cellSkip := cellsWithHighRetryRate(rows)
-	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, cellSkip)
+	covered := cellsWithCoverage(rows)
+	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, cellSkip, covered)
 	if !ok {
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"regression skipped: every grid candidate filtered (retry-rate exclusions: %s, HardChunkLimit=%d)",
-			formatRetryCellSkips(cellSkip), profile.HardChunkLimit,
+			"regression skipped: every grid candidate filtered (retry-rate exclusions: %s, HardChunkLimit=%d, covered cells: %d)",
+			formatRetryCellSkips(cellSkip), profile.HardChunkLimit, len(covered),
 		)
 		return false
 	}
@@ -262,8 +263,8 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	}
 
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows; predicted %.0f rows/s [95%% CI: %s]; R²=%s",
-		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), predicted, ciStr, r2Str,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %.0f rows/s [95%% CI: %s]; R²=%s",
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), len(covered), predicted, ciStr, r2Str,
 	)
 	return true
 }
@@ -318,7 +319,18 @@ func sortedKeys(m map[int]bool) []int {
 // at one (PR, RAB) combo no longer bans the whole WAW — other reader
 // combos at the same WAW remain selectable if their historical retry
 // record is clean.
-func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, cellSkip map[retryCellKey]bool) (waw int, csBytes int64, parallelReaders, readAheadBuffers int, predicted float64, ok bool) {
+//
+// covered is the cube-corner extrapolation gate (#221): the argmax
+// refuses to pick a (WAW, PR, RAB) cell the training data has never
+// visited, because the linear model adds PR and WAW effects
+// independently and can extrapolate catastrophically across the empty
+// corners. Measured failure: 124-row history with WAW=1 only at PR=2
+// and PR=4 only at WAW≥2 → argmax picked WAW=1/PR=4, throughput
+// collapsed 14×. When all candidates are uncovered (rare; only on
+// fresh history before exploration), the caller falls through to the
+// smoothed-bins tier — simpler model, fewer assumptions, no
+// extrapolation.
+func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, cellSkip map[retryCellKey]bool, covered map[coverageCellKey]bool) (waw int, csBytes int64, parallelReaders, readAheadBuffers int, predicted float64, ok bool) {
 	const fallbackBytes int64 = 10_000_000
 	optimumBytes := profile.OptimumBulkChunkBytes
 	if optimumBytes <= 0 {
@@ -348,6 +360,9 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 				if cellSkip[retryCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
 					continue
 				}
+				if !covered[coverageCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
+					continue
+				}
 				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
 				if pred > bestPred {
 					bestPred = pred
@@ -363,6 +378,47 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 		return 0, 0, 0, 0, 0, false
 	}
 	return bestWAW, bestCSBytes, bestPR, bestRAB, bestPred, true
+}
+
+// coverageCellKey identifies a (WriteAheadWriters, ParallelReaders,
+// ReadAheadBuffers) cell for the argmax cube-corner extrapolation gate
+// (#221). Structurally identical to retryCellKey but kept as a distinct
+// type so callers can't accidentally pass one map where the other is
+// expected — the two filters have different semantics (one bans cells
+// because they performed badly, the other bans cells because they
+// haven't been measured at all).
+type coverageCellKey struct {
+	WAW              int
+	ParallelReaders  int
+	ReadAheadBuffers int
+}
+
+// cellsWithCoverage returns the set of (WAW, PR, RAB) cells the
+// training data has at least one completed run at. Used by
+// argmaxRegression to refuse to extrapolate to cells the model has
+// never seen. Same row-filtering convention as the other tuning
+// helpers — incomplete runs (FinalThroughput <= 0) are skipped because
+// they aren't evidence the cell has been "visited" in a meaningful
+// sense; the chunk-level checkpoint backend may surface them.
+//
+// ChunkSize is intentionally not in the key. The regression treats CS
+// as a continuous numeric feature (cs_z, cs_z²) so it can interpolate
+// between observed CS values; (WAW, PR, RAB) are effectively
+// categorical with a small fixed set of grid values, so an exact-match
+// coverage check is the right granularity.
+func cellsWithCoverage(rows []HistoryRecord) map[coverageCellKey]bool {
+	out := map[coverageCellKey]bool{}
+	for _, r := range rows {
+		if r.FinalThroughput <= 0 {
+			continue
+		}
+		out[coverageCellKey{
+			WAW:              r.WriteAheadWriters,
+			ParallelReaders:  r.ParallelReaders,
+			ReadAheadBuffers: r.ReadAheadBuffers,
+		}] = true
+	}
+	return out
 }
 
 // retryCellKey identifies a (WriteAheadWriters, ParallelReaders,

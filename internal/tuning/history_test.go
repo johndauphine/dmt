@@ -710,6 +710,8 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 	// 60 rows, throughput = 1000 - 50·(WAW-4)² + 100 (positive bias).
 	// WAW range 1..6 spread evenly; all clean (no retries) so RULE 1
 	// doesn't fire. Should clear minRowsForRegression and pick WAW=4.
+	// Reader settings pinned at baseline (PR=2, RAB=4) so the #221
+	// coverage gate keeps every WAW cell selectable.
 	rows := make([]HistoryRecord, 60)
 	for i := range rows {
 		waw := (i % 6) + 1
@@ -721,6 +723,8 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 			WriteAheadWriters: waw,
 			ChunkSize:         50_000,
 			AvgRowBytes:       500,
+			ParallelReaders:   2,
+			ReadAheadBuffers:  4,
 			FinalThroughput:   thru,
 			CPUCores:          16,
 			MemoryGB:          48,
@@ -738,6 +742,142 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 	}
 	if !strings.Contains(out.Reasoning, "regression-selected") {
 		t.Errorf("Reasoning should record regression tier; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyHistory_RegressionRefusesUncoveredCubeCorner (#221) pins
+// the cube-corner extrapolation gate. Reproduces the exact failure
+// mode measured live on SO2010: history has WAW=1 only at PR=2 and
+// PR=4 only at WAW≥2, so the corner (WAW=1, PR=4) has zero training
+// samples. Pre-fix the linear regression would add the WAW and PR
+// effects independently and pick that corner with a confident-looking
+// prediction; the actual run came in 14× slower than predicted.
+//
+// Expected post-fix: argmax must NOT pick a (WAW, PR, RAB) combo
+// with zero training coverage. With this fixture the only covered
+// (WAW=1, PR=*) cell is (1, 2, 4) and the only covered (WAW=2, PR=*)
+// cells are (2, 2, 4), (2, 4, 4), (2, 4, 8) — argmax stays within
+// those.
+func TestApplyHistory_RegressionRefusesUncoveredCubeCorner(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+
+	// 36 rows total; readerGrid coverage:
+	//   (WAW=1, PR=2, RAB=4): 12 rows at 800K — the only WAW=1 cell.
+	//   (WAW=2, PR=2, RAB=4): 12 rows at 700K.
+	//   (WAW=2, PR=4, RAB=4): 6 rows at 600K.
+	//   (WAW=2, PR=4, RAB=8): 6 rows at 550K.
+	// Uncovered: (1,4,4), (1,4,8), (1,2,8), (2,2,8), and every other
+	// (WAW≥3, *, *). Linear extrapolation would push the model toward
+	// believing (WAW=1, PR=4) inherits PR=4's effect at WAW=2 — but
+	// PR=4 was actually worse at WAW=2 than PR=2, so the bad pick
+	// here would be (WAW=1, PR=2) again (correct) OR (WAW>=2, PR=2).
+	// Either way the argmax must NOT pick an uncovered cell like
+	// (WAW=1, PR=4, RAB=4) or (WAW=3, *, *).
+	rows := []HistoryRecord{}
+	add := func(waw, pr, rab, n int, thr float64) {
+		for i := 0; i < n; i++ {
+			rows = append(rows, HistoryRecord{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				WriteAheadWriters: waw,
+				ChunkSize:         50_000,
+				AvgRowBytes:       500,
+				ParallelReaders:   pr,
+				ReadAheadBuffers:  rab,
+				FinalThroughput:   thr,
+				CPUCores:          16,
+				MemoryGB:          48,
+			})
+		}
+	}
+	add(1, 2, 4, 12, 800_000)
+	add(2, 2, 4, 12, 700_000)
+	add(2, 4, 4, 6, 600_000)
+	add(2, 4, 8, 6, 550_000)
+
+	history := &stubHistory{rows: rows}
+	applyHistory(&out, in, profile, history, DBTuning{})
+
+	// Define what "covered" looks like for the assertion. argmax must
+	// land on one of these triples.
+	type cell struct{ waw, pr, rab int }
+	covered := map[cell]bool{
+		{1, 2, 4}: true,
+		{2, 2, 4}: true,
+		{2, 4, 4}: true,
+		{2, 4, 8}: true,
+	}
+	picked := cell{out.WriteAheadWriters, out.ParallelReaders, out.ReadAheadBuffers}
+	if !covered[picked] {
+		t.Errorf("argmax picked uncovered cube-corner (WAW=%d, PR=%d, RAB=%d); covered set = %v; full reasoning: %s",
+			picked.waw, picked.pr, picked.rab, covered, out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "covered cells") {
+		t.Errorf("Reasoning should surface covered-cells count; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyHistory_RegressionFallsThroughWhenNoCoverage (#221) pins
+// the degradation path: when no training rows match any cell in the
+// readerGrid (e.g. all history is at PR=3 / RAB=5 — values outside
+// the grid), every argmax candidate is filtered. argmaxRegression
+// must return ok=false and the caller falls through to smoothed bins.
+func TestApplyHistory_RegressionFallsThroughWhenNoCoverage(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+
+	// 30 rows all at PR=3, RAB=5 — values not in readerGrid ({2,4}×{4,8}).
+	// Regression argmax will find every grid candidate uncovered;
+	// applyHistoryRegression returns false and applyHistorySelection
+	// falls to smoothed-bins. Smoothed-bins's reader-filter (#219
+	// codex pass 3) will then find no rows matching baseline (PR=2,
+	// RAB=4) — both tiers cleanly skip with reasoning emitted.
+	rows := make([]HistoryRecord, 30)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: (i % 6) + 1,
+			ChunkSize:         50_000,
+			AvgRowBytes:       500,
+			ParallelReaders:   3, // outside readerGrid
+			ReadAheadBuffers:  5, // outside readerGrid
+			FinalThroughput:   600_000 + float64(i*1000),
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	history := &stubHistory{rows: rows}
+
+	applyHistory(&out, in, profile, history, DBTuning{})
+
+	if !strings.Contains(out.Reasoning, "regression skipped: every grid candidate filtered") {
+		t.Errorf("Reasoning should announce regression-tier filter-empty skip; got %q", out.Reasoning)
+	}
+	// Coverage count is non-zero in the fixture (6 distinct WAW values
+	// at PR=3/RAB=5), but every covered cell is outside readerGrid so
+	// argmax filters them all. The diagnostic surfaces the count so a
+	// reader of the log can tell the difference between "no history
+	// at all" and "history doesn't intersect the grid".
+	if !strings.Contains(out.Reasoning, "covered cells:") {
+		t.Errorf("Reasoning should surface covered-cells count even when filtered out; got %q", out.Reasoning)
+	}
+	// And the smoothed-bins tier should also skip — none of these
+	// rows match the current run's baseline reader settings.
+	if !strings.Contains(out.Reasoning, "no rows match current reader settings") {
+		t.Errorf("Reasoning should record smoothed-bins skip when no rows match baseline reader settings; got %q", out.Reasoning)
 	}
 }
 
