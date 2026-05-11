@@ -229,6 +229,42 @@ func TestDetectRegimeDrift_WidenedThresholdStillFiresAtTwoX(t *testing.T) {
 	}
 }
 
+// TestDetectRegimeDrift_ReaderAxisChangeNotDrift (#219, codex review)
+// guards against the bug Codex flagged after the initial #219 commit:
+// once the tuner started varying ParallelReaders / ReadAheadBuffers
+// at the same (WAW, ChunkSize) outer cell, throughput shifts caused
+// by reader-axis picks could be misclassified as regime drift if
+// the drift cell still keyed by (WAW, ChunkSize) only.
+//
+// The fix extends configKey to the full (WAW, ChunkSize, PR, RAB)
+// quadruple. This test pins that behavior: 9 runs at the same
+// (WAW=2, CS=50000) but split across two PR/RAB combos — the "old"
+// runs at PR=2/RAB=4 ~500K and the "recent" run at PR=4/RAB=8 ~1M —
+// must NOT fire drift, because the recent cell only has one sample
+// (below driftMinAtConfig) and the older cell is unchanged.
+func TestDetectRegimeDrift_ReaderAxisChangeNotDrift(t *testing.T) {
+	// 8 runs at (WAW=2, CS=50000, PR=2, RAB=4) at ~500K rows/s.
+	older := makeFixedConfigRunsWithReaders(2, 50000, 2, 4, []float64{
+		500_000, 510_000, 490_000,
+		505_000, 495_000, 500_000,
+		498_000, 502_000,
+	})
+	// 1 newer run at the same outer cell but different inner combo,
+	// ~2× throughput (a plausible reader-axis effect). Newer
+	// timestamp so it becomes mostRecentCell.
+	newer := makeFixedConfigRunsWithReaders(2, 50000, 4, 8, []float64{
+		1_000_000,
+	})
+	for i := range newer {
+		newer[i].Timestamp = older[len(older)-1].Timestamp.Add(time.Hour)
+	}
+	rows := append(older, newer...)
+
+	if detectRegimeDrift(rows) {
+		t.Error("reader-axis change at same (WAW, CS) should NOT fire drift — the recent cell has just 1 run, below driftMinAtConfig")
+	}
+}
+
 // makeFixedConfigRuns builds a synthetic slice where every row uses the
 // same WAW + chunk_size and the throughputs come from the slice; each
 // row gets a monotonically increasing Timestamp so the detector's
@@ -241,6 +277,27 @@ func makeFixedConfigRuns(waw, chunkSize int, throughputs []float64) []HistoryRec
 			Timestamp:         base.Add(time.Duration(i) * time.Hour),
 			WriteAheadWriters: waw,
 			ChunkSize:         chunkSize,
+			AvgRowBytes:       500,
+			FinalThroughput:   th,
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	return rows
+}
+
+// makeFixedConfigRunsWithReaders is the #219 counterpart that also pins
+// ParallelReaders and ReadAheadBuffers on the synthetic rows. Used by
+// tests that need to distinguish runs by the full configKey quadruple.
+func makeFixedConfigRunsWithReaders(waw, chunkSize, pr, rab int, throughputs []float64) []HistoryRecord {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows := make([]HistoryRecord, len(throughputs))
+	for i, th := range throughputs {
+		rows[i] = HistoryRecord{
+			Timestamp:         base.Add(time.Duration(i) * time.Hour),
+			WriteAheadWriters: waw,
+			ChunkSize:         chunkSize,
+			ParallelReaders:   pr,
+			ReadAheadBuffers:  rab,
 			AvgRowBytes:       500,
 			FinalThroughput:   th,
 			CPUCores:          16, MemoryGB: 48,

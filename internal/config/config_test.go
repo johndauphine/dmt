@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
 
@@ -574,6 +575,88 @@ func TestAutoTuneUserOverride(t *testing.T) {
 	}
 	if cfg.Migration.ParallelReaders != 6 {
 		t.Errorf("expected user-specified 6 readers, got %d", cfg.Migration.ParallelReaders)
+	}
+}
+
+// TestApplyAISuggestions_UserOverridesPRRAB (#219) pins the
+// user-override mechanism for parallel_readers and read_ahead_buffers
+// across the full round-trip: user sets explicit values in YAML →
+// applyDefaults snapshots them as Original* → tuner produces different
+// suggestions → ApplyAISuggestions must keep the user's values, NOT the
+// tuner's.
+//
+// Pre-#219 the tuner ignored these axes entirely so the override path
+// was never exercised for them in tests. Now that the tuner actively
+// recommends PR/RAB values, this test guards the gate.
+func TestApplyAISuggestions_UserOverridesPRRAB(t *testing.T) {
+	cfg := &Config{
+		Source: SourceConfig{Type: "postgres", Host: "localhost", Port: 5432, Database: "s", User: "u", Password: "p"},
+		Target: TargetConfig{Type: "mssql", Host: "localhost", Port: 1433, Database: "t", User: "u", Password: "p"},
+		Migration: MigrationConfig{
+			ParallelReaders:  6, // user-specified
+			ReadAheadBuffers: 12, // user-specified
+		},
+	}
+	cfg.autoConfig.CPUCores = 16
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
+	}
+
+	// Sanity: applyDefaults preserved the user's values and snapshotted
+	// them as Original* so the override gate downstream can fire.
+	if cfg.autoConfig.OriginalParallelReaders != 6 {
+		t.Fatalf("OriginalParallelReaders snapshot=%d, want 6", cfg.autoConfig.OriginalParallelReaders)
+	}
+	if cfg.autoConfig.OriginalReadAheadBuffers != 12 {
+		t.Fatalf("OriginalReadAheadBuffers snapshot=%d, want 12", cfg.autoConfig.OriginalReadAheadBuffers)
+	}
+
+	// Tuner suggests something different on both axes.
+	suggestions := &driver.SmartConfigSuggestions{
+		ParallelReaders:  2,
+		ReadAheadBuffers: 4,
+	}
+	cfg.ApplyAISuggestions(suggestions)
+
+	if cfg.Migration.ParallelReaders != 6 {
+		t.Errorf("user override clobbered: ParallelReaders=%d, want 6 (user value)", cfg.Migration.ParallelReaders)
+	}
+	if cfg.Migration.ReadAheadBuffers != 12 {
+		t.Errorf("user override clobbered: ReadAheadBuffers=%d, want 12 (user value)", cfg.Migration.ReadAheadBuffers)
+	}
+}
+
+// TestApplyAISuggestions_AppliesPRRABWhenUnset (#219) is the
+// complementary case: when the user did NOT set PR/RAB in YAML, the
+// tuner's suggestion must take effect (Original*==0 gate).
+func TestApplyAISuggestions_AppliesPRRABWhenUnset(t *testing.T) {
+	cfg := &Config{
+		Source:    SourceConfig{Type: "postgres", Host: "localhost", Port: 5432, Database: "s", User: "u", Password: "p"},
+		Target:    TargetConfig{Type: "mssql", Host: "localhost", Port: 1433, Database: "t", User: "u", Password: "p"},
+		Migration: MigrationConfig{}, // user left PR/RAB unset
+	}
+	cfg.autoConfig.CPUCores = 16
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
+	}
+	if cfg.autoConfig.OriginalParallelReaders != 0 {
+		t.Fatalf("OriginalParallelReaders should be 0 when user didn't set; got %d", cfg.autoConfig.OriginalParallelReaders)
+	}
+	if cfg.autoConfig.OriginalReadAheadBuffers != 0 {
+		t.Fatalf("OriginalReadAheadBuffers should be 0 when user didn't set; got %d", cfg.autoConfig.OriginalReadAheadBuffers)
+	}
+
+	suggestions := &driver.SmartConfigSuggestions{
+		ParallelReaders:  4,
+		ReadAheadBuffers: 8,
+	}
+	cfg.ApplyAISuggestions(suggestions)
+
+	if cfg.Migration.ParallelReaders != 4 {
+		t.Errorf("tuner suggestion not applied: ParallelReaders=%d, want 4 (suggested)", cfg.Migration.ParallelReaders)
+	}
+	if cfg.Migration.ReadAheadBuffers != 8 {
+		t.Errorf("tuner suggestion not applied: ReadAheadBuffers=%d, want 8 (suggested)", cfg.Migration.ReadAheadBuffers)
 	}
 }
 

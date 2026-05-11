@@ -135,6 +135,12 @@ type HistoryRecord struct {
 	Workers           int
 	ChunkSize         int
 	WriteAheadWriters int
+	// ParallelReaders and ReadAheadBuffers are persisted on AITuningRecord
+	// but were dropped by the adapter before #219. Now carried through so
+	// the regression can learn from their variance once the exploration
+	// grid starts varying them.
+	ParallelReaders  int
+	ReadAheadBuffers int
 
 	// AvgRowBytes is the avg_row_size_bytes the analyzer recorded for
 	// the migration that produced this row. Used by PR2's regression to

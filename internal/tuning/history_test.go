@@ -283,6 +283,184 @@ func TestWawsWithHighRetryRate_ThroughputAware(t *testing.T) {
 	}
 }
 
+// TestCellsWithHighRetryRate_PerCellNotPerWAW (#219, codex review)
+// pins the bug Codex flagged on the original #219 commit: WAW-level
+// retry exclusion would ban an entire WAW value based on retries seen
+// at a single bad reader combo, even if a different reader combo at
+// the same WAW had a clean record. The fix is per-cell aggregation
+// keyed by (WAW, PR, RAB).
+//
+// Setup: WAW=2 has 10 runs at PR=4/RAB=8 with 80% retries and below-
+// median throughput (bad reader combo) AND 10 runs at PR=2/RAB=4 with
+// 0 retries and above-median throughput (clean combo). Expectation:
+// only the bad-combo cell appears in the skip map; the clean cell
+// remains selectable.
+func TestCellsWithHighRetryRate_PerCellNotPerWAW(t *testing.T) {
+	mk := func(waw, pr, rab int, retries int, thr float64) HistoryRecord {
+		return HistoryRecord{
+			WriteAheadWriters: waw,
+			ParallelReaders:   pr,
+			ReadAheadBuffers:  rab,
+			ChunkRetryCount:   retries,
+			FinalThroughput:   thr,
+		}
+	}
+	// WAW=1 clean cell at 800K → eligible, median anchor.
+	// WAW=2/PR=4/RAB=8 bad cell at 400K with retries → excluded.
+	// WAW=2/PR=2/RAB=4 clean cell at 900K → kept.
+	// WAW=4 clean cell at 600K → kept.
+	rows := []HistoryRecord{}
+	for i := 0; i < 10; i++ {
+		rows = append(rows, mk(1, 2, 4, 0, 800_000))
+		rows = append(rows, mk(2, 4, 8, 1, 400_000)) // bad combo, retries
+		rows = append(rows, mk(2, 2, 4, 0, 900_000)) // clean combo at same WAW
+		rows = append(rows, mk(4, 2, 4, 0, 600_000))
+	}
+
+	got := cellsWithHighRetryRate(rows)
+
+	badCell := retryCellKey{WAW: 2, ParallelReaders: 4, ReadAheadBuffers: 8}
+	cleanCell := retryCellKey{WAW: 2, ParallelReaders: 2, ReadAheadBuffers: 4}
+
+	if !got[badCell] {
+		t.Errorf("bad combo (WAW=2/PR=4/RAB=8) with 100%% retries should be excluded; got %v", got)
+	}
+	if got[cleanCell] {
+		t.Errorf("clean combo (WAW=2/PR=2/RAB=4) at same WAW must NOT be excluded — that was Codex's bug (#219 review)")
+	}
+	if got[retryCellKey{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}] {
+		t.Errorf("clean WAW=1 cell must not be excluded; got %v", got)
+	}
+	if got[retryCellKey{WAW: 4, ParallelReaders: 2, ReadAheadBuffers: 4}] {
+		t.Errorf("clean WAW=4 cell must not be excluded; got %v", got)
+	}
+}
+
+// TestFormatRetryCellSkips_DeterministicOrder pins that the reasoning
+// log format sorts cell keys so log diffs aren't churned by map
+// iteration order.
+func TestFormatRetryCellSkips_DeterministicOrder(t *testing.T) {
+	m := map[retryCellKey]bool{
+		{WAW: 4, ParallelReaders: 2, ReadAheadBuffers: 4}: true,
+		{WAW: 1, ParallelReaders: 4, ReadAheadBuffers: 8}: true,
+		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true,
+		{WAW: 2, ParallelReaders: 4, ReadAheadBuffers: 4}: true,
+	}
+	want := "[WAW=1/PR=2/RAB=4, WAW=1/PR=4/RAB=8, WAW=2/PR=4/RAB=4, WAW=4/PR=2/RAB=4]"
+	got := formatRetryCellSkips(m)
+	if got != want {
+		t.Errorf("formatRetryCellSkips ordering wrong:\n got=%s\nwant=%s", got, want)
+	}
+}
+
+// TestFormatRetryCellSkips_EmptyMapEmitsNone documents the empty-map
+// rendering — readers of the reasoning string should see "none" rather
+// than "[]" so the log line is unambiguous.
+func TestFormatRetryCellSkips_EmptyMapEmitsNone(t *testing.T) {
+	if got := formatRetryCellSkips(nil); got != "none" {
+		t.Errorf("formatRetryCellSkips(nil)=%q, want %q", got, "none")
+	}
+	if got := formatRetryCellSkips(map[retryCellKey]bool{}); got != "none" {
+		t.Errorf("formatRetryCellSkips({})=%q, want %q", got, "none")
+	}
+}
+
+// TestApplyHistorySelection_SmoothedBinsFiltersByReaderSettings
+// (#219, codex review pass 3) pins the third instance of the
+// PR/RAB-coupling bug Codex flagged. Before this fix, the smoothed-bins
+// fallback aggregated by WAW only, so a bad reader combo's retries
+// could ban a WAW from selection even though the current run would use
+// a clean reader combo.
+//
+// Setup: history has 20 rows, fewer than minRowsForRegression=30, so
+// the regression tier is skipped and applyHistorySelection falls to
+// smoothed bins.
+//   - 10 rows at WAW=2 / PR=4/RAB=8 with retries and 200K rows/s
+//     (the bad combo).
+//   - 10 rows at WAW=2 / PR=2/RAB=4 clean at 800K rows/s
+//     (the current run's reader settings).
+// Expected: smoothed bins picks WAW=2 — it should ignore the PR=4/RAB=8
+// rows because the current run uses PR=2/RAB=4. Pre-fix the contaminated
+// bin's retry rate would have excluded WAW=2 entirely.
+func TestApplyHistorySelection_SmoothedBinsFiltersByReaderSettings(t *testing.T) {
+	rows := []HistoryRecord{}
+	for i := 0; i < 10; i++ {
+		rows = append(rows, HistoryRecord{
+			WriteAheadWriters: 2,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			ParallelReaders:   4,
+			ReadAheadBuffers:  8,
+			ChunkRetryCount:   1,
+			FinalThroughput:   200_000,
+		})
+		rows = append(rows, HistoryRecord{
+			WriteAheadWriters: 2,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			ParallelReaders:   2,
+			ReadAheadBuffers:  4,
+			ChunkRetryCount:   0,
+			FinalThroughput:   800_000,
+		})
+	}
+
+	out := Output{
+		WriteAheadWriters: 1, // baseline
+		ChunkSize:         50000,
+		ParallelReaders:   2, // current run's reader settings
+		ReadAheadBuffers:  4,
+	}
+	applyHistorySelection(&out, Input{AvgRowBytes: 500}, DriverProfile{}, rows)
+
+	if out.Tier != TierSmoothedBins {
+		t.Fatalf("Tier = %q, want %q (regression should be skipped, smoothed-bins should pick)", out.Tier, TierSmoothedBins)
+	}
+	if out.WriteAheadWriters != 2 {
+		t.Errorf("smoothed-bins picked WAW=%d, want 2 (clean combo at WAW=2 has highest mean; bad combo at same WAW should not contaminate the bin)", out.WriteAheadWriters)
+	}
+	// Reasoning must surface the reader filter so a reader of the log
+	// can tell which slice of history smoothed-bins actually used.
+	if !strings.Contains(out.Reasoning, "reader=PR2/RAB4") {
+		t.Errorf("Reasoning missing reader-filter tag; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyHistorySelection_SmoothedBinsEmptyWhenNoMatchingReaderRows
+// covers the "no rows at current reader settings" branch. When the
+// current run's PR/RAB combo isn't in history, smoothed-bins should
+// gracefully report it via reasoning rather than pick from contaminated
+// bins.
+func TestApplyHistorySelection_SmoothedBinsEmptyWhenNoMatchingReaderRows(t *testing.T) {
+	// 20 rows entirely at PR=4/RAB=8.
+	rows := []HistoryRecord{}
+	for i := 0; i < 20; i++ {
+		rows = append(rows, HistoryRecord{
+			WriteAheadWriters: 2,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			ParallelReaders:   4,
+			ReadAheadBuffers:  8,
+			FinalThroughput:   500_000,
+		})
+	}
+
+	out := Output{
+		WriteAheadWriters: 1,
+		ChunkSize:         50000,
+		ParallelReaders:   2, // doesn't match any row
+		ReadAheadBuffers:  4,
+	}
+	applyHistorySelection(&out, Input{AvgRowBytes: 500}, DriverProfile{}, rows)
+
+	if out.Tier == TierSmoothedBins {
+		t.Errorf("smoothed-bins should NOT pick when no rows match current reader settings; got tier=%q WAW=%d", out.Tier, out.WriteAheadWriters)
+	}
+	if !strings.Contains(out.Reasoning, "no rows match current reader settings") {
+		t.Errorf("Reasoning missing 'no rows match current reader settings' explanation; got %q", out.Reasoning)
+	}
+}
+
 // TestAggregateByWAW groups records and ignores zero-throughput rows
 // (incomplete runs).
 func TestAggregateByWAW(t *testing.T) {
@@ -377,16 +555,20 @@ func TestApplyHistory_EndToEnd(t *testing.T) {
 	// the median of [500K, 610K, 700K] = 610K) → both gates of the
 	// throughput-aware filter (#204) fire → excluded. WAW=4 has clean
 	// runs at 610K. WAW=1 (700K, clean) should win.
+	// Rows pinned at the baseline reader settings (PR=2, RAB=4) so the
+	// #219 reader-filter on smoothed-bins keeps them. Real persisted
+	// history has actual PR/RAB values; the Go zero default in test
+	// fixtures had to be made explicit after the filter landed.
 	history := &stubHistory{rows: []HistoryRecord{
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 700_000},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 720_000},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 1, FinalThroughput: 680_000},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 510_000, ChunkRetryCount: 2},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 490_000, ChunkRetryCount: 1},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 2, FinalThroughput: 500_000, ChunkRetryCount: 3},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 600_000},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 620_000},
-		{CPUCores: 16, MemoryGB: 48, WriteAheadWriters: 4, FinalThroughput: 610_000},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 1, FinalThroughput: 700_000},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 1, FinalThroughput: 720_000},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 1, FinalThroughput: 680_000},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 2, FinalThroughput: 510_000, ChunkRetryCount: 2},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 2, FinalThroughput: 490_000, ChunkRetryCount: 1},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 2, FinalThroughput: 500_000, ChunkRetryCount: 3},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 4, FinalThroughput: 600_000},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 4, FinalThroughput: 620_000},
+		{CPUCores: 16, MemoryGB: 48, ParallelReaders: 2, ReadAheadBuffers: 4, WriteAheadWriters: 4, FinalThroughput: 610_000},
 	}}
 
 	applyHistory(&out, in, profile, history, DBTuning{})
@@ -748,6 +930,10 @@ func TestApplyHistory_SmoothedBinsReasoningEmittedWhenPickMatchesBaseline(t *tes
 	for i := 0; i < 6; i++ {
 		rows = append(rows, HistoryRecord{
 			CPUCores: 16, MemoryGB: 48,
+			// Pinned at baseline reader settings so #219's
+			// smoothed-bins reader-filter keeps the rows.
+			ParallelReaders:   2,
+			ReadAheadBuffers:  4,
 			WriteAheadWriters: 1,
 			FinalThroughput:   700_000 + float64(i*1_000),
 		})
