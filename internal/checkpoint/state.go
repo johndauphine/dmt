@@ -362,6 +362,20 @@ func (s *State) ensureTuningResultColumns() error {
 		{"target_max_wal_size_mb", "ALTER TABLE ai_tuning_history ADD COLUMN target_max_wal_size_mb INTEGER"},
 		{"target_wal_level", "ALTER TABLE ai_tuning_history ADD COLUMN target_wal_level TEXT"},
 		{"source_max_server_memory_mb", "ALTER TABLE ai_tuning_history ADD COLUMN source_max_server_memory_mb INTEGER"},
+		// #215 workload-identity columns. Together they form the
+		// (source endpoint, target endpoint) tuple used by the new
+		// Tier 1 exact-identity classifier. Pre-#215 rows have NULL
+		// for these columns and naturally fall through to Tier 2 /
+		// baseline — correct behavior since their identity is
+		// unrecoverable.
+		{"source_host", "ALTER TABLE ai_tuning_history ADD COLUMN source_host TEXT"},
+		{"source_port", "ALTER TABLE ai_tuning_history ADD COLUMN source_port INTEGER"},
+		{"source_database", "ALTER TABLE ai_tuning_history ADD COLUMN source_database TEXT"},
+		{"source_schema", "ALTER TABLE ai_tuning_history ADD COLUMN source_schema TEXT"},
+		{"target_host", "ALTER TABLE ai_tuning_history ADD COLUMN target_host TEXT"},
+		{"target_port", "ALTER TABLE ai_tuning_history ADD COLUMN target_port INTEGER"},
+		{"target_database", "ALTER TABLE ai_tuning_history ADD COLUMN target_database TEXT"},
+		{"target_schema", "ALTER TABLE ai_tuning_history ADD COLUMN target_schema TEXT"},
 	}
 	for _, m := range migrations {
 		if have[m.col] {
@@ -370,6 +384,17 @@ func (s *State) ensureTuningResultColumns() error {
 		if _, err := s.db.Exec(m.ddl); err != nil {
 			return fmt.Errorf("migrating ai_tuning_history.%s: %w", m.col, err)
 		}
+	}
+	// #215: composite btree index on the workload identity columns so
+	// the Tier 1 exact-identity lookup is O(log N). CREATE INDEX IF NOT
+	// EXISTS is idempotent — safe to run on every startup.
+	const idxDDL = `CREATE INDEX IF NOT EXISTS idx_ai_tuning_workload_identity
+		ON ai_tuning_history(
+			source_host, source_port, source_database, source_schema,
+			target_host, target_port, target_database, target_schema
+		)`
+	if _, err := s.db.Exec(idxDDL); err != nil {
+		return fmt.Errorf("creating idx_ai_tuning_workload_identity: %w", err)
 	}
 	return nil
 }
@@ -1251,8 +1276,10 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 			estimated_memory_mb, ai_reasoning, was_ai_used,
 			platform, target_shared_buffers_mb, target_synchronous_commit,
 			target_fsync, target_full_page_writes, target_max_wal_size_mb,
-			target_wal_level, source_max_server_memory_mb
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			target_wal_level, source_max_server_memory_mb,
+			source_host, source_port, source_database, source_schema,
+			target_host, target_port, target_database, target_schema
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.Timestamp.Format("2006-01-02 15:04:05"),
 		record.SourceDBType, record.TargetDBType,
@@ -1265,6 +1292,11 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 		nullStr(record.Platform), nullInt(record.TargetSharedBuffersMB), nullStr(record.TargetSyncCommit),
 		nullStr(record.TargetFsync), nullStr(record.TargetFullPageWrites), nullInt(record.TargetMaxWALSizeMB),
 		nullStr(record.TargetWALLevel), nullInt(record.SourceMaxServerMemoryMB),
+		// #215 workload identity. All fields nullable; nullStr/nullInt
+		// elide empty values so pre-identity records won't ever match
+		// the Tier 1 exact-identity filter.
+		nullStr(record.SourceHost), nullInt(int64(record.SourcePort)), nullStr(record.SourceDatabase), nullStr(record.SourceSchema),
+		nullStr(record.TargetHost), nullInt(int64(record.TargetPort)), nullStr(record.TargetDatabase), nullStr(record.TargetSchema),
 	)
 	return err
 }
@@ -1301,7 +1333,9 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		       final_throughput, final_duration_seconds, chunk_retry_count,
 		       platform, target_shared_buffers_mb, target_synchronous_commit,
 		       target_fsync, target_full_page_writes, target_max_wal_size_mb,
-		       target_wal_level, source_max_server_memory_mb
+		       target_wal_level, source_max_server_memory_mb,
+		       source_host, source_port, source_database, source_schema,
+		       target_host, target_port, target_database, target_schema
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
 		ORDER BY timestamp DESC`, limit, sourceType, targetType)
@@ -1324,6 +1358,9 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		// #144 regime columns; nullable for older rows that predate the migration.
 		var platform, targetSyncCommit, targetFsync, targetFullPageWrites, targetWALLevel sql.NullString
 		var targetSharedBuffersMB, targetMaxWALSizeMB, sourceMaxServerMemoryMB sql.NullInt64
+		// #215 workload identity; nullable for older rows.
+		var sourceHost, sourceDatabase, sourceSchema, targetHost, targetDatabase, targetSchema sql.NullString
+		var sourcePort, targetPort sql.NullInt64
 
 		if err := rows.Scan(
 			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
@@ -1337,8 +1374,35 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 			&platform, &targetSharedBuffersMB, &targetSyncCommit,
 			&targetFsync, &targetFullPageWrites, &targetMaxWALSizeMB,
 			&targetWALLevel, &sourceMaxServerMemoryMB,
+			&sourceHost, &sourcePort, &sourceDatabase, &sourceSchema,
+			&targetHost, &targetPort, &targetDatabase, &targetSchema,
 		); err != nil {
 			return nil, err
+		}
+		// #215 workload-identity passthrough.
+		if sourceHost.Valid {
+			r.SourceHost = sourceHost.String
+		}
+		if sourcePort.Valid {
+			r.SourcePort = int(sourcePort.Int64)
+		}
+		if sourceDatabase.Valid {
+			r.SourceDatabase = sourceDatabase.String
+		}
+		if sourceSchema.Valid {
+			r.SourceSchema = sourceSchema.String
+		}
+		if targetHost.Valid {
+			r.TargetHost = targetHost.String
+		}
+		if targetPort.Valid {
+			r.TargetPort = int(targetPort.Int64)
+		}
+		if targetDatabase.Valid {
+			r.TargetDatabase = targetDatabase.String
+		}
+		if targetSchema.Valid {
+			r.TargetSchema = targetSchema.String
 		}
 		if chunkRetryCount.Valid {
 			r.ChunkRetryCount = int(chunkRetryCount.Int64)

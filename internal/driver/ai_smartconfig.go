@@ -125,6 +125,19 @@ type AutoTuneInput struct {
 	TotalRows    int64
 	AvgRowBytes  int64
 
+	// Workload identity (#215). Together these form the tuple the
+	// Tier 1 exact-identity classifier uses to find historically-
+	// comparable runs. Caller (orchestrator) populates from
+	// dbconfig.SourceConfig / TargetConfig.
+	SourceHost     string
+	SourcePort     int
+	SourceDatabase string
+	SourceSchema   string
+	TargetHost     string
+	TargetPort     int
+	TargetDatabase string
+	TargetSchema   string
+
 	LargestTables []TableStats
 }
 
@@ -227,6 +240,18 @@ type AITuningRecord struct {
 	TargetMaxWALSizeMB      int64  `json:"target_max_wal_size_mb,omitempty"`
 	TargetWALLevel          string `json:"target_wal_level,omitempty"`
 	SourceMaxServerMemoryMB int64  `json:"source_max_server_memory_mb,omitempty"`
+
+	// Workload identity (#215). Mirrors the matching fields on
+	// checkpoint.AITuningRecord — the orchestrator's stateHistoryAdapter
+	// copies between the two struct shapes.
+	SourceHost     string `json:"source_host,omitempty"`
+	SourcePort     int    `json:"source_port,omitempty"`
+	SourceDatabase string `json:"source_database,omitempty"`
+	SourceSchema   string `json:"source_schema,omitempty"`
+	TargetHost     string `json:"target_host,omitempty"`
+	TargetPort     int    `json:"target_port,omitempty"`
+	TargetDatabase string `json:"target_database,omitempty"`
+	TargetSchema   string `json:"target_schema,omitempty"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal
@@ -245,6 +270,19 @@ type SmartConfigAnalyzer struct {
 	currentTuning   DBTuningSnapshot
 	forceExplore    bool   // mirrors cfg.Migration.Explore
 	exploreMode     string // mirrors cfg.Migration.ExploreMode
+
+	// Workload identity (#215). Populated by SetWorkloadIdentity from
+	// the orchestrator's cfg.Source / cfg.Target. Flows through
+	// buildAutoTuneInput → toTuningInput → tuning.Input where the
+	// Tier 1 classifier reads it.
+	identitySourceHost     string
+	identitySourcePort     int
+	identitySourceDatabase string
+	identitySourceSchema   string
+	identityTargetHost     string
+	identityTargetPort     int
+	identityTargetDatabase string
+	identityTargetSchema   string
 }
 
 // NewSmartConfigAnalyzer creates a new smart config analyzer.
@@ -293,6 +331,22 @@ func (s *SmartConfigAnalyzer) SetTargetMode(mode string) {
 func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
 	s.forceExplore = force
 	s.exploreMode = mode
+}
+
+// SetWorkloadIdentity wires the (source endpoint, target endpoint) tuple
+// from cfg.Source / cfg.Target into the analyzer so the Tier 1 exact-
+// identity classifier (#215) can find historically-comparable rows.
+// Empty values are stored as-is and naturally skip the Tier 1 lookup
+// (the classifier's hasExactIdentity gate rejects empties).
+func (s *SmartConfigAnalyzer) SetWorkloadIdentity(sourceHost string, sourcePort int, sourceDB, sourceSchema string, targetHost string, targetPort int, targetDB, targetSchema string) {
+	s.identitySourceHost = sourceHost
+	s.identitySourcePort = sourcePort
+	s.identitySourceDatabase = sourceDB
+	s.identitySourceSchema = sourceSchema
+	s.identityTargetHost = targetHost
+	s.identityTargetPort = targetPort
+	s.identityTargetDatabase = targetDB
+	s.identityTargetSchema = targetSchema
 }
 
 // Analyze performs smart configuration detection on the source database.
@@ -361,17 +415,26 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 // adding the exploration fields from the analyzer's configured state.
 func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 	return tuning.Input{
-		CPUCores:           in.CPUCores,
-		MemoryGB:           in.MemoryGB,
-		AvailableMemoryMB:  in.AvailableMemoryMB,
-		MaxMemoryMB:        in.MaxMemoryMB,
-		Platform:           in.Platform,
-		SourceDBType:       in.DatabaseType,
-		TargetDBType:       in.TargetType,
-		TargetMode:         in.TargetMode,
-		TotalTables:        in.TotalTables,
-		TotalRows:          in.TotalRows,
-		AvgRowBytes:        in.AvgRowBytes,
+		CPUCores:          in.CPUCores,
+		MemoryGB:          in.MemoryGB,
+		AvailableMemoryMB: in.AvailableMemoryMB,
+		MaxMemoryMB:       in.MaxMemoryMB,
+		Platform:          in.Platform,
+		SourceDBType:      in.DatabaseType,
+		TargetDBType:      in.TargetType,
+		TargetMode:        in.TargetMode,
+		TotalTables:       in.TotalTables,
+		TotalRows:         in.TotalRows,
+		AvgRowBytes:       in.AvgRowBytes,
+		// Workload identity passthrough (#215).
+		SourceHost:         in.SourceHost,
+		SourcePort:         in.SourcePort,
+		SourceDatabase:     in.SourceDatabase,
+		SourceSchema:       in.SourceSchema,
+		TargetHost:         in.TargetHost,
+		TargetPort:         in.TargetPort,
+		TargetDatabase:     in.TargetDatabase,
+		TargetSchema:       in.TargetSchema,
 		ForceExplore:       s.forceExplore,
 		ExplorationEpsilon: explorationEpsilon(s.exploreMode),
 	}
@@ -474,6 +537,18 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
 			TargetWALLevel:          r.TargetWALLevel,
 			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
+			// Workload identity passthrough (#215). Pre-#215 rows
+			// have empty values for these — exact-identity match is
+			// equality on strings/ints, so empties fail to match the
+			// user's input and the row falls through to Tier 2.
+			SourceHost:     r.SourceHost,
+			SourcePort:     r.SourcePort,
+			SourceDatabase: r.SourceDatabase,
+			SourceSchema:   r.SourceSchema,
+			TargetHost:     r.TargetHost,
+			TargetPort:     r.TargetPort,
+			TargetDatabase: r.TargetDatabase,
+			TargetSchema:   r.TargetSchema,
 		})
 	}
 	return out, nil
@@ -590,6 +665,20 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		TargetMaxWALSizeMB:      actual.TargetMaxWALSizeMB,
 		TargetWALLevel:          actual.TargetWALLevel,
 		SourceMaxServerMemoryMB: actual.SourceMaxServerMemoryMB,
+		// Workload identity passthrough (#215). The values come from
+		// the AutoTuneInput the orchestrator built when calling Tune,
+		// so they reflect THIS run's exact endpoints. Pre-#215 callers
+		// that don't set these fields leave them empty in the record,
+		// which is the correct outcome — empty values can't satisfy
+		// Tier 1's equality check.
+		SourceHost:     input.SourceHost,
+		SourcePort:     input.SourcePort,
+		SourceDatabase: input.SourceDatabase,
+		SourceSchema:   input.SourceSchema,
+		TargetHost:     input.TargetHost,
+		TargetPort:     input.TargetPort,
+		TargetDatabase: input.TargetDatabase,
+		TargetSchema:   input.TargetSchema,
 	}
 
 	if err := s.historyProvider.SaveAITuning(record); err != nil {
@@ -671,6 +760,15 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 		TotalRows:         s.suggestions.TotalRows,
 		AvgRowBytes:       avgRowSize,
 		LargestTables:     largestTables,
+		// Workload identity passthrough (#215).
+		SourceHost:     s.identitySourceHost,
+		SourcePort:     s.identitySourcePort,
+		SourceDatabase: s.identitySourceDatabase,
+		SourceSchema:   s.identitySourceSchema,
+		TargetHost:     s.identityTargetHost,
+		TargetPort:     s.identityTargetPort,
+		TargetDatabase: s.identityTargetDatabase,
+		TargetSchema:   s.identityTargetSchema,
 	}
 }
 

@@ -122,6 +122,24 @@ type AITuningRecord struct {
 	TargetMaxWALSizeMB      int64  `json:"target_max_wal_size_mb,omitempty"`
 	TargetWALLevel          string `json:"target_wal_level,omitempty"`
 	SourceMaxServerMemoryMB int64  `json:"source_max_server_memory_mb,omitempty"`
+
+	// Workload identity (#215). Together these form the tuple the
+	// Tier 1 classifier uses to find historically-comparable runs:
+	// same exact (source endpoint, target endpoint) = same workload.
+	// Empty values indicate either pre-#215 rows whose identity is
+	// unrecoverable (correctly excluded from Tier 1 matches by SQL
+	// equality semantics) or runs that didn't propagate the identity
+	// for some reason. Stored verbatim as the user wrote them in the
+	// config; not normalized (no localhost↔127.0.0.1 fold, no
+	// case-fold for case-sensitive dialects like PG).
+	SourceHost     string `json:"source_host,omitempty"`
+	SourcePort     int    `json:"source_port,omitempty"`
+	SourceDatabase string `json:"source_database,omitempty"`
+	SourceSchema   string `json:"source_schema,omitempty"`
+	TargetHost     string `json:"target_host,omitempty"`
+	TargetPort     int    `json:"target_port,omitempty"`
+	TargetDatabase string `json:"target_database,omitempty"`
+	TargetSchema   string `json:"target_schema,omitempty"`
 }
 
 // WawAggregateRecord pre-aggregates ai_tuning_history rows by write_ahead_writers.
