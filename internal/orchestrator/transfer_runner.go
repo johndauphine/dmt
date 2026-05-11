@@ -22,14 +22,13 @@ import (
 
 // TransferRunner executes transfer jobs with a worker pool.
 type TransferRunner struct {
-	sourcePool     pool.SourcePool
-	targetPool     pool.TargetPool
-	state          checkpoint.StateBackend
-	config         *config.Config
-	progress       *progress.Tracker
-	notifier       notify.Provider
-	targetMode     TargetModeStrategy
-	errorDiagnoser *driver.AIErrorDiagnoser
+	sourcePool pool.SourcePool
+	targetPool pool.TargetPool
+	state      checkpoint.StateBackend
+	config     *config.Config
+	progress   *progress.Tracker
+	notifier   notify.Provider
+	targetMode TargetModeStrategy
 }
 
 // NewTransferRunner creates a new TransferRunner.
@@ -41,17 +40,15 @@ func NewTransferRunner(
 	prog *progress.Tracker,
 	notifier notify.Provider,
 	targetMode TargetModeStrategy,
-	errorDiagnoser *driver.AIErrorDiagnoser,
 ) *TransferRunner {
 	return &TransferRunner{
-		sourcePool:     sourcePool,
-		targetPool:     targetPool,
-		state:          state,
-		config:         cfg,
-		progress:       prog,
-		notifier:       notifier,
-		targetMode:     targetMode,
-		errorDiagnoser: errorDiagnoser,
+		sourcePool: sourcePool,
+		targetPool: targetPool,
+		state:      state,
+		config:     cfg,
+		progress:   prog,
+		notifier:   notifier,
+		targetMode: targetMode,
 	}
 }
 
@@ -469,13 +466,15 @@ func (r *TransferRunner) checkGeographyError(tableName string, err error) {
 	}
 }
 
-// diagnoseError uses AI to analyze the error and provide suggestions.
+// diagnoseError analyzes a transfer error and emits a diagnosis through
+// the deterministic catalog (#173). Pattern-matched diagnoses are
+// suggestions, not corrections — emitting one never changes control
+// flow; the underlying error continues to propagate to the caller.
+//
+// The caller's ctx is forwarded so a canceled/timed-out transfer stays
+// silent rather than emitting a misleading "no diagnosis available"
+// box (driver.DiagnoseError returns nil when ctx is already done).
 func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err error) {
-	if r.errorDiagnoser == nil {
-		return
-	}
-
-	// Build error context with table information
 	errCtx := &driver.ErrorContext{
 		ErrorMessage: err.Error(),
 		TableName:    j.Table.Name,
@@ -485,7 +484,6 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		TargetMode:   r.config.Migration.TargetMode,
 	}
 
-	// Add column info from the job's table
 	if j.Table.Columns != nil {
 		errCtx.Columns = make([]driver.Column, len(j.Table.Columns))
 		for i, col := range j.Table.Columns {
@@ -501,18 +499,9 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 		}
 	}
 
-	// Call AI diagnosis (non-blocking, use short timeout)
-	diagCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	diagnosis, diagErr := r.errorDiagnoser.Diagnose(diagCtx, errCtx)
-	if diagErr != nil {
-		logging.Debug("AI error diagnosis unavailable: %v", diagErr)
-		return
+	if diag := driver.DiagnoseError(ctx, errCtx); diag != nil {
+		driver.EmitDiagnosis(diag)
 	}
-
-	// Emit the diagnosis (TUI will format as box, CLI falls back to logging)
-	driver.EmitDiagnosis(diagnosis)
 }
 
 // collectFailures gathers and deduplicates table failures.

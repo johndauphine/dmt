@@ -1527,11 +1527,7 @@ func (c *Config) DebugDump() string {
 			} else {
 				b.WriteString("  Type Mapping: deterministic only (no AI fallback)\n")
 			}
-			if diagnoser := driver.GetAIErrorDiagnoser(); diagnoser != nil {
-				b.WriteString("  Error Diagnosis: enabled\n")
-			} else {
-				b.WriteString("  Error Diagnosis: disabled\n")
-			}
+			b.WriteString("  Error Diagnosis: deterministic catalog (no AI)\n")
 			// AI adjust settings from migration_defaults
 			defaults := secretsCfg.GetMigrationDefaults()
 			if defaults.AIAdjust != nil && *defaults.AIAdjust {
