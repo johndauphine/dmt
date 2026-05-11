@@ -742,6 +742,18 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	// pick this run; ExploreMode controls steady-state ε strength.
 	analyzer.SetExploration(o.config.Migration.Explore, o.config.Migration.ExploreMode)
 
+	// Wire workload identity (#215). Together these form the tuple the
+	// Tier 1 exact-identity classifier uses to find historically-
+	// comparable runs. Values come verbatim from cfg.Source / cfg.Target —
+	// the user wrote them, the user understands them. Stored without
+	// normalization so the SQL equality match is what the user expects.
+	analyzer.SetWorkloadIdentity(
+		o.config.Source.Host, o.config.Source.Port,
+		o.config.Source.Database, o.config.Source.Schema,
+		o.config.Target.Host, o.config.Target.Port,
+		o.config.Target.Database, o.config.Target.Schema,
+	)
+
 	// Capture effective DB tuning at run start (#144). Used for both:
 	//   (a) smartconfig prompt regime classification (per trajectory row)
 	//   (b) persisting on the saved AITuningRecord so future runs can

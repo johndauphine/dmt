@@ -39,6 +39,20 @@ type Input struct {
 	TotalRows    int64
 	AvgRowBytes  int64
 
+	// Workload identity (#215). Together these form the tuple the
+	// Tier 1 exact-identity classifier uses to find historically-
+	// comparable runs. Empty fields skip the Tier 1 lookup entirely —
+	// callers who don't propagate the identity get the Tier 2 / Tier 3
+	// fallback behavior (which was the only path pre-#215).
+	SourceHost     string
+	SourcePort     int
+	SourceDatabase string
+	SourceSchema   string
+	TargetHost     string
+	TargetPort     int
+	TargetDatabase string
+	TargetSchema   string
+
 	// Exploration policy (PR2 #179). ForceExplore mirrors the user's
 	// --explore CLI flag / cfg.Migration.Explore: when true, the tuner
 	// picks from the planned exploration grid this run regardless of
@@ -174,6 +188,20 @@ type HistoryRecord struct {
 	TargetMaxWALSizeMB      int64
 	TargetWALLevel          string
 	SourceMaxServerMemoryMB int64
+
+	// Workload identity (#215). Pre-#215 rows have empty values for
+	// these — the Tier 1 exact-identity filter compares string/int
+	// equality so any empty field on either side fails to match. That
+	// is correct: pre-#215 rows have unknown identity and should fall
+	// through to the Tier 2 / Tier 3 fallback.
+	SourceHost     string
+	SourcePort     int
+	SourceDatabase string
+	SourceSchema   string
+	TargetHost     string
+	TargetPort     int
+	TargetDatabase string
+	TargetSchema   string
 }
 
 // DBTuning is the current run's DB-tuning snapshot used by ClassifyRegime
@@ -225,19 +253,68 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		}
 	}
 
-	// Exploration enters three ways:
-	//   1. The user forced it via --explore, regardless of history state.
-	//   2. We have a working history backend AND the bucket is in
-	//      cold-start (< explorationGridRuns runs) — the planned grid
-	//      fills out the regression's training data.
-	//   3. Regime-drift detector fires — throughput at a fixed (WAW, CS)
-	//      config has shifted materially, so the regression's training
-	//      data is stale and we re-explore to refresh.
+	// Forced/drift-triggered exploration takes precedence over every
+	// selection tier (including #215's Tier 1). Users invoking
+	// --explore explicitly want a planned-grid probe — overriding it
+	// based on history depth would silently ignore the request. Drift
+	// detection is similar: when throughput has materially shifted at
+	// a fixed config, the existing history is stale and the right
+	// answer is to re-explore, not to keep training on it (Codex
+	// review on PR #218).
+	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
+	if in.ForceExplore || driftDetected {
+		applyGridExploration(&out, in, profile, len(rows))
+		finalizeTierAndReasoning(&out, history, historyAvailable)
+		applyMemoryClamp(&out, in)
+		return out
+	}
+
+	// Tier 1 (#215): exact-identity classifier. When the history holds
+	// enough rows for THIS exact workload (source+target endpoints all
+	// match) AND those rows are still regime-comparable to today's run,
+	// train the regression on those alone. Best signal when available;
+	// falls through silently to Tier 2 below when there aren't enough
+	// exact matches.
+	//
+	// The identity filter is applied to the *regime-filtered* cohort,
+	// not rawRows. Otherwise a same-endpoint run after a hardware or
+	// DB-tuning change (or a workload that grew past the row-count
+	// threshold) would silently keep training on incompatible old
+	// data: the host hasn't physically changed identity, but the
+	// regime has. Apply both filters to keep "exact same workload +
+	// comparable setup" as the actual Tier 1 contract (Codex review
+	// on PR #218).
+	//
+	// Tier 1 skips the cold-start exploration grid because the bucket
+	// is already past cold-start FOR THIS WORKLOAD by definition. ε-
+	// perturbation still applies — that's the steady-state exploration
+	// channel for keeping the regression's training data fresh.
+	if historyAvailable && hasExactIdentity(in) {
+		identityRows := filterByExactIdentity(regimeRows, in)
+		identityRows = filterOutliers(identityRows)
+		if len(identityRows) >= minRowsForRegression {
+			applyHistorySelection(&out, in, profile, identityRows)
+			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
+				applyEpsilonPerturbation(&out, profile)
+			}
+			finalizeTierAndReasoning(&out, history, historyAvailable)
+			applyMemoryClamp(&out, in)
+			return out
+		}
+	}
+
+	// Tier 2 / Tier 3 fallback: regime-filtered selection + cold-start
+	// exploration + baseline. Pre-#215 behavior, kept verbatim. Fires
+	// when the exact-identity cohort is too thin (or absent — pre-#215
+	// rows, nil-history, missing identity in Input).
+	//
+	// Cold-start exploration: when we have a working history backend
+	// AND the bucket is in cold-start (< explorationGridRuns runs) —
+	// the planned grid fills out the regression's training data.
 	// Nil-history OR a failed history fetch does NOT enter exploration
 	// on its own — there's nowhere to learn from / persist the probe
 	// to, so the baseline output is what the user gets.
-	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
-	if in.ForceExplore || driftDetected || (historyAvailable && shouldExplore(in, len(rows))) {
+	if historyAvailable && shouldExplore(in, len(rows)) {
 		// Exploration paths (planned grid, ε-perturbation) intentionally
 		// don't apply the historical-retry filter — that's a SELECTION
 		// concern (handled inside applyHistorySelection's selectWAW /

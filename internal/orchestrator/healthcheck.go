@@ -224,6 +224,18 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		})
 	}
 
+	// Wire workload identity (#215) so analyze-mode tuning records
+	// carry the (source endpoint, target endpoint) tuple. Without
+	// this, records saved via analyze would have empty identity and
+	// fail to match Tier 1 lookups — wasting otherwise-valid training
+	// data (Codex review on PR #218).
+	analyzer.SetWorkloadIdentity(
+		o.config.Source.Host, o.config.Source.Port,
+		o.config.Source.Database, o.config.Source.Schema,
+		o.config.Target.Host, o.config.Target.Port,
+		o.config.Target.Database, o.config.Target.Schema,
+	)
+
 	// Run analysis
 	suggestions, err := analyzer.Analyze(ctx, schema)
 	if err != nil {
@@ -399,6 +411,15 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetTy
 			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
 			TargetWALLevel:          r.TargetWALLevel,
 			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
+			// #215 workload identity
+			SourceHost:     r.SourceHost,
+			SourcePort:     r.SourcePort,
+			SourceDatabase: r.SourceDatabase,
+			SourceSchema:   r.SourceSchema,
+			TargetHost:     r.TargetHost,
+			TargetPort:     r.TargetPort,
+			TargetDatabase: r.TargetDatabase,
+			TargetSchema:   r.TargetSchema,
 		}
 	}
 	return result, nil
@@ -436,6 +457,15 @@ func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 		TargetMaxWALSizeMB:      record.TargetMaxWALSizeMB,
 		TargetWALLevel:          record.TargetWALLevel,
 		SourceMaxServerMemoryMB: record.SourceMaxServerMemoryMB,
+		// #215 workload identity
+		SourceHost:     record.SourceHost,
+		SourcePort:     record.SourcePort,
+		SourceDatabase: record.SourceDatabase,
+		SourceSchema:   record.SourceSchema,
+		TargetHost:     record.TargetHost,
+		TargetPort:     record.TargetPort,
+		TargetDatabase: record.TargetDatabase,
+		TargetSchema:   record.TargetSchema,
 	})
 }
 

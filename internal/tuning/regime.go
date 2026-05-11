@@ -162,3 +162,53 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// hasExactIdentity reports whether the Input carries a complete enough
+// workload-identity tuple for the Tier 1 classifier (#215) to do an
+// equality lookup. Hosts and database names are required; schemas may
+// legitimately be empty for drivers that don't expose them (MySQL has
+// no schema concept distinct from database). Ports are required because
+// SQLite NULL ≠ 0 in equality, so a missing port would prevent matches.
+//
+// Returns false on missing required fields → caller skips Tier 1 and
+// falls through to the Tier 2 / Tier 3 path (regime filter or baseline).
+func hasExactIdentity(in Input) bool {
+	if in.SourceHost == "" || in.SourceDatabase == "" {
+		return false
+	}
+	if in.TargetHost == "" || in.TargetDatabase == "" {
+		return false
+	}
+	if in.SourcePort == 0 || in.TargetPort == 0 {
+		return false
+	}
+	return true
+}
+
+// filterByExactIdentity returns the subset of rows whose workload
+// identity tuple matches the input exactly (#215). All eight fields
+// must match by equality — same source host/port/db/schema AND same
+// target host/port/db/schema. Pre-#215 rows have empty identity fields
+// and naturally fall out of the match (empty string ≠ user's non-empty
+// host).
+//
+// No normalization is applied. `localhost` and `127.0.0.1` are treated
+// as distinct hosts. Case-sensitive comparison (PG identifiers are
+// case-sensitive by default; users who want loose matching can
+// normalize in their config).
+func filterByExactIdentity(rows []HistoryRecord, in Input) []HistoryRecord {
+	out := make([]HistoryRecord, 0, len(rows))
+	for _, r := range rows {
+		if r.SourceHost == in.SourceHost &&
+			r.SourcePort == in.SourcePort &&
+			r.SourceDatabase == in.SourceDatabase &&
+			r.SourceSchema == in.SourceSchema &&
+			r.TargetHost == in.TargetHost &&
+			r.TargetPort == in.TargetPort &&
+			r.TargetDatabase == in.TargetDatabase &&
+			r.TargetSchema == in.TargetSchema {
+			out = append(out, r)
+		}
+	}
+	return out
+}

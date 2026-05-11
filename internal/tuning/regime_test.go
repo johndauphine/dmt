@@ -253,3 +253,252 @@ func TestClassifyRegime_DeltasAreReadable(t *testing.T) {
 		t.Errorf("tuning delta missing or malformed: %q", joined)
 	}
 }
+
+// --- Issue #215: exact-identity workload classifier ---
+
+// mkIdentity helper returns an Input with all 8 identity fields set.
+// Saves verbosity in the test fixtures below.
+func mkIdentity() Input {
+	return Input{
+		SourceHost:     "src.example.com",
+		SourcePort:     1433,
+		SourceDatabase: "MyDB",
+		SourceSchema:   "dbo",
+		TargetHost:     "tgt.example.com",
+		TargetPort:     5432,
+		TargetDatabase: "mydb",
+		TargetSchema:   "public",
+		CPUCores:       16, MemoryGB: 48,
+	}
+}
+
+// TestHasExactIdentity_FullTuple — happy path. All required fields set.
+func TestHasExactIdentity_FullTuple(t *testing.T) {
+	if !hasExactIdentity(mkIdentity()) {
+		t.Error("full identity tuple should be detected as complete")
+	}
+}
+
+// TestHasExactIdentity_MissingHostFails — missing required field.
+// Schemas may legitimately be empty (MySQL has no schema concept), so
+// empty schema does NOT disqualify; empty host does.
+func TestHasExactIdentity_MissingHostFails(t *testing.T) {
+	in := mkIdentity()
+	in.SourceHost = ""
+	if hasExactIdentity(in) {
+		t.Error("missing SourceHost should fail hasExactIdentity")
+	}
+}
+
+// TestHasExactIdentity_MissingPortFails — port is required because
+// SQLite NULL != 0 in equality, so a missing port would silently
+// prevent any matches.
+func TestHasExactIdentity_MissingPortFails(t *testing.T) {
+	in := mkIdentity()
+	in.SourcePort = 0
+	if hasExactIdentity(in) {
+		t.Error("missing SourcePort should fail hasExactIdentity")
+	}
+}
+
+// TestHasExactIdentity_EmptySchemaAllowed — drivers without schema
+// concept (MySQL) leave the schema field empty. That's legitimate;
+// the check should pass.
+func TestHasExactIdentity_EmptySchemaAllowed(t *testing.T) {
+	in := mkIdentity()
+	in.SourceSchema = ""
+	in.TargetSchema = ""
+	if !hasExactIdentity(in) {
+		t.Error("empty schemas should not disqualify identity (drivers without schema concept)")
+	}
+}
+
+// TestFilterByExactIdentity_AllMatchPass — every row matches the input.
+func TestFilterByExactIdentity_AllMatchPass(t *testing.T) {
+	in := mkIdentity()
+	rows := []HistoryRecord{
+		{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema,
+			TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema,
+			FinalThroughput: 1_000_000},
+		{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema,
+			TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema,
+			FinalThroughput: 1_100_000},
+	}
+	got := filterByExactIdentity(rows, in)
+	if len(got) != 2 {
+		t.Errorf("expected 2 matching rows, got %d", len(got))
+	}
+}
+
+// TestFilterByExactIdentity_OneFieldDifferentRejected — exactly one
+// field differs on each test row; all must be rejected.
+func TestFilterByExactIdentity_OneFieldDifferentRejected(t *testing.T) {
+	in := mkIdentity()
+	cases := []struct {
+		name string
+		row  HistoryRecord
+	}{
+		{"source_host_diff", HistoryRecord{SourceHost: "OTHER", SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema, TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema}},
+		{"source_port_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: 9999, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema, TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema}},
+		{"source_db_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: "OTHER", SourceSchema: in.SourceSchema, TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema}},
+		{"source_schema_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: "OTHER", TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema}},
+		{"target_host_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema, TargetHost: "OTHER", TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema}},
+		{"target_port_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema, TargetHost: in.TargetHost, TargetPort: 9999, TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema}},
+		{"target_db_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema, TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: "OTHER", TargetSchema: in.TargetSchema}},
+		{"target_schema_diff", HistoryRecord{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema, TargetHost: in.TargetHost, TargetPort: in.TargetPort, TargetDatabase: in.TargetDatabase, TargetSchema: "OTHER"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterByExactIdentity([]HistoryRecord{tc.row}, in)
+			if len(got) != 0 {
+				t.Errorf("row with %s should be rejected; got %d matches", tc.name, len(got))
+			}
+		})
+	}
+}
+
+// TestFilterByExactIdentity_PreIdentityRowsRejected — rows persisted
+// before #215 have empty identity fields. Equality comparison rejects
+// them, leaving them out of the Tier 1 cohort. That's correct: their
+// identity is unrecoverable, so they shouldn't claim to match anything.
+func TestFilterByExactIdentity_PreIdentityRowsRejected(t *testing.T) {
+	in := mkIdentity()
+	rows := []HistoryRecord{
+		{}, // all-zero — represents a pre-#215 row
+		{SourceHost: in.SourceHost, SourcePort: in.SourcePort, SourceDatabase: in.SourceDatabase}, // partial — also rejected
+	}
+	got := filterByExactIdentity(rows, in)
+	if len(got) != 0 {
+		t.Errorf("pre-#215 rows (empty identity) should not match; got %d", len(got))
+	}
+}
+
+// TestTune_ExactIdentityCohort_FiresRegression — integration test for
+// the Tier 1 dispatch. When the history holds ≥minRowsForRegression
+// rows from the exact same identity, the tuner should fire regression
+// on those alone (not the broader regime-comparable set).
+func TestTune_ExactIdentityCohort_FiresRegression(t *testing.T) {
+	current := mkIdentity()
+	current.SourceDBType = "mssql"
+	current.TargetDBType = "postgres"
+	current.AvgRowBytes = 500
+
+	// 30 matching-identity rows + 30 different-identity rows. Tier 1
+	// should ignore the different-identity rows entirely.
+	rows := make([]HistoryRecord, 0, 60)
+	mkRow := func(host string, throughput float64, waw int) HistoryRecord {
+		return HistoryRecord{
+			SourceHost: host, SourcePort: current.SourcePort, SourceDatabase: current.SourceDatabase, SourceSchema: current.SourceSchema,
+			TargetHost: current.TargetHost, TargetPort: current.TargetPort, TargetDatabase: current.TargetDatabase, TargetSchema: current.TargetSchema,
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			CPUCores: 16, MemoryGB: 48,
+			WriteAheadWriters: waw, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4, // match baseline()'s defaults so argmax covers a cell (#220/#222)
+			FinalThroughput: throughput,
+		}
+	}
+	// Matching identity: 30 rows, throughput peaks at WAW=4.
+	for i := 0; i < 30; i++ {
+		waw := (i % 6) + 1
+		dev := waw - 4
+		rows = append(rows, mkRow(current.SourceHost, 1_000_000.0-50_000.0*float64(dev*dev), waw))
+	}
+	// Different host: 30 rows with very different shape (throughput peaks
+	// at WAW=1). If these leaked into the Tier 1 cohort, the regression
+	// would mispredict.
+	for i := 0; i < 30; i++ {
+		waw := (i % 6) + 1
+		rows = append(rows, mkRow("other-host.example.com", 100_000.0+200_000.0/float64(waw), waw))
+	}
+
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	// Tier 1 should have fired regression; reasoning should reflect that.
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Tier 1 should fire regression on exact-identity cohort; got: %q", out.Reasoning)
+	}
+	// The "over N filtered rows" count should be 30 (the matching
+	// identity cohort), not 60 (all rows). Tier 1 isolation matters.
+	if !strings.Contains(out.Reasoning, "over 30 filtered rows") {
+		t.Errorf("Tier 1 should train on 30 matching rows, not the full 60; got: %q", out.Reasoning)
+	}
+}
+
+// TestTune_ExactIdentityCohortTooThin_FallsThroughToTier2 — when the
+// exact-identity cohort has fewer than minRowsForRegression rows, the
+// dispatch falls through to the Tier 2 regime filter. The rest of the
+// rows (regime-comparable but not identity-matching) take over.
+func TestTune_ExactIdentityCohortTooThin_FallsThroughToTier2(t *testing.T) {
+	current := mkIdentity()
+	current.SourceDBType = "mssql"
+	current.TargetDBType = "postgres"
+	current.AvgRowBytes = 500
+	current.TotalRows = 100_000_000
+
+	mkRow := func(host string, totalRows int64, throughput float64, waw int) HistoryRecord {
+		return HistoryRecord{
+			SourceHost: host, SourcePort: current.SourcePort, SourceDatabase: current.SourceDatabase, SourceSchema: current.SourceSchema,
+			TargetHost: current.TargetHost, TargetPort: current.TargetPort, TargetDatabase: current.TargetDatabase, TargetSchema: current.TargetSchema,
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			CPUCores: 16, MemoryGB: 48,
+			TotalRows: totalRows, AvgRowBytes: 500,
+			WriteAheadWriters: waw, ChunkSize: 50_000,
+			ParallelReaders: 2, ReadAheadBuffers: 4, // match baseline()'s defaults (#220/#222)
+			FinalThroughput: throughput,
+		}
+	}
+
+	rows := make([]HistoryRecord, 0, 35)
+	// 5 matching-identity rows — below regression floor.
+	for i := 0; i < 5; i++ {
+		rows = append(rows, mkRow(current.SourceHost, current.TotalRows, 1_000_000, (i%6)+1))
+	}
+	// 30 different-identity but regime-comparable rows (same workload,
+	// different source host). Tier 2 will route through these.
+	for i := 0; i < 30; i++ {
+		rows = append(rows, mkRow("other-host.example.com", current.TotalRows, 800_000, (i%6)+1))
+	}
+
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	// Should NOT be from Tier 1 (only 5 matches); should fall through
+	// to Tier 2 (regime-filtered, larger cohort). The "filtered rows"
+	// count in the reasoning should be > 5 (some subset of the 35).
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Tier 2 should fire regression on the 35-row cohort; got: %q", out.Reasoning)
+	}
+}
+
+// TestTune_NoIdentityInInput_FallsThroughToTier2 — when the caller
+// doesn't populate the identity fields (e.g., test fixtures or
+// pre-#215 callers that haven't been updated), Tier 1 is skipped
+// silently and the Tier 2 path takes over. Backward compatibility.
+func TestTune_NoIdentityInInput_FallsThroughToTier2(t *testing.T) {
+	current := Input{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		CPUCores: 16, MemoryGB: 48,
+		AvgRowBytes: 500, TotalRows: 100_000_000,
+		// No identity fields set.
+	}
+	rows := make([]HistoryRecord, 30)
+	for i := range rows {
+		waw := (i % 6) + 1
+		rows[i] = HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			CPUCores: 16, MemoryGB: 48,
+			TotalRows: current.TotalRows, AvgRowBytes: 500,
+			WriteAheadWriters: waw, ChunkSize: 50_000,
+			ParallelReaders: 2, ReadAheadBuffers: 4, // baseline defaults (#220/#222)
+			FinalThroughput: 800_000,
+		}
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	// Tier 2 fires with the full 30-row cohort.
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Tier 2 should fire when identity is missing; got: %q", out.Reasoning)
+	}
+}
