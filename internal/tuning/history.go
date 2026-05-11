@@ -225,9 +225,16 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	covered := cellsWithCoverage(rows)
 	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, cellSkip, covered)
 	if !ok {
+		// Intersect cellSkip with the argmax grid before logging — the
+		// raw map can include cells outside readerGrid (e.g., historical
+		// PR=3/RAB=5 rows). Those never participated in argmax filtering,
+		// so quoting them in the skip reason is misleading (Copilot
+		// review on #221). The covered-cells count is left as the full
+		// historical figure since it's diagnostic of "did any history
+		// land in the grid at all" — orthogonal concern.
 		out.Reasoning = appendReasoning(out.Reasoning,
 			"regression skipped: every grid candidate filtered (retry-rate exclusions: %s, HardChunkLimit=%d, covered cells: %d)",
-			formatRetryCellSkips(cellSkip), profile.HardChunkLimit, len(covered),
+			formatRetryCellSkips(cellSkipsInGrid(cellSkip)), profile.HardChunkLimit, len(covered),
 		)
 		return false
 	}
@@ -417,6 +424,37 @@ func cellsWithCoverage(rows []HistoryRecord) map[coverageCellKey]bool {
 			ParallelReaders:  r.ParallelReaders,
 			ReadAheadBuffers: r.ReadAheadBuffers,
 		}] = true
+	}
+	return out
+}
+
+// cellSkipsInGrid filters the raw retry-rate exclusion map down to
+// entries whose (PR, RAB) pair appears in readerGrid and whose WAW is
+// in the argmax grid range. Used by the regression skip reasoning so
+// the log only mentions cells that actually participated in argmax
+// filtering — historical exclusions for cells outside the grid (e.g.,
+// PR=3/RAB=5 rows) never gated a candidate and shouldn't be quoted as
+// reasons the grid emptied (Copilot review on #221).
+func cellSkipsInGrid(cellSkip map[retryCellKey]bool) map[retryCellKey]bool {
+	if len(cellSkip) == 0 {
+		return cellSkip
+	}
+	gridPairs := map[[2]int]bool{}
+	for _, r := range readerGrid {
+		gridPairs[[2]int{r.ParallelReaders, r.ReadAheadBuffers}] = true
+	}
+	out := map[retryCellKey]bool{}
+	for k, v := range cellSkip {
+		if !v {
+			continue
+		}
+		if k.WAW < 1 || k.WAW > maxWAWForGrid {
+			continue
+		}
+		if !gridPairs[[2]int{k.ParallelReaders, k.ReadAheadBuffers}] {
+			continue
+		}
+		out[k] = true
 	}
 	return out
 }

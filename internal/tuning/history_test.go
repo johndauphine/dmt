@@ -336,6 +336,66 @@ func TestCellsWithHighRetryRate_PerCellNotPerWAW(t *testing.T) {
 	}
 }
 
+// TestCellSkipsInGrid_FiltersOutOfGridEntries (Copilot review on #221)
+// pins that the skip reasoning logs only retry-rate exclusions whose
+// (PR, RAB) pair is in readerGrid and whose WAW is in the argmax grid
+// range. Without this filter, historical rows at PR/RAB values outside
+// the grid get quoted as "the reason argmax emptied" even though they
+// never participated in argmax filtering.
+func TestCellSkipsInGrid_FiltersOutOfGridEntries(t *testing.T) {
+	// 4 retry-rate exclusions: 2 in-grid, 2 out-of-grid.
+	cellSkip := map[retryCellKey]bool{
+		{WAW: 2, ParallelReaders: 2, ReadAheadBuffers: 4}: true, // in grid
+		{WAW: 4, ParallelReaders: 4, ReadAheadBuffers: 8}: true, // in grid
+		{WAW: 2, ParallelReaders: 3, ReadAheadBuffers: 5}: true, // PR=3 not in {2,4}
+		{WAW: 2, ParallelReaders: 2, ReadAheadBuffers: 7}: true, // RAB=7 not in {4,8}
+	}
+	got := cellSkipsInGrid(cellSkip)
+
+	if len(got) != 2 {
+		t.Errorf("filtered set has %d entries, want 2 (only the two in-grid cells)", len(got))
+	}
+	if !got[retryCellKey{WAW: 2, ParallelReaders: 2, ReadAheadBuffers: 4}] {
+		t.Error("in-grid cell (WAW=2, PR=2, RAB=4) should be retained")
+	}
+	if !got[retryCellKey{WAW: 4, ParallelReaders: 4, ReadAheadBuffers: 8}] {
+		t.Error("in-grid cell (WAW=4, PR=4, RAB=8) should be retained")
+	}
+	if got[retryCellKey{WAW: 2, ParallelReaders: 3, ReadAheadBuffers: 5}] {
+		t.Error("out-of-grid cell (PR=3) leaked through filter")
+	}
+}
+
+// TestCellSkipsInGrid_EmptyInput is the empty-map fast path. Returns
+// the same map to avoid a needless allocation.
+func TestCellSkipsInGrid_EmptyInput(t *testing.T) {
+	if got := cellSkipsInGrid(nil); len(got) != 0 {
+		t.Errorf("nil input should return empty; got %d entries", len(got))
+	}
+	if got := cellSkipsInGrid(map[retryCellKey]bool{}); len(got) != 0 {
+		t.Errorf("empty input should return empty; got %d entries", len(got))
+	}
+}
+
+// TestCellSkipsInGrid_FiltersOutOfRangeWAW pins that cells with WAW
+// outside [1, maxWAWForGrid] are filtered. Defensive — current
+// production code only writes WAW values within range, but a future
+// schema change or corrupted history row shouldn't poison the log.
+func TestCellSkipsInGrid_FiltersOutOfRangeWAW(t *testing.T) {
+	cellSkip := map[retryCellKey]bool{
+		{WAW: 0, ParallelReaders: 2, ReadAheadBuffers: 4}:                  true, // below floor
+		{WAW: maxWAWForGrid + 1, ParallelReaders: 2, ReadAheadBuffers: 4}:  true, // above cap
+		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}:                  true, // in range
+	}
+	got := cellSkipsInGrid(cellSkip)
+	if len(got) != 1 {
+		t.Errorf("filtered set has %d entries, want 1", len(got))
+	}
+	if !got[retryCellKey{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}] {
+		t.Error("in-range WAW=1 should be retained")
+	}
+}
+
 // TestFormatRetryCellSkips_DeterministicOrder pins that the reasoning
 // log format sorts cell keys so log diffs aren't churned by map
 // iteration order.
@@ -921,6 +981,8 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 			WriteAheadWriters: waw,
 			ChunkSize:         50_000,
 			AvgRowBytes:       500,
+			ParallelReaders:   2, // pinned at baseline so the #221 coverage
+			ReadAheadBuffers:  4, // gate doesn't pre-empt the retry-rate filter
 			FinalThroughput:   thru,
 			ChunkRetryCount:   retries,
 			CPUCores:          16,
@@ -936,6 +998,12 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 	}
 	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxWAWForGrid {
 		t.Errorf("picked WAW=%d outside valid grid [1..%d]", out.WriteAheadWriters, maxWAWForGrid)
+	}
+	// Sanity: the regression tier (not smoothed-bins) should have done the
+	// picking — otherwise this test would pass via the coverage-gate
+	// fall-through and not actually exercise the retry-rate filter.
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Reasoning should record regression-selected (not a coverage-gate fall-through); got %q", out.Reasoning)
 	}
 }
 
@@ -973,6 +1041,8 @@ func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 			WriteAheadWriters: waw,
 			ChunkSize:         5,
 			AvgRowBytes:       500,
+			ParallelReaders:   2, // pinned at baseline so the #221 coverage
+			ReadAheadBuffers:  4, // gate doesn't pre-empt the HardChunkLimit filter
 			FinalThroughput:   500_000 + float64(waw*1000),
 			CPUCores:          16, MemoryGB: 48,
 		}
@@ -990,6 +1060,12 @@ func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 	// was filtered out).
 	if strings.Contains(out.Reasoning, "regression-selected") {
 		t.Errorf("Reasoning should not say regression-selected when grid was fully filtered; got %q", out.Reasoning)
+	}
+	// The skip reason should specifically cite HardChunkLimit (not just
+	// that something filtered). Otherwise the test could pass via the
+	// coverage-gate fall-through and not actually exercise HardChunkLimit.
+	if !strings.Contains(out.Reasoning, "HardChunkLimit=10") {
+		t.Errorf("Reasoning should attribute the regression skip to HardChunkLimit=10; got %q", out.Reasoning)
 	}
 	_ = originalWAW
 }
