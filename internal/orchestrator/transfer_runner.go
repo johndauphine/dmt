@@ -470,7 +470,11 @@ func (r *TransferRunner) checkGeographyError(tableName string, err error) {
 // the deterministic catalog (#173). Pattern-matched diagnoses are
 // suggestions, not corrections — emitting one never changes control
 // flow; the underlying error continues to propagate to the caller.
-func (r *TransferRunner) diagnoseError(_ context.Context, j transfer.Job, err error) {
+//
+// The caller's ctx is forwarded so a canceled/timed-out transfer stays
+// silent rather than emitting a misleading "no diagnosis available"
+// box (driver.DiagnoseError returns nil when ctx is already done).
+func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err error) {
 	errCtx := &driver.ErrorContext{
 		ErrorMessage: err.Error(),
 		TableName:    j.Table.Name,
@@ -495,7 +499,7 @@ func (r *TransferRunner) diagnoseError(_ context.Context, j transfer.Job, err er
 		}
 	}
 
-	if diag := driver.DiagnoseError(context.Background(), errCtx); diag != nil {
+	if diag := driver.DiagnoseError(ctx, errCtx); diag != nil {
 		driver.EmitDiagnosis(diag)
 	}
 }
