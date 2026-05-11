@@ -677,16 +677,10 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		return nil, fmt.Errorf("building jobs: %w", err)
 	}
 
-	// Create AI error diagnoser if AI is configured (#170 — diagnoser
-	// is AI-specific, no deterministic equivalent; silently no-op when
-	// AI isn't available).
-	var errorDiagnoser *driver.AIErrorDiagnoser
-	if aiMapper := driver.GetAIMapper(); aiMapper != nil {
-		errorDiagnoser = driver.NewAIErrorDiagnoser(aiMapper)
-		logging.Debug("AI error diagnosis enabled")
-	}
-
-	// Execute jobs using TransferRunner
+	// Execute jobs using TransferRunner. Error diagnosis runs through the
+	// deterministic catalog in internal/driver/errordiag (#173); the
+	// former AI-driven diagnoser was removed to avoid sending error
+	// messages (which routinely contain row data) to a third-party LLM.
 	runner := NewTransferRunner(
 		o.sourcePool,
 		o.targetPool,
@@ -695,7 +689,6 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 		o.progress,
 		o.notifier,
 		o.targetMode,
-		errorDiagnoser,
 	)
 
 	result, err := runner.Run(ctx, runID, buildResult, tables, resume)
