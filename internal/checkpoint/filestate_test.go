@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -346,14 +347,20 @@ func TestAtomicWriteFile_CreatesMissingDir(t *testing.T) {
 	}
 }
 
-// TestAtomicWriteFile_NoTornWritesOnFailure simulates the "crash
-// mid-write" failure mode #254 cares about: instead of actually
-// SIGKILLing a goroutine, we inject the failure by pre-creating an
-// undeletable file at the target's temp-name pattern. The point is
-// to verify the safety property the atomic pattern delivers: if the
-// write fails partway, the existing file is left untouched, not
-// truncated.
+// TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact simulates
+// the "crash mid-write" failure mode #254 cares about. Failure is
+// injected by chmod'ing the directory read-only so CreateTemp fails;
+// the safety property to verify is that the previous file's
+// contents are left intact, not torn. Skipped where chmod can't
+// enforce that restriction (root, Windows).
 func TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0500 doesn't restrict writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks; failure injection won't fire")
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.yaml")
 
@@ -361,9 +368,6 @@ func TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Make the directory read-only so CreateTemp fails. This
-	// simulates a midway permission/disk failure that would have
-	// torn os.WriteFile but must leave atomicWriteFile a no-op.
 	if err := os.Chmod(dir, 0500); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}

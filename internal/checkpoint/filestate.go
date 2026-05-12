@@ -147,12 +147,18 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 
 	// fsync the parent dir so the rename itself is durably committed.
-	// Best-effort: some platforms (and some filesystems) don't allow
-	// opening a directory for sync — those returns are non-fatal
-	// because the rename already made the data visible.
+	// Open-failure is non-fatal (Windows doesn't let you open a
+	// directory handle), but if we *can* open it, an Sync error from
+	// the underlying storage (PVC/NFS/disk-full-on-metadata) is a
+	// real durability failure and must be surfaced. The crash-safety
+	// contract this function advertises depends on the dir fsync
+	// actually landing.
 	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+		syncErr := d.Sync()
+		_ = d.Close() // close error on a read handle is uninteresting
+		if syncErr != nil {
+			return fmt.Errorf("fsync state dir: %w", syncErr)
+		}
 	}
 	return nil
 }
