@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -74,14 +75,84 @@ func NewFileState(path string) (*FileState, error) {
 	return fs, nil
 }
 
-// save writes the current state to the YAML file.
+// save writes the current state to the YAML file using the standard
+// temp + fsync + rename + dir-fsync atomic-write pattern. Pre-#254
+// this used os.WriteFile, which is *not* crash-safe: a SIGKILL,
+// OOM-kill, or pod eviction partway through the write would leave a
+// truncated YAML file that fails to parse on resume — exactly the
+// failure mode the file backend was added to handle (Airflow/k8s).
 func (fs *FileState) save() error {
 	data, err := yaml.Marshal(fs.state)
 	if err != nil {
 		return fmt.Errorf("marshaling state: %w", err)
 	}
-	if err := os.WriteFile(fs.path, data, 0600); err != nil {
-		return fmt.Errorf("writing state file: %w", err)
+	return atomicWriteFile(fs.path, data, 0600)
+}
+
+// atomicWriteFile writes data to path atomically: it stages the
+// content in a temp file in the same directory, fsyncs the file,
+// renames it into place, and then fsyncs the parent directory so the
+// rename itself is durable across power loss. Returns the existing
+// file unchanged if any step fails (the partially-written temp is
+// cleaned up by the deferred Remove).
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+
+	// Ensure parent directory exists. 0700 mirrors the restrictive
+	// permissions used elsewhere in checkpoint storage.
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("creating state dir: %w", err)
+	}
+
+	// Stage in the same directory as the target so the eventual rename
+	// stays within one filesystem (rename across filesystems is not
+	// atomic and may fall back to copy+delete).
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.")
+	if err != nil {
+		return fmt.Errorf("creating temp state file: %w", err)
+	}
+	tmpName := f.Name()
+	// On the happy path the rename below removes the temp from this
+	// name, making this Remove a no-op. On any error path it cleans
+	// up the partial file so we don't leak temps next to the state.
+	defer os.Remove(tmpName)
+
+	// Match the final file's mode exactly so the temp doesn't widen
+	// permissions during the brief window before the rename. CreateTemp
+	// defaults to 0600 on most platforms, but Chmod nails it down.
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return fmt.Errorf("chmod temp state file: %w", err)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("writing temp state file: %w", err)
+	}
+
+	// fsync the file data to disk before the rename. Without this,
+	// the rename can land but the file's contents may still be in the
+	// page cache and lost on power failure.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("fsync temp state file: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing temp state file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("renaming state file into place: %w", err)
+	}
+
+	// fsync the parent dir so the rename itself is durably committed.
+	// Best-effort: some platforms (and some filesystems) don't allow
+	// opening a directory for sync — those returns are non-fatal
+	// because the rename already made the data visible.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
