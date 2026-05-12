@@ -634,9 +634,11 @@ sensor = PythonSensor(
 
 | Database | As Source | As Target | Write Method | Auth |
 |----------|-----------|-----------|--------------|------|
-| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) | Password, Kerberos |
-| SQL Server | ✓ | ✓ | TDS bulk copy | Password, Kerberos |
+| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) | Password |
+| SQL Server | ✓ | ✓ | TDS bulk copy | Password |
 | MySQL | ✓ | ✓ | Multi-row INSERT | Password |
+
+Kerberos / SPNEGO is **not currently supported** — the DSN-building plumbing exists but is not wired to the runtime drivers, and we don't yet have a Kerberized integration environment to verify against. See #251 for the re-enable plan.
 
 All combinations are supported, including same-engine migrations (PG→PG, MSSQL→MSSQL, MySQL→MySQL).
 
@@ -668,7 +670,6 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 ### Database Support
 - **PostgreSQL, SQL Server, MySQL** - migrate between any combination
 - **Bulk copy protocols** - PostgreSQL COPY, TDS bulk copy, MySQL LOAD DATA for maximum throughput
-- **Kerberos authentication** - SPNEGO/keytab support for SQL Server and PostgreSQL
 - **SSL/TLS encryption** - configurable per connection
 
 ### Transfer Engine
@@ -863,29 +864,20 @@ The `source` section configures the database to migrate FROM.
 | `host` | **Yes** | - | Database server hostname or IP address |
 | `port` | No | Auto | Database server port (1433/5432/3306) |
 | `database` | **Yes** | - | Database name |
-| `user` | Yes* | - | Username for authentication (*not required for Kerberos) |
-| `password` | Yes* | - | Password for authentication (*not required for Kerberos). Supports `${ENV_VAR}` syntax |
+| `user` | **Yes** | - | Username for authentication |
+| `password` | **Yes** | - | Password for authentication. Supports `${ENV_VAR}` syntax |
 | `schema` | No | Auto | Schema containing tables to migrate |
 
 **SSL/TLS Settings (source):**
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `ssl_mode` | No | `require` | PostgreSQL SSL mode: `disable`, `require`, `verify-ca`, `verify-full` |
+| `ssl_mode` | No | `require` | PostgreSQL SSL mode: `disable`, `require`, `verify-ca`, `verify-full`. MySQL accepts the same names plus `preferred` for explicit downgradeable TLS. |
 | `encrypt` | No | `true` | SQL Server encryption: `true` or `false` |
 | `trust_server_cert` | No | `false` | SQL Server: Skip certificate validation (use only for testing) |
 | `packet_size` | No | `32767` | SQL Server TDS packet size in bytes (max: 32767). Larger packets improve throughput. |
 
-**Kerberos Settings (source):**
-
-| Parameter | Required | Default | Description |
-|-----------|----------|---------|-------------|
-| `auth` | No | `password` | Authentication method: `password` or `kerberos` |
-| `krb5_conf` | No | System default | Path to krb5.conf file (e.g., `/etc/krb5.conf`) |
-| `keytab` | No | Credential cache | Path to keytab file for service account authentication |
-| `realm` | No | Auto-detected | Kerberos realm (e.g., `EXAMPLE.COM`) |
-| `spn` | No | Auto-detected | SQL Server Service Principal Name (e.g., `MSSQLSvc/host.example.com:1433`) |
-| `gssencmode` | No | `prefer` | PostgreSQL GSSAPI encryption: `disable`, `prefer`, `require` |
+Kerberos / SPNEGO auth is **not currently supported** (see [#251](https://github.com/johndauphine/dmt/issues/251)). Setting `auth: kerberos` is rejected at config-load. The `auth`, `krb5_conf`, `keytab`, `realm`, `spn`, and `gssencmode` fields are reserved in the schema for the eventual re-enable.
 
 ### Target Database Settings
 
@@ -897,11 +889,11 @@ The `target` section configures the database to migrate TO. It uses the same par
 | `host` | **Yes** | - | Database server hostname or IP address |
 | `port` | No | Auto | Database server port (5432/1433/3306) |
 | `database` | **Yes** | - | Database name |
-| `user` | Yes* | - | Username for authentication |
-| `password` | Yes* | - | Password for authentication |
+| `user` | **Yes** | - | Username for authentication |
+| `password` | **Yes** | - | Password for authentication |
 | `schema` | No | Auto | Target schema for migrated tables |
 
-The same SSL/TLS and Kerberos settings are available for `target`.
+The same SSL/TLS settings are available for `target`.
 
 ### Migration Settings
 
@@ -997,68 +989,7 @@ The `ai` section configures AI-powered features.
 
 ## Kerberos Authentication
 
-For enterprise environments, Kerberos authentication eliminates the need to store database passwords. Both SQL Server and PostgreSQL support Kerberos.
-
-### SQL Server with Kerberos
-
-```yaml
-source:
-  type: mssql
-  host: sqlserver.example.com
-  database: MyDatabase
-  auth: kerberos
-  user: svc_migrate@EXAMPLE.COM   # Kerberos principal (optional)
-  # spn: MSSQLSvc/sqlserver.example.com:1433  # Auto-detected if not specified
-  encrypt: "true"
-```
-
-**Requirements:**
-- Linux: Install `krb5-user`, configure `/etc/krb5.conf`, run `kinit` or use a keytab
-- Windows: Domain-joined machine with logged-in domain user
-- macOS: Configure Kerberos in System Preferences
-
-**Using a keytab (for service accounts):**
-```yaml
-source:
-  type: mssql
-  host: sqlserver.example.com
-  database: MyDatabase
-  auth: kerberos
-  user: svc_migrate@EXAMPLE.COM
-  keytab: /etc/krb5.keytab
-  realm: EXAMPLE.COM
-```
-
-### PostgreSQL with Kerberos (GSSAPI)
-
-```yaml
-target:
-  type: postgres
-  host: postgres.example.com
-  database: mydb
-  auth: kerberos
-  user: svc_migrate@EXAMPLE.COM
-  gssencmode: require   # disable, prefer (default), require
-  ssl_mode: disable     # SSL not needed when using GSSAPI encryption
-```
-
-### Kerberos Setup (Linux)
-
-```bash
-# Install Kerberos client
-sudo apt install krb5-user   # Debian/Ubuntu
-sudo yum install krb5-workstation  # RHEL/CentOS
-
-# Configure /etc/krb5.conf with your realm
-# Then authenticate:
-kinit svc_migrate@EXAMPLE.COM
-
-# Verify ticket
-klist
-
-# Run migration (no password needed)
-./dmt -c config.yaml run
-```
+**Not currently supported** — tracked in [#251](https://github.com/johndauphine/dmt/issues/251). The `auth`, `krb5_conf`, `keytab`, `realm`, `spn`, and `gssencmode` fields are reserved in the YAML schema for the eventual re-enable; `auth: kerberos` is rejected at config-load until a verifiable Kerberized test environment is in place.
 
 ## Example Configurations
 
@@ -1067,9 +998,7 @@ Ready-to-use example configuration files are available in the [`examples/`](exam
 | File | Description |
 |------|-------------|
 | `config-mssql-to-pg.yaml` | SQL Server → PostgreSQL with password auth |
-| `config-mssql-to-pg-kerberos.yaml` | SQL Server → PostgreSQL with Kerberos |
 | `config-pg-to-mssql.yaml` | PostgreSQL → SQL Server with password auth |
-| `config-pg-to-mssql-kerberos.yaml` | PostgreSQL → SQL Server with Kerberos |
 | `config-local.yaml` | Minimal config for local Docker development |
 | `config-production.yaml` | Full production config with all options |
 
@@ -1108,43 +1037,7 @@ migration:
   target_mode: drop_recreate         # Drop and recreate tables
 ```
 
-### Example 2: SQL Server to PostgreSQL (Kerberos Authentication)
-
-Enterprise migration using Kerberos - no passwords in config file:
-
-```yaml
-# config-mssql-to-pg-kerberos.yaml
-source:
-  type: mssql
-  host: sqlserver.corp.example.com
-  port: 1433
-  database: SourceDatabase
-  schema: dbo
-  auth: kerberos                     # Use Kerberos instead of password
-  user: svc_migrate@CORP.EXAMPLE.COM # Kerberos principal
-  keytab: /etc/mssql-migrate.keytab  # Service account keytab
-  realm: CORP.EXAMPLE.COM            # Kerberos realm
-  encrypt: "true"
-
-target:
-  type: postgres
-  host: postgres.corp.example.com
-  port: 5432
-  database: target_db
-  schema: public
-  auth: kerberos                     # Use Kerberos/GSSAPI
-  user: svc_migrate@CORP.EXAMPLE.COM
-  gssencmode: require                # Require GSSAPI encryption
-  ssl_mode: disable                  # SSL not needed with GSSAPI
-
-migration:
-  workers: 8
-  chunk_size: 200000
-  create_indexes: true
-  create_foreign_keys: true
-```
-
-### Example 3: PostgreSQL to SQL Server (Password Authentication)
+### Example 2: PostgreSQL to SQL Server (Password Authentication)
 
 Reverse migration from PostgreSQL to SQL Server:
 
@@ -1180,41 +1073,7 @@ migration:
   create_foreign_keys: true
 ```
 
-### Example 4: PostgreSQL to SQL Server (Kerberos Authentication)
-
-```yaml
-# config-pg-to-mssql-kerberos.yaml
-source:
-  type: postgres
-  host: postgres.corp.example.com
-  port: 5432
-  database: source_db
-  schema: public
-  auth: kerberos
-  user: svc_migrate@CORP.EXAMPLE.COM
-  gssencmode: require
-  ssl_mode: disable
-
-target:
-  type: mssql
-  host: sqlserver.corp.example.com
-  port: 1433
-  database: TargetDatabase
-  schema: dbo
-  auth: kerberos
-  user: svc_migrate@CORP.EXAMPLE.COM
-  keytab: /etc/mssql-migrate.keytab
-  realm: CORP.EXAMPLE.COM
-  encrypt: "true"
-
-migration:
-  workers: 8
-  chunk_size: 200000
-  write_ahead_writers: 8
-  parallel_readers: 1
-```
-
-### Example 5: Minimal Configuration (Local Development)
+### Example 3: Minimal Configuration (Local Development)
 
 Simplest config for local Docker databases:
 
@@ -1238,7 +1097,7 @@ target:
   ssl_mode: disable                  # Disable SSL for local dev
 ```
 
-### Example 6: Production Configuration with All Options
+### Example 4: Production Configuration with All Options
 
 Full production configuration with Slack notifications and validation:
 

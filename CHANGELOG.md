@@ -38,6 +38,22 @@ All notable changes to this project will be documented in this file.
   now maps to `tls=true` (verify CA + hostname), which is strictly
   safer.
 
+### Removed
+
+- **Kerberos auth descoped pending a verifiable test environment**
+  (#251). The README and example configs advertised Kerberos /
+  SPNEGO support for SQL Server and PostgreSQL, but the runtime
+  drivers go through `Dialect.BuildDSN(..., cfg.DSNOptions())` and
+  `DSNOptions()` doesn't carry `auth`/`keytab`/`realm`/`SPN`, so an
+  `auth: kerberos` config silently fell back to password auth.
+  `examples/config-mssql-to-pg-kerberos.yaml` and
+  `examples/config-pg-to-mssql-kerberos.yaml` are removed, the
+  README no longer claims Kerberos as a supported auth method, and
+  config-load now rejects `auth: kerberos` with an error pointing at
+  #251. The DSN-builder code path that would emit a correct
+  Kerberos DSN is left in place (with its tests) for the eventual
+  re-enable.
+
 ### Fixed
 
 - **File-state writes are now crash-safe** (#254). The YAML file
