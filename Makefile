@@ -1,4 +1,5 @@
-.PHONY: build clean test test-short test-coverage run install check setup-hooks
+.PHONY: build clean test test-short test-coverage run install check setup-hooks \
+        load-fixture-pgbench load-fixture-so2010-minimal test-fixtures-load
 
 # Build variables
 BINARY_NAME=dmt
@@ -164,6 +165,35 @@ bench-all-down: bench-dbs-down mssql-target-down mysql-bench-down
 
 bench-dbs-down:
 	docker rm -f mssql-bench pg-bench 2>/dev/null || true
+
+# ----------------------------------------------------------------------
+# Fixture loaders (#178)
+# ----------------------------------------------------------------------
+# CI-friendly fixtures that populate the running test/bench containers
+# with reproducible data. Each loader is idempotent (drops+recreates)
+# and completes in seconds. See docs/FIXTURES.md for the full inventory
+# (including the full SO2010/SO2013/WWI .bak procedures that aren't
+# scriptable here without large downloads).
+
+# pgbench: scale-1 PostgreSQL TPC-B-like fixture (~16 MB, <1 s to load).
+# Override scale with FIXTURE_SCALE=10 etc. Targets pg-test by default,
+# falls back to pg-bench.
+load-fixture-pgbench:
+	./scripts/load-fixture-pgbench.sh
+
+# SO2010-minimal: synthesized DDL + tiny seed for the StackOverflow2010
+# schema (~30 rows total, 9 tables). Covers the type-mapping surface
+# without the 10 GB .bak download.
+load-fixture-so2010-minimal:
+	./scripts/load-fixture-so2010-minimal.sh
+
+# Convenience: load every CI-friendly fixture in one shot. SO2013 and
+# WWI are explicitly excluded — they require a manual .bak restore;
+# see docs/FIXTURES.md for the procedure.
+test-fixtures-load: load-fixture-pgbench load-fixture-so2010-minimal
+	@echo ""
+	@echo "All CI-friendly fixtures loaded."
+	@echo "For full SO2010/SO2013/WWI bench fixtures, see docs/FIXTURES.md"
 
 # Pre-commit hooks
 setup-hooks:
