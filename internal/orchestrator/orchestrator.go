@@ -16,6 +16,7 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
@@ -44,6 +45,32 @@ type TableFailure struct {
 	TableName string
 	Error     error
 }
+
+// PartialMigrationError is returned by Run/Resume when at least one
+// table failed to transfer and migration.allow_partial is not enabled.
+// Pre-#248 these scenarios returned nil and exited 0, which silently
+// promoted incomplete migrations in unattended automation. The error
+// implements an ExitCode() method so exitcodes.FromError maps it to
+// TransferError without needing to import the orchestrator package.
+type PartialMigrationError struct {
+	Failed []TableFailure
+}
+
+func (e *PartialMigrationError) Error() string {
+	names := make([]string, len(e.Failed))
+	for i, f := range e.Failed {
+		names[i] = f.TableName
+	}
+	return fmt.Sprintf("migration completed with %d failed table(s): %s",
+		len(e.Failed), strings.Join(names, ", "))
+}
+
+// ExitCode reports the CLI exit code this error should map to.
+// exitcodes only depends on stdlib, so importing it here is acyclic
+// (orchestrator → exitcodes is a one-way edge); using the constant
+// rather than a magic 3 keeps the two in sync if TransferError is
+// ever renumbered.
+func (e *PartialMigrationError) ExitCode() int { return exitcodes.TransferError }
 
 // Orchestrator coordinates the migration process
 type Orchestrator struct {
@@ -532,6 +559,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	throughput := float64(totalRows) / duration.Seconds()
 
 	// Determine final status and send appropriate notification
+	partialErr := false
 	if len(tableFailures) > 0 {
 		// Partial success
 		failureNames := make([]string, len(tableFailures))
@@ -543,6 +571,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			len(successTables), len(tableFailures), totalRows, throughput, failureNames)
 		logging.Warn("Migration completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
 			len(successTables), len(tableFailures), totalRows, duration.Round(time.Second), throughput)
+		partialErr = !o.config.Migration.AllowPartial
 	} else {
 		// Full success
 		o.state.CompleteRun(runID, "success", "")
@@ -568,6 +597,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.logPGIdentifierChanges(tables)
 	}
 
+	if partialErr {
+		return &PartialMigrationError{Failed: tableFailures}
+	}
 	return nil
 }
 
@@ -1108,6 +1140,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 	}
 
+	partialErr := false
 	if len(tableFailures) > 0 {
 		// Partial success
 		failureNames := make([]string, len(tableFailures))
@@ -1119,6 +1152,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			successCount, len(tableFailures), totalRows, throughput, failureNames)
 		logging.Warn("Resume completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
 			successCount, len(tableFailures), totalRows, duration.Round(time.Second), throughput)
+		partialErr = !o.config.Migration.AllowPartial
 	} else {
 		// Full success
 		o.state.CompleteRun(run.ID, "success", "")
@@ -1143,6 +1177,9 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		o.logPGIdentifierChanges(tablesToTransfer)
 	}
 
+	if partialErr {
+		return &PartialMigrationError{Failed: tableFailures}
+	}
 	return nil
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -586,5 +587,40 @@ func TestProfileSubcommands(t *testing.T) {
 				t.Fatalf("app.Run() error: %v", err)
 			}
 		})
+	}
+}
+
+// TestExitErrHandler_PropagatesPartialMigrationError guards the #248 fix:
+// orchestrator.PartialMigrationError implements ExitCode() int which would
+// otherwise satisfy urfave/cli/v2.ExitCoder and be intercepted by cli's
+// HandleExitCoder (calling os.Exit directly), bypassing the centralized
+// "Error:/Exit code N (description)" stderr formatting in main.go. The
+// ExitErrHandler override on cli.App must keep that interception disabled
+// so the error propagates back through app.Run.
+func TestExitErrHandler_PropagatesPartialMigrationError(t *testing.T) {
+	want := &orchestrator.PartialMigrationError{
+		Failed: []orchestrator.TableFailure{{TableName: "dbo.Users"}},
+	}
+
+	app := &cli.App{
+		ExitErrHandler: func(*cli.Context, error) {},
+		Commands: []*cli.Command{
+			{
+				Name:   "boom",
+				Action: func(*cli.Context) error { return want },
+			},
+		},
+	}
+
+	err := app.Run([]string{"dmt", "boom"})
+	if err == nil {
+		t.Fatal("app.Run returned nil; PartialMigrationError was intercepted by cli (override broken)")
+	}
+	var got *orchestrator.PartialMigrationError
+	if !errors.As(err, &got) {
+		t.Fatalf("app.Run returned %T (%v), want *orchestrator.PartialMigrationError", err, err)
+	}
+	if got.ExitCode() != 3 {
+		t.Errorf("ExitCode() = %d, want 3", got.ExitCode())
 	}
 }

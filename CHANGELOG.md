@@ -7,6 +7,21 @@ All notable changes to this project will be documented in this file.
 > record for that window. Tracking #233 to formalize CHANGELOG
 > discipline going forward.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Partial migrations exit non-zero by default** (#248). When one or
+  more tables fail to transfer, `dmt run` and `dmt resume` now exit
+  with code 3 (`TransferError`) instead of 0. The run is still
+  recorded in state as `partial` and the JSON result still includes
+  the per-table breakdown, so consumers that inspect `result.status`
+  and `result.failed_tables` see the same information they did before
+  — only the exit code changed. Set `migration.allow_partial: true`
+  in your config to restore the pre-#248 behavior (exit 0 on
+  partial). This closes a silent automation hazard where Airflow/k8s
+  jobs treated partial migrations as successful.
+
 ## [4.0.0] - 2026-05-12
 
 Major release: the **AI-optional architecture epic (#167)** ships

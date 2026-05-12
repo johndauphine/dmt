@@ -3,10 +3,12 @@ package orchestrator
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/exitcodes"
 )
 
 func TestComputeConfigHash(t *testing.T) {
@@ -398,5 +400,49 @@ func TestParsePGSize(t *testing.T) {
 			t.Errorf("parsePGSize(%q) = (%d, %v), want (%d, %v)",
 				tc.raw, got, ok, tc.wantMB, tc.wantOK)
 		}
+	}
+}
+
+func TestPartialMigrationError(t *testing.T) {
+	err := &PartialMigrationError{
+		Failed: []TableFailure{
+			{TableName: "dbo.Users"},
+			{TableName: "dbo.Orders"},
+		},
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "2 failed table(s)") {
+		t.Errorf("Error() = %q, want substring %q", msg, "2 failed table(s)")
+	}
+	if !strings.Contains(msg, "dbo.Users") || !strings.Contains(msg, "dbo.Orders") {
+		t.Errorf("Error() = %q, want both table names listed", msg)
+	}
+
+	if code := err.ExitCode(); code != exitcodes.TransferError {
+		t.Errorf("ExitCode() = %d, want %d (TransferError)", code, exitcodes.TransferError)
+	}
+}
+
+// TestComputeConfigHash_AllowPartialInvariant guards against the
+// regression Codex caught on the #248 PR: adding the new
+// MigrationConfig.AllowPartial field must not change the resume
+// config hash, because that would invalidate every in-progress
+// resume across the #248 upgrade. Hash continuity is enforced via
+// `json:"-"` on the field.
+func TestComputeConfigHash_AllowPartialInvariant(t *testing.T) {
+	base := &config.Config{
+		Source: config.SourceConfig{Type: "mssql", Host: "h", Port: 1433, Database: "d", User: "u", Password: "p"},
+		Target: config.TargetConfig{Type: "postgres", Host: "h", Port: 5432, Database: "d", User: "u", Password: "p"},
+	}
+	other := *base
+	other.Migration.AllowPartial = true
+
+	baseHash := computeConfigHash(base)
+	otherHash := computeConfigHash(&other)
+	if baseHash != otherHash {
+		t.Errorf("flipping MigrationConfig.AllowPartial changed the resume config hash; "+
+			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
+			baseHash, otherHash)
 	}
 }

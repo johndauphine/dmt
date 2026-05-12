@@ -34,6 +34,13 @@ func main() {
 		Name:    version.Name,
 		Usage:   version.Description,
 		Version: version.Version,
+		// Suppress urfave/cli's default ExitCoder handling so errors
+		// from action funcs propagate back to app.Run and get formatted
+		// by dmt's centralized handler below (Error/Exit code/recoverable
+		// banner). Without this, any error implementing ExitCode() int
+		// (e.g. orchestrator.PartialMigrationError from #248) would be
+		// intercepted by cli.HandleExitCoder and bypass our format.
+		ExitErrHandler: func(*cli.Context, error) {},
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "config",
