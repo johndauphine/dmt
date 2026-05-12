@@ -1,6 +1,9 @@
 package mssql
 
 import (
+	"context"
+	"database/sql"
+
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -43,6 +46,13 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 // matters at our chunk sizes. Memory budget is the only cap.
 func (d *Driver) HardChunkLimit(avgRowBytes int64) int {
 	return 0
+}
+
+// ProbeTarget returns an empty TargetProbe — MSSQL doesn't have a
+// runtime-probed value that affects chunk_size today. Method exists
+// to satisfy the Driver interface (#166).
+func (d *Driver) ProbeTarget(_ context.Context, _ *sql.DB) driver.TargetProbe {
+	return driver.TargetProbe{}
 }
 
 // Dialect returns the MSSQL dialect.

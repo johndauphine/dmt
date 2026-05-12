@@ -125,11 +125,19 @@ type ControllerOptions struct {
 // just add contention.
 const defaultMaxWAW = 8
 
-// defaultMinChunkSize is the floor for the memory-pressure shrink
+// DefaultMinChunkSize is the floor for the memory-pressure shrink
 // rule when ControllerOptions doesn't set one. Below 5000 rows per
 // chunk, per-row overhead dominates and throughput degrades sharply.
 // Matches the old AI adjuster's floor (Copilot review on PR #194).
-const defaultMinChunkSize = 5000
+//
+// Exported so callers (e.g. orchestrator/transfer_runner clamping
+// MinChunkSize under a probe-derived hard cap, #166) can reference
+// the single source of truth instead of duplicating the literal 5000.
+const DefaultMinChunkSize = 5000
+
+// defaultMinChunkSize is kept as a private alias for in-package use
+// so the rest of this file doesn't churn across the export.
+const defaultMinChunkSize = DefaultMinChunkSize
 
 // controllerCooldown is the per-knob hysteresis window. The same
 // 90s the AI loop used; preserved intentionally so the controller

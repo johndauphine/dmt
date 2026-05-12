@@ -257,6 +257,16 @@ type MigrationConfig struct {
 	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"` // Enable rule-based runtime parameter adjustment during migration (default: true)
 	AIAdjustInterval string `yaml:"ai_adjust_interval"`  // How often the controller evaluates metrics (default: 5s)
 
+	// TargetHardChunkLimit is the runtime-discovered hard cap on chunk_size
+	// from target-side probes (today: MySQL @@max_allowed_packet, see
+	// #166). Populated by the orchestrator after the smartconfig analyzer
+	// runs; never serialized — it's a derived value, not user config.
+	// `json:"-"` is load-bearing: the resume config hash is computed via
+	// json.Marshal, and including this runtime-probed value would falsely
+	// flag an unchanged YAML as "config changed" across resumes (Codex
+	// review on #166).
+	TargetHardChunkLimit int `yaml:"-" json:"-"`
+
 	// Explore forces an exploration probe on this run instead of the
 	// tuner's argmax pick (PR2 #179 wires the actual exploration policy;
 	// PR1 #175 just plumbs the flag through CLI → config → orchestrator).

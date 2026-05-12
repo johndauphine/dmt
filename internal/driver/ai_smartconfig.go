@@ -268,8 +268,11 @@ type SmartConfigAnalyzer struct {
 	maxMemoryMB     int64
 	pendingSave     *pendingTuningSave
 	currentTuning   DBTuningSnapshot
-	forceExplore    bool   // mirrors cfg.Migration.Explore
-	exploreMode     string // mirrors cfg.Migration.ExploreMode
+	forceExplore        bool        // mirrors cfg.Migration.Explore
+	exploreMode         string      // mirrors cfg.Migration.ExploreMode
+	targetProbe         TargetProbe // populated via SetTargetProbe (#166)
+	uncappedAvgRowBytes int64       // pre-cap average row size from sampled tables (#166)
+	maxSampledRowBytes  int64       // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
 
 	// Workload identity (#215). Populated by SetWorkloadIdentity from
 	// the orchestrator's cfg.Source / cfg.Target. Flows through
@@ -317,6 +320,53 @@ func (s *SmartConfigAnalyzer) SetMaxMemoryMB(mb int64) {
 // SetTargetDBType sets the target database type for per-target tuning.
 func (s *SmartConfigAnalyzer) SetTargetDBType(targetType string) {
 	s.targetDBType = targetType
+}
+
+// SetTargetProbe records the result of a target-side probe (#166).
+// The orchestrator probes the target via Driver.ProbeTarget before
+// running Analyze; results flow into toTuningProfile so MySQL's
+// HardChunkLimit can be derived from the live @@max_allowed_packet
+// value rather than guessed.
+func (s *SmartConfigAnalyzer) SetTargetProbe(probe TargetProbe) {
+	s.targetProbe = probe
+}
+
+// TargetHardChunkLimit returns the effective chunk_size cap that the
+// orchestrator carries past smartconfig into the runtime controller
+// (which would otherwise grow chunks above the packet limit during
+// mid-migration tuning — Codex review on #166).
+//
+// Resolution order:
+//   - If a target-side probe surfaced a protocol cap (today: MySQL
+//     @@max_allowed_packet), the packet-derived limit wins.
+//   - Otherwise the driver's static HardChunkLimit applies (0 for all
+//     drivers today — the runtime controller treats 0 as "no cap").
+//
+// Returns 0 only when neither a probe nor a static limit applies,
+// which is the common case for PG and MSSQL targets. (Copilot review
+// on #166 — earlier doc claimed "returns 0 when no probe is set",
+// which understated the static-limit fallthrough path.)
+//
+// The packet calc uses s.maxSampledRowBytes (the widest row across
+// sampled tables) rather than the average — chunk_size is global
+// across all tables in a migration, so a workload that mixes narrow
+// and wide tables would otherwise let chunks for the wide table
+// exceed @@max_allowed_packet. Falls back to the uncapped average if
+// max isn't populated.
+func (s *SmartConfigAnalyzer) TargetHardChunkLimit() int {
+	d, err := Get(s.targetDBType)
+	staticLimit := 0
+	if err == nil {
+		staticLimit = d.HardChunkLimit(s.suggestions.AvgRowSizeBytes)
+	}
+	packetRowBytes := s.maxSampledRowBytes
+	if packetRowBytes == 0 {
+		packetRowBytes = s.uncappedAvgRowBytes
+	}
+	if packetRowBytes == 0 {
+		packetRowBytes = s.suggestions.AvgRowSizeBytes
+	}
+	return chunkLimitFromProbe(staticLimit, s.targetProbe, packetRowBytes)
 }
 
 // SetTargetMode sets the migration target mode (drop_recreate or upsert).
@@ -470,6 +520,11 @@ func explorationEpsilon(mode string) float64 {
 // toTuningProfile builds the per-target DriverProfile from the registered
 // driver. Unknown target → zero-valued profile, which the tuner treats as
 // "use 10 MB conservative chunk fallback + WAW=1 floor."
+//
+// For MySQL targets, the probed @@max_allowed_packet (from
+// SetTargetProbe) drives HardChunkLimit instead of the driver's static
+// HardChunkLimit method — the protocol cap is server-configurable and
+// can only be determined at runtime (#166).
 func (s *SmartConfigAnalyzer) toTuningProfile() tuning.DriverProfile {
 	profile := tuning.DriverProfile{Name: s.targetDBType, BaselineWAW: 2}
 	d, err := Get(s.targetDBType)
@@ -480,12 +535,49 @@ func (s *SmartConfigAnalyzer) toTuningProfile() tuning.DriverProfile {
 	profile.BaselineWAW = defaults.WriteAheadWriters
 	profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
 	profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
-	// TODO(#166): when the MySQL @@max_allowed_packet probe lands and
-	// HardChunkLimit becomes row-size-dependent, thread the analyzer's
-	// avg_row_bytes into this call. PR1 ships with all drivers returning 0
-	// regardless of input, so passing 0 is a no-op today.
-	profile.HardChunkLimit = d.HardChunkLimit(0)
+
+	avgRowBytes := s.suggestions.AvgRowSizeBytes
+	// For the packet calculation, use the *widest sampled* row, not
+	// the average. chunk_size is global across all tables in a
+	// migration; the protocol cap must hold for the worst-case row.
+	// Falls back to uncapped average and then to capped average for
+	// code paths that don't run calculateAvgRowSize (Codex review on
+	// #166).
+	packetRowBytes := s.maxSampledRowBytes
+	if packetRowBytes == 0 {
+		packetRowBytes = s.uncappedAvgRowBytes
+	}
+	if packetRowBytes == 0 {
+		packetRowBytes = avgRowBytes
+	}
+	profile.HardChunkLimit = chunkLimitFromProbe(d.HardChunkLimit(avgRowBytes), s.targetProbe, packetRowBytes)
 	return profile
+}
+
+// chunkLimitFromProbe picks the HardChunkLimit value used in the
+// DriverProfile. When a target-side probe surfaces a protocol cap
+// (today: MySQL @@max_allowed_packet), that wins — it's the hard
+// physical limit, server-configurable, and only knowable at runtime.
+// Otherwise the driver's static HardChunkLimit applies. Extracted as
+// a pure function so smartconfig tests can exercise the math without
+// depending on driver-registry state (#166).
+func chunkLimitFromProbe(driverStaticLimit int, probe TargetProbe, avgRowBytes int64) int {
+	if probe.MaxAllowedPacket > 0 && avgRowBytes > 0 {
+		const safetyMarginPct = 80
+		safeBytes := probe.MaxAllowedPacket * safetyMarginPct / 100
+		limit := int(safeBytes / avgRowBytes)
+		// Clamp to at least 1 — when avgRowBytes exceeds 80% of the
+		// packet, integer division returns 0 and downstream code would
+		// treat that as "no cap," which is the opposite of the intent.
+		// One row per chunk is the smallest meaningful unit, and
+		// matches what the protocol permits in this scenario (Codex
+		// review on #166).
+		if limit < 1 {
+			limit = 1
+		}
+		return limit
+	}
+	return driverStaticLimit
 }
 
 // toTuningHistory wraps the analyzer's TuningHistoryProvider in an
@@ -695,8 +787,23 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// calculateAvgRowSize returns the average row size from the largest tables.
+// calculateAvgRowSize returns the average row size from the largest
+// tables, capped at 2000 bytes for the memory-budget math (the cap
+// keeps a single wide table from inflating the per-chunk memory
+// estimate beyond what it would actually consume in practice).
+//
+// Side effects (both used by the #166 MySQL packet calculation):
+//   - s.uncappedAvgRowBytes: pre-cap average across sampled tables.
+//   - s.maxSampledRowBytes: widest row in sampled tables. The packet
+//     cap must hold for the worst-case row, not the average — chunk_size
+//     is global across all tables in a migration, so a mix of narrow
+//     and wide tables would otherwise allow chunks that exceed
+//     @@max_allowed_packet when inserting the wide one (Codex review
+//     on #166).
 func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
+	// Average: top-5 largest tables only — they dominate runtime, so
+	// averaging across them approximates the steady-state row size
+	// for memory-budget purposes.
 	var totalSize int64
 	var count int
 	for i, t := range tables {
@@ -708,14 +815,30 @@ func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
 			count++
 		}
 	}
-	avgRowSize := int64(500)
+	uncapped := int64(500)
 	if count > 0 {
-		avgRowSize = totalSize / int64(count)
+		uncapped = totalSize / int64(count)
 	}
-	if avgRowSize > 2000 {
-		avgRowSize = 2000
+	s.uncappedAvgRowBytes = uncapped
+
+	// Max: ALL tables in the workload (Codex review on #166).
+	// chunk_size is global; the packet cap must hold for the worst-case
+	// row even if that row lives in a small, low-row-count outlier table
+	// outside the top 5. Without this, a workload with four narrow
+	// tables plus one tiny 8KB-row table can still pick a chunk_size
+	// that overflows @@max_allowed_packet when inserting the wide one.
+	var maxRow int64
+	for _, t := range tables {
+		if t.AvgRowSizeBytes > maxRow {
+			maxRow = t.AvgRowSizeBytes
+		}
 	}
-	return avgRowSize
+	s.maxSampledRowBytes = maxRow
+
+	if uncapped > 2000 {
+		return 2000
+	}
+	return uncapped
 }
 
 // buildAutoTuneInput constructs input for the tuner.

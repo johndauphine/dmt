@@ -4,6 +4,9 @@
 package driver
 
 import (
+	"context"
+	"database/sql"
+
 	"github.com/johndauphine/dmt/internal/dbconfig"
 )
 
@@ -78,9 +81,33 @@ type Driver interface {
 	// HardChunkLimit returns the largest chunk_size (in rows) the target
 	// can accept regardless of memory budget — typically driven by a
 	// protocol-level packet/frame limit. Returns 0 when no protocol limit
-	// applies (memory budget is the only cap). Probe-driven values (e.g.
-	// MySQL @@max_allowed_packet) land in a follow-up to #166.
+	// applies (memory budget is the only cap). For probe-driven values
+	// (e.g. MySQL @@max_allowed_packet), callers should consult
+	// ProbeTarget and compute the limit from TargetProbe.MaxAllowedPacket
+	// — this synchronous method has no DB access and must return 0 for
+	// drivers whose limits depend on runtime probes.
 	HardChunkLimit(avgRowBytes int64) int
+
+	// ProbeTarget runs target-side probes that need a live DB
+	// connection (#166). MySQL probes @@max_allowed_packet; PG and
+	// MSSQL don't need probes today and return an empty TargetProbe.
+	// Probe failures degrade gracefully — callers see a zero-valued
+	// field and fall back to the memory-budget-only chunk size.
+	ProbeTarget(ctx context.Context, db *sql.DB) TargetProbe
+}
+
+// TargetProbe carries runtime-probed values from the target database
+// that affect chunk_size selection. Zero values mean "not probed" or
+// "not applicable for this driver"; callers should treat any field
+// as advisory and never as required.
+type TargetProbe struct {
+	// MaxAllowedPacket is MySQL's per-statement byte cap from
+	// SELECT @@max_allowed_packet. Other drivers leave this zero.
+	// Smartconfig uses this to compute HardChunkLimit as
+	// (MaxAllowedPacket * 0.8) / avg_row_bytes — the 0.8 safety
+	// margin accounts for protocol overhead per chunk (escapes,
+	// column metadata, etc.).
+	MaxAllowedPacket int64
 }
 
 // WriterOptions contains options for creating a Writer.

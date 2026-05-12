@@ -135,17 +135,32 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	}
 	if adjustEnabled {
 		collector := monitor.NewMetricsCollector(tuner, adjustInterval)
-		runtimeMonitor = monitor.NewController(tuner, collector, adjustInterval, monitor.ControllerOptions{
-			// MaxChunkSize / MinChunkSize / MaxWAW left at defaults.
-			// Defaults: MaxChunkSize=0 (uncapped — current driver
-			// HardChunkLimit implementations all return 0 today, so
-			// there's nothing useful to plumb), MinChunkSize=5000
-			// (memory-pressure floor), MaxWAW=8. The
-			// RuleWriteErrorAdjuster constructed below catches the
-			// common chunk-size-too-big failure modes (MySQL
-			// placeholder cap, MSSQL parameter cap) by halving on
-			// write error rather than relying on a static cap.
-		})
+
+		// Carry the probe-derived hard cap from applyAITuning into the
+		// controller so growth and shrink rules can't push chunk_size
+		// past the target's protocol limit mid-migration (#166).
+		// Without this, MySQL targets with a default 4MB @@max_allowed_packet
+		// could exceed the packet via runtime growth even when the
+		// initial chunk_size was packet-safe. Codex review on #166.
+		controllerOpts := monitor.ControllerOptions{
+			// MaxWAW left at default (8). The RuleWriteErrorAdjuster
+			// constructed below catches chunk-too-big errors by
+			// halving on write error, which is the fast-feedback
+			// safety net; MaxChunkSize is the proactive cap.
+		}
+		if hardCap := r.config.Migration.TargetHardChunkLimit; hardCap > 0 {
+			controllerOpts.MaxChunkSize = hardCap
+			// Clamp the memory-pressure shrink floor under the cap so
+			// the controller can't paradoxically raise chunk_size to
+			// monitor.DefaultMinChunkSize when that exceeds the packet
+			// limit. Referencing the exported constant keeps this
+			// in sync with the controller's actual default (Copilot
+			// review on #166).
+			if hardCap < monitor.DefaultMinChunkSize {
+				controllerOpts.MinChunkSize = hardCap
+			}
+		}
+		runtimeMonitor = monitor.NewController(tuner, collector, adjustInterval, controllerOpts)
 
 		monitorCtx, cancelMonitor := context.WithCancel(ctx)
 		defer cancelMonitor()

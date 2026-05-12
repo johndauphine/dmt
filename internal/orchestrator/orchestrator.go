@@ -723,8 +723,31 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	// Set target DB type and migration mode for cross-engine awareness
 	if o.targetPool != nil {
 		analyzer.SetTargetDBType(o.targetPool.DBType())
+
+		// Probe target for runtime values that affect chunk_size
+		// selection (#166). MySQL surfaces @@max_allowed_packet here
+		// so the tuner's HardChunkLimit reflects the live cap rather
+		// than the static 0; without this the migration path could
+		// pick a chunk_size that exceeds the packet limit and crash
+		// mid-transfer. PG/MSSQL return empty probes.
+		if td, err := driver.Get(o.targetPool.DBType()); err == nil {
+			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+			analyzer.SetTargetProbe(td.ProbeTarget(probeCtx, o.targetPool.DB()))
+			probeCancel()
+		}
 	}
 	analyzer.SetTargetMode(o.config.Migration.TargetMode)
+
+	// Capture the probe-derived hard cap so transfer_runner can carry it
+	// into the runtime controller. Without this, runtime growth rules can
+	// push chunk_size above the packet limit and crash mid-migration
+	// (Codex review on #166). Set after Analyze runs (below) so the
+	// uncapped row size is populated.
+	defer func() {
+		if o.targetPool != nil {
+			o.config.Migration.TargetHardChunkLimit = analyzer.TargetHardChunkLimit()
+		}
+	}()
 
 	// Pass user-configured memory cap
 	if o.config.Migration.MaxMemoryMB > 0 {

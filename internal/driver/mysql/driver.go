@@ -3,8 +3,12 @@
 package mysql
 
 import (
+	"context"
+	"database/sql"
+
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 func init() {
@@ -40,11 +44,56 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 	}
 }
 
-// HardChunkLimit returns 0 in this PR. A follow-up adds the
-// SELECT @@max_allowed_packet probe at writer-init and applies it here
-// (extended INSERT must fit inside the packet). See #166 step 4.
+// HardChunkLimit returns 0 — MySQL's row-count cap depends on the
+// server's @@max_allowed_packet, which requires a live DB connection
+// to probe. Callers with a connection should use ProbeTarget +
+// HardChunkLimitFromPacket; this synchronous method has no way to
+// observe the packet size and must return 0 (#166).
 func (d *Driver) HardChunkLimit(avgRowBytes int64) int {
 	return 0
+}
+
+// HardChunkLimitFromPacket computes the row-count cap from a probed
+// @@max_allowed_packet value. The 0.8 safety margin leaves headroom
+// for per-chunk protocol overhead (column metadata, escapes, the
+// VALUES wrapper). Zero inputs return zero (caller falls back to the
+// memory-budget cap). When a single row exceeds 80% of the packet,
+// returns 1 — one row per chunk is the smallest meaningful unit and
+// is still strictly below the protocol limit; falling back to 0
+// would disable packet protection exactly when it matters most
+// (Codex review on #166).
+func HardChunkLimitFromPacket(maxAllowedPacket, avgRowBytes int64) int {
+	if maxAllowedPacket <= 0 || avgRowBytes <= 0 {
+		return 0
+	}
+	const safetyMarginPct = 80
+	safeBytes := maxAllowedPacket * safetyMarginPct / 100
+	limit := int(safeBytes / avgRowBytes)
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
+}
+
+// ProbeTarget queries the MySQL server for runtime values that affect
+// chunk_size selection. Today: @@max_allowed_packet. Failures degrade
+// gracefully — an empty TargetProbe is returned and smartconfig falls
+// back to the memory-budget-only chunk size, which still keeps dmt
+// running (just without the protocol-aware safety net).
+func (d *Driver) ProbeTarget(ctx context.Context, db *sql.DB) driver.TargetProbe {
+	var probe driver.TargetProbe
+	if db == nil {
+		return probe
+	}
+	var packet int64
+	if err := db.QueryRowContext(ctx, "SELECT @@max_allowed_packet").Scan(&packet); err != nil {
+		logging.Debug("mysql: @@max_allowed_packet probe failed: %v (continuing without packet-aware chunk cap)", err)
+		return probe
+	}
+	probe.MaxAllowedPacket = packet
+	logging.Debug("mysql: probed @@max_allowed_packet = %d bytes (%.1f MB)",
+		packet, float64(packet)/1024/1024)
+	return probe
 }
 
 // Dialect returns the MySQL dialect.
