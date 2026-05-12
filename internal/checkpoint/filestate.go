@@ -154,16 +154,22 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	// not a supported operation and returns an error. dmt builds
 	// Windows binaries; failing every save on that platform would be
 	// strictly worse than the rename-already-landed durability we get
-	// without the explicit dir fsync. On POSIX, a Sync error from
-	// the underlying storage (PVC/NFS/disk-full-on-metadata) is a
-	// real durability failure and is surfaced.
+	// without the explicit dir fsync.
+	//
+	// On POSIX every error in this block is surfaced — both an Open
+	// failure (e.g. dir mode 0300 / EACCES, ACL restriction) and a
+	// Sync failure (PVC/NFS/disk-full-on-metadata) mean the
+	// crash-safety contract this function advertises wasn't actually
+	// delivered, and the caller must know that.
 	if runtime.GOOS != "windows" {
-		if d, err := os.Open(dir); err == nil {
-			syncErr := d.Sync()
-			_ = d.Close() // close error on a read handle is uninteresting
-			if syncErr != nil {
-				return fmt.Errorf("fsync state dir: %w", syncErr)
-			}
+		d, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("opening state dir for fsync: %w", err)
+		}
+		syncErr := d.Sync()
+		_ = d.Close() // close error on a read handle is uninteresting
+		if syncErr != nil {
+			return fmt.Errorf("fsync state dir: %w", syncErr)
 		}
 	}
 	return nil
