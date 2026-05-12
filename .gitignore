@@ -8,6 +8,10 @@ dmt-*
 *.yml
 !examples/*.yaml
 !examples/*.yml
+# CI-loadable fixture configs (no secrets — passwords come from env vars
+# via ${VAR} expansion). See #178 / docs/FIXTURES.md.
+!scripts/fixtures/*.yaml
+!scripts/fixtures/*.yml
 
 # State database
 *.db
