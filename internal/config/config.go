@@ -226,8 +226,14 @@ type MigrationConfig struct {
 	CreateIndexes          bool     `yaml:"create_indexes"`           // Create non-PK indexes
 	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`      // Create foreign key constraints
 	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
-	SampleValidation       bool     `yaml:"sample_validation"`        // Enable sample data validation
-	SampleSize             int      `yaml:"sample_size"`              // Number of rows to sample for validation
+	SampleValidation       bool     `yaml:"sample_validation"`        // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
+	SampleSize             int      `yaml:"sample_size"`              // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+
+	// Validation configures the cross-DB validation passes that run
+	// after data transfer completes (#226). Zero value preserves the
+	// pre-#226 behavior (row-count parity only). See the Validation
+	// struct's field docs for the full mode taxonomy.
+	Validation ValidationConfig `yaml:"validation"`
 	ReadAheadBuffers       int      `yaml:"read_ahead_buffers"`       // Number of chunks to read ahead (default=8)
 	WriteAheadWriters      int      `yaml:"write_ahead_writers"`      // Number of parallel writers per job (default=2)
 	ParallelReaders        int      `yaml:"parallel_readers"`         // Number of parallel readers per job (default=2)
@@ -315,6 +321,60 @@ type MigrationConfig struct {
 	// "deterministic" with AI configured can set the field explicitly.
 	// Issues #197, #209.
 	ApproxTypeAction string `yaml:"approx_type_action,omitempty"`
+}
+
+// ValidationConfig configures the post-transfer validation passes
+// added in #226. The default zero value preserves pre-#226 behavior
+// (row-count parity only); higher modes layer on additional checks
+// and cost more wall time in proportion to table size.
+//
+// Modes (inclusive — each one runs everything below it):
+//
+//	count_only   row-count parity only (legacy default)
+//	null_parity  + per-column NULL count parity (one query/table)
+//	sample       + N random rows fetched + canonicalized + compared
+//	full         RESERVED for a future iteration; rejected at runtime
+type ValidationConfig struct {
+	// Mode selects the validation passes. Empty string means
+	// count_only (preserves pre-#226 default). Set to
+	// "null_parity" or "sample"; "full" is reserved.
+	Mode string `yaml:"mode,omitempty"`
+
+	// SampleRows is the cap on Pass B's row sample. Zero means
+	// the validation package's default (1000).
+	SampleRows int `yaml:"sample_rows,omitempty"`
+
+	// SampleRowsPercent sets an additional cap as a percent of the
+	// table's row count: actual sample = min(SampleRows,
+	// rows * SampleRowsPercent/100). Zero disables this cap.
+	SampleRowsPercent float64 `yaml:"sample_rows_percent,omitempty"`
+
+	// HashColumns is reserved for a future row-hash pass; not
+	// consumed by this PR's null_parity / sample passes. Kept on
+	// the config surface so existing YAML doesn't break if it
+	// lands later.
+	HashColumns []string `yaml:"hash_columns,omitempty"`
+
+	// FailOnMismatch controls whether a failing pass causes the
+	// orchestrator to exit non-zero. Default true. Set false for
+	// log-only runs (useful in initial roll-outs to gather signal
+	// without blocking).
+	FailOnMismatch *bool `yaml:"fail_on_mismatch,omitempty"`
+
+	// Timeout caps per-table validation runtime as a Go-format
+	// duration string (e.g. "30s", "5m", "1h"). Empty means no cap
+	// — the surrounding context's deadline is the only bound.
+	// Stored as string rather than time.Duration so YAML "1h"
+	// parses; the orchestrator runs it through time.ParseDuration
+	// at use time (Codex review on #226).
+	Timeout string `yaml:"timeout,omitempty"`
+
+	// MaxParallel bounds how many tables validate concurrently.
+	// Zero uses the validation package's default (4). Each
+	// parallel table consumes ~one DB connection per side per
+	// pass; bounded fan-out prevents pool exhaustion on schemas
+	// with 100+ tables (Codex review on #226).
+	MaxParallel int `yaml:"max_parallel,omitempty"`
 }
 
 // LoadOptions controls configuration loading behavior.

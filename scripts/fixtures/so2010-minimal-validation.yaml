@@ -1,0 +1,38 @@
+# SO2010-minimal MSSQL→PG with SAMPLE validation (#226 smoke).
+# Used to verify the new validation passes run end-to-end against
+# real DBs. mode: sample runs Pass C (null parity) + Pass B
+# (deterministic row sample), both bounded-cost. The full row-hash
+# pass is reserved for a future iteration; this PR ships the
+# bounded-cost passes only.
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010Minimal
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2010_minimal_target
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
+  ai_adjust: false
+  validation:
+    mode: sample
+    sample_rows: 10
+    fail_on_mismatch: true
