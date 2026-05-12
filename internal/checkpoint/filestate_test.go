@@ -468,7 +468,13 @@ func TestFileState_SyncTimestamps_BasicLifecycle(t *testing.T) {
 	if err := fs.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, newer); err != nil {
 		t.Fatalf("UpdateSyncTimestamp (overwrite): %v", err)
 	}
-	ts, _ = fs.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	ts, err = fs.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp (post-overwrite): %v", err)
+	}
+	if ts == nil {
+		t.Fatal("expected non-nil timestamp after overwrite")
+	}
 	if !ts.Equal(newer) {
 		t.Errorf("timestamp not overwritten: got %v, want %v", *ts, newer)
 	}
