@@ -193,16 +193,29 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 	configJSON, _ := json.Marshal(config)
 	hash := sha256.Sum256(configJSON)
 
+	// Carry over sync_timestamps from any prior state — they persist
+	// across runs so date-based incremental sync can read the
+	// previous high-water mark on a fresh `dmt run`. Without this,
+	// the second invocation's CreateRun (which fires before any
+	// GetLastSyncTimestamp call) would overwrite the loaded map
+	// with nil, silently degrading incremental sync to full
+	// (Codex review on #255 PR).
+	var carriedTimestamps map[string]time.Time
+	if fs.state != nil && len(fs.state.SyncTimestamps) > 0 {
+		carriedTimestamps = fs.state.SyncTimestamps
+	}
+
 	fs.state = &fileStateData{
-		RunID:        id,
-		StartedAt:    time.Now(),
-		Status:       "running",
-		SourceSchema: sourceSchema,
-		TargetSchema: targetSchema,
-		ConfigHash:   hex.EncodeToString(hash[:8]), // First 8 bytes
-		ProfileName:  profileName,
-		ConfigPath:   configPath,
-		Tables:       make(map[string]tableState),
+		RunID:          id,
+		StartedAt:      time.Now(),
+		Status:         "running",
+		SourceSchema:   sourceSchema,
+		TargetSchema:   targetSchema,
+		ConfigHash:     hex.EncodeToString(hash[:8]), // First 8 bytes
+		ProfileName:    profileName,
+		ConfigPath:     configPath,
+		Tables:         make(map[string]tableState),
+		SyncTimestamps: carriedTimestamps,
 	}
 
 	return fs.save()

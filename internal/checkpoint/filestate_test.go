@@ -487,6 +487,52 @@ func TestFileState_SyncTimestamps_BasicLifecycle(t *testing.T) {
 	}
 }
 
+// TestFileState_SyncTimestamps_SurviveCreateRun is the realistic
+// end-to-end flow Codex flagged on the first #255 PR commit:
+// invocation #2 calls NewFileState (loading the YAML), then the
+// orchestrator calls CreateRun *before* any GetLastSyncTimestamp.
+// CreateRun rebuilds fileStateData; without explicit carry-over
+// of SyncTimestamps the loaded map gets dropped and incremental
+// sync silently degrades to full again on every run.
+func TestFileState_SyncTimestamps_SurviveCreateRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.yaml")
+
+	// Run #1: update timestamp, then complete.
+	fs1, err := NewFileState(statePath)
+	if err != nil {
+		t.Fatalf("NewFileState #1: %v", err)
+	}
+	if err := fs1.CreateRun("run-1", "dbo", "public", map[string]any{"k": "v"}, "", ""); err != nil {
+		t.Fatalf("CreateRun #1: %v", err)
+	}
+	want := time.Date(2026, 5, 12, 8, 0, 0, 0, time.UTC)
+	if err := fs1.UpdateSyncTimestamp("dbo", "Orders", "public", want); err != nil {
+		t.Fatalf("UpdateSyncTimestamp: %v", err)
+	}
+
+	// Run #2: simulate orchestrator flow — reopen, CreateRun
+	// (this is where the bug manifested), then GetLastSyncTimestamp.
+	fs2, err := NewFileState(statePath)
+	if err != nil {
+		t.Fatalf("NewFileState #2: %v", err)
+	}
+	if err := fs2.CreateRun("run-2", "dbo", "public", map[string]any{"k": "v"}, "", ""); err != nil {
+		t.Fatalf("CreateRun #2: %v", err)
+	}
+
+	got, err := fs2.GetLastSyncTimestamp("dbo", "Orders", "public")
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp: %v", err)
+	}
+	if got == nil {
+		t.Fatal("sync timestamp was wiped by CreateRun — #255 regression Codex flagged")
+	}
+	if !got.Equal(want) {
+		t.Errorf("got %v, want %v", *got, want)
+	}
+}
+
 // TestFileState_SyncTimestamps_PersistAcrossReopen is the second
 // half of the #255 contract: stored timestamps must round-trip
 // through the YAML file. This is what makes the recommended
