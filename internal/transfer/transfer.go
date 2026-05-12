@@ -25,6 +25,22 @@ import (
 // No buffer sizing constants — all pipeline buffer depths are derived from
 // the memory budget via pool.CalculatePipelineBuffers.
 
+// sendChunkOrCancel pushes r to ch unless ctx is cancelled first. It exists
+// because reader goroutines must not block forever on a bare
+// `chunkChan <- r` when the consumer side stops draining — the original
+// (#250) pre-fix code did exactly that, leaking reader goroutines and
+// holding source DB cursors after writer failure. Returns true if the
+// chunk landed in the channel, false if ctx was cancelled and the reader
+// should stop producing.
+func sendChunkOrCancel(ctx context.Context, ch chan<- chunkResult, r chunkResult) bool {
+	select {
+	case ch <- r:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // ProgressSaver is an interface for saving transfer progress
 type ProgressSaver interface {
 	SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
@@ -596,6 +612,16 @@ func executeKeysetPagination(
 	bufferSize := pipelineBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
+	// Per-transfer reader context. Cancelling this releases any reader
+	// goroutines blocked on `chunkChan <- result` after the consumer
+	// stops draining (e.g. on writer failure), and aborts in-flight DB
+	// queries via QueryContext so source-side cursors don't linger.
+	// Deferred cancel covers all return paths; we also call it
+	// explicitly after the consumer loop so the cleanup happens before
+	// wp.wait() rather than after the function returns. (#250)
+	readerCtx, cancelReaders := context.WithCancel(ctx)
+	defer cancelReaders()
+
 	// Split PK range for parallel readers
 	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
 
@@ -621,15 +647,15 @@ func executeKeysetPagination(
 
 			for {
 				select {
-				case <-ctx.Done():
-					chunkChan <- chunkResult{err: ctx.Err()}
+				case <-readerCtx.Done():
+					sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: readerCtx.Err()})
 					return
 				default:
 				}
 
 				// Memory pressure check — pause if heap is above threshold
-				if !memGuard.waitIfNeeded(ctx) {
-					chunkChan <- chunkResult{err: ctx.Err()}
+				if !memGuard.waitIfNeeded(readerCtx) {
+					sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: readerCtx.Err()})
 					return
 				}
 
@@ -642,10 +668,10 @@ func executeKeysetPagination(
 
 				// Time the query
 				queryStart := time.Now()
-				rows, err := db.QueryContext(ctx, query, args...)
+				rows, err := db.QueryContext(readerCtx, query, args...)
 				queryTime := time.Since(queryStart)
 				if err != nil {
-					chunkChan <- chunkResult{err: fmt.Errorf("keyset query: %w", err)}
+					sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: fmt.Errorf("keyset query: %w", err)})
 					return
 				}
 
@@ -655,7 +681,7 @@ func executeKeysetPagination(
 				rows.Close()
 				scanTime := time.Since(scanStart)
 				if err != nil {
-					chunkChan <- chunkResult{err: fmt.Errorf("scanning rows: %w", err)}
+					sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: fmt.Errorf("scanning rows: %w", err)})
 					return
 				}
 
@@ -673,7 +699,7 @@ func executeKeysetPagination(
 				if logging.IsDebug() {
 					sendStart = time.Now()
 				}
-				chunkChan <- chunkResult{
+				if !sendChunkOrCancel(readerCtx, chunkChan, chunkResult{
 					rows:      chunk,
 					lastPK:    lastPK,
 					readerID:  readerID,
@@ -681,6 +707,8 @@ func executeKeysetPagination(
 					queryTime: queryTime,
 					scanTime:  scanTime,
 					readEnd:   time.Now(),
+				}) {
+					return
 				}
 				if logging.IsDebug() {
 					if sendWait := time.Since(sendStart); sendWait > 500*time.Millisecond {
@@ -875,6 +903,13 @@ chunkLoop:
 		}
 	}
 
+	// Release any reader goroutines blocked mid-send on chunkChan before
+	// wp.wait() blocks the function for in-flight writes. The deferred
+	// cancelReaders() at function entry would otherwise only fire after
+	// return, leaving readers stuck (and holding source-side cursors)
+	// for the entire writer drain. (#250)
+	cancelReaders()
+
 	// Clean up queue depth reporting
 	if tuner != nil && lastReportedQueueDepth != 0 {
 		tuner.ReportQueueDepth(-lastReportedQueueDepth)
@@ -1016,6 +1051,11 @@ func executeRowNumberPagination(
 	bufferSize := rnBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
+	// Per-transfer reader context — see executeKeysetPagination for the
+	// rationale. Same fix shape applied here. (#250)
+	readerCtx, cancelReaders := context.WithCancel(ctx)
+	defer cancelReaders()
+
 	// Memory guardrail for ROW_NUMBER reader (same cap logic as keyset path)
 	guardMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
 	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < guardMemMB {
@@ -1031,15 +1071,15 @@ func executeRowNumberPagination(
 
 		for rowNum < endRow {
 			select {
-			case <-ctx.Done():
-				chunkChan <- chunkResult{err: ctx.Err()}
+			case <-readerCtx.Done():
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: readerCtx.Err()})
 				return
 			default:
 			}
 
 			// Memory pressure check — pause if heap is above threshold
-			if !memGuard.waitIfNeeded(ctx) {
-				chunkChan <- chunkResult{err: ctx.Err()}
+			if !memGuard.waitIfNeeded(readerCtx) {
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: readerCtx.Err()})
 				return
 			}
 
@@ -1058,10 +1098,10 @@ func executeRowNumberPagination(
 
 			// Time the query
 			queryStart := time.Now()
-			rows, err := db.QueryContext(ctx, query, args...)
+			rows, err := db.QueryContext(readerCtx, query, args...)
 			queryTime := time.Since(queryStart)
 			if err != nil {
-				chunkChan <- chunkResult{err: fmt.Errorf("row_number query: %w", err)}
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: fmt.Errorf("row_number query: %w", err)})
 				return
 			}
 
@@ -1071,12 +1111,12 @@ func executeRowNumberPagination(
 			rows.Close()
 			scanTime := time.Since(scanStart)
 			if err != nil {
-				chunkChan <- chunkResult{err: fmt.Errorf("scanning rows: %w", err)}
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: fmt.Errorf("scanning rows: %w", err)})
 				return
 			}
 
 			if len(chunk) == 0 {
-				chunkChan <- chunkResult{done: true}
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{done: true})
 				return
 			}
 
@@ -1087,7 +1127,7 @@ func executeRowNumberPagination(
 			if logging.IsDebug() {
 				sendStart = time.Now()
 			}
-			chunkChan <- chunkResult{
+			if !sendChunkOrCancel(readerCtx, chunkChan, chunkResult{
 				rows:      chunk,
 				rowNum:    newRowNum,
 				readerID:  0,
@@ -1095,6 +1135,8 @@ func executeRowNumberPagination(
 				queryTime: queryTime,
 				scanTime:  scanTime,
 				readEnd:   time.Now(),
+			}) {
+				return
 			}
 			if logging.IsDebug() {
 				if sendWait := time.Since(sendStart); sendWait > 500*time.Millisecond {
@@ -1107,11 +1149,11 @@ func executeRowNumberPagination(
 			rowNum = newRowNum
 
 			if len(chunk) < effectiveChunkSize {
-				chunkChan <- chunkResult{done: true}
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{done: true})
 				return
 			}
 		}
-		chunkChan <- chunkResult{done: true}
+		sendChunkOrCancel(readerCtx, chunkChan, chunkResult{done: true})
 	}()
 
 	// Get partition ID and row count for staging table naming and checkpointing
@@ -1326,6 +1368,10 @@ chunkLoop:
 			chunkWaitStart = time.Now()
 		}
 	}
+
+	// Release the ROW_NUMBER reader if it's blocked mid-send on
+	// chunkChan before wp.wait() runs. (#250)
+	cancelReaders()
 
 	// Clean up queue depth reporting
 	if tuner != nil && lastReportedQueueDepth != 0 {
