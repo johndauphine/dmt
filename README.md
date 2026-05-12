@@ -7,6 +7,27 @@
 
 High-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL.
 
+## Quick Start
+
+dmt runs **deterministically with no AI provider required** — type mapping, error diagnosis, DB tuning, and runtime parameter adjustment all use built-in rule catalogs. AI features remain available as an opt-in enhancement for vendor-specific edge cases (see [Optional AI Enhancements](#optional-ai-enhancements) below).
+
+```bash
+# 1. Create secrets file (no AI section by default; pass --with-ai to opt in)
+./dmt init-secrets
+
+# 2. Create a config (interactive)
+./dmt init -o my-migration.yaml
+
+# 3. Run the migration
+./dmt run --config my-migration.yaml
+```
+
+For interactive use, launch without arguments:
+
+```bash
+./dmt
+```
+
 ## Interactive Mode
 
 Launch the tool without arguments to enter the **Interactive Shell**, a modern TUI designed for ease of use.
@@ -237,11 +258,29 @@ Descriptions are shown in `profile list`.
 - You can relocate the SQLite DB by setting `migration.data_dir` in your config (e.g., to a shared volume).
 - On first run, the default data directory (`~/.dmt`) is created automatically if it does not exist.
 
-## AI Features
+## Optional AI Enhancements
 
-The tool includes AI-powered features to help with complex migrations. All AI features share common configuration under the `ai` section.
+dmt's core migration path is **fully deterministic** — type mapping, error diagnosis, DB tuning, and runtime parameter adjustment all work without AI. The features described here are *optional enhancements* for cases the deterministic catalog doesn't cover (vendor-specific column types like Oracle `hierarchyid` or MSSQL `geography`).
 
-### Quick Start
+**To opt in (two safe paths):**
+
+1. **Brand-new install** — run `dmt init-secrets --with-ai` to seed the AI provider section at template-creation time.
+2. **Existing secrets file** — APPEND an `ai:` block to your `~/.secrets/dmt-config.yaml`. Do NOT run `--force --with-ai`; that would overwrite your `master_key` and Slack webhook values.
+
+Example snippet to append:
+
+```yaml
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: ""  # Get from https://console.anthropic.com/
+      model: "claude-haiku-4-5-20251001"
+```
+
+All AI features share common configuration under the `ai` section.
+
+### AI Quick Start
 
 Simply add your API key to enable AI features:
 

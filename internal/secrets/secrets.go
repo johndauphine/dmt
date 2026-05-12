@@ -527,13 +527,32 @@ encryption:
 `, e.Path, e.Path)
 }
 
-// GenerateTemplate returns a template secrets file content
+// GenerateTemplate returns a template secrets file content with no AI
+// section. This is the default for `dmt init-secrets` — dmt runs
+// migrations deterministically (no AI required) since #167. AI remains
+// available as an optional enhancement; users who want it can pass
+// `init-secrets --with-ai` to seed the AI provider section, or paste
+// the snippet returned by AISection() into their secrets file by hand.
 func GenerateTemplate() string {
-	return `# DMT Secrets Configuration
-# This file contains sensitive configuration that should not be committed to version control.
-# Permissions should be restricted: chmod 600 ~/.secrets/dmt-config.yaml
+	return generateTemplate(false)
+}
 
-ai:
+// GenerateTemplateWithAI returns a template secrets file content with
+// the AI provider section seeded. Used by `dmt init-secrets --with-ai`
+// (#174) so users who want AI features can opt in at template-creation
+// time without editing the file.
+func GenerateTemplateWithAI() string {
+	return generateTemplate(true)
+}
+
+// AISection returns the AI portion of the secrets template as a
+// standalone snippet, suitable for appending to a previously
+// AI-free file or for inclusion in documentation.
+func AISection() string {
+	return aiSection
+}
+
+const aiSection = `ai:
   default_provider: anthropic  # Which provider to use by default
 
   providers:
@@ -567,8 +586,40 @@ ai:
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
       # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
+`
 
-encryption:
+func generateTemplate(withAI bool) string {
+	const headerNoAI = `# DMT Secrets Configuration
+# This file contains sensitive configuration that should not be committed to version control.
+# Permissions should be restricted: chmod 600 ~/.secrets/dmt-config.yaml
+
+# AI features are OPTIONAL. dmt runs migrations deterministically without
+# an AI provider (type mapping, error diagnosis, DB tuning, and runtime
+# parameter adjustment all use built-in rule catalogs since #167).
+#
+# To enable AI later WITHOUT losing the values below, append an ai:
+# section to this file. See the AI provider snippet at:
+#   https://github.com/johndauphine/dmt#optional-ai-enhancements
+#
+# (Do NOT run "dmt init-secrets --force --with-ai" — that overwrites
+# this file and would erase your master_key, slack webhook, and any
+# other values you've set, which can render encrypted profiles
+# unusable.)
+
+`
+	const headerWithAI = `# DMT Secrets Configuration
+# This file contains sensitive configuration that should not be committed to version control.
+# Permissions should be restricted: chmod 600 ~/.secrets/dmt-config.yaml
+
+`
+	header := headerNoAI
+	aiBlock := ""
+	if withAI {
+		header = headerWithAI
+		aiBlock = aiSection + "\n"
+	}
+
+	body := `encryption:
   master_key: ""  # Used for encrypting profiles, generate with: openssl rand -base64 32
 
 notifications:
@@ -599,8 +650,11 @@ migration_defaults:
   max_retries: 3                  # Retry failed tables N times
   history_retention_days: 30      # Keep run history for N days
 
-  # AI features (enabled by default when AI provider is configured)
-  ai_adjust: true                 # Enable AI-driven parameter adjustment
-  ai_adjust_interval: "30s"       # How often AI evaluates metrics
+  # Runtime tuning (deterministic rule-based controller since PR #195; the
+  # field is named ai_adjust for backward compatibility and is being
+  # renamed to runtime_tuning in #211).
+  ai_adjust: true                 # Enable mid-migration parameter adjustment
+  ai_adjust_interval: "30s"       # How often the controller evaluates metrics
 `
+	return header + aiBlock + body
 }

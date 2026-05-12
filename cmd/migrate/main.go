@@ -277,13 +277,17 @@ func main() {
 			},
 			{
 				Name:   "init-secrets",
-				Usage:  "Create a secrets file for API keys and encryption",
+				Usage:  "Create a secrets file for encryption and notifications (AI is optional, see --with-ai)",
 				Action: initSecrets,
 				Flags: []cli.Flag{
 					&cli.BoolFlag{
 						Name:    "force",
 						Aliases: []string{"f"},
 						Usage:   "Overwrite existing secrets file",
+					},
+					&cli.BoolFlag{
+						Name:  "with-ai",
+						Usage: "Seed the AI provider section (anthropic / openai / gemini / ollama / lmstudio). AI is optional since #167; dmt runs migrations deterministically without it.",
 					},
 				},
 			},
@@ -1005,6 +1009,7 @@ func initConfig(c *cli.Context) error {
 // initSecrets creates a secrets file for API keys and encryption
 func initSecrets(c *cli.Context) error {
 	force := c.Bool("force")
+	withAI := c.Bool("with-ai")
 
 	// Ensure secrets directory exists
 	secretsDir, err := secrets.EnsureSecretsDir()
@@ -1021,8 +1026,16 @@ func initSecrets(c *cli.Context) error {
 		}
 	}
 
-	// Generate template
-	template := secrets.GenerateTemplate()
+	// Default template is AI-free; --with-ai seeds the AI provider
+	// section. AI is optional in dmt (since #167) — the deterministic
+	// type mapper, error diagnosis catalog, and DB tuning analyzer all
+	// run without it.
+	var template string
+	if withAI {
+		template = secrets.GenerateTemplateWithAI()
+	} else {
+		template = secrets.GenerateTemplate()
+	}
 
 	// Write with secure permissions
 	if err := os.WriteFile(secretsPath, []byte(template), 0600); err != nil {
@@ -1032,9 +1045,17 @@ func initSecrets(c *cli.Context) error {
 	fmt.Printf("Secrets file created: %s\n", secretsPath)
 	fmt.Printf("Directory: %s (permissions: 0700)\n", secretsDir)
 	fmt.Println("\nNext steps:")
-	fmt.Println("1. Edit the file to add your AI provider API key")
-	fmt.Println("2. Set encryption.master_key for profile encryption:")
+	fmt.Println("1. Set encryption.master_key for profile encryption:")
 	fmt.Println("   Generate with: openssl rand -base64 32")
+	if withAI {
+		fmt.Println("2. Edit the file to add your AI provider API key (required for AI features to work; leave blank to skip a provider)")
+		fmt.Println("3. You're ready to run `dmt run --config config.yaml`")
+	} else {
+		fmt.Println("2. You're ready to run `dmt run --config config.yaml`")
+		fmt.Println("\nAI features are OPTIONAL. To opt in later, APPEND an ai: section to")
+		fmt.Println("the file manually — do NOT run --force --with-ai, which would overwrite")
+		fmt.Println("any master_key / slack webhook values you set above.")
+	}
 	fmt.Println("\nIMPORTANT: Keep this file secure and never commit it to version control!")
 
 	return nil
@@ -1252,6 +1273,15 @@ func runSetup(c *cli.Context) error {
 	}
 
 	fmt.Println("\nSetup complete!")
+
+	// Final summary — distinguish "AI: not configured (optional)" from
+	// "AI: configured" so users see explicitly that the AI-free path is
+	// supported rather than a degraded mode (#174).
+	if state.AIConfigured {
+		fmt.Println("  AI: configured")
+	} else {
+		fmt.Println("  AI: not configured (optional; to enable later, append an ai: section to ~/.secrets/dmt-config.yaml — see README § Optional AI Enhancements)")
+	}
 
 	// Run AI analysis if requested
 	if state.RunAnalysis {

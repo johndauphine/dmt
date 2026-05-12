@@ -231,16 +231,47 @@ func TestSecretsNotFoundError(t *testing.T) {
 	}
 }
 
-func TestGenerateTemplate(t *testing.T) {
+func TestGenerateTemplate_DefaultIsAIFree(t *testing.T) {
+	// Per #174, the default template no longer seeds an AI provider
+	// section — `dmt init-secrets` produces an AI-free file; users who
+	// want AI opt in via `--with-ai`. Critical sections that must
+	// always be present.
 	template := GenerateTemplate()
-
-	// Verify template contains expected sections
 	if len(template) == 0 {
 		t.Fatal("Template should not be empty")
 	}
 
-	// Check for key sections
-	expectedStrings := []string{
+	mustContain := []string{"master_key", "encryption:", "notifications:", "migration_defaults:"}
+	for _, s := range mustContain {
+		if !contains(template, s) {
+			t.Errorf("Template missing expected string: %q", s)
+		}
+	}
+
+	// AI provider section must NOT appear in the default template;
+	// references to `--with-ai` should explain the opt-in path.
+	mustNotContain := []string{"default_provider", "anthropic:", "openai:", "api_key:"}
+	for _, s := range mustNotContain {
+		if contains(template, s) {
+			t.Errorf("Default template should not contain %q — AI is opt-in via --with-ai (#174)", s)
+		}
+	}
+	// Template should point users at a non-destructive opt-in path
+	// for AI (NOT --force --with-ai, which would wipe master_key etc).
+	// Codex review on #174 caught this.
+	if !contains(template, "optional-ai-enhancements") {
+		t.Error("Default template should reference the README anchor for the safe AI opt-in path")
+	}
+	if !contains(template, "Do NOT run") || !contains(template, "--force") {
+		t.Error("Default template should warn against the destructive --force --with-ai overwrite path")
+	}
+}
+
+func TestGenerateTemplateWithAI_IncludesProviderSection(t *testing.T) {
+	// The --with-ai opt-in variant seeds all providers from the
+	// AISection() snippet so users can fill in just the key.
+	template := GenerateTemplateWithAI()
+	mustContain := []string{
 		"default_provider",
 		"anthropic:",
 		"openai:",
@@ -248,10 +279,26 @@ func TestGenerateTemplate(t *testing.T) {
 		"lmstudio:",
 		"master_key",
 	}
-
-	for _, s := range expectedStrings {
+	for _, s := range mustContain {
 		if !contains(template, s) {
-			t.Errorf("Template missing expected string: %q", s)
+			t.Errorf("AI-enabled template missing expected string: %q", s)
+		}
+	}
+}
+
+func TestAISection_IsStandaloneSnippet(t *testing.T) {
+	// AISection() is the snippet users can paste into a previously
+	// AI-free secrets file. Must contain the provider list.
+	section := AISection()
+	for _, s := range []string{"default_provider", "anthropic:", "openai:"} {
+		if !contains(section, s) {
+			t.Errorf("AISection missing %q", s)
+		}
+	}
+	// Must NOT contain non-AI sections — it's an AI-only snippet.
+	for _, s := range []string{"encryption:", "notifications:", "migration_defaults:"} {
+		if contains(section, s) {
+			t.Errorf("AISection should be AI-only; contains %q", s)
 		}
 	}
 }
