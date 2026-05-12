@@ -49,20 +49,40 @@ func NewRunner(cfg Config, src, tgt Endpoint) *Runner {
 	return r
 }
 
-// Run executes the configured passes against every table. Returns
-// a structured Result; the caller decides whether to error based
-// on cfg.FailOnMismatch.
+// Run executes the configured passes against every table. Tables
+// run concurrently up to MaxParallel; each table runs its passes
+// sequentially (passes share DB connections — running them in
+// parallel adds contention without speeding wall clock).
+//
+// Returns a structured Result; the caller decides whether to
+// error based on cfg.FailOnMismatch.
 func (r *Runner) Run(ctx context.Context, tables []source.Table) Result {
 	if len(r.Passes) == 0 {
 		return Result{}
 	}
 
+	// Bound table-level concurrency. Default 4 — each parallel
+	// table consumes one connection per side, plus one per pass.
+	// Codex caught the original unbounded fan-out on #226: 100+
+	// tables would spawn 100+ goroutines and exhaust connection
+	// pools.
+	maxPar := r.Cfg.MaxParallel
+	if maxPar <= 0 {
+		maxPar = 4
+	}
+	if maxPar > len(tables) {
+		maxPar = len(tables)
+	}
+
 	results := make([]TableResult, len(tables))
+	sem := make(chan struct{}, maxPar)
 	var wg sync.WaitGroup
 	for i, t := range tables {
 		wg.Add(1)
 		go func(idx int, table source.Table) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			results[idx] = r.runOneTable(ctx, table)
 		}(i, t)
 	}

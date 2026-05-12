@@ -1,7 +1,9 @@
-# SO2010-minimal MSSQL→PG with FULL validation (#226 smoke).
+# SO2010-minimal MSSQL→PG with SAMPLE validation (#226 smoke).
 # Used to verify the new validation passes run end-to-end against
-# real DBs. The fixture is tiny (~30 rows) so full-mode validation
-# (row-hash + sample + null-parity) completes in <1 second.
+# real DBs. mode: sample runs Pass C (null parity) + Pass B
+# (deterministic row sample), both bounded-cost. The full row-hash
+# pass is reserved for a future iteration; this PR ships the
+# bounded-cost passes only.
 
 source:
   type: mssql

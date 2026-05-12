@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
@@ -334,10 +333,11 @@ type MigrationConfig struct {
 //	count_only   row-count parity only (legacy default)
 //	null_parity  + per-column NULL count parity (one query/table)
 //	sample       + N random rows fetched + canonicalized + compared
-//	full         + every row's SHA-256 folded into a table digest
+//	full         RESERVED for a future iteration; rejected at runtime
 type ValidationConfig struct {
 	// Mode selects the validation passes. Empty string means
-	// count_only (preserves pre-#226 default).
+	// count_only (preserves pre-#226 default). Set to
+	// "null_parity" or "sample"; "full" is reserved.
 	Mode string `yaml:"mode,omitempty"`
 
 	// SampleRows is the cap on Pass B's row sample. Zero means
@@ -349,9 +349,10 @@ type ValidationConfig struct {
 	// rows * SampleRowsPercent/100). Zero disables this cap.
 	SampleRowsPercent float64 `yaml:"sample_rows_percent,omitempty"`
 
-	// HashColumns optionally restricts Pass A's column set —
-	// useful to skip columns that legitimately drift (audit
-	// timestamps, etc). Empty means "all columns."
+	// HashColumns is reserved for a future row-hash pass; not
+	// consumed by this PR's null_parity / sample passes. Kept on
+	// the config surface so existing YAML doesn't break if it
+	// lands later.
 	HashColumns []string `yaml:"hash_columns,omitempty"`
 
 	// FailOnMismatch controls whether a failing pass causes the
@@ -360,9 +361,20 @@ type ValidationConfig struct {
 	// without blocking).
 	FailOnMismatch *bool `yaml:"fail_on_mismatch,omitempty"`
 
-	// Timeout caps per-table validation runtime. Zero = no cap
-	// (use the surrounding context's deadline only).
-	Timeout time.Duration `yaml:"timeout,omitempty"`
+	// Timeout caps per-table validation runtime as a Go-format
+	// duration string (e.g. "30s", "5m", "1h"). Empty means no cap
+	// — the surrounding context's deadline is the only bound.
+	// Stored as string rather than time.Duration so YAML "1h"
+	// parses; the orchestrator runs it through time.ParseDuration
+	// at use time (Codex review on #226).
+	Timeout string `yaml:"timeout,omitempty"`
+
+	// MaxParallel bounds how many tables validate concurrently.
+	// Zero uses the validation package's default (4). Each
+	// parallel table consumes ~one DB connection per side per
+	// pass; bounded fan-out prevents pool exhaustion on schemas
+	// with 100+ tables (Codex review on #226).
+	MaxParallel int `yaml:"max_parallel,omitempty"`
 }
 
 // LoadOptions controls configuration loading behavior.

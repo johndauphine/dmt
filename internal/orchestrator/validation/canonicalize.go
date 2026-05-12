@@ -7,6 +7,7 @@ import (
 	"hash"
 	"strconv"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -165,31 +166,44 @@ func writeTaggedFloat(h hash.Hash, v float64) {
 // that happens to be valid UTF-8 (e.g. a small PNG with no high-bit
 // bytes) as a string. We require:
 //   - at least 1 byte
-//   - no NUL bytes
-//   - >50% printable
+//   - no NUL bytes (a NUL anywhere is a strong tell for binary)
+//   - majority of runes are printable or recognized whitespace
 //
-// Tight enough to keep BINARY/BLOB columns on the bytes path, loose
-// enough that legitimate strings with control characters still go
-// through tagString. The validation layer doesn't try to be perfect
-// about this — drivers SHOULD distinguish string vs []byte by type
-// for non-ambiguous columns. The fallback here is for the cases
-// where a driver returns []byte for what semantically is text.
+// Iterates at the RUNE level via utf8.DecodeRune so non-ASCII text
+// (汉字, é, emoji) is correctly counted as printable — the prior
+// byte-level loop only recognized ASCII printables, which would
+// falsely tag any byte slice containing CJK or accented characters
+// as binary and route it through the hex path (Codex review on
+// #226). Drivers SHOULD distinguish string vs []byte by type for
+// non-ambiguous columns; this fallback is for the cases where a
+// driver returns []byte for what semantically is text.
 func looksLikeText(b []byte) bool {
 	if len(b) == 0 {
 		return false
 	}
-	printable := 0
-	for _, c := range b {
-		if c == 0x00 {
+	if !utf8.Valid(b) {
+		return false
+	}
+	totalRunes := 0
+	printableRunes := 0
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == 0x00 {
 			return false
 		}
-		if c >= 0x20 && c < 0x7F {
-			printable++
-		} else if c == '\n' || c == '\r' || c == '\t' {
-			printable++
+		totalRunes++
+		if r == utf8.RuneError {
+			// Defensive — utf8.Valid passed but DecodeRune
+			// returned RuneError. Treat as non-printable.
+			i += size
+			continue
 		}
+		if unicode.IsPrint(r) || r == '\n' || r == '\r' || r == '\t' {
+			printableRunes++
+		}
+		i += size
 	}
-	return printable*2 > len(b)
+	return printableRunes*2 > totalRunes
 }
 
 func truncateForError(s string, max int) string {

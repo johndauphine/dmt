@@ -1,21 +1,27 @@
-// Package validation implements cross-DB row-count, NULL parity,
-// sample-row, and column-hash validation (#226). The package is
-// deliberately independent of the rest of the orchestrator: it
-// takes plain *sql.DB handles + table metadata and returns a
-// structured Result the orchestrator can render.
+// Package validation implements cross-DB deep validation passes
+// layered on top of the orchestrator's existing row-count parity
+// check (#226). The package is deliberately independent of the
+// rest of the orchestrator: it takes plain *sql.DB handles +
+// table metadata and returns a structured Result the orchestrator
+// can render.
 //
 // The validation pipeline runs as a sequence of independent passes:
 //
 //   - count_only (existing behavior): COUNT(*) parity per table.
-//   - null_parity:                   per-column NULL count parity.
-//   - sample:                        N random PKs round-tripped
-//                                     value-by-value.
-//   - full:                          per-column SHA-256 hash over
-//                                     canonicalized row bytes.
+//     Provided by the orchestrator, not this package.
+//   - null_parity: per-column NULL count parity. One aggregation
+//     query per side. Catches systematic NULL drift with strict
+//     equality.
+//   - sample:      N deterministically-chosen rows fetched from
+//     both sides and compared field-by-field via a Go-side
+//     canonicalizer.
 //
-// Higher modes include all lower-mode checks. Default remains
-// count_only so the new code is opt-in and never silently slows
-// down a pre-existing migration.
+// "full" is reserved as a mode name for a possible future
+// whole-table row-hash pass; the orchestrator rejects it at
+// runtime with a clear pointer.
+//
+// Default remains count_only so the new code is opt-in and never
+// silently slows down a pre-existing migration.
 package validation
 
 import (
@@ -74,6 +80,14 @@ type Config struct {
 	// Timeout caps per-table validation runtime. Zero means
 	// no cap (use the surrounding context's deadline only).
 	Timeout time.Duration
+
+	// MaxParallel bounds how many tables validate concurrently.
+	// Each parallel table consumes ~one connection per side per
+	// pass, so unbounded fan-out overwhelms connection pools on
+	// schemas with 100+ tables. Zero uses the documented default
+	// (4) — sized to fit within most pool budgets without
+	// starving the rest of the orchestrator.
+	MaxParallel int
 }
 
 // EffectiveSampleRows returns the row count to sample, applying

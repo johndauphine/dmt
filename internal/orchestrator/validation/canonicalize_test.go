@@ -146,8 +146,59 @@ func TestCanonicalize_BinaryBytesGoesThroughHexPath(t *testing.T) {
 	if looksLikeText(binary) {
 		t.Fatal("looksLikeText should reject content with NUL bytes")
 	}
-	// The two encodings (uppercase vs lowercase hex) should not
-	// occur in practice — encoding/hex always emits lowercase — but
-	// the looksLikeText guard is what prevents binary from
-	// silently sliding into the string tag.
+}
+
+// TestCanonicalize_NonASCIITextBytesHashAsString guards the
+// Copilot-flagged regression on #226: the prior looksLikeText only
+// recognized ASCII printables, so byte slices containing CJK,
+// accented characters, or emoji were misrouted through the binary
+// hex path. After the unicode.IsPrint fix, valid UTF-8 text bytes
+// hash identically to the string form regardless of driver type.
+func TestCanonicalize_NonASCIITextBytesHashAsString(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+	}{
+		{"japanese", "日本語"},
+		{"accented", "élève café"},
+		{"emoji", "hello 🚀 world"},
+		{"mixed", "汉字 with English"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			asString := hashOf(t, tt.s)
+			asBytes := hashOf(t, []byte(tt.s))
+			if !bytes.Equal(asString, asBytes) {
+				t.Errorf("UTF-8 text via string vs []byte hashed differently — driver-type variance would cause false validation mismatches\n  string: %x\n  bytes:  %x",
+					asString, asBytes)
+			}
+		})
+	}
+}
+
+func TestLooksLikeText_UTF8Variants(t *testing.T) {
+	// Sanity checks on the heuristic — the canonicalizer relies
+	// on this function to route bytes to either the string or
+	// bytes/hex path.
+	tests := []struct {
+		name string
+		b    []byte
+		want bool
+	}{
+		{"plain ASCII", []byte("hello world"), true},
+		{"empty", []byte{}, false},
+		{"contains NUL", []byte{'h', 0, 'i'}, false},
+		{"PNG header (binary)", []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}, false},
+		{"Japanese UTF-8", []byte("日本語"), true},
+		{"accented", []byte("café"), true},
+		{"emoji", []byte("🚀"), true},
+		{"invalid UTF-8 byte sequence", []byte{0xff, 0xfe, 0xfd}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := looksLikeText(tt.b); got != tt.want {
+				t.Errorf("looksLikeText(%q) = %v, want %v", tt.b, got, tt.want)
+			}
+		})
+	}
 }

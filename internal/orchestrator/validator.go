@@ -140,7 +140,14 @@ func (o *Orchestrator) runDeepValidation(ctx context.Context) error {
 		SampleRowsPercent: o.config.Migration.Validation.SampleRowsPercent,
 		HashColumns:       o.config.Migration.Validation.HashColumns,
 		FailOnMismatch:    o.config.Migration.Validation.FailOnMismatch,
-		Timeout:           o.config.Migration.Validation.Timeout,
+		MaxParallel:       o.config.Migration.Validation.MaxParallel,
+	}
+	if s := o.config.Migration.Validation.Timeout; s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("validation.timeout %q: %w (use Go-format duration like \"30s\", \"5m\", \"1h\")", s, err)
+		}
+		cfg.Timeout = d
 	}
 
 	src := validation.Endpoint{
