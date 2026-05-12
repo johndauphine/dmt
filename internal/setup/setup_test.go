@@ -156,6 +156,35 @@ func TestAINoSkips(t *testing.T) {
 	}
 }
 
+// Per #174, an empty input at StepConfigureAI defaults to "n" (skip AI)
+// — the friction-free path for a fresh install on the AI-optional
+// architecture. Pre-#174 the default was "y" which prompted for an API
+// key the user might not have.
+func TestConfigureAI_EmptyInputDefaultsToSkip(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("") // empty input — should default to skip
+
+	if s.CurrentStep != StepSourceType {
+		t.Fatalf("empty input at StepConfigureAI should default to skip-AI; got step %d", s.CurrentStep)
+	}
+	if s.AIConfigured {
+		t.Fatal("AIConfigured should be false after skipping with default")
+	}
+}
+
+func TestConfigureAI_DefaultPromptIsSkip(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	if s.CurrentStep != StepConfigureAI {
+		t.Fatalf("expected StepConfigureAI, got %d", s.CurrentStep)
+	}
+	p := s.Prompt()
+	if p.Default != "n" {
+		t.Errorf("StepConfigureAI prompt default should be \"n\" per #174; got %q", p.Default)
+	}
+}
+
 func TestInvalidInput(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")

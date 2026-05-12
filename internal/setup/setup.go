@@ -106,17 +106,23 @@ func NewState() *State {
 // Prompt returns prompt info for the current step.
 func (s *State) Prompt() PromptInfo {
 	switch s.CurrentStep {
-	// Phase 1: AI/Secrets
+	// Phase 1: AI/Secrets (optional since #167)
 	case StepCheckSecrets:
 		return PromptInfo{
-			Text:          "Checking AI configuration...",
+			Text:          "Checking for existing AI configuration...",
 			IsAutoAction:  true,
-			SectionHeader: "Phase 1: AI Configuration",
+			SectionHeader: "Phase 1: Optional AI Setup",
 		}
 	case StepConfigureAI:
+		// AI is optional in dmt (#167) — the deterministic type mapper,
+		// error catalog, and DB tuning analyzer all run without it.
+		// Default flipped from "y" to "n" so a fresh install completes
+		// without prompting for API keys (#174). Users who want AI for
+		// vendor-specific type mapping (Oracle hierarchyid, MSSQL
+		// geography, etc.) can opt in.
 		return PromptInfo{
-			Text:    "Configure AI features? (y/n)",
-			Default: "y",
+			Text:    "Configure optional AI features (vendor-type fallback)? (y/n)",
+			Default: "n",
 			Choices: []string{"y", "n"},
 		}
 	case StepAIProvider:
@@ -293,13 +299,15 @@ func (s *State) Prompt() PromptInfo {
 			IsAutoAction: true,
 		}
 
-	// Phase 8: AI Analysis
+	// Phase 8: AI Analysis (only reached when AI was configured;
+	// the deterministic analyze flow is run via `dmt analyze` separately
+	// — this step is the wizard-integrated convenience pass).
 	case StepRunAnalysis:
 		return PromptInfo{
-			Text:          "Run AI analysis on source database? (y/n)",
+			Text:          "Run analysis on source database? (y/n)",
 			Default:       "y",
 			Choices:       []string{"y", "n"},
-			SectionHeader: "Phase 8: AI Analysis",
+			SectionHeader: "Phase 8: Optional Source Analysis",
 		}
 
 	case StepDone:
@@ -332,7 +340,9 @@ func (s *State) Process(input string) string {
 	case StepConfigureAI:
 		v := strings.ToLower(input)
 		if v == "" {
-			v = "y"
+			// Default flipped to "n" in #174 — AI is optional and
+			// skipping is the friction-free path for a fresh install.
+			v = "n"
 		}
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
