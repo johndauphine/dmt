@@ -311,7 +311,9 @@ tables:
 // TestAtomicWriteFile_CreatesMissingDir covers the directory-missing
 // branch of #254's acceptance criteria: NewFileState may be pointed
 // at a nested path whose parent dirs don't exist yet. atomicWriteFile
-// must MkdirAll them with safe permissions.
+// must MkdirAll them with safe permissions. POSIX-only perm checks
+// run only on Linux/macOS since Windows ignores the mode bits passed
+// to MkdirAll and Mode().Perm() doesn't reliably reflect ACLs.
 func TestAtomicWriteFile_CreatesMissingDir(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "missing", "subdir", "state.yaml")
@@ -326,6 +328,10 @@ func TestAtomicWriteFile_CreatesMissingDir(t *testing.T) {
 	}
 	if string(got) != "hello" {
 		t.Errorf("contents = %q, want %q", got, "hello")
+	}
+
+	if runtime.GOOS == "windows" {
+		return // perm assertions below are POSIX-only
 	}
 
 	// Final file has the requested perms.
@@ -390,9 +396,11 @@ func TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact(t *testing.T) {
 	}
 }
 
-// TestAtomicWriteFile_NoLeftoverTempFiles guards that the deferred
-// cleanup actually runs. A successful write must not leave .tmp
-// siblings; a failed write must not either.
+// TestAtomicWriteFile_NoLeftoverTempFiles guards the success path:
+// after a clean write, no .tmp siblings should be left behind. The
+// failure-path cleanup is covered indirectly by
+// TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact, which
+// exercises the defer-Remove on a CreateTemp-failure code path.
 func TestAtomicWriteFile_NoLeftoverTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.yaml")
