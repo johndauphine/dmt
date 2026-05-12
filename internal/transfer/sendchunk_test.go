@@ -43,9 +43,15 @@ func TestSendChunkOrCancel_AlreadyCancelled(t *testing.T) {
 
 // TestSendChunkOrCancel_UnblocksMidSend is the core regression guard
 // for #250: a reader goroutine blocked on `chunkChan <- r` must
-// unblock the moment the per-transfer context is cancelled, even if
-// nothing is draining the channel. Before the fix, bare sends would
-// leak the goroutine plus the close-channel goroutine waiting on it.
+// unblock when the per-transfer context is cancelled, even if nothing
+// is draining the channel. Before the fix, bare sends leaked the
+// goroutine plus the close-channel goroutine waiting on it.
+//
+// Cancel can fire before *or* after the goroutine reaches the select —
+// both schedules end the same way: the unbuffered send is never ready
+// (no consumer), the ctx.Done() arm is, the goroutine exits via Done,
+// and delivered stays false. So no timing handshake is needed; we just
+// assert "exits within a bounded wait."
 func TestSendChunkOrCancel_UnblocksMidSend(t *testing.T) {
 	ch := make(chan chunkResult) // unbuffered → producer blocks immediately
 	ctx, cancel := context.WithCancel(context.Background())
@@ -58,11 +64,6 @@ func TestSendChunkOrCancel_UnblocksMidSend(t *testing.T) {
 		delivered = sendChunkOrCancel(ctx, ch, chunkResult{seq: 1})
 	}()
 
-	// Give the goroutine a moment to land on the select.
-	time.Sleep(20 * time.Millisecond)
-
-	// Cancel without anyone consuming from ch. The producer must exit
-	// via the ctx.Done() branch.
 	cancel()
 
 	done := make(chan struct{})
@@ -106,8 +107,15 @@ func TestSendChunkOrCancel_NoLeakUnderWriterFailurePattern(t *testing.T) {
 	}
 
 	// Consumer drains only a few chunks, then "fails" and cancels.
+	// Guard the drains with a timeout so a producer regression (e.g.
+	// sendChunkOrCancel returning early without sending) fails the
+	// test fast instead of hanging the suite.
 	for i := 0; i < 3; i++ {
-		<-ch
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatalf("drain %d/3 timed out — producer never sent", i+1)
+		}
 	}
 	cancel()
 
