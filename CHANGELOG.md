@@ -26,12 +26,17 @@ All notable changes to this project will be documented in this file.
   When `ssl_mode` is unset (or set to an unrecognized value), the
   MySQL DSN now uses `tls=true` (TLS required, CA + hostname
   verification) instead of the pre-#252 `tls=preferred` (TLS
-  attempted, silent plaintext fallback). Operators connecting to
-  non-TLS MySQL instances (e.g. local Docker test containers) must
-  now explicitly set `ssl_mode: disable`. Additionally, `verify-ca`
-  no longer maps to `skip-verify` (no verification — the direct
-  inverse of the operator's intent); it now maps to `tls=true`
-  (verify CA + hostname), which is strictly safer.
+  attempted, silent plaintext fallback). The MySQL driver's default
+  and the setup wizard's default both moved from `"preferred"` to
+  `"required"`. Operators who still want downgradeable TLS can
+  explicitly set `ssl_mode: preferred` — that branch maps to
+  `tls=preferred` as before, but it's now an explicit opt-in, not a
+  silent default. Operators connecting to non-TLS MySQL instances
+  (e.g. local Docker test containers) must set `ssl_mode: disable`.
+  Additionally, `verify-ca` no longer maps to `skip-verify` (no
+  verification — the direct inverse of the operator's intent); it
+  now maps to `tls=true` (verify CA + hostname), which is strictly
+  safer.
 
 ### Fixed
 

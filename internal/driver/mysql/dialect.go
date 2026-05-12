@@ -68,6 +68,15 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 			params.Set("tls", "true")
 		case "verify-full", "verify_full", "verify-identity", "verify_identity":
 			params.Set("tls", "true")
+		case "preferred":
+			// Explicit opt-in to downgradeable TLS: try TLS, fall back
+			// to plaintext on connection failure. NOT a safe default
+			// (#252) — operators with this setting are knowingly
+			// trading security for compatibility with mixed-TLS
+			// environments. The driver and setup-wizard defaults
+			// changed away from "preferred" in #252; this branch only
+			// fires when the operator explicitly typed it.
+			params.Set("tls", "preferred")
 		default:
 			// Unknown values used to fall through to `preferred`
 			// (downgradeable to plaintext). Default to `tls=true`

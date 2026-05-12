@@ -71,6 +71,7 @@ func TestBuildDSN_SSLMode_AllModes(t *testing.T) {
 		{"verify-full", "true", "CA + hostname verification"},
 		{"verify_full", "true", "underscore variant"},
 		{"verify-identity", "true", "MySQL term for verify-full"},
+		{"preferred", "preferred", "#252: explicit opt-in to downgradeable TLS"},
 		{"bogus-mode", "true", "#252: unknown values default to tls=true (require) instead of pre-fix tls=preferred (downgrade)"},
 		{"", "true", "#252: empty/unset defaults to tls=true instead of pre-fix tls=preferred"},
 	}
@@ -86,10 +87,11 @@ func TestBuildDSN_SSLMode_AllModes(t *testing.T) {
 			if !strings.Contains(dsn, want) {
 				t.Errorf("ssl_mode=%q produced DSN %s; want it to contain %q", tc.mode, dsn, want)
 			}
-			// Production-default sanity: the downgradeable
-			// `tls=preferred` must never appear, on any mode.
-			if strings.Contains(dsn, "tls=preferred") {
-				t.Errorf("ssl_mode=%q produced downgradeable tls=preferred; DSN: %s", tc.mode, dsn)
+			// `tls=preferred` (downgradeable) must only ever appear
+			// when the operator explicitly typed "preferred" — never
+			// from any other configured value or from the default.
+			if tc.mode != "preferred" && strings.Contains(dsn, "tls=preferred") {
+				t.Errorf("ssl_mode=%q produced downgradeable tls=preferred unexpectedly; DSN: %s", tc.mode, dsn)
 			}
 			// `skip-verify` (TLS without any verification) was the
 			// pre-#252 mapping for verify-ca. It should never appear
