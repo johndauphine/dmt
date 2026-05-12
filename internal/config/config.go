@@ -376,6 +376,24 @@ type ValidationConfig struct {
 	// without blocking).
 	FailOnMismatch *bool `yaml:"fail_on_mismatch,omitempty"`
 
+	// FailOnTimeout controls whether a row-count validation timeout
+	// is treated as a failure or a warning (#253). Default true:
+	// timeouts fail the run, matching the "fail loud, fail early"
+	// stance used by #248's exit-code policy. Set to false to
+	// restore pre-#253 behavior where timeouts logged a warning
+	// and the run could still be reported successful.
+	//
+	// `json:"-"` so the field doesn't perturb the resume config
+	// hash (same load-bearing rationale as MigrationConfig.AllowPartial).
+	FailOnTimeout *bool `yaml:"fail_on_timeout,omitempty" json:"-"`
+
+	// FailOnEstimateMismatch controls whether a count disagreement
+	// observed via the estimated-counts fallback (after exact COUNT
+	// timed out on one or both sides) is treated as a failure or a
+	// warning (#253). Default true. Set to false to log-only.
+	// Same `json:"-"` rationale as FailOnTimeout.
+	FailOnEstimateMismatch *bool `yaml:"fail_on_estimate_mismatch,omitempty" json:"-"`
+
 	// Timeout caps per-table validation runtime as a Go-format
 	// duration string (e.g. "30s", "5m", "1h"). Empty means no cap
 	// — the surrounding context's deadline is the only bound.

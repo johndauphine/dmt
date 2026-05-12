@@ -567,7 +567,9 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 }
 
 // GetRowCountExact returns the exact row count using COUNT(*).
-func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
+// MySQL has no NOLOCK equivalent (uses MVCC); strictConsistency is
+// accepted for interface symmetry and ignored here.
+func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
 	var count int64
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
 	err := r.db.QueryRowContext(ctx, query).Scan(&count)

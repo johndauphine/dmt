@@ -634,8 +634,9 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 }
 
 // GetRowCountExact returns the exact row count using COUNT(*).
-// This may be slow on large tables.
-func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
+// Postgres has no NOLOCK equivalent (uses MVCC); strictConsistency
+// is accepted for interface symmetry and ignored here.
+func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
 	sanitizedTable := sanitizePGTableName(table)
 	var count int64
 	err := w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)

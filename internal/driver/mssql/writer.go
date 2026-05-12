@@ -472,8 +472,10 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 }
 
 // GetRowCountExact returns the exact row count using COUNT(*).
-// This may be slow on large tables.
-func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
+// The Writer never read uncommitted data even pre-#253 (no NOLOCK
+// hint), so strictConsistency is accepted for interface symmetry
+// with the Reader but is effectively a no-op here.
+func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
 	var count int64
 	err := w.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, table))).Scan(&count)
 	return count, err

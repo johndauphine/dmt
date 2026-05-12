@@ -25,9 +25,14 @@ type Reader interface {
 	ReadTable(ctx context.Context, opts ReadOptions) (<-chan Batch, error)
 
 	// Metadata
-	GetRowCount(ctx context.Context, schema, table string) (int64, error)      // Tries fast first, falls back to exact
-	GetRowCountFast(ctx context.Context, schema, table string) (int64, error)  // Fast approximate count from system statistics
-	GetRowCountExact(ctx context.Context, schema, table string) (int64, error) // Exact COUNT(*) - may be slow on large tables
+	GetRowCount(ctx context.Context, schema, table string) (int64, error)     // Tries fast first, falls back to exact
+	GetRowCountFast(ctx context.Context, schema, table string) (int64, error) // Fast approximate count from system statistics
+	// GetRowCountExact returns the exact row count via COUNT(*).
+	// strictConsistency=true asks MSSQL drivers to drop the
+	// `WITH (NOLOCK)` hint so the count is read-committed rather
+	// than dirty (#253). Other drivers don't have NOLOCK semantics
+	// and ignore the flag.
+	GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error)
 	GetPartitionBoundaries(ctx context.Context, t *Table, numPartitions int) ([]Partition, error)
 	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
 
