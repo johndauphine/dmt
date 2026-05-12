@@ -203,6 +203,17 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	// Set target database type for more accurate recommendations
 	if o.targetPool != nil {
 		analyzer.SetTargetDBType(o.targetPool.DBType())
+
+		// Probe target for runtime values that affect chunk_size
+		// selection (#166). MySQL surfaces @@max_allowed_packet here;
+		// PG and MSSQL return empty probes. Failures degrade
+		// gracefully — analyzer falls back to the static
+		// HardChunkLimit (0 today on all drivers).
+		if td, err := driver.Get(o.targetPool.DBType()); err == nil {
+			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+			analyzer.SetTargetProbe(td.ProbeTarget(probeCtx, o.targetPool.DB()))
+			probeCancel()
+		}
 	}
 
 	// Capture effective DB tuning for regime classification (#144). Without

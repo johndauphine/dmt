@@ -3,6 +3,9 @@
 package postgres
 
 import (
+	"context"
+	"database/sql"
+
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -45,6 +48,14 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 // frame limit. Memory budget is the only cap.
 func (d *Driver) HardChunkLimit(avgRowBytes int64) int {
 	return 0
+}
+
+// ProbeTarget returns an empty TargetProbe — PG has no runtime-probed
+// values that affect chunk_size today. Method exists to satisfy the
+// Driver interface (#166); future probes (e.g. shared_buffers-derived
+// cap) could populate fields here.
+func (d *Driver) ProbeTarget(_ context.Context, _ *sql.DB) driver.TargetProbe {
+	return driver.TargetProbe{}
 }
 
 // Dialect returns the PostgreSQL dialect.
