@@ -22,6 +22,20 @@ All notable changes to this project will be documented in this file.
   partial). This closes a silent automation hazard where Airflow/k8s
   jobs treated partial migrations as successful.
 
+### Fixed
+
+- **Reader goroutines no longer leak when writers fail mid-transfer**
+  (#250). In both the keyset and ROW_NUMBER pagination paths, reader
+  goroutines used bare `chunkChan <- result` sends. On writer
+  failure the consumer would break out of its loop, but blocked
+  readers would never unblock — leaking the reader goroutines (and
+  the close-channel goroutine waiting on them) and holding source
+  DB cursors until the process exited. Readers now run under a
+  per-transfer child context and send via a select that also
+  watches `ctx.Done()`, and the consumer cancels that context after
+  it stops draining. Aborts in-flight source-side queries via
+  `QueryContext` as well.
+
 ## [4.0.0] - 2026-05-12
 
 Major release: the **AI-optional architecture epic (#167)** ships
