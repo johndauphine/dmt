@@ -487,6 +487,40 @@ func TestFileState_SyncTimestamps_BasicLifecycle(t *testing.T) {
 	}
 }
 
+// TestFileState_SyncTimestamps_NoDelimiterCollision guards against
+// the Codex review finding on this PR: an earlier flat-key encoding
+// joined the (source schema, table, target schema) triple with '|',
+// which collided on quoted identifiers containing pipes. The
+// nested-map encoding makes the storage unambiguous regardless of
+// identifier contents.
+func TestFileState_SyncTimestamps_NoDelimiterCollision(t *testing.T) {
+	fs, err := NewFileState(filepath.Join(t.TempDir(), "state.yaml"))
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	// Two distinct triples that would collide under a "join with |"
+	// encoding: "a|b|c|d" results from ("a", "b|c", "d") AND from
+	// ("a|b", "c", "d"). The two writes must remain independent.
+	tsA := time.Date(2026, 5, 12, 8, 0, 0, 0, time.UTC)
+	tsB := time.Date(2026, 5, 13, 8, 0, 0, 0, time.UTC)
+	if err := fs.UpdateSyncTimestamp("a", "b|c", "d", tsA); err != nil {
+		t.Fatalf("UpdateSyncTimestamp A: %v", err)
+	}
+	if err := fs.UpdateSyncTimestamp("a|b", "c", "d", tsB); err != nil {
+		t.Fatalf("UpdateSyncTimestamp B: %v", err)
+	}
+
+	got, _ := fs.GetLastSyncTimestamp("a", "b|c", "d")
+	if got == nil || !got.Equal(tsA) {
+		t.Errorf("triple A: got %v, want %v", got, tsA)
+	}
+	got, _ = fs.GetLastSyncTimestamp("a|b", "c", "d")
+	if got == nil || !got.Equal(tsB) {
+		t.Errorf("triple B: got %v, want %v", got, tsB)
+	}
+}
+
 // TestFileState_SyncTimestamps_SurviveCreateRun is the realistic
 // end-to-end flow Codex flagged on the first #255 PR commit:
 // invocation #2 calls NewFileState (loading the YAML), then the

@@ -42,10 +42,21 @@ type fileStateData struct {
 	// date-based incremental sync. Pre-#255 the file backend
 	// no-op'd Get/UpdateSyncTimestamp, so an incremental sync
 	// configured against the recommended Airflow/k8s file backend
-	// silently degraded to a full-table copy every run. The key
-	// is the triple joined with '|'; see syncTimestampKey.
-	// Persists across runs in the same state file.
-	SyncTimestamps map[string]time.Time `yaml:"sync_timestamps,omitempty"`
+	// silently degraded to a full-table copy every run.
+	//
+	// Encoded as nested maps (sourceSchema → table → targetSchema →
+	// ts) rather than a delimiter-joined flat key — quoted
+	// identifiers can contain almost anything (including pipes,
+	// dots, brackets), and a flat-key encoding had alias
+	// collisions where different triples mapped to the same key
+	// (Codex review on this PR). The nested form serializes
+	// cleanly in YAML too:
+	//
+	//	sync_timestamps:
+	//	  dbo:
+	//	    Orders:
+	//	      public: 2026-05-12T08:00:00Z
+	SyncTimestamps map[string]map[string]map[string]time.Time `yaml:"sync_timestamps,omitempty"`
 }
 
 // tableState tracks per-table progress.
@@ -200,7 +211,7 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 	// GetLastSyncTimestamp call) would overwrite the loaded map
 	// with nil, silently degrading incremental sync to full
 	// (Codex review on #255 PR).
-	var carriedTimestamps map[string]time.Time
+	var carriedTimestamps map[string]map[string]map[string]time.Time
 	if fs.state != nil && len(fs.state.SyncTimestamps) > 0 {
 		carriedTimestamps = fs.state.SyncTimestamps
 	}
@@ -547,34 +558,26 @@ func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 	return nil, nil
 }
 
-// syncTimestampKey builds the composite key used in
-// fileStateData.SyncTimestamps. The triple matches the SQLite
-// backend's UNIQUE(source_schema, table_name, target_schema) on
-// table_sync_timestamps. Joined with '|' — none of the components
-// can contain that character (PostgreSQL/MSSQL/MySQL identifier
-// rules don't allow it). Lowercase normalization is intentional:
-// schema/table names are case-insensitive in most engines, and
-// matching the SQLite backend's semantics (which uses the values
-// as-is) here means a YAML state file written by one casing also
-// resolves on the next run under a different casing — fragile but
-// preserves the existing behavior; if SQLite changes this it
-// should too.
-func syncTimestampKey(sourceSchema, tableName, targetSchema string) string {
-	return sourceSchema + "|" + tableName + "|" + targetSchema
-}
-
 // GetLastSyncTimestamp returns the last successful sync timestamp
 // recorded for (sourceSchema, tableName, targetSchema). Pre-#255
 // this was a no-op that returned (nil, nil), silently degrading
 // date-based incremental sync to a full sync every run when the
-// file backend was used. Now reads from the persisted map.
+// file backend was used. Now reads from the persisted nested map.
 func (fs *FileState) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 	if fs.state == nil || fs.state.SyncTimestamps == nil {
 		return nil, nil
 	}
-	ts, ok := fs.state.SyncTimestamps[syncTimestampKey(sourceSchema, tableName, targetSchema)]
+	tables, ok := fs.state.SyncTimestamps[sourceSchema]
+	if !ok {
+		return nil, nil
+	}
+	targets, ok := tables[tableName]
+	if !ok {
+		return nil, nil
+	}
+	ts, ok := targets[targetSchema]
 	if !ok {
 		return nil, nil
 	}
@@ -592,9 +595,15 @@ func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema s
 		fs.state = &fileStateData{Tables: make(map[string]tableState)}
 	}
 	if fs.state.SyncTimestamps == nil {
-		fs.state.SyncTimestamps = make(map[string]time.Time)
+		fs.state.SyncTimestamps = make(map[string]map[string]map[string]time.Time)
 	}
-	fs.state.SyncTimestamps[syncTimestampKey(sourceSchema, tableName, targetSchema)] = ts
+	if fs.state.SyncTimestamps[sourceSchema] == nil {
+		fs.state.SyncTimestamps[sourceSchema] = make(map[string]map[string]time.Time)
+	}
+	if fs.state.SyncTimestamps[sourceSchema][tableName] == nil {
+		fs.state.SyncTimestamps[sourceSchema][tableName] = make(map[string]time.Time)
+	}
+	fs.state.SyncTimestamps[sourceSchema][tableName][targetSchema] = ts
 	return fs.save()
 }
 
