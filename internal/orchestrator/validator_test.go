@@ -61,9 +61,32 @@ func TestValidationPolicy_Evaluate(t *testing.T) {
 			wantFailed: true,
 		},
 		{
-			name:       "estimate_match_passes",
+			// Estimates can match for reasons unrelated to a timeout
+			// (e.g. a future smartconfig that prefers estimates for
+			// huge tables). When exactTimedOut is false, the
+			// usedEstimate match path stays a pass.
+			name:       "estimate_match_passes_when_not_timeout_driven",
 			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true},
 			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 100, usedEstimate: true},
+			wantFailed: false,
+		},
+		{
+			// Codex-caught regression on the #253 PR: previously,
+			// when the exact COUNT(*) timed out but estimates filled
+			// in AND matched, the result was a green pass — silently
+			// violating fail_on_timeout. Now the policy fails it.
+			name:       "exact_timeout_with_matching_estimates_fails_under_fail_on_timeout",
+			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true},
+			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 100, usedEstimate: true, exactTimedOut: true},
+			wantFailed: true,
+		},
+		{
+			// Same scenario with fail_on_timeout disabled: still
+			// passes (operator explicitly accepted estimate-fallback
+			// after exact timeout).
+			name:       "exact_timeout_with_matching_estimates_passes_when_opted_out",
+			policy:     validationPolicy{FailOnTimeout: false, FailOnEstimateMismatch: true},
+			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 100, usedEstimate: true, exactTimedOut: true},
 			wantFailed: false,
 		},
 		{

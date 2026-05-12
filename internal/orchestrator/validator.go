@@ -54,9 +54,18 @@ func (p validationPolicy) evaluate(r tableValidationResult) bool {
 	case r.err != nil:
 		logging.Error("%-30s ERROR: %v", r.tableName, r.err)
 		return true
+	case r.exactTimedOut && p.FailOnTimeout:
+		// Exact COUNT(*) timed out and we filled in with estimates.
+		// fail_on_timeout: true → fail regardless of whether the
+		// estimates happened to match; the operator asked to be
+		// notified when real validation didn't complete. (Codex
+		// review on #253 PR.)
+		logging.Error("%-30s EXACT TIMEOUT (estimated source=~%d target=~%d; exact validation incomplete after %v)",
+			r.tableName, r.sourceCount, r.targetCount, ValidationTimeout)
+		return true
 	case r.targetCount == r.sourceCount:
 		if r.usedEstimate {
-			logging.Warn("%-30s OK ~%d rows (estimated)", r.tableName, r.targetCount)
+			logging.Warn("%-30s OK ~%d rows (estimated; fail_on_timeout disabled)", r.tableName, r.targetCount)
 		} else {
 			logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
 		}
@@ -86,8 +95,16 @@ type tableValidationResult struct {
 	sourceCount  int64
 	targetCount  int64
 	err          error
-	timedOut     bool
+	timedOut     bool // exact AND estimated both failed
 	usedEstimate bool // true if we used fast/estimated counts
+	// exactTimedOut is true whenever the exact COUNT(*) path
+	// exceeded ValidationTimeout, even if the estimated-count
+	// fallback subsequently succeeded. Distinct from `timedOut`,
+	// which is only true if estimates also failed. The validator
+	// policy uses this to honor fail_on_timeout for the
+	// estimate-fallback success path that previously slipped
+	// through as a green result (Codex review on #253 PR).
+	exactTimedOut bool
 }
 
 // Validate checks row counts between source and target in parallel.
@@ -283,8 +300,14 @@ func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableV
 		return result
 	}
 
-	// If either timed out, fall back to estimated counts
+	// If either timed out, fall back to estimated counts. Record
+	// the exact timeout separately so fail_on_timeout can still
+	// surface it even when estimates filled in — operators set
+	// fail_on_timeout because they want to know real validation
+	// completed, not because they're happy with an estimated
+	// approximation (Codex review on #253 PR).
 	if srcTimedOut || tgtTimedOut {
+		result.exactTimedOut = true
 		srcEst, srcEstErr := o.sourcePool.GetRowCountFast(ctx, o.config.Source.Schema, t.Name)
 		tgtEst, tgtEstErr := o.targetPool.GetRowCountFast(ctx, o.config.Target.Schema, t.Name)
 
