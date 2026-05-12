@@ -331,12 +331,21 @@ func (s *SmartConfigAnalyzer) SetTargetProbe(probe TargetProbe) {
 	s.targetProbe = probe
 }
 
-// TargetHardChunkLimit returns the probe-derived chunk_size cap so the
-// orchestrator can carry it past smartconfig into the runtime controller
+// TargetHardChunkLimit returns the effective chunk_size cap that the
+// orchestrator carries past smartconfig into the runtime controller
 // (which would otherwise grow chunks above the packet limit during
-// mid-migration tuning — Codex review on #166). Returns 0 when no probe
-// is set or analyzer hasn't run yet, in which case the runtime
-// controller falls back to its default (uncapped) behavior.
+// mid-migration tuning — Codex review on #166).
+//
+// Resolution order:
+//   - If a target-side probe surfaced a protocol cap (today: MySQL
+//     @@max_allowed_packet), the packet-derived limit wins.
+//   - Otherwise the driver's static HardChunkLimit applies (0 for all
+//     drivers today — the runtime controller treats 0 as "no cap").
+//
+// Returns 0 only when neither a probe nor a static limit applies,
+// which is the common case for PG and MSSQL targets. (Copilot review
+// on #166 — earlier doc claimed "returns 0 when no probe is set",
+// which understated the static-limit fallthrough path.)
 //
 // The packet calc uses s.maxSampledRowBytes (the widest row across
 // sampled tables) rather than the average — chunk_size is global

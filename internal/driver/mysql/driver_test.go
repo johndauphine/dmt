@@ -1,6 +1,9 @@
 package mysql
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestHardChunkLimitFromPacket(t *testing.T) {
 	tests := []struct {
@@ -87,8 +90,11 @@ func TestHardChunkLimitFromPacket_PreventsDefault50000Crash(t *testing.T) {
 }
 
 func TestProbeTarget_NilDBReturnsEmpty(t *testing.T) {
+	// Use context.Background() rather than nil — database/sql methods
+	// panic on a nil ctx when db is non-nil, and idiomatic test code
+	// shouldn't normalize the nil-ctx case (Copilot review on #166).
 	d := &Driver{}
-	probe := d.ProbeTarget(nil, nil)
+	probe := d.ProbeTarget(context.Background(), nil)
 	if probe.MaxAllowedPacket != 0 {
 		t.Errorf("nil DB should return empty probe; got MaxAllowedPacket=%d", probe.MaxAllowedPacket)
 	}

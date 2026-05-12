@@ -150,10 +150,13 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		}
 		if hardCap := r.config.Migration.TargetHardChunkLimit; hardCap > 0 {
 			controllerOpts.MaxChunkSize = hardCap
-			// MinChunkSize default is 5000; clamp it under the cap so
-			// memory-pressure shrink doesn't paradoxically increase
-			// chunk_size to exceed the packet.
-			if hardCap < 5000 {
+			// Clamp the memory-pressure shrink floor under the cap so
+			// the controller can't paradoxically raise chunk_size to
+			// monitor.DefaultMinChunkSize when that exceeds the packet
+			// limit. Referencing the exported constant keeps this
+			// in sync with the controller's actual default (Copilot
+			// review on #166).
+			if hardCap < monitor.DefaultMinChunkSize {
 				controllerOpts.MinChunkSize = hardCap
 			}
 		}
