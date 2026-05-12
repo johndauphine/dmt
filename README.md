@@ -889,8 +889,8 @@ The `target` section configures the database to migrate TO. It uses the same par
 | `host` | **Yes** | - | Database server hostname or IP address |
 | `port` | No | Auto | Database server port (5432/1433/3306) |
 | `database` | **Yes** | - | Database name |
-| `user` | Yes* | - | Username for authentication |
-| `password` | Yes* | - | Password for authentication |
+| `user` | **Yes** | - | Username for authentication |
+| `password` | **Yes** | - | Password for authentication |
 | `schema` | No | Auto | Target schema for migrated tables |
 
 The same SSL/TLS settings are available for `target`.

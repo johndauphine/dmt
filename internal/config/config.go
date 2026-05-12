@@ -1032,7 +1032,7 @@ func (c *Config) validate() error {
 	// `auth: kerberos` config silently falls back to password auth.
 	// Reject it at load time rather than letting that happen.
 	if strings.EqualFold(c.Source.Auth, "kerberos") {
-		return fmt.Errorf("source.auth: kerberos is not currently supported (the dead DSN path is not wired to runtime drivers); tracking re-enable in #251")
+		return fmt.Errorf("source.auth: kerberos is not currently supported; tracking re-enable in #251")
 	}
 
 	// Validate target
@@ -1047,7 +1047,7 @@ func (c *Config) validate() error {
 	}
 	// See source.auth note above — same descope applies to target. (#251)
 	if strings.EqualFold(c.Target.Auth, "kerberos") {
-		return fmt.Errorf("target.auth: kerberos is not currently supported (the dead DSN path is not wired to runtime drivers); tracking re-enable in #251")
+		return fmt.Errorf("target.auth: kerberos is not currently supported; tracking re-enable in #251")
 	}
 
 	// Same-engine migration validation: prevent migration to the exact same database
