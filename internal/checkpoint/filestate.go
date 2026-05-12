@@ -37,6 +37,15 @@ type fileStateData struct {
 	ProfileName  string                `yaml:"profile_name,omitempty"`
 	ConfigPath   string                `yaml:"config_path,omitempty"`
 	Tables       map[string]tableState `yaml:"tables"`
+	// SyncTimestamps records the last successful sync time per
+	// (source schema, table, target schema) triple, used by
+	// date-based incremental sync. Pre-#255 the file backend
+	// no-op'd Get/UpdateSyncTimestamp, so an incremental sync
+	// configured against the recommended Airflow/k8s file backend
+	// silently degraded to a full-table copy every run. The key
+	// is the triple joined with '|'; see syncTimestampKey.
+	// Persists across runs in the same state file.
+	SyncTimestamps map[string]time.Time `yaml:"sync_timestamps,omitempty"`
 }
 
 // tableState tracks per-table progress.
@@ -525,15 +534,55 @@ func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 	return nil, nil
 }
 
-// GetLastSyncTimestamp is a no-op for file state (doesn't persist sync timestamps).
-// Date-based incremental sync falls back to full sync when using file state backend.
-func (fs *FileState) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
-	return nil, nil
+// syncTimestampKey builds the composite key used in
+// fileStateData.SyncTimestamps. The triple matches the SQLite
+// backend's UNIQUE(source_schema, table_name, target_schema) on
+// table_sync_timestamps. Joined with '|' — none of the components
+// can contain that character (PostgreSQL/MSSQL/MySQL identifier
+// rules don't allow it). Lowercase normalization is intentional:
+// schema/table names are case-insensitive in most engines, and
+// matching the SQLite backend's semantics (which uses the values
+// as-is) here means a YAML state file written by one casing also
+// resolves on the next run under a different casing — fragile but
+// preserves the existing behavior; if SQLite changes this it
+// should too.
+func syncTimestampKey(sourceSchema, tableName, targetSchema string) string {
+	return sourceSchema + "|" + tableName + "|" + targetSchema
 }
 
-// UpdateSyncTimestamp is a no-op for file state.
+// GetLastSyncTimestamp returns the last successful sync timestamp
+// recorded for (sourceSchema, tableName, targetSchema). Pre-#255
+// this was a no-op that returned (nil, nil), silently degrading
+// date-based incremental sync to a full sync every run when the
+// file backend was used. Now reads from the persisted map.
+func (fs *FileState) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if fs.state == nil || fs.state.SyncTimestamps == nil {
+		return nil, nil
+	}
+	ts, ok := fs.state.SyncTimestamps[syncTimestampKey(sourceSchema, tableName, targetSchema)]
+	if !ok {
+		return nil, nil
+	}
+	return &ts, nil
+}
+
+// UpdateSyncTimestamp persists the sync timestamp for the given
+// (sourceSchema, tableName, targetSchema) triple. Uses the
+// crash-safe atomic-write path established in #254, so a
+// SIGKILL/eviction partway through the save can't tear the file.
 func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error {
-	return nil
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.state == nil {
+		fs.state = &fileStateData{Tables: make(map[string]tableState)}
+	}
+	if fs.state.SyncTimestamps == nil {
+		fs.state.SyncTimestamps = make(map[string]time.Time)
+	}
+	fs.state.SyncTimestamps[syncTimestampKey(sourceSchema, tableName, targetSchema)] = ts
+	return fs.save()
 }
 
 // SaveAIAdjustment is a no-op for file state (doesn't persist AI history).

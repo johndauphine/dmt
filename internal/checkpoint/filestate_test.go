@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestFileState_CreateAndResumeRun(t *testing.T) {
@@ -418,5 +419,106 @@ func TestAtomicWriteFile_NoLeftoverTempFiles(t *testing.T) {
 			continue
 		}
 		t.Errorf("unexpected leftover file: %s", e.Name())
+	}
+}
+
+// TestFileState_SyncTimestamps_BasicLifecycle is the core #255
+// regression guard: the file backend's Get/UpdateSyncTimestamp
+// pair used to be no-ops, silently degrading date-based
+// incremental sync to a full sync on every run. Mirrors the
+// shape of the SQLite test in state_test.go.
+func TestFileState_SyncTimestamps_BasicLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	fs, err := NewFileState(filepath.Join(tmpDir, "state.yaml"))
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	const sourceSchema = "dbo"
+	const tableName = "Orders"
+	const targetSchema = "public"
+
+	// First lookup returns no timestamp.
+	ts, err := fs.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp (pre-update): %v", err)
+	}
+	if ts != nil {
+		t.Errorf("expected nil timestamp pre-sync, got %v", ts)
+	}
+
+	syncTime := time.Date(2026, 5, 12, 10, 30, 0, 0, time.UTC)
+	if err := fs.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, syncTime); err != nil {
+		t.Fatalf("UpdateSyncTimestamp: %v", err)
+	}
+
+	ts, err = fs.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp (post-update): %v", err)
+	}
+	if ts == nil {
+		t.Fatal("expected non-nil timestamp after update")
+	}
+	if !ts.Equal(syncTime) {
+		t.Errorf("timestamp mismatch: got %v, want %v", *ts, syncTime)
+	}
+
+	// Newer timestamp overwrites.
+	newer := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	if err := fs.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, newer); err != nil {
+		t.Fatalf("UpdateSyncTimestamp (overwrite): %v", err)
+	}
+	ts, _ = fs.GetLastSyncTimestamp(sourceSchema, tableName, targetSchema)
+	if !ts.Equal(newer) {
+		t.Errorf("timestamp not overwritten: got %v, want %v", *ts, newer)
+	}
+
+	// Different table → no timestamp.
+	ts, _ = fs.GetLastSyncTimestamp(sourceSchema, "OtherTable", targetSchema)
+	if ts != nil {
+		t.Errorf("different table should have nil timestamp, got %v", ts)
+	}
+
+	// Different target schema → no timestamp (same source table can
+	// be synced to multiple targets independently).
+	ts, _ = fs.GetLastSyncTimestamp(sourceSchema, tableName, "other_schema")
+	if ts != nil {
+		t.Errorf("different target schema should have nil timestamp, got %v", ts)
+	}
+}
+
+// TestFileState_SyncTimestamps_PersistAcrossReopen is the second
+// half of the #255 contract: stored timestamps must round-trip
+// through the YAML file. This is what makes the recommended
+// Airflow/k8s file backend actually deliver delta-sync runs on
+// the second invocation instead of silently doing a full copy.
+func TestFileState_SyncTimestamps_PersistAcrossReopen(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.yaml")
+
+	fs1, err := NewFileState(statePath)
+	if err != nil {
+		t.Fatalf("NewFileState #1: %v", err)
+	}
+	want := time.Date(2026, 5, 12, 8, 0, 0, 0, time.UTC)
+	if err := fs1.UpdateSyncTimestamp("dbo", "Users", "public", want); err != nil {
+		t.Fatalf("UpdateSyncTimestamp: %v", err)
+	}
+
+	// Reopen — simulates a second run picking up where the first
+	// left off (the Airflow/k8s invocation pattern).
+	fs2, err := NewFileState(statePath)
+	if err != nil {
+		t.Fatalf("NewFileState #2: %v", err)
+	}
+	got, err := fs2.GetLastSyncTimestamp("dbo", "Users", "public")
+	if err != nil {
+		t.Fatalf("GetLastSyncTimestamp after reopen: %v", err)
+	}
+	if got == nil {
+		t.Fatal("sync timestamp was lost across reopen — #255 regression")
+	}
+	if !got.Equal(want) {
+		t.Errorf("got %v, want %v", *got, want)
 	}
 }
