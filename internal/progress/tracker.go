@@ -22,7 +22,7 @@ type Tracker struct {
 	activeTables map[string]int // table name -> active job count
 
 	// Table counts for progress reporting
-	tablesTotal    atomic.Int32
+	tablesTotal    atomic.Int64
 	tablesComplete atomic.Int32
 	tablesFailed   atomic.Int32
 
@@ -191,7 +191,7 @@ func (t *Tracker) emitProgressImmediate() {
 
 // SetTablesTotal sets the total number of tables to transfer
 func (t *Tracker) SetTablesTotal(total int) {
-	t.tablesTotal.Store(int32(total))
+	t.tablesTotal.Store(int64(total))
 }
 
 // SetTotal sets the total number of rows to transfer

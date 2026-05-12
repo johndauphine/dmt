@@ -3,6 +3,7 @@ package progress
 import (
 	"bytes"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -330,9 +331,7 @@ func TestTracker_Stress_ReporterAndMutators(t *testing.T) {
 	tracker := New()
 	tracker.SetReporter(&NullReporter{}, time.Millisecond)
 
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
-
+	const iterationsPerMutator = 5000
 	mutators := []func(){
 		func() { tracker.SetTotal(1000) },
 		func() { tracker.SetTablesTotal(10) },
@@ -348,23 +347,18 @@ func TestTracker_Stress_ReporterAndMutators(t *testing.T) {
 		func() { _ = tracker.Current() },
 	}
 
+	var wg sync.WaitGroup
 	for _, fn := range mutators {
 		wg.Add(1)
 		go func(f func()) {
 			defer wg.Done()
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-					f()
-				}
+			for i := 0; i < iterationsPerMutator; i++ {
+				f()
+				runtime.Gosched()
 			}
 		}(fn)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	close(stop)
 	wg.Wait()
 	tracker.Finish()
 }
