@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -146,18 +147,23 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("renaming state file into place: %w", err)
 	}
 
-	// fsync the parent dir so the rename itself is durably committed.
-	// Open-failure is non-fatal (Windows doesn't let you open a
-	// directory handle), but if we *can* open it, an Sync error from
+	// fsync the parent dir on POSIX so the rename itself is durably
+	// committed. Skipped on Windows: although os.Open(dir) succeeds
+	// (Go uses FILE_FLAG_BACKUP_SEMANTICS), File.Sync calls
+	// FlushFileBuffers on the read-only directory handle which is
+	// not a supported operation and returns an error. dmt builds
+	// Windows binaries; failing every save on that platform would be
+	// strictly worse than the rename-already-landed durability we get
+	// without the explicit dir fsync. On POSIX, a Sync error from
 	// the underlying storage (PVC/NFS/disk-full-on-metadata) is a
-	// real durability failure and must be surfaced. The crash-safety
-	// contract this function advertises depends on the dir fsync
-	// actually landing.
-	if d, err := os.Open(dir); err == nil {
-		syncErr := d.Sync()
-		_ = d.Close() // close error on a read handle is uninteresting
-		if syncErr != nil {
-			return fmt.Errorf("fsync state dir: %w", syncErr)
+	// real durability failure and is surfaced.
+	if runtime.GOOS != "windows" {
+		if d, err := os.Open(dir); err == nil {
+			syncErr := d.Sync()
+			_ = d.Close() // close error on a read handle is uninteresting
+			if syncErr != nil {
+				return fmt.Errorf("fsync state dir: %w", syncErr)
+			}
 		}
 	}
 	return nil
