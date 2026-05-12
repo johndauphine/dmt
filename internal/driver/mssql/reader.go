@@ -434,11 +434,26 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 }
 
 // GetRowCountExact returns the exact row count using COUNT(*).
-// This may be slow on large tables.
-func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string) (int64, error) {
+// This may be slow on large tables. When strictConsistency is true
+// the `WITH (NOLOCK)` table hint is dropped so the count is
+// read-committed rather than dirty (#253). The pre-#253 behavior
+// (always NOLOCK) was a silent override of the operator's
+// strict_consistency setting.
+func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error) {
 	var count int64
-	err := r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WITH (NOLOCK)", r.dialect.QualifyTable(schema, table))).Scan(&count)
+	err := r.db.QueryRowContext(ctx, buildExactRowCountQuery(r.dialect.QualifyTable(schema, table), strictConsistency)).Scan(&count)
 	return count, err
+}
+
+// buildExactRowCountQuery is the testable string-building half of
+// GetRowCountExact — split out so the NOLOCK / strict_consistency
+// contract can be unit-tested without a live DB (#253).
+func buildExactRowCountQuery(qualifiedTable string, strictConsistency bool) string {
+	hint := " WITH (NOLOCK)"
+	if strictConsistency {
+		hint = ""
+	}
+	return fmt.Sprintf("SELECT COUNT(*) FROM %s%s", qualifiedTable, hint)
 }
 
 // GetPartitionBoundaries calculates partition boundaries using MIN/MAX.

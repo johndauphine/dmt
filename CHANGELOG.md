@@ -38,6 +38,29 @@ All notable changes to this project will be documented in this file.
   now maps to `tls=true` (verify CA + hostname), which is strictly
   safer.
 
+- **Validation no longer reports false-positive success on missing
+  evidence** (#253). Three policy gaps closed:
+
+  1. Row-count validation **timeouts** were warnings, not failures.
+     A `COUNT(*)` that exceeded `ValidationTimeout` (30s default)
+     was reported as a warning and the run could still finish
+     "successful." Now timeouts fail the run by default; opt out
+     via `migration.validation.fail_on_timeout: false`.
+  2. **Estimated-count mismatches** were warnings, not failures.
+     When the exact `COUNT(*)` timed out on one or both sides dmt
+     fell back to estimated counts; if those disagreed, the
+     discrepancy logged a warning. Now mismatches under the
+     estimated-counts fallback fail the run by default; opt out
+     via `migration.validation.fail_on_estimate_mismatch: false`.
+  3. **MSSQL exact-count ignored `strict_consistency`**. The
+     `GetRowCountExact` query always included `WITH (NOLOCK)`,
+     silently overriding any operator who explicitly asked for
+     read-committed counts. `strict_consistency: true` now drops
+     the NOLOCK hint.
+
+  Combined with #248, this closes both layers of silent acceptance
+  between a broken migration and a green status.
+
 ### Removed
 
 - **Kerberos auth descoped pending a verifiable test environment**

@@ -9,11 +9,82 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator/validation"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/target"
 )
+
+// validationPolicy carries the resolved fail-or-warn flags for the
+// row-count validation phase. Default true on each flag (#253);
+// users opt out via validation.fail_on_timeout: false /
+// fail_on_estimate_mismatch: false to restore pre-#253 log-only
+// behavior.
+type validationPolicy struct {
+	FailOnTimeout          bool
+	FailOnEstimateMismatch bool
+}
+
+func newValidationPolicy(cfg config.ValidationConfig) validationPolicy {
+	p := validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true}
+	if v := cfg.FailOnTimeout; v != nil {
+		p.FailOnTimeout = *v
+	}
+	if v := cfg.FailOnEstimateMismatch; v != nil {
+		p.FailOnEstimateMismatch = *v
+	}
+	return p
+}
+
+// evaluate logs the per-table result line and returns true if the
+// table should count as a validation failure under the configured
+// policy. The logging stays here so the wall of "%-30s ..." lines
+// remains aligned and uniform; the boolean is what the outer loop
+// in Validate consumes.
+func (p validationPolicy) evaluate(r tableValidationResult) bool {
+	switch {
+	case r.timedOut:
+		if p.FailOnTimeout {
+			logging.Error("%-30s TIMEOUT (failed; both exact and estimated counts unavailable after %v)", r.tableName, ValidationTimeout)
+			return true
+		}
+		logging.Warn("%-30s TIMEOUT (validation skipped after %v; fail_on_timeout disabled)", r.tableName, ValidationTimeout)
+		return false
+	case r.err != nil:
+		logging.Error("%-30s ERROR: %v", r.tableName, r.err)
+		return true
+	case r.exactTimedOut && p.FailOnTimeout:
+		// Exact COUNT(*) timed out and we filled in with estimates.
+		// fail_on_timeout: true → fail regardless of whether the
+		// estimates happened to match; the operator asked to be
+		// notified when real validation didn't complete. (Codex
+		// review on #253 PR.)
+		logging.Error("%-30s EXACT TIMEOUT (estimated source=~%d target=~%d; exact validation incomplete after %v)",
+			r.tableName, r.sourceCount, r.targetCount, ValidationTimeout)
+		return true
+	case r.targetCount == r.sourceCount:
+		if r.usedEstimate {
+			logging.Warn("%-30s OK ~%d rows (estimated; fail_on_timeout disabled)", r.tableName, r.targetCount)
+		} else {
+			logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
+		}
+		return false
+	case r.usedEstimate:
+		if p.FailOnEstimateMismatch {
+			logging.Error("%-30s FAIL source=~%d target=~%d (estimated counts disagree, diff=%d)",
+				r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
+			return true
+		}
+		logging.Warn("%-30s DIFF source=~%d target=~%d (estimated, diff=%d; fail_on_estimate_mismatch disabled)",
+			r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
+		return false
+	default:
+		logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
+			r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
+		return true
+	}
+}
 
 // ValidationTimeout is the maximum time to wait for a single table's row count query.
 const ValidationTimeout = 30 * time.Second
@@ -24,8 +95,16 @@ type tableValidationResult struct {
 	sourceCount  int64
 	targetCount  int64
 	err          error
-	timedOut     bool
+	timedOut     bool // exact AND estimated both failed
 	usedEstimate bool // true if we used fast/estimated counts
+	// exactTimedOut is true whenever the exact COUNT(*) path
+	// exceeded ValidationTimeout, even if the estimated-count
+	// fallback subsequently succeeded. Distinct from `timedOut`,
+	// which is only true if estimates also failed. The validator
+	// policy uses this to honor fail_on_timeout for the
+	// estimate-fallback success path that previously slipped
+	// through as a green result (Codex review on #253 PR).
+	exactTimedOut bool
 }
 
 // Validate checks row counts between source and target in parallel.
@@ -71,33 +150,17 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 		return allResults[i].tableName < allResults[j].tableName
 	})
 
+	// Pre-#253 timeouts and estimate-mismatches were warnings, not
+	// failures, which combined with #248 (silent partial-success
+	// exit) let a run be reported successful even when validation
+	// never completed or compared approximate counts that disagreed.
+	policy := newValidationPolicy(o.config.Migration.Validation)
+
 	// Report results
 	var failed bool
 	for _, r := range allResults {
-		if r.timedOut {
-			logging.Warn("%-30s TIMEOUT (validation skipped after %v)", r.tableName, ValidationTimeout)
-			continue
-		}
-		if r.err != nil {
-			logging.Error("%-30s ERROR: %v", r.tableName, r.err)
+		if policy.evaluate(r) {
 			failed = true
-			continue
-		}
-		if r.targetCount == r.sourceCount {
-			if r.usedEstimate {
-				logging.Warn("%-30s OK ~%d rows (estimated)", r.tableName, r.targetCount)
-			} else {
-				logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
-			}
-		} else {
-			if r.usedEstimate {
-				logging.Warn("%-30s DIFF source=~%d target=~%d (estimated, diff=%d)",
-					r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
-			} else {
-				logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
-					r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
-				failed = true
-			}
 		}
 	}
 
@@ -216,14 +279,18 @@ func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableV
 	timeoutCtx, cancel := context.WithTimeout(ctx, ValidationTimeout)
 	defer cancel()
 
-	// Query source count (exact)
-	sourceCount, srcErr := o.sourcePool.GetRowCountExact(timeoutCtx, o.config.Source.Schema, t.Name)
+	// Query source count (exact). strict_consistency=true drops the
+	// `WITH (NOLOCK)` hint on the MSSQL side so the count is
+	// read-committed rather than dirty (#253). Other drivers ignore
+	// the flag.
+	strict := o.config.Migration.StrictConsistency
+	sourceCount, srcErr := o.sourcePool.GetRowCountExact(timeoutCtx, o.config.Source.Schema, t.Name, strict)
 	srcTimedOut := timeoutCtx.Err() == context.DeadlineExceeded
 
 	// Query target count (exact) - use fresh timeout
 	timeoutCtx2, cancel2 := context.WithTimeout(ctx, ValidationTimeout)
 	defer cancel2()
-	targetCount, tgtErr := o.targetPool.GetRowCountExact(timeoutCtx2, o.config.Target.Schema, t.Name)
+	targetCount, tgtErr := o.targetPool.GetRowCountExact(timeoutCtx2, o.config.Target.Schema, t.Name, strict)
 	tgtTimedOut := timeoutCtx2.Err() == context.DeadlineExceeded
 
 	// If both exact counts succeeded, use them
@@ -233,8 +300,14 @@ func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableV
 		return result
 	}
 
-	// If either timed out, fall back to estimated counts
+	// If either timed out, fall back to estimated counts. Record
+	// the exact timeout separately so fail_on_timeout can still
+	// surface it even when estimates filled in — operators set
+	// fail_on_timeout because they want to know real validation
+	// completed, not because they're happy with an estimated
+	// approximation (Codex review on #253 PR).
 	if srcTimedOut || tgtTimedOut {
+		result.exactTimedOut = true
 		srcEst, srcEstErr := o.sourcePool.GetRowCountFast(ctx, o.config.Source.Schema, t.Name)
 		tgtEst, tgtEstErr := o.targetPool.GetRowCountFast(ctx, o.config.Target.Schema, t.Name)
 

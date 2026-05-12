@@ -64,6 +64,20 @@ migration:
   sample_validation: false      # Enable sample data validation after row count check
   sample_size: 100              # Number of random rows to sample per table
 
+  # Validation pass/fail policy (#253). Default is "fail loud" on any
+  # missing-evidence outcome; flip individual flags to false for
+  # log-only behavior during initial roll-out.
+  validation:
+    # When fail_on_timeout: true (default), a row-count query that
+    # exceeds ValidationTimeout fails the run. When false, it logs a
+    # warning and the run can still be reported successful — the
+    # pre-#253 behavior.
+    fail_on_timeout: true
+    # When fail_on_estimate_mismatch: true (default), an estimated-
+    # row-count disagreement (used after exact COUNT timed out) fails
+    # the run. When false, it logs a warning only.
+    fail_on_estimate_mismatch: true
+
   # Automation safety
   allow_partial: false          # When false (default), partial migrations (≥1 failed table) exit with code 3 so
                                 # Airflow/k8s/CI see them as failures. Set true to restore pre-#248 exit-0 behavior.
