@@ -1024,6 +1024,16 @@ func (c *Config) validate() error {
 	if !isValidDriverType(c.Source.Type) {
 		return fmt.Errorf("source.type '%s' is not a valid driver type (supported: %v)", c.Source.Type, availableDriverTypes())
 	}
+	// Kerberos auth is descoped pending a verifiable test environment
+	// (#251). The DSN-building functions in this file (SourceDSN /
+	// TargetDSN) emit correct Kerberos DSNs, but the runtime drivers
+	// use Dialect.BuildDSN(..., cfg.DSNOptions()) instead, and
+	// DSNOptions doesn't carry auth/keytab/realm/SPN — so an
+	// `auth: kerberos` config silently falls back to password auth.
+	// Reject it at load time rather than letting that happen.
+	if strings.EqualFold(c.Source.Auth, "kerberos") {
+		return fmt.Errorf("source.auth: kerberos is not currently supported (the dead DSN path is not wired to runtime drivers); tracking re-enable in #251")
+	}
 
 	// Validate target
 	if c.Target.Host == "" {
@@ -1034,6 +1044,10 @@ func (c *Config) validate() error {
 	}
 	if !isValidDriverType(c.Target.Type) {
 		return fmt.Errorf("target.type '%s' is not a valid driver type (supported: %v)", c.Target.Type, availableDriverTypes())
+	}
+	// See source.auth note above — same descope applies to target. (#251)
+	if strings.EqualFold(c.Target.Auth, "kerberos") {
+		return fmt.Errorf("target.auth: kerberos is not currently supported (the dead DSN path is not wired to runtime drivers); tracking re-enable in #251")
 	}
 
 	// Same-engine migration validation: prevent migration to the exact same database

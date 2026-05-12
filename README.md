@@ -634,9 +634,11 @@ sensor = PythonSensor(
 
 | Database | As Source | As Target | Write Method | Auth |
 |----------|-----------|-----------|--------------|------|
-| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) | Password, Kerberos |
-| SQL Server | ✓ | ✓ | TDS bulk copy | Password, Kerberos |
+| PostgreSQL | ✓ | ✓ | COPY protocol (fastest) | Password |
+| SQL Server | ✓ | ✓ | TDS bulk copy | Password |
 | MySQL | ✓ | ✓ | Multi-row INSERT | Password |
+
+Kerberos / SPNEGO is **not currently supported** — the DSN-building plumbing exists but is not wired to the runtime drivers, and we don't yet have a Kerberized integration environment to verify against. See #251 for the re-enable plan.
 
 All combinations are supported, including same-engine migrations (PG→PG, MSSQL→MSSQL, MySQL→MySQL).
 
@@ -668,7 +670,6 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 ### Database Support
 - **PostgreSQL, SQL Server, MySQL** - migrate between any combination
 - **Bulk copy protocols** - PostgreSQL COPY, TDS bulk copy, MySQL LOAD DATA for maximum throughput
-- **Kerberos authentication** - SPNEGO/keytab support for SQL Server and PostgreSQL
 - **SSL/TLS encryption** - configurable per connection
 
 ### Transfer Engine
@@ -863,29 +864,20 @@ The `source` section configures the database to migrate FROM.
 | `host` | **Yes** | - | Database server hostname or IP address |
 | `port` | No | Auto | Database server port (1433/5432/3306) |
 | `database` | **Yes** | - | Database name |
-| `user` | Yes* | - | Username for authentication (*not required for Kerberos) |
-| `password` | Yes* | - | Password for authentication (*not required for Kerberos). Supports `${ENV_VAR}` syntax |
+| `user` | **Yes** | - | Username for authentication |
+| `password` | **Yes** | - | Password for authentication. Supports `${ENV_VAR}` syntax |
 | `schema` | No | Auto | Schema containing tables to migrate |
 
 **SSL/TLS Settings (source):**
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `ssl_mode` | No | `require` | PostgreSQL SSL mode: `disable`, `require`, `verify-ca`, `verify-full` |
+| `ssl_mode` | No | `require` | PostgreSQL SSL mode: `disable`, `require`, `verify-ca`, `verify-full`. MySQL accepts the same names plus `preferred` for explicit downgradeable TLS. |
 | `encrypt` | No | `true` | SQL Server encryption: `true` or `false` |
 | `trust_server_cert` | No | `false` | SQL Server: Skip certificate validation (use only for testing) |
 | `packet_size` | No | `32767` | SQL Server TDS packet size in bytes (max: 32767). Larger packets improve throughput. |
 
-**Kerberos Settings (source):**
-
-| Parameter | Required | Default | Description |
-|-----------|----------|---------|-------------|
-| `auth` | No | `password` | Authentication method: `password` or `kerberos` |
-| `krb5_conf` | No | System default | Path to krb5.conf file (e.g., `/etc/krb5.conf`) |
-| `keytab` | No | Credential cache | Path to keytab file for service account authentication |
-| `realm` | No | Auto-detected | Kerberos realm (e.g., `EXAMPLE.COM`) |
-| `spn` | No | Auto-detected | SQL Server Service Principal Name (e.g., `MSSQLSvc/host.example.com:1433`) |
-| `gssencmode` | No | `prefer` | PostgreSQL GSSAPI encryption: `disable`, `prefer`, `require` |
+Kerberos / SPNEGO auth is **not currently supported** (see [#251](https://github.com/johndauphine/dmt/issues/251)). Setting `auth: kerberos` is rejected at config-load. The `auth`, `krb5_conf`, `keytab`, `realm`, `spn`, and `gssencmode` fields are reserved in the schema for the eventual re-enable.
 
 ### Target Database Settings
 

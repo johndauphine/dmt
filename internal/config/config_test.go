@@ -389,6 +389,65 @@ func TestSameEngineValidation(t *testing.T) {
 	}
 }
 
+// TestValidate_RejectsKerberosAuth guards #251's descope: the
+// DSN-building code in this package emits correct Kerberos DSNs, but
+// the runtime drivers use Dialect.BuildDSN(..., cfg.DSNOptions()) and
+// DSNOptions doesn't carry auth/keytab/etc — so an `auth: kerberos`
+// config silently falls back to password auth. Validation must reject
+// it explicitly until #251 lands a verified wiring.
+func TestValidate_RejectsKerberosAuth(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Source: SourceConfig{
+				Type: "postgres", Host: "src", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Target: TargetConfig{
+				Type: "mssql", Host: "tgt", Port: 1433, Database: "d",
+				User: "u", Password: "p",
+			},
+			Migration: MigrationConfig{TargetMode: "drop_recreate"},
+		}
+	}
+
+	for _, side := range []string{"source", "target"} {
+		t.Run(side, func(t *testing.T) {
+			cfg := base()
+			if side == "source" {
+				cfg.Source.Auth = "kerberos"
+			} else {
+				cfg.Target.Auth = "kerberos"
+			}
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("%s.auth=kerberos validated successfully; expected rejection", side)
+			}
+			if !strings.Contains(err.Error(), "#251") {
+				t.Errorf("error doesn't reference the tracking issue (#251): %v", err)
+			}
+			if !strings.Contains(err.Error(), side+".auth") {
+				t.Errorf("error doesn't name the offending field (%s.auth): %v", side, err)
+			}
+		})
+	}
+
+	t.Run("case_insensitive", func(t *testing.T) {
+		cfg := base()
+		cfg.Source.Auth = "Kerberos"
+		if err := cfg.validate(); err == nil {
+			t.Error("validate accepted Kerberos (capital K); should be case-insensitive")
+		}
+	})
+
+	t.Run("password_still_works", func(t *testing.T) {
+		cfg := base()
+		cfg.Source.Auth = "password"
+		if err := cfg.validate(); err != nil {
+			t.Errorf("validate rejected auth=password: %v", err)
+		}
+	})
+}
+
 func TestAutoTuneWriteAheadWriters(t *testing.T) {
 	// Test that write-ahead writers get set to a reasonable value
 	// (may be from auto-tuning or global defaults)
