@@ -13,7 +13,7 @@ import (
 // Tracker tracks migration progress
 type Tracker struct {
 	bar       *progressbar.ProgressBar
-	total     int64
+	total     atomic.Int64
 	current   atomic.Int64
 	startTime time.Time
 
@@ -22,7 +22,7 @@ type Tracker struct {
 	activeTables map[string]int // table name -> active job count
 
 	// Table counts for progress reporting
-	tablesTotal    int
+	tablesTotal    atomic.Int32
 	tablesComplete atomic.Int32
 	tablesFailed   atomic.Int32
 
@@ -98,9 +98,10 @@ func (t *Tracker) emitProgress() {
 	t.mu.Unlock()
 
 	current := t.current.Load()
+	total := t.total.Load()
 	var progressPct float64
-	if t.total > 0 {
-		progressPct = float64(current) / float64(t.total) * 100
+	if total > 0 {
+		progressPct = float64(current) / float64(total) * 100
 	}
 
 	var rowsPerSec int64
@@ -112,10 +113,10 @@ func (t *Tracker) emitProgress() {
 	update := ProgressUpdate{
 		Phase:           phase,
 		TablesComplete:  int(t.tablesComplete.Load()),
-		TablesTotal:     t.tablesTotal,
+		TablesTotal:     int(t.tablesTotal.Load()),
 		TablesRunning:   tablesRunning,
 		RowsTransferred: current,
-		RowsTotal:       t.total,
+		RowsTotal:       total,
 		ProgressPct:     progressPct,
 		RowsPerSecond:   rowsPerSec,
 		CurrentTables:   activeTables,
@@ -160,9 +161,10 @@ func (t *Tracker) emitProgressImmediate() {
 	t.mu.Unlock()
 
 	current := t.current.Load()
+	total := t.total.Load()
 	var progressPct float64
-	if t.total > 0 {
-		progressPct = float64(current) / float64(t.total) * 100
+	if total > 0 {
+		progressPct = float64(current) / float64(total) * 100
 	}
 
 	var rowsPerSec int64
@@ -174,10 +176,10 @@ func (t *Tracker) emitProgressImmediate() {
 	update := ProgressUpdate{
 		Phase:           phase,
 		TablesComplete:  int(t.tablesComplete.Load()),
-		TablesTotal:     t.tablesTotal,
+		TablesTotal:     int(t.tablesTotal.Load()),
 		TablesRunning:   tablesRunning,
 		RowsTransferred: current,
-		RowsTotal:       t.total,
+		RowsTotal:       total,
 		ProgressPct:     progressPct,
 		RowsPerSecond:   rowsPerSec,
 		CurrentTables:   activeTables,
@@ -189,12 +191,12 @@ func (t *Tracker) emitProgressImmediate() {
 
 // SetTablesTotal sets the total number of tables to transfer
 func (t *Tracker) SetTablesTotal(total int) {
-	t.tablesTotal = total
+	t.tablesTotal.Store(int32(total))
 }
 
 // SetTotal sets the total number of rows to transfer
 func (t *Tracker) SetTotal(total int64) {
-	t.total = total
+	t.total.Store(total)
 
 	// Only create progress bar if not in JSON mode
 	t.reporterMu.Lock()
@@ -280,7 +282,7 @@ func (t *Tracker) TableFailed() {
 
 // TablesTotal returns the total number of tables to transfer.
 func (t *Tracker) TablesTotal() int {
-	return t.tablesTotal
+	return int(t.tablesTotal.Load())
 }
 
 // TablesComplete returns the number of tables successfully completed.

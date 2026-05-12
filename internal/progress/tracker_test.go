@@ -32,8 +32,8 @@ func TestTracker_SetTotal(t *testing.T) {
 		tracker.SetReporter(&NullReporter{}, 0)
 		tracker.SetTotal(1000)
 
-		if tracker.total != 1000 {
-			t.Errorf("total = %d, want 1000", tracker.total)
+		if got := tracker.total.Load(); got != 1000 {
+			t.Errorf("total = %d, want 1000", got)
 		}
 		if tracker.bar != nil {
 			t.Error("expected no progress bar in JSON mode")
@@ -45,8 +45,8 @@ func TestTracker_SetTablesTotal(t *testing.T) {
 	tracker := New()
 	tracker.SetTablesTotal(10)
 
-	if tracker.tablesTotal != 10 {
-		t.Errorf("tablesTotal = %d, want 10", tracker.tablesTotal)
+	if got := tracker.tablesTotal.Load(); got != 10 {
+		t.Errorf("tablesTotal = %d, want 10", got)
 	}
 }
 
@@ -321,6 +321,52 @@ func TestTracker_NoReporter(t *testing.T) {
 	tracker.SetPhase("testing")
 	tracker.emitProgress()
 	tracker.emitProgressImmediate()
+}
+
+// TestTracker_Stress_ReporterAndMutators exercises the race detector against
+// concurrent mutation of every shared field while a reporter goroutine is
+// emitting. Regression guard for #249.
+func TestTracker_Stress_ReporterAndMutators(t *testing.T) {
+	tracker := New()
+	tracker.SetReporter(&NullReporter{}, time.Millisecond)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	mutators := []func(){
+		func() { tracker.SetTotal(1000) },
+		func() { tracker.SetTablesTotal(10) },
+		func() { tracker.SetPhase("transferring") },
+		func() { tracker.Add(1) },
+		func() { tracker.StartTable("t") },
+		func() { tracker.EndTable("t") },
+		func() { tracker.TableComplete() },
+		func() { tracker.TableFailed() },
+		func() { _ = tracker.TablesTotal() },
+		func() { _ = tracker.TablesComplete() },
+		func() { _ = tracker.TablesFailed() },
+		func() { _ = tracker.Current() },
+	}
+
+	for _, fn := range mutators {
+		wg.Add(1)
+		go func(f func()) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					f()
+				}
+			}
+		}(fn)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	tracker.Finish()
 }
 
 func TestTracker_ProgressPct_ZeroTotal(t *testing.T) {
