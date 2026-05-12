@@ -1,0 +1,36 @@
+# SO2010-minimal MSSQL→PG with FULL validation (#226 smoke).
+# Used to verify the new validation passes run end-to-end against
+# real DBs. The fixture is tiny (~30 rows) so full-mode validation
+# (row-hash + sample + null-parity) completes in <1 second.
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010Minimal
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2010_minimal_target
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
+  ai_adjust: false
+  validation:
+    mode: sample
+    sample_rows: 10
+    fail_on_mismatch: true

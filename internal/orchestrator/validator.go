@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/orchestrator/validation"
 	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/internal/target"
 )
 
 // ValidationTimeout is the maximum time to wait for a single table's row count query.
@@ -102,7 +104,100 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 	if failed {
 		return fmt.Errorf("validation failed")
 	}
+
+	// After row-count parity, run the deeper validation passes
+	// configured by Migration.Validation.Mode (#226). Empty mode
+	// or "count_only" → no additional passes; pre-#226 behavior.
+	if err := o.runDeepValidation(ctx); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// runDeepValidation runs the configured #226 passes (null_parity,
+// sample) on top of the legacy row-count check. Skipped when
+// validation.mode is empty or "count_only". The "full" mode is
+// reserved for a separate in-DB row-hashing follow-up (this PR's
+// Pass A would have pulled every row across the wire twice — see
+// the PR discussion); we reject it here with a clear pointer
+// rather than silently degrading to a weaker check.
+func (o *Orchestrator) runDeepValidation(ctx context.Context) error {
+	mode := validation.Mode(o.config.Migration.Validation.Mode)
+	if mode == "" || mode == validation.ModeCountOnly {
+		return nil
+	}
+	if mode == validation.ModeFull {
+		return fmt.Errorf("validation.mode: full is reserved for the in-DB row-hashing follow-up to #226. Use 'sample' for value-level checks on a row sample, or 'null_parity' for NULL-count parity")
+	}
+	if mode != validation.ModeNullParity && mode != validation.ModeSample {
+		return fmt.Errorf("validation.mode %q is not recognized; valid values are count_only, null_parity, sample", mode)
+	}
+
+	cfg := validation.Config{
+		Mode:              mode,
+		SampleRows:        o.config.Migration.Validation.SampleRows,
+		SampleRowsPercent: o.config.Migration.Validation.SampleRowsPercent,
+		HashColumns:       o.config.Migration.Validation.HashColumns,
+		FailOnMismatch:    o.config.Migration.Validation.FailOnMismatch,
+		Timeout:           o.config.Migration.Validation.Timeout,
+	}
+
+	src := validation.Endpoint{
+		DB:     o.sourcePool.DB(),
+		Driver: o.sourcePool.DBType(),
+		Schema: o.config.Source.Schema,
+		// Source identifiers are used verbatim — dmt doesn't
+		// rewrite them when extracting the schema.
+		IdentifierFor: nil,
+	}
+	tgt := validation.Endpoint{
+		DB:     o.targetPool.DB(),
+		Driver: o.targetPool.DBType(),
+		Schema: o.config.Target.Schema,
+		// Target identifiers are sanitized when the transfer phase
+		// writes to PG (target.SanitizePGIdentifier lowercases —
+		// see CLAUDE.md § "Identifier Sanitization"). Without the
+		// same transform on the validation side, queries against
+		// the target hit "relation does not exist" for tables that
+		// DO exist under a sanitized name.
+		IdentifierFor: targetIdentifierTransform(o.targetPool.DBType()),
+	}
+
+	logging.Info("\nDeep Validation (%s):", mode)
+	runner := validation.NewRunner(cfg, src, tgt)
+	result := runner.Run(ctx, o.tables)
+
+	rendered := validation.FormatResult(result)
+	if rendered != "" {
+		// Strip the trailing newline so the logger's own newline
+		// doesn't double-space the report. Format string is "%s"
+		// (not the rendered text itself) to satisfy go vet's
+		// non-constant-format-string check.
+		logging.Info("%s", strings.TrimRight(rendered, "\n"))
+	}
+
+	if result.HasFailure() && cfg.FailOnMismatchOrDefault() {
+		return fmt.Errorf("deep validation (%s) failed", mode)
+	}
+	if result.HasFailure() {
+		logging.Warn("Deep validation failures detected; continuing because validation.fail_on_mismatch is false")
+	}
+	return nil
+}
+
+// targetIdentifierTransform returns the per-driver identifier
+// transform applied to source identifiers when querying the
+// target endpoint. PostgreSQL targets sanitize to lowercase via
+// target.SanitizePGIdentifier; other targets pass identifiers
+// through unchanged (the transfer phase doesn't rewrite them).
+func targetIdentifierTransform(targetDriver string) func(string) string {
+	switch targetDriver {
+	case "postgres", "postgresql", "pg":
+		return target.SanitizePGIdentifier
+	default:
+		return nil
+	}
 }
 
 // validateTable validates a single table's row count.
