@@ -910,6 +910,15 @@ chunkLoop:
 	// for the entire writer drain. (#250)
 	cancelReaders()
 
+	// If the parent context was cancelled while readers were shutting
+	// down, sendChunkOrCancel's select can race and silently drop the
+	// reader's error chunk (both branches ready). Catch that here so a
+	// SIGINT/timeout during transfer can't be reported as a successful
+	// migration. (#250 review)
+	if loopErr == nil && ctx.Err() != nil {
+		loopErr = ctx.Err()
+	}
+
 	// Clean up queue depth reporting
 	if tuner != nil && lastReportedQueueDepth != 0 {
 		tuner.ReportQueueDepth(-lastReportedQueueDepth)
@@ -1372,6 +1381,13 @@ chunkLoop:
 	// Release the ROW_NUMBER reader if it's blocked mid-send on
 	// chunkChan before wp.wait() runs. (#250)
 	cancelReaders()
+
+	// Same cancellation-race guard as the keyset path: if the parent
+	// ctx fired while the reader was shutting down, surface it as
+	// loopErr so the migration isn't reported as successful. (#250 review)
+	if loopErr == nil && ctx.Err() != nil {
+		loopErr = ctx.Err()
+	}
 
 	// Clean up queue depth reporting
 	if tuner != nil && lastReportedQueueDepth != 0 {
