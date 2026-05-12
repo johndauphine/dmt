@@ -2,6 +2,131 @@
 
 All notable changes to this project will be documented in this file.
 
+> CHANGELOG entries between v3.0.0 and v3.60.0 (Jan 2026 → May 2026)
+> weren't maintained; the per-PR commit messages are the canonical
+> record for that window. Tracking #233 to formalize CHANGELOG
+> discipline going forward.
+
+## [4.0.0] - 2026-05-12
+
+Major release: the **AI-optional architecture epic (#167)** ships
+end-to-end. dmt no longer requires an AI provider for any migration
+path; deterministic catalogs cover type mapping, error diagnosis, DB
+tuning, runtime parameter adjustment, and smart-config selection. AI
+remains available as an opt-in enhancement for vendor-specific edge
+cases (e.g. Oracle `hierarchyid`, MSSQL `geography`).
+
+### Breaking Changes
+
+- **Setup defaults flipped**: `dmt init-secrets` no longer seeds an
+  AI provider section; `dmt setup` wizard's AI prompt defaults to
+  "skip" rather than "configure". Existing users with AI configured
+  in `~/.secrets/dmt-config.yaml` continue to work; the change is
+  visible only on fresh installs. (#174)
+- **Driver interface additions**: anyone implementing a custom
+  `driver.Driver` must now provide `HardChunkLimit(avgRowBytes int64) int`
+  and `ProbeTarget(ctx, db) TargetProbe`. Built-in drivers updated.
+  (#166)
+- **Removed exported types**:
+  - `driver.AIErrorDiagnoser`, `driver.GetAIErrorDiagnoser`,
+    `driver.NewAIErrorDiagnoser` (replaced by deterministic
+    `errordiag` package + dispatch helpers). (#173)
+  - `dbtuning.AIQuerier`, `dbtuning.AITuningAnalyzer`,
+    `dbtuning.NewAITuningAnalyzer`. (#172)
+- **`dbtuning.Analyze` signature**: removed the trailing `aiMapper interface{}`
+  parameter. Callers that previously passed `nil` should drop the
+  argument. (#172)
+
+### Added
+
+- **Deterministic error diagnosis catalog** with 76 regex-matched
+  patterns across PG (26), MSSQL (25), MySQL (25). Replaces the
+  AI-driven `ai_errordiag.go` (382 LOC removed). Catalog growth via
+  the unmatched-error log signal. (#173)
+- **Deterministic DB tuning catalog** with 30 settings across PG (11),
+  MSSQL (9), MySQL (10). Replaces the AI-driven `ai_analyzer.go`
+  (482 LOC removed). Each setting has a hardcoded SQL query plus a
+  pure Go rule producing recommendations. (#172)
+- **MySQL `@@max_allowed_packet` probe** drives the `chunk_size` hard
+  cap so MySQL targets with default 4MB packet no longer crash on
+  wide rows. Probe-derived cap threaded through to the runtime
+  controller (`MaxChunkSize`/`MinChunkSize`) so growth rules can't
+  exceed the packet limit mid-transfer. (#166)
+- **Deep validation passes** layered after the existing row-count
+  check: `validation.mode: null_parity` adds per-column NULL count
+  parity; `validation.mode: sample` adds value-level row comparison
+  via a deterministic MD5(pk)-ordered sample. Default mode unchanged
+  (`count_only`); cross-DB canonicalizer normalizes types so source
+  and target produce identical bytes for the same value. (#226)
+- **CI-loadable fixture loaders**: `make load-fixture-pgbench` +
+  `make load-fixture-so2010-minimal`. SO2010-minimal synthesizes
+  byte-for-byte-compatible schema and seed for the public Brent Ozar
+  dataset; `make test-fixtures-load` chains both in ~5s. Manual
+  procedures for full SO2010/SO2013/WWI documented in
+  `docs/FIXTURES.md`. (#178)
+- **Tier 1 exact-identity workload classifier** for the deterministic
+  tuner: matches historical runs by 8-tuple identity
+  (source+target host/port/db/schema) before falling back to regime
+  filtering. Improved R² on stable-workload runs. (#215)
+- **Setup wizard `--with-ai` flag** + `secrets.GenerateTemplateWithAI()`
+  for users who explicitly opt into AI features at template creation.
+  Default `dmt init-secrets` produces an AI-free file. (#174)
+- **Optional AI Enhancements** README section reframes AI as opt-in
+  rather than required; Quick Start at the top of the README is
+  explicit about no AI being needed. (#174)
+- **Pattern of `codex review --base main` after every substantial PR**
+  caught real bugs across the epic (~25 P1/P2 findings between Codex
+  and Copilot — schema sanitization, integer-division-to-zero on
+  packet caps, MySQL parameter syntax mismatches, UTF-8 rune-vs-byte
+  handling, `time.Duration` YAML parsing, unbounded goroutine fan-out,
+  more). See per-PR commit messages.
+
+### Changed
+
+- **Runtime parameter adjustment** is fully deterministic. The
+  field `migration.ai_adjust` is preserved for config backward
+  compatibility but no longer involves AI; it controls a rule-based
+  controller (4 deterministic rules). A rename to `runtime_tuning`
+  with deprecation cycle is tracked in #211.
+- **Regression-tier tuner** learns `parallel_readers` and
+  `read_ahead_buffers` in addition to `write_ahead_writers` and
+  `chunk_size`. Argmax now skips uncovered cube-corner cells
+  (refuses to extrapolate beyond training-data support). (#219, #221)
+- **MySQL text/blob tiers** preserved via canonical `MaxBytes`,
+  fixing nvarchar(max)/text/varbinary(max) → LONGTEXT/LONGBLOB. (#196, #206)
+
+### Removed
+
+- **AI-driven error diagnoser** (`internal/driver/ai_errordiag.go`).
+  Error messages no longer egress to third-party LLMs, closing a
+  PII-leak surface. (#173)
+- **AI-driven DB tuning analyzer** (`internal/driver/dbtuning/ai_analyzer.go`).
+  Server-configurable settings no longer require LLM round-trips. (#172)
+- **AI smartconfig prompt machinery** (~1500 LOC across earlier PRs
+  during the epic): replaced by the deterministic tuner in
+  `internal/tuning/`.
+
+### Production-Readiness Tracking
+
+The production-readiness epic #236 was opened and made progress on:
+- **#178** CI-loadable fixtures (this release)
+- **#226** deep validation passes (this release; full row-hash mode
+  reserved for a future iteration after the cost analysis concluded
+  it didn't justify its bandwidth)
+
+Remaining work: #227 (ROW_NUMBER resume safety, P0), #228 (preflight
+health checks, P1), #229 (structured logs + Prometheus + OTLP, P1),
+#230 (CI gating, P1, unblocked by this release's #178), and others.
+
+### Closed-as-not-pursued
+
+- **#244** — same-engine in-DB row hashing was filed during the
+  #226 PR and closed after analysis: dmt's headline use case is
+  cross-engine, where row-level proof is fundamentally Go-side;
+  same-engine migrations have first-party tools (pg_dump, native
+  backup-restore) that already provide higher-fidelity guarantees
+  than a SQL row-hash sum.
+
 ## [3.0.0] - 2026-01-13
 
 ### Breaking Changes
