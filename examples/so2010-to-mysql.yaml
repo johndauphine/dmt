@@ -20,6 +20,10 @@ target:
   database: so2010
   user: root
   password: testpass
+  # Local Docker MySQL test container ships without TLS certs.
+  # Production deployments should remove this line so the dialect's
+  # default (tls=true, require + verify) applies — see #252.
+  ssl_mode: disable
 
 migration:
   workers: 8
