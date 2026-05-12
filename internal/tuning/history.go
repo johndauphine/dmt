@@ -266,7 +266,7 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	}
 	ciStr := "N/A"
 	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, avg); ok {
-		ciStr = formatThroughputRange(low, high)
+		ciStr = formatPredictionInterval(predicted, low, high)
 	}
 
 	out.Reasoning = appendReasoning(out.Reasoning,
@@ -276,26 +276,53 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	return true
 }
 
-// formatThroughputRange formats a (low, high) throughput pair as a
-// short human-readable range. Picks units (K vs M rows/s) based on
-// magnitude so the reasoning string stays readable. Always emits both
-// endpoints in the same unit for easy visual comparison.
+// formatPredictionInterval formats the regression's 95% PI for display
+// in the reasoning string. Picks units (K vs M rows/s) based on
+// magnitude so the line stays readable. Always emits both endpoints in
+// the same unit for easy visual comparison.
 //
-// Negative low values (the prediction interval can extend below zero
-// when uncertainty is large) are clamped to 0 in the display — a
-// "throughput could be negative" string would mislead users; the
-// information that matters is "the lower bound is essentially zero,
-// model has very low confidence."
-func formatThroughputRange(low, high float64) string {
+// Negative low values (the PI can extend below zero when uncertainty is
+// large) are clamped to 0 in the display — a "throughput could be
+// negative" string would mislead users; the information that matters is
+// "the lower bound is essentially zero, model has very low confidence."
+//
+// Width cap (#218): when the upper bound is physically absurd
+// (>piAbsoluteCeiling rows/s) or far beyond the predicted value
+// (>piRelativeRatio × pred), the raw number is replaced with a
+// "wide" marker. The math is technically correct in that case — the
+// model is honestly saying "I have no idea at this x*" — but printing
+// 9.6e23 rows/s erodes operator trust ("did dmt overflow?") and the
+// lower bound is already clamped to 0, so the numeric range carries
+// no usable information. The marker preserves the no-confidence
+// signal without the misleading number. Lives near the rest of the
+// reasoning-string format so future tweaks stay co-located.
+func formatPredictionInterval(pred, low, high float64) string {
+	if high > piAbsoluteCeiling || (pred > 0 && high > piRelativeRatio*pred) {
+		return "wide — low model confidence at this point"
+	}
 	if low < 0 {
 		low = 0
 	}
-	// Pick the larger endpoint's natural unit; small numbers in K, large in M.
 	if high >= 1_000_000 {
 		return fmt.Sprintf("%.2fM–%.2fM rows/s", low/1_000_000, high/1_000_000)
 	}
 	return fmt.Sprintf("%.0fK–%.0fK rows/s", low/1000, high/1000)
 }
+
+// piAbsoluteCeiling caps the displayed PI upper bound at a value well
+// past any realistic throughput for the databases dmt targets.
+// Postgres COPY on a fast NVMe box tops out around 2-5M rows/s on
+// small-row workloads; 100M is two orders of magnitude past that and
+// catches the ~10²⁴ rows/s leverage-explosion case from #218 without
+// false-positiving on aggressive but real predictions.
+const piAbsoluteCeiling = 100_000_000.0
+
+// piRelativeRatio is the second-line cap: when high > k × pred, the
+// CI is so wide it tells the operator nothing useful about whether
+// the picked config is well-understood. 10× catches the "model has
+// some signal but extrapolation blew the upper bound" case where the
+// absolute ceiling wouldn't fire (e.g., pred=2M rows/s, high=50M).
+const piRelativeRatio = 10.0
 
 // sortedKeys returns the int keys of m sorted ascending. Used by the
 // regression-skipped reasoning so the retry-rate exclusion list logs
