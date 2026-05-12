@@ -37,6 +37,26 @@ type fileStateData struct {
 	ProfileName  string                `yaml:"profile_name,omitempty"`
 	ConfigPath   string                `yaml:"config_path,omitempty"`
 	Tables       map[string]tableState `yaml:"tables"`
+	// SyncTimestamps records the last successful sync time per
+	// (source schema, table, target schema) triple, used by
+	// date-based incremental sync. Pre-#255 the file backend
+	// no-op'd Get/UpdateSyncTimestamp, so an incremental sync
+	// configured against the recommended Airflow/k8s file backend
+	// silently degraded to a full-table copy every run.
+	//
+	// Encoded as nested maps (sourceSchema → table → targetSchema →
+	// ts) rather than a delimiter-joined flat key — quoted
+	// identifiers can contain almost anything (including pipes,
+	// dots, brackets), and a flat-key encoding had alias
+	// collisions where different triples mapped to the same key
+	// (Codex review on this PR). The nested form serializes
+	// cleanly in YAML too:
+	//
+	//	sync_timestamps:
+	//	  dbo:
+	//	    Orders:
+	//	      public: 2026-05-12T08:00:00Z
+	SyncTimestamps map[string]map[string]map[string]time.Time `yaml:"sync_timestamps,omitempty"`
 }
 
 // tableState tracks per-table progress.
@@ -184,16 +204,29 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 	configJSON, _ := json.Marshal(config)
 	hash := sha256.Sum256(configJSON)
 
+	// Carry over sync_timestamps from any prior state — they persist
+	// across runs so date-based incremental sync can read the
+	// previous high-water mark on a fresh `dmt run`. Without this,
+	// the second invocation's CreateRun (which fires before any
+	// GetLastSyncTimestamp call) would overwrite the loaded map
+	// with nil, silently degrading incremental sync to full
+	// (Codex review on #255 PR).
+	var carriedTimestamps map[string]map[string]map[string]time.Time
+	if fs.state != nil && len(fs.state.SyncTimestamps) > 0 {
+		carriedTimestamps = fs.state.SyncTimestamps
+	}
+
 	fs.state = &fileStateData{
-		RunID:        id,
-		StartedAt:    time.Now(),
-		Status:       "running",
-		SourceSchema: sourceSchema,
-		TargetSchema: targetSchema,
-		ConfigHash:   hex.EncodeToString(hash[:8]), // First 8 bytes
-		ProfileName:  profileName,
-		ConfigPath:   configPath,
-		Tables:       make(map[string]tableState),
+		RunID:          id,
+		StartedAt:      time.Now(),
+		Status:         "running",
+		SourceSchema:   sourceSchema,
+		TargetSchema:   targetSchema,
+		ConfigHash:     hex.EncodeToString(hash[:8]), // First 8 bytes
+		ProfileName:    profileName,
+		ConfigPath:     configPath,
+		Tables:         make(map[string]tableState),
+		SyncTimestamps: carriedTimestamps,
 	}
 
 	return fs.save()
@@ -525,15 +558,53 @@ func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 	return nil, nil
 }
 
-// GetLastSyncTimestamp is a no-op for file state (doesn't persist sync timestamps).
-// Date-based incremental sync falls back to full sync when using file state backend.
+// GetLastSyncTimestamp returns the last successful sync timestamp
+// recorded for (sourceSchema, tableName, targetSchema). Pre-#255
+// this was a no-op that returned (nil, nil), silently degrading
+// date-based incremental sync to a full sync every run when the
+// file backend was used. Now reads from the persisted nested map.
 func (fs *FileState) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
-	return nil, nil
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if fs.state == nil || fs.state.SyncTimestamps == nil {
+		return nil, nil
+	}
+	tables, ok := fs.state.SyncTimestamps[sourceSchema]
+	if !ok {
+		return nil, nil
+	}
+	targets, ok := tables[tableName]
+	if !ok {
+		return nil, nil
+	}
+	ts, ok := targets[targetSchema]
+	if !ok {
+		return nil, nil
+	}
+	return &ts, nil
 }
 
-// UpdateSyncTimestamp is a no-op for file state.
+// UpdateSyncTimestamp persists the sync timestamp for the given
+// (sourceSchema, tableName, targetSchema) triple. Uses the
+// crash-safe atomic-write path established in #254, so a
+// SIGKILL/eviction partway through the save can't tear the file.
 func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error {
-	return nil
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.state == nil {
+		fs.state = &fileStateData{Tables: make(map[string]tableState)}
+	}
+	if fs.state.SyncTimestamps == nil {
+		fs.state.SyncTimestamps = make(map[string]map[string]map[string]time.Time)
+	}
+	if fs.state.SyncTimestamps[sourceSchema] == nil {
+		fs.state.SyncTimestamps[sourceSchema] = make(map[string]map[string]time.Time)
+	}
+	if fs.state.SyncTimestamps[sourceSchema][tableName] == nil {
+		fs.state.SyncTimestamps[sourceSchema][tableName] = make(map[string]time.Time)
+	}
+	fs.state.SyncTimestamps[sourceSchema][tableName][targetSchema] = ts
+	return fs.save()
 }
 
 // SaveAIAdjustment is a no-op for file state (doesn't persist AI history).

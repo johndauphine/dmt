@@ -79,6 +79,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Date-based incremental sync now works on the file backend**
+  (#255). Pre-#255 the file backend's `GetLastSyncTimestamp` and
+  `UpdateSyncTimestamp` were explicit no-ops, so date-based
+  incremental sync configured against the Airflow/k8s-recommended
+  file backend silently degraded to a full-table copy every run.
+  The cost scaled linearly with table size instead of delta size —
+  the inverse of what incremental sync is supposed to deliver.
+  Timestamps now persist in a `sync_timestamps:` map in the YAML
+  state file, keyed by (source schema, table, target schema) to
+  match the SQLite backend's UNIQUE constraint. Writes go through
+  the crash-safe `atomicWriteFile` path established in #254.
+
 - **File-state writes are now crash-safe** (#254). The YAML file
   backend used by the Airflow/k8s headless mode previously wrote via
   `os.WriteFile`, which is not atomic: a SIGKILL, OOM-kill, or pod
