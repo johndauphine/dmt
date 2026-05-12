@@ -35,22 +35,62 @@ func (d *Dialect) BuildDSN(host string, port int, database, user, password strin
 	params.Set("multiStatements", "true")
 	params.Set("interpolateParams", "true")
 
-	// Handle SSL/TLS mode
-	if sslMode, ok := opts["ssl_mode"].(string); ok && sslMode != "" {
+	// Handle SSL/TLS mode. Accept both `ssl_mode` (MySQL convention)
+	// and `sslmode` (Postgres convention — what dbconfig.DSNOptions
+	// actually emits today, see #252). Reading both keys is the
+	// Codex-recommended normalization so an operator's configured TLS
+	// mode isn't silently ignored.
+	sslMode, ok := opts["ssl_mode"].(string)
+	if !ok || sslMode == "" {
+		// Fall back to the Postgres key that dbconfig still uses.
+		if v, vok := opts["sslmode"].(string); vok {
+			sslMode = v
+			ok = true
+		}
+	}
+	if ok && sslMode != "" {
 		switch strings.ToLower(sslMode) {
 		case "disable", "disabled", "false":
 			params.Set("tls", "false")
 		case "require", "required", "true":
 			params.Set("tls", "true")
 		case "verify-ca", "verify_ca":
-			params.Set("tls", "skip-verify")
+			// go-sql-driver/mysql has no built-in "verify CA but not
+			// hostname" mode. The pre-#252 mapping was `skip-verify`
+			// (TLS with NO verification) — the direct inverse of what
+			// the operator asked for. Map to `tls=true` (CA + hostname
+			// verification) instead: strictly stricter than verify-ca,
+			// which is safe; the alternative would be a custom
+			// RegisterTLSConfig path we don't yet have config plumbing
+			// for. Users who need genuine CA-only verification should
+			// use verify-full and accept the hostname constraint, or
+			// register a custom TLS profile (future).
+			params.Set("tls", "true")
 		case "verify-full", "verify_full", "verify-identity", "verify_identity":
 			params.Set("tls", "true")
-		default:
+		case "preferred":
+			// Explicit opt-in to downgradeable TLS: try TLS, fall back
+			// to plaintext on connection failure. NOT a safe default
+			// (#252) — operators with this setting are knowingly
+			// trading security for compatibility with mixed-TLS
+			// environments. The driver and setup-wizard defaults
+			// changed away from "preferred" in #252; this branch only
+			// fires when the operator explicitly typed it.
 			params.Set("tls", "preferred")
+		default:
+			// Unknown values used to fall through to `preferred`
+			// (downgradeable to plaintext). Default to `tls=true`
+			// instead — the operator clearly intended TLS but we
+			// don't recognize the mode name; failing closed is safer
+			// than failing open.
+			params.Set("tls", "true")
 		}
 	} else {
-		params.Set("tls", "preferred")
+		// No ssl_mode configured. Pre-#252 default was `preferred`
+		// (silent downgrade to plain). Default to `tls=true` instead
+		// (require + verify). Operators who explicitly want plain
+		// can set `ssl_mode: disable`.
+		params.Set("tls", "true")
 	}
 
 	// Handle charset

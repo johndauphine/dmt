@@ -33,7 +33,10 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 	return driver.DriverDefaults{
 		Port:                  3306,
 		Schema:                "", // MySQL uses database name, not schema
-		SSLMode:               "preferred",
+		// "require" maps to tls=true (require + verify) in the
+		// dialect; operators who knowingly want downgradeable TLS
+		// must explicitly set ssl_mode: preferred. (#252)
+		SSLMode:               "require",
 		WriteAheadWriters:     2,
 		ScaleWritersWithCores: true,
 

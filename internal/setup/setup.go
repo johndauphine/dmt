@@ -746,12 +746,19 @@ func (s *State) sslPrompt(dbType, sslMode string, trustCert bool) PromptInfo {
 			Choices: []string{"y", "n"},
 		}
 	case "mysql":
-		def := "preferred"
+		// Default is "require" rather than "preferred" — preferred
+		// allows silent plaintext downgrade and isn't safe as a
+		// default. (#252) Operators who explicitly want downgradeable
+		// TLS can type "preferred" at the prompt. Form is the
+		// Postgres-style canonical (disable/require/verify-ca/verify-full)
+		// documented in dbconfig.SourceConfig.SSLMode; the dialect
+		// accepts the MySQL-native variants as aliases.
+		def := "require"
 		if sslMode != "" {
 			def = sslMode
 		}
 		return PromptInfo{
-			Text:    "SSL mode (disabled/preferred/required/verify_ca/verify_identity)",
+			Text:    "SSL mode (disable/require/verify-ca/verify-full, or 'preferred' for downgradeable TLS)",
 			Default: def,
 		}
 	default:
@@ -778,7 +785,7 @@ func (s *State) processSSL(input string, isSource bool) {
 		case "mysql":
 			if input == "" {
 				if s.Config.Source.SSLMode == "" {
-					s.Config.Source.SSLMode = "preferred"
+					s.Config.Source.SSLMode = "require" // #252 safe default
 				}
 			} else {
 				s.Config.Source.SSLMode = input
@@ -802,7 +809,7 @@ func (s *State) processSSL(input string, isSource bool) {
 		case "mysql":
 			if input == "" {
 				if s.Config.Target.SSLMode == "" {
-					s.Config.Target.SSLMode = "preferred"
+					s.Config.Target.SSLMode = "require" // #252 safe default
 				}
 			} else {
 				s.Config.Target.SSLMode = input
