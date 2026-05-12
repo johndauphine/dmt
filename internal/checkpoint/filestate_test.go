@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -304,5 +305,118 @@ tables:
 	}
 	if failed != 0 {
 		t.Errorf("failed = %d, want 0", failed)
+	}
+}
+
+// TestAtomicWriteFile_CreatesMissingDir covers the directory-missing
+// branch of #254's acceptance criteria: NewFileState may be pointed
+// at a nested path whose parent dirs don't exist yet. atomicWriteFile
+// must MkdirAll them with safe permissions. POSIX-only perm checks
+// run only on Linux/macOS since Windows ignores the mode bits passed
+// to MkdirAll and Mode().Perm() doesn't reliably reflect ACLs.
+func TestAtomicWriteFile_CreatesMissingDir(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "missing", "subdir", "state.yaml")
+
+	if err := atomicWriteFile(nested, []byte("hello"), 0600); err != nil {
+		t.Fatalf("atomicWriteFile into missing dir: %v", err)
+	}
+
+	got, err := os.ReadFile(nested)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Errorf("contents = %q, want %q", got, "hello")
+	}
+
+	if runtime.GOOS == "windows" {
+		return // perm assertions below are POSIX-only
+	}
+
+	// Final file has the requested perms.
+	info, err := os.Stat(nested)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("file perm = %o, want 0600", info.Mode().Perm())
+	}
+
+	// Parent dir has the restrictive perms MkdirAll requested.
+	dirInfo, err := os.Stat(filepath.Dir(nested))
+	if err != nil {
+		t.Fatalf("stat parent: %v", err)
+	}
+	if dirInfo.Mode().Perm() != 0700 {
+		t.Errorf("parent dir perm = %o, want 0700", dirInfo.Mode().Perm())
+	}
+}
+
+// TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact simulates
+// the "crash mid-write" failure mode #254 cares about. Failure is
+// injected by chmod'ing the directory read-only so CreateTemp fails;
+// the safety property to verify is that the previous file's
+// contents are left intact, not torn. Skipped where chmod can't
+// enforce that restriction (root, Windows).
+func TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0500 doesn't restrict writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission checks; failure injection won't fire")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.yaml")
+
+	if err := os.WriteFile(path, []byte("ORIGINAL"), 0600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+
+	err := atomicWriteFile(path, []byte("NEW DATA"), 0600)
+	if err == nil {
+		t.Fatal("atomicWriteFile succeeded into a read-only dir; expected error")
+	}
+
+	// Restore so we can read the file back.
+	_ = os.Chmod(dir, 0700)
+
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read back: %v", readErr)
+	}
+	if string(got) != "ORIGINAL" {
+		t.Errorf("existing file was modified or truncated despite failed write: got %q, want %q", got, "ORIGINAL")
+	}
+}
+
+// TestAtomicWriteFile_NoLeftoverTempFiles guards the success path:
+// after a clean write, no .tmp siblings should be left behind. The
+// failure-path cleanup is covered indirectly by
+// TestAtomicWriteFile_FailedWriteLeavesExistingFileIntact, which
+// exercises the defer-Remove on a CreateTemp-failure code path.
+func TestAtomicWriteFile_NoLeftoverTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.yaml")
+
+	if err := atomicWriteFile(path, []byte("data"), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() == filepath.Base(path) {
+			continue
+		}
+		t.Errorf("unexpected leftover file: %s", e.Name())
 	}
 }

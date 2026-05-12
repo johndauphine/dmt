@@ -40,6 +40,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **File-state writes are now crash-safe** (#254). The YAML file
+  backend used by the Airflow/k8s headless mode previously wrote via
+  `os.WriteFile`, which is not atomic: a SIGKILL, OOM-kill, or pod
+  eviction partway through the write would leave a truncated YAML
+  file that fails to parse on resume — exactly the failure mode the
+  file backend was added to handle. `FileState.save()` now uses the
+  standard tmp + fsync + rename + dir-fsync pattern, so the state
+  file is always either the pre-write or post-write version, never
+  torn. Also `MkdirAll`s missing parent directories with 0700 perms.
+
 - **Reader goroutines no longer leak when writers fail mid-transfer**
   (#250). In both the keyset and ROW_NUMBER pagination paths, reader
   goroutines used bare `chunkChan <- result` sends. On writer
