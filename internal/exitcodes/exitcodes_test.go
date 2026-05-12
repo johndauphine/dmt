@@ -62,6 +62,30 @@ func TestExitError(t *testing.T) {
 	}
 }
 
+// fakeCoder is a minimal implementation of the ExitCoder interface used
+// to verify FromError honors typed exit-code carriers (e.g.
+// orchestrator.PartialMigrationError) without importing them here.
+type fakeCoder struct {
+	code int
+	msg  string
+}
+
+func (e *fakeCoder) Error() string { return e.msg }
+func (e *fakeCoder) ExitCode() int { return e.code }
+
+func TestFromError_HonorsExitCoder(t *testing.T) {
+	err := &fakeCoder{code: TransferError, msg: "partial migration: 2 failed"}
+	if got := FromError(err); got != TransferError {
+		t.Errorf("FromError(ExitCoder) = %d, want %d", got, TransferError)
+	}
+
+	// Wrapped through fmt.Errorf must still resolve via errors.As.
+	wrapped := errors.Join(errors.New("context"), err)
+	if got := FromError(wrapped); got != TransferError {
+		t.Errorf("FromError(wrapped ExitCoder) = %d, want %d", got, TransferError)
+	}
+}
+
 func TestIsRecoverable(t *testing.T) {
 	recoverable := []int{ConnectionError, Cancelled, IOError}
 	nonRecoverable := []int{Success, ConfigError, TransferError, ValidationError, StateError}

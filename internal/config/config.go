@@ -228,6 +228,13 @@ type MigrationConfig struct {
 	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
 	SampleValidation       bool     `yaml:"sample_validation"`        // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
 	SampleSize             int      `yaml:"sample_size"`              // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+	// AllowPartial controls the exit-code contract when one or more
+	// tables fail to transfer. Default (false) returns a
+	// PartialMigrationError so unattended automation (Airflow, k8s
+	// jobs, CI) sees a non-zero exit code. Set to true to preserve
+	// the pre-#248 behavior where partial migrations exited 0 with a
+	// "partial" status in JSON output and a warning in the log.
+	AllowPartial           bool     `yaml:"allow_partial"`
 
 	// Validation configures the cross-DB validation passes that run
 	// after data transfer completes (#226). Zero value preserves the

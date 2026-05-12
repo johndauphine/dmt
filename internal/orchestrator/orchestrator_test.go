@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -398,5 +399,26 @@ func TestParsePGSize(t *testing.T) {
 			t.Errorf("parsePGSize(%q) = (%d, %v), want (%d, %v)",
 				tc.raw, got, ok, tc.wantMB, tc.wantOK)
 		}
+	}
+}
+
+func TestPartialMigrationError(t *testing.T) {
+	err := &PartialMigrationError{
+		Failed: []TableFailure{
+			{TableName: "dbo.Users"},
+			{TableName: "dbo.Orders"},
+		},
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "2 failed table(s)") {
+		t.Errorf("Error() = %q, want substring %q", msg, "2 failed table(s)")
+	}
+	if !strings.Contains(msg, "dbo.Users") || !strings.Contains(msg, "dbo.Orders") {
+		t.Errorf("Error() = %q, want both table names listed", msg)
+	}
+
+	if code := err.ExitCode(); code != 3 {
+		t.Errorf("ExitCode() = %d, want 3 (TransferError)", code)
 	}
 }

@@ -57,6 +57,14 @@ func NewExitError(err error, code int) *ExitError {
 
 // FromError determines the appropriate exit code for an error.
 // It examines error messages and types to classify the error.
+// ExitCoder is implemented by errors that know their own CLI exit code.
+// Lets packages (e.g. orchestrator.PartialMigrationError) declare their
+// exit code locally without a dependency on this package's constants
+// becoming an import cycle.
+type ExitCoder interface {
+	ExitCode() int
+}
+
 func FromError(err error) int {
 	if err == nil {
 		return Success
@@ -66,6 +74,12 @@ func FromError(err error) int {
 	var exitErr *ExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.Code
+	}
+
+	// Honor error types that declare their own exit code.
+	var coder ExitCoder
+	if errors.As(err, &coder) {
+		return coder.ExitCode()
 	}
 
 	// Check for os.PathError first (file not found, permission denied, etc.)
