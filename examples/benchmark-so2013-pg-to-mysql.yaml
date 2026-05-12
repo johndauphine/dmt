@@ -20,6 +20,10 @@ target:
   database: so2013
   user: root
   password: ${MYSQL_PASSWORD}
+  # Local Docker mysql-bench container ships without TLS certs.
+  # Production deployments should remove this line so the dialect's
+  # default (tls=true, require + verify) applies — see #252.
+  ssl_mode: disable
 
 migration:
   target_mode: drop_recreate
