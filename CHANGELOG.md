@@ -28,7 +28,7 @@ All notable changes to this project will be documented in this file.
   verification) instead of the pre-#252 `tls=preferred` (TLS
   attempted, silent plaintext fallback). The MySQL driver's default
   and the setup wizard's default both moved from `"preferred"` to
-  `"required"`. Operators who still want downgradeable TLS can
+  `"require"`. Operators who still want downgradeable TLS can
   explicitly set `ssl_mode: preferred` — that branch maps to
   `tls=preferred` as before, but it's now an explicit opt-in, not a
   silent default. Operators connecting to non-TLS MySQL instances

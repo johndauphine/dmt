@@ -37,18 +37,21 @@ func TestBuildDSNTimeoutOverride(t *testing.T) {
 // for #252: dbconfig.DSNOptions emits the Postgres-style key
 // `sslmode`, but the MySQL dialect historically read only `ssl_mode`,
 // so configured TLS settings were silently ignored. Both keys must
-// produce the same DSN.
+// now produce byte-for-byte identical DSNs — asserting equality is
+// stricter than asserting both contain `tls=true`, and would catch a
+// regression where e.g. one path picked up a different default.
 func TestBuildDSN_SSLMode_KeyNormalization(t *testing.T) {
 	d := &Dialect{}
 
 	mysqlKey := d.BuildDSN("localhost", 3306, "db", "u", "p", map[string]any{"ssl_mode": "require"})
 	pgKey := d.BuildDSN("localhost", 3306, "db", "u", "p", map[string]any{"sslmode": "require"})
 
-	if !strings.Contains(mysqlKey, "tls=true") {
-		t.Errorf("ssl_mode key not honored; DSN: %s", mysqlKey)
+	if mysqlKey != pgKey {
+		t.Errorf("ssl_mode and sslmode keys produced different DSNs:\n  ssl_mode: %s\n  sslmode : %s", mysqlKey, pgKey)
 	}
-	if !strings.Contains(pgKey, "tls=true") {
-		t.Errorf("sslmode key (Postgres-style) not honored; DSN: %s", pgKey)
+	// Sanity check: the normalized DSN still honors the configured mode.
+	if !strings.Contains(mysqlKey, "tls=true") {
+		t.Errorf("normalized DSN doesn't include expected tls=true: %s", mysqlKey)
 	}
 }
 
