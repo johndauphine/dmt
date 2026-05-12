@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -163,14 +164,12 @@ func isIntegerType(dataType string) bool {
 	return false
 }
 
-// AnalyzeConfig uses AI to analyze the source database and suggest optimal configuration.
+// AnalyzeConfig analyzes the source database and emits tuning
+// recommendations. The flow is deterministic — smartconfig (#175/#179)
+// produces parameter suggestions from regression + history, and
+// dbtuning (#172) emits per-DB recommendations from a hardcoded
+// catalog. No AI is required.
 func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*driver.SmartConfigSuggestions, error) {
-	// Get AI mapper from secrets
-	aiMapper, err := driver.NewAITypeMapperFromSecrets()
-	if err != nil {
-		return nil, fmt.Errorf("loading AI type mapper: %w", err)
-	}
-
 	// Target-only mode: provide limited analysis (no schema, but still tuning recommendations)
 	if o.sourcePool == nil && o.targetPool != nil {
 		logging.Debug("Analyzing target database only (source unavailable)...")
@@ -181,7 +180,7 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		o.applySystemDefaults(suggestions)
 
 		// Add target database tuning recommendations
-		o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
+		o.addDatabaseTuningRecommendations(ctx, suggestions)
 
 		return suggestions, nil
 	}
@@ -263,7 +262,7 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	})
 
 	// Add database tuning recommendations using the same AI mapper
-	o.addDatabaseTuningRecommendations(ctx, suggestions, aiMapper)
+	o.addDatabaseTuningRecommendations(ctx, suggestions)
 
 	return suggestions, nil
 }
@@ -484,13 +483,11 @@ func (a *stateHistoryAdapter) UpdateAITuningResult(throughput float64, durationS
 	return a.state.UpdateAITuningResult(throughput, durationSecs, chunkRetryCount)
 }
 
-// addDatabaseTuningRecommendations adds source and target database tuning recommendations.
-func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, suggestions *driver.SmartConfigSuggestions, aiMapper *driver.AITypeMapper) {
-	// AI mapper is passed from AnalyzeConfig to avoid refetching
-	if aiMapper == nil {
-		return
-	}
-
+// addDatabaseTuningRecommendations adds source and target database
+// tuning recommendations from the deterministic catalog (#172).
+// Previously this required an AI mapper; the catalog is now hardcoded
+// per driver and no AI is consulted, so the call always runs.
+func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, suggestions *driver.SmartConfigSuggestions) {
 	// Schema statistics for recommendations
 	stats := dbtuning.SchemaStatistics{
 		TotalTables:     suggestions.TotalTables,
@@ -499,11 +496,25 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 		EstimatedMemMB:  suggestions.EstimatedMemMB,
 	}
 
+	// HostMemoryMB describes the DB *server's* RAM, not dmt's host.
+	// Only pass dmt's host RAM when the DB connection is local;
+	// otherwise rules that size memory from it would emit recommendations
+	// against the wrong machine (Codex review on #172).
+	dmtHost := dbtuning.DetectSystemInfo()
+	sourceSys := dbtuning.SystemInfo{CPUCores: dmtHost.CPUCores}
+	targetSys := dbtuning.SystemInfo{CPUCores: dmtHost.CPUCores}
+	if isLocalDBHost(o.config.Source.Host) {
+		sourceSys.HostMemoryMB = dmtHost.HostMemoryMB
+	}
+	if isLocalDBHost(o.config.Target.Host) {
+		targetSys.HostMemoryMB = dmtHost.HostMemoryMB
+	}
+
 	// Run source and target analysis concurrently for better performance
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	// Analyze source database tuning using AI-driven approach (concurrent)
+	// Analyze source database tuning (concurrent)
 	if o.sourcePool != nil && o.sourcePool.DB() != nil {
 		wg.Add(1)
 		go func() {
@@ -520,7 +531,7 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 				o.sourcePool.DBType(),
 				"source",
 				stats,
-				aiMapper,
+				sourceSys,
 			)
 
 			mu.Lock()
@@ -568,7 +579,7 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 				o.targetPool.DBType(),
 				"target",
 				stats,
-				aiMapper,
+				targetSys,
 			)
 
 			mu.Lock()
@@ -601,4 +612,26 @@ func (o *Orchestrator) addDatabaseTuningRecommendations(ctx context.Context, sug
 
 	// Wait for all analyses to complete before returning
 	wg.Wait()
+}
+
+// isLocalDBHost reports whether the given config host string points at
+// the same machine dmt is running on. Used to decide whether dmt's
+// host RAM (gopsutil) is a meaningful proxy for the DB server's RAM
+// for sizing recommendations. Conservative — when in doubt, returns
+// false (resulting in no RAM-based recommendation rather than a
+// confidently wrong one).
+func isLocalDBHost(host string) bool {
+	if host == "" {
+		// Empty host typically means "connect via socket / pipe", which
+		// requires the DB to be local. Treat as local.
+		return true
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+		return true
+	}
+	if h, err := os.Hostname(); err == nil && strings.EqualFold(host, h) {
+		return true
+	}
+	return false
 }

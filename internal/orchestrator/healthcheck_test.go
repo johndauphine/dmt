@@ -68,3 +68,27 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 		})
 	}
 }
+
+func TestIsLocalDBHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"", true},
+		{"localhost", true},
+		{"LOCALHOST", true},
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"0.0.0.0", true},
+		{"db.example.com", false},
+		{"10.0.0.5", false},
+		{"some-cloud-rds.amazonaws.com", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := isLocalDBHost(tc.host); got != tc.want {
+				t.Errorf("isLocalDBHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
