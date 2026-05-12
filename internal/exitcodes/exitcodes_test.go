@@ -79,7 +79,7 @@ func TestFromError_HonorsExitCoder(t *testing.T) {
 		t.Errorf("FromError(ExitCoder) = %d, want %d", got, TransferError)
 	}
 
-	// Wrapped through fmt.Errorf must still resolve via errors.As.
+	// Wrapping via errors.Join must still resolve through errors.As.
 	wrapped := errors.Join(errors.New("context"), err)
 	if got := FromError(wrapped); got != TransferError {
 		t.Errorf("FromError(wrapped ExitCoder) = %d, want %d", got, TransferError)

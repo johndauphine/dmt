@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/exitcodes"
 )
 
 func TestComputeConfigHash(t *testing.T) {
@@ -418,8 +419,8 @@ func TestPartialMigrationError(t *testing.T) {
 		t.Errorf("Error() = %q, want both table names listed", msg)
 	}
 
-	if code := err.ExitCode(); code != 3 {
-		t.Errorf("ExitCode() = %d, want 3 (TransferError)", code)
+	if code := err.ExitCode(); code != exitcodes.TransferError {
+		t.Errorf("ExitCode() = %d, want %d (TransferError)", code, exitcodes.TransferError)
 	}
 }
 
@@ -437,9 +438,11 @@ func TestComputeConfigHash_AllowPartialInvariant(t *testing.T) {
 	other := *base
 	other.Migration.AllowPartial = true
 
-	if computeConfigHash(base) != computeConfigHash(&other) {
+	baseHash := computeConfigHash(base)
+	otherHash := computeConfigHash(&other)
+	if baseHash != otherHash {
 		t.Errorf("flipping MigrationConfig.AllowPartial changed the resume config hash; "+
 			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
-			computeConfigHash(base), computeConfigHash(&other))
+			baseHash, otherHash)
 	}
 }

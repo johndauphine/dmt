@@ -16,6 +16,7 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/notify"
 	"github.com/johndauphine/dmt/internal/pool"
@@ -64,11 +65,12 @@ func (e *PartialMigrationError) Error() string {
 		len(e.Failed), strings.Join(names, ", "))
 }
 
-// ExitCode reports the CLI exit code this error should map to. Matches
-// the exitcodes.TransferError constant (3) without importing the
-// exitcodes package (which would create an import cycle once
-// exitcodes wants to dispatch on this type).
-func (e *PartialMigrationError) ExitCode() int { return 3 }
+// ExitCode reports the CLI exit code this error should map to.
+// exitcodes only depends on stdlib, so importing it here is acyclic
+// (orchestrator → exitcodes is a one-way edge); using the constant
+// rather than a magic 3 keeps the two in sync if TransferError is
+// ever renumbered.
+func (e *PartialMigrationError) ExitCode() int { return exitcodes.TransferError }
 
 // Orchestrator coordinates the migration process
 type Orchestrator struct {
