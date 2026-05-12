@@ -234,7 +234,15 @@ type MigrationConfig struct {
 	// jobs, CI) sees a non-zero exit code. Set to true to preserve
 	// the pre-#248 behavior where partial migrations exited 0 with a
 	// "partial" status in JSON output and a warning in the log.
-	AllowPartial           bool     `yaml:"allow_partial"`
+	//
+	// `json:"-"` is load-bearing: the resume config hash
+	// (computeConfigHash) is computed via json.Marshal of the
+	// sanitized config; including a new field with a non-omitted zero
+	// value would falsely flag an unchanged YAML as "config changed"
+	// across the #248 upgrade (Codex review on PR closing this issue).
+	// Exit-code policy doesn't affect data transfer, so it has no
+	// business participating in the hash.
+	AllowPartial           bool     `yaml:"allow_partial" json:"-"`
 
 	// Validation configures the cross-DB validation passes that run
 	// after data transfer completes (#226). Zero value preserves the

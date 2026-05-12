@@ -422,3 +422,24 @@ func TestPartialMigrationError(t *testing.T) {
 		t.Errorf("ExitCode() = %d, want 3 (TransferError)", code)
 	}
 }
+
+// TestComputeConfigHash_AllowPartialInvariant guards against the
+// regression Codex caught on the #248 PR: adding the new
+// MigrationConfig.AllowPartial field must not change the resume
+// config hash, because that would invalidate every in-progress
+// resume across the #248 upgrade. Hash continuity is enforced via
+// `json:"-"` on the field.
+func TestComputeConfigHash_AllowPartialInvariant(t *testing.T) {
+	base := &config.Config{
+		Source: config.SourceConfig{Type: "mssql", Host: "h", Port: 1433, Database: "d", User: "u", Password: "p"},
+		Target: config.TargetConfig{Type: "postgres", Host: "h", Port: 5432, Database: "d", User: "u", Password: "p"},
+	}
+	other := *base
+	other.Migration.AllowPartial = true
+
+	if computeConfigHash(base) != computeConfigHash(&other) {
+		t.Errorf("flipping MigrationConfig.AllowPartial changed the resume config hash; "+
+			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
+			computeConfigHash(base), computeConfigHash(&other))
+	}
+}
