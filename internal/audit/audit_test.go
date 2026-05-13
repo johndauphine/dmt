@@ -214,6 +214,84 @@ func TestTamperEvident_HashChain(t *testing.T) {
 	}
 }
 
+// TestCloseResumable_KeepsFileWritable pins the codex-review fix:
+// Ctrl-C / context cancellation during a transfer must leave the
+// audit file writable so the eventual `dmt resume` can reopen it.
+// Close() chmod-locks to 0444 (good for terminal closes); CloseResumable
+// skips the chmod (good for interrupted runs).
+func TestCloseResumable_KeepsFileWritable(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := New(Options{Dir: dir, RunID: "resumable"})
+	l.RecordEvent(Event{Type: "run_start"})
+	if err := l.CloseResumable(); err != nil {
+		t.Fatalf("CloseResumable: %v", err)
+	}
+	st, err := os.Stat(l.Path())
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("CloseResumable should leave file writable; mode=%v", st.Mode())
+	}
+}
+
+// TestResumeChain_ContinuesAcrossReopen pins the codex-review fix: in
+// tamper-evident mode, opening an existing audit file for append must
+// pick up the chain from where the prior run left off. Without this,
+// the verifier breaks across a Run + Resume even when no tampering
+// happened.
+func TestResumeChain_ContinuesAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+
+	// First "run": write 2 events, close resumable (operator hit Ctrl-C).
+	first, _ := New(Options{Dir: dir, RunID: "chain-resume", TamperEvident: true})
+	first.RecordEvent(Event{Type: "run_start"})
+	first.RecordEvent(Event{Type: "preflight"})
+	firstSeq := first.seq
+	firstHash := first.prevHash
+	if err := first.CloseResumable(); err != nil {
+		t.Fatalf("first CloseResumable: %v", err)
+	}
+	if firstSeq != 2 {
+		t.Fatalf("expected seq=2 before reopen, got %d", firstSeq)
+	}
+
+	// "Resume": reopen the same file. Logger MUST continue the chain.
+	second, err := New(Options{Dir: dir, RunID: "chain-resume", TamperEvident: true})
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	if second.seq != firstSeq {
+		t.Errorf("resumed seq = %d, want %d (continue from prior close)", second.seq, firstSeq)
+	}
+	if second.prevHash != firstHash {
+		t.Errorf("resumed prevHash = %q, want %q", second.prevHash, firstHash)
+	}
+	second.RecordEvent(Event{Type: "resume_start"})
+	second.Close()
+
+	// Verify the combined file's chain replays cleanly.
+	f, _ := os.Open(second.Path())
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	prevHash := "GENESIS"
+	var seenSeqs []int64
+	for scanner.Scan() {
+		var ev map[string]any
+		_ = json.Unmarshal(scanner.Bytes(), &ev)
+		seq := int64(ev["seq"].(float64))
+		seenSeqs = append(seenSeqs, seq)
+		if ev["prev_hash"] != prevHash {
+			t.Errorf("seq %d prev_hash = %v, want %v", seq, ev["prev_hash"], prevHash)
+		}
+		prevHash = ev["hash"].(string)
+	}
+	// Expect seq 1,2,3 — strictly monotonic across the reopen.
+	if len(seenSeqs) != 3 || seenSeqs[0] != 1 || seenSeqs[1] != 2 || seenSeqs[2] != 3 {
+		t.Errorf("seqs across reopen = %v, want [1 2 3]", seenSeqs)
+	}
+}
+
 // TestScrubFields_NestedMap pins the recursive scrubbing behavior. A
 // config_resolved event commonly has nested {source: {password: ...}}
 // — the audit log mustn't leak the password just because it's one

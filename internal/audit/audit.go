@@ -30,6 +30,7 @@
 package audit
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -149,7 +150,58 @@ func New(opts Options) (*Logger, error) {
 		tamperEvident: opts.TamperEvident,
 		prevHash:      "GENESIS",
 	}
+	// If we're appending to an existing file in tamper-evident mode,
+	// pick up the chain from where it left off (Codex review on #235).
+	// Otherwise a resume would restart seq=1/prev_hash=GENESIS and break
+	// the documented verifier across the combined run+resume file.
+	if opts.TamperEvident {
+		if err := l.resumeChain(path); err != nil {
+			// Close the file we just opened so we don't leak the fd.
+			_ = f.Close()
+			return nil, fmt.Errorf("audit: resume hash chain in %q: %w", path, err)
+		}
+	}
 	return l, nil
+}
+
+// resumeChain scans the existing audit file for the last event's
+// seq+hash so a resumed Logger continues the chain instead of restarting
+// at seq=1/prev=GENESIS. No-op when the file is empty (fresh run) or
+// not in tamper-evident mode (caller gates this).
+func (l *Logger) resumeChain(path string) error {
+	r, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // fresh file
+		}
+		return err
+	}
+	defer r.Close()
+	var lastSeq int64
+	lastHash := "GENESIS"
+	scanner := bufio.NewScanner(r)
+	// Audit lines can be large (config_resolved with the full sanitized
+	// config); bump the buffer ceiling so the scanner doesn't refuse
+	// long lines.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var ev map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			return fmt.Errorf("audit: previous event not parseable: %w", err)
+		}
+		if s, ok := ev["seq"].(float64); ok {
+			lastSeq = int64(s)
+		}
+		if h, ok := ev["hash"].(string); ok && h != "" {
+			lastHash = h
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	l.seq = lastSeq
+	l.prevHash = lastHash
+	return nil
 }
 
 // Path returns the on-disk path of the audit log. Empty for the
@@ -210,10 +262,27 @@ func (l *Logger) RecordEvent(ev Event) error {
 }
 
 // Close flushes any buffered data, closes the file, and chmod-s it to
-// 0444 (read-only). Idempotent — repeat calls return nil. Close errors
-// are returned but the file is always closed; callers can rely on the
-// file being safe to ship after Close, even on error.
+// 0444 (read-only). Use this for terminal closes — successful run,
+// hard-failed run, panic. For interrupted runs that the operator will
+// resume, use CloseResumable instead so the file stays writable.
+//
+// Idempotent — repeat calls return nil. Close errors are returned but
+// the file is always closed; callers can rely on the file being safe
+// to ship after Close, even on error.
 func (l *Logger) Close() error {
+	return l.closeImpl(true /*chmodReadOnly*/)
+}
+
+// CloseResumable closes the file but DOES NOT chmod it to 0444, so a
+// subsequent `dmt resume` can reopen the same file in O_APPEND mode
+// and continue the audit log (Codex review on #235). Without this,
+// Ctrl-C during a transfer would lock the audit file out of the
+// resume that the user explicitly asked for.
+func (l *Logger) CloseResumable() error {
+	return l.closeImpl(false /*chmodReadOnly*/)
+}
+
+func (l *Logger) closeImpl(chmodReadOnly bool) error {
 	if l == nil || l == disabledLogger {
 		return nil
 	}
@@ -224,20 +293,18 @@ func (l *Logger) Close() error {
 	}
 	l.closed = true
 	closeErr := l.file.Close()
-	// Chmod is best-effort; some filesystems (e.g. mounted volumes
-	// without execute bits) reject 0444 and we don't want that to
-	// fail the run.
-	chmodErr := os.Chmod(l.path, 0o444)
-	if closeErr != nil {
-		return closeErr
+	if chmodReadOnly {
+		// Chmod is best-effort; some filesystems (e.g. mounted volumes
+		// without execute bits) reject 0444 and we don't want that to
+		// fail the run.
+		if chmodErr := os.Chmod(l.path, 0o444); chmodErr != nil {
+			// Log instead of return — the audit data is on disk; the
+			// chmod is enforcement-by-filesystem and degrades gracefully
+			// on systems that can't honor it.
+			logging.Warn("audit: chmod %q to 0444 failed: %v", l.path, chmodErr)
+		}
 	}
-	if chmodErr != nil {
-		// Log instead of return — the audit data is on disk; the
-		// chmod is enforcement-by-filesystem and degrades gracefully
-		// on systems that can't honor it.
-		logging.Warn("audit: chmod %q to 0444 failed: %v", l.path, chmodErr)
-	}
-	return nil
+	return closeErr
 }
 
 // resolveDir returns the absolute audit directory, defaulting to

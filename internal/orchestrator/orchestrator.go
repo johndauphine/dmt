@@ -445,6 +445,45 @@ func (o *Orchestrator) endPhaseSpan() {
 	}
 }
 
+// classifyRunOutcome distills the deferred audit handler's three inputs
+// (the named-return error from Run/Resume, the panic value from recover)
+// into a (status, error_string, resumable) triple. The deferred handler
+// uses `resumable` to decide whether to keep the audit file writable
+// for a future resume (Codex review on #235 — Ctrl-C / context cancel
+// must NOT chmod-lock the file out from under the next dmt resume).
+//
+// Status taxonomy:
+//   - "panic"   — go runtime panic during the run; rec is non-nil
+//   - "success" — runErr is nil
+//   - "failed"  — runErr is non-nil; covers preflight, schema, transfer,
+//                 validation errors, AND user-initiated cancellation
+//                 (context.Canceled / context.DeadlineExceeded)
+//
+// Resumable taxonomy:
+//   - resumable=true  for context cancellations (the operator can
+//                     `dmt resume` cleanly; we leave the audit file 0600)
+//   - resumable=false otherwise (chmod-0444 lock the file)
+func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable bool) {
+	if rec != nil {
+		return "panic", fmt.Sprintf("panic: %v", rec), false
+	}
+	if runErr == nil {
+		return "success", "", false
+	}
+	errStr = runErr.Error()
+	// Treat context cancellation / deadline as resumable so an
+	// interrupted run's audit file stays writable for the eventual
+	// `dmt resume`. The exitcodes package recognizes "context
+	// canceled" / "context deadline" — use the same string match for
+	// consistency.
+	low := strings.ToLower(errStr)
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) ||
+		strings.Contains(low, "context canceled") || strings.Contains(low, "context deadline") {
+		return "cancelled", errStr, true
+	}
+	return "failed", errStr, false
+}
+
 // openAuditor opens an append-only NDJSON audit log for this run
 // (#235). Honors the config's AuditDir / TamperEvident / NoAudit
 // settings. Failures to open the audit log degrade to a disabled
@@ -533,7 +572,7 @@ func (o *Orchestrator) SetProgressReporter(reporter progress.Reporter, interval 
 }
 
 // Run executes a new migration.
-func (o *Orchestrator) Run(ctx context.Context) error {
+func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	// Use provided run ID or generate a new one
 	runID := o.opts.RunID
 	if runID == "" {
@@ -576,30 +615,30 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// to 0444. Compliance auditors get a self-describing file on
 	// every exit path — success, partial, error, even a panic.
 	o.openAuditor(runID, false /*resume*/)
-	runOK := false
-	runErrStr := ""
 	defer func() {
-		status := "failed"
-		if r := recover(); r != nil {
-			runErrStr = fmt.Sprintf("panic: %v", r)
-			o.auditEvent("run_complete", map[string]any{
-				"status":      "panic",
-				"error":       runErrStr,
-				"duration_ms": time.Since(startTime).Milliseconds(),
-			})
-			_ = o.auditor.Close()
-			panic(r) // re-raise; we don't try to swallow panics
-		}
-		if runOK {
-			status = "success"
-		}
+		rec := recover()
+		status, errStr, resumable := classifyRunOutcome(runErr, rec)
 		o.auditEvent("run_complete", map[string]any{
 			"status":      status,
-			"error":       runErrStr,
+			"error":       errStr,
 			"duration_ms": time.Since(startTime).Milliseconds(),
 		})
-		if err := o.auditor.Close(); err != nil {
-			logging.Warn("audit close: %v", err)
+		// Resumable interruption (Ctrl-C / context cancel) MUST leave
+		// the audit file writable so the eventual `dmt resume` can
+		// append its own run_complete. CloseResumable() skips the
+		// chmod-0444 step; a successful or hard-failed run gets the
+		// usual lockdown (Codex review on #235).
+		if resumable {
+			if err := o.auditor.CloseResumable(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		} else {
+			if err := o.auditor.Close(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		}
+		if rec != nil {
+			panic(rec) // re-raise after the audit event is durable
 		}
 	}()
 	o.auditEvent("run_start", map[string]any{
@@ -619,10 +658,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		},
 		"config_hash": computeConfigHash(o.config),
 	})
-	// runOK is set to true at the success-path exit below; runErrStr
-	// is filled by error paths via setRunErr() so the deferred
-	// run_complete captures the failure cause.
-	_ = func(err error) { runErrStr = err.Error() }
 
 	logging.Info("Starting migration run: %s", runID)
 	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
@@ -852,7 +887,6 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
 		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tables), totalRows, duration.Round(time.Second), throughput)
-		runOK = true
 		o.auditEvent("validation_complete", map[string]any{
 			"tables":     len(tables),
 			"rows_total": totalRows,
@@ -1153,7 +1187,7 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 }
 
 // Resume continues an interrupted migration
-func (o *Orchestrator) Resume(ctx context.Context) error {
+func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	run, err := o.state.GetLastIncompleteRun()
 	if err != nil {
 		return fmt.Errorf("finding incomplete run: %w", err)
@@ -1216,30 +1250,25 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	// log a warning but don't fail the resume — compliance is best-
 	// effort here; the original Run()'s record remains intact.
 	o.openAuditor(run.ID, true /*resume*/)
-	resumeOK := false
-	resumeErrStr := ""
 	defer func() {
-		status := "failed"
-		if r := recover(); r != nil {
-			resumeErrStr = fmt.Sprintf("panic: %v", r)
-			o.auditEvent("resume_complete", map[string]any{
-				"status":      "panic",
-				"error":       resumeErrStr,
-				"duration_ms": time.Since(startTime).Milliseconds(),
-			})
-			_ = o.auditor.Close()
-			panic(r)
-		}
-		if resumeOK {
-			status = "success"
-		}
+		rec := recover()
+		status, errStr, resumable := classifyRunOutcome(resumeErr, rec)
 		o.auditEvent("resume_complete", map[string]any{
 			"status":      status,
-			"error":       resumeErrStr,
+			"error":       errStr,
 			"duration_ms": time.Since(startTime).Milliseconds(),
 		})
-		if err := o.auditor.Close(); err != nil {
-			logging.Warn("audit close: %v", err)
+		if resumable {
+			if err := o.auditor.CloseResumable(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		} else {
+			if err := o.auditor.Close(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		}
+		if rec != nil {
+			panic(rec)
 		}
 	}()
 	o.auditEvent("resume_start", map[string]any{
@@ -1247,7 +1276,6 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		"dmt_version":         versionString(),
 		"original_started_at": run.StartedAt.UTC().Format(time.RFC3339),
 	})
-	_ = func(err error) { resumeErrStr = err.Error() }
 
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
 
@@ -1547,7 +1575,6 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
-		resumeOK = true
 	}
 
 	// Record transfer-only throughput in AI tuning history for future learning
