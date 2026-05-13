@@ -163,14 +163,18 @@ func (o *Orchestrator) estimatedTargetBytes() int64 {
 // applyPreFlightSkips downgrades skipped error-severity findings to info
 // (so they still show in logs as "we skipped this") and recomputes the
 // Aborted flag. Skip names match Finding.Check exactly OR by dotted-prefix
-// — "privileges" matches every "privileges.*" check.
+// — "privileges" matches every "privileges.*" check. The literal "all"
+// downgrades every error regardless of check name; used by `dmt preflight`
+// to show findings without enforcing the gate (`dmt run` short-circuits
+// the whole phase 0 on "all" so the checks never run).
 func applyPreFlightSkips(r preFlightResult, skip map[string]bool) preFlightResult {
 	if len(skip) == 0 {
 		return r
 	}
+	skipAll := skip[preFlightSkipAll]
 	for i := range r.Findings {
 		f := &r.Findings[i]
-		if !shouldSkip(f.Check, skip) {
+		if !skipAll && !shouldSkip(f.Check, skip) {
 			continue
 		}
 		if f.Severity == driver.SeverityError {
