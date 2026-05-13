@@ -307,10 +307,10 @@ func TestScrubFields_NestedMap(t *testing.T) {
 		},
 	}
 	out := scrubFields(in)
-	if got, _ := out["source"].(map[string]any)["password"]; got == "hunter2" {
+	if got := out["source"].(map[string]any)["password"]; got == "hunter2" {
 		t.Errorf("nested password not scrubbed: %+v", out)
 	}
-	if got, _ := out["target"].(map[string]any)["api_key"]; strings.Contains(got.(string), "AAAABBBBCCCCDDDDEEEEFFFF") {
+	if got := out["target"].(map[string]any)["api_key"]; strings.Contains(got.(string), "AAAABBBBCCCCDDDDEEEEFFFF") {
 		t.Errorf("nested api_key not scrubbed: %+v", out)
 	}
 }
