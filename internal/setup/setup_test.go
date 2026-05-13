@@ -1,7 +1,10 @@
 package setup
 
 import (
+	"reflect"
 	"testing"
+
+	"github.com/johndauphine/dmt/internal/config"
 )
 
 func TestHappyPath(t *testing.T) {
@@ -721,6 +724,297 @@ func TestInvalidTargetMode(t *testing.T) {
 
 	if err := s.Process("invalid_mode"); err == "" {
 		t.Fatal("expected error for invalid target mode")
+	}
+}
+
+func TestUpsertPromptsForDateColumns(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("n")
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5432")
+	s.Process("db")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // source conn
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5433")
+	s.Process("db2")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // target conn
+
+	if s.CurrentStep != StepTargetMode {
+		t.Fatalf("expected StepTargetMode, got %d", s.CurrentStep)
+	}
+	s.Process("upsert")
+	if s.CurrentStep != StepDateColumns {
+		t.Fatalf("upsert should route to StepDateColumns, got %d", s.CurrentStep)
+	}
+
+	s.Process("LastActivityDate, LastEditDate ,CreationDate")
+	want := []string{"LastActivityDate", "LastEditDate", "CreationDate"}
+	if !reflect.DeepEqual(s.Config.Migration.DateUpdatedColumns, want) {
+		t.Fatalf("DateUpdatedColumns mismatch: got %v want %v",
+			s.Config.Migration.DateUpdatedColumns, want)
+	}
+	if s.CurrentStep != StepCreateIndexes {
+		t.Fatalf("after StepDateColumns expected StepCreateIndexes, got %d", s.CurrentStep)
+	}
+}
+
+func TestDropRecreateSkipsDateColumns(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("n")
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5432")
+	s.Process("db")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // source conn
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5433")
+	s.Process("db2")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // target conn
+
+	s.Process("drop_recreate")
+	if s.CurrentStep != StepCreateIndexes {
+		t.Fatalf("drop_recreate should bypass StepDateColumns, got %d", s.CurrentStep)
+	}
+}
+
+func TestTargetModeDefaultHonorsExistingConfig(t *testing.T) {
+	s := NewState()
+	s.Config.Migration.TargetMode = "upsert"
+	s.CurrentStep = StepTargetMode
+
+	if got := s.Prompt().Default; got != "upsert" {
+		t.Fatalf("StepTargetMode default should reflect pre-loaded config, got %q", got)
+	}
+
+	// Hitting Enter should keep "upsert" rather than silently reverting.
+	s.Process("")
+	if s.Config.Migration.TargetMode != "upsert" {
+		t.Fatalf("empty input should preserve upsert, got %q", s.Config.Migration.TargetMode)
+	}
+	if s.CurrentStep != StepDateColumns {
+		t.Fatalf("expected routing to StepDateColumns, got %d", s.CurrentStep)
+	}
+}
+
+func TestEditOrNewKeepsLoadedConfig(t *testing.T) {
+	s := NewState()
+	s.Config = config.Config{}
+	s.Config.Source.Host = "prod-db.example.com"
+	s.Config.Migration.TargetMode = "upsert"
+	s.ConfigPath = "config.yaml"
+	s.CurrentStep = StepEditOrNew
+
+	s.Process("e")
+	if s.CurrentStep != StepCheckSecrets {
+		t.Fatalf("StepEditOrNew(e) should advance to StepCheckSecrets, got %d", s.CurrentStep)
+	}
+	if s.Config.Source.Host != "prod-db.example.com" {
+		t.Fatal("editing should preserve loaded source host")
+	}
+	if s.Config.Migration.TargetMode != "upsert" {
+		t.Fatal("editing should preserve loaded target_mode")
+	}
+}
+
+func TestEditOrNewResetsOnFresh(t *testing.T) {
+	s := NewState()
+	s.Config.Source.Host = "prod-db.example.com"
+	s.Config.Migration.TargetMode = "upsert"
+	s.ConfigPath = "config.yaml"
+	s.CurrentStep = StepEditOrNew
+
+	s.Process("n")
+	if s.CurrentStep != StepCheckSecrets {
+		t.Fatalf("StepEditOrNew(n) should advance to StepCheckSecrets, got %d", s.CurrentStep)
+	}
+	if s.Config.Source.Host != "" {
+		t.Fatal("new should discard loaded source host")
+	}
+	if s.ConfigPath != "config.yaml" {
+		t.Fatalf("new should preserve ConfigPath, got %q", s.ConfigPath)
+	}
+}
+
+func TestDateColumnsDashClearsList(t *testing.T) {
+	s := NewState()
+	s.Config.Migration.DateUpdatedColumns = []string{"LastActivityDate"}
+	s.CurrentStep = StepDateColumns
+
+	s.Process("-")
+	if len(s.Config.Migration.DateUpdatedColumns) != 0 {
+		t.Fatalf("'-' should clear DateUpdatedColumns, got %v",
+			s.Config.Migration.DateUpdatedColumns)
+	}
+	if s.CurrentStep != StepCreateIndexes {
+		t.Fatalf("expected StepCreateIndexes after clear, got %d", s.CurrentStep)
+	}
+}
+
+func TestDateColumnsBlankPreserves(t *testing.T) {
+	s := NewState()
+	s.Config.Migration.DateUpdatedColumns = []string{"LastActivityDate", "CreationDate"}
+	s.CurrentStep = StepDateColumns
+
+	s.Process("")
+	want := []string{"LastActivityDate", "CreationDate"}
+	if !reflect.DeepEqual(s.Config.Migration.DateUpdatedColumns, want) {
+		t.Fatalf("blank input should preserve existing list, got %v",
+			s.Config.Migration.DateUpdatedColumns)
+	}
+}
+
+func TestEditModePreservesBoolFalseDefaults(t *testing.T) {
+	// User had `create_indexes: false` in their YAML — editing should
+	// show "n" as default and Enter should preserve false.
+	s := NewState()
+	s.EditMode = true
+	s.Config.Migration.CreateIndexes = false
+	s.Config.Migration.CreateForeignKeys = false
+	s.CurrentStep = StepCreateIndexes
+
+	if got := s.Prompt().Default; got != "n" {
+		t.Fatalf("EditMode + loaded false: expected default 'n', got %q", got)
+	}
+	s.Process("")
+	if s.Config.Migration.CreateIndexes {
+		t.Fatal("Enter on 'n' default should preserve CreateIndexes=false")
+	}
+	if got := s.Prompt().Default; got != "n" {
+		t.Fatalf("EditMode + loaded FKs false: expected default 'n', got %q", got)
+	}
+	s.Process("")
+	if s.Config.Migration.CreateForeignKeys {
+		t.Fatal("Enter on 'n' default should preserve CreateForeignKeys=false")
+	}
+}
+
+func TestFreshModeBoolDefaults(t *testing.T) {
+	// No config loaded — bool prompts should default to "y" (dmt's fresh
+	// default) even though the zero-value bool is false.
+	s := NewState()
+	s.CurrentStep = StepCreateIndexes
+	if got := s.Prompt().Default; got != "y" {
+		t.Fatalf("fresh mode: expected default 'y', got %q", got)
+	}
+}
+
+func TestEditModeWorkersPreserved(t *testing.T) {
+	s := NewState()
+	s.EditMode = true
+	s.Config.Migration.Workers = 16
+	s.CurrentStep = StepWorkers
+
+	if got := s.Prompt().Default; got != "16" {
+		t.Fatalf("loaded Workers should drive default, got %q", got)
+	}
+	s.Process("")
+	if s.Config.Migration.Workers != 16 {
+		t.Fatalf("blank input should preserve Workers=16, got %d", s.Config.Migration.Workers)
+	}
+}
+
+func TestEditModeWorkersZeroOmissionPreserved(t *testing.T) {
+	// Config omitted `workers:` — Enter must leave it 0 so runtime
+	// auto-tuning still kicks in.
+	s := NewState()
+	s.EditMode = true
+	s.Config.Migration.Workers = 0
+	s.CurrentStep = StepWorkers
+
+	info := s.Prompt()
+	if info.Default != "" {
+		t.Fatalf("EditMode + Workers=0: prompt should not show a concrete default, got %q", info.Default)
+	}
+	s.Process("")
+	if s.Config.Migration.Workers != 0 {
+		t.Fatalf("blank input must preserve Workers=0 in EditMode, got %d", s.Config.Migration.Workers)
+	}
+}
+
+func TestFreshModeWorkersGetsNumCPUDefault(t *testing.T) {
+	s := NewState()
+	s.CurrentStep = StepWorkers
+	if info := s.Prompt(); info.Default == "" {
+		t.Fatal("fresh setup should show a concrete NumCPU-capped default")
+	}
+	s.Process("")
+	if s.Config.Migration.Workers <= 0 {
+		t.Fatalf("fresh setup blank input should materialize NumCPU default, got %d", s.Config.Migration.Workers)
+	}
+}
+
+func TestSourceConnConfigResolvesPlaceholders(t *testing.T) {
+	t.Setenv("DMT_TEST_PASSWORD", "s3cret")
+	s := NewState()
+	s.Config.Source.Password = "${env:DMT_TEST_PASSWORD}"
+
+	conn := s.SourceConnConfig()
+	if conn.Source.Password != "s3cret" {
+		t.Fatalf("SourceConnConfig should resolve env placeholder, got %q", conn.Source.Password)
+	}
+	// Raw state must remain untouched so a re-save preserves the placeholder.
+	if s.Config.Source.Password != "${env:DMT_TEST_PASSWORD}" {
+		t.Fatalf("SourceConnConfig must not mutate s.Config, got %q", s.Config.Source.Password)
+	}
+}
+
+func TestSourceConnConfigIgnoresTargetExpansionFailure(t *testing.T) {
+	t.Setenv("DMT_SRC_PASS", "good")
+	s := NewState()
+	s.Config.Source.Password = "${env:DMT_SRC_PASS}"
+	// Target points at a file that doesn't exist; previously this would
+	// poison the whole expansion and leave source unresolved.
+	s.Config.Target.Password = "${file:/tmp/dmt-test-does-not-exist-zzz}"
+
+	conn := s.SourceConnConfig()
+	if conn.Source.Password != "good" {
+		t.Fatalf("missing target file should not break source resolution, got %q", conn.Source.Password)
+	}
+}
+
+func TestPerFieldExpansionFailureLeavesPlaceholder(t *testing.T) {
+	s := NewState()
+	s.Config.Source.Password = "${file:/tmp/dmt-test-does-not-exist-zzz}"
+
+	conn := s.SourceConnConfig()
+	// On failure, the placeholder survives so the eventual auth error
+	// mentions the actual missing credential rather than silent emptyness.
+	if conn.Source.Password != "${file:/tmp/dmt-test-does-not-exist-zzz}" {
+		t.Fatalf("failed expansion should leave placeholder, got %q", conn.Source.Password)
+	}
+}
+
+func TestEditOrNewRejectsBadInput(t *testing.T) {
+	s := NewState()
+	s.ConfigPath = "config.yaml"
+	s.CurrentStep = StepEditOrNew
+
+	if errMsg := s.Process("maybe"); errMsg == "" {
+		t.Fatal("bad input should produce a validation error")
+	}
+	if s.CurrentStep != StepEditOrNew {
+		t.Fatal("step should not advance on bad input")
 	}
 }
 

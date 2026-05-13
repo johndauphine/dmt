@@ -19,12 +19,15 @@ import (
 type Step int
 
 const (
+	// Phase 0: pre-flight (only entered when an existing config was loaded)
+	StepEditOrNew Step = iota // prompt: edit existing config or start fresh?
+
 	// Phase 1: AI/Secrets
-	StepCheckSecrets Step = iota // auto: check if secrets exist with valid AI
-	StepConfigureAI              // prompt: Configure AI features? (y/n)
-	StepAIProvider               // prompt: choose provider
-	StepAIKey                    // prompt: API key or base URL
-	StepWriteSecrets             // auto: write secrets file
+	StepCheckSecrets // auto: check if secrets exist with valid AI
+	StepConfigureAI  // prompt: Configure AI features? (y/n)
+	StepAIProvider   // prompt: choose provider
+	StepAIKey        // prompt: API key or base URL
+	StepWriteSecrets // auto: write secrets file
 
 	// Phase 2: Source Database
 	StepSourceType
@@ -56,6 +59,7 @@ const (
 
 	// Phase 6: Migration Settings
 	StepTargetMode
+	StepDateColumns // prompt: date_updated_columns (only when target_mode=upsert)
 	StepCreateIndexes
 	StepCreateFKs
 	StepWorkers
@@ -93,6 +97,13 @@ type State struct {
 	Force         bool   // overwrite existing files
 	RunAnalysis   bool   // user wants to run AI analysis after setup
 	LastConnError string // last connection test error message
+	// EditMode is true when the wizard was launched against an existing
+	// config file (caller set CurrentStep=StepEditOrNew + populated Config).
+	// Bool-typed prompt defaults (create_indexes, create_foreign_keys)
+	// can't otherwise distinguish "user set false" from "field unset", so
+	// they look at this flag to decide whether to honor the loaded value
+	// or fall back to dmt's documented defaults.
+	EditMode bool
 }
 
 // NewState creates a new setup state with sensible defaults.
@@ -103,9 +114,71 @@ func NewState() *State {
 	}
 }
 
+// SourceConnConfig returns a copy of s.Config with source-side placeholders
+// resolved, suitable for the source connection test. The wizard keeps raw
+// `${env:...}` / `${file:...}` values in s.Config so re-saving preserves
+// them; connection tests need the resolved values to authenticate.
+//
+// Expansion is scoped to the source side and tolerates per-field failures
+// (an unrelated target `${file:/missing}` must not break source auth).
+// On per-field failure the placeholder survives unchanged so the eventual
+// connect error mentions the actual credential the user needs to fix.
+func (s *State) SourceConnConfig() config.Config {
+	cfg := s.Config
+	expandStringFields(
+		&cfg.Source.Host,
+		&cfg.Source.User,
+		&cfg.Source.Password,
+		&cfg.Source.Database,
+		&cfg.Source.Schema,
+		&cfg.Source.Krb5Conf,
+		&cfg.Source.Keytab,
+		&cfg.Source.Realm,
+		&cfg.Source.SPN,
+	)
+	return cfg
+}
+
+// TargetConnConfig is SourceConnConfig's mirror for the target connection test.
+func (s *State) TargetConnConfig() config.Config {
+	cfg := s.Config
+	expandStringFields(
+		&cfg.Target.Host,
+		&cfg.Target.User,
+		&cfg.Target.Password,
+		&cfg.Target.Database,
+		&cfg.Target.Schema,
+		&cfg.Target.Krb5Conf,
+		&cfg.Target.Keytab,
+		&cfg.Target.Realm,
+		&cfg.Target.SPN,
+	)
+	return cfg
+}
+
+// expandStringFields resolves each string in-place. A per-field expansion
+// failure leaves that field's placeholder unchanged so other fields still
+// get the resolved value.
+func expandStringFields(fields ...*string) {
+	for _, f := range fields {
+		if expanded, err := config.Expand(*f); err == nil {
+			*f = expanded
+		}
+	}
+}
+
 // Prompt returns prompt info for the current step.
 func (s *State) Prompt() PromptInfo {
 	switch s.CurrentStep {
+	// Phase 0: pre-flight (only reached when caller pre-loads a config)
+	case StepEditOrNew:
+		return PromptInfo{
+			Text:          fmt.Sprintf("Found existing config at %s. Edit it or start fresh? (e/n)", s.ConfigPath),
+			Default:       "e",
+			Choices:       []string{"e", "n"},
+			SectionHeader: "Existing configuration detected",
+		}
+
 	// Phase 1: AI/Secrets (optional since #167)
 	case StepCheckSecrets:
 		return PromptInfo{
@@ -260,26 +333,41 @@ func (s *State) Prompt() PromptInfo {
 	case StepTargetMode:
 		return PromptInfo{
 			Text:          "Target mode (drop_recreate/upsert)",
-			Default:       "drop_recreate",
+			Default:       defaultIfEmpty(s.Config.Migration.TargetMode, "drop_recreate"),
 			Choices:       []string{"drop_recreate", "upsert"},
 			SectionHeader: "Phase 6: Migration Settings",
+		}
+	case StepDateColumns:
+		return PromptInfo{
+			Text:    "Date columns for incremental sync (comma-separated; Enter = keep, '-' = clear)",
+			Default: strings.Join(s.Config.Migration.DateUpdatedColumns, ","),
 		}
 	case StepCreateIndexes:
 		return PromptInfo{
 			Text:    "Create indexes? (y/n)",
-			Default: "y",
+			Default: s.boolDefault(s.Config.Migration.CreateIndexes, "y"),
 			Choices: []string{"y", "n"},
 		}
 	case StepCreateFKs:
 		return PromptInfo{
 			Text:    "Create foreign keys? (y/n)",
-			Default: "y",
+			Default: s.boolDefault(s.Config.Migration.CreateForeignKeys, "y"),
 			Choices: []string{"y", "n"},
 		}
 	case StepWorkers:
+		if s.EditMode && s.Config.Migration.Workers == 0 {
+			// Loaded config omitted `workers:` — preserve the omission so
+			// runtime auto-tuning still applies. Enter leaves it unset.
+			return PromptInfo{
+				Text: "Workers (Enter = auto-detect at runtime)",
+			}
+		}
 		def := runtime.NumCPU()
 		if def > 8 {
 			def = 8
+		}
+		if s.Config.Migration.Workers > 0 {
+			def = s.Config.Migration.Workers
 		}
 		return PromptInfo{
 			Text:    "Workers",
@@ -328,6 +416,28 @@ func (s *State) Process(input string) string {
 	input = strings.TrimSpace(input)
 
 	switch s.CurrentStep {
+	// Phase 0: pre-flight
+	case StepEditOrNew:
+		v := strings.ToLower(input)
+		if v == "" {
+			v = "e"
+		}
+		switch v {
+		case "e", "edit":
+			// Keep pre-loaded Config as-is; defaults will appear in each step.
+		case "n", "new":
+			// User chose to start fresh — discard the pre-loaded config but
+			// preserve ConfigPath so we save back to the same file.
+			// Also clear EditMode so bool defaults revert to "fresh" values.
+			path := s.ConfigPath
+			s.Config = config.Config{}
+			s.ConfigPath = path
+			s.EditMode = false
+		default:
+			return "Enter e to edit, n to start new"
+		}
+		s.CurrentStep = StepCheckSecrets
+
 	// Phase 1: AI
 	case StepCheckSecrets:
 		if input == "has_ai" {
@@ -592,18 +702,43 @@ func (s *State) Process(input string) string {
 	// Phase 6: Migration Settings
 	case StepTargetMode:
 		if input == "" {
-			input = "drop_recreate"
+			input = defaultIfEmpty(s.Config.Migration.TargetMode, "drop_recreate")
 		}
 		if input != "drop_recreate" && input != "upsert" {
 			return "Options: drop_recreate, upsert"
 		}
 		s.Config.Migration.TargetMode = input
+		if input == "upsert" {
+			s.CurrentStep = StepDateColumns
+		} else {
+			s.CurrentStep = StepCreateIndexes
+		}
+
+	case StepDateColumns:
+		switch input {
+		case "":
+			// Empty input preserves the existing list (wizard convention:
+			// Enter accepts the displayed default).
+		case "-", "none":
+			// Explicit clear — required to remove a previously-set list,
+			// since blank means "keep" everywhere else in the wizard.
+			s.Config.Migration.DateUpdatedColumns = nil
+		default:
+			parts := strings.Split(input, ",")
+			cols := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if p = strings.TrimSpace(p); p != "" {
+					cols = append(cols, p)
+				}
+			}
+			s.Config.Migration.DateUpdatedColumns = cols
+		}
 		s.CurrentStep = StepCreateIndexes
 
 	case StepCreateIndexes:
 		v := strings.ToLower(input)
 		if v == "" {
-			v = "y"
+			v = s.boolDefault(s.Config.Migration.CreateIndexes, "y")
 		}
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
@@ -614,7 +749,7 @@ func (s *State) Process(input string) string {
 	case StepCreateFKs:
 		v := strings.ToLower(input)
 		if v == "" {
-			v = "y"
+			v = s.boolDefault(s.Config.Migration.CreateForeignKeys, "y")
 		}
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
@@ -623,12 +758,18 @@ func (s *State) Process(input string) string {
 		s.CurrentStep = StepWorkers
 
 	case StepWorkers:
-		def := runtime.NumCPU()
-		if def > 8 {
-			def = 8
-		}
 		if input == "" {
-			s.Config.Migration.Workers = def
+			// Fresh setup (Workers==0): apply NumCPU-capped default.
+			// EditMode + Workers==0: leave it 0 so the YAML round-trip
+			//   preserves the omission and runtime auto-tunes.
+			// Either mode + Workers>0: keep the existing value.
+			if !s.EditMode && s.Config.Migration.Workers == 0 {
+				def := runtime.NumCPU()
+				if def > 8 {
+					def = 8
+				}
+				s.Config.Migration.Workers = def
+			}
 		} else {
 			workers, err := strconv.Atoi(input)
 			if err != nil || workers <= 0 {
@@ -832,4 +973,19 @@ func defaultIfEmpty(val, def string) string {
 		return val
 	}
 	return def
+}
+
+// boolDefault returns "y"/"n" for prompt display.
+// In EditMode (config was loaded), the loaded value wins regardless of its
+// zero-ness — a user who explicitly set `create_indexes: false` must see
+// "n" as the default and Enter must preserve it. In fresh-setup mode,
+// fall back to the supplied dmt default ("y" for create_indexes/FKs).
+func (s *State) boolDefault(loaded bool, freshDefault string) string {
+	if s.EditMode {
+		if loaded {
+			return "y"
+		}
+		return "n"
+	}
+	return freshDefault
 }

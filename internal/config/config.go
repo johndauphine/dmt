@@ -501,6 +501,48 @@ func expandYAMLTemplates(yamlStr string) (string, error) {
 	return result, nil
 }
 
+// Expand resolves a single ${env:...}, ${file:...}, or legacy ${VAR}
+// template in s. Non-template strings are returned unchanged. Pair with
+// LoadRaw: callers who need a resolved single field (e.g. just the
+// source-side password for a connection test) can scope expansion to
+// one value at a time instead of rolling up the whole config.
+func Expand(s string) (string, error) {
+	return expandTemplateValue(s)
+}
+
+// LoadRaw reads a config YAML for *editing* — no secret-template expansion,
+// no defaults application, no validation. Placeholders like ${env:DB_PASSWORD}
+// and ${file:/run/secrets/x} survive as literal strings so the setup wizard
+// can re-marshal them back to disk without exposing resolved secrets.
+//
+// This is intentionally narrow: the migration runtime must always use Load /
+// LoadWithOptions so that templates resolve before connection attempts.
+//
+// Known limitations (each tracked as a follow-up):
+//   - Templated non-string scalars (e.g. `source.port: ${env:DB_PORT}` or
+//     `migration.workers: ${env:DMT_WORKERS}`) fail YAML unmarshal here
+//     because the int/bool field cannot hold the placeholder string. The
+//     wizard's edit path then falls back to fresh-setup mode for such
+//     configs. Fixing requires yaml.Node-level expansion of non-string
+//     fields while preserving placeholders for string secrets.
+//   - YAML omission of an optional bool (e.g. `create_indexes`) is
+//     indistinguishable from explicit `false` in the resulting Config.
+//     The wizard's EditMode currently treats both as `false`, which can
+//     flip the documented `y` default to `n` on round-trip. The fix
+//     mirrors the AIAdjust precedent: change the field to *bool so nil
+//     means "absent".
+func LoadRaw(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config file: %w", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	return &cfg, nil
+}
+
 // LoadBytes reads configuration from YAML bytes.
 func LoadBytes(data []byte) (*Config, error) {
 	// Expand templates (${file:path}, ${env:VAR}, and legacy ${VAR} syntax)

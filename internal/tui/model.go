@@ -860,7 +860,42 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		m.setupState = setup.NewState()
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
-		m.appendOutput("\n--- SETUP WIZARD ---\n")
+
+		configFile, profileName := parseConfigArgs(parts)
+		// Always honor the requested path so /setup @newfile.yaml saves
+		// to newfile.yaml even when it doesn't exist yet. The os.Stat
+		// branch below only decides whether to *load* it.
+		m.setupState.ConfigPath = configFile
+		var loaded bool
+
+		if profileName != "" {
+			if cfg, err := loadProfileConfig(profileName); err == nil {
+				m.setupState.Config = *cfg
+				m.setupState.ConfigPath = profileName + ".yaml"
+				loaded = true
+			}
+		}
+		if !loaded {
+			if _, err := os.Stat(configFile); err == nil {
+				// LoadRaw, not LoadWithOptions — placeholders like ${env:PASS}
+				// must survive a re-save so the wizard never writes resolved
+				// secrets to disk.
+				if cfg, err := config.LoadRaw(configFile); err == nil {
+					m.setupState.Config = *cfg
+					loaded = true
+				}
+			}
+		}
+
+		var header string
+		if loaded {
+			header = fmt.Sprintf("\n--- SETUP WIZARD: %s ---\n", m.setupState.ConfigPath)
+			m.setupState.CurrentStep = setup.StepEditOrNew
+			m.setupState.EditMode = true
+		} else {
+			header = "\n--- SETUP WIZARD ---\n"
+		}
+		m.appendOutput(header)
 		return m.processSetupAutoSteps()
 
 	case "/wizard":
@@ -1978,19 +2013,23 @@ func (m *Model) runSetupConnTest(step setup.Step) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
+		// Resolve placeholders only for the side being tested — see comments
+		// in cmd/migrate/main.go and internal/setup.SourceConnConfig.
 		var result *setup.ConnTestResult
 		if step == setup.StepSourceConnTest {
+			conn := m.setupState.SourceConnConfig()
 			result = setup.TestConnection(ctx,
-				m.setupState.Config.Source.Type, m.setupState.Config.Source.Host,
-				m.setupState.Config.Source.Port, m.setupState.Config.Source.Database,
-				m.setupState.Config.Source.User, m.setupState.Config.Source.Password,
-				m.setupState.Config.Source.DSNOptions())
+				conn.Source.Type, conn.Source.Host,
+				conn.Source.Port, conn.Source.Database,
+				conn.Source.User, conn.Source.Password,
+				conn.Source.DSNOptions())
 		} else {
+			conn := m.setupState.TargetConnConfig()
 			result = setup.TestConnection(ctx,
-				m.setupState.Config.Target.Type, m.setupState.Config.Target.Host,
-				m.setupState.Config.Target.Port, m.setupState.Config.Target.Database,
-				m.setupState.Config.Target.User, m.setupState.Config.Target.Password,
-				m.setupState.Config.Target.DSNOptions())
+				conn.Target.Type, conn.Target.Host,
+				conn.Target.Port, conn.Target.Database,
+				conn.Target.User, conn.Target.Password,
+				conn.Target.DSNOptions())
 		}
 
 		return SetupConnTestMsg{Step: step, Result: result}
