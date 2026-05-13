@@ -77,6 +77,17 @@ type tableError struct {
 func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *BuildResult, tables []source.Table, resume bool) (*RunResult, error) {
 	jobs := buildResult.Jobs
 
+	// Stamp resume status on every job so the transfer layer can branch on
+	// it without re-deriving from progress state. Specifically, ROW_NUMBER
+	// pagination uses this to enable idempotent-on-dup writes for ALL
+	// partitions on resume — including partitions that crashed before
+	// their first checkpoint flush (resumeLastPK == nil), which would
+	// otherwise replay already-committed rows on a plain INSERT and fail
+	// with duplicate-PK errors (#227 codex follow-up).
+	for i := range jobs {
+		jobs[i].IsResume = resume
+	}
+
 	// Initialize progress
 	logging.Debug("Created %d jobs, calculating total rows", len(jobs))
 	var totalRows int64
