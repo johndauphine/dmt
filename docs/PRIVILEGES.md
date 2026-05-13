@@ -1,9 +1,11 @@
 # Minimum Database Privileges
 
 These are the minimum privileges dmt needs to run a migration. The
-`dmt preflight` subcommand verifies every privilege listed here against
-the live database — if `dmt preflight -c your-config.yaml` passes,
-your grants are sufficient.
+`dmt preflight` subcommand verifies a **critical subset** of the
+privileges listed here — enough to fail-fast on the most common
+misconfigurations, but not an exhaustive audit. Passing preflight is a
+necessary but not sufficient condition; the full `GRANT` recipes below
+are what the migration actually exercises at runtime.
 
 > **Source-of-truth**: this doc is hand-derived from
 > `internal/driver/postgres/preflight.go`,
@@ -17,6 +19,27 @@ the per-driver `GRANT` blocks below are exactly the SQL to issue. Each
 target is split into two sub-roles because `target_mode: drop_recreate`
 and `target_mode: upsert` need genuinely different privilege sets — a
 production upsert job should NOT carry DDL rights.
+
+## What `dmt preflight` actually probes
+
+Preflight uses cheap, portable probes that catch the privileges most
+likely to be missing in a deployment. It does **not** enumerate every
+table-level grant — runtime errors will surface anything preflight
+can't see.
+
+| Driver | What preflight probes | What it does NOT probe |
+|--------|------------------------|------------------------|
+| **PostgreSQL** | `USAGE` on schema (source + target); `CREATE` on schema (target, both modes) via `has_schema_privilege()` | Per-table `SELECT` / `INSERT` / `UPDATE` / `ALL`; ownership (required for `DROP TABLE`); `pg_read_all_stats` (gracefully degrades) |
+| **SQL Server** | Database-scoped `SELECT` (source); `CREATE TABLE` + `INSERT` (target drop_recreate); `INSERT` + `UPDATE` (target upsert) via `HAS_PERMS_BY_NAME()` | Schema-scoped `ALTER` / `REFERENCES` / `CONTROL`; granular per-table grants; `VIEW SERVER STATE` (gracefully degrades) |
+| **MySQL / MariaDB** | Verbs `SELECT` (source); `CREATE` + `DROP` + `INSERT` (target drop_recreate); `INSERT` + `UPDATE` + `SELECT` (target upsert) via `SHOW GRANTS` parsing, scoped to the target database | `ALTER` / `INDEX` / `REFERENCES`; column-scoped grants |
+
+Probes that fail for permission reasons (rather than missing privilege)
+degrade to info-level findings — for example, `pg_stat_activity` and
+`sys.dm_exec_sessions` need extra grants to read other sessions and
+are non-fatal when denied.
+
+The recipes below are exhaustive: they include the grants preflight
+**doesn't** check but the migration phases still need.
 
 ## A note on `target_mode: drop_recreate` and the backup acknowledgment
 
@@ -79,9 +102,9 @@ CREATE ROLE <role> LOGIN PASSWORD '<password>';
 -- probes both explicitly.
 GRANT USAGE, CREATE ON SCHEMA <schema> TO <role>;
 
--- ALL on existing tables: drop_recreate may DROP + recreate tables
--- that already exist in the target. INSERT covers the bulk-load
--- phase. ALL is the safest grant for a drop_recreate target.
+-- ALL on existing tables: covers INSERT for the bulk-load phase and
+-- the post-load DDL (CREATE INDEX, ALTER TABLE ADD CONSTRAINT) that
+-- targets existing tables.
 GRANT ALL ON ALL TABLES IN SCHEMA <schema> TO <role>;
 
 -- Default privileges so any tables dmt creates remain manageable by
@@ -90,10 +113,35 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA <schema>
   GRANT ALL ON TABLES TO <role>;
 ```
 
+> **Important — DROP TABLE requires ownership in PostgreSQL.**
+> `GRANT ALL ON ALL TABLES` does **not** confer the right to drop
+> tables owned by another role; PG requires the executing role to own
+> the table (or to be a member of the owner role / a superuser).
+> If your target schema contains pre-existing tables owned by a
+> different role, `drop_recreate` will fail at the DROP step. Pick one:
+>
+> 1. **Transfer ownership** to the dmt role for every table in scope:
+>    `ALTER TABLE <schema>.<table> OWNER TO <role>;` (or schema-wide:
+>    `REASSIGN OWNED BY <old_owner> TO <role>;`).
+> 2. **Re-create the schema fresh** — `DROP SCHEMA <schema> CASCADE;
+>    CREATE SCHEMA <schema> AUTHORIZATION <role>;` — so dmt owns every
+>    table it creates.
+> 3. **Switch to `target_mode: upsert`**, which never drops existing
+>    tables and only needs `INSERT`/`UPDATE`/`SELECT`.
+
 ### Target role (`target_mode: upsert`)
 
 ```sql
--- Assumes the target tables already exist (upsert never creates DDL).
+CREATE ROLE <role> LOGIN PASSWORD '<password>';
+
+-- USAGE to resolve objects in the schema.
+-- CREATE: upsert does not issue CREATE TABLE at runtime, but
+-- preflight unconditionally probes USAGE + CREATE on the target
+-- schema (internal/driver/postgres/preflight.go:checkPrivilegesPG),
+-- so the grant is required for the check to pass even though the
+-- upsert DML path never exercises it. If you want to lock the upsert
+-- role down further, skip the probe via
+-- `--skip-preflight=privileges.schema_create`.
 GRANT USAGE, CREATE ON SCHEMA <schema> TO <role>;
 
 -- SELECT for the merge probe, INSERT for new rows, UPDATE for
@@ -105,12 +153,18 @@ GRANT SELECT, INSERT, UPDATE
 ```
 
 > dmt's upsert path uses temp staging tables. Temp tables in
-> PostgreSQL live in a per-session schema and don't require `CREATE`
-> on the user schema — but preflight still probes for it because the
-> identity/sequence-reset phase may need DDL rights. If your
-> deployment can't grant `CREATE` to the upsert role, set
-> `migration.reset_sequences: false` and skip the `privileges.schema_create`
-> check via `--skip-preflight=privileges.schema_create`.
+> PostgreSQL live in a per-session `pg_temp` schema and don't require
+> `CREATE` on the user schema, so the grant above is purely to
+> satisfy preflight's probe — not because the upsert DML path needs
+> it. Two ways to handle this if your security policy forbids
+> granting schema `CREATE` to an upsert role:
+>
+> - **Satisfy the probe:** grant `CREATE ON SCHEMA <schema>` as shown
+>   above (the upsert path never exercises it at runtime).
+> - **Skip the probe:** run with
+>   `--skip-preflight=privileges.schema_create`. Trade-off: any future
+>   change to the upsert path that *does* need schema `CREATE` would
+>   surface at runtime rather than at preflight.
 
 ### Optional: pool-headroom probe
 
@@ -191,7 +245,14 @@ GRANT ALTER, REFERENCES, CONTROL ON SCHEMA::<schema> TO <user>;
 ### Target role (`target_mode: upsert`)
 
 ```sql
+-- Replace <login>, <password>, <db>, <user> with your values. Use a
+-- distinct <login>/<user> from the drop_recreate target so the upsert
+-- principal never carries DDL rights.
+USE master;
+CREATE LOGIN <login> WITH PASSWORD = '<password>';
+
 USE <db>;
+CREATE USER <user> FOR LOGIN <login>;
 
 -- INSERT for new rows, UPDATE for changed rows. Preflight probes
 -- both explicitly.
@@ -293,10 +354,13 @@ read-before-write.
 You can verify your grants without running dmt by running:
 
 ```sql
-SHOW GRANTS FOR CURRENT_USER();
+SHOW GRANTS;
 ```
 
-dmt's preflight parses this exact output. The presence of an
+This is the same statement preflight executes (no `FOR` clause —
+`SHOW GRANTS FOR CURRENT_USER()` is not uniformly supported across
+MySQL / MariaDB versions, so plain `SHOW GRANTS` is the portable
+form). dmt's preflight parses this exact output. The presence of an
 `ALL PRIVILEGES` or `ALL` token in the privileges list counts as
 satisfying every probe.
 
@@ -304,13 +368,18 @@ satisfying every probe.
 
 ## Verification
 
-Once the grants above are in place, run preflight to confirm:
+Once the grants above are in place, run preflight to confirm the
+probed subset is satisfied:
 
 ```bash
 dmt preflight -c your-config.yaml
 ```
 
-Exit code 0 = all required privileges satisfied. Non-zero output
-will name the missing privilege and the `GRANT` statement to fix
-it. See [CONTRIBUTING.md](../CONTRIBUTING.md) for local-repro tips
-and the test-DB setup used by the integration test.
+Exit code 0 = every privilege preflight probes is in place (see the
+[probed-subset table](#what-dmt-preflight-actually-probes)). Non-zero
+output names the missing privilege and the `GRANT` statement to fix
+it. Grants outside the probed subset (per-table SELECT/INSERT, schema
+ALTER/REFERENCES, etc.) won't fail preflight but will surface as
+runtime errors if missing — issue the full recipe above for a clean
+migration. See [CONTRIBUTING.md](../CONTRIBUTING.md) for local-repro
+tips and the test-DB setup used by the integration test.
