@@ -430,10 +430,23 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			m.viewport.YPosition = headerHeight
 			m.content.WriteString(m.welcomeMessage())
 			m.viewport.SetContent(m.content.String())
+			// Start anchored at the bottom so AtBottom() returns true and
+			// subsequent appendOutput auto-scrolls. Without this, the
+			// welcome-message overflow leaves YOffset=0 for the whole
+			// session and every new line silently appends off-screen
+			// until the user manually scrolls down.
+			m.viewport.GotoBottom()
 			m.ready = true
 		} else {
+			// Preserve at-bottom state across resizes — a shrink can leave
+			// YOffset stranded above the new max, which would otherwise
+			// break auto-follow the same way as the init bug above.
+			wasAtBottom := m.viewport.AtBottom()
 			m.viewport.Width = msg.Width - 2
 			m.viewport.Height = msg.Height - verticalMarginHeight
+			if wasAtBottom {
+				m.viewport.GotoBottom()
+			}
 		}
 		m.width = msg.Width
 		m.height = msg.Height
