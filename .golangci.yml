@@ -1,38 +1,44 @@
+version: "2"
 run:
-  timeout: 5m
-  go: "1.21"
-
+  # Match go.mod so the linter parses the same language version as the
+  # build. Stale `go: "1.21"` here previously caused v2 to silently
+  # fail to type-check Go-1.25-only constructs (#230 CI fallout).
+  go: "1.25"
 linters:
-  enable:
-    - govet
-    - staticcheck
-    - gosimple
-    - ineffassign
   disable:
-    - errcheck      # Too noisy for non-critical error returns (logging, notifications)
-    - unused        # False positives with conditional compilation
-
-linters-settings:
-  staticcheck:
-    checks:
-      - all
-      - -SA9003     # Empty branch - sometimes intentional for clarity
-  gosimple:
-    checks:
-      - all
-      - -S1009      # Nil check before len() - sometimes clearer to be explicit
-
-issues:
-  exclude-rules:
-    # Ignore unchecked errors for notification calls (non-critical)
-    - linters:
-        - errcheck
-      text: "notifier\\."
-    # Ignore unchecked errors for progress bar (cosmetic)
-    - linters:
-        - errcheck
-      text: "bar\\."
-    # Ignore unchecked errors for state logging (best effort)
-    - linters:
-        - errcheck
-      text: "CompleteRun|MarkTaskComplete"
+    - errcheck
+    - unused
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -S1009
+        - -SA9003
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+        text: notifier\.
+      - linters:
+          - errcheck
+        text: bar\.
+      - linters:
+          - errcheck
+        text: CompleteRun|MarkTaskComplete
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

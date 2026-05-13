@@ -6,14 +6,14 @@ Welcome. This guide covers what you need to know to run dmt's checks locally and
 
 You need:
 
-- **Go 1.24+** (`go.mod` pins the floor)
+- **Go 1.25+** (`go.mod` pins the floor at 1.25.0)
 - **Docker** with at least 8 GB allocated for the test database containers
 - **make** (the repo standardizes on `make` targets so the CI workflow and your local commands stay in lockstep)
 
 Optional but recommended:
 
-- **golangci-lint** v1.62.2 — `brew install golangci-lint` or download from the [releases page](https://github.com/golangci/golangci-lint/releases). CI pins this version; running a newer one locally may surface findings your PR doesn't have to fix.
-- **govulncheck** — `go install golang.org/x/vuln/cmd/govulncheck@latest`
+- **golangci-lint** v2.12.2 — `brew install golangci-lint` or download from the [releases page](https://github.com/golangci/golangci-lint/releases). CI pins this version; running a newer one locally may surface findings your PR doesn't have to fix. Earlier v1.x binaries are built with Go 1.23 and cannot type-check this project's Go-1.25 code.
+- **govulncheck** v1.1.4 — `go install golang.org/x/vuln/cmd/govulncheck@v1.1.4` (CI pins this version)
 
 ## Running the checks locally
 
