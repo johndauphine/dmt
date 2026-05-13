@@ -38,9 +38,11 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
+	// go-sql-driver/mysql can echo the DSN in its open/ping errors —
+	// see #231. ScrubError strips the password.
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening connection: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("opening connection: %w", err))
 	}
 
 	// Configure connection pool
@@ -51,7 +53,7 @@ func NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptio
 	// Test connection
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pinging database: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("pinging database: %w", err))
 	}
 
 	// Detect MySQL vs MariaDB

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
 
@@ -271,9 +272,14 @@ func (n *Notifier) send(msg SlackMessage) error {
 		return fmt.Errorf("marshaling message: %w", err)
 	}
 
+	// net/http error messages from Post include the full URL
+	// ("Post \"https://hooks.slack.com/services/T.../B.../xxx\": ..."),
+	// and the path portion *is* the credential — there is no separate
+	// password for incoming webhooks. ScrubError replaces the path
+	// with [REDACTED] before the error reaches a logger (#231).
 	resp, err := n.httpClient.Post(n.config.WebhookURL, "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("sending to Slack: %w", err)
+		return logging.ScrubError(fmt.Errorf("sending to Slack: %w", err))
 	}
 	defer resp.Body.Close()
 

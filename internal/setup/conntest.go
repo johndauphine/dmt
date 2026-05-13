@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
 
 	// Register SQL drivers for connection testing.
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
@@ -48,10 +49,15 @@ func TestConnection(ctx context.Context, dbType, host string, port int, database
 		return &ConnTestResult{Error: fmt.Sprintf("no sql driver mapping for: %s", canonical)}
 	}
 
+	// sql.Open + PingContext error strings from each driver library
+	// can echo the DSN (and thus the password). Scrub before
+	// publishing the message into ConnTestResult, which is rendered
+	// to the setup-wizard UI and may be logged for support
+	// debugging (#231).
 	db, err := sql.Open(sqlDriver, dsn)
 	if err != nil {
 		return &ConnTestResult{
-			Error:     fmt.Sprintf("connection error: %v", err),
+			Error:     logging.Scrub(fmt.Sprintf("connection error: %v", err)),
 			LatencyMs: time.Since(start).Milliseconds(),
 		}
 	}
@@ -59,7 +65,7 @@ func TestConnection(ctx context.Context, dbType, host string, port int, database
 
 	if err := db.PingContext(ctx); err != nil {
 		return &ConnTestResult{
-			Error:     fmt.Sprintf("ping failed: %v", err),
+			Error:     logging.Scrub(fmt.Sprintf("ping failed: %v", err)),
 			LatencyMs: time.Since(start).Milliseconds(),
 		}
 	}
