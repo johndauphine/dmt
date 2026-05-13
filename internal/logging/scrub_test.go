@@ -82,6 +82,21 @@ func TestScrub_KeyValueCredentials(t *testing.T) {
 			input: "auth failure: passwd=secret123 user=root",
 			leak:  "secret123",
 		},
+		// Copilot review on #231: the kv_credential rule used to
+		// hard-code `=` as the separator, silently rewriting YAML-ish
+		// inputs from `:` to `=`. The pattern now captures the
+		// separator (including surrounding whitespace) so the original
+		// structural form survives. Pin both shapes.
+		{
+			name:  "colon separator preserved",
+			input: "config: password: hunter2 model=claude",
+			leak:  "hunter2",
+		},
+		{
+			name:  "equals separator preserved",
+			input: "config: password=hunter2 model=claude",
+			leak:  "hunter2",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +106,27 @@ func TestScrub_KeyValueCredentials(t *testing.T) {
 			}
 			if !strings.Contains(out, RedactedToken) {
 				t.Fatalf("expected redaction token: %q", out)
+			}
+		})
+	}
+}
+
+// TestScrub_KeyValueSeparatorPreserved pins the Copilot-review fix on
+// #231: the kv_credential rule used to hard-code `=` regardless of the
+// original separator, so `password: hunter2` became `password=[REDACTED]`
+// and confused log parsers expecting YAML shape. Now the separator is
+// captured and emitted verbatim.
+func TestScrub_KeyValueSeparatorPreserved(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"password=hunter2", "password=" + RedactedToken},
+		{"password = hunter2", "password = " + RedactedToken},
+		{"password: hunter2", "password: " + RedactedToken},
+		{"password:hunter2", "password:" + RedactedToken},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := Scrub(tc.in); got != tc.want {
+				t.Errorf("Scrub(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}

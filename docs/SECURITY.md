@@ -52,7 +52,7 @@ every Slack-notifier failure passes through one of:
   its `Error()` string is scrubbed; `errors.Is` / `errors.As` continue
   to work against the underlying sentinel.
 
-The scrubbing fires at three structural points:
+The scrubbing fires at four structural points:
 
 1. **Driver `NewReader` / `NewWriter`** (`internal/driver/postgres`,
    `mssql`, `mysql`). Errors from `pgxpool.ParseConfig`, `sql.Open`,

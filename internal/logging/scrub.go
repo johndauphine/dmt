@@ -100,18 +100,28 @@ func initScrubPatterns() {
 			pattern:     regexp.MustCompile(`([A-Za-z0-9_.+\-]+):([^@/\s]+)@tcp\(`),
 			replacement: `$1:` + RedactedToken + `@tcp(`,
 		},
-		// Generic key=value with secret-looking names. Used by error
-		// messages that quote DSN tail parameters (e.g.
+		// Generic key=value (or key:value) with secret-looking names.
+		// Used by error messages that quote DSN tail parameters (e.g.
 		// "?password=hunter2&sslmode=require") and by structured logs
 		// that emit raw connection strings. Matches password, passwd,
 		// pwd, api_key, apikey, api-key, secret, token. Authorization
 		// is handled separately above (so the Bearer/Token prefix is
 		// preserved). The value extends to the next ;, &, ', ", or
 		// whitespace.
+		//
+		// The separator group (`(\s*[=:]\s*)`) is captured rather than
+		// matched-and-discarded so YAML-ish inputs like
+		// "password: hunter2" round-trip as "password: [REDACTED]"
+		// instead of being silently rewritten to "password=[REDACTED]"
+		// (Copilot review on #231). Quote characters surrounding the
+		// VALUE itself are redacted along with the value — preserving
+		// them would require a more elaborate alternation; if an
+		// operator pipes through `Scrub`, "[REDACTED]" should be read
+		// as "the secret value used to live here, in whatever form."
 		{
 			name:        "kv_credential",
-			pattern:     regexp.MustCompile(`(?i)\b(password|passwd|pwd|api[_\-]?key|secret|token)\s*[=:]\s*("[^"]*"|'[^']*'|[^\s;&'"]+)`),
-			replacement: `$1=` + RedactedToken,
+			pattern:     regexp.MustCompile(`(?i)\b(password|passwd|pwd|api[_\-]?key|secret|token)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;&'"]+)`),
+			replacement: `${1}${2}` + RedactedToken,
 		},
 		// Anthropic API keys (sk-ant-...) and OpenAI keys (sk-...). The
 		// full key length varies by provider but the high-entropy tail
