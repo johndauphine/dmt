@@ -61,7 +61,10 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v8+ of the action supports golangci-lint v2.x. v6 only knew how
+        # to parse v1.x version strings and crashed on v2.12.2 with a
+        # `parseVersion` error — surfaced as the second CI red on #230.
+        uses: golangci/golangci-lint-action@v8
         with:
           # v2.12.2 is the first release whose binary is built with a
           # toolchain that can type-check Go-1.25 packages. v1.x was
