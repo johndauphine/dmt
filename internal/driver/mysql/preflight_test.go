@@ -51,36 +51,50 @@ func TestParseMySQLVersion(t *testing.T) {
 // match every probe; specific verb lists must match by exact-verb token
 // (so "SELECT" doesn't match "SELECT_NEXTVAL"-style hypothetical
 // privileges); and the absence of the verb must return false rather than
-// erroring out.
+// erroring out. Scope-aware matching (#228 Copilot review): a grant on
+// `other_db`.* must NOT satisfy a check against `mydb` — preflight has
+// to surface false-positive risk on cross-DB grants.
 func TestGrantsInclude(t *testing.T) {
 	cases := []struct {
 		name   string
 		grants []string
 		priv   string
+		dbName string
 		want   bool
 	}{
 		{
-			name:   "all privileges matches anything",
+			name:   "global ALL PRIVILEGES matches any scope",
 			grants: []string{"GRANT ALL PRIVILEGES ON *.* TO 'dmt'@'%'"},
 			priv:   "SELECT",
+			dbName: "mydb",
 			want:   true,
 		},
 		{
-			name:   "bare ALL ON matches",
+			name:   "bare ALL ON matching db",
 			grants: []string{"GRANT ALL ON `db`.* TO 'dmt'@'%'"},
 			priv:   "CREATE",
+			dbName: "db",
 			want:   true,
 		},
 		{
-			name:   "verb list matches present",
+			name:   "verb list matches present, matching scope",
 			grants: []string{"GRANT SELECT, INSERT, UPDATE ON `db`.* TO 'dmt'@'%'"},
 			priv:   "INSERT",
+			dbName: "db",
 			want:   true,
 		},
 		{
-			name:   "verb list rejects absent",
+			name:   "scope mismatch rejects grant on other db",
+			grants: []string{"GRANT ALL PRIVILEGES ON `other_db`.* TO 'dmt'@'%'"},
+			priv:   "SELECT",
+			dbName: "mydb",
+			want:   false,
+		},
+		{
+			name:   "verb list rejects absent verb",
 			grants: []string{"GRANT SELECT, INSERT ON `db`.* TO 'dmt'@'%'"},
 			priv:   "DROP",
+			dbName: "db",
 			want:   false,
 		},
 		{
@@ -89,33 +103,51 @@ func TestGrantsInclude(t *testing.T) {
 				"GRANT SELECT ON `db`.* TO 'dmt'@'%'",
 				"GRANT INSERT, UPDATE ON `db`.* TO 'dmt'@'%'",
 			},
-			priv: "UPDATE",
-			want: true,
+			priv:   "UPDATE",
+			dbName: "db",
+			want:   true,
 		},
 		{
 			name:   "verb prefix match is not allowed",
 			grants: []string{"GRANT SELECT_FOO ON `db`.* TO 'dmt'@'%'"},
 			priv:   "SELECT",
+			dbName: "db",
 			want:   false,
 		},
 		{
 			name:   "empty grants returns false",
 			grants: nil,
 			priv:   "SELECT",
+			dbName: "db",
 			want:   false,
 		},
 		{
 			name:   "case-insensitive verb matching",
 			grants: []string{"grant select, insert on `db`.* to 'dmt'@'%'"},
 			priv:   "SELECT",
+			dbName: "db",
+			want:   true,
+		},
+		{
+			name:   "empty dbName falls back to scope-less match",
+			grants: []string{"GRANT SELECT ON `other_db`.* TO 'dmt'@'%'"},
+			priv:   "SELECT",
+			dbName: "",
+			want:   true,
+		},
+		{
+			name:   "table-scoped grant matches the db scope",
+			grants: []string{"GRANT SELECT ON `db`.`tbl` TO 'dmt'@'%'"},
+			priv:   "SELECT",
+			dbName: "db",
 			want:   true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := grantsInclude(tc.grants, tc.priv)
+			got := grantsInclude(tc.grants, tc.priv, tc.dbName)
 			if got != tc.want {
-				t.Errorf("grantsInclude(%v, %q) = %v, want %v", tc.grants, tc.priv, got, tc.want)
+				t.Errorf("grantsInclude(%v, %q, %q) = %v, want %v", tc.grants, tc.priv, tc.dbName, got, tc.want)
 			}
 		})
 	}

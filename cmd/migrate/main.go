@@ -903,7 +903,11 @@ func healthCheck(c *cli.Context) error {
 			}
 		}
 		if !result.Healthy {
-			return fmt.Errorf("health check failed")
+			// Use the same exit-code policy as the human-readable path
+			// (Copilot review): JSON consumers (Airflow, CI) need ConfigError
+			// for misconfiguration vs ConnectionError for ping failure so
+			// retry policy can branch correctly.
+			return preflightExitError(result)
 		}
 		return nil
 	}
@@ -942,16 +946,30 @@ func healthCheck(c *cli.Context) error {
 	fmt.Printf("\n  Overall: %s\n", boolToHealthy(result.Healthy))
 
 	if !result.Healthy {
-		// PreFlightAborted means the failures are environment misconfigurations
-		// — map to ConfigError so automation distinguishes "fix your privileges
-		// / version / encoding" from a recoverable transfer hiccup.
-		if result.PreFlightAborted {
-			return exitcodes.NewExitError(fmt.Errorf("preflight failed: %d findings", len(result.PreFlightFindings)), exitcodes.ConfigError)
-		}
-		// Connection-only failure (ping failed before preflight could run)
-		return exitcodes.NewExitError(fmt.Errorf("preflight failed"), exitcodes.ConnectionError)
+		return preflightExitError(result)
 	}
 	return nil
+}
+
+// preflightExitError classifies a failed preflight result into an exit code:
+//   - ConfigError when at least one error-severity finding remains
+//     (misconfigured environment — non-recoverable, operator must fix it).
+//   - ConnectionError when the ping itself failed (network/credentials —
+//     potentially recoverable; retry policy can backoff).
+//
+// The message counts only error-severity findings so the operator isn't
+// misled by warn/info findings inflating the failure count (Copilot review).
+func preflightExitError(result *orchestrator.HealthCheckResult) error {
+	if result.PreFlightAborted {
+		errorCount := 0
+		for _, f := range result.PreFlightFindings {
+			if f.Severity == driver.SeverityError {
+				errorCount++
+			}
+		}
+		return exitcodes.NewExitError(fmt.Errorf("preflight failed: %d blocking finding(s)", errorCount), exitcodes.ConfigError)
+	}
+	return exitcodes.NewExitError(fmt.Errorf("preflight failed"), exitcodes.ConnectionError)
 }
 
 func analyzeConfig(c *cli.Context) error {

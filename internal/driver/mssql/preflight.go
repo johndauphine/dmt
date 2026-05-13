@@ -60,10 +60,20 @@ func checkBackupAcknowledgmentMSSQL(ctx context.Context, db *sql.DB, req driver.
 		JOIN sys.schemas s ON s.schema_id = t.schema_id
 		JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0, 1)
 		WHERE s.name = @p1 AND p.rows > 0`, schema).Scan(&name)
-	if err != nil {
-		// sql.ErrNoRows OR catalog read failure — treat both as "no
-		// concern detected"; matches the PG path's posture.
+	switch {
+	case err == sql.ErrNoRows:
+		// Clean schema — guard satisfied.
 		return nil
+	case err != nil:
+		// Probe failure must NOT silently pass; same data-safety rule
+		// as the PG/MySQL backup-ack guards (Copilot review).
+		return []driver.PreFlightFinding{{
+			Severity: driver.SeverityError,
+			Check:    "backup.acknowledgment",
+			Side:     req.Side,
+			Message:  fmt.Sprintf("could not verify target schema [%s] is empty: %v", schema, err),
+			Remedy:   "grant the dmt login SELECT on sys.tables/sys.schemas/sys.partitions, fix the connection issue, or re-run with --confirm-backup to acknowledge that drop_recreate may destroy data",
+		}}
 	}
 	return []driver.PreFlightFinding{{
 		Severity: driver.SeverityError,
@@ -232,15 +242,33 @@ func mssqlCheckDbPerm(ctx context.Context, db *sql.DB, perm, intent string, side
 		}}
 	}
 	if ok != 1 {
+		// Look up the actual database user name so the remedy is
+		// copy-pasteable. SUSER_SNAME() / USER_NAME() are always
+		// available; falling back to a placeholder keeps the remedy
+		// useful even if the lookup fails (Copilot review:
+		// "[current_user]" is not valid T-SQL).
+		principal := lookupDBPrincipal(ctx, db)
 		return []driver.PreFlightFinding{{
 			Severity: driver.SeverityError,
 			Check:    "privileges." + strings.ToLower(strings.ReplaceAll(perm, " ", "_")),
 			Side:     side,
 			Message:  fmt.Sprintf("connected login lacks %s permission on this database (needed to %s)", perm, intent),
-			Remedy:   fmt.Sprintf("GRANT %s TO [current_user];", perm),
+			Remedy:   fmt.Sprintf("GRANT %s TO %s;", perm, principal),
 		}}
 	}
 	return nil
+}
+
+// lookupDBPrincipal returns the quoted database user name suitable for
+// pasting into a GRANT statement. Falls back to <user> when USER_NAME()
+// can't be resolved — better an obvious placeholder than an invalid
+// T-SQL identifier.
+func lookupDBPrincipal(ctx context.Context, db *sql.DB) string {
+	var name string
+	if err := db.QueryRowContext(ctx, "SELECT USER_NAME()").Scan(&name); err != nil || strings.TrimSpace(name) == "" {
+		return "<user>"
+	}
+	return "[" + strings.ReplaceAll(strings.TrimSpace(name), "]", "]]") + "]"
 }
 
 func appendIfNonNilMSSQL(s []driver.PreFlightFinding, f *driver.PreFlightFinding) []driver.PreFlightFinding {

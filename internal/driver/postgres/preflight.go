@@ -67,12 +67,21 @@ func checkBackupAcknowledgmentPG(ctx context.Context, db *sql.DB, req driver.Pre
 		  AND c.relkind = 'r'
 		  AND c.reltuples > 0
 		LIMIT 1`, schema).Scan(&name)
-	if err == sql.ErrNoRows || err != nil {
-		// Either no non-empty tables (clean schema) OR the catalog read
-		// failed. The catalog read shouldn't fail given we just passed
-		// other checks; treat both cases as "no concern" — operator is
-		// not destroying data we can detect.
+	switch {
+	case err == sql.ErrNoRows:
+		// Clean schema — nothing to destroy, guard is satisfied.
 		return nil
+	case err != nil:
+		// Probe failure must NOT silently pass: we can't prove the
+		// schema is empty, so we must require explicit acknowledgment
+		// rather than risk dropping populated tables (Copilot review).
+		return []driver.PreFlightFinding{{
+			Severity: driver.SeverityError,
+			Check:    "backup.acknowledgment",
+			Side:     req.Side,
+			Message:  fmt.Sprintf("could not verify target schema %q is empty: %v", schema, err),
+			Remedy:   "grant the dmt role read access to pg_class/pg_namespace, fix the connection issue, or re-run with --confirm-backup to acknowledge that drop_recreate may destroy data",
+		}}
 	}
 	return []driver.PreFlightFinding{{
 		Severity: driver.SeverityError,

@@ -52,7 +52,16 @@ func checkBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.
 	if schema == "" {
 		// MySQL uses the database itself as the schema — read DATABASE().
 		if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&schema); err != nil {
-			return nil
+			// Can't determine which database — fail closed (Copilot review):
+			// silently proceeding here would let drop_recreate run against
+			// whatever DB the operator forgot to specify.
+			return []driver.PreFlightFinding{{
+				Severity: driver.SeverityError,
+				Check:    "backup.acknowledgment",
+				Side:     req.Side,
+				Message:  fmt.Sprintf("could not resolve target database via DATABASE(): %v", err),
+				Remedy:   "set target.schema explicitly, or re-run with --confirm-backup if you've verified the target is safe",
+			}}
 		}
 	}
 	var name string
@@ -61,8 +70,19 @@ func checkBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.
 		FROM information_schema.TABLES
 		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND TABLE_ROWS > 0
 		LIMIT 1`, schema).Scan(&name)
-	if err != nil {
+	switch {
+	case err == sql.ErrNoRows:
+		// Clean schema — guard satisfied.
 		return nil
+	case err != nil:
+		// Probe failure must NOT silently pass.
+		return []driver.PreFlightFinding{{
+			Severity: driver.SeverityError,
+			Check:    "backup.acknowledgment",
+			Side:     req.Side,
+			Message:  fmt.Sprintf("could not verify target schema `%s` is empty: %v", schema, err),
+			Remedy:   "grant the dmt user SELECT on information_schema.TABLES, fix the connection issue, or re-run with --confirm-backup",
+		}}
 	}
 	return []driver.PreFlightFinding{{
 		Severity: driver.SeverityError,
@@ -91,6 +111,12 @@ func checkConnectionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlight
 // 5.7 introduced JSON and is the oldest version still receiving fixes;
 // 5.6 is unsupported upstream. MariaDB 10.3 is the matching JSON-capable
 // floor.
+//
+// MariaDB has a long-standing compatibility hack: VERSION() prefixes the
+// real version with "5.5.5-" so legacy clients that hardcode "MySQL 5.5
+// or above" accept it. We have to peel that prefix off before parsing or
+// the floor check would treat MariaDB 10.x as MySQL 5.5 and fail every
+// modern MariaDB server (Copilot review).
 func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
 	var v string
 	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&v); err != nil {
@@ -101,7 +127,12 @@ func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSid
 			Message:  fmt.Sprintf("could not read VERSION(): %v", err),
 		}}
 	}
-	major, minor, ok := parseMySQLVersion(v)
+	isMaria := strings.Contains(strings.ToLower(v), "mariadb")
+	parseable := v
+	if isMaria {
+		parseable = stripMariaDBCompatPrefix(v)
+	}
+	major, minor, ok := parseMySQLVersion(parseable)
 	if !ok {
 		return []driver.PreFlightFinding{{
 			Severity: driver.SeverityWarn,
@@ -110,7 +141,6 @@ func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSid
 			Message:  fmt.Sprintf("could not parse VERSION() = %q", v),
 		}}
 	}
-	isMaria := strings.Contains(strings.ToLower(v), "mariadb")
 	switch {
 	case isMaria && (major < 10 || (major == 10 && minor < 3)):
 		return []driver.PreFlightFinding{{
@@ -130,6 +160,21 @@ func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSid
 		}}
 	}
 	return nil
+}
+
+// stripMariaDBCompatPrefix removes MariaDB's legacy "5.5.5-" client-
+// compatibility prefix from a VERSION() string. Real MariaDB versions
+// have always started at 10.0; anything beginning with "5.5.5-" followed
+// by another major.minor is the compatibility hack and the real version
+// is the segment after the prefix. Inputs that don't match the hack
+// pattern are returned unchanged.
+func stripMariaDBCompatPrefix(v string) string {
+	const prefix = "5.5.5-"
+	trimmed := strings.TrimSpace(v)
+	if !strings.HasPrefix(trimmed, prefix) {
+		return v
+	}
+	return trimmed[len(prefix):]
 }
 
 // parseMySQLVersion extracts (major, minor) from strings like
@@ -270,19 +315,48 @@ func checkPrivilegesMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 		}
 	}
 
+	// Resolve which database the grants must be scoped to. Empty
+	// req.Schema means "current database via DATABASE()" — same convention
+	// as the backup-ack check. If we can't determine it, fall back to
+	// scope-less matching (the prior behavior) but log via a finding so
+	// the operator knows the check is degraded (Copilot review).
+	dbName := strings.TrimSpace(req.Schema)
+	if dbName == "" {
+		_ = db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName)
+	}
+
 	var findings []driver.PreFlightFinding
 	for _, p := range required {
-		if !grantsInclude(grants, p) {
+		if !grantsInclude(grants, p, dbName) {
 			findings = append(findings, driver.PreFlightFinding{
 				Severity: driver.SeverityError,
 				Check:    "privileges." + strings.ToLower(p),
 				Side:     req.Side,
-				Message:  fmt.Sprintf("connected user lacks %s privilege per SHOW GRANTS", p),
-				Remedy:   fmt.Sprintf("GRANT %s ON <db>.* TO CURRENT_USER();", p),
+				Message:  fmt.Sprintf("connected user lacks %s privilege on %s per SHOW GRANTS", p, formatScope(dbName)),
+				Remedy:   fmt.Sprintf("GRANT %s ON %s.* TO CURRENT_USER();", p, formatDBForGrant(dbName)),
 			})
 		}
 	}
 	return findings
+}
+
+// formatScope produces the human-readable scope label for grant messages.
+// Empty dbName means "scope unresolved" — the message says "any schema"
+// since the check fell back to global matching.
+func formatScope(dbName string) string {
+	if dbName == "" {
+		return "any database"
+	}
+	return fmt.Sprintf("`%s`", dbName)
+}
+
+// formatDBForGrant returns the right substitution for the remedy text:
+// the schema name when known, otherwise <db> as a placeholder.
+func formatDBForGrant(dbName string) string {
+	if dbName == "" {
+		return "<db>"
+	}
+	return fmt.Sprintf("`%s`", dbName)
 }
 
 func loadGrantsMySQL(ctx context.Context, db *sql.DB) ([]string, error) {
@@ -302,27 +376,85 @@ func loadGrantsMySQL(ctx context.Context, db *sql.DB) ([]string, error) {
 	return grants, rows.Err()
 }
 
-// grantsInclude reports whether any grant line confers privilege p. ALL
-// PRIVILEGES is treated as covering anything; partial-grant strings like
-// "GRANT SELECT, INSERT ON ..." are matched on the verb list inside the
-// GRANT prefix.
-func grantsInclude(grants []string, p string) bool {
+// grantsInclude reports whether any grant line confers privilege p with
+// a scope that covers dbName. A grant scope of "*.*" (global) always
+// matches; "<db>.*" or "<db>.<obj>" matches only if <db> == dbName
+// (case-sensitive comparison — MySQL identifier case sensitivity depends
+// on lower_case_table_names, but on most installs database names are
+// case-sensitive on Linux and case-insensitive on macOS/Windows;
+// SHOW GRANTS reports them verbatim, so matching the verbatim form is
+// the right call).
+//
+// dbName == "" disables scope filtering and reverts to the pre-Copilot
+// behavior (any grant scope counts) — used as a fallback when DATABASE()
+// resolution failed.
+func grantsInclude(grants []string, p, dbName string) bool {
 	upperP := strings.ToUpper(p)
 	for _, g := range grants {
-		ug := strings.ToUpper(g)
-		// "GRANT ALL PRIVILEGES ON ..." or "GRANT ALL ON ..."
-		if strings.Contains(ug, "GRANT ALL PRIVILEGES") || strings.HasPrefix(ug, "GRANT ALL ON") {
+		privs, scopeDB, ok := parseGrantLine(g)
+		if !ok {
+			continue
+		}
+		if !grantHasVerb(privs, upperP) {
+			continue
+		}
+		if dbName == "" || scopeDB == "*" || scopeDB == dbName {
 			return true
 		}
-		// "GRANT SELECT, INSERT, UPDATE ON ..." — extract the privilege
-		// list between GRANT and ON.
-		if idx := strings.Index(ug, " ON "); idx > len("GRANT ") {
-			privList := ug[len("GRANT "):idx]
-			for _, tok := range strings.Split(privList, ",") {
-				if strings.TrimSpace(tok) == upperP {
-					return true
-				}
-			}
+	}
+	return false
+}
+
+// parseGrantLine extracts the upper-cased privilege-list segment and the
+// database identifier from the ON clause. Returns ok=false when the line
+// doesn't match the GRANT ... ON <db>.<obj> shape (proxy grants, role
+// grants, etc. fall through). scopeDB == "*" represents the global
+// "ON *.*" scope; otherwise it's the unquoted database identifier.
+func parseGrantLine(g string) (privs, scopeDB string, ok bool) {
+	upper := strings.ToUpper(g)
+	if !strings.HasPrefix(upper, "GRANT ") {
+		return "", "", false
+	}
+	onIdx := strings.Index(upper, " ON ")
+	if onIdx < len("GRANT ") {
+		return "", "", false
+	}
+	privs = upper[len("GRANT "):onIdx]
+
+	// Look for " TO " from the ORIGINAL string (not upper) so we don't
+	// corrupt the database identifier's case during extraction.
+	toIdx := strings.Index(upper[onIdx:], " TO ")
+	if toIdx < 0 {
+		return "", "", false
+	}
+	scope := strings.TrimSpace(g[onIdx+len(" ON "):]) // preserve case
+	// Truncate scope at " TO " in the original string.
+	relativeTo := strings.Index(strings.ToUpper(scope), " TO ")
+	if relativeTo > 0 {
+		scope = strings.TrimSpace(scope[:relativeTo])
+	}
+	// scope is now like "*.*" or "`mydb`.*" or "`mydb`.`tbl`".
+	dbPart := scope
+	if dot := strings.Index(scope, "."); dot > 0 {
+		dbPart = scope[:dot]
+	}
+	dbPart = strings.Trim(dbPart, "`\"")
+	if dbPart == "*" {
+		return privs, "*", true
+	}
+	return privs, dbPart, true
+}
+
+// grantHasVerb checks whether the comma-separated privilege list contains
+// verb v (or ALL PRIVILEGES / ALL).
+func grantHasVerb(privs, v string) bool {
+	for _, tok := range strings.Split(privs, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "ALL PRIVILEGES" || tok == "ALL" {
+			return true
+		}
+		if tok == v {
+			return true
 		}
 	}
 	return false
