@@ -4,7 +4,7 @@ dmt follows [Semantic Versioning 2.0.0](https://semver.org/). This document is t
 
 ## Triggers
 
-### MAJOR (`v1.x.x` → `v2.0.0`) — breaking changes
+### MAJOR (`v5.x.x` → `v6.0.0`) — breaking changes
 
 A change requires a MAJOR bump if it could cause a previously-working migration to fail or silently produce different results. Specifically:
 
@@ -15,7 +15,7 @@ A change requires a MAJOR bump if it could cause a previously-working migration 
 - An **exit code** is renumbered or its meaning is materially changed
 - An **environment variable** dmt reads is renamed or its semantics changed
 
-### MINOR (`v1.0.x` → `v1.1.0`) — additive changes
+### MINOR (`v5.0.x` → `v5.1.0`) — additive changes
 
 A change is MINOR if it adds capability without breaking existing usage:
 
@@ -27,7 +27,7 @@ A change is MINOR if it adds capability without breaking existing usage:
 - New optional dependency
 - New optional feature flag
 
-### PATCH (`v1.0.0` → `v1.0.1`) — bug fixes
+### PATCH (`v5.0.0` → `v5.0.1`) — bug fixes
 
 A change is PATCH if it fixes incorrect behavior without changing the public contract:
 
@@ -40,20 +40,20 @@ A change is PATCH if it fixes incorrect behavior without changing the public con
 
 ## Stability commitments
 
-After v1.0.0:
+From `v5.0.0` onward (see the [Production-readiness milestone](#production-readiness-milestone--v500) below):
 
 - **Stable** — every YAML field listed in `config.yaml.example` without an `(experimental)` comment is stable. Stable fields participate in the deprecation cycle below; they don't disappear in a minor bump.
 - **Experimental** — fields prefixed with `experimental_` in YAML or marked `(experimental)` in `config.yaml.example`. May change name, default, or semantics in any release. Use at your own risk.
 - The CLI subcommands documented in `dmt --help` are stable. The `dmt help <subcommand>` output is the contract for each.
 - Driver interfaces in `internal/driver/` are NOT stable — `internal/` is implementation, not public API. The CLI is dmt's public surface.
 
-Before v1.0.0 (the current state — see [v1.0.0 readiness criteria](#v100-readiness-criteria) below), the SemVer policy applies on a best-effort basis. The [SemVer spec section 4](https://semver.org/#spec-item-4) explicitly allows breaking changes in `0.x.y` minor bumps; we try to avoid them but make no formal commitment.
+Releases before `v5.0.0` applied this policy on a best-effort basis only; the [SemVer spec section 4](https://semver.org/#spec-item-4) allowance for breaking changes in `0.x.y` minor bumps was used pragmatically across the `v1.x`–`v4.x` line.
 
 ## Deprecation cycle
 
-A breaking change to a stable field after v1.0.0 must follow this cycle:
+A breaking change to a stable field after `v5.0.0` must follow this cycle:
 
-- **Release N (minor bump)** — introduce the new name. Continue to accept the old name with a `WARN`-level log message: `field "ai_adjust" is deprecated; rename to "runtime_tuning". Will be removed in v2.0.0.` Document the deprecation in `CHANGELOG.md` under "Deprecated".
+- **Release N (minor bump)** — introduce the new name. Continue to accept the old name with a `WARN`-level log message: `field "ai_adjust" is deprecated; rename to "runtime_tuning". Will be removed in v6.0.0.` Document the deprecation in `CHANGELOG.md` under "Deprecated".
 - **Release N+1 ... (any number of minor bumps)** — old name still works, still warns. Operators have time to migrate.
 - **Release N+M (next major bump)** — old name is removed. Document the removal in `CHANGELOG.md` under "Removed". The removal is the breaking change that gates the major bump.
 
