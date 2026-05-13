@@ -15,7 +15,9 @@ All notable changes to this project will be documented in this file.
   NDJSON record of every `dmt run` / `dmt resume` to
   `$HOME/.dmt/audit/<run_id>.ndjson` (override with `--audit-dir`).
   Compliance-regime-friendly: each line is one event, the file is
-  `chmod 0444` after the run ends, and `--audit-tamper-evident` opts
+  `chmod 0444` after a successful or hard-failed run (cancelled /
+  resumable runs keep the file 0600 so `dmt resume` can append to
+  it), and `--audit-tamper-evident` opts
   into hash-chained events (each event carries `seq` / `prev_hash` /
   `hash` so retroactive modification is detectable via a one-liner
   shell verification). Sensitive values flow through the same scrubber

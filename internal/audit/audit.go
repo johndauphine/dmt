@@ -135,10 +135,12 @@ func New(opts Options) (*Logger, error) {
 		return nil, fmt.Errorf("audit: create dir %q: %w", dir, err)
 	}
 	path := filepath.Join(dir, opts.RunID+".ndjson")
-	// O_APPEND so every Write atomically lands at end-of-file (POSIX
-	// guarantee for opens < PIPE_BUF; our JSON lines are well under).
-	// O_EXCL would be stronger but breaks legitimate resume scenarios
-	// where the same run_id is being recorded after an earlier crash.
+	// O_APPEND so every write(2) lands at a unique end-of-file offset
+	// regardless of concurrent writers (POSIX append semantics for
+	// regular files — the kernel serializes the offset adjustment with
+	// the write itself). O_EXCL would be stronger but breaks legitimate
+	// resume scenarios where the same run_id is being recorded after an
+	// earlier crash.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %q: %w", path, err)
@@ -258,6 +260,19 @@ func (l *Logger) RecordEvent(ev Event) error {
 	if _, err := l.file.Write(append(line, '\n')); err != nil {
 		return fmt.Errorf("audit: write event: %w", err)
 	}
+	// In tamper-evident mode, fsync after each event so the hash chain
+	// is durable on disk before the next event extends it. Without
+	// this, a crash between Write and the OS's eventual fsync could
+	// leave the chain torn — the in-memory prevHash for event N+1
+	// would reference an event that never reached the platter
+	// (Copilot review on #235). For plain mode the OS page cache is
+	// fine; audit is best-effort there and the perf cost of per-event
+	// fsync isn't worth the marginally-stronger guarantee.
+	if l.tamperEvident {
+		if err := l.file.Sync(); err != nil {
+			return fmt.Errorf("audit: fsync event: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -305,6 +320,19 @@ func (l *Logger) closeImpl(chmodReadOnly bool) error {
 		}
 	}
 	return closeErr
+}
+
+// ResolveFilePath returns the on-disk path of the audit file for a
+// given (dir, runID) pair without creating anything. Callers use this
+// to pre-check whether a file pre-exists (e.g. `dmt resume` wants to
+// distinguish "reopening prior audit" from "creating fresh"). Mirrors
+// the path New() will use internally.
+func ResolveFilePath(dir, runID string) (string, error) {
+	resolved, err := resolveDir(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolved, runID+".ndjson"), nil
 }
 
 // resolveDir returns the absolute audit directory, defaulting to
@@ -403,7 +431,12 @@ func marshalLine(ev Event, scrubbed map[string]any) ([]byte, error) {
 }
 
 // canonicalJSON encodes a map with sorted keys and no extraneous
-// whitespace. Required for hash chaining to be reproducible.
+// whitespace. Required for hash chaining to be reproducible AND for
+// the documented `jq + sha256sum` verifier to produce matching hashes
+// — jq does not HTML-escape `<>&`, so we must not either. We use a
+// json.Encoder with SetEscapeHTML(false) and trim its trailing newline
+// (Encoder appends one) to match jq's `-c` output byte-for-byte.
+// (Copilot review on #235.)
 func canonicalJSON(m map[string]any) ([]byte, error) {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -416,7 +449,7 @@ func canonicalJSON(m map[string]any) ([]byte, error) {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		kb, err := json.Marshal(k)
+		kb, err := marshalNoEscape(k)
 		if err != nil {
 			return nil, err
 		}
@@ -434,8 +467,8 @@ func canonicalJSON(m map[string]any) ([]byte, error) {
 
 // canonicalValue recursively encodes a value. Maps go through
 // canonicalJSON so nested objects also have sorted keys; everything
-// else uses encoding/json, which is already deterministic for the
-// primitive types we use.
+// else uses marshalNoEscape so HTML-special characters survive
+// unchanged for the documented verifier to match.
 func canonicalValue(v any) ([]byte, error) {
 	switch typed := v.(type) {
 	case map[string]any:
@@ -456,8 +489,28 @@ func canonicalValue(v any) ([]byte, error) {
 		buf = append(buf, ']')
 		return buf, nil
 	default:
-		return json.Marshal(v)
+		return marshalNoEscape(v)
 	}
+}
+
+// marshalNoEscape returns the canonical-JSON encoding of v with HTML
+// escaping disabled. encoding/json's default behavior is to escape
+// `<`, `>`, and `&` as `<` / `>` / `&` for safety in
+// HTML contexts; that's the wrong choice for an audit log designed
+// to be replayed through `jq -cS`, which does no such escaping. The
+// hash verifier and the bytes-on-disk both go through this function
+// so they stay aligned.
+func marshalNoEscape(v any) ([]byte, error) {
+	var sb strings.Builder
+	enc := json.NewEncoder(&sb)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	out := sb.String()
+	// Encoder always appends a trailing newline; strip it so the
+	// caller can splice the bytes into a larger structure cleanly.
+	return []byte(strings.TrimSuffix(out, "\n")), nil
 }
 
 // computeHash returns sha256(prev_hash || canonicalJSON(event without

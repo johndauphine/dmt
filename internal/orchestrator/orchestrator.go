@@ -445,24 +445,31 @@ func (o *Orchestrator) endPhaseSpan() {
 	}
 }
 
-// classifyRunOutcome distills the deferred audit handler's three inputs
+// classifyRunOutcome distills the deferred audit handler's two inputs
 // (the named-return error from Run/Resume, the panic value from recover)
 // into a (status, error_string, resumable) triple. The deferred handler
 // uses `resumable` to decide whether to keep the audit file writable
 // for a future resume (Codex review on #235 — Ctrl-C / context cancel
 // must NOT chmod-lock the file out from under the next dmt resume).
 //
-// Status taxonomy:
-//   - "panic"   — go runtime panic during the run; rec is non-nil
-//   - "success" — runErr is nil
-//   - "failed"  — runErr is non-nil; covers preflight, schema, transfer,
-//                 validation errors, AND user-initiated cancellation
-//                 (context.Canceled / context.DeadlineExceeded)
+// Status taxonomy — these are the values the audit log's `status` field
+// can carry on `run_complete` / `resume_complete`. Documented in
+// docs/AUDIT-LOG.md; downstream consumers should accept all four:
+//   - "success"   — runErr is nil
+//   - "failed"    — runErr is non-nil and not a context cancellation;
+//                   covers preflight, schema, transfer, validation errors
+//   - "cancelled" — runErr is context.Canceled or context.DeadlineExceeded
+//                   (or wraps one of those). Operationally distinct from
+//                   "failed" because the operator can `dmt resume`.
+//   - "panic"     — go runtime panic during the run; rec is non-nil
 //
 // Resumable taxonomy:
-//   - resumable=true  for context cancellations (the operator can
-//                     `dmt resume` cleanly; we leave the audit file 0600)
-//   - resumable=false otherwise (chmod-0444 lock the file)
+//   - resumable=true  for "cancelled" (operator interrupted the run
+//                     intentionally; `dmt resume` is the right next
+//                     step — leave the audit file 0600 so resume can
+//                     reopen it)
+//   - resumable=false otherwise (chmod 0444 locks the file as the
+//                     terminal record of what happened)
 func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable bool) {
 	if rec != nil {
 		return "panic", fmt.Sprintf("panic: %v", rec), false
@@ -490,10 +497,29 @@ func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable
 // auditor with a warning; compliance benefits less from a refused
 // migration than from a successful one with a missing audit record,
 // so the migration always proceeds.
-func (o *Orchestrator) openAuditor(runID string, _ bool) {
+//
+// The resume flag drives one piece of post-open behavior: when true
+// and the file did NOT pre-exist (the prior Run() ran without audit
+// enabled, or somebody deleted the file), we emit an `audit_missing_on_resume`
+// event before any other audit traffic so the audit reader can
+// detect the gap. The audit file's hash chain (when tamper-evident)
+// will start fresh from GENESIS in that case — there's no prior chain
+// to continue.
+func (o *Orchestrator) openAuditor(runID string, resume bool) {
 	if o.config.Migration.NoAudit {
 		o.auditor = audit.Disabled()
 		return
+	}
+	// Note whether the file pre-existed before we open it, so we can
+	// distinguish "resume reopening the original audit" from "resume
+	// creating fresh because the original was missing". audit.New's
+	// O_CREATE makes this check have to happen first.
+	preexisting := true
+	if resume {
+		path, _ := audit.ResolveFilePath(o.config.Migration.AuditDir, runID)
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			preexisting = false
+		}
 	}
 	logger, err := audit.New(audit.Options{
 		Dir:           o.config.Migration.AuditDir,
@@ -507,6 +533,17 @@ func (o *Orchestrator) openAuditor(runID string, _ bool) {
 	}
 	o.auditor = logger
 	logging.Debug("audit log opened: %s", logger.Path())
+	if resume && !preexisting {
+		// Operator started Resume on a run that has no prior audit
+		// file — either the original Run() had --no-audit set, or
+		// somebody moved/deleted the file. Either way, this is the
+		// first audit event for the run; mark the discontinuity
+		// explicitly so the auditor sees a "this isn't the whole
+		// story" signal at the top.
+		o.auditEvent("audit_missing_on_resume", map[string]any{
+			"note": "no prior audit file found for this run_id; resume is creating a fresh audit log",
+		})
+	}
 }
 
 // auditEvent records one audit event with the standard typed shape.
@@ -625,9 +662,9 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		})
 		// Resumable interruption (Ctrl-C / context cancel) MUST leave
 		// the audit file writable so the eventual `dmt resume` can
-		// append its own run_complete. CloseResumable() skips the
-		// chmod-0444 step; a successful or hard-failed run gets the
-		// usual lockdown (Codex review on #235).
+		// append its own resume_start / resume_complete events.
+		// CloseResumable() skips the chmod-0444 step; a successful or
+		// hard-failed run gets the usual lockdown (Codex review on #235).
 		if resumable {
 			if err := o.auditor.CloseResumable(); err != nil {
 				logging.Warn("audit close: %v", err)
@@ -638,7 +675,11 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 			}
 		}
 		if rec != nil {
-			panic(rec) // re-raise after the audit event is durable
+			// re-raise after the audit event has been written to the
+			// OS (tamper-evident mode additionally fsyncs); the OS may
+			// still hold dirty pages but the audit record is no longer
+			// in dmt's process memory only.
+			panic(rec)
 		}
 	}()
 	o.auditEvent("run_start", map[string]any{

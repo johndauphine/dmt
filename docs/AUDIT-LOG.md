@@ -12,8 +12,9 @@ Every `dmt run` and `dmt resume` invocation writes one audit file:
 
 - `<audit-dir>` defaults to `$HOME/.dmt/audit` and is overridable via `--audit-dir=/path` or `migration.audit_dir` in YAML.
 - `<run_id>` is the 8-char run identifier (same one shown by `dmt status` and `dmt history`).
-- During the run, the file is mode 0600 (operator-only) and opened `O_APPEND` — every write atomically lands at end-of-file.
-- After the run ends, the file is `chmod 0444` (read-only) so even the operator can't accidentally truncate it. Filesystem-enforced immutability; pair with a snapshot tool for the regulator's preferred storage.
+- During the run, the file is mode 0600 (operator-only) and opened `O_APPEND` — every write lands at a unique end-of-file offset, even under concurrent writers.
+- After the run ends successfully or with a hard failure, the file is `chmod 0444` (read-only) so even the operator can't accidentally truncate it. Filesystem-enforced immutability; pair with a snapshot tool for the regulator's preferred storage.
+- **Exception — cancelled / resumable runs**: when the operator interrupts a run with Ctrl-C (or the context deadline fires), the file stays at 0600 so the eventual `dmt resume` can reopen it in `O_APPEND` and continue the same audit log. The lockdown happens on the FINAL close — the successful or hard-failed `Run` / `Resume` invocation that produces the terminal `run_complete` / `resume_complete` event.
 
 Disable with `--no-audit` (CLI) or `migration.no_audit: true` (YAML). Use sparingly — the default audit has zero data-plane impact.
 
@@ -112,8 +113,8 @@ Final event for the run. Emitted via deferred handler, so even panics produce on
 
 | Field | Type | Notes |
 |---|---|---|
-| `status` | string | `success`, `failed`, or `panic` |
-| `error` | string | Set when `status != success`; scrubbed |
+| `status` | string | One of `success`, `failed`, `cancelled`, `panic`. `cancelled` covers Ctrl-C and context deadline; the audit file stays writable so the operator can `dmt resume` and append more events |
+| `error` | string | Set when `status != success`; scrubbed. Empty string on the success path |
 | `duration_ms` | int | Wall-clock duration of the Run/Resume |
 
 ## Scrubbing
