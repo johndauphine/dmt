@@ -1,5 +1,6 @@
 .PHONY: build clean test test-short test-coverage run install check setup-hooks \
-        load-fixture-pgbench load-fixture-so2010-minimal test-fixtures-load
+        load-fixture-pgbench load-fixture-so2010-minimal test-fixtures-load \
+        integration-test
 
 # Build variables
 BINARY_NAME=dmt
@@ -194,6 +195,22 @@ test-fixtures-load: load-fixture-pgbench load-fixture-so2010-minimal
 	@echo ""
 	@echo "All CI-friendly fixtures loaded."
 	@echo "For full SO2010/SO2013/WWI bench fixtures, see docs/FIXTURES.md"
+
+# integration-test runs the mssql → postgres migration end-to-end against
+# real DB containers (#230). Used by .github/workflows/integration.yml and
+# also invokable locally for repro:
+#
+#   make build && make test-dbs-up
+#   ./scripts/load-fixture-so2010-minimal.sh
+#   make integration-test
+#
+# Expects:
+#   - dmt binary built (./dmt) — make depends on `build`
+#   - MSSQL_PASSWORD / PG_PASSWORD env vars (default TestPass2024 for both)
+#   - StackOverflow2010Minimal already loaded in the MSSQL container
+#   - PG container reachable at localhost:5432
+integration-test: build
+	./scripts/integration-test.sh
 
 # Pre-commit hooks
 setup-hooks:

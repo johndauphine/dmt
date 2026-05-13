@@ -1,0 +1,144 @@
+# Cross-DB integration tests (#230).
+#
+# Spins up real MSSQL + PG service containers, loads the SO2010-minimal
+# fixture into MSSQL, and runs a real dmt mssql→pg migration end-to-end.
+# Failing this job blocks the PR — every PR proves the primary cross-DB
+# migration path still works.
+#
+# Per the #230 issue body, the full 6-pair matrix (mssql↔pg, mssql↔mysql,
+# pg↔mysql) is the eventual goal; this PR ships mssql→pg only because
+# pg-source and mysql-source equivalents of SO2010-minimal don't exist
+# yet. Tracked as a follow-up.
+#
+# Local reproduction: `make test-dbs-up && make integration-test` —
+# see CONTRIBUTING.md.
+
+name: integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mssql-to-postgres:
+    name: mssql → postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: TestPass2024
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        # No HEALTHCHECK on the upstream image; we poll explicitly below.
+
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: TestPass2024
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      MSSQL_PASSWORD: TestPass2024
+      PG_PASSWORD: TestPass2024
+      # Run the integration test against the host-published service ports
+      # rather than going through `docker exec`. GHA service containers
+      # have generated names (codex review on #230 — service keys are
+      # network aliases, not container names), so `docker exec mssql ...`
+      # would fail with "no such container". Telling the test scripts
+      # to use host-installed sqlcmd / psql via localhost sidesteps that.
+      DMT_CI_MODE: "1"
+      # Isolate dmt state for this run — see #230 codex review on
+      # integration-test.sh; using ~/.dmt would clobber the operator's
+      # profile/history DB locally. The directory is created by
+      # ci-mssql-pg.yaml's data_dir, and we wipe it before each run.
+      DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-state
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build dmt
+        run: make build
+
+      - name: Install mssql-tools (sqlcmd) + PG client
+        # mssql-tools18 ships sqlcmd that's compatible with all SQL
+        # Server 2017+ images. The PG client comes with ubuntu-latest.
+        # `apt-get install -y` here is intentional — failures should fail
+        # the job so we don't run the next step against a missing tool.
+        run: |
+          set -euo pipefail
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc
+          echo "/opt/mssql-tools18/bin" >> "$GITHUB_PATH"
+          # psql is preinstalled on ubuntu-latest runners; verify and fail loud if missing
+          which psql
+
+      - name: Wait for MSSQL to accept connections
+        # SQL Server's container reports "Started up" before sqlcmd works.
+        # Poll the host-published port with sqlcmd — no docker exec, no
+        # container-name guessing. Fails loud at 90s rather than letting
+        # the next step hang under the job's 15m timeout.
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            if sqlcmd -S "localhost,1433" -U sa -P "$MSSQL_PASSWORD" -C -l 3 \
+                   -Q "SELECT 1" >/dev/null 2>&1; then
+              echo "MSSQL ready after $((i * 3))s"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "MSSQL did not become ready within 90s"
+          docker ps -a
+          exit 1
+
+      - name: Load SO2010-minimal fixture into MSSQL
+        # Bypass scripts/load-fixture-so2010-minimal.sh (which uses
+        # docker exec) and pipe the SQL directly via host sqlcmd. The
+        # fixture SQL itself (./scripts/fixtures/so2010-minimal.sql) is
+        # the source of truth — the loader script is just a shim.
+        run: |
+          set -e
+          sqlcmd -S "localhost,1433" -U sa -P "$MSSQL_PASSWORD" -C \
+            -i scripts/fixtures/so2010-minimal.sql
+
+      - name: Run dmt mssql → postgres migration
+        run: make integration-test
+
+      - name: Validate target row counts (dmt validate)
+        # Explicit dmt-level validation pass — the script in
+        # integration-test.sh also asserts row counts, but `dmt validate`
+        # is the production-shape check, so we run it too.
+        run: ./dmt -c scripts/fixtures/ci-mssql-pg.yaml validate
+
+      - name: Upload dmt logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmt-logs-${{ github.run_id }}
+          path: |
+            /tmp/dmt-ci.log
+            ${{ env.DMT_STATE_DIR }}
+          if-no-files-found: ignore

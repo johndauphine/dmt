@@ -1,0 +1,111 @@
+# Fast-feedback CI for every PR (#230).
+#
+# Goal: any PR breaking build / vet / unit tests / -race / lint / vuln
+# fails red within ~2 minutes so the author sees a problem before the
+# slower integration job in `integration.yml` finishes. Each job runs
+# in parallel under a shared go-mod cache so total wall-clock is
+# governed by the slowest job, not the sum.
+#
+# These checks are also runnable locally via the `make` targets
+# referenced in each step (CONTRIBUTING.md documents the exact
+# commands).
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel in-flight runs when a PR is updated — saves CI minutes and
+# stops stale results from racing the fresh ones to the PR UI.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build + unit tests + race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # -short skips the testing.Short()-gated integration tests; those
+      # run in integration.yml against real DB containers.
+      - name: go test (unit)
+        run: go test ./... -short
+
+      # -race finds data races in concurrency-heavy paths (transfer
+      # pipeline, writer pool). Unblocked by #249 closing on a
+      # progress-tracker race. CI fails red if any test reports DATA RACE.
+      - name: go test -race
+        run: go test ./... -race -short -timeout 5m
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        # v8+ of the action supports golangci-lint v2.x. v6 only knew how
+        # to parse v1.x version strings and crashed on v2.12.2 with a
+        # `parseVersion` error — surfaced as the second CI red on #230.
+        uses: golangci/golangci-lint-action@v8
+        with:
+          # v2.12.2 is the first release whose binary is built with a
+          # toolchain that can type-check Go-1.25 packages. v1.x was
+          # built with Go 1.23 and reported all our Go-1.25-only
+          # constructs as "package requires newer Go version" errors,
+          # which is how the initial #230 lint job failed. Bump in
+          # lockstep with the .golangci.yml `run.go:` directive when
+          # upgrading the project's Go version.
+          version: v2.12.2
+          # only-new-issues filters findings to those introduced by
+          # THIS PR's diff vs main. Pre-existing lint debt (18 findings
+          # on main as of #230 going green) is tracked as a follow-up
+          # — fixing it all in this PR would balloon scope, but every
+          # new PR is still gated on "don't add new issues."
+          only-new-issues: true
+          args: --timeout=5m
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install govulncheck
+        # Pin to a specific version (not @latest) so CI output is
+        # reproducible across PRs — bump intentionally in lockstep with
+        # security advisories (Copilot review on #230).
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+      # `continue-on-error: true` is deliberate (#230). govulncheck
+      # surfaces real CVEs the CI workflow couldn't fix in this PR:
+      # stdlib `net` findings with "Fixed in: go1.26.3" — a release
+      # that isn't yet out at the time of writing. Blocking PRs on
+      # vulns no one can patch would just teach reviewers to ignore
+      # the gate. This step is currently INFORMATIONAL — findings show
+      # in the PR check summary so operators see new CVEs the day
+      # they're published. Flip continue-on-error off once the
+      # toolchain patches catch up (tracked alongside the Go version
+      # bump).
+      - name: govulncheck (informational, see comment above)
+        run: govulncheck ./...
+        continue-on-error: true

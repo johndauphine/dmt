@@ -1,0 +1,47 @@
+# CI-only config for the mssql → postgres integration test (#230).
+# Loaded by `make integration-test` and the `integration.yml` workflow.
+# Mirrors so2010-minimal-test.yaml but pins target_mode=drop_recreate
+# and disables AI tuning so CI runs are deterministic.
+#
+# Local reproduction:
+#   make build && make test-dbs-up
+#   ./scripts/load-fixture-so2010-minimal.sh
+#   ./dmt -c scripts/fixtures/ci-mssql-pg.yaml run --confirm-backup
+
+source:
+  type: mssql
+  host: localhost
+  port: 1433
+  database: StackOverflow2010Minimal
+  user: sa
+  password: ${MSSQL_PASSWORD}
+  schema: dbo
+  encrypt: false
+  trust_server_cert: true
+
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2010_minimal_ci
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
+  ai_adjust: false
+  # Tight checkpoint settings so the resume path exercises in CI even on
+  # the tiny fixture (~30 rows).
+  chunk_size: 10
+  checkpoint_frequency: 1
+  # Isolate state so a local `make integration-test` run doesn't write
+  # to the operator's ~/.dmt/migrate.db (which holds saved profiles
+  # + run history). The CI workflow sets DMT_STATE_DIR explicitly;
+  # for local runs, scripts/integration-test.sh defaults it to
+  # <repo>/.dmt-ci-state. Codex review on #230.
+  data_dir: ${DMT_STATE_DIR}

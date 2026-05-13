@@ -12,6 +12,9 @@ dmt-*
 # via ${VAR} expansion). See #178 / docs/FIXTURES.md.
 !scripts/fixtures/*.yaml
 !scripts/fixtures/*.yml
+# CI workflow definitions live under .github/workflows/ and are required
+# in-repo for GitHub Actions (#230).
+!.github/workflows/*.yml
 
 # State database
 *.db
@@ -39,3 +42,7 @@ vendor/
 *.bak
 *.png
 *.jpg
+
+# Isolated state dir for integration tests (#230). See
+# scripts/integration-test.sh and scripts/fixtures/ci-mssql-pg.yaml.
+.dmt-ci-state/
