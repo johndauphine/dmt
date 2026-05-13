@@ -887,6 +887,14 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
 
+		// Seed Slack webhook from the global secrets file so the wizard
+		// shows the current value as Enter-to-keep, regardless of whether
+		// AI was previously configured. Capture Original too so a failed
+		// write can revert without leaving a misleading "configured" hint.
+		loadedWebhook := setup.LoadExistingSlackWebhook()
+		m.setupState.SlackWebhook = loadedWebhook
+		m.setupState.SlackWebhookOriginal = loadedWebhook
+
 		configFile, profileName := parseConfigArgs(parts)
 		// Always honor the requested path so /setup @newfile.yaml saves
 		// to newfile.yaml even when it doesn't exist yet. The os.Stat
@@ -1986,6 +1994,20 @@ func (m *Model) processSetupAutoSteps() tea.Cmd {
 				return nil
 			}
 			m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Secrets saved to %s", secrets.GetSecretsPath())) + "\n")
+			m.setupState.Process("")
+
+		case setup.StepWriteSlackSecret:
+			if err := m.setupState.WriteSlackSecret(); err != nil {
+				errMsg := m.setupState.Process(err.Error())
+				m.appendOutput(styleError.Render(fmt.Sprintf("  %s", errMsg)) + "\n")
+				m.renderSetupPrompt()
+				return nil
+			}
+			if m.setupState.SlackWebhook == "" {
+				m.appendOutput(styleSuccess.Render("  Slack webhook cleared") + "\n")
+			} else {
+				m.appendOutput(styleSuccess.Render(fmt.Sprintf("  Slack webhook saved to %s", secrets.GetSecretsPath())) + "\n")
+			}
 			m.setupState.Process("")
 
 		case setup.StepSourceConnTest, setup.StepTargetConnTest:

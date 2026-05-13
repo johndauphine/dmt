@@ -32,6 +32,27 @@ func (s *State) WriteSecretsFile() error {
 	return secrets.Save(updates)
 }
 
+// WriteSlackSecret persists the wizard's Slack webhook URL to the global
+// secrets file. Empty string explicitly clears the value (see
+// secrets.SaveSlackWebhook for why this can't go through secrets.Save).
+func (s *State) WriteSlackSecret() error {
+	return secrets.SaveSlackWebhook(s.SlackWebhook)
+}
+
+// LoadExistingSlackWebhook returns the webhook URL currently stored in
+// the global secrets file, or "" if none is set or the file can't be
+// read. Callers seed State.SlackWebhook with this before entering the
+// wizard so edit mode shows the current value as a hit-Enter-to-keep
+// default.
+func LoadExistingSlackWebhook() string {
+	secrets.Reset()
+	cfg, err := secrets.Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.Notifications.Slack.WebhookURL
+}
+
 // WriteConfigFile marshals the config and writes it to the configured path.
 func (s *State) WriteConfigFile() error {
 	data, err := yaml.Marshal(&s.Config)

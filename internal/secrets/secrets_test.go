@@ -63,6 +63,94 @@ encryption:
 	}
 }
 
+func TestSaveSlackWebhookSetAndClear(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretsFile := filepath.Join(tmpDir, "test-secrets.yaml")
+	// Seed with pre-existing AI + master_key so we can also verify those
+	// survive a Slack write — the only thing that must change is the
+	// webhook URL.
+	seed := `
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "preserve-me"
+encryption:
+  master_key: "preserve-me-too"
+`
+	if err := os.WriteFile(secretsFile, []byte(seed), 0600); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	os.Setenv(SecretsFileEnvVar, secretsFile)
+	defer os.Unsetenv(SecretsFileEnvVar)
+
+	// Set a webhook.
+	if err := SaveSlackWebhook("https://hooks.example.invalid/services/T/B/X"); err != nil {
+		t.Fatalf("SaveSlackWebhook set: %v", err)
+	}
+	Reset()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load after set: %v", err)
+	}
+	if cfg.Notifications.Slack.WebhookURL != "https://hooks.example.invalid/services/T/B/X" {
+		t.Fatalf("webhook not persisted, got %q", cfg.Notifications.Slack.WebhookURL)
+	}
+	if cfg.AI.Providers["anthropic"].APIKey != "preserve-me" {
+		t.Fatal("AI provider api_key clobbered by Slack write")
+	}
+	if cfg.Encryption.MasterKey != "preserve-me-too" {
+		t.Fatal("master_key clobbered by Slack write")
+	}
+
+	// Clear by passing empty — the merge-skips-empty semantics in Save
+	// can't do this; SaveSlackWebhook bypasses merge for exactly this case.
+	if err := SaveSlackWebhook(""); err != nil {
+		t.Fatalf("SaveSlackWebhook clear: %v", err)
+	}
+	Reset()
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load after clear: %v", err)
+	}
+	if cfg.Notifications.Slack.WebhookURL != "" {
+		t.Fatalf("clear failed, webhook still %q", cfg.Notifications.Slack.WebhookURL)
+	}
+	// Other sections still intact.
+	if cfg.AI.Providers["anthropic"].APIKey != "preserve-me" {
+		t.Fatal("AI provider api_key clobbered by Slack clear")
+	}
+}
+
+func TestSaveSlackWebhookRefusesToOverwriteMalformedFile(t *testing.T) {
+	// Regression: a malformed existing secrets file used to silently
+	// parse into a zero-value Config, and the subsequent write would
+	// clobber whatever AI/encryption/migration_defaults content the
+	// operator had — destroying credentials. SaveSlackWebhook now
+	// surfaces the parse error and refuses to write.
+	tmpDir := t.TempDir()
+	secretsFile := filepath.Join(tmpDir, "test-secrets.yaml")
+	malformed := "ai:\n  default_provider: anthropic\n  providers:\n    anthropic:\n      api_key: \"oh-no-this-is-not-closed\n"
+	if err := os.WriteFile(secretsFile, []byte(malformed), 0600); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	os.Setenv(SecretsFileEnvVar, secretsFile)
+	defer os.Unsetenv(SecretsFileEnvVar)
+
+	if err := SaveSlackWebhook("https://hooks.example.invalid/services/T/B/X"); err == nil {
+		t.Fatal("expected parse error refusing to overwrite malformed secrets file")
+	}
+
+	// File contents must be unchanged after the refused write.
+	got, err := os.ReadFile(secretsFile)
+	if err != nil {
+		t.Fatalf("read after refused write: %v", err)
+	}
+	if string(got) != malformed {
+		t.Fatalf("malformed secrets file was modified despite refused write\nwant: %q\ngot:  %q", malformed, string(got))
+	}
+}
+
 func TestValidateCloudProviderRequiresAPIKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsFile := filepath.Join(tmpDir, "test-secrets.yaml")

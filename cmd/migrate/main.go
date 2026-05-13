@@ -1306,6 +1306,14 @@ func runSetup(c *cli.Context) error {
 	reader := bufio.NewReader(os.Stdin)
 	state := setup.NewState()
 
+	// Seed Slack webhook from the global secrets file so edit mode shows
+	// the current value as Enter-to-keep. Capture Original too so a
+	// failed write can revert without leaving a misleading "configured"
+	// hint.
+	loadedWebhook := setup.LoadExistingSlackWebhook()
+	state.SlackWebhook = loadedWebhook
+	state.SlackWebhookOriginal = loadedWebhook
+
 	if c.IsSet("output") {
 		state.ConfigPath = c.String("output")
 	}
@@ -1381,6 +1389,16 @@ func runSetup(c *cli.Context) error {
 					fmt.Printf("  Error: %s\n", result)
 				} else {
 					fmt.Printf("  Secrets saved to %s\n", secrets.GetSecretsPath())
+				}
+
+			case setup.StepWriteSlackSecret:
+				if err := state.WriteSlackSecret(); err != nil {
+					result = err.Error()
+					fmt.Printf("  Error: %s\n", result)
+				} else if state.SlackWebhook == "" {
+					fmt.Println("  Slack webhook cleared")
+				} else {
+					fmt.Printf("  Slack webhook saved to %s\n", secrets.GetSecretsPath())
 				}
 
 			case setup.StepWriteConfig:

@@ -11,6 +11,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Setup wizard prompts for Slack webhook URL** (#281). New Phase 1b
+  step (`StepSlackWebhook`) interposes between the AI prompts and the
+  Phase 2 source database configuration. Runs unconditionally — the
+  webhook is independent of AI, so users who skip AI still see the
+  prompt. Edit mode pre-populates from the existing
+  `~/.secrets/dmt-config.yaml` so Enter preserves the current value;
+  blank input on a fresh setup skips writing entirely; `-` or `none`
+  explicitly clears the stored webhook. The webhook lives only in
+  the global secrets file (matches existing CLAUDE.md guidance: AI
+  and Slack are global-only), not in the per-migration config.
+
+- **`secrets.SaveSlackWebhook`** (#281). New helper that sets the
+  Slack webhook URL with explicit-clear semantics (empty string
+  writes through), unlike `secrets.Save` whose merge logic skips
+  zero values. Preserves all other sections of the secrets file
+  (AI, Encryption, MigrationDefaults).
+
 - **Setup wizard loads existing config and offers Edit-vs-New** (#279).
   `/setup` (TUI) and `dmt setup -o existing.yaml` (CLI) used to always
   start from a blank slate even when the underlying state machine

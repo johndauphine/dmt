@@ -261,6 +261,48 @@ func Save(updates *Config) error {
 	return nil
 }
 
+// SaveSlackWebhook sets the Slack webhook URL in the secrets file,
+// preserving all other sections (AI, Encryption, MigrationDefaults).
+// Unlike Save's merge semantics, an empty url explicitly clears the
+// existing value — the setup wizard needs this so users can disable
+// notifications by clearing the webhook in the prompt.
+func SaveSlackWebhook(url string) error {
+	path := GetSecretsPath()
+
+	existing := &Config{}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		// Surface parse errors instead of swallowing them — a malformed
+		// existing file would otherwise leave `existing` as the zero
+		// Config and the subsequent write would clobber AI keys,
+		// encryption key, and migration defaults with just the Slack
+		// section. Caller should hand-fix the YAML.
+		if err := yaml.Unmarshal(data, existing); err != nil {
+			return fmt.Errorf("parsing existing secrets file (refusing to overwrite): %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading existing secrets file: %w", err)
+	}
+
+	existing.Notifications.Slack.WebhookURL = url
+
+	newData, err := yaml.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+
+	if _, err := EnsureSecretsDir(); err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
+		return fmt.Errorf("writing secrets file: %w", err)
+	}
+
+	Reset()
+	return nil
+}
+
 // mergeConfig merges updates into existing config, only overwriting non-zero values.
 func mergeConfig(existing, updates *Config) {
 	mergeAIConfig(&existing.AI, &updates.AI)
