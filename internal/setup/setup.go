@@ -114,6 +114,24 @@ func NewState() *State {
 	}
 }
 
+// ConnConfig returns a copy of s.Config with secret placeholders resolved,
+// suitable for connection testing. The wizard keeps raw `${env:...}` /
+// `${file:...}` values in s.Config so a re-save preserves them on disk;
+// connection tests need the resolved values to authenticate.
+//
+// In non-edit mode (fresh setup), s.Config has no placeholders and this
+// is effectively a deep copy. On expansion failure (env var missing,
+// file not found), falls back to returning s.Config so the test reports
+// an authentication failure rather than a setup error — the user can
+// then enter credentials manually.
+func (s *State) ConnConfig() config.Config {
+	resolved, err := s.Config.ResolveSecrets()
+	if err != nil {
+		return s.Config
+	}
+	return *resolved
+}
+
 // Prompt returns prompt info for the current step.
 func (s *State) Prompt() PromptInfo {
 	switch s.CurrentStep {
@@ -302,13 +320,18 @@ func (s *State) Prompt() PromptInfo {
 			Choices: []string{"y", "n"},
 		}
 	case StepWorkers:
+		if s.EditMode && s.Config.Migration.Workers == 0 {
+			// Loaded config omitted `workers:` — preserve the omission so
+			// runtime auto-tuning still applies. Enter leaves it unset.
+			return PromptInfo{
+				Text: "Workers (Enter = auto-detect at runtime)",
+			}
+		}
 		def := runtime.NumCPU()
 		if def > 8 {
 			def = 8
 		}
 		if s.Config.Migration.Workers > 0 {
-			// Workers=0 is unambiguously "not set" — non-zero means the
-			// user (or a prior wizard run) chose this value, preserve it.
 			def = s.Config.Migration.Workers
 		}
 		return PromptInfo{
@@ -701,14 +724,17 @@ func (s *State) Process(input string) string {
 
 	case StepWorkers:
 		if input == "" {
-			if s.Config.Migration.Workers == 0 {
+			// Fresh setup (Workers==0): apply NumCPU-capped default.
+			// EditMode + Workers==0: leave it 0 so the YAML round-trip
+			//   preserves the omission and runtime auto-tunes.
+			// Either mode + Workers>0: keep the existing value.
+			if !s.EditMode && s.Config.Migration.Workers == 0 {
 				def := runtime.NumCPU()
 				if def > 8 {
 					def = 8
 				}
 				s.Config.Migration.Workers = def
 			}
-			// If Workers was already set (loaded config), leave it alone.
 		} else {
 			workers, err := strconv.Atoi(input)
 			if err != nil || workers <= 0 {

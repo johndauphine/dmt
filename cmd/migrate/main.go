@@ -1345,19 +1345,22 @@ func runSetup(c *cli.Context) error {
 			case setup.StepSourceConnTest, setup.StepTargetConnTest:
 				fmt.Printf("  %s\n", info.Text)
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				// Resolve ${env:...} / ${file:...} placeholders for the test;
+				// state.Config keeps the raw form so a re-save preserves them.
+				conn := state.ConnConfig()
 				var connResult *setup.ConnTestResult
 				if state.CurrentStep == setup.StepSourceConnTest {
 					connResult = setup.TestConnection(ctx,
-						state.Config.Source.Type, state.Config.Source.Host,
-						state.Config.Source.Port, state.Config.Source.Database,
-						state.Config.Source.User, state.Config.Source.Password,
-						state.Config.Source.DSNOptions())
+						conn.Source.Type, conn.Source.Host,
+						conn.Source.Port, conn.Source.Database,
+						conn.Source.User, conn.Source.Password,
+						conn.Source.DSNOptions())
 				} else {
 					connResult = setup.TestConnection(ctx,
-						state.Config.Target.Type, state.Config.Target.Host,
-						state.Config.Target.Port, state.Config.Target.Database,
-						state.Config.Target.User, state.Config.Target.Password,
-						state.Config.Target.DSNOptions())
+						conn.Target.Type, conn.Target.Host,
+						conn.Target.Port, conn.Target.Database,
+						conn.Target.User, conn.Target.Password,
+						conn.Target.DSNOptions())
 				}
 				cancel()
 

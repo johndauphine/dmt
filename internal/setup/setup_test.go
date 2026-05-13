@@ -934,6 +934,55 @@ func TestEditModeWorkersPreserved(t *testing.T) {
 	}
 }
 
+func TestEditModeWorkersZeroOmissionPreserved(t *testing.T) {
+	// Config omitted `workers:` — Enter must leave it 0 so runtime
+	// auto-tuning still kicks in.
+	s := NewState()
+	s.EditMode = true
+	s.Config.Migration.Workers = 0
+	s.CurrentStep = StepWorkers
+
+	info := s.Prompt()
+	if info.Default != "" {
+		t.Fatalf("EditMode + Workers=0: prompt should not show a concrete default, got %q", info.Default)
+	}
+	s.Process("")
+	if s.Config.Migration.Workers != 0 {
+		t.Fatalf("blank input must preserve Workers=0 in EditMode, got %d", s.Config.Migration.Workers)
+	}
+}
+
+func TestFreshModeWorkersGetsNumCPUDefault(t *testing.T) {
+	s := NewState()
+	s.CurrentStep = StepWorkers
+	if info := s.Prompt(); info.Default == "" {
+		t.Fatal("fresh setup should show a concrete NumCPU-capped default")
+	}
+	s.Process("")
+	if s.Config.Migration.Workers <= 0 {
+		t.Fatalf("fresh setup blank input should materialize NumCPU default, got %d", s.Config.Migration.Workers)
+	}
+}
+
+func TestConnConfigResolvesEnvPlaceholders(t *testing.T) {
+	t.Setenv("DMT_TEST_PASSWORD", "s3cret")
+	s := NewState()
+	s.Config.Source.Password = "${env:DMT_TEST_PASSWORD}"
+	s.Config.Target.Password = "${env:DMT_TEST_PASSWORD}"
+
+	conn := s.ConnConfig()
+	if conn.Source.Password != "s3cret" {
+		t.Fatalf("ConnConfig should resolve env placeholder, got %q", conn.Source.Password)
+	}
+	if conn.Target.Password != "s3cret" {
+		t.Fatalf("ConnConfig should resolve target placeholder, got %q", conn.Target.Password)
+	}
+	// Raw state must remain untouched so a re-save preserves the placeholder.
+	if s.Config.Source.Password != "${env:DMT_TEST_PASSWORD}" {
+		t.Fatalf("ConnConfig must not mutate s.Config, got %q", s.Config.Source.Password)
+	}
+}
+
 func TestEditOrNewRejectsBadInput(t *testing.T) {
 	s := NewState()
 	s.ConfigPath = "config.yaml"

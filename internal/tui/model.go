@@ -2010,19 +2010,22 @@ func (m *Model) runSetupConnTest(step setup.Step) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
+		// Resolve ${env:...} / ${file:...} placeholders for the test;
+		// setupState.Config keeps the raw form so a re-save preserves them.
+		conn := m.setupState.ConnConfig()
 		var result *setup.ConnTestResult
 		if step == setup.StepSourceConnTest {
 			result = setup.TestConnection(ctx,
-				m.setupState.Config.Source.Type, m.setupState.Config.Source.Host,
-				m.setupState.Config.Source.Port, m.setupState.Config.Source.Database,
-				m.setupState.Config.Source.User, m.setupState.Config.Source.Password,
-				m.setupState.Config.Source.DSNOptions())
+				conn.Source.Type, conn.Source.Host,
+				conn.Source.Port, conn.Source.Database,
+				conn.Source.User, conn.Source.Password,
+				conn.Source.DSNOptions())
 		} else {
 			result = setup.TestConnection(ctx,
-				m.setupState.Config.Target.Type, m.setupState.Config.Target.Host,
-				m.setupState.Config.Target.Port, m.setupState.Config.Target.Database,
-				m.setupState.Config.Target.User, m.setupState.Config.Target.Password,
-				m.setupState.Config.Target.DSNOptions())
+				conn.Target.Type, conn.Target.Host,
+				conn.Target.Port, conn.Target.Database,
+				conn.Target.User, conn.Target.Password,
+				conn.Target.DSNOptions())
 		}
 
 		return SetupConnTestMsg{Step: step, Result: result}
