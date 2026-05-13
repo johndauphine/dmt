@@ -873,7 +873,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		}
 		if !loaded {
 			if _, err := os.Stat(configFile); err == nil {
-				if cfg, err := config.LoadWithOptions(configFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
+				// LoadRaw, not LoadWithOptions — placeholders like ${env:PASS}
+				// must survive a re-save so the wizard never writes resolved
+				// secrets to disk.
+				if cfg, err := config.LoadRaw(configFile); err == nil {
 					m.setupState.Config = *cfg
 					m.setupState.ConfigPath = configFile
 					loaded = true
@@ -885,6 +888,7 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		if loaded {
 			header = fmt.Sprintf("\n--- SETUP WIZARD: %s ---\n", m.setupState.ConfigPath)
 			m.setupState.CurrentStep = setup.StepEditOrNew
+			m.setupState.EditMode = true
 		} else {
 			header = "\n--- SETUP WIZARD ---\n"
 		}

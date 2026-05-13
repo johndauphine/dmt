@@ -97,6 +97,13 @@ type State struct {
 	Force         bool   // overwrite existing files
 	RunAnalysis   bool   // user wants to run AI analysis after setup
 	LastConnError string // last connection test error message
+	// EditMode is true when the wizard was launched against an existing
+	// config file (caller set CurrentStep=StepEditOrNew + populated Config).
+	// Bool-typed prompt defaults (create_indexes, create_foreign_keys)
+	// can't otherwise distinguish "user set false" from "field unset", so
+	// they look at this flag to decide whether to honor the loaded value
+	// or fall back to dmt's documented defaults.
+	EditMode bool
 }
 
 // NewState creates a new setup state with sensible defaults.
@@ -279,25 +286,30 @@ func (s *State) Prompt() PromptInfo {
 		}
 	case StepDateColumns:
 		return PromptInfo{
-			Text:    "Date columns for incremental sync (comma-separated, blank = full scans)",
+			Text:    "Date columns for incremental sync (comma-separated; Enter = keep, '-' = clear)",
 			Default: strings.Join(s.Config.Migration.DateUpdatedColumns, ","),
 		}
 	case StepCreateIndexes:
 		return PromptInfo{
 			Text:    "Create indexes? (y/n)",
-			Default: "y",
+			Default: s.boolDefault(s.Config.Migration.CreateIndexes, "y"),
 			Choices: []string{"y", "n"},
 		}
 	case StepCreateFKs:
 		return PromptInfo{
 			Text:    "Create foreign keys? (y/n)",
-			Default: "y",
+			Default: s.boolDefault(s.Config.Migration.CreateForeignKeys, "y"),
 			Choices: []string{"y", "n"},
 		}
 	case StepWorkers:
 		def := runtime.NumCPU()
 		if def > 8 {
 			def = 8
+		}
+		if s.Config.Migration.Workers > 0 {
+			// Workers=0 is unambiguously "not set" — non-zero means the
+			// user (or a prior wizard run) chose this value, preserve it.
+			def = s.Config.Migration.Workers
 		}
 		return PromptInfo{
 			Text:    "Workers",
@@ -358,9 +370,11 @@ func (s *State) Process(input string) string {
 		case "n", "new":
 			// User chose to start fresh — discard the pre-loaded config but
 			// preserve ConfigPath so we save back to the same file.
+			// Also clear EditMode so bool defaults revert to "fresh" values.
 			path := s.ConfigPath
 			s.Config = config.Config{}
 			s.ConfigPath = path
+			s.EditMode = false
 		default:
 			return "Enter e to edit, n to start new"
 		}
@@ -643,7 +657,15 @@ func (s *State) Process(input string) string {
 		}
 
 	case StepDateColumns:
-		if input != "" {
+		switch input {
+		case "":
+			// Empty input preserves the existing list (wizard convention:
+			// Enter accepts the displayed default).
+		case "-", "none":
+			// Explicit clear — required to remove a previously-set list,
+			// since blank means "keep" everywhere else in the wizard.
+			s.Config.Migration.DateUpdatedColumns = nil
+		default:
 			parts := strings.Split(input, ",")
 			cols := make([]string, 0, len(parts))
 			for _, p := range parts {
@@ -653,13 +675,12 @@ func (s *State) Process(input string) string {
 			}
 			s.Config.Migration.DateUpdatedColumns = cols
 		}
-		// Empty input preserves any pre-loaded list as-is.
 		s.CurrentStep = StepCreateIndexes
 
 	case StepCreateIndexes:
 		v := strings.ToLower(input)
 		if v == "" {
-			v = "y"
+			v = s.boolDefault(s.Config.Migration.CreateIndexes, "y")
 		}
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
@@ -670,7 +691,7 @@ func (s *State) Process(input string) string {
 	case StepCreateFKs:
 		v := strings.ToLower(input)
 		if v == "" {
-			v = "y"
+			v = s.boolDefault(s.Config.Migration.CreateForeignKeys, "y")
 		}
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
@@ -679,12 +700,15 @@ func (s *State) Process(input string) string {
 		s.CurrentStep = StepWorkers
 
 	case StepWorkers:
-		def := runtime.NumCPU()
-		if def > 8 {
-			def = 8
-		}
 		if input == "" {
-			s.Config.Migration.Workers = def
+			if s.Config.Migration.Workers == 0 {
+				def := runtime.NumCPU()
+				if def > 8 {
+					def = 8
+				}
+				s.Config.Migration.Workers = def
+			}
+			// If Workers was already set (loaded config), leave it alone.
 		} else {
 			workers, err := strconv.Atoi(input)
 			if err != nil || workers <= 0 {
@@ -888,4 +912,19 @@ func defaultIfEmpty(val, def string) string {
 		return val
 	}
 	return def
+}
+
+// boolDefault returns "y"/"n" for prompt display.
+// In EditMode (config was loaded), the loaded value wins regardless of its
+// zero-ness — a user who explicitly set `create_indexes: false` must see
+// "n" as the default and Enter must preserve it. In fresh-setup mode,
+// fall back to the supplied dmt default ("y" for create_indexes/FKs).
+func (s *State) boolDefault(loaded bool, freshDefault string) string {
+	if s.EditMode {
+		if loaded {
+			return "y"
+		}
+		return "n"
+	}
+	return freshDefault
 }

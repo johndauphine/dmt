@@ -1313,10 +1313,13 @@ func runSetup(c *cli.Context) error {
 
 	// If the target config already exists, load it so the wizard offers
 	// edit-vs-new and seeds each prompt with the user's prior values.
+	// LoadRaw (not Load) — placeholders like ${env:PASS} must survive a
+	// re-save so the wizard never writes resolved secrets to disk.
 	if _, err := os.Stat(state.ConfigPath); err == nil {
-		if cfg, err := config.LoadWithOptions(state.ConfigPath, config.LoadOptions{SuppressWarnings: true}); err == nil {
+		if cfg, err := config.LoadRaw(state.ConfigPath); err == nil {
 			state.Config = *cfg
 			state.CurrentStep = setup.StepEditOrNew
+			state.EditMode = true
 		}
 	}
 

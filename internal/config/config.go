@@ -501,6 +501,25 @@ func expandYAMLTemplates(yamlStr string) (string, error) {
 	return result, nil
 }
 
+// LoadRaw reads a config YAML for *editing* — no secret-template expansion,
+// no defaults application, no validation. Placeholders like ${env:DB_PASSWORD}
+// and ${file:/run/secrets/x} survive as literal strings so the setup wizard
+// can re-marshal them back to disk without exposing resolved secrets.
+//
+// This is intentionally narrow: the migration runtime must always use Load /
+// LoadWithOptions so that templates resolve before connection attempts.
+func LoadRaw(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config file: %w", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	return &cfg, nil
+}
+
 // LoadBytes reads configuration from YAML bytes.
 func LoadBytes(data []byte) (*Config, error) {
 	// Expand templates (${file:path}, ${env:VAR}, and legacy ${VAR} syntax)

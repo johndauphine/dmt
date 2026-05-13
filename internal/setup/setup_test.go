@@ -856,6 +856,84 @@ func TestEditOrNewResetsOnFresh(t *testing.T) {
 	}
 }
 
+func TestDateColumnsDashClearsList(t *testing.T) {
+	s := NewState()
+	s.Config.Migration.DateUpdatedColumns = []string{"LastActivityDate"}
+	s.CurrentStep = StepDateColumns
+
+	s.Process("-")
+	if len(s.Config.Migration.DateUpdatedColumns) != 0 {
+		t.Fatalf("'-' should clear DateUpdatedColumns, got %v",
+			s.Config.Migration.DateUpdatedColumns)
+	}
+	if s.CurrentStep != StepCreateIndexes {
+		t.Fatalf("expected StepCreateIndexes after clear, got %d", s.CurrentStep)
+	}
+}
+
+func TestDateColumnsBlankPreserves(t *testing.T) {
+	s := NewState()
+	s.Config.Migration.DateUpdatedColumns = []string{"LastActivityDate", "CreationDate"}
+	s.CurrentStep = StepDateColumns
+
+	s.Process("")
+	want := []string{"LastActivityDate", "CreationDate"}
+	if !reflect.DeepEqual(s.Config.Migration.DateUpdatedColumns, want) {
+		t.Fatalf("blank input should preserve existing list, got %v",
+			s.Config.Migration.DateUpdatedColumns)
+	}
+}
+
+func TestEditModePreservesBoolFalseDefaults(t *testing.T) {
+	// User had `create_indexes: false` in their YAML — editing should
+	// show "n" as default and Enter should preserve false.
+	s := NewState()
+	s.EditMode = true
+	s.Config.Migration.CreateIndexes = false
+	s.Config.Migration.CreateForeignKeys = false
+	s.CurrentStep = StepCreateIndexes
+
+	if got := s.Prompt().Default; got != "n" {
+		t.Fatalf("EditMode + loaded false: expected default 'n', got %q", got)
+	}
+	s.Process("")
+	if s.Config.Migration.CreateIndexes {
+		t.Fatal("Enter on 'n' default should preserve CreateIndexes=false")
+	}
+	if got := s.Prompt().Default; got != "n" {
+		t.Fatalf("EditMode + loaded FKs false: expected default 'n', got %q", got)
+	}
+	s.Process("")
+	if s.Config.Migration.CreateForeignKeys {
+		t.Fatal("Enter on 'n' default should preserve CreateForeignKeys=false")
+	}
+}
+
+func TestFreshModeBoolDefaults(t *testing.T) {
+	// No config loaded — bool prompts should default to "y" (dmt's fresh
+	// default) even though the zero-value bool is false.
+	s := NewState()
+	s.CurrentStep = StepCreateIndexes
+	if got := s.Prompt().Default; got != "y" {
+		t.Fatalf("fresh mode: expected default 'y', got %q", got)
+	}
+}
+
+func TestEditModeWorkersPreserved(t *testing.T) {
+	s := NewState()
+	s.EditMode = true
+	s.Config.Migration.Workers = 16
+	s.CurrentStep = StepWorkers
+
+	if got := s.Prompt().Default; got != "16" {
+		t.Fatalf("loaded Workers should drive default, got %q", got)
+	}
+	s.Process("")
+	if s.Config.Migration.Workers != 16 {
+		t.Fatalf("blank input should preserve Workers=16, got %d", s.Config.Migration.Workers)
+	}
+}
+
 func TestEditOrNewRejectsBadInput(t *testing.T) {
 	s := NewState()
 	s.ConfigPath = "config.yaml"
