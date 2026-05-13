@@ -9,6 +9,96 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Preflight health checks** (#228). New `TaskPreFlight` phase 0
+  runs BEFORE schema extraction or DDL: connection ping, supported
+  DB version (PG 12+, MSSQL 2016+, MySQL 5.7+/MariaDB 10.3+),
+  encoding/collation, pool headroom (`max_connections - current_connections
+  ≥ workers + 5`), per-driver privilege probes via information-schema
+  introspection, and a backup-acknowledgment guard that requires
+  `--confirm-backup` when `drop_recreate` mode runs against a
+  non-empty target schema. Misconfigured environments now fail in
+  ~0.5s with an actionable remedy instead of dying minutes into a
+  partial run. Unified into a single `dmt preflight` subcommand
+  (with `health-check` kept as an alias for existing Airflow/k8s
+  probes). Opt-out per check via `--skip-preflight=name1,name2`
+  or `--skip-preflight=all`.
+
+- **Observability surface** (#229). Three coordinated surfaces, all
+  off by default, all sharing the same dimension names (`run_id`,
+  `phase`, `table`, `source_db`, `target_db`):
+  - `--log-format=json` now emits structured fields on every line
+    via slog-style base attributes. Existing printf-style log calls
+    work unchanged; new `logging.Event` API for hot-path structured
+    calls.
+  - `--metrics-addr=:9090` binds a Prometheus `/metrics` endpoint
+    with 11 metrics (`rows_total`, `bytes_total`, `errors_total`,
+    `retries_total`, `chunk_duration_seconds`, `phase_duration_seconds`,
+    `writer_queue_depth`, `writers_active`, `runtime_tuning_adjustments_total`,
+    `ai_fallback_total`, `migration_info`). Per-run-labeled gauges
+    cleared on RunComplete to bound cardinality.
+  - `--otel-endpoint=URL` exports OTLP HTTP traces — one root span
+    per run, child spans per orchestrator phase. Chunk milestones
+    emit as span events on the phase span rather than separate spans
+    (avoids flooding tracing backends on 100M-row migrations).
+  - New `docs/OBSERVABILITY.md` + Grafana dashboard JSON.
+
+- **CI gating on every PR** (#230). `.github/workflows/ci.yml` runs
+  `go build`, `go vet`, unit tests, `go test -race`, golangci-lint
+  v2.12.2 (only-new-issues — pre-existing lint debt isn't a PR
+  blocker), and govulncheck v1.1.4. `.github/workflows/integration.yml`
+  spins up MSSQL 2022 + Postgres 16 service containers, loads the
+  SO2010-minimum fixture, runs a real `dmt mssql → postgres` migration,
+  and asserts row-count parity. dmt logs uploaded as artifacts on
+  failure. Local reproduction documented in `CONTRIBUTING.md`
+  (`make integration-test` runs the exact same script CI does, with
+  isolated state at `./.dmt-ci-state/` so the operator's
+  `~/.dmt/migrate.db` is never touched). govulncheck is currently
+  informational (`continue-on-error: true`) until stdlib `net`
+  findings have a released Go toolchain fix.
+
+- **Release policy + process** (#233). New `VERSIONING.md` documents
+  SemVer triggers (MAJOR/MINOR/PATCH), stability commitments
+  (stable vs experimental fields), and the deprecation cycle for
+  breaking changes. New `RELEASE.md` documents how to cut a release,
+  release cadence, the hotfix path, and pre-release/RC tagging.
+  Goes binding at v1.0.0; best-effort before.
+
+### Fixed
+
+- **ROW_NUMBER pagination resume safety** (#227, #266, #267). Four
+  layered correctness bugs that previously caused silent data loss
+  or duplication on resume of composite/varchar-PK tables, all
+  closed:
+  1. Resume preflight was partition-blind: large ROW_NUMBER tables
+     have partition-level checkpoints, but the truncation decision
+     checked only the table-level checkpoint and used
+     `SupportsKeysetPagination()` (which excludes ROW_NUMBER) to
+     gate partition-awareness. Fixed: use `HasPK()` to match the
+     actual partitioning decision in `job_builder.go`, and clear
+     partition-level checkpoints whenever a target is truncated.
+  2. Per-table checkpoints lag acked rows by up to
+     `checkpoint_freq - 1` chunks. On crash + resume those chunks
+     would replay, and a plain INSERT would crash on duplicate PK.
+     Fixed: when the orchestrator dispatches a job as part of a
+     Resume() call, the writer routes through driver-specific
+     idempotent paths (PG: temp staging + COPY + `INSERT...SELECT
+     ON CONFLICT DO NOTHING`; MySQL: `ON DUPLICATE KEY UPDATE
+     pk_col = pk_col` — NOT `INSERT IGNORE`, which masks
+     data-conversion errors; MSSQL: per-partition staging + insert-only
+     `MERGE`). Replayed rows become silent no-ops; non-resume
+     `drop_recreate` runs are unchanged.
+  3. Stale-checkpoint clears in resume preflight were silently
+     swallowing errors, so a failed clear could leave the system in
+     the exact pre-#227 state. Fixed: clears are now fatal — the
+     run aborts with `ConfigError` if either `ClearTransferProgress`
+     or `ClearPartitionTransferProgress` fails.
+  4. Resume preflight now also verifies that partition progress
+     records are consistent with the partition task graph (#267) —
+     a stale partition_id whose task no longer exists in the run
+     surfaces as a resume-time error rather than silent skip.
+
 ### Breaking Changes
 
 - **Partial migrations exit non-zero by default** (#248). When one or

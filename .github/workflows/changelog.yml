@@ -1,0 +1,131 @@
+# CHANGELOG-entry gate for PRs (#233).
+#
+# Every PR that changes source files (anything outside docs/ + the .github/
+# scaffold) must add a line under the `## [Unreleased]` section of
+# CHANGELOG.md. Opt-out with the `no-changelog` PR label for trivial
+# cases (typo fixes, dependency bumps that don't change behavior,
+# CI-only changes).
+#
+# The check is intentionally cheap: a single diff scan against the
+# merge base, no Go toolchain needed. Runs in ~5s.
+
+name: changelog
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: changelog-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog-entry:
+    name: CHANGELOG entry required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need merge-base for the diff comparison; setup-action's
+          # default shallow clone (depth=1) lacks the history.
+          fetch-depth: 0
+
+      - name: Check for CHANGELOG entry
+        env:
+          # PR_LABELS is a JSON array of label names attached to this PR.
+          # `contains()` doesn't read directly; we shell out and grep.
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          # Opt-out — `no-changelog` label skips the check. Useful for
+          # typo fixes, CI-only changes, and dependency bumps.
+          if echo "$PR_LABELS" | grep -q '"no-changelog"'; then
+            echo "PR labeled 'no-changelog' — skipping CHANGELOG entry check."
+            exit 0
+          fi
+
+          # Use the MERGE-BASE between this PR and the base branch, not
+          # the tip of the base branch. Otherwise, when main moves ahead
+          # while the PR is in review, unrelated source changes on main
+          # leak into our diff and falsely flag docs-only PRs as
+          # source-changing (Copilot review on #233). The merge base
+          # matches what GitHub's PR view shows.
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
+
+          # Did this PR touch source files? Anything outside of docs/,
+          # *.md (root-level docs), .github/ (except workflows themselves),
+          # and other clearly non-shipping paths counts as a source change.
+          SOURCE_CHANGED=0
+          while read -r path; do
+            case "$path" in
+              docs/*|*.md|LICENSE|.gitignore|.github/CODEOWNERS|examples/*)
+                continue ;;
+              *)
+                SOURCE_CHANGED=1
+                break ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" HEAD)
+
+          if [ "$SOURCE_CHANGED" -eq 0 ]; then
+            echo "PR touches only docs/examples/license — CHANGELOG entry not required."
+            exit 0
+          fi
+
+          # Source change present — require a CHANGELOG.md edit that
+          # adds at least one bulleted line UNDER the `## [Unreleased]`
+          # section specifically. Naive `^+- ` matches additions
+          # anywhere in the diff, which release PRs (which move
+          # entries from [Unreleased] to a versioned section) would
+          # falsely satisfy. We instead post-process the merged file:
+          # find [Unreleased], walk forward until the next versioned
+          # section, and verify at least one bullet exists in between
+          # (Copilot review on #233).
+          unreleased_bullets="$(
+            awk '
+              /^## \[Unreleased\]/ { in_section = 1; next }
+              /^## \[/             { in_section = 0 }
+              in_section && /^- /  { count++ }
+              END                  { print count + 0 }
+            ' CHANGELOG.md
+          )"
+          base_unreleased_bullets="$(
+            git show "$BASE_SHA":CHANGELOG.md | awk '
+              /^## \[Unreleased\]/ { in_section = 1; next }
+              /^## \[/             { in_section = 0 }
+              in_section && /^- /  { count++ }
+              END                  { print count + 0 }
+            '
+          )"
+          if [ "$unreleased_bullets" -le "$base_unreleased_bullets" ]; then
+            cat <<'MSG' >&2
+          PR touches source files but adds no new bullet under
+          CHANGELOG.md's [Unreleased] section.
+
+          Add a line describing your change under one of:
+            ### Added
+            ### Changed
+            ### Deprecated
+            ### Removed
+            ### Fixed
+            ### Security
+            ### Breaking Changes
+
+          Reference your issue or PR number. Example:
+
+            - Backup-acknowledgment guard now requires --confirm-backup
+              for drop_recreate runs against non-empty targets (#228).
+
+          For trivial changes (typo fix, CI-only, dep bump), add the
+          'no-changelog' label to skip this check. See VERSIONING.md
+          for the policy.
+          MSG
+            exit 1
+          fi
+
+          echo "CHANGELOG entry found — gate satisfied."
