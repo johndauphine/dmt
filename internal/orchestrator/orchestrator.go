@@ -19,6 +19,7 @@ import (
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/notify"
+	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
@@ -89,6 +90,28 @@ type Orchestrator struct {
 	// Set by transferAll after each run; used by UpdateAITuningResult to persist
 	// retry pressure into ai_tuning_history.
 	lastChunkRetryCount int
+
+	// metrics is the observability surface for #229. Always non-nil —
+	// observability.Noop() satisfies the interface when metrics are
+	// disabled, so call sites can invoke methods unconditionally without
+	// nil checks. SetMetrics() swaps in a real Registry when --metrics-addr
+	// is supplied.
+	metrics observability.Metrics
+
+	// phaseStart tracks when the current phase began so setPhase can record
+	// the duration of the OUTGOING phase against the metrics histogram.
+	// Zero value means "no prior phase" — first call records nothing.
+	phaseStart time.Time
+	phaseName  string
+
+	// traceCtx carries the active run span's context for downstream phase
+	// spans (#229). Set in Run/Resume after the run span starts; setPhase
+	// derives a phase span from it. Nil outside Run/Resume.
+	traceCtx context.Context
+
+	// phaseSpan is the active phase span — ended when setPhase transitions
+	// or when Run/Resume returns. Nil before the first setPhase call.
+	phaseSpan observability.Span
 }
 
 // Options configures the orchestrator.
@@ -325,12 +348,22 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		cfg.Target.Type,
 	)
 
+	// Reset the process-wide Metrics surface to noop. A prior orchestrator
+	// instance (long-running TUI, tests, sidecar deployments) may have
+	// installed a real Registry via SetMetrics; without this reset, a
+	// subsequent NewWithOptions caller that doesn't pass --metrics-addr
+	// would still emit metrics through observability.Global() from the
+	// stale registry. setupObservability() reinstalls a real surface only
+	// when the flag is set AND Start() succeeds (Copilot review).
+	observability.SetGlobal(observability.Noop())
+
 	return &Orchestrator{
 		config:     cfg,
 		sourcePool: sourcePool,
 		targetPool: targetPool,
 		state:      state,
 		progress:   progress.New(),
+		metrics:    observability.Noop(),
 		notifier:   notifier,
 		opts:       opts,
 		targetMode: targetModeStrategy,
@@ -356,6 +389,69 @@ func (o *Orchestrator) SetRunContext(profileName, configPath string) {
 	o.runConfig = configPath
 }
 
+// setPhase updates the progress tracker AND the structured-logging
+// base attribute so every subsequent log line, metric label, and trace
+// span carries the current phase (#229). Phase names are short snake_case
+// (e.g. "transfer", "creating_tables") so they're stable identifiers in
+// observability tooling.
+//
+// setPhase also records the duration of the OUTGOING phase against the
+// phase_duration_seconds histogram and ends its OTLP trace span before
+// stamping the new phase. The FINAL phase's duration is captured by
+// endPhaseSpan() which Run()/Resume() invoke via defer.
+func (o *Orchestrator) setPhase(phase string) {
+	if !o.phaseStart.IsZero() && o.phaseName != "" {
+		o.metrics.ObservePhaseDuration(o.phaseName, time.Since(o.phaseStart).Seconds())
+	}
+	if o.phaseSpan != nil {
+		o.phaseSpan.End()
+		o.phaseSpan = nil
+	}
+	o.progress.SetPhase(phase)
+	logging.SetBaseAttr("phase", phase)
+	o.phaseStart = time.Now()
+	o.phaseName = phase
+	// Start a new phase span attached to the run span — observability.Tracer
+	// returns a no-op tracer when OTLP isn't configured, so this is free
+	// when traces are disabled.
+	if o.traceCtx != nil {
+		_, o.phaseSpan = observability.Tracer().StartSpan(o.traceCtx, "phase."+phase, "phase", phase)
+	}
+}
+
+// endPhaseSpan ends the current phase span and records final duration to
+// metrics. Called by Run/Resume in a defer so the last phase doesn't get
+// stuck "open" after the run ends. Safe to call when no phase is active.
+func (o *Orchestrator) endPhaseSpan() {
+	if !o.phaseStart.IsZero() && o.phaseName != "" {
+		o.metrics.ObservePhaseDuration(o.phaseName, time.Since(o.phaseStart).Seconds())
+		o.phaseStart = time.Time{}
+		o.phaseName = ""
+	}
+	if o.phaseSpan != nil {
+		o.phaseSpan.End()
+		o.phaseSpan = nil
+	}
+}
+
+// SetMetrics installs a non-noop metrics implementation. Called by the
+// CLI when --metrics-addr is set and the Registry has been started.
+// Safe to call before Run/Resume; effects take hold on the next phase
+// transition.
+//
+// Also installs m as the process-wide Metrics surface (observability.Global)
+// so hot-path call sites in transfer/writer pool can record metrics
+// without threading the surface through every constructor.
+func (o *Orchestrator) SetMetrics(m observability.Metrics) {
+	if m == nil {
+		o.metrics = observability.Noop()
+		observability.SetGlobal(observability.Noop())
+		return
+	}
+	o.metrics = m
+	observability.SetGlobal(m)
+}
+
 // SetProgressReporter configures JSON progress reporting for Airflow/automation.
 // When enabled, disables the terminal progress bar and emits JSON updates to stderr.
 func (o *Orchestrator) SetProgressReporter(reporter progress.Reporter, interval time.Duration) {
@@ -370,6 +466,35 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		runID = uuid.New().String()[:8]
 	}
 	startTime := time.Now()
+
+	// #229 observability: stamp run_id + source/target DB type + an
+	// initial phase ("starting") onto every log line, metric label,
+	// and trace span for the rest of this run. Without the initial
+	// phase value, the Info("Starting migration run...") lines below
+	// would log with `phase=<missing>` until the first setPhase call
+	// (Copilot review). Cleared via defer so process-resident state
+	// (TUI, tests) doesn't leak attributes from a prior run into the next.
+	logging.WithFields(map[string]any{
+		"run_id":    runID,
+		"source_db": o.sourcePool.DBType(),
+		"target_db": o.targetPool.DBType(),
+		"phase":     "starting",
+	})
+	o.metrics.RunStarted(runID, o.sourcePool.DBType(), o.targetPool.DBType())
+	defer logging.ClearBaseAttrs()
+	defer o.metrics.RunComplete(runID)
+
+	// One root span per run; phase spans below attach as children (#229).
+	// No-op when OTLP isn't configured.
+	runCtx, runSpan := observability.Tracer().StartSpan(ctx, "dmt.run",
+		"run_id", runID, "source_db", o.sourcePool.DBType(), "target_db", o.targetPool.DBType())
+	o.traceCtx = runCtx
+	defer func() {
+		o.endPhaseSpan()
+		runSpan.End()
+		o.traceCtx = nil
+	}()
+
 	logging.Info("Starting migration run: %s", runID)
 	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
 
@@ -394,7 +519,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// headroom. Fail loud and early rather than minutes into a partial run
 	// (#228). Run AFTER CreateRun so the failed-preflight outcome shows up
 	// in the run history; the operator can grep `dmt history` for it later.
-	o.progress.SetPhase("preflight")
+	o.setPhase("preflight")
 	logging.Debug("Running preflight checks...")
 	if err := o.runPreFlight(ctx); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -403,7 +528,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Extract schema
-	o.progress.SetPhase("extracting_schema")
+	o.setPhase("extracting_schema")
 	logging.Debug("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
@@ -487,7 +612,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
 
 	// Create target schema and tables
-	o.progress.SetPhase("creating_tables")
+	o.setPhase("creating_tables")
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
@@ -502,7 +627,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Transfer data
-	o.progress.SetPhase("transfer")
+	o.setPhase("transfer")
 	logging.Debug("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
 	transferStart := time.Now()
@@ -542,7 +667,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Finalize (only for successful tables)
-	o.progress.SetPhase("finalizing")
+	o.setPhase("finalizing")
 	logging.Debug("Finalizing...")
 	o.state.UpdatePhase(runID, "finalizing")
 	if err := o.targetMode.Finalize(ctx, successTables); err != nil {
@@ -552,7 +677,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	// Validate (only for successful tables)
-	o.progress.SetPhase("validating")
+	o.setPhase("validating")
 	logging.Debug("Validating...")
 	o.state.UpdatePhase(runID, "validating")
 	o.tables = successTables // Update for validation
@@ -924,13 +1049,39 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	startTime := time.Now()
+
+	// #229 observability: same per-run attribute decoration as Run(),
+	// including the initial "starting" phase so early log lines carry
+	// a phase attr (Copilot review). resume=true differentiates the
+	// two flows in log queries.
+	logging.WithFields(map[string]any{
+		"run_id":    run.ID,
+		"source_db": o.sourcePool.DBType(),
+		"target_db": o.targetPool.DBType(),
+		"resume":    true,
+		"phase":     "starting",
+	})
+	o.metrics.RunStarted(run.ID, o.sourcePool.DBType(), o.targetPool.DBType())
+	defer logging.ClearBaseAttrs()
+	defer o.metrics.RunComplete(run.ID)
+
+	// One root span per Resume(), same shape as Run() but with resume=true.
+	runCtx, runSpan := observability.Tracer().StartSpan(ctx, "dmt.resume",
+		"run_id", run.ID, "source_db", o.sourcePool.DBType(), "target_db", o.targetPool.DBType(), "resume", true)
+	o.traceCtx = runCtx
+	defer func() {
+		o.endPhaseSpan()
+		runSpan.End()
+		o.traceCtx = nil
+	}()
+
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
 
 	// Preflight (phase 0) — same gate as Run(). A resume can fail if the
 	// environment changed between runs (privileges revoked, version
 	// downgraded, target unreachable). Operator can opt out per-check with
 	// --skip-preflight if they know what they're doing. #228.
-	o.progress.SetPhase("preflight")
+	o.setPhase("preflight")
 	logging.Debug("Running preflight checks...")
 	if err := o.runPreFlight(ctx); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1003,7 +1154,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		o.tables = tables // Use all tables for finalize/validate
 
 		// Finalize
-		o.progress.SetPhase("finalizing")
+		o.setPhase("finalizing")
 		logging.Debug("Finalizing...")
 		if err := o.targetMode.Finalize(ctx, tables); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1012,7 +1163,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		}
 
 		// Validate
-		o.progress.SetPhase("validating")
+		o.setPhase("validating")
 		logging.Debug("Validating...")
 		if err := o.Validate(ctx); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1120,7 +1271,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Transfer only the incomplete tables
-	o.progress.SetPhase("transfer")
+	o.setPhase("transfer")
 	logging.Debug("Transferring data...")
 	transferStart := time.Now()
 	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer, true)
@@ -1160,7 +1311,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	// Finalize (uses successful tables for constraints)
 	o.tables = successTables
-	o.progress.SetPhase("finalizing")
+	o.setPhase("finalizing")
 	logging.Debug("Finalizing...")
 	if err := o.targetMode.Finalize(ctx, successTables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1169,7 +1320,7 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 	}
 
 	// Validate successful tables
-	o.progress.SetPhase("validating")
+	o.setPhase("validating")
 	logging.Debug("Validating...")
 	if err := o.Validate(ctx); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())

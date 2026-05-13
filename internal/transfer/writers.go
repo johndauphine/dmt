@@ -2,9 +2,11 @@ package transfer
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/target"
@@ -30,6 +32,12 @@ type writerPool struct {
 	tuner      RuntimeTuner
 	aiAdjuster WriteErrorAdjuster
 	tableName  string // original table name (for tuner per-table overrides)
+
+	// #229 observability: bytes_total uses this estimate to convert a
+	// row count into a wire-size approximation. Captured from the table's
+	// Columns at pool construction (driver.Table.GoHeapBytesPerRow).
+	// Zero means "skip bytes accounting" — emits rows_total only.
+	bytesPerRow int64
 }
 
 // writerPoolConfig holds the configuration for creating a writer pool.
@@ -56,6 +64,11 @@ type writerPoolConfig struct {
 	Tuner      RuntimeTuner
 	AIAdjuster WriteErrorAdjuster
 	TableName  string
+
+	// BytesPerRow is the per-row size estimate for bytes_total metric (#229).
+	// Pull from driver.Table.GoHeapBytesPerRow at the call site so the metric
+	// reflects realistic row weight; zero disables bytes accounting.
+	BytesPerRow int64
 }
 
 // newWriterPool creates a new writer pool with the given configuration.
@@ -88,6 +101,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		tuner:                  cfg.Tuner,
 		aiAdjuster:             cfg.AIAdjuster,
 		tableName:              cfg.TableName,
+		bytesPerRow:            cfg.BytesPerRow,
 	}
 
 	// Create the base writer pool with our write function
@@ -107,6 +121,10 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 // On failure, it asks the AI for a new chunk_size and retries with smaller sub-batches.
 func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]any) error {
 	batchSize := wp.batchSizeFn()
+	// #229 observability: time the entire chunk write (including any
+	// sub-chunking inside the driver-specific path) and record after
+	// success. Errors are NOT timed — the chunk failed, not slow.
+	start := time.Now()
 	var err error
 	switch {
 	case wp.useUpsert:
@@ -120,8 +138,23 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 	}
 
 	if err == nil {
+		// Hot-path metrics (#229): rows + chunk duration go up on success.
+		// bytesPerRow is the table's GoHeapBytesPerRow estimate captured at
+		// pool construction time; multiplying gives a usable
+		// rows-vs-bytes ratio in Grafana even without exact wire-size
+		// accounting (which the driver doesn't expose uniformly).
+		m := observability.Global()
+		m.IncRows(wp.tableName, "transfer", int64(len(rows)))
+		if wp.bytesPerRow > 0 {
+			m.IncBytes(wp.tableName, "transfer", int64(len(rows))*wp.bytesPerRow)
+		}
+		m.ObserveChunkDuration(wp.tableName, time.Since(start).Seconds())
 		return nil
 	}
+
+	// Error counter: classify rather than emit the raw error string to keep
+	// label cardinality bounded for Prometheus.
+	observability.Global().IncErrors(wp.tableName, "transfer", classifyWriteError(err))
 
 	// Try AI-driven chunk size adjustment for error recovery
 	newChunkSize := wp.evaluateAndAdjust(ctx, rows, err)
@@ -130,9 +163,35 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 	}
 
 	logging.Info("Retrying table %s with chunk_size=%d (was %d rows)", wp.tableName, newChunkSize, len(rows))
+	observability.Global().IncRetries(wp.tableName)
 
 	// Retry with smaller sub-batches
 	return wp.retryWithChunkSize(ctx, writerID, rows, newChunkSize)
+}
+
+// classifyWriteError maps a write error to one of a small set of class
+// labels (#229 — Prometheus errors_total). Keeping the set small bounds
+// the label cardinality. Unrecognized errors fall under "unknown" rather
+// than leaking unbounded substrings into label space.
+func classifyWriteError(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "deadlock"):
+		return "deadlock"
+	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline"):
+		return "timeout"
+	case strings.Contains(s, "connection") || strings.Contains(s, "reset") || strings.Contains(s, "refused"):
+		return "network"
+	case strings.Contains(s, "constraint") || strings.Contains(s, "duplicate") || strings.Contains(s, "conflict") || strings.Contains(s, "violation"):
+		return "constraint"
+	case strings.Contains(s, "permission") || strings.Contains(s, "denied"):
+		return "permission"
+	default:
+		return "unknown"
+	}
 }
 
 // evaluateAndAdjust asks the AI adjuster to recommend a new batch_size for the error.

@@ -799,6 +799,7 @@ func executeKeysetPagination(
 		Tuner:                  tuner,
 		AIAdjuster:             aiAdjuster,
 		TableName:              job.Table.Name,
+		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
 	})
 
 	// Setup checkpoint coordinator with dynamic checkpoint frequency
@@ -1264,6 +1265,7 @@ func executeRowNumberPagination(
 		Tuner:                  tuner,
 		AIAdjuster:             aiAdjuster,
 		TableName:              job.Table.Name,
+		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
 	})
 
 	if idempotentOnDup {
