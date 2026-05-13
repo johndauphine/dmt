@@ -425,8 +425,21 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 		footerHeight := 7 // Input box (3) + Status bar (1) + Separator (1) + Suggestions (1) + Safety (1)
 		verticalMarginHeight := headerHeight + footerHeight
 
+		// Clamp width/height to a minimum of 1 so a tiny terminal never
+		// produces a negative-sized viewport. The viewport's internal
+		// visibleLines() does slice math on Height and panics with
+		// "slice bounds out of range" on GotoBottom when Height < 0.
+		vpWidth := msg.Width - 2
+		if vpWidth < 1 {
+			vpWidth = 1
+		}
+		vpHeight := msg.Height - verticalMarginHeight
+		if vpHeight < 1 {
+			vpHeight = 1
+		}
+
 		if !m.ready {
-			m.viewport = viewport.New(msg.Width-2, msg.Height-verticalMarginHeight)
+			m.viewport = viewport.New(vpWidth, vpHeight)
 			m.viewport.YPosition = headerHeight
 			m.content.WriteString(m.welcomeMessage())
 			m.viewport.SetContent(m.content.String())
@@ -442,8 +455,8 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			// YOffset stranded above the new max, which would otherwise
 			// break auto-follow the same way as the init bug above.
 			wasAtBottom := m.viewport.AtBottom()
-			m.viewport.Width = msg.Width - 2
-			m.viewport.Height = msg.Height - verticalMarginHeight
+			m.viewport.Width = vpWidth
+			m.viewport.Height = vpHeight
 			if wasAtBottom {
 				m.viewport.GotoBottom()
 			}
