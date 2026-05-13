@@ -1029,7 +1029,12 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			// This also wipes any partition-level checkpoints from a prior
 			// run; otherwise a partitioned ROW_NUMBER table would resume
 			// each partition from a stale rowNum and skip data.
-			o.state.ClearTransferProgress(taskID)
+			// Both clears are best-effort: surface failures as warnings so
+			// resume continues, but the operator can spot inconsistent
+			// state (Copilot review).
+			if err := o.state.ClearTransferProgress(taskID); err != nil {
+				logging.Warn("Failed to clear transfer progress for %s: %v", t.Name, err)
+			}
 			if err := o.state.ClearPartitionTransferProgress(run.ID, taskKey); err != nil {
 				logging.Warn("Failed to clear partition progress for %s: %v", t.Name, err)
 			}
@@ -1063,9 +1068,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 					// Also clear partition-level checkpoints so partitioned tables
 					// restart cleanly instead of resuming each partition from a
 					// stale rowNum and skipping data (#227).
+					// Both clears are best-effort; surface failures as warnings
+					// (Copilot review).
 					logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
 						t.Name, targetCount, rowsDone)
-					o.state.ClearTransferProgress(taskID)
+					if err := o.state.ClearTransferProgress(taskID); err != nil {
+						logging.Warn("Failed to clear transfer progress for %s: %v", t.Name, err)
+					}
 					if err := o.state.ClearPartitionTransferProgress(run.ID, taskKey); err != nil {
 						logging.Warn("Failed to clear partition progress for %s: %v", t.Name, err)
 					}

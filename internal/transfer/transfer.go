@@ -1238,8 +1238,10 @@ func executeRowNumberPagination(
 	//
 	// First-run (job.IsResume == false) keeps the fast plain-INSERT path.
 	// The upsert target mode already handles idempotency via
-	// MERGE/ON CONFLICT DO UPDATE and is left untouched.
-	idempotentOnDup := job.IsResume && cfg.Migration.TargetMode != "upsert"
+	// MERGE/ON CONFLICT DO UPDATE and is left untouched. job.Table.HasPK()
+	// is redundant with the early-return at line 1004 but makes the
+	// writer-side requirement explicit at the gate (Copilot review).
+	idempotentOnDup := job.IsResume && cfg.Migration.TargetMode != "upsert" && job.Table.HasPK()
 
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
@@ -1265,8 +1267,12 @@ func executeRowNumberPagination(
 	})
 
 	if idempotentOnDup {
-		logging.Debug("ROW_NUMBER resume for %s: enabling idempotent-on-dup writer (start=%d, resume=%d, partition=%v)",
-			job.Table.Name, startRow, initialRowNum, partitionID)
+		partitionStr := "single"
+		if partitionID != nil {
+			partitionStr = fmt.Sprintf("p%d", *partitionID)
+		}
+		logging.Debug("ROW_NUMBER resume for %s: enabling idempotent-on-dup writer (start=%d, resume=%d, partition=%s)",
+			job.Table.Name, startRow, initialRowNum, partitionStr)
 	}
 
 	// Setup ROW_NUMBER checkpoint handler
