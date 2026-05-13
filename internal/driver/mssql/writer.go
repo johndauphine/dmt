@@ -585,6 +585,12 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		return nil
 	}
 
+	// Resume-safe path for ROW_NUMBER-paged tables: stage + insert-only MERGE
+	// so replayed rows that already exist become silent no-ops (#227).
+	if opts.IdempotentOnDup {
+		return w.writeBatchIdempotent(ctx, opts)
+	}
+
 	fullTableName := fmt.Sprintf("[%s].[%s]", opts.Schema, opts.Table)
 
 	conn, err := w.db.Conn(ctx)
@@ -776,11 +782,100 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Execute MERGE
-	mergeSQL := w.buildMerge(targetTable, stagingTable, mappedCols, mappedPKCols, spatialCols, isCrossEngine)
+	mergeSQL := w.buildMerge(targetTable, stagingTable, mappedCols, mappedPKCols, spatialCols, isCrossEngine, false)
 	if err := w.executeMergeWithRetry(ctx, conn, targetTable, mergeSQL, hasIdentity, 5); err != nil {
 		return fmt.Errorf("merge failed: %w", err)
 	}
 
+	return nil
+}
+
+// writeBatchIdempotent is the IdempotentOnDup path for WriteBatch (#227).
+// Rows are bulk-loaded into a per-writer-per-partition temp staging table and
+// merged into the target via an insert-only MERGE — replayed rows already
+// present become silent no-ops without overwriting existing values.
+//
+// It reuses the staging/bulk-load/MERGE machinery from UpsertBatch but
+// supplies its own column metadata path because callers of WriteBatch don't
+// pass ColumnTypes/SRIDs (UpsertBatch does). Spatial columns are still
+// detected from the staging table once it exists.
+func (w *Writer) writeBatchIdempotent(ctx context.Context, opts driver.WriteBatchOptions) error {
+	if len(opts.PKColumns) == 0 {
+		return fmt.Errorf("IdempotentOnDup requires PKColumns to be set")
+	}
+
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Per-writer + per-partition staging name keeps concurrent writers and
+	// partitions on the same connection pool from colliding.
+	stagingTable := w.safeStagingName(opts.Table, opts.WriterID, opts.PartitionID)
+	targetTable := w.dialect.QualifyTable(opts.Schema, opts.Table)
+
+	createSQL := fmt.Sprintf(`SELECT TOP 0 * INTO %s FROM %s`, stagingTable, targetTable)
+	if _, err := conn.ExecContext(ctx, createSQL); err != nil {
+		return fmt.Errorf("creating idempotent staging table: %w", err)
+	}
+
+	isCrossEngine := w.sourceType == "postgres"
+	spatialCols, err := w.getSpatialColumns(ctx, conn, stagingTable)
+	if err != nil {
+		return fmt.Errorf("detecting spatial columns: %w", err)
+	}
+	if isCrossEngine && len(spatialCols) > 0 {
+		if err := w.alterSpatialColumnsToText(ctx, conn, stagingTable, spatialCols); err != nil {
+			return fmt.Errorf("altering spatial columns: %w", err)
+		}
+	}
+
+	actualCols, err := w.getStagingTableColumns(ctx, conn, stagingTable)
+	if err != nil {
+		return fmt.Errorf("getting staging table columns: %w", err)
+	}
+	colMapping := make(map[string]string, len(actualCols))
+	for _, ac := range actualCols {
+		colMapping[strings.ToLower(ac)] = ac
+	}
+	mappedCols := make([]string, len(opts.Columns))
+	for i, c := range opts.Columns {
+		if actual, ok := colMapping[strings.ToLower(c)]; ok {
+			mappedCols[i] = actual
+		} else {
+			mappedCols[i] = c
+		}
+	}
+	mappedPKCols := make([]string, len(opts.PKColumns))
+	for i, pk := range opts.PKColumns {
+		if actual, ok := colMapping[strings.ToLower(pk)]; ok {
+			mappedPKCols[i] = actual
+		} else {
+			mappedPKCols[i] = pk
+		}
+	}
+
+	var hasIdentity bool
+	identitySQL := `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM sys.columns c
+			JOIN sys.tables t ON c.object_id = t.object_id
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = @p1 AND t.name = @p2 AND c.is_identity = 1
+		) THEN 1 ELSE 0 END`
+	if err := conn.QueryRowContext(ctx, identitySQL, opts.Schema, opts.Table).Scan(&hasIdentity); err != nil {
+		hasIdentity = false
+	}
+
+	if err := w.bulkInsertToTemp(ctx, conn, stagingTable, mappedCols, opts.Rows); err != nil {
+		return fmt.Errorf("bulk insert to idempotent staging: %w", err)
+	}
+
+	mergeSQL := w.buildMerge(targetTable, stagingTable, mappedCols, mappedPKCols, spatialCols, isCrossEngine, true)
+	if err := w.executeMergeWithRetry(ctx, conn, targetTable, mergeSQL, hasIdentity, 5); err != nil {
+		return fmt.Errorf("idempotent merge failed: %w", err)
+	}
 	return nil
 }
 
@@ -914,7 +1009,12 @@ func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable
 	return tx.Commit()
 }
 
-func (w *Writer) buildMerge(targetTable, stagingTable string, cols, pkCols []string, spatialCols []spatialColumn, isCrossEngine bool) string {
+// buildMerge constructs the MERGE statement that drives both upsert and the
+// resume-safe insert-only path (#227). When insertOnly is true, the
+// WHEN MATCHED ... THEN UPDATE branch is omitted entirely — replayed rows
+// already in the target become silent no-ops rather than being overwritten
+// with potentially-changed source values.
+func (w *Writer) buildMerge(targetTable, stagingTable string, cols, pkCols []string, spatialCols []spatialColumn, isCrossEngine bool, insertOnly bool) string {
 	spatialMap := make(map[string]spatialColumn, len(spatialCols))
 	for _, col := range spatialCols {
 		spatialMap[strings.ToLower(col.Name)] = col
@@ -985,7 +1085,7 @@ func (w *Writer) buildMerge(targetTable, stagingTable string, cols, pkCols []str
 	sb.WriteString(fmt.Sprintf("USING %s AS source\n", stagingTable))
 	sb.WriteString(fmt.Sprintf("ON %s\n", strings.Join(onClauses, " AND ")))
 
-	if len(setClauses) > 0 {
+	if !insertOnly && len(setClauses) > 0 {
 		sb.WriteString(fmt.Sprintf("WHEN MATCHED AND (%s) THEN UPDATE SET %s\n",
 			strings.Join(changeDetection, " OR "),
 			strings.Join(setClauses, ", ")))

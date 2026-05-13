@@ -22,6 +22,7 @@ type writerPool struct {
 	targetPKCols           []string
 	partitionID            *int
 	useUpsert              bool
+	idempotentOnDup        bool // #227: skip-on-duplicate-PK for ROW_NUMBER resume
 	upsertMergeChunkSizeFn func() int
 	batchSizeFn            func() int // dynamic writer batch size (for target DB sub-batching)
 
@@ -37,6 +38,7 @@ type writerPoolConfig struct {
 	BufferSize             int
 	JobBufferSize          int   // computed by pool.CalculateJobBufferSize
 	UseUpsert              bool
+	IdempotentOnDup        bool       // #227: ROW_NUMBER resume — writer should skip rows already in target instead of erroring on duplicate PK
 	UpsertMergeChunkSizeFn func() int
 	BatchSizeFn            func() int // dynamic writer batch size
 	TargetSchema           string
@@ -80,6 +82,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		targetPKCols:           cfg.TargetPKCols,
 		partitionID:            cfg.PartitionID,
 		useUpsert:              cfg.UseUpsert,
+		idempotentOnDup:        cfg.IdempotentOnDup,
 		upsertMergeChunkSizeFn: upsertFn,
 		batchSizeFn:            batchFn,
 		tuner:                  cfg.Tuner,
@@ -105,9 +108,14 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]any) error {
 	batchSize := wp.batchSizeFn()
 	var err error
-	if wp.useUpsert {
+	switch {
+	case wp.useUpsert:
 		err = wp.executeUpsertWithChunking(ctx, writerID, rows, batchSize)
-	} else {
+	case wp.idempotentOnDup:
+		// #227: ROW_NUMBER resume — driver handles staging + idempotent insert.
+		err = writeChunkIdempotent(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+			wp.targetCols, wp.targetPKCols, rows, writerID, wp.partitionID, batchSize)
+	default:
 		err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows, batchSize, wp.targetPKCols...)
 	}
 
@@ -163,10 +171,14 @@ func (wp *writerPool) retryWithChunkSize(ctx context.Context, writerID int, rows
 
 		chunk := rows[i:end]
 		var err error
-		if wp.useUpsert {
+		switch {
+		case wp.useUpsert:
 			err = writeChunkUpsertWithWriter(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
 				wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, chunk, writerID, wp.partitionID, batchSize)
-		} else {
+		case wp.idempotentOnDup:
+			err = writeChunkIdempotent(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
+				wp.targetCols, wp.targetPKCols, chunk, writerID, wp.partitionID, batchSize)
+		default:
 			err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, chunk, batchSize, wp.targetPKCols...)
 		}
 

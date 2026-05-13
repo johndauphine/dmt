@@ -102,6 +102,34 @@ type WriteBatchOptions struct {
 	// Drivers that support ordered bulk inserts (e.g., MSSQL BCP ORDER hint)
 	// can use this to skip sorting, improving insert performance.
 	OrderColumns []string
+
+	// IdempotentOnDup, when true, makes the writer skip rows whose PK
+	// already exists in the target instead of erroring (#227). This is
+	// used during resume of ROW_NUMBER-paged tables, where the same chunk
+	// may be replayed because the per-table checkpoint lags acked rows
+	// by up to CheckpointFrequency-1 chunks. The driver-specific shapes:
+	//   - Postgres: temp staging table + COPY + INSERT...SELECT...ON CONFLICT DO NOTHING.
+	//   - MySQL:    INSERT ... ON DUPLICATE KEY UPDATE <pk> = <pk> (no-op assignment).
+	//   - MSSQL:    staging + MERGE with WHEN NOT MATCHED THEN INSERT only.
+	// Semantics are insert-only: an already-present row is a silent no-op,
+	// not an upsert. Replayed already-committed rows must not overwrite
+	// the target with changed source values.
+	IdempotentOnDup bool
+
+	// PKColumns is the list of primary key columns. Required when
+	// IdempotentOnDup is true so the writer knows what to conflict on.
+	PKColumns []string
+
+	// WriterID identifies this writer for per-writer staging table isolation.
+	// Used by the IdempotentOnDup paths in PG/MSSQL to namespace temp tables
+	// across parallel writers. Ignored when IdempotentOnDup is false.
+	WriterID int
+
+	// PartitionID is included in PG/MSSQL idempotent staging table names so
+	// concurrent partitions on the same writer connection don't collide.
+	// Ignored when IdempotentOnDup is false. Optional even when IdempotentOnDup
+	// is true (single-job non-partitioned ROW_NUMBER tables pass nil).
+	PartitionID *int
 }
 
 // UpsertBatchOptions configures an upsert operation.

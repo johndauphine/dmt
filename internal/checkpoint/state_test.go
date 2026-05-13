@@ -671,6 +671,161 @@ func TestCountPartitionTasks(t *testing.T) {
 	}
 }
 
+// TestClearPartitionTransferProgress verifies the resume preflight safety net
+// added for #227: when the orchestrator decides to truncate a table on resume,
+// it must also wipe any partition-level transfer_progress rows. Without this,
+// a large ROW_NUMBER-paged table whose target gets truncated would resume
+// each partition from a stale rowNum and skip data on the freshly-cleared
+// target. Table-level progress for OTHER tables must not be touched.
+func TestClearPartitionTransferProgress(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	runID := "test-run"
+	if err := state.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun() error: %v", err)
+	}
+
+	// Set up: votes has 3 partitions + a table-level task; posts has 2
+	// partitions + table-level task. Save progress for all of them so we
+	// can prove the clear is scoped correctly.
+	votesPartitionIDs := []int64{}
+	for i := 1; i <= 3; i++ {
+		key := fmt.Sprintf("transfer:public.votes:p%d", i)
+		taskID, err := state.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask(%s) error: %v", key, err)
+		}
+		votesPartitionIDs = append(votesPartitionIDs, taskID)
+		pid := i
+		if err := state.SaveTransferProgress(taskID, "votes", &pid, int64(1000*i), 1000, 5000); err != nil {
+			t.Fatalf("SaveTransferProgress(votes p%d): %v", i, err)
+		}
+	}
+	votesTableID, err := state.CreateTask(runID, "transfer", "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("CreateTask(votes) error: %v", err)
+	}
+	if err := state.SaveTransferProgress(votesTableID, "votes", nil, int64(999), 999, 5000); err != nil {
+		t.Fatalf("SaveTransferProgress(votes table) error: %v", err)
+	}
+
+	postsPartitionIDs := []int64{}
+	for i := 1; i <= 2; i++ {
+		key := fmt.Sprintf("transfer:public.posts:p%d", i)
+		taskID, err := state.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask(%s) error: %v", key, err)
+		}
+		postsPartitionIDs = append(postsPartitionIDs, taskID)
+		pid := i
+		if err := state.SaveTransferProgress(taskID, "posts", &pid, int64(2000*i), 2000, 10000); err != nil {
+			t.Fatalf("SaveTransferProgress(posts p%d): %v", i, err)
+		}
+	}
+
+	// Clear only votes partition progress.
+	if err := state.ClearPartitionTransferProgress(runID, "transfer:public.votes"); err != nil {
+		t.Fatalf("ClearPartitionTransferProgress() error: %v", err)
+	}
+
+	for _, tid := range votesPartitionIDs {
+		p, err := state.GetTransferProgress(tid)
+		if err != nil {
+			t.Fatalf("GetTransferProgress(votes partition %d): %v", tid, err)
+		}
+		if p != nil {
+			t.Errorf("expected votes partition %d progress cleared, got %+v", tid, p)
+		}
+	}
+
+	// Table-level votes progress must NOT be cleared by partition-clear.
+	tp, err := state.GetTransferProgress(votesTableID)
+	if err != nil {
+		t.Fatalf("GetTransferProgress(votes table): %v", err)
+	}
+	if tp == nil {
+		t.Error("expected votes table-level progress to remain, got nil")
+	}
+
+	// Posts partitions must be untouched.
+	for _, tid := range postsPartitionIDs {
+		p, err := state.GetTransferProgress(tid)
+		if err != nil {
+			t.Fatalf("GetTransferProgress(posts partition %d): %v", tid, err)
+		}
+		if p == nil {
+			t.Errorf("expected posts partition %d progress to remain, got nil", tid)
+		}
+	}
+}
+
+// TestClearPartitionTransferProgress_UnderscoreInTableName guards against the
+// LIKE-wildcard footgun: a table named "order_items" must not match a clear
+// targeted at "order" or vice versa.
+func TestClearPartitionTransferProgress_UnderscoreInTableName(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	runID := "test-run"
+	if err := state.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun() error: %v", err)
+	}
+
+	// order_items partitions
+	itemsIDs := []int64{}
+	for i := 1; i <= 2; i++ {
+		key := fmt.Sprintf("transfer:public.order_items:p%d", i)
+		taskID, err := state.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
+		itemsIDs = append(itemsIDs, taskID)
+		pid := i
+		if err := state.SaveTransferProgress(taskID, "order_items", &pid, int64(i*100), 100, 200); err != nil {
+			t.Fatalf("SaveTransferProgress: %v", err)
+		}
+	}
+
+	// Different table whose name would match the LIKE wildcard if we forgot to escape "_"
+	otherID, err := state.CreateTask(runID, "transfer", "transfer:public.orderXitems:p1")
+	if err != nil {
+		t.Fatalf("CreateTask(other): %v", err)
+	}
+	pid := 1
+	if err := state.SaveTransferProgress(otherID, "orderXitems", &pid, int64(42), 42, 100); err != nil {
+		t.Fatalf("SaveTransferProgress(other): %v", err)
+	}
+
+	// Clear order_items partitions — the X-named table must remain.
+	if err := state.ClearPartitionTransferProgress(runID, "transfer:public.order_items"); err != nil {
+		t.Fatalf("ClearPartitionTransferProgress: %v", err)
+	}
+
+	for _, id := range itemsIDs {
+		p, err := state.GetTransferProgress(id)
+		if err != nil {
+			t.Fatalf("GetTransferProgress(items): %v", err)
+		}
+		if p != nil {
+			t.Errorf("expected order_items partition cleared, got %+v", p)
+		}
+	}
+	p, err := state.GetTransferProgress(otherID)
+	if err != nil {
+		t.Fatalf("GetTransferProgress(other): %v", err)
+	}
+	if p == nil {
+		t.Error("expected orderXitems partition to remain, got nil — LIKE pattern leaked through _ wildcard")
+	}
+}
+
 // TestAITuningRegimeColumnsRoundTrip pins the #144 follow-up: the new regime
 // columns (platform, target_shared_buffers_mb, target_synchronous_commit, etc.)
 // must persist and round-trip correctly through SaveAITuning + GetAITuningHistory.

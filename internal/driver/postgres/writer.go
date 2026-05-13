@@ -777,6 +777,12 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		return nil
 	}
 
+	// Resume-safe path for ROW_NUMBER-paged tables: skip rows whose PK already
+	// exists in the target instead of failing on duplicate (#227).
+	if opts.IdempotentOnDup {
+		return w.writeBatchIdempotent(ctx, opts)
+	}
+
 	conn, err := w.pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -838,6 +844,119 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
+	return nil
+}
+
+// writeBatchIdempotent implements the IdempotentOnDup path for WriteBatch
+// (#227). Rows are COPY'd into a per-writer temp staging table and then moved
+// to the target via INSERT ... SELECT ... ON CONFLICT (<pk>) DO NOTHING.
+// Already-present rows are a silent no-op; this preserves resume safety for
+// ROW_NUMBER-paged tables without overwriting (no DO UPDATE branch — that
+// would be wrong on replay if the source value changed mid-migration).
+func (w *Writer) writeBatchIdempotent(ctx context.Context, opts driver.WriteBatchOptions) error {
+	if len(opts.PKColumns) == 0 {
+		return fmt.Errorf("IdempotentOnDup requires PKColumns to be set")
+	}
+
+	conn, err := w.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Release()
+
+	// Sanitize identifiers consistently with the create-table path.
+	sanitizedTable := sanitizePGTableName(opts.Table)
+	sanitizedCols := make([]string, len(opts.Columns))
+	for i, col := range opts.Columns {
+		sanitizedCols[i] = sanitizePGIdentifier(col)
+	}
+	sanitizedPK := make([]string, len(opts.PKColumns))
+	for i, pk := range opts.PKColumns {
+		sanitizedPK[i] = sanitizePGIdentifier(pk)
+	}
+
+	// Per-writer + per-partition staging name so concurrent writers /
+	// partitions on the same connection pool don't collide. Hash keeps
+	// the identifier under PostgreSQL's 63-char limit even for long
+	// schema.table names.
+	stagingKey := fmt.Sprintf("%s.%s.%d", opts.Schema, opts.Table, opts.WriterID)
+	if opts.PartitionID != nil {
+		stagingKey = fmt.Sprintf("%s.p%d", stagingKey, *opts.PartitionID)
+	}
+	hash := sha256.Sum256([]byte(stagingKey))
+	stagingTable := fmt.Sprintf("_stg_idem_%x", hash[:8])
+
+	target := w.dialect.QualifyTable(opts.Schema, sanitizedTable)
+
+	// LIKE ... INCLUDING ALL pulls in PK/defaults/not-null/etc., which is fine
+	// for a transient staging table — the INSERT...SELECT path matches columns
+	// by name. ON COMMIT DELETE ROWS leaves the schema in place for reuse but
+	// auto-clears between transactions. We don't run inside a transaction here
+	// (matching UpsertBatch), so we explicitly TRUNCATE at the end.
+	_, err = conn.Exec(ctx, fmt.Sprintf(
+		"CREATE TEMP TABLE IF NOT EXISTS %s (LIKE %s INCLUDING DEFAULTS) ON COMMIT DELETE ROWS",
+		w.dialect.QuoteIdentifier(stagingTable), target))
+	if err != nil {
+		return fmt.Errorf("creating idempotent staging table: %w", err)
+	}
+
+	// Adaptive sub-batching mirrors WriteBatch/UpsertBatch so we don't blow
+	// past TCP send buffers on wide rows.
+	batchSize := copyBatchSize(opts.Rows, w.copyBatchBytes)
+	for start := 0; start < len(opts.Rows); start += batchSize {
+		end := start + batchSize
+		if end > len(opts.Rows) {
+			end = len(opts.Rows)
+		}
+		subBatch := opts.Rows[start:end]
+
+		const mb = 1024 * 1024
+		batchBytes := estimateRowBytes(subBatch, 100) * len(subBatch)
+		timeoutSecs := (batchBytes + mb - 1) / mb
+		if timeoutSecs < 30 {
+			timeoutSecs = 30
+		}
+		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
+		_, err = conn.Conn().CopyFrom(
+			copyCtx,
+			pgx.Identifier{stagingTable},
+			sanitizedCols,
+			pgx.CopyFromRows(subBatch),
+		)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("idempotent staging copy [%d:%d]: %w", start, end, err)
+		}
+	}
+
+	// INSERT ... SELECT ... ON CONFLICT DO NOTHING. The conflict target lists
+	// the PK columns; PG matches any unique constraint that covers exactly
+	// those columns, so this works whether the table has a real PRIMARY KEY
+	// or just a unique index (CreatePrimaryKey is idempotent — see orchestrator
+	// resume preflight — so the PK should exist by this point).
+	quotedCols := make([]string, len(sanitizedCols))
+	for i, c := range sanitizedCols {
+		quotedCols[i] = w.dialect.QuoteIdentifier(c)
+	}
+	colList := strings.Join(quotedCols, ", ")
+
+	quotedPK := make([]string, len(sanitizedPK))
+	for i, p := range sanitizedPK {
+		quotedPK[i] = w.dialect.QuoteIdentifier(p)
+	}
+	pkList := strings.Join(quotedPK, ", ")
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) SELECT %s FROM %s ON CONFLICT (%s) DO NOTHING",
+		target, colList, colList, w.dialect.QuoteIdentifier(stagingTable), pkList,
+	)
+	if _, err = conn.Exec(ctx, insertSQL); err != nil {
+		return fmt.Errorf("idempotent insert from staging: %w", err)
+	}
+
+	// Best-effort cleanup — ON COMMIT DELETE ROWS would clear it on the next
+	// transaction boundary, but we're not in a transaction so we truncate now.
+	_, _ = conn.Exec(ctx, fmt.Sprintf("TRUNCATE %s", w.dialect.QuoteIdentifier(stagingTable)))
 	return nil
 }
 

@@ -28,8 +28,9 @@ type StateBackend interface {
 	// Progress tracking (for chunk-level resume)
 	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
 	GetTransferProgress(taskID int64) (*TransferProgress, error)
-	ClearTransferProgress(taskID int64) error    // Clear progress for fresh re-transfer
-	CountPartitionTasks(runID, taskKeyPrefix string) (int, error) // Count partition tasks for a table
+	ClearTransferProgress(taskID int64) error                           // Clear progress for fresh re-transfer
+	ClearPartitionTransferProgress(runID, tableTaskKey string) error    // Clear ALL partition-level progress for a table (#227 resume preflight)
+	CountPartitionTasks(runID, taskKeyPrefix string) (int, error)       // Count partition tasks for a table
 
 	// History (optional - file backend may return empty)
 	GetAllRuns() ([]Run, error)

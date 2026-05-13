@@ -1216,11 +1216,23 @@ func executeRowNumberPagination(
 
 	rnJobBufSize := rnBufs.JobChanDepth
 
+	// #227: when resuming a ROW_NUMBER-paged table (i.e. initialRowNum is past
+	// the partition's start), the per-table checkpoint can lag acked rows by
+	// up to CheckpointFrequency-1 chunks. Replaying those chunks would crash
+	// the writer on duplicate PK; routing this run's writes through the
+	// driver's idempotent-on-dup path turns those replays into silent no-ops.
+	// drop_recreate runs on first execution (initialRowNum == startRow) keep
+	// the fast plain-INSERT path. The upsert target mode already handles
+	// idempotency via MERGE/ON CONFLICT DO UPDATE and is left untouched.
+	isResume := initialRowNum > startRow
+	idempotentOnDup := isResume && cfg.Migration.TargetMode != "upsert"
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
 		JobBufferSize:          rnJobBufSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
+		IdempotentOnDup:        idempotentOnDup,
 		UpsertMergeChunkSizeFn: upsertChunkFn,
 		BatchSizeFn:            batchSizeFn,
 		TargetSchema:           cfg.Target.Schema,
@@ -1237,6 +1249,11 @@ func executeRowNumberPagination(
 		AIAdjuster:             aiAdjuster,
 		TableName:              job.Table.Name,
 	})
+
+	if idempotentOnDup {
+		logging.Debug("ROW_NUMBER resume for %s: enabling idempotent-on-dup writer (start=%d, resume=%d)",
+			job.Table.Name, startRow, initialRowNum)
+	}
 
 	// Setup ROW_NUMBER checkpoint handler
 	lastCheckpointRowNum := initialRowNum
@@ -1590,6 +1607,26 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 		Rows:         rows,
 		BatchSize:    batchSize,
 		OrderColumns: orderCols,
+	})
+}
+
+// writeChunkIdempotent writes a chunk in idempotent-on-duplicate mode used by
+// ROW_NUMBER resume (#227). The driver-specific WriteBatch implementation
+// switches to its insert-only path (staging + INSERT...ON CONFLICT DO NOTHING
+// for PG/MSSQL, INSERT ... ON DUPLICATE KEY UPDATE pk = pk for MySQL) so a
+// replayed chunk is a silent no-op for already-committed rows.
+func writeChunkIdempotent(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
+	cols, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
+	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
+		Schema:          schema,
+		Table:           table,
+		Columns:         cols,
+		Rows:            rows,
+		BatchSize:       batchSize,
+		IdempotentOnDup: true,
+		PKColumns:       pkCols,
+		WriterID:        writerID,
+		PartitionID:     partitionID,
 	})
 }
 
