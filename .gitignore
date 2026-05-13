@@ -42,3 +42,7 @@ vendor/
 *.bak
 *.png
 *.jpg
+
+# Isolated state dir for integration tests (#230). See
+# scripts/integration-test.sh and scripts/fixtures/ci-mssql-pg.yaml.
+.dmt-ci-state/

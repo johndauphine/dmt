@@ -53,7 +53,7 @@ make test-dbs-down
 The integration test:
 
 1. Drops + recreates the target PG database (`so2010_minimal_ci`) so each run is hermetic
-2. Clears `~/.dmt/migrate.db` so resume logic doesn't engage on stale state
+2. Wipes a dedicated state directory (`./.dmt-ci-state/` by default, overridable via `DMT_STATE_DIR`) so resume logic doesn't engage on stale state. **Your `~/.dmt/migrate.db` is NOT touched** — `data_dir: ${DMT_STATE_DIR}` in `scripts/fixtures/ci-mssql-pg.yaml` redirects all dmt state writes to the isolated path.
 3. Runs `dmt run --config scripts/fixtures/ci-mssql-pg.yaml --confirm-backup`
 4. Verifies every target table has the expected row count
 

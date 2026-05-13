@@ -39,3 +39,9 @@ migration:
   # the tiny fixture (~30 rows).
   chunk_size: 10
   checkpoint_frequency: 1
+  # Isolate state so a local `make integration-test` run doesn't write
+  # to the operator's ~/.dmt/migrate.db (which holds saved profiles
+  # + run history). The CI workflow sets DMT_STATE_DIR explicitly;
+  # for local runs, scripts/integration-test.sh defaults it to
+  # <repo>/.dmt-ci-state. Codex review on #230.
+  data_dir: ${DMT_STATE_DIR}
