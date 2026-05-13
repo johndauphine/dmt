@@ -4,7 +4,7 @@ dmt follows [Semantic Versioning 2.0.0](https://semver.org/). This document is t
 
 ## Triggers
 
-### MAJOR (`v1.x.x` → `v2.0.0`) — breaking changes
+### MAJOR (`v5.x.x` → `v6.0.0`) — breaking changes
 
 A change requires a MAJOR bump if it could cause a previously-working migration to fail or silently produce different results. Specifically:
 
@@ -15,7 +15,7 @@ A change requires a MAJOR bump if it could cause a previously-working migration 
 - An **exit code** is renumbered or its meaning is materially changed
 - An **environment variable** dmt reads is renamed or its semantics changed
 
-### MINOR (`v1.0.x` → `v1.1.0`) — additive changes
+### MINOR (`v5.0.x` → `v5.1.0`) — additive changes
 
 A change is MINOR if it adds capability without breaking existing usage:
 
@@ -27,7 +27,7 @@ A change is MINOR if it adds capability without breaking existing usage:
 - New optional dependency
 - New optional feature flag
 
-### PATCH (`v1.0.0` → `v1.0.1`) — bug fixes
+### PATCH (`v5.0.0` → `v5.0.1`) — bug fixes
 
 A change is PATCH if it fixes incorrect behavior without changing the public contract:
 
@@ -40,20 +40,20 @@ A change is PATCH if it fixes incorrect behavior without changing the public con
 
 ## Stability commitments
 
-After v1.0.0:
+From `v5.0.0` onward (see the [Production-readiness milestone](#production-readiness-milestone--v500) below):
 
 - **Stable** — every YAML field listed in `config.yaml.example` without an `(experimental)` comment is stable. Stable fields participate in the deprecation cycle below; they don't disappear in a minor bump.
 - **Experimental** — fields prefixed with `experimental_` in YAML or marked `(experimental)` in `config.yaml.example`. May change name, default, or semantics in any release. Use at your own risk.
 - The CLI subcommands documented in `dmt --help` are stable. The `dmt help <subcommand>` output is the contract for each.
 - Driver interfaces in `internal/driver/` are NOT stable — `internal/` is implementation, not public API. The CLI is dmt's public surface.
 
-Before v1.0.0 (the current state — see [v1.0.0 readiness criteria](#v100-readiness-criteria) below), the SemVer policy applies on a best-effort basis. The [SemVer spec section 4](https://semver.org/#spec-item-4) explicitly allows breaking changes in `0.x.y` minor bumps; we try to avoid them but make no formal commitment.
+Releases before `v5.0.0` applied this policy on a best-effort basis only; the [SemVer spec section 4](https://semver.org/#spec-item-4) allowance for breaking changes in `0.x.y` minor bumps was used pragmatically across the `v1.x`–`v4.x` line.
 
 ## Deprecation cycle
 
-A breaking change to a stable field after v1.0.0 must follow this cycle:
+A breaking change to a stable field after `v5.0.0` must follow this cycle:
 
-- **Release N (minor bump)** — introduce the new name. Continue to accept the old name with a `WARN`-level log message: `field "ai_adjust" is deprecated; rename to "runtime_tuning". Will be removed in v2.0.0.` Document the deprecation in `CHANGELOG.md` under "Deprecated".
+- **Release N (minor bump)** — introduce the new name. Continue to accept the old name with a `WARN`-level log message: `field "ai_adjust" is deprecated; rename to "runtime_tuning". Will be removed in v6.0.0.` Document the deprecation in `CHANGELOG.md` under "Deprecated".
 - **Release N+1 ... (any number of minor bumps)** — old name still works, still warns. Operators have time to migrate.
 - **Release N+M (next major bump)** — old name is removed. Document the removal in `CHANGELOG.md` under "Removed". The removal is the breaking change that gates the major bump.
 
@@ -64,23 +64,25 @@ The [`ai_adjust → runtime_tuning` rename (#211)](https://github.com/johndauphi
 - The internal `state.db` SQLite schema can change between PATCH releases; dmt auto-migrates on `New()` and doesn't promise schema stability.
 - AI prompts and tuning heuristics are tuned freely — they're not part of the public contract. Output throughput numbers may improve or regress across versions.
 - Error message wording. Exit *codes* are stable (see the [`internal/exitcodes`](./internal/exitcodes/exitcodes.go) package — Success, ConfigError, ConnectionError, TransferError, ValidationError, Cancelled, StateError, IOError); the human-readable messages attached to them are not.
-- Log message wording in `text` mode. Structured JSON log field names ARE stable after v1.0.0 (covered by `internal/logging` and `internal/observability` package surface).
+- Log message wording in `text` mode. Structured JSON log field names ARE stable after v5.0.0 (covered by `internal/logging` and `internal/observability` package surface).
 
-## v1.0.0 readiness criteria
+## Production-readiness milestone — `v5.0.0`
 
-`v1.0.0` ships when the [production-readiness epic #236](https://github.com/johndauphine/dmt/issues/236) closes. Concretely:
+dmt's production-readiness milestone shipped as `v5.0.0` (May 2026), closing the [production-readiness epic #236](https://github.com/johndauphine/dmt/issues/236). All ten gates green:
 
 1. **Correctness** — Full-checksum validation default (#226 ✅), ROW_NUMBER resume safety (#227 ✅), partial migrations exit non-zero (#248 ✅), progress race-free (#249 ✅), no writer-failure goroutine leak (#250 ✅)
 2. **AI optional** — Migration works without AI configured on all three reference drivers (#167 ✅ DoD met)
 3. **Operability** — Preflight checks (#228 ✅), JSON logs + Prometheus /metrics + OTLP traces (#229 ✅)
 4. **Verification** — Every PR runs cross-DB integration + race + lint + govulncheck (#230 ✅)
 5. **Auth/transport correctness** — Kerberos works or is descoped (#251 ✅ descoped), MySQL TLS (#252 ✅), validation timeouts fail loud (#253 ✅)
-6. **Security** — No secrets/PII in logs (#231), minimum privileges documented (#232)
-7. **Release discipline** — This document (#233)
-8. **Runbook** — SRE-ready failure-mode catalog (#234)
+6. **Security** — No secrets/PII in logs (#231 ✅), minimum privileges documented (#232 ✅)
+7. **Release discipline** — This document (#233 ✅)
+8. **Runbook** — SRE-ready failure-mode catalog (#234 ✅)
 9. **State durability** — FileState atomic writes (#254 ✅), sync timestamps (#255 ✅)
-10. **Compliance** — Audit trail (#235)
+10. **Compliance** — Audit trail (#235 ✅)
 
-Checkboxes for items currently in progress (P2/P3) update as those issues close. When all ten are green, the next release is `v1.0.0` rather than another `v0.x`.
+Notes on the version number:
 
-After `v1.0.0`, this policy is binding rather than best-effort.
+- The repo was at `v4.0.0` when the epic closed. The natural next release under SemVer is `v5.0.0` — `[Unreleased]` contains real breaking changes (#248 partial-exit-code default flip, #252 MySQL TLS default flip, #253 validation fail-loud, #251 Kerberos descoped) that require a MAJOR bump regardless of the production-readiness narrative.
+- The choice was made deliberately not to re-number to `v1.0.0` despite the production-readiness framing. Downgrading the version string (`v4.x → v1.0.0`) confuses package managers, Docker tag tooling, and version-pinning automation. Continuous numbering is operator-friendlier.
+- After `v5.0.0`, this policy is binding rather than best-effort.
