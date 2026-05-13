@@ -2,6 +2,7 @@ package setup
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -26,7 +27,11 @@ func TestHappyPath(t *testing.T) {
 		t.Fatalf("unexpected error: %s", err)
 	}
 
-	// Should jump to source type
+	// Phase 1b: Slack — skip
+	if s.CurrentStep != StepSlackWebhook {
+		t.Fatalf("expected StepSlackWebhook, got %d", s.CurrentStep)
+	}
+	s.Process("") // skip Slack
 	if s.CurrentStep != StepSourceType {
 		t.Fatalf("expected StepSourceType, got %d", s.CurrentStep)
 	}
@@ -129,8 +134,9 @@ func TestSecretsExistWithValidAI(t *testing.T) {
 	s := NewState()
 	s.Process("has_ai")
 
-	if s.CurrentStep != StepSourceType {
-		t.Fatalf("expected StepSourceType, got %d", s.CurrentStep)
+	// Phase 1b Slack interposes between Phase 1 AI and Phase 2 source.
+	if s.CurrentStep != StepSlackWebhook {
+		t.Fatalf("expected StepSlackWebhook, got %d", s.CurrentStep)
 	}
 	if !s.AIConfigured {
 		t.Fatal("expected AIConfigured")
@@ -151,8 +157,9 @@ func TestAINoSkips(t *testing.T) {
 	s.Process("no_ai")
 	s.Process("n") // don't configure AI
 
-	if s.CurrentStep != StepSourceType {
-		t.Fatalf("expected StepSourceType, got %d", s.CurrentStep)
+	// Skipping AI now lands on Slack, not directly on source.
+	if s.CurrentStep != StepSlackWebhook {
+		t.Fatalf("expected StepSlackWebhook, got %d", s.CurrentStep)
 	}
 	if s.AIConfigured {
 		t.Fatal("expected AIConfigured to be false")
@@ -168,7 +175,7 @@ func TestConfigureAI_EmptyInputDefaultsToSkip(t *testing.T) {
 	s.Process("no_ai")
 	s.Process("") // empty input — should default to skip
 
-	if s.CurrentStep != StepSourceType {
+	if s.CurrentStep != StepSlackWebhook {
 		t.Fatalf("empty input at StepConfigureAI should default to skip-AI; got step %d", s.CurrentStep)
 	}
 	if s.AIConfigured {
@@ -270,6 +277,7 @@ func TestConnectionFailRetryEditSkip(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// Fill in source
 	s.Process("postgres")
@@ -333,6 +341,7 @@ func TestTargetConnectionFailRetry(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// Fill in source
 	s.Process("mssql")
@@ -373,6 +382,7 @@ func TestInvalidConnResultChoice(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	s.Process("postgres")
 	s.Process("localhost")
@@ -402,6 +412,7 @@ func TestAIConfiguredShowsAnalysis(t *testing.T) {
 	s.Process("ollama") // local provider
 	s.Process("")       // default URL
 	s.Process("")       // write secrets success
+	s.Process("")       // skip Slack
 
 	// Source
 	s.Process("postgres")
@@ -454,6 +465,7 @@ func TestAIConfiguredShowsAnalysis(t *testing.T) {
 func TestAnalysisYes(t *testing.T) {
 	s := NewState()
 	s.Process("has_ai") // existing AI
+	s.Process("")       // skip Slack
 
 	// Source
 	s.Process("postgres")
@@ -502,6 +514,7 @@ func TestNoAnalysisWhenAINotConfigured(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n") // no AI
+	s.Process("")  // skip Slack
 
 	// Source
 	s.Process("postgres")
@@ -542,6 +555,7 @@ func TestNoAnalysisWhenAINotConfigured(t *testing.T) {
 func TestNoAnalysisWhenSourceConnFailed(t *testing.T) {
 	s := NewState()
 	s.Process("has_ai")
+	s.Process("") // skip Slack
 
 	// Source
 	s.Process("postgres")
@@ -584,6 +598,7 @@ func TestDefaultValues(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// Accept all defaults
 	s.Process("") // source type -> mssql
@@ -605,6 +620,7 @@ func TestInvalidPort(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 	s.Process("postgres")
 	s.Process("localhost")
 
@@ -636,6 +652,7 @@ func TestRequiredDatabase(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 	s.Process("postgres")
 	s.Process("localhost")
 	s.Process("5432")
@@ -653,6 +670,7 @@ func TestInvalidWorkers(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// Fast-forward to workers
 	s.Process("postgres")
@@ -697,6 +715,7 @@ func TestInvalidTargetMode(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// Fast-forward to target mode
 	s.Process("postgres")
@@ -731,6 +750,7 @@ func TestUpsertPromptsForDateColumns(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 	s.Process("postgres")
 	s.Process("localhost")
 	s.Process("5432")
@@ -773,6 +793,7 @@ func TestDropRecreateSkipsDateColumns(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 	s.Process("postgres")
 	s.Process("localhost")
 	s.Process("5432")
@@ -1022,6 +1043,7 @@ func TestMSSQLSSLDefaults(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// MSSQL source
 	s.Process("mssql")
@@ -1048,6 +1070,7 @@ func TestPostgresSSLDefaults(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	s.Process("postgres")
 	s.Process("localhost")
@@ -1061,6 +1084,155 @@ func TestPostgresSSLDefaults(t *testing.T) {
 	s.Process("")
 	if s.Config.Source.SSLMode != "prefer" {
 		t.Fatalf("expected prefer default ssl, got %s", s.Config.Source.SSLMode)
+	}
+}
+
+func TestSlackWebhookBlankSkipsSave(t *testing.T) {
+	s := NewState()
+	s.CurrentStep = StepSlackWebhook
+	// Blank input means "keep existing" — should bypass StepWriteSlackSecret
+	// entirely and proceed to source. No I/O attempted.
+	s.Process("")
+	if s.CurrentStep != StepSourceType {
+		t.Fatalf("blank Slack input should skip directly to StepSourceType, got %d", s.CurrentStep)
+	}
+}
+
+func TestSlackWebhookDashClears(t *testing.T) {
+	s := NewState()
+	s.SlackWebhook = "https://hooks.example.invalid/services/T/B/X"
+	s.CurrentStep = StepSlackWebhook
+	s.Process("-")
+	if s.SlackWebhook != "" {
+		t.Fatalf("'-' should clear SlackWebhook, got %q", s.SlackWebhook)
+	}
+	if s.CurrentStep != StepWriteSlackSecret {
+		t.Fatalf("'-' should route through StepWriteSlackSecret to persist clear, got %d", s.CurrentStep)
+	}
+}
+
+func TestSlackWebhookURLSets(t *testing.T) {
+	s := NewState()
+	s.CurrentStep = StepSlackWebhook
+	s.Process("https://hooks.example.invalid/services/T/B/X")
+	if s.SlackWebhook != "https://hooks.example.invalid/services/T/B/X" {
+		t.Fatalf("URL should be stored in SlackWebhook, got %q", s.SlackWebhook)
+	}
+	if s.CurrentStep != StepWriteSlackSecret {
+		t.Fatalf("URL should route through StepWriteSlackSecret, got %d", s.CurrentStep)
+	}
+}
+
+func TestSlackWebhookPromptDoesNotLeakSecret(t *testing.T) {
+	// Regression: webhook URLs are credentials (logging/scrub.go redacts
+	// them). The prompt must NOT put the raw URL in Default — that would
+	// echo in the CLI "[default]" rendering and TUI scrollback. The
+	// prompt must also be marked masked so the TUI's input-echo path
+	// (handleSetupStep) shows ****** instead of the pasted URL.
+	s := NewState()
+	secret := "https://hooks.example.invalid/services/T01ABCDEFGH/B01ZZZZZZZZ/XXXXXXXXXXXXXXXXXXXXXXXX"
+	s.SlackWebhook = secret
+	s.SlackWebhookOriginal = secret
+	s.CurrentStep = StepSlackWebhook
+
+	info := s.Prompt()
+	if info.Default != "" {
+		t.Fatalf("Default must be empty to avoid leaking webhook URL, got %q", info.Default)
+	}
+	if strings.Contains(info.Text, secret) {
+		t.Fatalf("prompt Text must not echo the webhook URL, got %q", info.Text)
+	}
+	if !info.IsMasked {
+		t.Fatal("IsMasked must be true so TUI does not echo pasted URL into scrollback")
+	}
+	// Sanity: the prompt should at least indicate that something is configured
+	// so the user knows Enter means "keep current" rather than "skip".
+	if !strings.Contains(strings.ToLower(info.Text), "currently") &&
+		!strings.Contains(strings.ToLower(info.Text), "keep") {
+		t.Fatalf("prompt Text should hint that a value is configured, got %q", info.Text)
+	}
+}
+
+func TestSlackPromptHintUsesOriginalNotStaged(t *testing.T) {
+	// The "currently configured" hint must reflect what's on disk, not
+	// what's been staged in memory. Otherwise a failed write would leave
+	// an unsaved URL in SlackWebhook and the prompt would incorrectly
+	// claim it's configured.
+	s := NewState()
+	s.SlackWebhook = "https://hooks.example.invalid/services/T/B/staged"
+	s.SlackWebhookOriginal = "" // nothing on disk
+	s.CurrentStep = StepSlackWebhook
+
+	info := s.Prompt()
+	if strings.Contains(strings.ToLower(info.Text), "currently") {
+		t.Fatalf("prompt should NOT claim 'currently configured' when only staged in memory, got %q", info.Text)
+	}
+}
+
+func TestSlackWriteFailureRevertsStaged(t *testing.T) {
+	// On write failure the in-memory staged URL must revert to the
+	// loaded value so the next prompt accurately reflects disk state
+	// and the user has to re-paste to retry (rather than silently
+	// skipping the save by pressing Enter).
+	s := NewState()
+	s.SlackWebhookOriginal = "https://hooks.example.invalid/services/T/B/original"
+	s.SlackWebhook = "https://hooks.example.invalid/services/T/B/staged" // user just pasted this
+	s.CurrentStep = StepWriteSlackSecret
+
+	errMsg := s.Process("permission denied")
+	if errMsg == "" {
+		t.Fatal("expected error message on write failure")
+	}
+	if s.SlackWebhook != s.SlackWebhookOriginal {
+		t.Fatalf("write failure should revert SlackWebhook to Original, got %q want %q",
+			s.SlackWebhook, s.SlackWebhookOriginal)
+	}
+	if s.CurrentStep != StepSlackWebhook {
+		t.Fatalf("expected to return to StepSlackWebhook, got %d", s.CurrentStep)
+	}
+}
+
+func TestSlackWriteSuccessUpdatesOriginal(t *testing.T) {
+	// On successful write, Original should advance to match SlackWebhook
+	// so a subsequent Enter-to-keep doesn't redundantly re-trigger the
+	// write.
+	s := NewState()
+	s.SlackWebhookOriginal = "https://hooks.example.invalid/services/T/B/old"
+	s.SlackWebhook = "https://hooks.example.invalid/services/T/B/new"
+	s.CurrentStep = StepWriteSlackSecret
+
+	s.Process("") // success
+	if s.SlackWebhookOriginal != s.SlackWebhook {
+		t.Fatalf("Original should match SlackWebhook after successful write, got original=%q webhook=%q",
+			s.SlackWebhookOriginal, s.SlackWebhook)
+	}
+}
+
+func TestSlackWebhookBlankInEditModePreservesSecret(t *testing.T) {
+	// Companion to the redaction test: even though Default is empty,
+	// hitting Enter must preserve s.SlackWebhook rather than wiping it.
+	s := NewState()
+	secret := "https://hooks.example.invalid/services/T/B/X"
+	s.SlackWebhook = secret
+	s.CurrentStep = StepSlackWebhook
+	s.Process("")
+	if s.SlackWebhook != secret {
+		t.Fatalf("blank input should preserve SlackWebhook, got %q", s.SlackWebhook)
+	}
+	if s.CurrentStep != StepSourceType {
+		t.Fatalf("blank should skip directly to StepSourceType (no rewrite), got %d", s.CurrentStep)
+	}
+}
+
+func TestSlackWriteFailureGoesBackToPrompt(t *testing.T) {
+	s := NewState()
+	s.CurrentStep = StepWriteSlackSecret
+	errMsg := s.Process("permission denied")
+	if errMsg == "" {
+		t.Fatal("expected error message on write failure")
+	}
+	if s.CurrentStep != StepSlackWebhook {
+		t.Fatalf("expected to return to StepSlackWebhook on failure, got %d", s.CurrentStep)
 	}
 }
 
@@ -1089,6 +1261,7 @@ func TestWriteConfigFailureGoesBackToConfigPath(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n")
+	s.Process("") // skip Slack
 
 	// Fill source
 	s.Process("postgres")

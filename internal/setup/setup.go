@@ -29,6 +29,10 @@ const (
 	StepAIKey        // prompt: API key or base URL
 	StepWriteSecrets // auto: write secrets file
 
+	// Phase 1b: Slack notifications (always runs, independent of AI choice)
+	StepSlackWebhook    // prompt: Slack webhook URL (blank = skip, '-' = clear)
+	StepWriteSlackSecret // auto: persist webhook to secrets file
+
 	// Phase 2: Source Database
 	StepSourceType
 	StepSourceHost
@@ -97,6 +101,20 @@ type State struct {
 	Force         bool   // overwrite existing files
 	RunAnalysis   bool   // user wants to run AI analysis after setup
 	LastConnError string // last connection test error message
+	// SlackWebhook holds the webhook URL for migration notifications.
+	// Callers should pre-populate from the existing secrets file before
+	// entering the wizard so edit mode shows the current value as a
+	// hit-Enter-to-keep default; the wizard writes it back via
+	// State.WriteSlackSecret(). On write failure the in-memory value
+	// is reverted to SlackWebhookOriginal so the prompt accurately
+	// reflects what's actually on disk.
+	SlackWebhook string
+	// SlackWebhookOriginal is the loaded-from-disk value captured at
+	// wizard start. The prompt's "currently configured" hint reads
+	// this (not SlackWebhook) so a failed write that leaves an unsaved
+	// URL in SlackWebhook doesn't mislead the user into thinking it's
+	// persisted.
+	SlackWebhookOriginal string
 	// EditMode is true when the wizard was launched against an existing
 	// config file (caller set CurrentStep=StepEditOrNew + populated Config).
 	// Bool-typed prompt defaults (create_indexes, create_foreign_keys)
@@ -220,6 +238,34 @@ func (s *State) Prompt() PromptInfo {
 	case StepWriteSecrets:
 		return PromptInfo{
 			Text:         "Saving AI configuration...",
+			IsAutoAction: true,
+		}
+
+	// Phase 1b: Slack notifications (independent of AI choice)
+	case StepSlackWebhook:
+		// Webhook URLs are credentials in this repo (see logging/scrub.go's
+		// slack_webhook regex). Echoing the value in PromptInfo.Default
+		// would leak it to the CLI prompt's "[default]" rendering and into
+		// the TUI scrollback that `/logs` can persist. So we deliberately
+		// leave Default empty here and tell the user via Text whether a
+		// value is already set — Enter still preserves it because the
+		// Process side reads from s.SlackWebhook, not from Default.
+		text := "Slack webhook URL (paste to set, '-' to clear, Enter to skip)"
+		if s.SlackWebhookOriginal != "" {
+			text = "Slack webhook URL — currently configured (Enter to keep, '-' to clear, or paste a new URL)"
+		}
+		return PromptInfo{
+			Text:          text,
+			SectionHeader: "Phase 1b: Optional Slack Notifications",
+			// Mask input echo too — the TUI scrollback rendering at
+			// handleSetupStep echoes any non-masked input as `> <input>`,
+			// which would persist the pasted webhook URL in the buffer
+			// that `/logs` can dump.
+			IsMasked: true,
+		}
+	case StepWriteSlackSecret:
+		return PromptInfo{
+			Text:         "Saving Slack webhook...",
 			IsAutoAction: true,
 		}
 
@@ -442,7 +488,7 @@ func (s *State) Process(input string) string {
 	case StepCheckSecrets:
 		if input == "has_ai" {
 			s.AIConfigured = true
-			s.CurrentStep = StepSourceType
+			s.CurrentStep = StepSlackWebhook
 		} else {
 			s.CurrentStep = StepConfigureAI
 		}
@@ -458,7 +504,7 @@ func (s *State) Process(input string) string {
 			return "Please enter y or n"
 		}
 		if v == "n" {
-			s.CurrentStep = StepSourceType
+			s.CurrentStep = StepSlackWebhook
 		} else {
 			s.CurrentStep = StepAIProvider
 		}
@@ -497,6 +543,41 @@ func (s *State) Process(input string) string {
 			s.CurrentStep = StepAIProvider
 			return fmt.Sprintf("Failed to save secrets: %s", input)
 		}
+		s.CurrentStep = StepSlackWebhook
+
+	// Phase 1b: Slack
+	case StepSlackWebhook:
+		switch input {
+		case "":
+			// Wizard convention: blank = keep the displayed default.
+			// Nothing to write — secrets file already has SlackWebhook
+			// (or is empty and we're skipping).
+			s.CurrentStep = StepSourceType
+		case "-", "none":
+			// Explicit clear — required since blank means "keep" everywhere
+			// else in the wizard.
+			s.SlackWebhook = ""
+			s.CurrentStep = StepWriteSlackSecret
+		default:
+			s.SlackWebhook = input
+			s.CurrentStep = StepWriteSlackSecret
+		}
+
+	case StepWriteSlackSecret:
+		if input != "" {
+			// Write failed — revert SlackWebhook to the loaded-from-disk
+			// value so the next prompt's "currently configured" hint
+			// matches what's actually on disk. Without this revert, the
+			// failed write's URL stays in SlackWebhook and Enter (= keep
+			// current) would silently skip the save retry, completing
+			// the wizard with no persisted webhook.
+			s.SlackWebhook = s.SlackWebhookOriginal
+			s.CurrentStep = StepSlackWebhook
+			return fmt.Sprintf("Failed to save Slack webhook: %s (in-memory change reverted; re-paste to retry)", input)
+		}
+		// Write succeeded — update Original so a subsequent Enter on the
+		// prompt won't re-trigger a save.
+		s.SlackWebhookOriginal = s.SlackWebhook
 		s.CurrentStep = StepSourceType
 
 	// Phase 2: Source
