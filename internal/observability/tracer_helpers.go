@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -79,17 +80,18 @@ func RecordError(ctx context.Context, err error) {
 }
 
 // kvsToAttrs converts the alternating-pair convention into OTel
-// attributes. Mirrors logging.mergeAttrs() so the same call-site list
-// can decorate logs AND spans.
+// attributes. Matches logging.mergeAttrs() so the same call-site kvs list
+// decorates logs AND spans identically — including non-string keys,
+// which are stringified rather than silently dropped (Copilot review).
 func kvsToAttrs(kvs []any) []attribute.KeyValue {
 	out := make([]attribute.KeyValue, 0, len(kvs)/2)
 	for i := 0; i+1 < len(kvs); i += 2 {
 		key, ok := kvs[i].(string)
 		if !ok {
-			// Skip non-string keys silently — OTel attributes require
-			// string keys and we already tolerate the same shape in
-			// logging.Event so failure modes line up.
-			continue
+			// Mirror logging.mergeAttrs: stringify non-string keys so an
+			// awkward call site still produces a visible attribute rather
+			// than silently dropping its value.
+			key = fmt.Sprintf("%v", kvs[i])
 		}
 		out = append(out, anyToAttr(key, kvs[i+1]))
 	}
@@ -116,14 +118,24 @@ func anyToAttr(key string, val any) attribute.KeyValue {
 	}
 }
 
+// anyToString turns an arbitrary value into a useful string attribute.
+// Important call sites pass errors (which implement Error() not String())
+// and unstructured maps; fmt.Sprint handles both without silently dropping
+// the value (Copilot review).
 func anyToString(v any) string {
 	if v == nil {
 		return ""
 	}
-	if s, ok := v.(interface{ String() string }); ok {
-		return s.String()
+	switch t := v.(type) {
+	case string:
+		return t
+	case error:
+		return t.Error()
+	case interface{ String() string }:
+		return t.String()
+	default:
+		return fmt.Sprint(v)
 	}
-	return ""
 }
 
 // noopSpan is the fallback returned when a tracer hasn't been initialized.

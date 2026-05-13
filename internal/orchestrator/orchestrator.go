@@ -348,6 +348,15 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		cfg.Target.Type,
 	)
 
+	// Reset the process-wide Metrics surface to noop. A prior orchestrator
+	// instance (long-running TUI, tests, sidecar deployments) may have
+	// installed a real Registry via SetMetrics; without this reset, a
+	// subsequent NewWithOptions caller that doesn't pass --metrics-addr
+	// would still emit metrics through observability.Global() from the
+	// stale registry. setupObservability() reinstalls a real surface only
+	// when the flag is set AND Start() succeeds (Copilot review).
+	observability.SetGlobal(observability.Noop())
+
 	return &Orchestrator{
 		config:     cfg,
 		sourcePool: sourcePool,
@@ -388,11 +397,8 @@ func (o *Orchestrator) SetRunContext(profileName, configPath string) {
 //
 // setPhase also records the duration of the OUTGOING phase against the
 // phase_duration_seconds histogram and ends its OTLP trace span before
-// stamping the new phase. The orchestrator's exit paths don't call
-// setPhase for a synthetic "done" phase, so the final phase's duration
-// won't be recorded — that's acceptable: the final phase is usually
-// `validating` which is fast; rows_total / transfer durations are
-// tracked separately.
+// stamping the new phase. The FINAL phase's duration is captured by
+// endPhaseSpan() which Run()/Resume() invoke via defer.
 func (o *Orchestrator) setPhase(phase string) {
 	if !o.phaseStart.IsZero() && o.phaseName != "" {
 		o.metrics.ObservePhaseDuration(o.phaseName, time.Since(o.phaseStart).Seconds())
@@ -461,14 +467,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 	startTime := time.Now()
 
-	// #229 observability: stamp run_id + source/target DB type onto every
-	// log line, metric label, and trace span for the rest of this run.
-	// Cleared via defer so process-resident state (TUI, tests) doesn't
-	// leak attributes from a prior run into the next one.
+	// #229 observability: stamp run_id + source/target DB type + an
+	// initial phase ("starting") onto every log line, metric label,
+	// and trace span for the rest of this run. Without the initial
+	// phase value, the Info("Starting migration run...") lines below
+	// would log with `phase=<missing>` until the first setPhase call
+	// (Copilot review). Cleared via defer so process-resident state
+	// (TUI, tests) doesn't leak attributes from a prior run into the next.
 	logging.WithFields(map[string]any{
 		"run_id":    runID,
 		"source_db": o.sourcePool.DBType(),
 		"target_db": o.targetPool.DBType(),
+		"phase":     "starting",
 	})
 	o.metrics.RunStarted(runID, o.sourcePool.DBType(), o.targetPool.DBType())
 	defer logging.ClearBaseAttrs()
@@ -1040,13 +1050,16 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	startTime := time.Now()
 
-	// #229 observability: same per-run attribute decoration as Run().
-	// resume=true differentiates the two flows in log queries.
+	// #229 observability: same per-run attribute decoration as Run(),
+	// including the initial "starting" phase so early log lines carry
+	// a phase attr (Copilot review). resume=true differentiates the
+	// two flows in log queries.
 	logging.WithFields(map[string]any{
 		"run_id":    run.ID,
 		"source_db": o.sourcePool.DBType(),
 		"target_db": o.targetPool.DBType(),
 		"resume":    true,
+		"phase":     "starting",
 	})
 	o.metrics.RunStarted(run.ID, o.sourcePool.DBType(), o.targetPool.DBType())
 	defer logging.ClearBaseAttrs()

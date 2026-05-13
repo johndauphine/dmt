@@ -82,10 +82,13 @@ type Registry struct {
 	writersActive   *prometheus.GaugeVec
 	tuningAdjust    *prometheus.CounterVec
 	aiFallbackTotal *prometheus.CounterVec
+	migrationInfo   *prometheus.GaugeVec // info-style gauge carrying source_db/target_db
 
-	mu       sync.Mutex
-	currentRunID string
-	server   *http.Server
+	mu              sync.Mutex
+	currentRunID    string
+	currentSourceDB string
+	currentTargetDB string
+	server          *http.Server
 }
 
 // New constructs a Registry with all metric instruments pre-registered.
@@ -120,7 +123,7 @@ func New() *Registry {
 		}, []string{"run_id", "table"}),
 		chunkDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: ns, Name: "chunk_duration_seconds",
-			Help:    "Time to read + write a single chunk. Labels: run_id, table.",
+			Help:    "Wall-clock time to WRITE one chunk to the target (does not include the source read; reads are pipelined separately). Labels: run_id, table.",
 			Buckets: prometheus.ExponentialBuckets(0.01, 2, 12), // 10ms .. ~40s
 		}, []string{"run_id", "table"}),
 		phaseDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -144,11 +147,15 @@ func New() *Registry {
 			Namespace: ns, Name: "ai_fallback_total",
 			Help: "AI fallbacks fired during a run. Labels: surface (typemap|errordiag|smartconfig).",
 		}, []string{"surface"}),
+		migrationInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: ns, Name: "migration_info",
+			Help: "Info-style gauge always 1; carries source_db/target_db labels keyed by run_id so dashboards can join other metrics by run_id and pivot on driver. Labels: run_id, source_db, target_db.",
+		}, []string{"run_id", "source_db", "target_db"}),
 	}
 	r.MustRegister(
 		reg.rowsTotal, reg.bytesTotal, reg.errorsTotal, reg.retriesTotal,
 		reg.chunkDuration, reg.phaseDuration, reg.queueDepth, reg.writersActive,
-		reg.tuningAdjust, reg.aiFallbackTotal,
+		reg.tuningAdjust, reg.aiFallbackTotal, reg.migrationInfo,
 	)
 	return reg
 }
@@ -199,15 +206,20 @@ func (r *Registry) Stop(ctx context.Context) error {
 // RunStarted snapshots the run-scoped labels. The first call after a fresh
 // run wins; if a second RunStarted lands before RunComplete (shouldn't
 // happen in practice), the new run_id takes over and the prior gauges
-// keep their last value until cleared by RunComplete.
+// keep their last value until cleared by RunComplete. We also stamp
+// migration_info{run_id, source_db, target_db} = 1 so dashboards can
+// join other run-scoped metrics and pivot on driver pair.
 func (r *Registry) RunStarted(runID, sourceDB, targetDB string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.currentRunID = runID
+	r.currentSourceDB = sourceDB
+	r.currentTargetDB = targetDB
 	// Initialize per-run gauges so /metrics shows the run even before
 	// the first writer dispatches.
 	r.queueDepth.WithLabelValues(runID).Set(0)
 	r.writersActive.WithLabelValues(runID).Set(0)
+	r.migrationInfo.WithLabelValues(runID, sourceDB, targetDB).Set(1)
 }
 
 // RunComplete clears every per-run-labeled series so the cardinality
@@ -222,8 +234,16 @@ func (r *Registry) RunComplete(runID string) {
 	defer r.mu.Unlock()
 	r.queueDepth.DeleteLabelValues(runID)
 	r.writersActive.DeleteLabelValues(runID)
+	// migration_info uses the captured source/target labels because
+	// DeleteLabelValues requires the exact label tuple a series was
+	// registered with. We track them on the Registry for this reason.
+	if r.currentSourceDB != "" && r.currentTargetDB != "" {
+		r.migrationInfo.DeleteLabelValues(runID, r.currentSourceDB, r.currentTargetDB)
+	}
 	if r.currentRunID == runID {
 		r.currentRunID = ""
+		r.currentSourceDB = ""
+		r.currentTargetDB = ""
 	}
 }
 

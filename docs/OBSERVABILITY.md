@@ -8,7 +8,7 @@ dmt exposes three coordinated surfaces so an SRE team can ingest dmt's behavior 
 | Prometheus metrics | `--metrics-addr=:9090` | disabled | Scrape-based numerical observability |
 | OpenTelemetry traces | `--otel-endpoint=URL` | disabled | Distributed-tracing UIs (Jaeger, Honeycomb, Tempo) |
 
-All three share the same dimension names (`run_id`, `phase`, `table`, `source_db`, `target_db`) so you can pivot between log, metric, and trace views in your tooling without re-mapping.
+The three surfaces overlap on `run_id`, `phase`, and `table` so you can pivot between log, metric, and trace views in your tooling without re-mapping. `source_db` / `target_db` appear on log lines and trace spans directly; in Prometheus they live on the `dmt_migration_info{run_id, source_db, target_db}` info-style gauge so dashboards can join other metrics by `run_id` and pivot on driver pair without exploding label cardinality everywhere.
 
 ## Structured JSON logs
 
@@ -67,12 +67,13 @@ The Prometheus endpoint binds at the address given by `--metrics-addr`. It only 
 | `dmt_bytes_total` | counter | `run_id`, `table`, `phase` | Bytes transferred (estimated from row size) |
 | `dmt_errors_total` | counter | `run_id`, `table`, `phase`, `error_class` | Errors raised during migration |
 | `dmt_retries_total` | counter | `run_id`, `table` | Chunk-level retries |
-| `dmt_chunk_duration_seconds` | histogram | `run_id`, `table` | Time to read+write a single chunk |
+| `dmt_chunk_duration_seconds` | histogram | `run_id`, `table` | Wall-clock time to **write** one chunk to the target (does NOT include the source read — reads are pipelined separately) |
 | `dmt_phase_duration_seconds` | histogram | `phase` | Wall-clock duration per orchestrator phase |
 | `dmt_writer_queue_depth` | gauge | `run_id` | Current depth of the writer pool's input queue |
 | `dmt_writers_active` | gauge | `run_id` | Active writer goroutines |
 | `dmt_runtime_tuning_adjustments_total` | counter | `rule_name`, `direction` | Runtime parameter adjustments |
 | `dmt_ai_fallback_total` | counter | `surface` | AI fallbacks fired (cross-ref #176) |
+| `dmt_migration_info` | gauge (always 1) | `run_id`, `source_db`, `target_db` | Info-style identity tuple. Set on RunStarted, deleted on RunComplete. Join other run-scoped metrics by `run_id` to pivot dashboards on driver pair. |
 
 ### Cardinality note
 
@@ -86,7 +87,7 @@ dmt --otel-endpoint=http://otel-collector:4318 run
 
 The OTLP HTTP exporter is enabled when `--otel-endpoint=URL` is set. The URL should be the collector's base URL — the exporter appends `/v1/traces` itself. `http://` is treated as insecure (dev setups); `https://` uses TLS.
 
-### Span hierarchy
+### Span hierarchy (current)
 
 ```
 dmt.run (or dmt.resume)
@@ -94,21 +95,20 @@ dmt.run (or dmt.resume)
 ├── phase.extracting_schema
 ├── phase.creating_tables
 ├── phase.transfer
-│   └── (table-level spans + per-chunk events emitted by the transfer goroutines)
 ├── phase.finalizing
 └── phase.validating
 ```
 
+Today's trace surface gives you run-level and phase-level timing. Table-level spans and per-chunk events are deferred: they need plumbing through the parallel writer goroutines and would benefit from richer span sampling so a 100M-row migration's 1000 chunks per table don't flood backends. For per-chunk visibility now, use `dmt_chunk_duration_seconds` (Prometheus histogram, labeled by table) — same dimension keys, no span explosion.
+
 ### Span attributes
 
-Every span carries the same dimensions as the metrics labels:
+Every span carries the same dimensions as the metric labels and log fields:
 
 - `run_id` — 8-char run identifier
-- `phase` — orchestrator phase name
-- `source_db` / `target_db` — driver names
-- `resume` — bool, only on resume runs
-
-Per-chunk milestones are emitted as **span events** on the table span (not as separate spans). A 100M-row migration with 1000 chunks per table would otherwise flood tracing backends; events give you the same per-chunk timing without the cardinality explosion.
+- `phase` — orchestrator phase name (on phase spans)
+- `source_db` / `target_db` — driver names (on the root span)
+- `resume` — bool, only on `dmt.resume` runs
 
 ## Grafana dashboard
 

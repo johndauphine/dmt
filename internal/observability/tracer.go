@@ -25,8 +25,13 @@ import (
 // log and continue without tracing rather than failing the migration.
 func SetupTracer(ctx context.Context, endpoint string) (func(context.Context) error, error) {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Host == "" {
+	if err != nil {
 		return nil, fmt.Errorf("invalid OTLP endpoint %q: %w", endpoint, err)
+	}
+	// Avoid `%w` on a nil err — Copilot review caught this would produce
+	// "...: %!w(<nil>)" and break errors.Unwrap. Emit a clean sentinel.
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid OTLP endpoint %q: missing host", endpoint)
 	}
 
 	opts := []otlptracehttp.Option{
