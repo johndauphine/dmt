@@ -737,6 +737,20 @@ func (s *State) ClearTransferProgress(taskID int64) error {
 	return err
 }
 
+// GetPartitionTransferProgressSummary returns aggregate saved progress across
+// all partition tasks for one table in a run.
+func (s *State) GetPartitionTransferProgressSummary(runID, tableTaskKey string) (PartitionProgressSummary, error) {
+	var summary PartitionProgressSummary
+	err := s.db.QueryRow(`
+		SELECT COALESCE(SUM(tp.rows_done), 0), COUNT(*)
+		FROM transfer_progress tp
+		JOIN tasks t ON t.id = tp.task_id
+		WHERE t.run_id = ? AND t.task_key LIKE ? ESCAPE '\'
+			AND tp.last_pk IS NOT NULL AND tp.last_pk != 'null'
+	`, runID, partitionTaskLikePattern(tableTaskKey)).Scan(&summary.RowsDone, &summary.PartitionsWithProgress)
+	return summary, err
+}
+
 // ClearPartitionTransferProgress removes all partition-level progress rows for a
 // table within a run (#227). Partitioned tables use task keys of the form
 // "transfer:schema.table:p<N>", and each partition saves its own
@@ -745,39 +759,34 @@ func (s *State) ClearTransferProgress(taskID int64) error {
 // a stale rowNum/PK against a freshly-truncated target — which would silently
 // skip rows 0..lastRowNum.
 func (s *State) ClearPartitionTransferProgress(runID, tableTaskKey string) error {
-	// Escape LIKE wildcards in the prefix so underscores and percent signs
-	// in table names (e.g., order_items) are treated literally.
-	escaped := strings.ReplaceAll(tableTaskKey, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `_`, `\_`)
-	escaped = strings.ReplaceAll(escaped, `%`, `\%`)
-	pattern := escaped + ":p%"
-
 	_, err := s.db.Exec(`
 		DELETE FROM transfer_progress
 		WHERE task_id IN (
 			SELECT id FROM tasks
 			WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
 		)
-	`, runID, pattern)
+	`, runID, partitionTaskLikePattern(tableTaskKey))
 	return err
 }
 
 // CountPartitionTasks returns the number of existing partition tasks for a table in a run.
 // It counts tasks matching the pattern "transfer:schema.table:p*".
 func (s *State) CountPartitionTasks(runID, taskKeyPrefix string) (int, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
+	`, runID, partitionTaskLikePattern(taskKeyPrefix)).Scan(&count)
+	return count, err
+}
+
+func partitionTaskLikePattern(taskKeyPrefix string) string {
 	// Escape LIKE wildcards in the prefix so underscores and percent signs
 	// in table names (e.g., order_items) are treated literally.
 	escaped := strings.ReplaceAll(taskKeyPrefix, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `_`, `\_`)
 	escaped = strings.ReplaceAll(escaped, `%`, `\%`)
-	pattern := escaped + ":p%"
-
-	var count int
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM tasks
-		WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
-	`, runID, pattern).Scan(&count)
-	return count, err
+	return escaped + ":p%"
 }
 
 // GetRunStats returns summary stats for a run

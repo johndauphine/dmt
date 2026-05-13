@@ -265,6 +265,68 @@ func TestFileState_ClearPartitionTransferProgress(t *testing.T) {
 	}
 }
 
+func TestFileState_GetPartitionTransferProgressSummary(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.yaml")
+	fs, err := NewFileState(stateFile)
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	const runID = "test-run-267"
+	if err := fs.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	for i, rowsDone := range []int64{100, 250, 400} {
+		pid := i + 1
+		key := "transfer:public.votes:p" + itoa(pid)
+		taskID, err := fs.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask(%s): %v", key, err)
+		}
+		if err := fs.SaveTransferProgress(taskID, "votes", &pid, int64(pid*1000), rowsDone, 1000); err != nil {
+			t.Fatalf("SaveTransferProgress(%s): %v", key, err)
+		}
+	}
+
+	tableTaskID, err := fs.CreateTask(runID, "transfer", "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("CreateTask(votes table): %v", err)
+	}
+	if err := fs.SaveTransferProgress(tableTaskID, "votes", nil, int64(999), 999, 1000); err != nil {
+		t.Fatalf("SaveTransferProgress(votes table): %v", err)
+	}
+
+	emptyProgressID, err := fs.CreateTask(runID, "transfer", "transfer:public.votes:p4")
+	if err != nil {
+		t.Fatalf("CreateTask(votes empty partition): %v", err)
+	}
+	pid := 4
+	if err := fs.SaveTransferProgress(emptyProgressID, "votes", &pid, nil, 999, 1000); err != nil {
+		t.Fatalf("SaveTransferProgress(votes empty partition): %v", err)
+	}
+
+	otherTaskID, err := fs.CreateTask(runID, "transfer", "transfer:public.posts:p1")
+	if err != nil {
+		t.Fatalf("CreateTask(posts): %v", err)
+	}
+	pid = 1
+	if err := fs.SaveTransferProgress(otherTaskID, "posts", &pid, int64(500), 500, 1000); err != nil {
+		t.Fatalf("SaveTransferProgress(posts): %v", err)
+	}
+
+	summary, err := fs.GetPartitionTransferProgressSummary(runID, "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("GetPartitionTransferProgressSummary: %v", err)
+	}
+	if summary.RowsDone != 750 {
+		t.Errorf("RowsDone = %d, want 750", summary.RowsDone)
+	}
+	if summary.PartitionsWithProgress != 3 {
+		t.Errorf("PartitionsWithProgress = %d, want 3", summary.PartitionsWithProgress)
+	}
+}
+
 // itoa is a tiny local helper so the test stays free of strconv imports.
 func itoa(n int) string {
 	if n == 0 {

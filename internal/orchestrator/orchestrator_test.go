@@ -487,6 +487,105 @@ func TestClearResumeProgressFailsOnStaleCheckpointCleanupErrors(t *testing.T) {
 	}
 }
 
+func TestExpectedResumeRowsUsesPartitionProgress(t *testing.T) {
+	tests := []struct {
+		name            string
+		isPartitioned   bool
+		tableLastPK     any
+		tableRowsDone   int64
+		summary         checkpoint.PartitionProgressSummary
+		summaryErr      error
+		wantRows        int64
+		wantHasProgress bool
+		wantSummaryCall bool
+		wantErr         string
+	}{
+		{
+			name:            "non partitioned uses table progress only",
+			tableLastPK:     int64(10),
+			tableRowsDone:   100,
+			wantRows:        100,
+			wantHasProgress: true,
+		},
+		{
+			name:          "partition progress works without table progress",
+			isPartitioned: true,
+			summary: checkpoint.PartitionProgressSummary{
+				RowsDone:               750,
+				PartitionsWithProgress: 3,
+			},
+			wantRows:        750,
+			wantHasProgress: true,
+			wantSummaryCall: true,
+		},
+		{
+			name:          "partition progress wins when it is larger",
+			isPartitioned: true,
+			tableLastPK:   int64(10),
+			tableRowsDone: 100,
+			summary: checkpoint.PartitionProgressSummary{
+				RowsDone:               750,
+				PartitionsWithProgress: 3,
+			},
+			wantRows:        750,
+			wantHasProgress: true,
+			wantSummaryCall: true,
+		},
+		{
+			name:            "falls back to table progress when no partition progress exists",
+			isPartitioned:   true,
+			tableLastPK:     int64(10),
+			tableRowsDone:   100,
+			wantRows:        100,
+			wantHasProgress: true,
+			wantSummaryCall: true,
+		},
+		{
+			name:            "partition summary errors are fatal",
+			isPartitioned:   true,
+			summaryErr:      errors.New("state db locked"),
+			wantSummaryCall: true,
+			wantErr:         "getting partition progress",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &resumeProgressSummaryState{
+				summary: tt.summary,
+				err:     tt.summaryErr,
+			}
+			o := &Orchestrator{state: state}
+
+			gotRows, gotHasProgress, err := o.expectedResumeRows(
+				"run-267", "transfer:public.votes",
+				tt.isPartitioned, tt.tableLastPK, tt.tableRowsDone,
+			)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expectedResumeRows() error = %v, want nil", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("expectedResumeRows() error = nil, want %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expectedResumeRows() error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+			}
+			if gotRows != tt.wantRows {
+				t.Errorf("rows = %d, want %d", gotRows, tt.wantRows)
+			}
+			if gotHasProgress != tt.wantHasProgress {
+				t.Errorf("hasProgress = %t, want %t", gotHasProgress, tt.wantHasProgress)
+			}
+			if (state.calls > 0) != tt.wantSummaryCall {
+				t.Errorf("summary called = %t, want %t", state.calls > 0, tt.wantSummaryCall)
+			}
+		})
+	}
+}
+
 type resumeProgressClearState struct {
 	checkpoint.StateBackend
 	clearErr            error
@@ -503,6 +602,21 @@ func (s *resumeProgressClearState) ClearTransferProgress(int64) error {
 func (s *resumeProgressClearState) ClearPartitionTransferProgress(string, string) error {
 	s.partitionClearCalls++
 	return s.partitionClearErr
+}
+
+type resumeProgressSummaryState struct {
+	checkpoint.StateBackend
+	summary checkpoint.PartitionProgressSummary
+	err     error
+	calls   int
+}
+
+func (s *resumeProgressSummaryState) GetPartitionTransferProgressSummary(
+	string,
+	string,
+) (checkpoint.PartitionProgressSummary, error) {
+	s.calls++
+	return s.summary, s.err
 }
 
 // TestComputeConfigHash_AllowPartialInvariant guards against the
