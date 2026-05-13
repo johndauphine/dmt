@@ -99,6 +99,11 @@ func (d *Driver) ProbeTarget(ctx context.Context, db *sql.DB) driver.TargetProbe
 	return probe
 }
 
+// PreFlight runs MySQL preflight checks (#228). Implementation in preflight.go.
+func (d *Driver) PreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+	return preFlight(ctx, db, req)
+}
+
 // Dialect returns the MySQL dialect.
 func (d *Driver) Dialect() driver.Dialect {
 	return &Dialect{}

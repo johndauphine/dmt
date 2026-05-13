@@ -78,6 +78,20 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 	wg.Wait()
 
 	result.Healthy = result.SourceConnected && result.TargetConnected
+
+	// Run preflight only when both pings succeeded. Driver-side checks
+	// assume the connection is live; running them against a dead pool
+	// would just emit a flurry of "could not read X" findings that
+	// duplicate the connection error the operator already sees.
+	if result.Healthy {
+		pf := o.collectPreFlightFindings(ctx)
+		pf = applyPreFlightSkips(pf, preFlightSkipSet(o.config.Migration.SkipPreflight))
+		result.PreFlightFindings = pf.Findings
+		result.PreFlightAborted = pf.Aborted
+		if pf.Aborted {
+			result.Healthy = false
+		}
+	}
 	return result, nil
 }
 

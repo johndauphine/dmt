@@ -94,6 +94,14 @@ type Driver interface {
 	// Probe failures degrade gracefully — callers see a zero-valued
 	// field and fall back to the memory-budget-only chunk size.
 	ProbeTarget(ctx context.Context, db *sql.DB) TargetProbe
+
+	// PreFlight runs the driver's preflight checks against the supplied
+	// connection (#228). The orchestrator invokes this before any
+	// schema-extraction or DDL work so misconfigured environments fail
+	// fast with actionable findings rather than silently after minutes
+	// of partial work. Drivers should return findings in stable order.
+	// The empty-slice return is the OK signal.
+	PreFlight(ctx context.Context, db *sql.DB, req PreFlightRequest) []PreFlightFinding
 }
 
 // TargetProbe carries runtime-probed values from the target database

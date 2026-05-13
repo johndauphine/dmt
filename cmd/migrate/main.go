@@ -149,6 +149,14 @@ func main() {
 						Name:  "explore",
 						Usage: "Force a tuning exploration probe on this run (PR2 #179 activates this; PR1 #175 plumbs the flag)",
 					},
+					&cli.StringFlag{
+						Name:  "skip-preflight",
+						Usage: "Comma-separated list of preflight checks to skip, or 'all' to disable preflight (#228). Skip names match Finding.Check (e.g. 'privileges.create_table') or a dotted prefix (e.g. 'privileges'). Use sparingly — preflight catches misconfigurations before they corrupt a long migration.",
+					},
+					&cli.BoolFlag{
+						Name:  "confirm-backup",
+						Usage: "Acknowledge that target tables will be dropped (drop_recreate mode). Required when the target schema already contains non-empty tables (#228).",
+					},
 				},
 			},
 			{
@@ -159,6 +167,10 @@ func main() {
 					&cli.BoolFlag{
 						Name:  "force-resume",
 						Usage: "Force resume even if config has changed",
+					},
+					&cli.StringFlag{
+						Name:  "skip-preflight",
+						Usage: "Comma-separated list of preflight checks to skip, or 'all' to disable preflight (#228)",
 					},
 				},
 			},
@@ -245,9 +257,20 @@ func main() {
 				},
 			},
 			{
-				Name:   "health-check",
-				Usage:  "Test database connections",
-				Action: healthCheck,
+				// preflight runs the connection ping AND the driver-side
+				// preflight checks introduced in #228. health-check is
+				// preserved as an alias so existing Airflow/k8s probes
+				// keep working without edits.
+				Name:    "preflight",
+				Aliases: []string{"health-check"},
+				Usage:   "Verify source/target connectivity, privileges, version, encoding, and other preflight checks (#228)",
+				Action:  healthCheck,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "skip-preflight",
+						Usage: "Comma-separated list of preflight checks to skip, or 'all' to disable preflight",
+					},
+				},
 			},
 			{
 				Name:   "analyze",
@@ -354,6 +377,14 @@ func runMigration(c *cli.Context) error {
 	if c.IsSet("explore") {
 		cfg.Migration.Explore = c.Bool("explore")
 	}
+	// Preflight knobs (#228). The CLI flags override any YAML values so
+	// operators can opt out per-invocation without editing config files.
+	if c.IsSet("skip-preflight") {
+		cfg.Migration.SkipPreflight = []string{c.String("skip-preflight")}
+	}
+	if c.IsSet("confirm-backup") {
+		cfg.Migration.ConfirmBackup = c.Bool("confirm-backup")
+	}
 
 	// Build orchestrator options
 	opts := orchestrator.Options{
@@ -435,6 +466,13 @@ func resumeMigration(c *cli.Context) error {
 	cfg, _, _, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Preflight skip flag — same plumbing as runMigration. confirm-backup
+	// is not on resume because resume implies an in-progress migration
+	// whose target was already created or staged (#228).
+	if c.IsSet("skip-preflight") {
+		cfg.Migration.SkipPreflight = []string{c.String("skip-preflight")}
 	}
 
 	opts := orchestrator.Options{
@@ -819,11 +857,17 @@ func forceCleanupAndExit(cleanup func()) {
 	os.Exit(exitcodes.Cancelled)
 }
 
-// healthCheck tests database connections
+// healthCheck implements `dmt preflight` (and its legacy `health-check`
+// alias). Tests connections and runs the driver-side preflight checks
+// introduced in #228.
 func healthCheck(c *cli.Context) error {
 	cfg, _, _, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if c.IsSet("skip-preflight") {
+		cfg.Migration.SkipPreflight = []string{c.String("skip-preflight")}
 	}
 
 	opts := orchestrator.Options{
@@ -859,7 +903,11 @@ func healthCheck(c *cli.Context) error {
 			}
 		}
 		if !result.Healthy {
-			return fmt.Errorf("health check failed")
+			// Use the same exit-code policy as the human-readable path
+			// (Copilot review): JSON consumers (Airflow, CI) need ConfigError
+			// for misconfiguration vs ConnectionError for ping failure so
+			// retry policy can branch correctly.
+			return preflightExitError(result)
 		}
 		return nil
 	}
@@ -885,12 +933,43 @@ func healthCheck(c *cli.Context) error {
 		fmt.Printf("    Error: %s\n", result.TargetError)
 	}
 
+	if len(result.PreFlightFindings) > 0 {
+		fmt.Println("\n  Preflight findings:")
+		for _, f := range result.PreFlightFindings {
+			fmt.Printf("    [%s] %s/%s: %s\n", f.Severity, f.Side, f.Check, f.Message)
+			if f.Remedy != "" {
+				fmt.Printf("      remedy: %s\n", f.Remedy)
+			}
+		}
+	}
+
 	fmt.Printf("\n  Overall: %s\n", boolToHealthy(result.Healthy))
 
 	if !result.Healthy {
-		return fmt.Errorf("health check failed")
+		return preflightExitError(result)
 	}
 	return nil
+}
+
+// preflightExitError classifies a failed preflight result into an exit code:
+//   - ConfigError when at least one error-severity finding remains
+//     (misconfigured environment — non-recoverable, operator must fix it).
+//   - ConnectionError when the ping itself failed (network/credentials —
+//     potentially recoverable; retry policy can backoff).
+//
+// The message counts only error-severity findings so the operator isn't
+// misled by warn/info findings inflating the failure count (Copilot review).
+func preflightExitError(result *orchestrator.HealthCheckResult) error {
+	if result.PreFlightAborted {
+		errorCount := 0
+		for _, f := range result.PreFlightFindings {
+			if f.Severity == driver.SeverityError {
+				errorCount++
+			}
+		}
+		return exitcodes.NewExitError(fmt.Errorf("preflight failed: %d blocking finding(s)", errorCount), exitcodes.ConfigError)
+	}
+	return exitcodes.NewExitError(fmt.Errorf("preflight failed"), exitcodes.ConnectionError)
 }
 
 func analyzeConfig(c *cli.Context) error {
