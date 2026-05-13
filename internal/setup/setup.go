@@ -553,9 +553,11 @@ func (s *State) Process(input string) string {
 			// Nothing to write — secrets file already has SlackWebhook
 			// (or is empty and we're skipping).
 			s.CurrentStep = StepSourceType
-		case "-", "none":
+		case "-":
 			// Explicit clear — required since blank means "keep" everywhere
-			// else in the wizard.
+			// else in the wizard. Single canonical sentinel so the prompt
+			// text and accepted inputs stay in lockstep (copilot review on
+			// #281 caught this drifting from the old "-"/"none" pair).
 			s.SlackWebhook = ""
 			s.CurrentStep = StepWriteSlackSecret
 		default:
@@ -800,9 +802,10 @@ func (s *State) Process(input string) string {
 		case "":
 			// Empty input preserves the existing list (wizard convention:
 			// Enter accepts the displayed default).
-		case "-", "none":
+		case "-":
 			// Explicit clear — required to remove a previously-set list,
 			// since blank means "keep" everywhere else in the wizard.
+			// Single canonical sentinel matches the prompt text.
 			s.Config.Migration.DateUpdatedColumns = nil
 		default:
 			parts := strings.Split(input, ",")
