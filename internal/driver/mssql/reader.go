@@ -28,9 +28,13 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
+	// go-mssqldb sometimes echoes the DSN in its open/ping errors —
+	// the message can include the password embedded in the URL form.
+	// ScrubError replaces it with [REDACTED] before the error reaches
+	// a log aggregator (#231).
 	db, err := sql.Open("sqlserver", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening connection: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("opening connection: %w", err))
 	}
 
 	// Configure connection pool
@@ -41,7 +45,7 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	// Test connection
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pinging database: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("pinging database: %w", err))
 	}
 
 	// Check database compatibility level - require 140+ for STRING_AGG support

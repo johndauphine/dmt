@@ -47,7 +47,10 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 
 		if db := o.sourcePool.DB(); db != nil {
 			if err := db.PingContext(sourceCtx); err != nil {
-				result.SourceError = err.Error()
+				// Ping errors from go-mssqldb / pgx / go-sql-driver/mysql
+				// can include the DSN. Scrub before this string lands in
+				// the JSON output or the TUI (#231).
+				result.SourceError = logging.Scrub(err.Error())
 			} else {
 				result.SourceConnected = true
 				// Get table count
@@ -68,7 +71,8 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 		defer targetCancel()
 
 		if err := o.targetPool.Ping(targetCtx); err != nil {
-			result.TargetError = err.Error()
+			// Same DSN-leak class as the source-side ping above (#231).
+			result.TargetError = logging.Scrub(err.Error())
 		} else {
 			result.TargetConnected = true
 		}

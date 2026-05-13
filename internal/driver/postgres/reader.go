@@ -29,9 +29,14 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
+	// pgx's ParseConfig / pgxpool error messages can include the raw
+	// DSN (password and all) when the conninfo string fails to parse —
+	// see #231. ScrubError replaces the password with [REDACTED] so
+	// the underlying error stays useful for diagnosis (port, sslmode,
+	// option name) without leaking credentials into operator logs.
 	poolConfig, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("parsing connection config: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("parsing connection config: %w", err))
 	}
 
 	poolConfig.MaxConns = int32(maxConns)
@@ -42,19 +47,19 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
 	if err != nil {
-		return nil, fmt.Errorf("creating pool: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("creating pool: %w", err))
 	}
 
 	if err := pool.Ping(context.Background()); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("pinging database: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("pinging database: %w", err))
 	}
 
 	// Create sql.DB wrapper for compatibility
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("creating sql.DB wrapper: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("creating sql.DB wrapper: %w", err))
 	}
 	db.SetMaxOpenConns(maxConns)
 	db.SetMaxIdleConns(maxConns / 4)

@@ -27,9 +27,13 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 	dialect := &Dialect{}
 	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
 
+	// go-sql-driver/mysql wraps the DSN into its open/ping errors —
+	// the user:password@tcp(...) form is the load-bearing leak vector
+	// for #231. ScrubError replaces the password with [REDACTED]
+	// before the error reaches a log aggregator.
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening connection: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("opening connection: %w", err))
 	}
 
 	db.SetMaxOpenConns(maxConns)
@@ -41,7 +45,7 @@ func NewReader(cfg *dbconfig.SourceConfig, maxConns int) (*Reader, error) {
 
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pinging database: %w", err)
+		return nil, logging.ScrubError(fmt.Errorf("pinging database: %w", err))
 	}
 
 	// Detect MySQL vs MariaDB

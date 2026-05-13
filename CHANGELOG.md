@@ -65,43 +65,53 @@ All notable changes to this project will be documented in this file.
   release cadence, the hotfix path, and pre-release/RC tagging.
   Goes binding at v1.0.0; best-effort before.
 
-- **Production migration runbook + failure-mode catalog** (#234). New
-  `docs/RUNBOOK.md` is the one-document operational reference for an
-  SRE taking a dmt migration to green: pre-run checklist (privileges,
-  disk, encoding, backup ack, `dmt preflight` walk-through), a
-  symptom-keyed failure-mode catalog covering preflight / connection /
-  privilege / disk / deadlock / hung-shutdown / validation /
-  partial-exit-3 / config-hash / stale-resume / torn-state-file /
-  MySQL TLS / content-divergence (one entry per closed issue from the
-  production-readiness epic), a one-paragraph pointer at each of the
-  three observability surfaces (cross-links to `OBSERVABILITY.md`),
-  the operational-command reference (`run` / `resume` / `preflight` /
-  `status` / `history` / `validate` / `analyze` / `profile`), and an
-  emergency-procedures section (graceful kill, SIGKILL escalation,
-  target-stuck-in-bad-state recovery, downstream-data-already-consumed
-  triage). Exit-code table included for automation predicates.
-  Cross-links `RESTARTABILITY.md`, `OBSERVABILITY.md`, `PRIVILEGES.md`
-  (sibling, #232), `FIXTURES.md`, and `CONTRIBUTING.md` rather than
-  duplicating them.
+- **Sensitive-value scrubbing audit** (#231). New
+  `internal/logging/scrub.go` exposes `Scrub(s)` /
+  `ScrubError(err)` with a centralized regex set covering
+  URL-style and libpq-style DSN passwords (PG, MSSQL, MySQL
+  shapes), `password=`/`passwd=`/`pwd=`/`api_key=`/`secret=`/
+  `token=` key/value forms (with `:` and `=` separators both
+  preserved), `Authorization: Bearer` headers, `sk-` and
+  `sk-ant-` API keys, and Slack incoming-webhook URLs. Threaded
+  through every site that wraps a driver-library error: the
+  PG / MSSQL / MySQL Reader and Writer constructors plus their
+  Ping calls, the setup wizard's `TestConnection`, the
+  orchestrator's `dmt preflight` JSON output, and the Slack
+  notifier's HTTP error path. New `docs/SECURITY.md`
+  documents the threat model, what's scrubbed, what's
+  never logged (row content), and how an operator verifies.
 
-- **Production migration runbook + failure-mode catalog** (#234). New
-  `docs/RUNBOOK.md` is the one-document operational reference for an
-  SRE taking a dmt migration to green: pre-run checklist (privileges,
-  disk, encoding, backup ack, `dmt preflight` walk-through), a
-  symptom-keyed failure-mode catalog covering preflight / connection /
-  privilege / disk / deadlock / hung-shutdown / validation /
-  partial-exit-3 / config-hash / stale-resume / torn-state-file /
-  MySQL TLS / content-divergence (one entry per closed issue from the
-  production-readiness epic), a one-paragraph pointer at each of the
-  three observability surfaces (cross-links to `OBSERVABILITY.md`),
-  the operational-command reference (`run` / `resume` / `preflight` /
-  `status` / `history` / `validate` / `analyze` / `profile`), and an
-  emergency-procedures section (graceful kill, SIGKILL escalation,
-  target-stuck-in-bad-state recovery, downstream-data-already-consumed
-  triage). Exit-code table included for automation predicates.
-  Cross-links `RESTARTABILITY.md`, `OBSERVABILITY.md`, `PRIVILEGES.md`
-  (sibling, #232), `FIXTURES.md`, and `CONTRIBUTING.md` rather than
-  duplicating them.
+- **Sensitive-value scrubbing audit** (#231). New
+  `internal/logging/scrub.go` exposes `Scrub(s)` /
+  `ScrubError(err)` with a centralized regex set covering
+  URL-style and libpq-style DSN passwords (PG, MSSQL, MySQL
+  shapes), `password=`/`passwd=`/`pwd=`/`api_key=`/`secret=`/
+  `token=` key/value forms (with `:` and `=` separators both
+  preserved), `Authorization: Bearer` headers, `sk-` and
+  `sk-ant-` API keys, and Slack incoming-webhook URLs. Threaded
+  through every site that wraps a driver-library error: the
+  PG / MSSQL / MySQL Reader and Writer constructors plus their
+  Ping calls, the setup wizard's `TestConnection`, the
+  orchestrator's `dmt preflight` JSON output, and the Slack
+  notifier's HTTP error path. New `docs/SECURITY.md`
+  documents the threat model, what's scrubbed, what's
+  never logged (row content), and how an operator verifies.
+
+- **Sensitive-value scrubbing audit** (#231). New
+  `internal/logging/scrub.go` exposes `Scrub(s)` /
+  `ScrubError(err)` with a centralized regex set covering
+  URL-style and libpq-style DSN passwords (PG, MSSQL, MySQL
+  shapes), `password=`/`passwd=`/`pwd=`/`api_key=`/`secret=`/
+  `token=` key/value forms (with `:` and `=` separators both
+  preserved), `Authorization: Bearer` headers, `sk-` and
+  `sk-ant-` API keys, and Slack incoming-webhook URLs. Threaded
+  through every site that wraps a driver-library error: the
+  PG / MSSQL / MySQL Reader and Writer constructors plus their
+  Ping calls, the setup wizard's `TestConnection`, the
+  orchestrator's `dmt preflight` JSON output, and the Slack
+  notifier's HTTP error path. New `docs/SECURITY.md`
+  documents the threat model, what's scrubbed, what's
+  never logged (row content), and how an operator verifies.
 
 ### Fixed
 
