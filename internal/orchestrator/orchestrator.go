@@ -1012,7 +1012,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			return fmt.Errorf("checking table %s: %w", t.Name, err)
 		}
 		if !exists {
-			// Table doesn't exist - create it and clear any stale progress
+			// Table doesn't exist - clear any stale progress before creating it.
+			// If cleanup fails, leaving the target missing is safer than creating
+			// an empty target beside stale partition checkpoints (#266).
+			if err := o.clearResumeProgress(run.ID, taskKey, taskID, t.Name); err != nil {
+				o.state.CompleteRun(run.ID, "failed", err.Error())
+				return err
+			}
 			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
 				o.state.CompleteRun(run.ID, "failed", err.Error())
 				return fmt.Errorf("creating table %s: %w", t.Name, err)
@@ -1024,19 +1030,6 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
 				o.state.CompleteRun(run.ID, "failed", err.Error())
 				return fmt.Errorf("ensuring PK on %s: %w", t.Name, err)
-			}
-			// Clear any saved progress since we're starting fresh.
-			// This also wipes any partition-level checkpoints from a prior
-			// run; otherwise a partitioned ROW_NUMBER table would resume
-			// each partition from a stale rowNum and skip data.
-			// Both clears are best-effort: surface failures as warnings so
-			// resume continues, but the operator can spot inconsistent
-			// state (Copilot review).
-			if err := o.state.ClearTransferProgress(taskID); err != nil {
-				logging.Warn("Failed to clear transfer progress for %s: %v", t.Name, err)
-			}
-			if err := o.state.ClearPartitionTransferProgress(run.ID, taskKey); err != nil {
-				logging.Warn("Failed to clear partition progress for %s: %v", t.Name, err)
 			}
 		} else {
 			// Table exists - check if we have saved chunk progress
@@ -1067,16 +1060,13 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 					// Target has fewer rows than expected - clear progress and truncate.
 					// Also clear partition-level checkpoints so partitioned tables
 					// restart cleanly instead of resuming each partition from a
-					// stale rowNum and skipping data (#227).
-					// Both clears are best-effort; surface failures as warnings
-					// (Copilot review).
+					// stale rowNum and skipping data (#227). Cleanup failure is
+					// fatal: truncating while stale checkpoints remain is unsafe (#266).
 					logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
 						t.Name, targetCount, rowsDone)
-					if err := o.state.ClearTransferProgress(taskID); err != nil {
-						logging.Warn("Failed to clear transfer progress for %s: %v", t.Name, err)
-					}
-					if err := o.state.ClearPartitionTransferProgress(run.ID, taskKey); err != nil {
-						logging.Warn("Failed to clear partition progress for %s: %v", t.Name, err)
+					if err := o.clearResumeProgress(run.ID, taskKey, taskID, t.Name); err != nil {
+						o.state.CompleteRun(run.ID, "failed", err.Error())
+						return err
 					}
 					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 						o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -1211,6 +1201,16 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	if partialErr {
 		return &PartialMigrationError{Failed: tableFailures}
+	}
+	return nil
+}
+
+func (o *Orchestrator) clearResumeProgress(runID, taskKey string, taskID int64, tableName string) error {
+	if err := o.state.ClearPartitionTransferProgress(runID, taskKey); err != nil {
+		return fmt.Errorf("clearing partition progress for %s: %w", tableName, err)
+	}
+	if err := o.state.ClearTransferProgress(taskID); err != nil {
+		return fmt.Errorf("clearing transfer progress for %s: %w", tableName, err)
 	}
 	return nil
 }

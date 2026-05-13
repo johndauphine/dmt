@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 )
@@ -381,14 +382,14 @@ func TestSanitizeForLog(t *testing.T) {
 // TestParsePGSize covers the conversion from PG SHOW values to MB.
 func TestParsePGSize(t *testing.T) {
 	cases := []struct {
-		raw       string
-		wantMB    int64
-		wantOK    bool
+		raw    string
+		wantMB int64
+		wantOK bool
 	}{
 		{"8GB", 8 * 1024, true},
 		{"16384MB", 16384, true},
-		{"1024kB", 1, true},     // 1024 KB = 1 MB
-		{"512kB", 0, true},      // sub-MB rounds down to 0
+		{"1024kB", 1, true}, // 1024 KB = 1 MB
+		{"512kB", 0, true},  // sub-MB rounds down to 0
 		{"2TB", 2 * 1024 * 1024, true},
 		{"  8GB  ", 8 * 1024, true}, // trim
 		{"GARBAGE", 0, false},
@@ -422,6 +423,86 @@ func TestPartialMigrationError(t *testing.T) {
 	if code := err.ExitCode(); code != exitcodes.TransferError {
 		t.Errorf("ExitCode() = %d, want %d (TransferError)", code, exitcodes.TransferError)
 	}
+}
+
+func TestClearResumeProgressFailsOnStaleCheckpointCleanupErrors(t *testing.T) {
+	tests := []struct {
+		name               string
+		clearErr           error
+		partitionClearErr  error
+		wantErr            string
+		wantClear          int
+		wantPartitionClear int
+	}{
+		{
+			name:               "table clear failure is fatal",
+			clearErr:           errors.New("state db locked"),
+			wantErr:            "clearing transfer progress for votes",
+			wantClear:          1,
+			wantPartitionClear: 1,
+		},
+		{
+			name:               "partition clear failure is fatal",
+			partitionClearErr:  errors.New("partition delete failed"),
+			wantErr:            "clearing partition progress for votes",
+			wantClear:          0,
+			wantPartitionClear: 1,
+		},
+		{
+			name:               "all clears succeed",
+			wantClear:          1,
+			wantPartitionClear: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &resumeProgressClearState{
+				clearErr:          tt.clearErr,
+				partitionClearErr: tt.partitionClearErr,
+			}
+			o := &Orchestrator{state: state}
+
+			err := o.clearResumeProgress("run-266", "transfer:public.votes", 42, "votes")
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("clearResumeProgress() error = %v, want nil", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("clearResumeProgress() error = nil, want %q", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("clearResumeProgress() error = %q, want substring %q", err.Error(), tt.wantErr)
+				}
+			}
+			if state.clearCalls != tt.wantClear {
+				t.Fatalf("ClearTransferProgress calls = %d, want %d", state.clearCalls, tt.wantClear)
+			}
+			if state.partitionClearCalls != tt.wantPartitionClear {
+				t.Fatalf("ClearPartitionTransferProgress calls = %d, want %d",
+					state.partitionClearCalls, tt.wantPartitionClear)
+			}
+		})
+	}
+}
+
+type resumeProgressClearState struct {
+	checkpoint.StateBackend
+	clearErr            error
+	partitionClearErr   error
+	clearCalls          int
+	partitionClearCalls int
+}
+
+func (s *resumeProgressClearState) ClearTransferProgress(int64) error {
+	s.clearCalls++
+	return s.clearErr
+}
+
+func (s *resumeProgressClearState) ClearPartitionTransferProgress(string, string) error {
+	s.partitionClearCalls++
+	return s.partitionClearErr
 }
 
 // TestComputeConfigHash_AllowPartialInvariant guards against the
