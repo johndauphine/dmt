@@ -109,16 +109,6 @@ All notable changes to this project will be documented in this file.
      records are consistent with the partition task graph (#267) —
      a stale partition_id whose task no longer exists in the run
      surfaces as a resume-time error rather than silent skip.
-- **Per-driver minimum-privileges documentation** (#232). New
-  `docs/PRIVILEGES.md` documents the exact `GRANT` statements
-  operators need to provision dmt service accounts on PostgreSQL,
-  SQL Server, and MySQL/MariaDB, split by source/target role and by
-  `target_mode: drop_recreate` vs `target_mode: upsert`. The grants
-  listed match what `dmt preflight` (#228) verifies at runtime, so an
-  operator who grants exactly what's documented passes preflight
-  cleanly. Also covers the backup-acknowledgment probe's catalog-read
-  requirement and notes the optional `VIEW SERVER STATE` /
-  `pg_read_all_stats` grants for the pool-headroom probe.
 
 ### Breaking Changes
 
