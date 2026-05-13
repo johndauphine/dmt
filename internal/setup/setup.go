@@ -114,22 +114,57 @@ func NewState() *State {
 	}
 }
 
-// ConnConfig returns a copy of s.Config with secret placeholders resolved,
-// suitable for connection testing. The wizard keeps raw `${env:...}` /
-// `${file:...}` values in s.Config so a re-save preserves them on disk;
-// connection tests need the resolved values to authenticate.
+// SourceConnConfig returns a copy of s.Config with source-side placeholders
+// resolved, suitable for the source connection test. The wizard keeps raw
+// `${env:...}` / `${file:...}` values in s.Config so re-saving preserves
+// them; connection tests need the resolved values to authenticate.
 //
-// In non-edit mode (fresh setup), s.Config has no placeholders and this
-// is effectively a deep copy. On expansion failure (env var missing,
-// file not found), falls back to returning s.Config so the test reports
-// an authentication failure rather than a setup error — the user can
-// then enter credentials manually.
-func (s *State) ConnConfig() config.Config {
-	resolved, err := s.Config.ResolveSecrets()
-	if err != nil {
-		return s.Config
+// Expansion is scoped to the source side and tolerates per-field failures
+// (an unrelated target `${file:/missing}` must not break source auth).
+// On per-field failure the placeholder survives unchanged so the eventual
+// connect error mentions the actual credential the user needs to fix.
+func (s *State) SourceConnConfig() config.Config {
+	cfg := s.Config
+	expandStringFields(
+		&cfg.Source.Host,
+		&cfg.Source.User,
+		&cfg.Source.Password,
+		&cfg.Source.Database,
+		&cfg.Source.Schema,
+		&cfg.Source.Krb5Conf,
+		&cfg.Source.Keytab,
+		&cfg.Source.Realm,
+		&cfg.Source.SPN,
+	)
+	return cfg
+}
+
+// TargetConnConfig is SourceConnConfig's mirror for the target connection test.
+func (s *State) TargetConnConfig() config.Config {
+	cfg := s.Config
+	expandStringFields(
+		&cfg.Target.Host,
+		&cfg.Target.User,
+		&cfg.Target.Password,
+		&cfg.Target.Database,
+		&cfg.Target.Schema,
+		&cfg.Target.Krb5Conf,
+		&cfg.Target.Keytab,
+		&cfg.Target.Realm,
+		&cfg.Target.SPN,
+	)
+	return cfg
+}
+
+// expandStringFields resolves each string in-place. A per-field expansion
+// failure leaves that field's placeholder unchanged so other fields still
+// get the resolved value.
+func expandStringFields(fields ...*string) {
+	for _, f := range fields {
+		if expanded, err := config.Expand(*f); err == nil {
+			*f = expanded
+		}
 	}
-	return *resolved
 }
 
 // Prompt returns prompt info for the current step.

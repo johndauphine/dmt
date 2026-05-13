@@ -501,28 +501,13 @@ func expandYAMLTemplates(yamlStr string) (string, error) {
 	return result, nil
 }
 
-// ResolveSecrets returns a copy of c with ${env:...}, ${file:...}, and
-// legacy ${VAR} templates expanded across every string field. Pair with
-// LoadRaw: the wizard keeps raw placeholders in its working state so a
-// re-save preserves them, but connection tests must authenticate with
-// resolved values.
-//
-// Implementation marshals → expands → unmarshals so any string field
-// (including nested DSN options) is covered uniformly.
-func (c *Config) ResolveSecrets() (*Config, error) {
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling for expansion: %w", err)
-	}
-	expanded, err := expandYAMLTemplates(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("expanding templates: %w", err)
-	}
-	var out Config
-	if err := yaml.Unmarshal([]byte(expanded), &out); err != nil {
-		return nil, fmt.Errorf("parsing expanded config: %w", err)
-	}
-	return &out, nil
+// Expand resolves a single ${env:...}, ${file:...}, or legacy ${VAR}
+// template in s. Non-template strings are returned unchanged. Pair with
+// LoadRaw: callers who need a resolved single field (e.g. just the
+// source-side password for a connection test) can scope expansion to
+// one value at a time instead of rolling up the whole config.
+func Expand(s string) (string, error) {
+	return expandTemplateValue(s)
 }
 
 // LoadRaw reads a config YAML for *editing* — no secret-template expansion,

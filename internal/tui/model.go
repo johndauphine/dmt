@@ -862,6 +862,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		m.textInput.Placeholder = ""
 
 		configFile, profileName := parseConfigArgs(parts)
+		// Always honor the requested path so /setup @newfile.yaml saves
+		// to newfile.yaml even when it doesn't exist yet. The os.Stat
+		// branch below only decides whether to *load* it.
+		m.setupState.ConfigPath = configFile
 		var loaded bool
 
 		if profileName != "" {
@@ -878,7 +882,6 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 				// secrets to disk.
 				if cfg, err := config.LoadRaw(configFile); err == nil {
 					m.setupState.Config = *cfg
-					m.setupState.ConfigPath = configFile
 					loaded = true
 				}
 			}
@@ -2010,17 +2013,18 @@ func (m *Model) runSetupConnTest(step setup.Step) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		// Resolve ${env:...} / ${file:...} placeholders for the test;
-		// setupState.Config keeps the raw form so a re-save preserves them.
-		conn := m.setupState.ConnConfig()
+		// Resolve placeholders only for the side being tested — see comments
+		// in cmd/migrate/main.go and internal/setup.SourceConnConfig.
 		var result *setup.ConnTestResult
 		if step == setup.StepSourceConnTest {
+			conn := m.setupState.SourceConnConfig()
 			result = setup.TestConnection(ctx,
 				conn.Source.Type, conn.Source.Host,
 				conn.Source.Port, conn.Source.Database,
 				conn.Source.User, conn.Source.Password,
 				conn.Source.DSNOptions())
 		} else {
+			conn := m.setupState.TargetConnConfig()
 			result = setup.TestConnection(ctx,
 				conn.Target.Type, conn.Target.Host,
 				conn.Target.Port, conn.Target.Database,

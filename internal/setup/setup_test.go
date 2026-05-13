@@ -964,22 +964,44 @@ func TestFreshModeWorkersGetsNumCPUDefault(t *testing.T) {
 	}
 }
 
-func TestConnConfigResolvesEnvPlaceholders(t *testing.T) {
+func TestSourceConnConfigResolvesPlaceholders(t *testing.T) {
 	t.Setenv("DMT_TEST_PASSWORD", "s3cret")
 	s := NewState()
 	s.Config.Source.Password = "${env:DMT_TEST_PASSWORD}"
-	s.Config.Target.Password = "${env:DMT_TEST_PASSWORD}"
 
-	conn := s.ConnConfig()
+	conn := s.SourceConnConfig()
 	if conn.Source.Password != "s3cret" {
-		t.Fatalf("ConnConfig should resolve env placeholder, got %q", conn.Source.Password)
-	}
-	if conn.Target.Password != "s3cret" {
-		t.Fatalf("ConnConfig should resolve target placeholder, got %q", conn.Target.Password)
+		t.Fatalf("SourceConnConfig should resolve env placeholder, got %q", conn.Source.Password)
 	}
 	// Raw state must remain untouched so a re-save preserves the placeholder.
 	if s.Config.Source.Password != "${env:DMT_TEST_PASSWORD}" {
-		t.Fatalf("ConnConfig must not mutate s.Config, got %q", s.Config.Source.Password)
+		t.Fatalf("SourceConnConfig must not mutate s.Config, got %q", s.Config.Source.Password)
+	}
+}
+
+func TestSourceConnConfigIgnoresTargetExpansionFailure(t *testing.T) {
+	t.Setenv("DMT_SRC_PASS", "good")
+	s := NewState()
+	s.Config.Source.Password = "${env:DMT_SRC_PASS}"
+	// Target points at a file that doesn't exist; previously this would
+	// poison the whole expansion and leave source unresolved.
+	s.Config.Target.Password = "${file:/tmp/dmt-test-does-not-exist-zzz}"
+
+	conn := s.SourceConnConfig()
+	if conn.Source.Password != "good" {
+		t.Fatalf("missing target file should not break source resolution, got %q", conn.Source.Password)
+	}
+}
+
+func TestPerFieldExpansionFailureLeavesPlaceholder(t *testing.T) {
+	s := NewState()
+	s.Config.Source.Password = "${file:/tmp/dmt-test-does-not-exist-zzz}"
+
+	conn := s.SourceConnConfig()
+	// On failure, the placeholder survives so the eventual auth error
+	// mentions the actual missing credential rather than silent emptyness.
+	if conn.Source.Password != "${file:/tmp/dmt-test-does-not-exist-zzz}" {
+		t.Fatalf("failed expansion should leave placeholder, got %q", conn.Source.Password)
 	}
 }
 

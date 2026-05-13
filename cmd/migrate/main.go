@@ -1345,17 +1345,20 @@ func runSetup(c *cli.Context) error {
 			case setup.StepSourceConnTest, setup.StepTargetConnTest:
 				fmt.Printf("  %s\n", info.Text)
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				// Resolve ${env:...} / ${file:...} placeholders for the test;
-				// state.Config keeps the raw form so a re-save preserves them.
-				conn := state.ConnConfig()
+				// Resolve ${env:...} / ${file:...} placeholders for the side
+				// being tested only — an unrelated missing template on the
+				// other side must not poison this test. state.Config keeps
+				// the raw form so a re-save preserves placeholders.
 				var connResult *setup.ConnTestResult
 				if state.CurrentStep == setup.StepSourceConnTest {
+					conn := state.SourceConnConfig()
 					connResult = setup.TestConnection(ctx,
 						conn.Source.Type, conn.Source.Host,
 						conn.Source.Port, conn.Source.Database,
 						conn.Source.User, conn.Source.Password,
 						conn.Source.DSNOptions())
 				} else {
+					conn := state.TargetConnConfig()
 					connResult = setup.TestConnection(ctx,
 						conn.Target.Type, conn.Target.Host,
 						conn.Target.Port, conn.Target.Database,
