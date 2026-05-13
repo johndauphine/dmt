@@ -860,7 +860,35 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		m.setupState = setup.NewState()
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
-		m.appendOutput("\n--- SETUP WIZARD ---\n")
+
+		configFile, profileName := parseConfigArgs(parts)
+		var loaded bool
+
+		if profileName != "" {
+			if cfg, err := loadProfileConfig(profileName); err == nil {
+				m.setupState.Config = *cfg
+				m.setupState.ConfigPath = profileName + ".yaml"
+				loaded = true
+			}
+		}
+		if !loaded {
+			if _, err := os.Stat(configFile); err == nil {
+				if cfg, err := config.LoadWithOptions(configFile, config.LoadOptions{SuppressWarnings: true}); err == nil {
+					m.setupState.Config = *cfg
+					m.setupState.ConfigPath = configFile
+					loaded = true
+				}
+			}
+		}
+
+		var header string
+		if loaded {
+			header = fmt.Sprintf("\n--- SETUP WIZARD: %s ---\n", m.setupState.ConfigPath)
+			m.setupState.CurrentStep = setup.StepEditOrNew
+		} else {
+			header = "\n--- SETUP WIZARD ---\n"
+		}
+		m.appendOutput(header)
 		return m.processSetupAutoSteps()
 
 	case "/wizard":

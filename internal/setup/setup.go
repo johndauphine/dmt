@@ -19,12 +19,15 @@ import (
 type Step int
 
 const (
+	// Phase 0: pre-flight (only entered when an existing config was loaded)
+	StepEditOrNew Step = iota // prompt: edit existing config or start fresh?
+
 	// Phase 1: AI/Secrets
-	StepCheckSecrets Step = iota // auto: check if secrets exist with valid AI
-	StepConfigureAI              // prompt: Configure AI features? (y/n)
-	StepAIProvider               // prompt: choose provider
-	StepAIKey                    // prompt: API key or base URL
-	StepWriteSecrets             // auto: write secrets file
+	StepCheckSecrets // auto: check if secrets exist with valid AI
+	StepConfigureAI  // prompt: Configure AI features? (y/n)
+	StepAIProvider   // prompt: choose provider
+	StepAIKey        // prompt: API key or base URL
+	StepWriteSecrets // auto: write secrets file
 
 	// Phase 2: Source Database
 	StepSourceType
@@ -56,6 +59,7 @@ const (
 
 	// Phase 6: Migration Settings
 	StepTargetMode
+	StepDateColumns // prompt: date_updated_columns (only when target_mode=upsert)
 	StepCreateIndexes
 	StepCreateFKs
 	StepWorkers
@@ -106,6 +110,15 @@ func NewState() *State {
 // Prompt returns prompt info for the current step.
 func (s *State) Prompt() PromptInfo {
 	switch s.CurrentStep {
+	// Phase 0: pre-flight (only reached when caller pre-loads a config)
+	case StepEditOrNew:
+		return PromptInfo{
+			Text:          fmt.Sprintf("Found existing config at %s. Edit it or start fresh? (e/n)", s.ConfigPath),
+			Default:       "e",
+			Choices:       []string{"e", "n"},
+			SectionHeader: "Existing configuration detected",
+		}
+
 	// Phase 1: AI/Secrets (optional since #167)
 	case StepCheckSecrets:
 		return PromptInfo{
@@ -260,9 +273,14 @@ func (s *State) Prompt() PromptInfo {
 	case StepTargetMode:
 		return PromptInfo{
 			Text:          "Target mode (drop_recreate/upsert)",
-			Default:       "drop_recreate",
+			Default:       defaultIfEmpty(s.Config.Migration.TargetMode, "drop_recreate"),
 			Choices:       []string{"drop_recreate", "upsert"},
 			SectionHeader: "Phase 6: Migration Settings",
+		}
+	case StepDateColumns:
+		return PromptInfo{
+			Text:    "Date columns for incremental sync (comma-separated, blank = full scans)",
+			Default: strings.Join(s.Config.Migration.DateUpdatedColumns, ","),
 		}
 	case StepCreateIndexes:
 		return PromptInfo{
@@ -328,6 +346,26 @@ func (s *State) Process(input string) string {
 	input = strings.TrimSpace(input)
 
 	switch s.CurrentStep {
+	// Phase 0: pre-flight
+	case StepEditOrNew:
+		v := strings.ToLower(input)
+		if v == "" {
+			v = "e"
+		}
+		switch v {
+		case "e", "edit":
+			// Keep pre-loaded Config as-is; defaults will appear in each step.
+		case "n", "new":
+			// User chose to start fresh — discard the pre-loaded config but
+			// preserve ConfigPath so we save back to the same file.
+			path := s.ConfigPath
+			s.Config = config.Config{}
+			s.ConfigPath = path
+		default:
+			return "Enter e to edit, n to start new"
+		}
+		s.CurrentStep = StepCheckSecrets
+
 	// Phase 1: AI
 	case StepCheckSecrets:
 		if input == "has_ai" {
@@ -592,12 +630,30 @@ func (s *State) Process(input string) string {
 	// Phase 6: Migration Settings
 	case StepTargetMode:
 		if input == "" {
-			input = "drop_recreate"
+			input = defaultIfEmpty(s.Config.Migration.TargetMode, "drop_recreate")
 		}
 		if input != "drop_recreate" && input != "upsert" {
 			return "Options: drop_recreate, upsert"
 		}
 		s.Config.Migration.TargetMode = input
+		if input == "upsert" {
+			s.CurrentStep = StepDateColumns
+		} else {
+			s.CurrentStep = StepCreateIndexes
+		}
+
+	case StepDateColumns:
+		if input != "" {
+			parts := strings.Split(input, ",")
+			cols := make([]string, 0, len(parts))
+			for _, p := range parts {
+				if p = strings.TrimSpace(p); p != "" {
+					cols = append(cols, p)
+				}
+			}
+			s.Config.Migration.DateUpdatedColumns = cols
+		}
+		// Empty input preserves any pre-loaded list as-is.
 		s.CurrentStep = StepCreateIndexes
 
 	case StepCreateIndexes:

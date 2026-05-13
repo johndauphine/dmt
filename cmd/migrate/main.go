@@ -1311,6 +1311,15 @@ func runSetup(c *cli.Context) error {
 	}
 	state.Force = c.Bool("force")
 
+	// If the target config already exists, load it so the wizard offers
+	// edit-vs-new and seeds each prompt with the user's prior values.
+	if _, err := os.Stat(state.ConfigPath); err == nil {
+		if cfg, err := config.LoadWithOptions(state.ConfigPath, config.LoadOptions{SuppressWarnings: true}); err == nil {
+			state.Config = *cfg
+			state.CurrentStep = setup.StepEditOrNew
+		}
+	}
+
 	fmt.Println("\n=== DMT Setup Wizard ===")
 
 	for state.CurrentStep != setup.StepDone {

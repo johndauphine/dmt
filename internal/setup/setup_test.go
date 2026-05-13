@@ -1,7 +1,10 @@
 package setup
 
 import (
+	"reflect"
 	"testing"
+
+	"github.com/johndauphine/dmt/internal/config"
 )
 
 func TestHappyPath(t *testing.T) {
@@ -721,6 +724,148 @@ func TestInvalidTargetMode(t *testing.T) {
 
 	if err := s.Process("invalid_mode"); err == "" {
 		t.Fatal("expected error for invalid target mode")
+	}
+}
+
+func TestUpsertPromptsForDateColumns(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("n")
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5432")
+	s.Process("db")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // source conn
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5433")
+	s.Process("db2")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // target conn
+
+	if s.CurrentStep != StepTargetMode {
+		t.Fatalf("expected StepTargetMode, got %d", s.CurrentStep)
+	}
+	s.Process("upsert")
+	if s.CurrentStep != StepDateColumns {
+		t.Fatalf("upsert should route to StepDateColumns, got %d", s.CurrentStep)
+	}
+
+	s.Process("LastActivityDate, LastEditDate ,CreationDate")
+	want := []string{"LastActivityDate", "LastEditDate", "CreationDate"}
+	if !reflect.DeepEqual(s.Config.Migration.DateUpdatedColumns, want) {
+		t.Fatalf("DateUpdatedColumns mismatch: got %v want %v",
+			s.Config.Migration.DateUpdatedColumns, want)
+	}
+	if s.CurrentStep != StepCreateIndexes {
+		t.Fatalf("after StepDateColumns expected StepCreateIndexes, got %d", s.CurrentStep)
+	}
+}
+
+func TestDropRecreateSkipsDateColumns(t *testing.T) {
+	s := NewState()
+	s.Process("no_ai")
+	s.Process("n")
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5432")
+	s.Process("db")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // source conn
+	s.Process("postgres")
+	s.Process("localhost")
+	s.Process("5433")
+	s.Process("db2")
+	s.Process("user")
+	s.Process("pass")
+	s.Process("public")
+	s.Process("disable")
+	s.Process("") // target conn
+
+	s.Process("drop_recreate")
+	if s.CurrentStep != StepCreateIndexes {
+		t.Fatalf("drop_recreate should bypass StepDateColumns, got %d", s.CurrentStep)
+	}
+}
+
+func TestTargetModeDefaultHonorsExistingConfig(t *testing.T) {
+	s := NewState()
+	s.Config.Migration.TargetMode = "upsert"
+	s.CurrentStep = StepTargetMode
+
+	if got := s.Prompt().Default; got != "upsert" {
+		t.Fatalf("StepTargetMode default should reflect pre-loaded config, got %q", got)
+	}
+
+	// Hitting Enter should keep "upsert" rather than silently reverting.
+	s.Process("")
+	if s.Config.Migration.TargetMode != "upsert" {
+		t.Fatalf("empty input should preserve upsert, got %q", s.Config.Migration.TargetMode)
+	}
+	if s.CurrentStep != StepDateColumns {
+		t.Fatalf("expected routing to StepDateColumns, got %d", s.CurrentStep)
+	}
+}
+
+func TestEditOrNewKeepsLoadedConfig(t *testing.T) {
+	s := NewState()
+	s.Config = config.Config{}
+	s.Config.Source.Host = "prod-db.example.com"
+	s.Config.Migration.TargetMode = "upsert"
+	s.ConfigPath = "config.yaml"
+	s.CurrentStep = StepEditOrNew
+
+	s.Process("e")
+	if s.CurrentStep != StepCheckSecrets {
+		t.Fatalf("StepEditOrNew(e) should advance to StepCheckSecrets, got %d", s.CurrentStep)
+	}
+	if s.Config.Source.Host != "prod-db.example.com" {
+		t.Fatal("editing should preserve loaded source host")
+	}
+	if s.Config.Migration.TargetMode != "upsert" {
+		t.Fatal("editing should preserve loaded target_mode")
+	}
+}
+
+func TestEditOrNewResetsOnFresh(t *testing.T) {
+	s := NewState()
+	s.Config.Source.Host = "prod-db.example.com"
+	s.Config.Migration.TargetMode = "upsert"
+	s.ConfigPath = "config.yaml"
+	s.CurrentStep = StepEditOrNew
+
+	s.Process("n")
+	if s.CurrentStep != StepCheckSecrets {
+		t.Fatalf("StepEditOrNew(n) should advance to StepCheckSecrets, got %d", s.CurrentStep)
+	}
+	if s.Config.Source.Host != "" {
+		t.Fatal("new should discard loaded source host")
+	}
+	if s.ConfigPath != "config.yaml" {
+		t.Fatalf("new should preserve ConfigPath, got %q", s.ConfigPath)
+	}
+}
+
+func TestEditOrNewRejectsBadInput(t *testing.T) {
+	s := NewState()
+	s.ConfigPath = "config.yaml"
+	s.CurrentStep = StepEditOrNew
+
+	if errMsg := s.Process("maybe"); errMsg == "" {
+		t.Fatal("bad input should produce a validation error")
+	}
+	if s.CurrentStep != StepEditOrNew {
+		t.Fatal("step should not advance on bad input")
 	}
 }
 
