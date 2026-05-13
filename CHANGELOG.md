@@ -39,6 +39,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **TUI viewport now auto-scrolls to follow new output** (#280). The
+  first `WindowSizeMsg` wrote the welcome message into the viewport
+  but never called `GotoBottom`, so `YOffset` stayed at 0 with the
+  welcome overflowing. From that moment `viewport.AtBottom()` returned
+  false for the whole session, and `appendOutput`'s auto-follow check
+  skipped `GotoBottom` on every new line — users had to manually
+  scroll to see migration progress, wizard prompts, etc. Init path
+  now anchors at the bottom so subsequent appends follow. Resize path
+  preserves at-bottom-ness across dimension changes. As a bonus
+  hardening, viewport width/height are clamped to a minimum of 1 so a
+  tiny terminal (fewer rows than the 7-row footer) doesn't panic
+  inside bubbles' `visibleLines()` with `slice bounds out of range`.
+
 - **Setup wizard honored loaded values for source/target fields but
   not Phase 6 / TargetMode** (#279). `StepTargetMode` hardcoded
   `drop_recreate` even for configs that set `target_mode: upsert`,
