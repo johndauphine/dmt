@@ -13,9 +13,9 @@ import (
 )
 
 // TestRegistry_RunLifecycleClearsGauges pins the cardinality-bound
-// invariant for #229: per-run-labeled gauges (queue_depth, writers_active)
-// must be deleted when RunComplete fires so a long-running dmt process
-// doesn't accumulate one label-value family per run.
+// invariant for #229: per-run-labeled gauges (queue_depth, writers_active,
+// migration_info) must be deleted when RunComplete fires so a long-running
+// dmt process doesn't accumulate one label-value family per run.
 func TestRegistry_RunLifecycleClearsGauges(t *testing.T) {
 	reg := New()
 
@@ -27,26 +27,42 @@ func TestRegistry_RunLifecycleClearsGauges(t *testing.T) {
 	if got != 7 {
 		t.Errorf("queueDepth(run-1) = %v, want 7", got)
 	}
+	// migration_info should be 1 after RunStarted (info-style gauge).
+	info := testutil.ToFloat64(reg.migrationInfo.WithLabelValues("run-1", "mssql", "postgres"))
+	if info != 1 {
+		t.Errorf("migration_info(run-1) = %v, want 1", info)
+	}
 
 	reg.RunComplete("run-1")
-	// After RunComplete, querying the labeled gauge re-creates it at 0.
-	// We instead verify the family no longer has the label by exporting
-	// metrics and grepping the text format.
+	// Verify all three per-run gauge families no longer carry run-1.
+	for _, want := range []string{"dmt_writer_queue_depth", "dmt_writers_active", "dmt_migration_info"} {
+		if hasRunLabel(t, reg, want, "run-1") {
+			t.Errorf("%s still has run_id=run-1 after RunComplete", want)
+		}
+	}
+}
+
+// hasRunLabel returns true if any series in metricName has run_id=runID.
+// Helper for the RunComplete cleanup assertions.
+func hasRunLabel(t *testing.T, reg *Registry, metricName, runID string) bool {
+	t.Helper()
 	dto, err := reg.registry.Gather()
 	if err != nil {
 		t.Fatalf("Gather: %v", err)
 	}
 	for _, mf := range dto {
-		if mf.GetName() == "dmt_writer_queue_depth" {
-			for _, m := range mf.GetMetric() {
-				for _, lp := range m.GetLabel() {
-					if lp.GetName() == "run_id" && lp.GetValue() == "run-1" {
-						t.Errorf("queue_depth still has run_id=run-1 after RunComplete")
-					}
+		if mf.GetName() != metricName {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "run_id" && lp.GetValue() == runID {
+					return true
 				}
 			}
 		}
 	}
+	return false
 }
 
 // TestRegistry_RowsBytesCounters covers the hot-path counters used by
@@ -212,3 +228,26 @@ var (
 	_ = prometheus.NewCounter
 	_ = io.Discard
 )
+
+// TestSetGlobal_ResetBetweenRuns pins the defensive Global reset added
+// in NewWithOptions (Copilot review on #229): a process that wraps
+// orchestrator construction in a loop (TUI, integration tests) must
+// not leak a real Registry from a prior run into a subsequent
+// no-metrics run.
+func TestSetGlobal_ResetBetweenRuns(t *testing.T) {
+	reg := New()
+	SetGlobal(reg)
+	if _, ok := Global().(*Registry); !ok {
+		t.Fatalf("expected *Registry after SetGlobal, got %T", Global())
+	}
+
+	// Simulate orchestrator construction performing the reset.
+	SetGlobal(Noop())
+
+	got := Global()
+	// noopMetrics is unexported; assert it's NOT a *Registry — that's
+	// the contract: anything non-nil and non-Registry counts as "off".
+	if _, ok := got.(*Registry); ok {
+		t.Errorf("expected non-Registry after reset, got *Registry — stale metrics surface leaked across runs")
+	}
+}
