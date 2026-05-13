@@ -57,6 +57,16 @@ type Job struct {
 	TaskID     int64         // For chunk-level resume
 	Saver      ProgressSaver // For saving progress (nil to disable)
 	DateFilter *DateFilter   // Optional date filter for incremental sync (upsert mode)
+
+	// IsResume is true when this job is dispatched as part of a Resume()
+	// run rather than a fresh Run(). It exists because per-partition
+	// checkpoint state alone cannot tell a writer "you might be replaying
+	// already-committed rows": a partition may have committed chunks to
+	// the target but crashed before the first checkpoint flush, leaving
+	// resumeLastPK == nil. ROW_NUMBER pagination uses this flag to enable
+	// the idempotent-on-dup writer path (#227 codex follow-up) for ALL
+	// partitions of the table on resume, not just those with saved progress.
+	IsResume bool
 }
 
 // chunkResult holds a chunk of data for the read-ahead pipeline
@@ -1216,11 +1226,29 @@ func executeRowNumberPagination(
 
 	rnJobBufSize := rnBufs.JobChanDepth
 
+	// #227: on resume of a ROW_NUMBER-paged table, route writes through the
+	// driver's idempotent-on-dup path so replayed already-committed rows
+	// become silent no-ops. We gate on job.IsResume (the orchestrator's
+	// Resume() vs Run() signal) rather than just initialRowNum > startRow:
+	// a partition can crash AFTER committing rows but BEFORE its first
+	// checkpoint flush, leaving resumeLastPK nil. In that case
+	// initialRowNum == startRow yet the target still holds the earlier
+	// partial chunks, and a plain INSERT replay would fail with
+	// duplicate-PK (codex review on initial #227 fix).
+	//
+	// First-run (job.IsResume == false) keeps the fast plain-INSERT path.
+	// The upsert target mode already handles idempotency via
+	// MERGE/ON CONFLICT DO UPDATE and is left untouched. job.Table.HasPK()
+	// is redundant with the early-return at line 1004 but makes the
+	// writer-side requirement explicit at the gate (Copilot review).
+	idempotentOnDup := job.IsResume && cfg.Migration.TargetMode != "upsert" && job.Table.HasPK()
+
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,
 		BufferSize:             bufferSize,
 		JobBufferSize:          rnJobBufSize,
 		UseUpsert:              cfg.Migration.TargetMode == "upsert",
+		IdempotentOnDup:        idempotentOnDup,
 		UpsertMergeChunkSizeFn: upsertChunkFn,
 		BatchSizeFn:            batchSizeFn,
 		TargetSchema:           cfg.Target.Schema,
@@ -1237,6 +1265,15 @@ func executeRowNumberPagination(
 		AIAdjuster:             aiAdjuster,
 		TableName:              job.Table.Name,
 	})
+
+	if idempotentOnDup {
+		partitionStr := "single"
+		if partitionID != nil {
+			partitionStr = fmt.Sprintf("p%d", *partitionID)
+		}
+		logging.Debug("ROW_NUMBER resume for %s: enabling idempotent-on-dup writer (start=%d, resume=%d, partition=%s)",
+			job.Table.Name, startRow, initialRowNum, partitionStr)
+	}
 
 	// Setup ROW_NUMBER checkpoint handler
 	lastCheckpointRowNum := initialRowNum
@@ -1590,6 +1627,26 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 		Rows:         rows,
 		BatchSize:    batchSize,
 		OrderColumns: orderCols,
+	})
+}
+
+// writeChunkIdempotent writes a chunk in idempotent-on-duplicate mode used by
+// ROW_NUMBER resume (#227). The driver-specific WriteBatch implementation
+// switches to its insert-only path (staging + INSERT...ON CONFLICT DO NOTHING
+// for PG/MSSQL, INSERT ... ON DUPLICATE KEY UPDATE pk = pk for MySQL) so a
+// replayed chunk is a silent no-op for already-committed rows.
+func writeChunkIdempotent(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
+	cols, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
+	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
+		Schema:          schema,
+		Table:           table,
+		Columns:         cols,
+		Rows:            rows,
+		BatchSize:       batchSize,
+		IdempotentOnDup: true,
+		PKColumns:       pkCols,
+		WriterID:        writerID,
+		PartitionID:     partitionID,
 	})
 }
 

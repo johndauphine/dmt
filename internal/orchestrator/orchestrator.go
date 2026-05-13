@@ -1017,15 +1017,37 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 				o.state.CompleteRun(run.ID, "failed", err.Error())
 				return fmt.Errorf("creating table %s: %w", t.Name, err)
 			}
-			// Clear any saved progress since we're starting fresh
-			o.state.ClearTransferProgress(taskID)
+			// Idempotent-INSERT-on-resume depends on the PK existing on the
+			// target. AI-generated CREATE TABLE DDL usually includes the PK
+			// inline, but CreatePrimaryKey is idempotent (no-op if PK exists)
+			// so call it defensively when re-creating a missing table on resume.
+			if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
+				o.state.CompleteRun(run.ID, "failed", err.Error())
+				return fmt.Errorf("ensuring PK on %s: %w", t.Name, err)
+			}
+			// Clear any saved progress since we're starting fresh.
+			// This also wipes any partition-level checkpoints from a prior
+			// run; otherwise a partitioned ROW_NUMBER table would resume
+			// each partition from a stale rowNum and skip data.
+			// Both clears are best-effort: surface failures as warnings so
+			// resume continues, but the operator can spot inconsistent
+			// state (Copilot review).
+			if err := o.state.ClearTransferProgress(taskID); err != nil {
+				logging.Warn("Failed to clear transfer progress for %s: %v", t.Name, err)
+			}
+			if err := o.state.ClearPartitionTransferProgress(run.ID, taskKey); err != nil {
+				logging.Warn("Failed to clear partition progress for %s: %v", t.Name, err)
+			}
 		} else {
 			// Table exists - check if we have saved chunk progress
 			lastPK, rowsDone, _ := progressSaver.GetProgress(taskID)
 
 			// For partitioned tables, progress is saved at partition level, not table level.
-			// Skip table-level truncation - partition cleanup in transfer.go handles partial data.
-			isPartitioned := t.IsLarge(o.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination()
+			// Skip table-level truncation - partition cleanup + idempotent INSERT on resume
+			// (#227) handles partial data. Match the partitioning decision made in
+			// job_builder.go: large + HasPK is partitioned (keyset for single-int PK,
+			// ROW_NUMBER otherwise).
+			isPartitioned := t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasPK()
 
 			if lastPK == nil && !isPartitioned {
 				// No chunk progress and not partitioned - truncate to ensure clean re-transfer
@@ -1042,10 +1064,20 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 					return fmt.Errorf("getting row count for %s: %w", t.Name, err)
 				}
 				if targetCount < rowsDone {
-					// Target has fewer rows than expected - clear progress and truncate
+					// Target has fewer rows than expected - clear progress and truncate.
+					// Also clear partition-level checkpoints so partitioned tables
+					// restart cleanly instead of resuming each partition from a
+					// stale rowNum and skipping data (#227).
+					// Both clears are best-effort; surface failures as warnings
+					// (Copilot review).
 					logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
 						t.Name, targetCount, rowsDone)
-					o.state.ClearTransferProgress(taskID)
+					if err := o.state.ClearTransferProgress(taskID); err != nil {
+						logging.Warn("Failed to clear transfer progress for %s: %v", t.Name, err)
+					}
+					if err := o.state.ClearPartitionTransferProgress(run.ID, taskKey); err != nil {
+						logging.Warn("Failed to clear partition progress for %s: %v", t.Name, err)
+					}
 					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 						o.state.CompleteRun(run.ID, "failed", err.Error())
 						return fmt.Errorf("truncating table %s: %w", t.Name, err)

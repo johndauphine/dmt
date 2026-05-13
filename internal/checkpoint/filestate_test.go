@@ -178,6 +178,116 @@ func TestFileState_ClearTransferProgress(t *testing.T) {
 	}
 }
 
+// TestFileState_ClearPartitionTransferProgress mirrors the SQLite test of the
+// same name for the file backend (#227). The file backend is used by Airflow
+// runs without SQLite, so its resume preflight needs the same partition-aware
+// clear behavior: clearing for one table must wipe only that table's
+// partitions and leave both the table-level record and sibling tables intact.
+func TestFileState_ClearPartitionTransferProgress(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.yaml")
+
+	fs, err := NewFileState(stateFile)
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	const runID = "test-run-227"
+	if err := fs.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// votes: 3 partitions + table-level
+	votesPartIDs := []int64{}
+	for i := 1; i <= 3; i++ {
+		key := "transfer:public.votes:p" + itoa(i)
+		taskID, err := fs.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask(%s): %v", key, err)
+		}
+		votesPartIDs = append(votesPartIDs, taskID)
+		pid := i
+		if err := fs.SaveTransferProgress(taskID, "votes", &pid, int64(1000*i), 1000, 5000); err != nil {
+			t.Fatalf("SaveTransferProgress votes p%d: %v", i, err)
+		}
+	}
+	votesTableID, err := fs.CreateTask(runID, "transfer", "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("CreateTask(votes table): %v", err)
+	}
+	if err := fs.SaveTransferProgress(votesTableID, "votes", nil, int64(42), 42, 5000); err != nil {
+		t.Fatalf("SaveTransferProgress votes table: %v", err)
+	}
+
+	// posts: 2 partitions (sibling table — must remain untouched)
+	postsPartIDs := []int64{}
+	for i := 1; i <= 2; i++ {
+		key := "transfer:public.posts:p" + itoa(i)
+		taskID, err := fs.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask(%s): %v", key, err)
+		}
+		postsPartIDs = append(postsPartIDs, taskID)
+		pid := i
+		if err := fs.SaveTransferProgress(taskID, "posts", &pid, int64(2000*i), 2000, 10000); err != nil {
+			t.Fatalf("SaveTransferProgress posts p%d: %v", i, err)
+		}
+	}
+
+	if err := fs.ClearPartitionTransferProgress(runID, "transfer:public.votes"); err != nil {
+		t.Fatalf("ClearPartitionTransferProgress: %v", err)
+	}
+
+	for _, id := range votesPartIDs {
+		p, err := fs.GetTransferProgress(id)
+		if err != nil {
+			t.Fatalf("GetTransferProgress votes part %d: %v", id, err)
+		}
+		if p != nil {
+			t.Errorf("expected votes partition %d cleared, got %+v", id, p)
+		}
+	}
+	tp, err := fs.GetTransferProgress(votesTableID)
+	if err != nil {
+		t.Fatalf("GetTransferProgress votes table: %v", err)
+	}
+	if tp == nil {
+		t.Error("expected votes table-level progress to remain")
+	}
+	for _, id := range postsPartIDs {
+		p, err := fs.GetTransferProgress(id)
+		if err != nil {
+			t.Fatalf("GetTransferProgress posts part %d: %v", id, err)
+		}
+		if p == nil {
+			t.Errorf("expected posts partition %d to remain, got nil", id)
+		}
+	}
+}
+
+// itoa is a tiny local helper so the test stays free of strconv imports.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
 func TestFileState_ConfigHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateFile := filepath.Join(tmpDir, "state.yaml")

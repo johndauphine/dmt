@@ -573,6 +573,19 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 
 	fullTableName := w.dialect.QualifyTable(opts.Schema, opts.Table)
 
+	// Resume-safe path for ROW_NUMBER-paged tables: append
+	// ON DUPLICATE KEY UPDATE <pk> = <pk> so replayed rows that already
+	// exist become no-ops (#227). Deliberately NOT INSERT IGNORE — that
+	// also silently masks data-conversion errors, which we don't want.
+	var dupSuffix string
+	if opts.IdempotentOnDup {
+		if len(opts.PKColumns) == 0 {
+			return fmt.Errorf("IdempotentOnDup requires PKColumns to be set")
+		}
+		quotedPK := w.dialect.QuoteIdentifier(opts.PKColumns[0])
+		dupSuffix = " ON DUPLICATE KEY UPDATE " + quotedPK + " = " + quotedPK
+	}
+
 	// Process in batches to avoid max_allowed_packet limits and placeholder limits.
 	// Per-call BatchSize (from AI tuner) takes priority over the writer's default.
 	batchSize := opts.BatchSize
@@ -590,7 +603,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 		}
 		batch := opts.Rows[start:end]
 
-		if err := w.insertBatch(ctx, fullTableName, colList, opts.Columns, batch); err != nil {
+		if err := w.insertBatch(ctx, fullTableName, colList, opts.Columns, batch, dupSuffix); err != nil {
 			return err
 		}
 	}
@@ -598,26 +611,12 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 	return nil
 }
 
-func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, columns []string, rows [][]any) error {
+func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, columns []string, rows [][]any, dupSuffix string) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// Build placeholder row: (?, ?, ?, ...)
-	placeholders := make([]string, len(columns))
-	for i := range columns {
-		placeholders[i] = "?"
-	}
-	rowPlaceholder := "(" + strings.Join(placeholders, ", ") + ")"
-
-	// Build all row placeholders
-	rowPlaceholders := make([]string, len(rows))
-	for i := range rows {
-		rowPlaceholders[i] = rowPlaceholder
-	}
-
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s",
-		tableName, colList, strings.Join(rowPlaceholders, ", "))
+	query := buildInsertSQL(tableName, colList, len(columns), len(rows), dupSuffix)
 
 	// Flatten all values
 	args := make([]any, 0, len(rows)*len(columns))
@@ -627,6 +626,26 @@ func (w *Writer) insertBatch(ctx context.Context, tableName, colList string, col
 
 	_, err := w.db.ExecContext(ctx, query, args...)
 	return err
+}
+
+// buildInsertSQL returns a multi-row INSERT statement, optionally followed by
+// dupSuffix (e.g. " ON DUPLICATE KEY UPDATE id = id" for the #227
+// IdempotentOnDup path). Extracted so the resume-safe shape is unit-testable
+// without a real MySQL connection.
+func buildInsertSQL(tableName, colList string, numCols, numRows int, dupSuffix string) string {
+	placeholders := make([]string, numCols)
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	rowPlaceholder := "(" + strings.Join(placeholders, ", ") + ")"
+
+	rowPlaceholders := make([]string, numRows)
+	for i := range rowPlaceholders {
+		rowPlaceholders[i] = rowPlaceholder
+	}
+
+	return fmt.Sprintf("INSERT INTO %s (%s) VALUES %s%s",
+		tableName, colList, strings.Join(rowPlaceholders, ", "), dupSuffix)
 }
 
 // UpsertBatch performs upsert using INSERT ... ON DUPLICATE KEY UPDATE.

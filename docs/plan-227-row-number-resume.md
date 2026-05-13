@@ -75,6 +75,8 @@ Normal (non-resume) runs continue to use plain `INSERT` — no perf regression f
 
 These are the design risks I'm uncertain about. Honest "the plan is wrong because X" answers are more valuable than "looks good."
 
+> CODEX: High-level review: the idempotent-insert direction is viable, but the plan needs two important corrections before implementation. First, the current `drop_recreate` path creates PKs before transfer, so Q1's "PKs are created after TaskTransfer" premise appears stale. Second, resume preflight currently checks only table-level progress before truncating, while large ROW_NUMBER transfers save partition-level progress. That is a separate correctness blocker: a resume can truncate the target, keep stale partition checkpoints, then restart each partition from a non-zero row number and skip data. Fix that before or with the writer idempotency work.
+
 ### Q1: PK availability at resume time (likely fatal — needs answer first)
 
 ROW_NUMBER tables in the drop-recreate flow have their PK created in **TaskCreatePKs**, which runs **AFTER TaskTransfer** (see `orchestrator/target_mode.go`). If a migration crashes mid-TaskTransfer and resumes mid-TaskTransfer, the PK constraint **does NOT yet exist on the target**. `ON CONFLICT` has nothing to conflict on; `INSERT IGNORE` has nothing to ignore.
@@ -85,6 +87,10 @@ This may kill the plan. Options:
 - (c) Different fix entirely (Strategy A or C from above).
 
 Reviewer: please verify the constraint-ordering claim against the actual code path, and weigh in on (a)/(b)/(c) — or propose another option.
+
+> CODEX: I do not think Q1 is fatal in the current code. `internal/orchestrator/orchestrator.go` calls `targetMode.PrepareTables()` before `transferAll()`, and `dropRecreateStrategy.PrepareTables()` immediately calls `CreateTableWithOptions()` then `CreatePrimaryKey()` for each table. For MySQL and MSSQL, `CreatePrimaryKey()` is a no-op because the generated table DDL includes the PK inline. For PostgreSQL, `CreatePrimaryKey()` runs `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY` before transfer starts. The `TaskCreatePKs` constant still exists, but this path does not appear to run PK creation as a post-transfer phase anymore. I would remove options (a)/(b) from the main plan unless there is another execution path not covered by `Run()`/`Resume()`.
+
+> CODEX: The caveat is resume when the table was missing and `Resume()` recreates it. That path calls `targetPool.CreateTable(ctx, &t, ...)`, not `targetMode.PrepareTables()`. For PG, confirm whether `CreateTable()` includes PK inline via the current table mapper; if not, a missing-table resume would recreate a table without the separate `CreatePrimaryKey()` call. This is less common than mid-transfer crash, but the implementation should either call the same prepare strategy or explicitly ensure PK existence before any idempotent insert.
 
 ### Q2: PG COPY → per-batch INSERT on resume
 
@@ -99,6 +105,10 @@ For large chunks (e.g. 100K rows × 10 cols = 1M params), the INSERT path could 
 
 Reviewer: does pgx's param limit actually bite at the chunk sizes dmt uses? Or is the sub-chunking trivial enough that this is a non-issue?
 
+> CODEX: Avoid the param-limit problem entirely if possible. PG already has an upsert staging shape in `internal/driver/postgres/writer.go`: temp table + `COPY` + `INSERT ... SELECT ... ON CONFLICT`. Add an insert-only conflict mode to that path (`DO NOTHING`) instead of building giant `INSERT VALUES` statements. That preserves COPY for resume and keeps behavior closer to the current high-throughput writer. If the implementation still chooses `INSERT VALUES`, then yes, it must sub-chunk by `floor(65535 / len(cols))` or lower; the default 100K chunk size will exceed the bind limit for many real tables.
+
+> CODEX: Do not reuse the existing PG `UpsertBatch()` unchanged for resume. It emits `DO UPDATE SET ...`, so a replayed already-committed row can overwrite the target with a changed source value. The plan's desired semantics are "already present means no-op"; that needs a new option or a separate helper.
+
 ### Q3: MySQL `INSERT IGNORE` masks too much
 
 `INSERT IGNORE` silently skips not just PK conflicts but **also data-conversion errors** (string-too-long, invalid date, out-of-range numeric, etc.). On resume, a row that was already in the target *and* now has a type-mismatch issue from source would silently disappear. That's data corruption masquerading as a successful resume.
@@ -108,6 +118,8 @@ Alternatives:
 - Run with stricter `sql_mode = STRICT_ALL_TABLES` per connection — promotes warnings to errors, neutralizes IGNORE's masking. But changes connection state globally.
 
 Reviewer: is `ON DUPLICATE KEY UPDATE pk = pk` the right call, or am I overthinking — would real-world type-mismatch errors during *resume* be caught by other layers (the source schema hasn't changed, so why would a value that worked on first attempt fail on retry)?
+
+> CODEX: Use `INSERT ... ON DUPLICATE KEY UPDATE pk_col = pk_col`, not `INSERT IGNORE`. The masking behavior of `IGNORE` is broader than this feature needs, and resume safety should not depend on "the same row converted successfully last time." The existing MySQL `UpsertBatch()` updates all non-PK columns, so it is also too strong for this case. Add an insert-only/idempotent mode that uses a no-op PK assignment. For composite PKs, assigning the first PK column to itself should be enough.
 
 ### Q4: MSSQL MERGE path's hidden dependencies
 
@@ -119,6 +131,8 @@ The existing MERGE path is used only by `target_mode: upsert` today. Routing res
 
 Reviewer: is the MERGE wiring actually reusable for a resume-only context, or would I be adding a new code path that just *looks* like upsert?
 
+> CODEX: Reuse the staging/bulk-load pieces, but not the current merge template as-is. `buildMerge()` includes a `WHEN MATCHED ... THEN UPDATE` branch. For resume, matched rows should be left untouched. Add an insert-only MERGE builder (`WHEN NOT MATCHED THEN INSERT ...`) or a mode flag that suppresses the matched/update branch. Also pass `partitionID` through `safeStagingName()`; `UpsertBatch()` currently calls `safeStagingName(opts.Table, opts.WriterID, nil)`, so two partitions on the same table can reuse the same local temp name on different connections safely, but partition-aware naming would make diagnostics and future non-local staging safer.
+
 ### Q5: Strategy A counterargument
 
 I rejected staging tables (~700 LOC, 2x disk, CREATE TABLE perm). The user (issue filer) initially recommended staging as the proper fix. Counter-arguments to "ship idempotent-INSERT now, defer staging":
@@ -128,6 +142,10 @@ I rejected staging tables (~700 LOC, 2x disk, CREATE TABLE perm). The user (issu
 - 2x disk during migration is not actually expensive on modern hardware; 700 LOC is one focused PR.
 
 Reviewer: is the staging approach actually better as the first cut, given (a) the PK-availability issue makes idempotent-INSERT unreliable, (b) staging is simpler to reason about, (c) the disk cost is less of a concern than I framed it?
+
+> CODEX: Since PK availability is mostly not the blocker, I would not jump all the way to durable per-chunk staging as the first cut. But the PG and MSSQL implementations should probably use their existing temporary staging mechanics internally for performance and SQL shape. In other words: "staging inside a batch writer" looks attractive; "persistent staging tables as the correctness model" still looks heavier than necessary for issue #227.
+
+> CODEX: The real first-cut blocker is resume preflight, not target-side staging. Before relying on idempotent insert, fix `Resume()` so large ROW_NUMBER tables with partition checkpoints are not truncated based on a nil table-level checkpoint. Reasonable options: teach resume preflight to inspect partition tasks for any saved progress, or clear all partition progress whenever it truncates. Without this, idempotent inserts may never get a chance to protect the replay window.
 
 ### Q6: Strategy C counterargument
 
@@ -140,6 +158,8 @@ Rejected as bad UX for partial big-table migrations. Counter-argument: how commo
 
 Reviewer: if real workloads have most data on keyset paths, is Strategy C's "wasted work" actually small enough that the simplicity wins?
 
+> CODEX: I would not choose Strategy C as the primary fix. The code already has ROW_NUMBER partitioning for large composite/varchar-PK tables, which implies the project expects some of these tables to be big enough to care about. Restart-from-zero is acceptable as an emergency fallback if constraints are missing or progress looks inconsistent, but making it the normal resume behavior would discard the value of the existing partition/checkpoint machinery.
+
 ## Recommendation pending answers
 
 If Q1 is fatal (PK doesn't exist at resume time): **switch to Strategy A** (staging tables) — it's the only option that doesn't depend on a target-side constraint.
@@ -147,6 +167,16 @@ If Q1 is fatal (PK doesn't exist at resume time): **switch to Strategy A** (stag
 If Q1 has a clean workaround (option (a): pre-create unique index on PK columns at TaskTransfer start for ROW_NUMBER tables): proceed with the idempotent-INSERT plan above.
 
 If reviewers convincingly argue Strategy C: simpler, ship that, move on.
+
+> CODEX: Updated recommendation based on current code: proceed with idempotent insert-on-conflict, but scope it as an insert-only writer mode rather than reusing upsert semantics wholesale. Required plan changes:
+>
+> 1. Fix resume preflight for partition-level ROW_NUMBER checkpoints before writer changes are considered complete.
+> 2. Ensure target PK existence on the resume missing-table path, especially PG `CreateTable()` vs `CreatePrimaryKey()`.
+> 3. Add `WriteBatchOptions.IdempotentOnDup` or a similar option, plus PK columns, and implement insert-only behavior per target:
+>    - PG: temp staging + COPY + `INSERT ... SELECT ... ON CONFLICT (...) DO NOTHING`.
+>    - MySQL: `INSERT ... ON DUPLICATE KEY UPDATE pk = pk`.
+>    - MSSQL: staging + insert-only `MERGE` with no `WHEN MATCHED` update.
+> 4. Add tests for both the duplicate replay window and the resume-preflight truncation/stale-partition-checkpoint case.
 
 ## Reviewer instructions
 

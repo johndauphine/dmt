@@ -246,15 +246,33 @@ CREATE TABLE transfer_progress (
 
 **Mitigation**: Reduce `checkpoint_frequency` for critical migrations (at cost of more I/O).
 
-### 2. ROW_NUMBER Pagination Limitations
+### 2. ROW_NUMBER Pagination — Resume Safety (fixed in #227)
 
-**Issue**: ROW_NUMBER pagination cannot cleanup partial data on resume.
+**Status:** Safe to resume. Tables paginated via `ROW_NUMBER()` (composite or varchar primary keys) used to risk silent duplicates or skipped rows on resume; both holes are closed.
 
-**Impact**: If a crash occurs mid-chunk, duplicate rows may be inserted on resume.
+**What went wrong before the fix**
 
-**Affected tables**: Tables with composite PKs or varchar PKs.
+ROW_NUMBER-paged tables saved chunk progress at the partition level (`transfer:schema.table:p<N>`), not the table level. Two distinct bugs combined to cause data loss on resume:
 
-**Mitigation**: Use `target_mode: drop_recreate` for affected tables, or ensure tables have single-column integer PKs.
+1. **Resume preflight truncated the wrong tables.** The preflight check decided "is this table partitioned?" by `IsLarge && SupportsKeysetPagination()`, which is false for composite/varchar PKs even when the table *is* partitioned via ROW_NUMBER. The result: large ROW_NUMBER tables were truncated on resume because their table-level checkpoint was always nil — but the partition-level checkpoints survived. Each partition then resumed from its saved `rowNum`, the source's `ORDER BY ROW_NUMBER()` started at 1, and rows 1..lastRowNum on each partition were skipped silently.
+2. **Per-table checkpoints lag acked rows.** The checkpoint coordinator only saves progress every `checkpoint_freq` acked chunks. Between flushes, up to `checkpoint_freq - 1` chunks of target-side data sit in a window where the state DB says less data has been written than is actually committed. On crash + resume, those chunks get replayed → duplicate PK errors (or silent overwrites for tables without unique constraints).
+
+**What changed (#227)**
+
+- **Preflight is partition-aware.** The truncation decision now uses `IsLarge && HasPK()`, which matches the actual partitioning decision in `job_builder.go`. Large ROW_NUMBER tables are no longer truncated based on a missing table-level checkpoint. When preflight *does* truncate (e.g. small ROW_NUMBER tables, or when the target row count fell below saved progress), it also clears any stale partition-level checkpoints so partitions don't resume from a non-zero `rowNum` against a freshly-cleared target.
+- **Idempotent INSERT on resume.** When the orchestrator dispatches a job as part of a Resume() call for a ROW_NUMBER-paged table in non-upsert mode, the writer routes through driver-specific idempotent paths so replayed already-committed rows are silent no-ops. The gate is the resume flag on the dispatched job — not the per-partition checkpoint state — so partitions that crashed AFTER committing rows but BEFORE the first checkpoint flush are still protected:
+  - **PostgreSQL**: temp staging table + COPY + `INSERT ... SELECT ... ON CONFLICT (pk) DO NOTHING`.
+  - **MySQL**: `INSERT ... ON DUPLICATE KEY UPDATE pk_col = pk_col` (no-op PK self-assignment — NOT `INSERT IGNORE`, which would also mask data-conversion errors).
+  - **MSSQL**: per-writer/per-partition staging table + MERGE with `WHEN NOT MATCHED THEN INSERT` only (no `WHEN MATCHED ... UPDATE` branch — replayed rows must not overwrite the target with potentially-changed source values).
+
+**Non-regression**
+
+Clean first-time runs and the upsert target mode are untouched. The idempotent path activates only on resume of ROW_NUMBER-paged tables in non-upsert mode, so first-time `drop_recreate` migrations still use the fast plain-INSERT/COPY/BCP path.
+
+**Operational notes**
+
+- Tables paginated via ROW_NUMBER must have a primary key; transfer fails fast with a clear error if not. Tables without a PK cannot be made resume-safe by this fix because there's nothing to conflict on.
+- The PostgreSQL idempotent path uses a `TEMP TABLE ... ON COMMIT DELETE ROWS`, so it adds one CREATE-TEMP-TABLE per chunk on resume. The MSSQL path uses a local `#temp` table. MySQL adds no extra DDL.
 
 ### 3. Upsert Mode Considerations
 

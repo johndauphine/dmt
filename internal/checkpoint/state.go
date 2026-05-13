@@ -737,6 +737,31 @@ func (s *State) ClearTransferProgress(taskID int64) error {
 	return err
 }
 
+// ClearPartitionTransferProgress removes all partition-level progress rows for a
+// table within a run (#227). Partitioned tables use task keys of the form
+// "transfer:schema.table:p<N>", and each partition saves its own
+// transfer_progress row. Resume preflight calls this after truncating a table
+// so partitioned ROW_NUMBER (or keyset) resumes don't restart partitions from
+// a stale rowNum/PK against a freshly-truncated target — which would silently
+// skip rows 0..lastRowNum.
+func (s *State) ClearPartitionTransferProgress(runID, tableTaskKey string) error {
+	// Escape LIKE wildcards in the prefix so underscores and percent signs
+	// in table names (e.g., order_items) are treated literally.
+	escaped := strings.ReplaceAll(tableTaskKey, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `_`, `\_`)
+	escaped = strings.ReplaceAll(escaped, `%`, `\%`)
+	pattern := escaped + ":p%"
+
+	_, err := s.db.Exec(`
+		DELETE FROM transfer_progress
+		WHERE task_id IN (
+			SELECT id FROM tasks
+			WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
+		)
+	`, runID, pattern)
+	return err
+}
+
 // CountPartitionTasks returns the number of existing partition tasks for a table in a run.
 // It counts tasks matching the pattern "transfer:schema.table:p*".
 func (s *State) CountPartitionTasks(runID, taskKeyPrefix string) (int, error) {
