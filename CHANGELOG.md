@@ -9,6 +9,49 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Setup wizard loads existing config and offers Edit-vs-New** (#279).
+  `/setup` (TUI) and `dmt setup -o existing.yaml` (CLI) used to always
+  start from a blank slate even when the underlying state machine
+  already wired existing values into every prompt's Default. Now both
+  entry points load the target config if it exists, route through a
+  new `StepEditOrNew` preflight, and seed each prompt with the
+  user's prior values so Enter preserves them. New configs
+  (`/setup @newfile.yaml`) still start fresh and save to the
+  requested path.
+
+- **Wizard prompts for `date_updated_columns` when target_mode=upsert**
+  (#279). Without a watermark column, upsert silently degraded to
+  full scans on every re-run. The new `StepDateColumns` prompt only
+  appears in upsert mode and accepts a comma-separated list (Enter
+  keeps the existing list, `-` clears it). drop_recreate bypasses
+  this step.
+
+- **`config.LoadRaw` and `config.Expand`** (#279). `LoadRaw` reads a
+  config YAML without secret-template expansion / defaults / validation,
+  so `${env:DB_PASSWORD}` placeholders survive a wizard round-trip and
+  are never written back to disk in cleartext. `Expand` is a public
+  single-string template expander used by the wizard's per-side
+  connection tests, which now resolve only the side being tested so
+  an unrelated missing template on the other side never poisons the
+  test (issue noted by codex review pass 3).
+
+### Fixed
+
+- **Setup wizard honored loaded values for source/target fields but
+  not Phase 6 / TargetMode** (#279). `StepTargetMode` hardcoded
+  `drop_recreate` even for configs that set `target_mode: upsert`,
+  and `StepCreateIndexes`/`CreateForeignKeys`/`Workers` ignored the
+  loaded values entirely. In EditMode the wizard now honors the
+  loaded `target_mode`, preserves explicit-false bools, and leaves
+  `Workers=0` (auto-tune) intact when the loaded YAML omitted the
+  key. Two narrower follow-ups tracked in the LoadRaw godoc:
+  `create_indexes`/`create_foreign_keys` should become `*bool` to
+  match the AIAdjust precedent, and templated non-string scalars
+  (e.g. `port: ${env:DB_PORT}`) still fail `LoadRaw` due to typed
+  unmarshal.
+
 ## [5.0.0] - 2026-05-13
 
 Production-readiness milestone: closes the [production-readiness
