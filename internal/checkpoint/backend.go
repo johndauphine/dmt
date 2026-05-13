@@ -28,9 +28,12 @@ type StateBackend interface {
 	// Progress tracking (for chunk-level resume)
 	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
 	GetTransferProgress(taskID int64) (*TransferProgress, error)
-	ClearTransferProgress(taskID int64) error                           // Clear progress for fresh re-transfer
-	ClearPartitionTransferProgress(runID, tableTaskKey string) error    // Clear ALL partition-level progress for a table (#227 resume preflight)
-	CountPartitionTasks(runID, taskKeyPrefix string) (int, error)       // Count partition tasks for a table
+	// GetPartitionTransferProgressSummary aggregates saved partition progress
+	// for one table.
+	GetPartitionTransferProgressSummary(runID, tableTaskKey string) (PartitionProgressSummary, error)
+	ClearTransferProgress(taskID int64) error                        // Clear progress for fresh re-transfer
+	ClearPartitionTransferProgress(runID, tableTaskKey string) error // Clear ALL partition-level progress for a table (#227 resume preflight)
+	CountPartitionTasks(runID, taskKeyPrefix string) (int, error)    // Count partition tasks for a table
 
 	// History (optional - file backend may return empty)
 	GetAllRuns() ([]Run, error)
@@ -60,6 +63,17 @@ type StateBackend interface {
 	// FULL ai_tuning_history. Same rationale as GetAITuningAggregatesByWaw.
 	GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error)
 	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
+}
+
+// PartitionProgressSummary summarizes saved progress across a table's
+// partition transfer tasks.
+type PartitionProgressSummary struct {
+	RowsDone               int64
+	PartitionsWithProgress int
+}
+
+func (s PartitionProgressSummary) HasProgress() bool {
+	return s.PartitionsWithProgress > 0
 }
 
 // HistoryBackend extends StateBackend with profile management.

@@ -1033,48 +1033,57 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 			}
 		} else {
 			// Table exists - check if we have saved chunk progress
-			lastPK, rowsDone, _ := progressSaver.GetProgress(taskID)
+			lastPK, rowsDone, err := progressSaver.GetProgress(taskID)
+			if err != nil {
+				o.state.CompleteRun(run.ID, "failed", err.Error())
+				return fmt.Errorf("getting progress for %s: %w", t.Name, err)
+			}
 
-			// For partitioned tables, progress is saved at partition level, not table level.
-			// Skip table-level truncation - partition cleanup + idempotent INSERT on resume
-			// (#227) handles partial data. Match the partitioning decision made in
-			// job_builder.go: large + HasPK is partitioned (keyset for single-int PK,
+			// Match the partitioning decision made in job_builder.go:
+			// large + HasPK is partitioned (keyset for single-int PK,
 			// ROW_NUMBER otherwise).
 			isPartitioned := t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasPK()
+			expectedRows, hasProgress, err := o.expectedResumeRows(
+				run.ID, taskKey, isPartitioned, lastPK, rowsDone,
+			)
+			if err != nil {
+				o.state.CompleteRun(run.ID, "failed", err.Error())
+				return err
+			}
 
-			if lastPK == nil && !isPartitioned {
-				// No chunk progress and not partitioned - truncate to ensure clean re-transfer
+			if !hasProgress {
+				if isPartitioned {
+					continue
+				}
+				// No chunk progress - truncate to ensure clean re-transfer.
 				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
 					o.state.CompleteRun(run.ID, "failed", err.Error())
 					return fmt.Errorf("truncating table %s: %w", t.Name, err)
 				}
-			} else if lastPK != nil {
-				// Have chunk progress - verify target row count matches saved progress
-				// If target has fewer rows than saved progress, data was lost; start fresh
-				targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
-				if err != nil {
-					o.state.CompleteRun(run.ID, "failed", err.Error())
-					return fmt.Errorf("getting row count for %s: %w", t.Name, err)
-				}
-				if targetCount < rowsDone {
-					// Target has fewer rows than expected - clear progress and truncate.
-					// Also clear partition-level checkpoints so partitioned tables
-					// restart cleanly instead of resuming each partition from a
-					// stale rowNum and skipping data (#227). Cleanup failure is
-					// fatal: truncating while stale checkpoints remain is unsafe (#266).
-					logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
-						t.Name, targetCount, rowsDone)
-					if err := o.clearResumeProgress(run.ID, taskKey, taskID, t.Name); err != nil {
-						o.state.CompleteRun(run.ID, "failed", err.Error())
-						return err
-					}
-					if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-						o.state.CompleteRun(run.ID, "failed", err.Error())
-						return fmt.Errorf("truncating table %s: %w", t.Name, err)
-					}
-				}
-				// If target has >= rowsDone, resume from saved progress
+				continue
 			}
+
+			// Have saved progress - verify target row count matches it.
+			// If target has fewer rows than saved progress, data was lost;
+			// clear all table + partition progress and start fresh.
+			targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
+			if err != nil {
+				o.state.CompleteRun(run.ID, "failed", err.Error())
+				return fmt.Errorf("getting row count for %s: %w", t.Name, err)
+			}
+			if targetCount < expectedRows {
+				logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
+					t.Name, targetCount, expectedRows)
+				if err := o.clearResumeProgress(run.ID, taskKey, taskID, t.Name); err != nil {
+					o.state.CompleteRun(run.ID, "failed", err.Error())
+					return err
+				}
+				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+					o.state.CompleteRun(run.ID, "failed", err.Error())
+					return fmt.Errorf("truncating table %s: %w", t.Name, err)
+				}
+			}
+			// If target has >= expectedRows, resume from saved progress.
 		}
 	}
 
@@ -1213,6 +1222,32 @@ func (o *Orchestrator) clearResumeProgress(runID, taskKey string, taskID int64, 
 		return fmt.Errorf("clearing transfer progress for %s: %w", tableName, err)
 	}
 	return nil
+}
+
+func (o *Orchestrator) expectedResumeRows(
+	runID, taskKey string,
+	isPartitioned bool,
+	tableLastPK any,
+	tableRowsDone int64,
+) (int64, bool, error) {
+	expectedRows := tableRowsDone
+	hasProgress := tableLastPK != nil
+
+	if !isPartitioned {
+		return expectedRows, hasProgress, nil
+	}
+
+	summary, err := o.state.GetPartitionTransferProgressSummary(runID, taskKey)
+	if err != nil {
+		return 0, false, fmt.Errorf("getting partition progress for %s: %w", taskKey, err)
+	}
+	if !summary.HasProgress() {
+		return expectedRows, hasProgress, nil
+	}
+	if !hasProgress || summary.RowsDone > expectedRows {
+		expectedRows = summary.RowsDone
+	}
+	return expectedRows, true, nil
 }
 
 // sanitizeForLog flattens AI-supplied strings to a single line before logging.

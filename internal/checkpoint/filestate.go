@@ -472,6 +472,23 @@ func (fs *FileState) ClearTransferProgress(taskID int64) error {
 	return nil
 }
 
+// GetPartitionTransferProgressSummary returns aggregate saved progress across
+// all partition task records for one table.
+func (fs *FileState) GetPartitionTransferProgressSummary(_ string, tableTaskKey string) (PartitionProgressSummary, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	prefix := tableTaskKey + ":p"
+	var summary PartitionProgressSummary
+	for key, ts := range fs.state.Tables {
+		if strings.HasPrefix(key, prefix) && ts.LastPK != nil {
+			summary.RowsDone += ts.RowsDone
+			summary.PartitionsWithProgress++
+		}
+	}
+	return summary, nil
+}
+
 // ClearPartitionTransferProgress clears all partition-level progress rows for a
 // table (#227). Task keys for partitions have the form "<tableTaskKey>:p<N>".
 // runID is unused for the file backend because each FileState instance is

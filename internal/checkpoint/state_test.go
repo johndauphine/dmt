@@ -671,6 +671,68 @@ func TestCountPartitionTasks(t *testing.T) {
 	}
 }
 
+func TestGetPartitionTransferProgressSummary(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	runID := "test-run"
+	if err := state.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun() error: %v", err)
+	}
+
+	for i, rowsDone := range []int64{100, 250, 400} {
+		pid := i + 1
+		key := fmt.Sprintf("transfer:public.votes:p%d", pid)
+		taskID, err := state.CreateTask(runID, "transfer", key)
+		if err != nil {
+			t.Fatalf("CreateTask(%s) error: %v", key, err)
+		}
+		if err := state.SaveTransferProgress(taskID, "votes", &pid, pid*1000, rowsDone, 1000); err != nil {
+			t.Fatalf("SaveTransferProgress(%s) error: %v", key, err)
+		}
+	}
+
+	tableTaskID, err := state.CreateTask(runID, "transfer", "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("CreateTask(votes table) error: %v", err)
+	}
+	if err := state.SaveTransferProgress(tableTaskID, "votes", nil, 999, 999, 1000); err != nil {
+		t.Fatalf("SaveTransferProgress(votes table) error: %v", err)
+	}
+
+	emptyProgressID, err := state.CreateTask(runID, "transfer", "transfer:public.votes:p4")
+	if err != nil {
+		t.Fatalf("CreateTask(votes empty partition) error: %v", err)
+	}
+	pid := 4
+	if err := state.SaveTransferProgress(emptyProgressID, "votes", &pid, nil, 999, 1000); err != nil {
+		t.Fatalf("SaveTransferProgress(votes empty partition) error: %v", err)
+	}
+
+	otherTaskID, err := state.CreateTask(runID, "transfer", "transfer:public.posts:p1")
+	if err != nil {
+		t.Fatalf("CreateTask(posts partition) error: %v", err)
+	}
+	pid = 1
+	if err := state.SaveTransferProgress(otherTaskID, "posts", &pid, 500, 500, 1000); err != nil {
+		t.Fatalf("SaveTransferProgress(posts) error: %v", err)
+	}
+
+	summary, err := state.GetPartitionTransferProgressSummary(runID, "transfer:public.votes")
+	if err != nil {
+		t.Fatalf("GetPartitionTransferProgressSummary() error: %v", err)
+	}
+	if summary.RowsDone != 750 {
+		t.Errorf("RowsDone = %d, want 750", summary.RowsDone)
+	}
+	if summary.PartitionsWithProgress != 3 {
+		t.Errorf("PartitionsWithProgress = %d, want 3", summary.PartitionsWithProgress)
+	}
+}
+
 // TestClearPartitionTransferProgress verifies the resume preflight safety net
 // added for #227: when the orchestrator decides to truncate a table on resume,
 // it must also wipe any partition-level transfer_progress rows. Without this,
