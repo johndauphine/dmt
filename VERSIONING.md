@@ -64,23 +64,25 @@ The [`ai_adjust → runtime_tuning` rename (#211)](https://github.com/johndauphi
 - The internal `state.db` SQLite schema can change between PATCH releases; dmt auto-migrates on `New()` and doesn't promise schema stability.
 - AI prompts and tuning heuristics are tuned freely — they're not part of the public contract. Output throughput numbers may improve or regress across versions.
 - Error message wording. Exit *codes* are stable (see the [`internal/exitcodes`](./internal/exitcodes/exitcodes.go) package — Success, ConfigError, ConnectionError, TransferError, ValidationError, Cancelled, StateError, IOError); the human-readable messages attached to them are not.
-- Log message wording in `text` mode. Structured JSON log field names ARE stable after v1.0.0 (covered by `internal/logging` and `internal/observability` package surface).
+- Log message wording in `text` mode. Structured JSON log field names ARE stable after v5.0.0 (covered by `internal/logging` and `internal/observability` package surface).
 
-## v1.0.0 readiness criteria
+## Production-readiness milestone — `v5.0.0`
 
-`v1.0.0` ships when the [production-readiness epic #236](https://github.com/johndauphine/dmt/issues/236) closes. Concretely:
+dmt's production-readiness milestone shipped as `v5.0.0` (May 2026), closing the [production-readiness epic #236](https://github.com/johndauphine/dmt/issues/236). All ten gates green:
 
 1. **Correctness** — Full-checksum validation default (#226 ✅), ROW_NUMBER resume safety (#227 ✅), partial migrations exit non-zero (#248 ✅), progress race-free (#249 ✅), no writer-failure goroutine leak (#250 ✅)
 2. **AI optional** — Migration works without AI configured on all three reference drivers (#167 ✅ DoD met)
 3. **Operability** — Preflight checks (#228 ✅), JSON logs + Prometheus /metrics + OTLP traces (#229 ✅)
 4. **Verification** — Every PR runs cross-DB integration + race + lint + govulncheck (#230 ✅)
 5. **Auth/transport correctness** — Kerberos works or is descoped (#251 ✅ descoped), MySQL TLS (#252 ✅), validation timeouts fail loud (#253 ✅)
-6. **Security** — No secrets/PII in logs (#231), minimum privileges documented (#232)
-7. **Release discipline** — This document (#233)
-8. **Runbook** — SRE-ready failure-mode catalog (#234)
+6. **Security** — No secrets/PII in logs (#231 ✅), minimum privileges documented (#232 ✅)
+7. **Release discipline** — This document (#233 ✅)
+8. **Runbook** — SRE-ready failure-mode catalog (#234 ✅)
 9. **State durability** — FileState atomic writes (#254 ✅), sync timestamps (#255 ✅)
-10. **Compliance** — Audit trail (#235)
+10. **Compliance** — Audit trail (#235 ✅)
 
-Checkboxes for items currently in progress (P2/P3) update as those issues close. When all ten are green, the next release is `v1.0.0` rather than another `v0.x`.
+Notes on the version number:
 
-After `v1.0.0`, this policy is binding rather than best-effort.
+- The repo was at `v4.0.0` when the epic closed. The natural next release under SemVer is `v5.0.0` — `[Unreleased]` contains real breaking changes (#248 partial-exit-code default flip, #252 MySQL TLS default flip, #253 validation fail-loud, #251 Kerberos descoped) that require a MAJOR bump regardless of the production-readiness narrative.
+- The choice was made deliberately not to re-number to `v1.0.0` despite the production-readiness framing. Downgrading the version string (`v4.x → v1.0.0`) confuses package managers, Docker tag tooling, and version-pinning automation. Continuous numbering is operator-friendlier.
+- After `v5.0.0`, this policy is binding rather than best-effort.

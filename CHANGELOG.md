@@ -9,6 +9,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-05-13
+
+Production-readiness milestone: closes the [production-readiness
+epic #236](https://github.com/johndauphine/dmt/issues/236) end-to-end.
+All ten gates green — see `VERSIONING.md` for the gate list and
+the note on why this lands as `v5.0.0` rather than re-numbering
+to `v1.0.0`.
+
 ### Added
 
 - **Per-run immutable audit log** (#235). dmt now writes an append-only
@@ -99,72 +107,6 @@ All notable changes to this project will be documented in this file.
   documents the threat model, what's scrubbed, what's
   never logged (row content), and how an operator verifies.
 
-- **Sensitive-value scrubbing audit** (#231). New
-  `internal/logging/scrub.go` exposes `Scrub(s)` /
-  `ScrubError(err)` with a centralized regex set covering
-  URL-style and libpq-style DSN passwords (PG, MSSQL, MySQL
-  shapes), `password=`/`passwd=`/`pwd=`/`api_key=`/`secret=`/
-  `token=` key/value forms (with `:` and `=` separators both
-  preserved), `Authorization: Bearer` headers, `sk-` and
-  `sk-ant-` API keys, and Slack incoming-webhook URLs. Threaded
-  through every site that wraps a driver-library error: the
-  PG / MSSQL / MySQL Reader and Writer constructors plus their
-  Ping calls, the setup wizard's `TestConnection`, the
-  orchestrator's `dmt preflight` JSON output, and the Slack
-  notifier's HTTP error path. New `docs/SECURITY.md`
-  documents the threat model, what's scrubbed, what's
-  never logged (row content), and how an operator verifies.
-
-- **Sensitive-value scrubbing audit** (#231). New
-  `internal/logging/scrub.go` exposes `Scrub(s)` /
-  `ScrubError(err)` with a centralized regex set covering
-  URL-style and libpq-style DSN passwords (PG, MSSQL, MySQL
-  shapes), `password=`/`passwd=`/`pwd=`/`api_key=`/`secret=`/
-  `token=` key/value forms (with `:` and `=` separators both
-  preserved), `Authorization: Bearer` headers, `sk-` and
-  `sk-ant-` API keys, and Slack incoming-webhook URLs. Threaded
-  through every site that wraps a driver-library error: the
-  PG / MSSQL / MySQL Reader and Writer constructors plus their
-  Ping calls, the setup wizard's `TestConnection`, the
-  orchestrator's `dmt preflight` JSON output, and the Slack
-  notifier's HTTP error path. New `docs/SECURITY.md`
-  documents the threat model, what's scrubbed, what's
-  never logged (row content), and how an operator verifies.
-
-### Fixed
-
-- **ROW_NUMBER pagination resume safety** (#227, #266, #267). Four
-  layered correctness bugs that previously caused silent data loss
-  or duplication on resume of composite/varchar-PK tables, all
-  closed:
-  1. Resume preflight was partition-blind: large ROW_NUMBER tables
-     have partition-level checkpoints, but the truncation decision
-     checked only the table-level checkpoint and used
-     `SupportsKeysetPagination()` (which excludes ROW_NUMBER) to
-     gate partition-awareness. Fixed: use `HasPK()` to match the
-     actual partitioning decision in `job_builder.go`, and clear
-     partition-level checkpoints whenever a target is truncated.
-  2. Per-table checkpoints lag acked rows by up to
-     `checkpoint_freq - 1` chunks. On crash + resume those chunks
-     would replay, and a plain INSERT would crash on duplicate PK.
-     Fixed: when the orchestrator dispatches a job as part of a
-     Resume() call, the writer routes through driver-specific
-     idempotent paths (PG: temp staging + COPY + `INSERT...SELECT
-     ON CONFLICT DO NOTHING`; MySQL: `ON DUPLICATE KEY UPDATE
-     pk_col = pk_col` — NOT `INSERT IGNORE`, which masks
-     data-conversion errors; MSSQL: per-partition staging + insert-only
-     `MERGE`). Replayed rows become silent no-ops; non-resume
-     `drop_recreate` runs are unchanged.
-  3. Stale-checkpoint clears in resume preflight were silently
-     swallowing errors, so a failed clear could leave the system in
-     the exact pre-#227 state. Fixed: clears are now fatal — the
-     run aborts with `ConfigError` if either `ClearTransferProgress`
-     or `ClearPartitionTransferProgress` fails.
-  4. Resume preflight now also verifies that partition progress
-     records are consistent with the partition task graph (#267) —
-     a stale partition_id whose task no longer exists in the run
-     surfaces as a resume-time error rather than silent skip.
-
 ### Breaking Changes
 
 - **Partial migrations exit non-zero by default** (#248). When one or
@@ -234,6 +176,38 @@ All notable changes to this project will be documented in this file.
   re-enable.
 
 ### Fixed
+
+- **ROW_NUMBER pagination resume safety** (#227, #266, #267). Four
+  layered correctness bugs that previously caused silent data loss
+  or duplication on resume of composite/varchar-PK tables, all
+  closed:
+  1. Resume preflight was partition-blind: large ROW_NUMBER tables
+     have partition-level checkpoints, but the truncation decision
+     checked only the table-level checkpoint and used
+     `SupportsKeysetPagination()` (which excludes ROW_NUMBER) to
+     gate partition-awareness. Fixed: use `HasPK()` to match the
+     actual partitioning decision in `job_builder.go`, and clear
+     partition-level checkpoints whenever a target is truncated.
+  2. Per-table checkpoints lag acked rows by up to
+     `checkpoint_freq - 1` chunks. On crash + resume those chunks
+     would replay, and a plain INSERT would crash on duplicate PK.
+     Fixed: when the orchestrator dispatches a job as part of a
+     Resume() call, the writer routes through driver-specific
+     idempotent paths (PG: temp staging + COPY + `INSERT...SELECT
+     ON CONFLICT DO NOTHING`; MySQL: `ON DUPLICATE KEY UPDATE
+     pk_col = pk_col` — NOT `INSERT IGNORE`, which masks
+     data-conversion errors; MSSQL: per-partition staging + insert-only
+     `MERGE`). Replayed rows become silent no-ops; non-resume
+     `drop_recreate` runs are unchanged.
+  3. Stale-checkpoint clears in resume preflight were silently
+     swallowing errors, so a failed clear could leave the system in
+     the exact pre-#227 state. Fixed: clears are now fatal — the
+     run aborts with `ConfigError` if either `ClearTransferProgress`
+     or `ClearPartitionTransferProgress` fails.
+  4. Resume preflight now also verifies that partition progress
+     records are consistent with the partition task graph (#267) —
+     a stale partition_id whose task no longer exists in the run
+     surfaces as a resume-time error rather than silent skip.
 
 - **Date-based incremental sync now works on the file backend**
   (#255). Pre-#255 the file backend's `GetLastSyncTimestamp` and
