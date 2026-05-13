@@ -92,6 +92,14 @@ func main() {
 				Value: 1 * time.Second,
 				Usage: "Interval between progress updates",
 			},
+			&cli.StringFlag{
+				Name:  "metrics-addr",
+				Usage: "Bind a Prometheus /metrics endpoint at this address (e.g. \":9090\") (#229). Empty = disabled.",
+			},
+			&cli.StringFlag{
+				Name:  "otel-endpoint",
+				Usage: "OTLP HTTP endpoint for trace export (e.g. \"http://otel-collector:4318\") (#229). Empty = disabled.",
+			},
 		},
 		Before: func(c *cli.Context) error {
 			// Set log level from flag
@@ -400,6 +408,10 @@ func runMigration(c *cli.Context) error {
 	defer orch.Close()
 	orch.SetRunContext(profileName, configPath)
 
+	// Observability: start Prometheus + OTLP if configured (#229).
+	stopObs := setupObservability(c, orch)
+	defer stopObs()
+
 	// Set up progress reporter if --progress flag is set
 	if c.Bool("progress") {
 		reporter := progress.NewJSONReporter(os.Stderr, c.Duration("progress-interval"))
@@ -485,6 +497,10 @@ func resumeMigration(c *cli.Context) error {
 		return fmt.Errorf("failed to create orchestrator: %w", err)
 	}
 	defer orch.Close()
+
+	// Observability: identical setup to runMigration (#229).
+	stopObs := setupObservability(c, orch)
+	defer stopObs()
 
 	// Set up progress reporter if --progress flag is set
 	if c.Bool("progress") {
