@@ -100,6 +100,18 @@ func main() {
 				Name:  "otel-endpoint",
 				Usage: "OTLP HTTP endpoint for trace export (e.g. \"http://otel-collector:4318\") (#229). Empty = disabled.",
 			},
+			&cli.StringFlag{
+				Name:  "audit-dir",
+				Usage: "Directory for per-run audit logs (#235). Default $HOME/.dmt/audit. NDJSON, append-only during the run, chmod 0444 after.",
+			},
+			&cli.BoolFlag{
+				Name:  "audit-tamper-evident",
+				Usage: "Opt into hash-chained audit events (#235). Each event gets seq/prev_hash/hash so retroactive modification is detectable. Required for high-compliance scenarios.",
+			},
+			&cli.BoolFlag{
+				Name:  "no-audit",
+				Usage: "Disable the per-run audit log entirely (#235). Only use this if you have another compliance mechanism — the default audit log has zero data-plane impact.",
+			},
 		},
 		Before: func(c *cli.Context) error {
 			// Set log level from flag
@@ -393,6 +405,16 @@ func runMigration(c *cli.Context) error {
 	if c.IsSet("confirm-backup") {
 		cfg.Migration.ConfirmBackup = c.Bool("confirm-backup")
 	}
+	// Audit-log knobs (#235). Same CLI-override-YAML pattern.
+	if c.IsSet("audit-dir") {
+		cfg.Migration.AuditDir = c.String("audit-dir")
+	}
+	if c.IsSet("audit-tamper-evident") {
+		cfg.Migration.AuditTamperEvident = c.Bool("audit-tamper-evident")
+	}
+	if c.IsSet("no-audit") {
+		cfg.Migration.NoAudit = c.Bool("no-audit")
+	}
 
 	// Build orchestrator options
 	opts := orchestrator.Options{
@@ -485,6 +507,18 @@ func resumeMigration(c *cli.Context) error {
 	// whose target was already created or staged (#228).
 	if c.IsSet("skip-preflight") {
 		cfg.Migration.SkipPreflight = []string{c.String("skip-preflight")}
+	}
+	// Audit knobs on resume — operators may want to opt out the audit
+	// on a resume specifically (e.g. resuming a job whose audit-dir
+	// has moved). (#235)
+	if c.IsSet("audit-dir") {
+		cfg.Migration.AuditDir = c.String("audit-dir")
+	}
+	if c.IsSet("audit-tamper-evident") {
+		cfg.Migration.AuditTamperEvident = c.Bool("audit-tamper-evident")
+	}
+	if c.IsSet("no-audit") {
+		cfg.Migration.NoAudit = c.Bool("no-audit")
 	}
 
 	opts := orchestrator.Options{

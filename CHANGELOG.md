@@ -11,6 +11,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Per-run immutable audit log** (#235). dmt now writes an append-only
+  NDJSON record of every `dmt run` / `dmt resume` to
+  `$HOME/.dmt/audit/<run_id>.ndjson` (override with `--audit-dir`).
+  Compliance-regime-friendly: each line is one event, the file is
+  `chmod 0444` after a successful or hard-failed run (cancelled /
+  resumable runs keep the file 0600 so `dmt resume` can append to
+  it), and `--audit-tamper-evident` opts
+  into hash-chained events (each event carries `seq` / `prev_hash` /
+  `hash` so retroactive modification is detectable via a one-liner
+  shell verification). Sensitive values flow through the same scrubber
+  established by #231 — DSN passwords, API keys, webhook URLs, and
+  any field whose key name matches `password` / `api_key` / `token` /
+  etc. are redacted before write. Row content is never logged by
+  design. Disable entirely with `--no-audit` for environments with
+  another compliance mechanism. New `docs/AUDIT-LOG.md` documents the
+  event schema, the hash-chain verification procedure, and retention
+  recommendations per compliance regime (SOC 2 / HIPAA / PCI-DSS / SOX).
+
 - **Preflight health checks** (#228). New `TaskPreFlight` phase 0
   runs BEFORE schema extraction or DDL: connection ping, supported
   DB version (PG 12+, MSSQL 2016+, MySQL 5.7+/MariaDB 10.3+),

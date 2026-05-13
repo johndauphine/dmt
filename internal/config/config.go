@@ -258,6 +258,24 @@ type MigrationConfig struct {
 	// --confirm-backup CLI flag.
 	ConfirmBackup bool `yaml:"confirm_backup" json:"-"`
 
+	// AuditDir overrides the audit-log directory (#235). Default is
+	// $HOME/.dmt/audit. Files written here are append-only during the
+	// run, chmod 0444 after. `json:"-"` matches the other CLI-only
+	// fields — the audit-dir choice doesn't affect the migration's
+	// data plane, so it shouldn't break resume on config-hash mismatch.
+	AuditDir string `yaml:"audit_dir" json:"-"`
+
+	// AuditTamperEvident enables hash-chained audit events (#235).
+	// Each event carries seq/prev_hash/hash so retroactive modification
+	// is detectable. Off by default; opt in for high-compliance
+	// scenarios (financial/healthcare/government).
+	AuditTamperEvident bool `yaml:"audit_tamper_evident" json:"-"`
+
+	// NoAudit disables the audit log entirely (#235). Default false
+	// (audit enabled). Use only when the operator has another
+	// compliance mechanism in place.
+	NoAudit bool `yaml:"no_audit" json:"-"`
+
 	// Validation configures the cross-DB validation passes that run
 	// after data transfer completes (#226). Zero value preserves the
 	// pre-#226 behavior (row-count parity only). See the Validation

@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/johndauphine/dmt/internal/audit"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
@@ -24,6 +27,7 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/target"
+	"github.com/johndauphine/dmt/internal/version"
 )
 
 // TaskType defines the type of migration task
@@ -112,6 +116,12 @@ type Orchestrator struct {
 	// phaseSpan is the active phase span — ended when setPhase transitions
 	// or when Run/Resume returns. Nil before the first setPhase call.
 	phaseSpan observability.Span
+
+	// auditor writes the immutable per-run NDJSON record (#235). Always
+	// non-nil — audit.Disabled() satisfies the interface when --no-audit
+	// is set so call sites stay unconditional. Initialized in Run/Resume
+	// once the run_id is known.
+	auditor *audit.Logger
 }
 
 // Options configures the orchestrator.
@@ -364,6 +374,7 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		state:      state,
 		progress:   progress.New(),
 		metrics:    observability.Noop(),
+		auditor:    audit.Disabled(),
 		notifier:   notifier,
 		opts:       opts,
 		targetMode: targetModeStrategy,
@@ -434,6 +445,145 @@ func (o *Orchestrator) endPhaseSpan() {
 	}
 }
 
+// classifyRunOutcome distills the deferred audit handler's two inputs
+// (the named-return error from Run/Resume, the panic value from recover)
+// into a (status, error_string, resumable) triple. The deferred handler
+// uses `resumable` to decide whether to keep the audit file writable
+// for a future resume (Codex review on #235 — Ctrl-C / context cancel
+// must NOT chmod-lock the file out from under the next dmt resume).
+//
+// Status taxonomy — these are the values the audit log's `status` field
+// can carry on `run_complete` / `resume_complete`. Documented in
+// docs/AUDIT-LOG.md; downstream consumers should accept all four:
+//   - "success"   — runErr is nil
+//   - "failed"    — runErr is non-nil and not a context cancellation;
+//                   covers preflight, schema, transfer, validation errors
+//   - "cancelled" — runErr is context.Canceled or context.DeadlineExceeded
+//                   (or wraps one of those). Operationally distinct from
+//                   "failed" because the operator can `dmt resume`.
+//   - "panic"     — go runtime panic during the run; rec is non-nil
+//
+// Resumable taxonomy:
+//   - resumable=true  for "cancelled" (operator interrupted the run
+//                     intentionally; `dmt resume` is the right next
+//                     step — leave the audit file 0600 so resume can
+//                     reopen it)
+//   - resumable=false otherwise (chmod 0444 locks the file as the
+//                     terminal record of what happened)
+func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable bool) {
+	if rec != nil {
+		return "panic", fmt.Sprintf("panic: %v", rec), false
+	}
+	if runErr == nil {
+		return "success", "", false
+	}
+	errStr = runErr.Error()
+	// Treat context cancellation / deadline as resumable so an
+	// interrupted run's audit file stays writable for the eventual
+	// `dmt resume`. The exitcodes package recognizes "context
+	// canceled" / "context deadline" — use the same string match for
+	// consistency.
+	low := strings.ToLower(errStr)
+	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) ||
+		strings.Contains(low, "context canceled") || strings.Contains(low, "context deadline") {
+		return "cancelled", errStr, true
+	}
+	return "failed", errStr, false
+}
+
+// openAuditor opens an append-only NDJSON audit log for this run
+// (#235). Honors the config's AuditDir / TamperEvident / NoAudit
+// settings. Failures to open the audit log degrade to a disabled
+// auditor with a warning; compliance benefits less from a refused
+// migration than from a successful one with a missing audit record,
+// so the migration always proceeds.
+//
+// The resume flag drives one piece of post-open behavior: when true
+// and the file did NOT pre-exist (the prior Run() ran without audit
+// enabled, or somebody deleted the file), we emit an `audit_missing_on_resume`
+// event before any other audit traffic so the audit reader can
+// detect the gap. The audit file's hash chain (when tamper-evident)
+// will start fresh from GENESIS in that case — there's no prior chain
+// to continue.
+func (o *Orchestrator) openAuditor(runID string, resume bool) {
+	if o.config.Migration.NoAudit {
+		o.auditor = audit.Disabled()
+		return
+	}
+	// Note whether the file pre-existed before we open it, so we can
+	// distinguish "resume reopening the original audit" from "resume
+	// creating fresh because the original was missing". audit.New's
+	// O_CREATE makes this check have to happen first.
+	preexisting := true
+	if resume {
+		path, _ := audit.ResolveFilePath(o.config.Migration.AuditDir, runID)
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			preexisting = false
+		}
+	}
+	logger, err := audit.New(audit.Options{
+		Dir:           o.config.Migration.AuditDir,
+		RunID:         runID,
+		TamperEvident: o.config.Migration.AuditTamperEvident,
+	})
+	if err != nil {
+		logging.Warn("audit log disabled: %v", err)
+		o.auditor = audit.Disabled()
+		return
+	}
+	o.auditor = logger
+	logging.Debug("audit log opened: %s", logger.Path())
+	if resume && !preexisting {
+		// Operator started Resume on a run that has no prior audit
+		// file — either the original Run() had --no-audit set, or
+		// somebody moved/deleted the file. Either way, this is the
+		// first audit event for the run; mark the discontinuity
+		// explicitly so the auditor sees a "this isn't the whole
+		// story" signal at the top.
+		o.auditEvent("audit_missing_on_resume", map[string]any{
+			"note": "no prior audit file found for this run_id; resume is creating a fresh audit log",
+		})
+	}
+}
+
+// auditEvent records one audit event with the standard typed shape.
+// Failure to record is logged but never propagates — see openAuditor's
+// rationale.
+func (o *Orchestrator) auditEvent(typeName string, fields map[string]any) {
+	if err := o.auditor.RecordEvent(audit.Event{Type: typeName, Fields: fields}); err != nil {
+		logging.Warn("audit record %q: %v", typeName, err)
+	}
+}
+
+// operatorLabel returns a short identity string for the audit log:
+// "user@hostname". Best-effort — empty fields are fine for the auditor.
+// Future enhancement: read from $DMT_OPERATOR if set to support service-
+// account scenarios where the OS user is generic.
+func operatorLabel() string {
+	user := os.Getenv("USER")
+	if user == "" {
+		user = os.Getenv("USERNAME") // Windows
+	}
+	host, _ := os.Hostname()
+	if user == "" && host == "" {
+		return "unknown"
+	}
+	if user == "" {
+		return "@" + host
+	}
+	if host == "" {
+		return user
+	}
+	return user + "@" + host
+}
+
+// versionString returns dmt's build version from internal/version,
+// matching what `dmt --version` reports. Available for audit-log
+// "dmt_version" field.
+func versionString() string {
+	return version.Version
+}
+
 // SetMetrics installs a non-noop metrics implementation. Called by the
 // CLI when --metrics-addr is set and the Registry has been started.
 // Safe to call before Run/Resume; effects take hold on the next phase
@@ -459,7 +609,7 @@ func (o *Orchestrator) SetProgressReporter(reporter progress.Reporter, interval 
 }
 
 // Run executes a new migration.
-func (o *Orchestrator) Run(ctx context.Context) error {
+func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	// Use provided run ID or generate a new one
 	runID := o.opts.RunID
 	if runID == "" {
@@ -494,6 +644,61 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		runSpan.End()
 		o.traceCtx = nil
 	}()
+
+	// #235 audit log: per-run immutable NDJSON. Set up before any other
+	// run-side work so a panic in the early phases is still recorded.
+	// The deferred close emits run_complete (with final status pulled
+	// from a captured named return value below) and chmods the file
+	// to 0444. Compliance auditors get a self-describing file on
+	// every exit path — success, partial, error, even a panic.
+	o.openAuditor(runID, false /*resume*/)
+	defer func() {
+		rec := recover()
+		status, errStr, resumable := classifyRunOutcome(runErr, rec)
+		o.auditEvent("run_complete", map[string]any{
+			"status":      status,
+			"error":       errStr,
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		})
+		// Resumable interruption (Ctrl-C / context cancel) MUST leave
+		// the audit file writable so the eventual `dmt resume` can
+		// append its own resume_start / resume_complete events.
+		// CloseResumable() skips the chmod-0444 step; a successful or
+		// hard-failed run gets the usual lockdown (Codex review on #235).
+		if resumable {
+			if err := o.auditor.CloseResumable(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		} else {
+			if err := o.auditor.Close(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		}
+		if rec != nil {
+			// re-raise after the audit event has been written to the
+			// OS (tamper-evident mode additionally fsyncs); the OS may
+			// still hold dirty pages but the audit record is no longer
+			// in dmt's process memory only.
+			panic(rec)
+		}
+	}()
+	o.auditEvent("run_start", map[string]any{
+		"operator":    operatorLabel(),
+		"dmt_version": versionString(),
+		"source": map[string]any{
+			"driver":   o.sourcePool.DBType(),
+			"host":     o.config.Source.Host,
+			"database": o.config.Source.Database,
+			"schema":   o.config.Source.Schema,
+		},
+		"target": map[string]any{
+			"driver":   o.targetPool.DBType(),
+			"host":     o.config.Target.Host,
+			"database": o.config.Target.Database,
+			"schema":   o.config.Target.Schema,
+		},
+		"config_hash": computeConfigHash(o.config),
+	})
 
 	logging.Info("Starting migration run: %s", runID)
 	logging.Info("Migration: %s -> %s", o.sourcePool.DBType(), o.targetPool.DBType())
@@ -723,6 +928,10 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
 		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tables), totalRows, duration.Round(time.Second), throughput)
+		o.auditEvent("validation_complete", map[string]any{
+			"tables":     len(tables),
+			"rows_total": totalRows,
+		})
 	}
 
 	// Record transfer-only throughput in AI tuning history for future learning
@@ -1019,7 +1228,7 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 }
 
 // Resume continues an interrupted migration
-func (o *Orchestrator) Resume(ctx context.Context) error {
+func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	run, err := o.state.GetLastIncompleteRun()
 	if err != nil {
 		return fmt.Errorf("finding incomplete run: %w", err)
@@ -1074,6 +1283,40 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 		runSpan.End()
 		o.traceCtx = nil
 	}()
+
+	// #235 audit log: resume runs append to the same audit file the
+	// original Run() opened (same run_id). The audit-dir code path is
+	// idempotent — if the file is 0444 from a Close() in the earlier
+	// crash, OpenFile fails and the auditor degrades to disabled. We
+	// log a warning but don't fail the resume — compliance is best-
+	// effort here; the original Run()'s record remains intact.
+	o.openAuditor(run.ID, true /*resume*/)
+	defer func() {
+		rec := recover()
+		status, errStr, resumable := classifyRunOutcome(resumeErr, rec)
+		o.auditEvent("resume_complete", map[string]any{
+			"status":      status,
+			"error":       errStr,
+			"duration_ms": time.Since(startTime).Milliseconds(),
+		})
+		if resumable {
+			if err := o.auditor.CloseResumable(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		} else {
+			if err := o.auditor.Close(); err != nil {
+				logging.Warn("audit close: %v", err)
+			}
+		}
+		if rec != nil {
+			panic(rec)
+		}
+	}()
+	o.auditEvent("resume_start", map[string]any{
+		"operator":            operatorLabel(),
+		"dmt_version":         versionString(),
+		"original_started_at": run.StartedAt.UTC().Format(time.RFC3339),
+	})
 
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
 
