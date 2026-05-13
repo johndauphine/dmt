@@ -244,6 +244,20 @@ type MigrationConfig struct {
 	// business participating in the hash.
 	AllowPartial           bool     `yaml:"allow_partial" json:"-"`
 
+	// SkipPreflight is a comma-separated list of preflight check names to
+	// skip, e.g. "privileges.create_table,disk.estimate" or "all" to
+	// disable preflight entirely (#228). Mirrors the --skip-preflight CLI
+	// flag; populated by the CLI before the orchestrator runs preflight.
+	// `json:"-"` for the same hash-stability reason as AllowPartial:
+	// skipping a check is policy, not a data-changing setting.
+	SkipPreflight []string `yaml:"skip_preflight" json:"-"`
+
+	// ConfirmBackup must be set to true for drop_recreate runs against a
+	// target schema that already contains non-empty tables (#228). It's a
+	// hard guard against accidentally dropping data. Mirrors the
+	// --confirm-backup CLI flag.
+	ConfirmBackup bool `yaml:"confirm_backup" json:"-"`
+
 	// Validation configures the cross-DB validation passes that run
 	// after data transfer completes (#226). Zero value preserves the
 	// pre-#226 behavior (row-count parity only). See the Validation

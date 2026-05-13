@@ -185,19 +185,26 @@ type StatusResult struct {
 	ProgressPercent float64   `json:"progress_percent"`
 }
 
-// HealthCheckResult contains connection health information.
+// HealthCheckResult contains connection health information and preflight
+// findings (#228). Connections are pinged in parallel; preflight checks
+// run sequentially after both pings succeed (driver-level findings need
+// a live DB anyway). PreFlightFindings is empty when both sides pass
+// cleanly; Healthy is true only when connections succeed AND no
+// SeverityError findings remain.
 type HealthCheckResult struct {
-	Timestamp        string `json:"timestamp"`
-	SourceConnected  bool   `json:"source_connected"`
-	SourceLatencyMs  int64  `json:"source_latency_ms"`
-	SourceDBType     string `json:"source_db_type"`
-	SourceTableCount int    `json:"source_table_count,omitempty"`
-	SourceError      string `json:"source_error,omitempty"`
-	TargetConnected  bool   `json:"target_connected"`
-	TargetLatencyMs  int64  `json:"target_latency_ms"`
-	TargetDBType     string `json:"target_db_type"`
-	TargetError      string `json:"target_error,omitempty"`
-	Healthy          bool   `json:"healthy"`
+	Timestamp         string                     `json:"timestamp"`
+	SourceConnected   bool                       `json:"source_connected"`
+	SourceLatencyMs   int64                      `json:"source_latency_ms"`
+	SourceDBType      string                     `json:"source_db_type"`
+	SourceTableCount  int                        `json:"source_table_count,omitempty"`
+	SourceError       string                     `json:"source_error,omitempty"`
+	TargetConnected   bool                       `json:"target_connected"`
+	TargetLatencyMs   int64                      `json:"target_latency_ms"`
+	TargetDBType      string                     `json:"target_db_type"`
+	TargetError       string                     `json:"target_error,omitempty"`
+	Healthy           bool                       `json:"healthy"`
+	PreFlightFindings []driver.PreFlightFinding  `json:"preflight_findings,omitempty"`
+	PreFlightAborted  bool                       `json:"preflight_aborted,omitempty"`
 }
 
 // DryRunResult contains the migration plan preview.
@@ -380,6 +387,19 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
+	}
+
+	// Preflight (phase 0): verify the environment satisfies the assumptions
+	// downstream phases make — privileges, version floor, encoding, connection
+	// headroom. Fail loud and early rather than minutes into a partial run
+	// (#228). Run AFTER CreateRun so the failed-preflight outcome shows up
+	// in the run history; the operator can grep `dmt history` for it later.
+	o.progress.SetPhase("preflight")
+	logging.Debug("Running preflight checks...")
+	if err := o.runPreFlight(ctx); err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
 	}
 
 	// Extract schema
@@ -905,6 +925,18 @@ func (o *Orchestrator) Resume(ctx context.Context) error {
 
 	startTime := time.Now()
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
+
+	// Preflight (phase 0) — same gate as Run(). A resume can fail if the
+	// environment changed between runs (privileges revoked, version
+	// downgraded, target unreachable). Operator can opt out per-check with
+	// --skip-preflight if they know what they're doing. #228.
+	o.progress.SetPhase("preflight")
+	logging.Debug("Running preflight checks...")
+	if err := o.runPreFlight(ctx); err != nil {
+		o.state.CompleteRun(run.ID, "failed", err.Error())
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return err
+	}
 
 	// Reset any running tasks to pending
 	if err := o.state.MarkRunAsResumed(run.ID); err != nil {
