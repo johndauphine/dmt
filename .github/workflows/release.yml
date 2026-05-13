@@ -1,0 +1,136 @@
+# Binary release on tag push (#233).
+#
+# Triggered by pushing a `v*.*.*` tag to main. Validates that the tag
+# matches a versioned section header in CHANGELOG.md, cross-compiles
+# binaries for the five supported targets, generates SHA-256
+# checksums, and publishes a GitHub Release with everything attached.
+#
+# Process is documented in RELEASE.md — when in doubt, that's the
+# source of truth.
+
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  # Needed to create the release. `contents: write` is the minimum
+  # scope; we don't request packages: write (no Docker push here)
+  # so the token blast radius stays narrow.
+  contents: write
+
+jobs:
+  release:
+    name: build + publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so CHANGELOG.md is available
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate tag matches a CHANGELOG section
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Strip the leading 'v' to get the bare version string
+          VERSION="${TAG#v}"
+          if ! grep -qE "^## \[${VERSION}\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md; then
+            echo "ERROR: tag $TAG does not have a matching '## [$VERSION]' section in CHANGELOG.md" >&2
+            echo "       Per RELEASE.md, the release PR must move [Unreleased] entries to" >&2
+            echo "       a versioned section BEFORE the tag is pushed." >&2
+            exit 1
+          fi
+          echo "Tag $TAG matches CHANGELOG entry."
+
+      - name: Extract CHANGELOG section for release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # Extract everything from the version header to the next `## [`
+          # header. Skip the version header itself; release-notes body
+          # starts with the section content.
+          awk -v v="${VERSION}" '
+            /^## \[/ {
+              if (in_section) exit
+              if ($0 ~ "^## \\[" v "\\]") {
+                in_section = 1
+                next
+              }
+            }
+            in_section { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          echo "Release notes for $TAG:"
+          echo "---"
+          cat /tmp/release-notes.md
+          echo "---"
+
+      - name: Build cross-platform binaries
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          declare -a TARGETS=(
+            "darwin amd64"
+            "darwin arm64"
+            "linux amd64"
+            "linux arm64"
+            "windows amd64"
+          )
+          # Use the same LDFLAGS the Makefile uses so `dmt --version`
+          # reports the tag accurately. Pass VERSION explicitly to
+          # override the default `git describe` fallback (which would
+          # report a dirty suffix here).
+          for target in "${TARGETS[@]}"; do
+            read -r goos goarch <<< "$target"
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            out="dist/dmt-${TAG}-${goos}-${goarch}${ext}"
+            echo "Building $out ..."
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build \
+                -ldflags "-s -w -X github.com/johndauphine/dmt/internal/version.Version=${TAG}" \
+                -o "$out" \
+                ./cmd/migrate
+          done
+          ls -la dist/
+
+      - name: Generate SHA-256 checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum dmt-* > checksums.txt
+          echo "checksums:"
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # gh release create handles both publishing the release AND
+          # uploading the assets in one call.
+          extra=()
+          # RC tags (v1.2.3-rc.1) → prerelease so the GitHub UI doesn't
+          # mark them as the "latest" release.
+          case "$TAG" in
+            *-rc.*|*-alpha.*|*-beta.*)
+              extra+=("--prerelease") ;;
+          esac
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/release-notes.md \
+            "${extra[@]}" \
+            dist/dmt-*${TAG}* \
+            dist/checksums.txt
