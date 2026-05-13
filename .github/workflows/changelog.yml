@@ -50,10 +50,13 @@ jobs:
             exit 0
           fi
 
-          # Determine the base commit. github.event.pull_request.base.sha
-          # is the merge-base; using that means the diff matches what
-          # GitHub shows in the PR view.
-          BASE_SHA="$(git rev-parse "origin/${BASE_REF}")"
+          # Use the MERGE-BASE between this PR and the base branch, not
+          # the tip of the base branch. Otherwise, when main moves ahead
+          # while the PR is in review, unrelated source changes on main
+          # leak into our diff and falsely flag docs-only PRs as
+          # source-changing (Copilot review on #233). The merge base
+          # matches what GitHub's PR view shows.
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" HEAD)"
 
           # Did this PR touch source files? Anything outside of docs/,
           # *.md (root-level docs), .github/ (except workflows themselves),
@@ -75,10 +78,31 @@ jobs:
           fi
 
           # Source change present — require a CHANGELOG.md edit that
-          # adds at least one bulleted line under `## [Unreleased]`.
-          # We don't try to enforce WHICH subsection (Added/Fixed/etc.);
-          # the section format is convention but not load-bearing.
-          if ! git diff "$BASE_SHA" HEAD -- CHANGELOG.md | grep -q '^+- '; then
+          # adds at least one bulleted line UNDER the `## [Unreleased]`
+          # section specifically. Naive `^+- ` matches additions
+          # anywhere in the diff, which release PRs (which move
+          # entries from [Unreleased] to a versioned section) would
+          # falsely satisfy. We instead post-process the merged file:
+          # find [Unreleased], walk forward until the next versioned
+          # section, and verify at least one bullet exists in between
+          # (Copilot review on #233).
+          unreleased_bullets="$(
+            awk '
+              /^## \[Unreleased\]/ { in_section = 1; next }
+              /^## \[/             { in_section = 0 }
+              in_section && /^- /  { count++ }
+              END                  { print count + 0 }
+            ' CHANGELOG.md
+          )"
+          base_unreleased_bullets="$(
+            git show "$BASE_SHA":CHANGELOG.md | awk '
+              /^## \[Unreleased\]/ { in_section = 1; next }
+              /^## \[/             { in_section = 0 }
+              in_section && /^- /  { count++ }
+              END                  { print count + 0 }
+            '
+          )"
+          if [ "$unreleased_bullets" -le "$base_unreleased_bullets" ]; then
             cat <<'MSG' >&2
           PR touches source files but adds no new bullet under
           CHANGELOG.md's [Unreleased] section.

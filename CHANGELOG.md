@@ -67,7 +67,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **ROW_NUMBER pagination resume safety** (#227, #266, #267). Three
+- **ROW_NUMBER pagination resume safety** (#227, #266, #267). Four
   layered correctness bugs that previously caused silent data loss
   or duplication on resume of composite/varchar-PK tables, all
   closed:

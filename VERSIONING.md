@@ -63,7 +63,7 @@ The [`ai_adjust → runtime_tuning` rename (#211)](https://github.com/johndauphi
 
 - The internal `state.db` SQLite schema can change between PATCH releases; dmt auto-migrates on `New()` and doesn't promise schema stability.
 - AI prompts and tuning heuristics are tuned freely — they're not part of the public contract. Output throughput numbers may improve or regress across versions.
-- Error message wording (only error CODES are stable per the exit-code policy above).
+- Error message wording. Exit *codes* are stable (see the [`internal/exitcodes`](./internal/exitcodes/exitcodes.go) package — Success, ConfigError, ConnectionError, TransferError, ValidationError, Cancelled, StateError, IOError); the human-readable messages attached to them are not.
 - Log message wording in `text` mode. Structured JSON log field names ARE stable after v1.0.0 (covered by `internal/logging` and `internal/observability` package surface).
 
 ## v1.0.0 readiness criteria

@@ -119,18 +119,34 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # gh release create handles both publishing the release AND
-          # uploading the assets in one call.
+          # Collect the artifacts explicitly via nullglob so an empty
+          # dist/ produces an empty array (and a clear failure below)
+          # instead of expanding to a literal `dmt-*` that confuses
+          # `gh release create` (Copilot review on #233). Tighten the
+          # glob to `dmt-${TAG}-*` so we don't accidentally pick up
+          # unrelated `dmt-*` artifacts that a future step might add.
+          shopt -s nullglob
+          assets=(dist/dmt-"${TAG}"-* dist/checksums.txt)
+          shopt -u nullglob
+          if [ "${#assets[@]}" -lt 6 ]; then
+            # Expect 5 binaries + checksums.txt = 6 minimum. Anything
+            # less means the build step silently produced nothing.
+            echo "ERROR: only ${#assets[@]} release asset(s) found; expected at least 6 (5 binaries + checksums.txt)." >&2
+            ls -la dist/ || true
+            exit 1
+          fi
+
+          # Pre-release classification. SemVer allows both dotted
+          # (`-rc.1`) and dotless (`-rc1`) pre-release identifiers, so
+          # match either by looking for the leading `-rc`/`-alpha`/`-beta`/`-pre`
+          # without requiring the dot (Copilot review on #233).
           extra=()
-          # RC tags (v1.2.3-rc.1) → prerelease so the GitHub UI doesn't
-          # mark them as the "latest" release.
           case "$TAG" in
-            *-rc.*|*-alpha.*|*-beta.*)
+            *-rc*|*-alpha*|*-beta*|*-pre*)
               extra+=("--prerelease") ;;
           esac
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file /tmp/release-notes.md \
             "${extra[@]}" \
-            dist/dmt-*${TAG}* \
-            dist/checksums.txt
+            "${assets[@]}"
