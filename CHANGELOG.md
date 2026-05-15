@@ -11,6 +11,24 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Studentized-residual outlier filter** (#225). Replaces the
+  feature-blind `0.5×median` row-level outlier rule in
+  `internal/tuning/history.go` with a leverage-adjusted
+  studentized-residual filter that scores each row against the
+  regression's prediction at its own features. The marginal floor kept
+  a host-throttled 575K rows/s run at a config the model predicted to
+  be 1.06M (because 575K > 0.5×median = 500K), which dragged R² from
+  0.20 down to 0.09 across the next two runs. The residual filter
+  reuses the `σ̂²` and `(XᵀX + λI)⁻¹` cached from #216 — no second
+  matrix solve. Drops rows with `|t| > 3` AND `ChunkRetryCount == 0`,
+  cap at 10% of rows per pass ordered by `|t|` descending. Gated to
+  ≥ 2 × `minRowsForRegression` (60 rows) — below that, the marginal
+  filter remains as the safety net. Reasoning emission is deferred so
+  that when Tune's Tier 1 (identity) cohort drives the selection, only
+  the identity cohort's drops appear in `Output.Reasoning` — the
+  regime cohort's filter pass is silent (avoids double-reporting
+  when the identity cohort is a subset of the regime cohort).
+
 - **Packet cap and memory budget scoped to filtered tables** (#241).
   When `applyAITuning` runs, the orchestrator's
   include/exclude-filtered table set is now passed into the
