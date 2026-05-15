@@ -359,6 +359,26 @@ func main() {
 					},
 				},
 			},
+			{
+				// Cache management (#177). Inspect and invalidate the
+				// `~/.dmt/type-cache.json` file. Subcommand-only — bare
+				// `dmt cache` prints usage.
+				Name:  "cache",
+				Usage: "Manage the type-mapping cache (~/.dmt/type-cache.json)",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "clear",
+						Usage:  "Remove cached type mappings (use --ai-only to keep deterministic entries)",
+						Action: cacheClear,
+						Flags: []cli.Flag{
+							&cli.BoolFlag{
+								Name:  "ai-only",
+								Usage: "Clear only AI-sourced entries (use after AI model upgrade). Leaves any non-AI entries in place.",
+							},
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -1530,4 +1550,30 @@ func printDryRunResult(r *orchestrator.DryRunResult) {
 	fmt.Printf("Workers: %d\n", r.Workers)
 	fmt.Printf("Chunk Size: %d\n", r.ChunkSize)
 	fmt.Printf("Estimated Memory: ~%d MB\n", r.EstimatedMemMB)
+}
+
+// cacheClear implements `dmt cache clear [--ai-only]` (#177). With no
+// flag it removes the entire ~/.dmt/type-cache.json file; with --ai-only
+// it preserves any non-AI entries (today: none — but the format is
+// designed to support deterministic-tagged entries in future).
+func cacheClear(c *cli.Context) error {
+	cacheFile := driver.DefaultCacheFilePath()
+	if c.Bool("ai-only") {
+		cleared, err := driver.ClearAICacheEntries(cacheFile)
+		if err != nil {
+			return fmt.Errorf("clearing AI cache entries: %w", err)
+		}
+		fmt.Printf("Cleared %d AI cache entries from %s\n", cleared, cacheFile)
+		return nil
+	}
+
+	if err := os.Remove(cacheFile); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("No cache file to clear at %s\n", cacheFile)
+			return nil
+		}
+		return fmt.Errorf("removing cache file: %w", err)
+	}
+	fmt.Printf("Removed cache file %s\n", cacheFile)
+	return nil
 }
