@@ -11,6 +11,23 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Drop `R²=` from regression-tier reasoning line** (#293). The
+  operator-facing log line emitted from
+  `internal/tuning/history.go::applyHistoryRegression` no longer
+  includes the model's training-set R². On noisy real workloads R²
+  is structurally capped low — within-cell variance dominates
+  between-cell signal — so the line read `R²=0.13` while the
+  regression's actual decisions were near-optimal (1.4% top-1
+  regret on the SO2010 → PG sweep that motivated this change, with
+  Spearman ρ = +0.68 and 95% CI coverage at 88%). Operators reading
+  the log thought the tuner was broken when it wasn't. The 95%
+  prediction interval still in the same line carries the relevant
+  point-level confidence in units operators understand (MB/s). The
+  `model.r2` field is still computed and remains available to debug
+  logs and the existing `regression_test.go` assertions. A negative-
+  guard assertion in `TestApplyHistory_RegressionTier` catches
+  accidental re-introduction.
+
 - **Studentized-residual outlier filter** (#225). Replaces the
   feature-blind `0.5×median` row-level outlier rule in
   `internal/tuning/history.go` with a leverage-adjusted
