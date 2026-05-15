@@ -256,25 +256,30 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	out.ReadAheadBuffers = pickedRAB
 	out.Tier = TierRegression
 
-	// Fit-quality signals (#216): R² (model-level) + 95% prediction
-	// interval at the picked point (point-level). Both nil/!ok when
-	// the model couldn't compute them — emit "N/A" to keep the format
-	// consistent without lying about confidence. PredictionInterval's
-	// explicit ok return distinguishes "couldn't compute" from
-	// "computed a legitimately zero-width interval" (Codex review on
-	// PR #217 — the prior `low != high` sentinel was ambiguous).
-	r2Str := "N/A"
-	if model.r2 != nil {
-		r2Str = fmt.Sprintf("%.2f", *model.r2)
-	}
+	// Point-level fit signal: 95% prediction interval at the picked
+	// point. !ok when the model couldn't compute it — emit "N/A" to keep
+	// the format consistent without lying about confidence.
+	// PredictionInterval's explicit ok return distinguishes "couldn't
+	// compute" from "computed a legitimately zero-width interval"
+	// (Codex review on PR #217 — the prior `low != high` sentinel was
+	// ambiguous).
+	//
+	// R² used to be emitted here too but was removed: on noisy real
+	// workloads it's structurally capped low (within-cell variance
+	// dominates between-cell signal), so the reasoning line read
+	// "R²=0.13" while the regression's actual decisions were near-
+	// optimal (1.4% top-1 regret on the SO2010 sweep). Operators
+	// reading the log thought the tuner was broken when it wasn't.
+	// model.r2 is still computed and remains available to debug logs
+	// and unit tests.
 	ciStr := "N/A"
 	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, avg); ok {
 		ciStr = formatPredictionInterval(predicted, low, high)
 	}
 
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %s [95%% CI: %s]; R²=%s",
-		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), len(covered), formatBytesPerSec(predicted), ciStr, r2Str,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %s [95%% CI: %s]",
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), len(covered), formatBytesPerSec(predicted), ciStr,
 	)
 	return true
 }
