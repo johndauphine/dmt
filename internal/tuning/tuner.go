@@ -210,7 +210,22 @@ type HistoryRecord struct {
 
 	// What happened
 	FinalThroughput float64
-	ChunkRetryCount int
+	// FinalThroughputBytes is the same observed throughput expressed in
+	// bytes/sec (#224 — FinalThroughput × AvgRowBytes at adapter-fill time,
+	// with the safeAvgRowBytes fallback when AvgRowBytes is unset on pre-#215
+	// rows). The regression trains on this so the dependent variable is in
+	// the same unit family as the chunk_size_bytes feature — drops the
+	// dual role log(avg_row_bytes) was playing as an implicit unit
+	// conversion AND a row-width effect, which materially improves
+	// cross-workload R².
+	//
+	// Stays alongside FinalThroughput (not replacing it) because the
+	// smoothed-bins tier, regime-drift detector, and orchestrator
+	// reasoning still operate in rows/sec — that's the unit the user's
+	// log expressed historically and rows/sec is the natural unit for a
+	// fixed-workload retry/throughput comparison.
+	FinalThroughputBytes int64
+	ChunkRetryCount      int
 
 	// Regime classification fields (host)
 	CPUCores int

@@ -1243,18 +1243,19 @@ func (e stubError) Error() string { return string(e) }
 // --- #218: PI upper-bound display cap ---
 
 // TestFormatPredictionInterval_AbsoluteCeiling_EmitsWideMarker — the
-// exact failure mode from #218: an astronomical upper bound (~10²⁴
-// rows/s) from a leverage explosion at a sparse-data x*. The raw
-// number erodes operator trust ("did dmt overflow?"); display the
-// "wide" marker instead.
+// exact failure mode from #218: an astronomical upper bound from a
+// leverage explosion at a sparse-data x*. The raw number erodes
+// operator trust ("did dmt overflow?"); display the "wide" marker
+// instead. Post-#224 inputs are bytes/sec; pred ~ 300 MB/s and
+// high ~ 10²⁴ B/s is the bytes/sec analogue of the original repro.
 func TestFormatPredictionInterval_AbsoluteCeiling_EmitsWideMarker(t *testing.T) {
-	// The literal numbers from the issue's repro: pred ~ 600K rows/s,
-	// high ~ 10²⁴ rows/s, low clamped at 0.
-	got := formatPredictionInterval(617_934, 0, 9.67e23)
+	// pred ≈ 300 MB/s (600K rows/s × 500B), high ≈ 9.67e23 B/s,
+	// low clamped at 0.
+	got := formatPredictionInterval(308_967_000, 0, 9.67e23)
 	if !strings.Contains(got, "wide") {
 		t.Errorf("absurd CI upper bound should emit 'wide' marker; got %q", got)
 	}
-	if strings.Contains(got, "M rows/s") || strings.Contains(got, "K rows/s") {
+	if strings.Contains(got, "MB/s") || strings.Contains(got, "GB/s") {
 		t.Errorf("absurd CI display should NOT include unit-formatted numbers (defeats the trust-preserving point); got %q", got)
 	}
 }
@@ -1262,11 +1263,11 @@ func TestFormatPredictionInterval_AbsoluteCeiling_EmitsWideMarker(t *testing.T) 
 // TestFormatPredictionInterval_RelativeRatio_EmitsWideMarker — the
 // pred-relative cap: even when the absolute ceiling wouldn't fire,
 // a CI upper bound far past the prediction tells the operator
-// nothing useful. Marker, not number.
+// nothing useful. Marker, not number. Post-#224 in bytes/sec:
+// pred=1 GB/s, high=25 GB/s — under the 1 TB/s absolute cap but
+// 25× pred, past the 10× relative cap.
 func TestFormatPredictionInterval_RelativeRatio_EmitsWideMarker(t *testing.T) {
-	// pred=2M rows/s, high=50M rows/s — under the absolute ceiling
-	// (100M) but 25× pred, past the 10× relative cap.
-	got := formatPredictionInterval(2_000_000, 0, 50_000_000)
+	got := formatPredictionInterval(1_000_000_000, 0, 25_000_000_000)
 	if !strings.Contains(got, "wide") {
 		t.Errorf("high/pred=25× should emit 'wide' marker (relative cap); got %q", got)
 	}
@@ -1275,25 +1276,25 @@ func TestFormatPredictionInterval_RelativeRatio_EmitsWideMarker(t *testing.T) {
 // TestFormatPredictionInterval_NormalRange_DisplaysNumbers — guard
 // against over-zealous capping: a sensible CI must still render as
 // numbers, otherwise the fix would silently break the common case.
+// Post-#224: 350 MB/s lo, 620 MB/s hi (the so2010-shape range,
+// rescaled to bytes/sec at ~500B avg row).
 func TestFormatPredictionInterval_NormalRange_DisplaysNumbers(t *testing.T) {
-	// Typical regression-tier output from the so2010 sweeps: pred ~
-	// 500K, low ~ 350K, high ~ 620K rows/s.
-	got := formatPredictionInterval(500_000, 350_000, 620_000)
+	got := formatPredictionInterval(500_000_000, 350_000_000, 620_000_000)
 	if strings.Contains(got, "wide") {
 		t.Errorf("normal CI should NOT emit 'wide' marker; got %q", got)
 	}
-	if !strings.Contains(got, "K") {
-		t.Errorf("sub-1M-rows/s CI should render in K units; got %q", got)
+	if !strings.Contains(got, "MB/s") {
+		t.Errorf("sub-1GB/s CI should render in MB/s units; got %q", got)
 	}
 }
 
 // TestFormatPredictionInterval_NegativeLowClamped — the existing
-// clamp-low-to-zero behavior must survive the rename; users would
-// be misled by "throughput could be negative."
+// clamp-low-to-zero behavior must survive the unit switch (#224);
+// users would be misled by "throughput could be negative."
 func TestFormatPredictionInterval_NegativeLowClamped(t *testing.T) {
-	got := formatPredictionInterval(400_000, -50_000, 800_000)
-	if !strings.HasPrefix(got, "0K–") {
-		t.Errorf("low<0 should render as '0K–...'; got %q", got)
+	got := formatPredictionInterval(400_000_000, -50_000_000, 800_000_000)
+	if !strings.HasPrefix(got, "0 MB/s–") {
+		t.Errorf("low<0 should render as '0 MB/s–...'; got %q", got)
 	}
 }
 
@@ -1301,10 +1302,9 @@ func TestFormatPredictionInterval_NegativeLowClamped(t *testing.T) {
 // prediction itself is zero (or nonpositive), the relative ratio
 // can't fire (division-by-zero guard); only the absolute ceiling
 // gates the display. Defensive test for the pred-zero edge.
+// Post-#224 in bytes/sec, well under the 1 TB/s absolute ceiling.
 func TestFormatPredictionInterval_ZeroPredAllowsAnyHigh(t *testing.T) {
-	// pred=0, high=50_000_000 (under absolute ceiling): should render
-	// as numbers, not "wide" — relative gate is bypassed.
-	got := formatPredictionInterval(0, 0, 50_000_000)
+	got := formatPredictionInterval(0, 0, 25_000_000_000)
 	if strings.Contains(got, "wide") {
 		t.Errorf("pred=0 should bypass relative ratio cap (high < absolute ceiling); got %q", got)
 	}

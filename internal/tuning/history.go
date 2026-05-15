@@ -270,16 +270,17 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	}
 
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %.0f rows/s [95%% CI: %s]; R²=%s",
-		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), len(covered), predicted, ciStr, r2Str,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %s [95%% CI: %s]; R²=%s",
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), len(covered), formatBytesPerSec(predicted), ciStr, r2Str,
 	)
 	return true
 }
 
 // formatPredictionInterval formats the regression's 95% PI for display
-// in the reasoning string. Picks units (K vs M rows/s) based on
-// magnitude so the line stays readable. Always emits both endpoints in
-// the same unit for easy visual comparison.
+// in the reasoning string. Inputs are in BYTES per second (#224 —
+// matches the regression's new dependent variable). Picks units (MB/s
+// vs GB/s) via formatBytesPerSec so the line stays readable. Always
+// emits both endpoints in the same unit for easy visual comparison.
 //
 // Negative low values (the PI can extend below zero when uncertainty is
 // large) are clamped to 0 in the display — a "throughput could be
@@ -287,14 +288,14 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 // "the lower bound is essentially zero, model has very low confidence."
 //
 // Width cap (#218): when the upper bound is physically absurd
-// (>piAbsoluteCeiling rows/s) or far beyond the predicted value
+// (>piAbsoluteCeiling bytes/s) or far beyond the predicted value
 // (>piRelativeRatio × pred), the raw number is replaced with a
 // "wide" marker. The math is technically correct in that case — the
 // model is honestly saying "I have no idea at this x*" — but printing
-// 9.6e23 rows/s erodes operator trust ("did dmt overflow?") and the
-// lower bound is already clamped to 0, so the numeric range carries
-// no usable information. The marker preserves the no-confidence
-// signal without the misleading number. Lives near the rest of the
+// 9.6e23 erodes operator trust ("did dmt overflow?") and the lower
+// bound is already clamped to 0, so the numeric range carries no
+// usable information. The marker preserves the no-confidence signal
+// without the misleading number. Lives near the rest of the
 // reasoning-string format so future tweaks stay co-located.
 func formatPredictionInterval(pred, low, high float64) string {
 	if high > piAbsoluteCeiling || (pred > 0 && high > piRelativeRatio*pred) {
@@ -303,25 +304,37 @@ func formatPredictionInterval(pred, low, high float64) string {
 	if low < 0 {
 		low = 0
 	}
-	if high >= 1_000_000 {
-		return fmt.Sprintf("%.2fM–%.2fM rows/s", low/1_000_000, high/1_000_000)
+	return fmt.Sprintf("%s–%s", formatBytesPerSec(low), formatBytesPerSec(high))
+}
+
+// formatBytesPerSec renders a bytes/sec value with units the operator
+// can scan at a glance (#224). MB/s for typical disk-bound workloads
+// (5-2000 MB/s on modern NVMe + PG COPY), GB/s for the rare very-fast
+// case (e.g. small-row in-memory targets). Sub-1MB/s renders in MB/s
+// with two decimal places rather than collapsing to KB/s — operators
+// care about the order of magnitude more than the last digit, and a
+// uniform unit makes side-by-side comparison easier.
+func formatBytesPerSec(bytesPerSec float64) string {
+	if bytesPerSec >= 1_000_000_000 { // >= 1 GB/s
+		return fmt.Sprintf("%.2f GB/s", bytesPerSec/1_000_000_000)
 	}
-	return fmt.Sprintf("%.0fK–%.0fK rows/s", low/1000, high/1000)
+	return fmt.Sprintf("%.0f MB/s", bytesPerSec/1_000_000)
 }
 
 // piAbsoluteCeiling caps the displayed PI upper bound at a value well
-// past any realistic throughput for the databases dmt targets.
-// Postgres COPY on a fast NVMe box tops out around 2-5M rows/s on
-// small-row workloads; 100M is two orders of magnitude past that and
-// catches the ~10²⁴ rows/s leverage-explosion case from #218 without
-// false-positiving on aggressive but real predictions.
-const piAbsoluteCeiling = 100_000_000.0
+// past any realistic throughput for the databases dmt targets, in
+// BYTES per second (#224 — re-anchored from the old rows/sec ceiling).
+// Fast NVMe + PG COPY tops out around 2-5 GB/s on dense workloads;
+// 1 TB/s is two-plus orders of magnitude past that and catches the
+// leverage-explosion case from #218 without false-positiving on
+// aggressive but real predictions.
+const piAbsoluteCeiling = 1_000_000_000_000.0 // 1 TB/s
 
 // piRelativeRatio is the second-line cap: when high > k × pred, the
 // CI is so wide it tells the operator nothing useful about whether
 // the picked config is well-understood. 10× catches the "model has
 // some signal but extrapolation blew the upper bound" case where the
-// absolute ceiling wouldn't fire (e.g., pred=2M rows/s, high=50M).
+// absolute ceiling wouldn't fire (e.g., pred=2 GB/s, high=50 GB/s).
 const piRelativeRatio = 10.0
 
 // sortedKeys returns the int keys of m sorted ascending. Used by the

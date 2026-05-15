@@ -23,21 +23,26 @@ func TestFitRegression_InsufficientData(t *testing.T) {
 // quadratic terms + categorical features add coefficients that interact
 // with the fit) — instead checks that on the training data, residuals
 // are small relative to signal.
+//
+// #224: y is bytes/sec. Asserts both Predict and the training-row
+// FinalThroughputBytes (rows/sec × avg_row_bytes) in the same unit.
 func TestFitRegression_RecoversLinearTrend(t *testing.T) {
-	// Synthetic: throughput = 100 + 50·WAW + noise.
+	// Synthetic: throughput = 100 + 50·WAW (rows/sec).
 	// 30 rows, WAW spread across 1..6, all same pair, fixed avg_row_bytes.
+	// bytes/sec = rows/sec × 500B = (100 + 50·WAW) × 500.
 	rows := make([]HistoryRecord, 30)
 	for i := range rows {
 		waw := (i % 6) + 1
 		throughput := 100.0 + 50.0*float64(waw)
 		rows[i] = HistoryRecord{
-			SourceDBType:      "mssql",
-			TargetDBType:      "postgres",
-			WriteAheadWriters: waw,
-			ChunkSize:         50000,
-			AvgRowBytes:       500,
-			FinalThroughput:   throughput,
-			CPUCores:          16, MemoryGB: 48,
+			SourceDBType:         "mssql",
+			TargetDBType:         "postgres",
+			WriteAheadWriters:    waw,
+			ChunkSize:            50000,
+			AvgRowBytes:          500,
+			FinalThroughput:      throughput,
+			FinalThroughputBytes: int64(throughput * 500),
+			CPUCores:             16, MemoryGB: 48,
 		}
 	}
 
@@ -48,19 +53,21 @@ func TestFitRegression_RecoversLinearTrend(t *testing.T) {
 
 	// Spot-check predictions across the WAW range — residuals should be
 	// small (data is noiseless; only the model's polynomial-vs-linear
-	// approximation introduces tiny error).
+	// approximation introduces tiny error). Residual tolerance scaled by
+	// AvgRowBytes since y is now in bytes/sec.
 	maxResidual := 0.0
 	for _, r := range rows {
 		pred := m.Predict(r.WriteAheadWriters, int64(r.ChunkSize)*r.AvgRowBytes,
 			r.ParallelReaders, r.ReadAheadBuffers,
 			r.SourceDBType, r.TargetDBType, "", r.AvgRowBytes)
-		resid := math.Abs(pred - r.FinalThroughput)
+		resid := math.Abs(pred - float64(r.FinalThroughputBytes))
 		if resid > maxResidual {
 			maxResidual = resid
 		}
 	}
-	if maxResidual > 1.0 {
-		t.Errorf("max residual on noiseless data = %.2f, want < 1.0 (model under-fits)", maxResidual)
+	// 1.0 rows/sec pre-#224 → 500 bytes/sec at the 500B avg_row_bytes scale.
+	if maxResidual > 500.0 {
+		t.Errorf("max residual on noiseless data = %.2f bytes/s, want < 500 (model under-fits)", maxResidual)
 	}
 }
 
@@ -527,5 +534,139 @@ func TestTCritical_TableValuesMonotone(t *testing.T) {
 	}
 	if tCritical(1000) != 1.96 {
 		t.Errorf("tCritical(1000)=%.2f, want 1.96 (normal approximation for large dof)", tCritical(1000))
+	}
+}
+
+// --- Issue #224: bytes/sec dependent variable ---
+
+// TestFitRegression_LinearScalingInvariance_R2 verifies the issue's
+// "Tier 1 (single-workload)" claim: within a fixed-avg_row_bytes
+// cohort, scaling y by a constant (bytes/sec = rows/sec × const) is
+// a linear transform, and R² is invariant under linear y rescaling.
+//
+// The test fits the same synthetic fixture twice with FinalThroughputBytes
+// set two ways: once as rows/sec × 500 (the "post-#224" path), once as
+// rows/sec × 1000 (a fixture pretending the rows were twice as wide).
+// R² must be identical to numerical precision — if it isn't, the
+// regression has accidentally introduced a non-linear dependence on
+// the y scale (e.g. by mixing in a hard-coded threshold or a feature
+// derived from y).
+func TestFitRegression_LinearScalingInvariance_R2(t *testing.T) {
+	mkRows := func(scale int64) []HistoryRecord {
+		rows := make([]HistoryRecord, 60)
+		for i := range rows {
+			waw := (i % 6) + 1
+			dev := waw - 4
+			rowsPerSec := 1000.0 - 50.0*float64(dev*dev)
+			rows[i] = HistoryRecord{
+				SourceDBType:         "mssql",
+				TargetDBType:         "postgres",
+				WriteAheadWriters:    waw,
+				ChunkSize:            50000,
+				AvgRowBytes:          500,
+				FinalThroughput:      rowsPerSec,
+				FinalThroughputBytes: int64(rowsPerSec) * scale,
+				CPUCores:             16, MemoryGB: 48,
+			}
+		}
+		return rows
+	}
+
+	mA, errA := fitRegression(mkRows(500))
+	mB, errB := fitRegression(mkRows(1000))
+	if errA != nil || errB != nil {
+		t.Fatalf("fitRegression errors: A=%v, B=%v", errA, errB)
+	}
+	if mA.r2 == nil || mB.r2 == nil {
+		t.Fatal("R² unexpectedly nil on linearly-rescaled fixtures")
+	}
+	delta := math.Abs(*mA.r2 - *mB.r2)
+	if delta > 1e-9 {
+		t.Errorf("R² changed under linear y rescale: A=%.12f, B=%.12f, |Δ|=%.3e (must be invariant)",
+			*mA.r2, *mB.r2, delta)
+	}
+}
+
+// TestFitRegression_BytesPerSecScale verifies the regression's y is in
+// bytes/sec post-#224: predictions for a fixed-row-width dataset must
+// be ≈ rows/sec × avg_row_bytes, not rows/sec. Catches the "forgot
+// to populate FinalThroughputBytes" regression that would otherwise
+// silently collapse y to zero (the throughputBytes fallback prevents
+// that today, but a future refactor could lose it).
+func TestFitRegression_BytesPerSecScale(t *testing.T) {
+	rows := make([]HistoryRecord, 30)
+	for i := range rows {
+		waw := (i % 6) + 1
+		rowsPerSec := 1_000_000.0 + 100_000.0*float64(waw) // 1.1M..1.6M rows/s
+		rows[i] = HistoryRecord{
+			SourceDBType:         "mssql",
+			TargetDBType:         "postgres",
+			WriteAheadWriters:    waw,
+			ChunkSize:            50000,
+			AvgRowBytes:          1000, // 1KB rows
+			FinalThroughput:      rowsPerSec,
+			FinalThroughputBytes: int64(rowsPerSec * 1000), // 1.1GB..1.6GB/s
+			CPUCores:             16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression: %v", err)
+	}
+
+	// Predict at WAW=4 should be ≈ (1_000_000 + 100_000·4) × 1000 = 1.4 GB/s,
+	// not 1.4M (the rows/sec value pre-#224).
+	pred := m.Predict(4, 50_000*1000, 0, 0, "mssql", "postgres", "", 1000)
+	if pred < 1.0e9 {
+		t.Errorf("Predict at the bytes/sec scale: got %.0f, want ≈1.4e9 (bytes/sec)", pred)
+	}
+}
+
+// TestThroughputBytes_FallbackWhenBytesUnset covers the back-compat path
+// for fixtures and adapters that only set FinalThroughput (rows/sec).
+// Tests and old persisted rows shouldn't silently train against y=0.
+func TestThroughputBytes_FallbackWhenBytesUnset(t *testing.T) {
+	r := HistoryRecord{FinalThroughput: 500_000, AvgRowBytes: 800}
+	got := throughputBytes(r)
+	want := 500_000.0 * 800
+	if got != want {
+		t.Errorf("throughputBytes fallback = %.0f, want %.0f", got, want)
+	}
+
+	// AvgRowBytes==0 → safeAvgRowBytes(0)==500 fallback applies.
+	r2 := HistoryRecord{FinalThroughput: 500_000}
+	got2 := throughputBytes(r2)
+	want2 := 500_000.0 * 500
+	if got2 != want2 {
+		t.Errorf("throughputBytes default-row-size fallback = %.0f, want %.0f", got2, want2)
+	}
+
+	// Explicit FinalThroughputBytes wins.
+	r3 := HistoryRecord{FinalThroughput: 1, AvgRowBytes: 1, FinalThroughputBytes: 42}
+	if throughputBytes(r3) != 42 {
+		t.Errorf("explicit FinalThroughputBytes should win, got %.0f", throughputBytes(r3))
+	}
+}
+
+// TestFormatBytesPerSec_PicksUnit pins the unit-selection thresholds for
+// the new helper (#224). MB/s below 1 GB/s, GB/s at-or-above. The
+// boundary value 999_999_999 stays in MB/s (one byte/s short of the
+// switchover) so the comparison is "≥" and stable against off-by-one.
+func TestFormatBytesPerSec_PicksUnit(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{500_000_000, "500 MB/s"},          // typical disk-bound
+		{999_999_999, "1000 MB/s"},         // boundary; %.0f rounds, but stays MB/s
+		{1_000_000_000, "1.00 GB/s"},       // exactly at switchover
+		{2_500_000_000, "2.50 GB/s"},       // fast NVMe
+		{0, "0 MB/s"},                      // zero — render, don't blank
+	}
+	for _, tc := range cases {
+		got := formatBytesPerSec(tc.in)
+		if got != tc.want {
+			t.Errorf("formatBytesPerSec(%.0f) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

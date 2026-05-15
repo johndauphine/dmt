@@ -677,7 +677,15 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			// regime classifier treats as "unknown skew" — neutral on
 			// the secondary axis rather than mismatching every input.
 			FinalThroughput:         r.FinalThroughput,
-			ChunkRetryCount:         r.ChunkRetryCount,
+			// FinalThroughputBytes is the bytes/sec form the regression
+			// trains on (#224). rows/sec stays the canonical persisted
+			// value (existing ai_tuning_history rows + non-regression
+			// consumers); the multiplication happens here, at the single
+			// adapter boundary, so a pre-#215 row with AvgRowSizeBytes==0
+			// gets the safeAvgRowBytes fallback consistently with the
+			// rest of the tuning pipeline.
+			FinalThroughputBytes: int64(r.FinalThroughput * float64(tuning.SafeAvgRowBytes(r.AvgRowSizeBytes))),
+			ChunkRetryCount:      r.ChunkRetryCount,
 			CPUCores:                r.CPUCores,
 			MemoryGB:                r.MemoryGB,
 			Platform:                r.Platform,

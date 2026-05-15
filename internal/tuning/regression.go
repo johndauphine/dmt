@@ -11,9 +11,9 @@ import (
 
 // Quadratic OLS over the migration history.
 //
-// Model:
+// Model (#224 — dependent variable is throughput in BYTES per second):
 //
-//	throughput = β₀
+//	throughput_bytes = β₀
 //	           + β₁·waw_z + β₂·waw_z²
 //	           + β₃·cs_z  + β₄·cs_z²
 //	           + β₅·logAvgRowBytes_z
@@ -21,6 +21,18 @@ import (
 //	           + Σ γᵢ · pair_i        (one-hot for each (source,target) pair seen)
 //	           + Σ δⱼ · mode_j        (one-hot for each target_mode seen)
 //	           + ε
+//
+// y is bytes/sec (FinalThroughputBytes — rows/sec × avg_row_bytes filled
+// in by the adapter), not rows/sec. Predicting in bytes/sec makes the
+// regression dimensionally clean: chunk_size_bytes (input feature) and
+// the prediction target now use the same unit family. Pre-#224 the
+// log(avg_row_bytes) feature did double duty — it captured genuine row-
+// width effects AND served as the implicit unit conversion relating
+// bytes-of-input to rows-of-output. With bytes/sec on the y axis, that
+// feature is purely about row-width effects, which materially improves
+// cross-workload R². Within a fixed-row-width cohort the math is
+// unchanged (bytes/sec = rows/sec × constant; R² is invariant under
+// linear y rescaling).
 //
 // The numeric features (waw, chunk_size_bytes, log(avg_row_bytes),
 // parallel_readers, read_ahead_buffers) are standardized to mean=0/std=1
@@ -114,9 +126,11 @@ type regressionModel struct {
 }
 
 // PredictionInterval returns the 95% prediction interval at the given
-// candidate point: low and high values such that the true throughput is
-// expected to fall in [low, high] 95% of the time. Standard ridge-OLS
-// formula:
+// candidate point in BYTES per second (#224 — matches the unit Predict
+// returns; the regression's y was switched from rows/sec to bytes/sec
+// for dimensional cleanliness). low and high are the values such that
+// the true throughput in bytes/sec is expected to fall in [low, high]
+// 95% of the time. Standard ridge-OLS formula:
 //
 //	ŷ ± t_{0.975, n-p} × σ̂ × √(1 + x*ᵀ (XᵀX + λI)⁻¹ x*)
 //
@@ -238,11 +252,37 @@ func safeAvgRowBytes(v int64) int64 {
 	return v
 }
 
+// SafeAvgRowBytes is the exported entry point for callers outside the
+// tuning package (e.g. the smartconfig adapter in internal/driver) that
+// need the same fallback policy when converting rows/sec → bytes/sec for
+// FinalThroughputBytes (#224). Keeps the fallback constant in one place.
+func SafeAvgRowBytes(v int64) int64 { return safeAvgRowBytes(v) }
+
+// throughputBytes returns the row's throughput in bytes/sec for the
+// regression's y vector (#224). Prefers FinalThroughputBytes when the
+// adapter populated it; falls back to FinalThroughput × safeAvgRowBytes
+// for older fixtures and test rows that only set the rows/sec field.
+// Returning float64 (not int64) keeps the OLS solve unchanged — bytes/sec
+// from a multiply-then-cast in the adapter is exactly representable up
+// past the petabytes-per-second range, well past any realistic value.
+func throughputBytes(r HistoryRecord) float64 {
+	if r.FinalThroughputBytes > 0 {
+		return float64(r.FinalThroughputBytes)
+	}
+	return r.FinalThroughput * float64(safeAvgRowBytes(r.AvgRowBytes))
+}
+
 // fitRegression builds the design matrix from the supplied rows and
 // solves for β via ridge-regularized normal equations (NOT pure QR;
 // see the package comment for why). Standardizes numeric features for
 // stability. Rows must have FinalThroughput > 0 (incomplete runs are
 // excluded by the caller in PR1's pipeline).
+//
+// The dependent variable y is FinalThroughputBytes (#224 — bytes/sec).
+// Rows where FinalThroughputBytes is zero get the safeAvgRowBytes
+// fallback applied here so older fixtures that only set FinalThroughput
+// (notably tests written before #224) keep training rather than
+// silently collapsing to a constant-zero y.
 func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	if len(rows) < minRowsForRegression {
 		return nil, errInsufficientRowsForRegression
@@ -325,7 +365,7 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 		// today — left empty to match the schema. PR2's exploration adds the
 		// field; for now this loop is a no-op when len(modes)==0.)
 
-		y.SetVec(i, r.FinalThroughput)
+		y.SetVec(i, throughputBytes(r))
 	}
 
 	// Ridge-regularized normal equations: β = (XᵀX + λI)⁻¹ Xᵀy.
@@ -427,11 +467,16 @@ func computeFitQuality(m *regressionModel, X *mat.Dense, y *mat.VecDense, ridgeX
 	}
 }
 
-// Predict returns the model's expected throughput for a candidate (waw,
-// csBytes) at the given current run's (source, target, target_mode,
-// avg_row_bytes). Pair and mode the model didn't see during training
-// contribute zero (the categorical features are absent); the prediction
-// then collapses to the numeric-feature surface plus the intercept.
+// Predict returns the model's expected throughput in BYTES per second
+// for a candidate (waw, csBytes) at the given current run's (source,
+// target, target_mode, avg_row_bytes). #224 switched the dependent
+// variable from rows/sec to bytes/sec — callers that need rows/sec
+// divide by avg_row_bytes at the boundary (argmaxRegression's
+// `csRows := int(pickedCSBytes / avg)` is unaffected because it
+// only consumes csBytes, not the prediction itself). Pair and mode
+// the model didn't see during training contribute zero (the
+// categorical features are absent); the prediction then collapses
+// to the numeric-feature surface plus the intercept.
 //
 // Uses the same featureVector helper as PredictionInterval so the two
 // paths share one feature-construction layout (Codex review on PR #217
