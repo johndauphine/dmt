@@ -11,6 +11,25 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SQLite driver for test-only migrations** (#298). New driver under
+  `internal/driver/sqlite/` uses the pure-Go `modernc.org/sqlite`
+  (already a transitive dependency of the checkpoint store) so dmt can
+  be exercised end-to-end without an external database server. SQLite
+  works as both source and target. The deterministic typemap learned a
+  fourth dialect via `internal/typemap/sqlite.go` plus targeted
+  updates in `internal/typemap/ddl/`, so cross-engine type mapping
+  (`sqlite ↔ {mssql, postgres, mysql}`) goes through the same path
+  the production drivers use. Single-writer pool, single-partition
+  reads, `INSERT OR IGNORE` for idempotent replay, and
+  `INSERT … ON CONFLICT … DO UPDATE SET … = excluded.*` for upserts.
+  `INTEGER PRIMARY KEY AUTOINCREMENT` is emitted only for sole
+  integer-PK columns; composite PKs preserve `NOT NULL` on identity
+  columns (SQLite, unlike PG/MSSQL/MySQL, does not implicitly
+  NOT NULL table-level PK columns). FK and CHECK constraints can
+  only be declared inline at CREATE TABLE on SQLite, so the post-
+  load Create FK / Create Check phases log a warning and skip — use
+  sqlite as source rather than target when FK enforcement matters.
+
 - **TUI `/explore` control** (#182). Adds a slash command to the
   interactive TUI for the tuner's exploration policy. `/explore on`
   arms a one-shot probe consumed by the next `/run` (sets
