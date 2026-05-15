@@ -672,3 +672,261 @@ func TestFormatBytesPerSec_PicksUnit(t *testing.T) {
 		}
 	}
 }
+
+// residualFilterFixture builds a fixture of mostly-clustered rows + one
+// underperforming "run 8" outlier + one matching-throughput survivor, all
+// at the same (WAW, PR, RAB, ChunkSize, AvgRowBytes). The majority cluster
+// trains the regression to predict ~1.0M rows/sec; the outlier at the
+// same config but 575K rows/sec is the run-8 repro from the issue and
+// must be flagged; the matching row at 1.028M sits within sigma of the
+// prediction and must survive. Returns the rows, the outlier's index in
+// the slice, and the matching survivor's index.
+func residualFilterFixture() ([]HistoryRecord, int, int) {
+	rows := make([]HistoryRecord, 0, 60)
+	for i := 0; i < 58; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: 1,
+			ParallelReaders:   4,
+			ReadAheadBuffers:  4,
+			ChunkSize:         1000,
+			AvgRowBytes:       500,
+			// Small spread around 1.03M rows/sec so the model fits tightly
+			// and sigma stays small relative to the outlier's deviation.
+			FinalThroughput: 1_000_000 + float64(i*1000),
+			ChunkRetryCount: 0,
+		})
+	}
+	outlier := HistoryRecord{
+		SourceDBType:      "mssql",
+		TargetDBType:      "postgres",
+		WriteAheadWriters: 1,
+		ParallelReaders:   4,
+		ReadAheadBuffers:  4,
+		ChunkSize:         1000,
+		AvgRowBytes:       500,
+		FinalThroughput:   575_000, // host throttling — far below the cluster
+		ChunkRetryCount:   0,       // clean run; matches the run-8 case
+	}
+	matching := HistoryRecord{
+		SourceDBType:      "mssql",
+		TargetDBType:      "postgres",
+		WriteAheadWriters: 1,
+		ParallelReaders:   4,
+		ReadAheadBuffers:  4,
+		ChunkSize:         1000,
+		AvgRowBytes:       500,
+		FinalThroughput:   1_028_000, // within sigma of the cluster mean
+		ChunkRetryCount:   0,
+	}
+	rows = append(rows, outlier, matching)
+	return rows, 58, 59
+}
+
+// TestFilterOutliersByResiduals_Run8Repro covers the headline case from
+// issue #225: the marginal-median 0.5× rule kept a 575K rows/sec run at
+// a config the regression predicted to be ~1.06M because 575K was just
+// above the 0.5×median floor. The residual filter must catch it.
+func TestFilterOutliersByResiduals_Run8Repro(t *testing.T) {
+	rows, outlierIdx, matchingIdx := residualFilterFixture()
+
+	kept, drops := filterOutliersByResiduals(rows)
+
+	if len(drops) != 1 {
+		t.Fatalf("expected exactly 1 drop, got %d (drops=%+v)", len(drops), drops)
+	}
+	if drops[0].index != outlierIdx {
+		t.Errorf("expected the 575K rows/sec row (index %d) to be the drop, got index %d", outlierIdx, drops[0].index)
+	}
+	if drops[0].tStat >= -studentizedOutlierThreshold {
+		t.Errorf("outlier t-stat should be more negative than -%g, got %.2f", studentizedOutlierThreshold, drops[0].tStat)
+	}
+
+	// Matching row must survive — same features, throughput near the
+	// prediction surface, no reason to drop it.
+	matchingY := rows[matchingIdx].FinalThroughput
+	foundMatching := false
+	for _, r := range kept {
+		if r.FinalThroughput == matchingY {
+			foundMatching = true
+			break
+		}
+	}
+	if !foundMatching {
+		t.Errorf("matching-throughput row (%.0f rows/s) was wrongly dropped", matchingY)
+	}
+	if len(kept) != len(rows)-1 {
+		t.Errorf("expected %d survivors, got %d", len(rows)-1, len(kept))
+	}
+}
+
+// TestFilterOutliersByResiduals_BelowGate_FallsBack verifies the
+// dispatcher uses the marginal filter when the row count is below
+// 2×minRowsForRegression. Below the gate the regression's β isn't
+// trustworthy enough to drive principled drops — falling back to the
+// marginal-median rule preserves the pre-#225 safety net.
+func TestFilterOutliersByResiduals_BelowGate_FallsBack(t *testing.T) {
+	// Build a row count below the gate but above filterOutliers'
+	// 3-row median-needed floor.
+	rows := []HistoryRecord{
+		{FinalThroughput: 600_000, ChunkRetryCount: 0},
+		{FinalThroughput: 700_000, ChunkRetryCount: 0}, // median
+		{FinalThroughput: 800_000, ChunkRetryCount: 0},
+		{FinalThroughput: 100_000, ChunkRetryCount: 0}, // <0.5×median, clean → drop
+		{FinalThroughput: 100_000, ChunkRetryCount: 1}, // <0.5×median, retried → keep
+	}
+	if len(rows) >= residualFilterMinRows {
+		t.Fatalf("test fixture broken: row count %d should be below %d gate", len(rows), residualFilterMinRows)
+	}
+	// filterOutliersByResiduals delegates to filterOutliers below the gate.
+	kept, drops := filterOutliersByResiduals(rows)
+	if drops != nil {
+		t.Errorf("expected nil drops when falling back to marginal filter, got %+v", drops)
+	}
+	if len(kept) != 4 {
+		t.Errorf("expected 4 rows kept by marginal fallback, got %d", len(kept))
+	}
+
+	// And via the public dispatcher (filterOutliersForRegression) —
+	// should also produce the marginal-filter result with nil drops
+	// (the dispatcher leaves drops empty on the marginal path, so
+	// appendOutlierReasoning is a no-op).
+	res := filterOutliersForRegression(rows)
+	if len(res.kept) != 4 {
+		t.Errorf("dispatcher fallback: expected 4 rows kept, got %d", len(res.kept))
+	}
+	if res.drops != nil {
+		t.Errorf("dispatcher fallback should leave drops nil; got %+v", res.drops)
+	}
+	if res.total != len(rows) {
+		t.Errorf("dispatcher fallback total: got %d, want %d", res.total, len(rows))
+	}
+}
+
+// TestFilterOutliersByResiduals_DropCapEnforced verifies the
+// residualFilterDropCap (10%) ceiling — when far more than 10% of rows
+// clear |t|>3 (a sign the model is mis-specified or noise is structured),
+// the filter drops at most cap×N and orders them by |t| descending so
+// the worst offenders go first. Prevents the model from "defining
+// reality" wholesale.
+func TestFilterOutliersByResiduals_DropCapEnforced(t *testing.T) {
+	// 60 rows total. Half are tightly clustered at ~1.0M rows/sec; the
+	// other half are spread at ~200K. The regression splits the
+	// difference, residuals on BOTH sides clear |t|>3. With cap=10% the
+	// filter must drop at most 6 rows even though 30 candidates exist.
+	rows := make([]HistoryRecord, 0, 60)
+	for i := 0; i < 30; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 1, ParallelReaders: 4, ReadAheadBuffers: 4,
+			ChunkSize: 1000, AvgRowBytes: 500,
+			FinalThroughput: 1_000_000 + float64(i*100), // tight cluster
+			ChunkRetryCount: 0,
+		})
+	}
+	for i := 0; i < 30; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 1, ParallelReaders: 4, ReadAheadBuffers: 4,
+			ChunkSize: 1000, AvgRowBytes: 500,
+			FinalThroughput: 200_000 + float64(i*100), // far-below cluster
+			ChunkRetryCount: 0,
+		})
+	}
+
+	_, drops := filterOutliersByResiduals(rows)
+	maxAllowed := int(math.Floor(residualFilterDropCap * float64(len(rows))))
+	if len(drops) > maxAllowed {
+		t.Errorf("drop cap violated: %d drops > %d max (%.0f%% of %d rows)",
+			len(drops), maxAllowed, residualFilterDropCap*100, len(rows))
+	}
+
+	// Verify drops are ordered worst-first.
+	for i := 1; i < len(drops); i++ {
+		if math.Abs(drops[i-1].tStat) < math.Abs(drops[i].tStat) {
+			t.Errorf("drops not ordered by |t| descending at i=%d: |%.2f| < |%.2f|",
+				i, drops[i-1].tStat, drops[i].tStat)
+		}
+	}
+}
+
+// TestFilterOutliersByResiduals_WellFitNoNoise verifies no drops on a
+// clean fit: when residuals are uniformly small relative to sigma, every
+// row's |t| stays well below the threshold and none are flagged. Guards
+// against the filter accidentally peeling perfectly-valid runs.
+func TestFilterOutliersByResiduals_WellFitNoNoise(t *testing.T) {
+	// 60 rows, throughput = 100 + 50·WAW (deterministic linear). Noise
+	// is zero; residuals are floating-point rounding errors only.
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		throughput := 100.0 + 50.0*float64(waw)
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ParallelReaders:   4,
+			ReadAheadBuffers:  4,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   throughput,
+			ChunkRetryCount:   0,
+		}
+	}
+
+	kept, drops := filterOutliersByResiduals(rows)
+	if len(drops) != 0 {
+		t.Errorf("expected no drops on noiseless data, got %d: %+v", len(drops), drops)
+	}
+	if len(kept) != len(rows) {
+		t.Errorf("expected all %d rows kept, got %d", len(rows), len(kept))
+	}
+}
+
+// TestFilterOutliersByResiduals_LegacyZeroAvgRowBytes guards the codex-
+// reviewed P2 bug: rows with AvgRowBytes=0 (older schema, manual inserts)
+// score against the SAME log-row-width feature fitRegression used during
+// training. Without the safeAvgRowBytes fallback on the scoring side, the
+// logAvg column has zero variance at scoring → ridge inverse blows up →
+// leverage clamps near 1 → valid well-fit rows exceed |t|>3 and get
+// cleared up to the 10% cap. Reproduced by codex on the first commit.
+func TestFilterOutliersByResiduals_LegacyZeroAvgRowBytes(t *testing.T) {
+	rows := make([]HistoryRecord, 60)
+	for i := range rows {
+		waw := (i % 6) + 1
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ParallelReaders:   4,
+			ReadAheadBuffers:  4,
+			ChunkSize:         50000,
+			AvgRowBytes:       0, // legacy — adapter should have filled it
+			FinalThroughput:   100.0 + 50.0*float64(waw),
+			ChunkRetryCount:   0,
+		}
+	}
+	_, drops := filterOutliersByResiduals(rows)
+	if len(drops) != 0 {
+		t.Errorf("legacy zero-AvgRowBytes rows wrongly dropped: %d drops, first=%+v", len(drops), drops[0])
+	}
+}
+
+// TestFilterOutliersByResiduals_RetryRowsExempt verifies a low-throughput
+// run with ChunkRetryCount > 0 is NOT dropped even when |t|>3 — low
+// throughput WITH retries is real load contention, not measurement
+// noise, and the regression should learn from it. Matches the existing
+// filterOutliers policy preserving retry signal.
+func TestFilterOutliersByResiduals_RetryRowsExempt(t *testing.T) {
+	rows, outlierIdx, _ := residualFilterFixture()
+	rows[outlierIdx].ChunkRetryCount = 5 // same features + low throughput, but retried
+
+	_, drops := filterOutliersByResiduals(rows)
+	for _, d := range drops {
+		if d.index == outlierIdx {
+			t.Errorf("retry-row (index %d, %d retries) was wrongly flagged as outlier: t=%.2f",
+				outlierIdx, rows[outlierIdx].ChunkRetryCount, d.tStat)
+		}
+	}
+}
