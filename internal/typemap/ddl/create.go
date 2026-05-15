@@ -48,7 +48,7 @@ func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) s
 		// SQLite emits the PRIMARY KEY inline on auto-increment columns
 		// (INTEGER PRIMARY KEY AUTOINCREMENT). Skip the table-level PK
 		// constraint in that case to avoid a duplicate declaration.
-		if !(targetDialect == DialectSQLite && hasInlineAutoIncPK(table, sourceDialect)) {
+		if targetDialect != DialectSQLite || !hasInlineAutoIncPK(table, sourceDialect) {
 			parts = append(parts, formatPrimaryKey(*pk, targetDialect))
 		}
 	}
