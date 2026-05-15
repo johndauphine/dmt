@@ -739,14 +739,14 @@ func filterByRegime(rows []HistoryRecord, in Input, currentTuning DBTuning) []Hi
 }
 
 // outlierFilterResult bundles the survivors of an outlier-filter pass
-// with the drops the pass made and the pre-filter row count. Lets the
-// caller defer reasoning emission until it knows whether THIS cohort
-// is the one feeding the eventual selector — Tune filters at two
-// cohorts (regime-wide + identity-only) and only one of them drives
-// the final pick. Emitting eagerly inside the filter would either
-// double-report (when the second cohort is a subset of the first) or
-// misattribute drops to a cohort that wasn't used (codex review on
-// the initial #225 commit).
+// with the drops the pass made and the count of rows the pass actually
+// scored. Lets the caller defer reasoning emission until it knows
+// whether THIS cohort is the one feeding the eventual selector — Tune
+// filters at two cohorts (regime-wide + identity-only) and only one
+// of them drives the final pick. Emitting eagerly inside the filter
+// would either double-report (when the second cohort is a subset of
+// the first) or misattribute drops to a cohort that wasn't used
+// (codex review on the initial #225 commit).
 type outlierFilterResult struct {
 	// kept is the survivor list (always populated, even when no drops).
 	kept []HistoryRecord
@@ -755,8 +755,13 @@ type outlierFilterResult struct {
 	// at most residualFilterDropCap × total entries when the residual
 	// filter fired.
 	drops []outlierDrop
-	// total is the pre-filter row count of the input. Used by
-	// appendOutlierReasoning to render "dropped X of Y rows".
+	// total is the count of rows the residual filter actually scored
+	// against |t| (i.e. the input minus incomplete rows that the
+	// filter strips up front). Matches the denominator used by the
+	// 10% drop cap so the "dropped X of Y rows" reasoning line agrees
+	// with the cap math. Set to the raw input length on the marginal
+	// fallback path — that path doesn't emit reasoning, so the value
+	// is effectively unused there (Copilot review on #290).
 	total int
 }
 
@@ -775,12 +780,18 @@ type outlierFilterResult struct {
 // identity subset that fell through to Tier 2) don't leave their
 // drop counts in the user-visible reasoning.
 func filterOutliersForRegression(rows []HistoryRecord) outlierFilterResult {
-	total := len(rows)
-	if total < residualFilterMinRows {
-		return outlierFilterResult{kept: filterOutliers(rows), total: total}
+	if len(rows) < residualFilterMinRows {
+		return outlierFilterResult{kept: filterOutliers(rows), total: len(rows)}
 	}
 	kept, drops := filterOutliersByResiduals(rows)
-	return outlierFilterResult{kept: kept, drops: drops, total: total}
+	// total = scored-row count = survivors + drops. Equals the
+	// completed-row count the residual filter actually evaluated
+	// (FinalThroughput==0 rows are stripped before scoring), which
+	// matches the 10% drop-cap denominator. Pre-fix this was the
+	// raw input length, which over-reported when incompletes were
+	// present and disagreed with the cap math (Copilot review on
+	// #290).
+	return outlierFilterResult{kept: kept, drops: drops, total: len(kept) + len(drops)}
 }
 
 // appendOutlierReasoning emits a one-line summary of the residual

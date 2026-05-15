@@ -913,6 +913,42 @@ func TestFilterOutliersByResiduals_LegacyZeroAvgRowBytes(t *testing.T) {
 	}
 }
 
+// TestFilterOutliersForRegression_TotalExcludesIncompletes guards the
+// Copilot review on PR #290: outlierFilterResult.total must reflect
+// the count of rows actually scored against |t| (i.e. with incomplete
+// FinalThroughput==0 rows stripped), not the raw input length. The
+// reasoning line "dropped X of Y rows" uses total as the denominator,
+// and that denominator must agree with the 10% drop cap (which is
+// computed against the scored set, not the input).
+func TestFilterOutliersForRegression_TotalExcludesIncompletes(t *testing.T) {
+	rows, _, _ := residualFilterFixture()
+	// Pad with 5 incomplete rows the residual filter will strip before
+	// scoring. Pre-fix this would have pushed total to 65; post-fix it
+	// stays at 60 (the scored set).
+	for i := 0; i < 5; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: 1,
+			ParallelReaders:   4,
+			ReadAheadBuffers:  4,
+			ChunkSize:         1000,
+			AvgRowBytes:       500,
+			FinalThroughput:   0, // incomplete — gets stripped
+		})
+	}
+	res := filterOutliersForRegression(rows)
+	scored := len(res.kept) + len(res.drops)
+	if res.total != scored {
+		t.Errorf("total=%d should equal scored count (kept %d + drops %d = %d); raw input was %d",
+			res.total, len(res.kept), len(res.drops), scored, len(rows))
+	}
+	// And explicitly: total must NOT count the 5 incompletes.
+	if res.total == len(rows) {
+		t.Errorf("total=%d equals raw input length, but it should exclude incomplete rows", res.total)
+	}
+}
+
 // TestFilterOutliersByResiduals_RetryRowsExempt verifies a low-throughput
 // run with ChunkRetryCount > 0 is NOT dropped even when |t|>3 — low
 // throughput WITH retries is real load contention, not measurement
