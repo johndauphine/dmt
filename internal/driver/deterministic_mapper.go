@@ -78,6 +78,7 @@ func (m *DeterministicMapper) SupportedTargets() []string {
 		typemap.DialectPostgres,
 		typemap.DialectMSSQL,
 		typemap.DialectMySQL,
+		typemap.DialectSQLite,
 	}
 }
 
@@ -192,7 +193,7 @@ func (m *DeterministicMapper) GenerateDropTableDDL(ctx context.Context, req Drop
 // so wiring can route to AI fallback (#170) for unsupported dialects.
 func isSupportedDialect(dialect string) bool {
 	switch dialect {
-	case typemap.DialectPostgres, typemap.DialectMSSQL, typemap.DialectMySQL:
+	case typemap.DialectPostgres, typemap.DialectMSSQL, typemap.DialectMySQL, typemap.DialectSQLite:
 		return true
 	}
 	return false

@@ -16,6 +16,17 @@ target:
   password: ${PG_PASSWORD}  # Use environment variable
   schema: public
 
+# SQLite example (test-only — no external server needed). The `database`
+# field is the .db file path. Host/port/user/password/schema are ignored.
+#
+# source:
+#   type: sqlite
+#   database: ./testdata/source.db
+#
+# target:
+#   type: sqlite
+#   database: ./testdata/target.db
+
 profile:
   name: example
   description: |

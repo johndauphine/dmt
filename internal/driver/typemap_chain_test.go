@@ -407,6 +407,7 @@ func TestFallbackChain_SupportedTargets_UnionDedupes(t *testing.T) {
 		typemap.DialectPostgres: true,
 		typemap.DialectMSSQL:    true,
 		typemap.DialectMySQL:    true,
+		typemap.DialectSQLite:   true,
 		"oracle":                true,
 	}
 	if len(got) != len(want) {

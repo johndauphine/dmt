@@ -149,6 +149,16 @@ func autoIncrementType(col Column, sourceDialect, targetDialect string) string {
 			return "SERIAL"
 		}
 	}
+	if targetDialect == DialectSQLite {
+		// SQLite's autoincrement is INTEGER PRIMARY KEY AUTOINCREMENT.
+		// The type MUST be exactly "INTEGER" (case-sensitive in some
+		// builds) for the rowid alias to kick in; AUTOINCREMENT keyword
+		// is appended in autoIncrementSuffix. The PRIMARY KEY clause
+		// itself is emitted by formatPrimaryKey later, which is fine —
+		// SQLite accepts both column-level and table-level PK
+		// declarations.
+		return "INTEGER"
+	}
 	return baseType
 }
 
@@ -172,6 +182,12 @@ func autoIncrementSuffix(col Column, targetDialect string) string {
 			start, inc = col.Identity.Start, col.Identity.Increment
 		}
 		return fmt.Sprintf("IDENTITY(%d, %d)", start, inc)
+	case DialectSQLite:
+		// SQLite uses INTEGER PRIMARY KEY AUTOINCREMENT (must appear
+		// inline). The PRIMARY KEY portion still gets emitted by the
+		// table-level constraint emitter; we emit PRIMARY KEY here too
+		// for SQLite specifically so AUTOINCREMENT is well-formed.
+		return "PRIMARY KEY AUTOINCREMENT"
 	}
 	return ""
 }
