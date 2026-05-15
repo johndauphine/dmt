@@ -72,7 +72,21 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 
 	parts := []string{fmt.Sprintf("    %s %s", quoted, typeStr)}
 
-	if !col.IsNullable && !(isAuto && isPK) {
+	// NOT NULL suppression: PG/MSSQL/MySQL all imply NOT NULL on PK
+	// columns via the table-level PRIMARY KEY constraint, and identity
+	// types (SERIAL, IDENTITY, AUTO_INCREMENT) imply it too. SQLite is
+	// the exception: a column in a table-level composite PK is NOT
+	// implicitly NOT NULL (only INTEGER PRIMARY KEY rowid aliases get
+	// the implicit constraint). So on SQLite we only suppress when the
+	// column will receive the inline `PRIMARY KEY AUTOINCREMENT` form
+	// — autoIncrementSuffix returning a non-empty string is the signal.
+	suppressNotNull := isAuto && isPK
+	if targetDialect == DialectSQLite && suppressNotNull {
+		if autoIncrementSuffix(col, constraints, targetDialect) == "" {
+			suppressNotNull = false
+		}
+	}
+	if !col.IsNullable && !suppressNotNull {
 		parts = append(parts, "NOT NULL")
 	}
 

@@ -572,6 +572,38 @@ func TestGenerateTableDDL_SqliteTarget_CompositePKWithIdentity(t *testing.T) {
 	}
 }
 
+// SQLite's table-level PRIMARY KEY constraint does NOT implicitly mark
+// its columns NOT NULL (unlike PG/MSSQL/MySQL). So when we suppress the
+// inline `PRIMARY KEY AUTOINCREMENT` form for a composite PK, we must
+// still emit `NOT NULL` on the identity column — otherwise the source's
+// non-null constraint is silently dropped.
+func TestGenerateTableDDL_SqliteTarget_CompositePKKeepsNotNull(t *testing.T) {
+	m := driver.NewDeterministicMapper()
+	resp, err := m.GenerateTableDDL(context.Background(), driver.TableDDLRequest{
+		SourceDBType: "postgres",
+		TargetDBType: "sqlite",
+		SourceTable: &driver.Table{
+			Name: "audit",
+			Columns: []driver.Column{
+				{Name: "tenant", DataType: "int4", IsNullable: false},
+				{Name: "id", DataType: "int4", IsNullable: false, IsIdentity: true},
+			},
+			PrimaryKey: []string{"tenant", "id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateTableDDL: %v", err)
+	}
+	ddl := resp.CreateTableDDL
+
+	if !contains(ddl, `"id" INTEGER NOT NULL`) {
+		t.Errorf("identity column in composite PK must remain NOT NULL on SQLite; got:\n%s", ddl)
+	}
+	if !contains(ddl, `"tenant" INTEGER NOT NULL`) {
+		t.Errorf("tenant column should be NOT NULL; got:\n%s", ddl)
+	}
+}
+
 func TestGenerateTableDDL_SqliteTarget_IdentityOutsidePK(t *testing.T) {
 	m := driver.NewDeterministicMapper()
 	resp, err := m.GenerateTableDDL(context.Background(), driver.TableDDLRequest{
