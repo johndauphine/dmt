@@ -702,6 +702,14 @@ func (c *Config) applyGlobalDefaults() {
 		case defaults.AIAdjust != nil:
 			v := *defaults.AIAdjust
 			c.Migration.RuntimeTuning = &v
+			// The acceptance criteria for #211 say "emit a WARN per
+			// migration when set" — set anywhere, including the secrets
+			// layer. Without this warning, a user with
+			// `migration_defaults.ai_adjust: false` in their global secrets
+			// file sees no signal that they need to rename before v6.0.0
+			// removes the legacy field.
+			logging.Warn(`field "migration_defaults.ai_adjust" in secrets file is deprecated; ` +
+				`rename to "migration_defaults.runtime_tuning". Will be removed in v6.0.0.`)
 		}
 	}
 	if c.Migration.RuntimeTuningInterval == "" && c.Migration.AIAdjustInterval == "" {
@@ -710,6 +718,8 @@ func (c *Config) applyGlobalDefaults() {
 			c.Migration.RuntimeTuningInterval = defaults.RuntimeTuningInterval
 		case defaults.AIAdjustInterval != "":
 			c.Migration.RuntimeTuningInterval = defaults.AIAdjustInterval
+			logging.Warn(`field "migration_defaults.ai_adjust_interval" in secrets file is deprecated; ` +
+				`rename to "migration_defaults.runtime_tuning_interval". Will be removed in v6.0.0.`)
 		}
 	}
 
@@ -753,18 +763,19 @@ func (c *Config) applyGlobalDefaults() {
 // fields are cleared so a later reader can't accidentally pick them
 // up and bypass the rename.
 func (c *Config) normalizeRuntimeTuningFields() {
-	const deprecatedBoolMsg = "migration.ai_adjust is deprecated; rename to migration.runtime_tuning. " +
-		"ai_adjust will be removed in a future release."
-	const deprecatedIntervalMsg = "migration.ai_adjust_interval is deprecated; rename to migration.runtime_tuning_interval. " +
-		"ai_adjust_interval will be removed in a future release."
+	// WARN messages follow the VERSIONING.md model — same wording the
+	// policy doc uses to describe a v5-to-v6 deprecation cycle, naming
+	// the target removal version so operators can plan migrations.
+	const deprecatedBoolMsg = `field "ai_adjust" is deprecated; rename to "runtime_tuning". Will be removed in v6.0.0.`
+	const deprecatedIntervalMsg = `field "ai_adjust_interval" is deprecated; rename to "runtime_tuning_interval". Will be removed in v6.0.0.`
 
 	// Boolean enable knob.
 	switch {
 	case c.Migration.RuntimeTuning != nil && c.Migration.AIAdjust != nil:
 		if *c.Migration.AIAdjust != *c.Migration.RuntimeTuning {
-			logging.Warn("migration.ai_adjust=%t conflicts with migration.runtime_tuning=%t; "+
-				"using runtime_tuning. Remove ai_adjust from your config to silence this warning; "+
-				"it will be removed in a future release.",
+			logging.Warn(`field "ai_adjust"=%t conflicts with "runtime_tuning"=%t; `+
+				`using "runtime_tuning". Remove "ai_adjust" from your config to silence this warning; `+
+				`it will be removed in v6.0.0.`,
 				*c.Migration.AIAdjust, *c.Migration.RuntimeTuning)
 		} else {
 			logging.Warn(deprecatedBoolMsg)
@@ -780,9 +791,10 @@ func (c *Config) normalizeRuntimeTuningFields() {
 	switch {
 	case c.Migration.RuntimeTuningInterval != "" && c.Migration.AIAdjustInterval != "":
 		if c.Migration.AIAdjustInterval != c.Migration.RuntimeTuningInterval {
-			logging.Warn("migration.ai_adjust_interval=%q conflicts with "+
-				"migration.runtime_tuning_interval=%q; using runtime_tuning_interval. "+
-				"Remove ai_adjust_interval from your config to silence this warning.",
+			logging.Warn(`field "ai_adjust_interval"=%q conflicts with `+
+				`"runtime_tuning_interval"=%q; using "runtime_tuning_interval". `+
+				`Remove "ai_adjust_interval" from your config to silence this warning; `+
+				`it will be removed in v6.0.0.`,
 				c.Migration.AIAdjustInterval, c.Migration.RuntimeTuningInterval)
 		} else {
 			logging.Warn(deprecatedIntervalMsg)

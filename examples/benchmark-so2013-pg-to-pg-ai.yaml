@@ -31,6 +31,6 @@ migration:
   target_mode: drop_recreate
   workers: 4
   chunk_size: 100000
-  ai_adjust: true
-  ai_adjust_interval: 30s
+  runtime_tuning: true
+  runtime_tuning_interval: 30s
   max_memory_mb: 8192

@@ -74,20 +74,23 @@ All notable changes to this project will be documented in this file.
   an unrelated missing template on the other side never poisons the
   test (issue noted by codex review pass 3).
 
-### Changed
+### Deprecated
 
-- **Rename `migration.ai_adjust` → `migration.runtime_tuning`** (#211).
-  The knob controls a deterministic rule-based controller (post-#172);
-  the old name implied AI involvement that no longer exists, which was
-  recurring user-facing confusion. Companion field
+- **`migration.ai_adjust` → `migration.runtime_tuning`** (#211). The
+  knob controls a deterministic rule-based controller (post-#172);
+  the old name implied AI involvement that no longer exists, which
+  was recurring user-facing confusion. Companion field
   `ai_adjust_interval` is renamed to `runtime_tuning_interval`. Both
-  names are accepted during a deprecation cycle: a config that still
-  uses `ai_adjust` continues to work and emits a one-time WARN log
+  names are accepted during the v5-to-v6 deprecation window per the
+  policy in [VERSIONING.md](VERSIONING.md): a config that still uses
+  `ai_adjust` continues to work and emits a WARN log per migration
   pointing at the new name. When both names are present with
   conflicting values, the new field wins and a clarifying WARN names
-  both. The legacy fields are slated for removal in a future release.
-  The same rename applies to `migration_defaults` in
-  `~/.secrets/dmt-config.yaml`.
+  both. The legacy fields will be removed in v6.0.0. The same rename
+  applies to `migration_defaults` in `~/.secrets/dmt-config.yaml`.
+  The stored resume config hash uses the legacy JSON wire shape (via
+  JSON tags), so an in-flight migration started before the upgrade
+  resumes cleanly without `--force-resume`.
 
 ### Fixed
 

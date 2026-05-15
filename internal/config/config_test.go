@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
 
@@ -879,10 +880,15 @@ func TestAIAdjustLegacyAliasMigratesToRuntimeTuning(t *testing.T) {
 }
 
 // TestRuntimeTuningWinsOverLegacyAlias covers the simultaneous-set
-// case: when both names are present in YAML, the new (canonical) name
-// wins, regardless of whether the values agree.
+// case with CONFLICTING values: when both names are present in YAML
+// with different values, the new (canonical) name wins and a
+// conflict-naming WARN fires (acceptance criteria for #211).
 func TestRuntimeTuningWinsOverLegacyAlias(t *testing.T) {
 	withEmptySecretsFile(t)
+
+	var logs strings.Builder
+	logging.SetOutput(&logs)
+	t.Cleanup(func() { logging.SetOutput(os.Stdout) })
 
 	legacy := true
 	canonical := false
@@ -905,6 +911,73 @@ func TestRuntimeTuningWinsOverLegacyAlias(t *testing.T) {
 	if cfg.Migration.AIAdjust != nil || cfg.Migration.AIAdjustInterval != "" {
 		t.Errorf("legacy fields must be cleared after normalization; got AIAdjust=%v AIAdjustInterval=%q",
 			cfg.Migration.AIAdjust, cfg.Migration.AIAdjustInterval)
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, `conflicts with "runtime_tuning"`) {
+		t.Errorf("expected conflict WARN naming runtime_tuning; got logs:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `conflicts with "runtime_tuning_interval"`) {
+		t.Errorf("expected conflict WARN naming runtime_tuning_interval; got logs:\n%s", logOutput)
+	}
+}
+
+// TestRuntimeTuningBothSetMatchingValuesWarnsOnce covers the
+// simultaneous-set case with MATCHING values: a user who has
+// duplicated the same value under both names (a clean migration in
+// progress, or a copy/paste) gets one deprecation WARN per field,
+// not a conflict WARN (the acceptance criteria carve this out
+// specifically: silent on value agreement, just the rename signal).
+func TestRuntimeTuningBothSetMatchingValuesWarnsOnce(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	var logs strings.Builder
+	logging.SetOutput(&logs)
+	t.Cleanup(func() { logging.SetOutput(os.Stdout) })
+
+	same := true
+	cfg := minConfigWithAI()
+	cfg.Migration.AIAdjust = &same
+	cfg.Migration.AIAdjustInterval = "5s"
+	cfg.Migration.RuntimeTuning = &same
+	cfg.Migration.RuntimeTuningInterval = "5s"
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.RuntimeTuning == nil || *cfg.Migration.RuntimeTuning != true {
+		t.Errorf("matching ai_adjust + runtime_tuning should resolve to true; got %v",
+			cfg.Migration.RuntimeTuning)
+	}
+	logOutput := logs.String()
+	if strings.Contains(logOutput, "conflicts with") {
+		t.Errorf("matching-value case must not emit a conflict WARN; got logs:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `field "ai_adjust" is deprecated`) {
+		t.Errorf("expected basic deprecation WARN for ai_adjust; got logs:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `field "ai_adjust_interval" is deprecated`) {
+		t.Errorf("expected basic deprecation WARN for ai_adjust_interval; got logs:\n%s", logOutput)
+	}
+}
+
+// TestNormalizeRuntimeTuningFieldsIsIdempotent pins that a second
+// call to normalize after the legacy fields are cleared emits no
+// further warnings — important if a future caller ever runs
+// normalize twice (e.g., a config reload path), so the user doesn't
+// see duplicate deprecation noise from a single config-on-disk.
+func TestNormalizeRuntimeTuningFieldsIsIdempotent(t *testing.T) {
+	v := false
+	cfg := &Config{}
+	cfg.Migration.AIAdjust = &v
+	cfg.Migration.AIAdjustInterval = "3s"
+	cfg.normalizeRuntimeTuningFields()
+
+	var logs strings.Builder
+	logging.SetOutput(&logs)
+	t.Cleanup(func() { logging.SetOutput(os.Stdout) })
+
+	cfg.normalizeRuntimeTuningFields() // second call should be silent
+	if got := logs.String(); strings.Contains(got, "deprecated") {
+		t.Errorf("idempotent call should emit no deprecation logs; got:\n%s", got)
 	}
 }
 
@@ -958,7 +1031,11 @@ func TestRuntimeTuningResumeHashStableAcrossRename(t *testing.T) {
 // TestAIAdjustLegacyAliasInSecrets covers the secrets-layer side of
 // the deprecation cycle: a global secrets file using the legacy
 // `ai_adjust` field name continues to be honored by
-// applyGlobalDefaults until the user migrates the file.
+// applyGlobalDefaults until the user migrates the file, AND emits a
+// per-migration deprecation warning so the user sees the same signal
+// they'd see if the legacy field were in their per-migration YAML
+// (acceptance criteria for #211 — "emit a WARN per migration when
+// set" applies to either layer).
 func TestAIAdjustLegacyAliasInSecrets(t *testing.T) {
 	tmp := t.TempDir()
 	secretsPath := filepath.Join(tmp, "dmt-config.yaml")
@@ -979,6 +1056,10 @@ migration_defaults:
 	secrets.Reset()
 	t.Cleanup(secrets.Reset)
 
+	var logs strings.Builder
+	logging.SetOutput(&logs)
+	t.Cleanup(func() { logging.SetOutput(os.Stdout) })
+
 	cfg := minConfigWithoutAI()
 	if err := cfg.applyDefaults(); err != nil {
 		t.Fatalf("applyDefaults() failed: %v", err)
@@ -990,6 +1071,13 @@ migration_defaults:
 	if cfg.Migration.RuntimeTuningInterval != "45s" {
 		t.Errorf("legacy migration_defaults.ai_adjust_interval should inherit; got %q",
 			cfg.Migration.RuntimeTuningInterval)
+	}
+	logOutput := logs.String()
+	if !strings.Contains(logOutput, `"migration_defaults.ai_adjust"`) {
+		t.Errorf("expected WARN about deprecated migration_defaults.ai_adjust; got logs:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, `"migration_defaults.ai_adjust_interval"`) {
+		t.Errorf("expected WARN about deprecated migration_defaults.ai_adjust_interval; got logs:\n%s", logOutput)
 	}
 }
 
