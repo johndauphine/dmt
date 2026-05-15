@@ -294,17 +294,25 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// low-throughput-but-clean runs doesn't get classified as "noise"
 	// and removed before the detector can compare it to older runs
 	// (Codex review on PR #183 — bug fix).
-	var regimeRows, rows []HistoryRecord
+	var regimeRows []HistoryRecord
+	var regimeFilter outlierFilterResult
 	historyAvailable := false
 	if history != nil {
 		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
 			historyAvailable = true
 			regimeRows = filterByRegime(r, in, currentTuning)
-			rows = filterOutliers(regimeRows)
+			// Defer the outlier-reasoning emission until we know which
+			// cohort drives the selector — Tier 1 (identity) may take
+			// over and run its own filter pass below. Emitting eagerly
+			// here would double-report when the identity cohort is a
+			// subset of the regime cohort (codex review on the initial
+			// #225 commit).
+			regimeFilter = filterOutliersForRegression(regimeRows)
 		} else {
 			logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
 		}
 	}
+	rows := regimeFilter.kept
 
 	// Forced/drift-triggered exploration takes precedence over every
 	// selection tier (including #215's Tier 1). Users invoking
@@ -314,6 +322,10 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// a fixed config, the existing history is stale and the right
 	// answer is to re-explore, not to keep training on it (Codex
 	// review on PR #218).
+	//
+	// Exploration paths don't use the regression's prediction surface,
+	// so outlier-filter drops here would be irrelevant to the chosen
+	// output — leave appendOutlierReasoning unfired.
 	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
 	if in.ForceExplore || driftDetected {
 		applyGridExploration(&out, in, profile, len(rows))
@@ -344,9 +356,12 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// channel for keeping the regression's training data fresh.
 	if historyAvailable && hasExactIdentity(in) {
 		identityRows := filterByExactIdentity(regimeRows, in)
-		identityRows = filterOutliers(identityRows)
-		if len(identityRows) >= minRowsForRegression {
-			applyHistorySelection(&out, in, profile, identityRows)
+		identityFilter := filterOutliersForRegression(identityRows)
+		if len(identityFilter.kept) >= minRowsForRegression {
+			// Identity cohort wins — its drops are the ones the
+			// selector consumed, so emit those (not the regime pass).
+			appendOutlierReasoning(&out, identityFilter)
+			applyHistorySelection(&out, in, profile, identityFilter.kept)
 			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
 				applyEpsilonPerturbation(&out, profile)
 			}
@@ -372,8 +387,16 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		// don't apply the historical-retry filter — that's a SELECTION
 		// concern (handled inside applyHistorySelection's selectWAW /
 		// argmaxRegression). See issue #186.
+		//
+		// Same rationale as the ForceExplore/drift branch: the
+		// regression's prediction surface isn't consumed, so the
+		// regime cohort's outlier drops aren't part of the chosen
+		// output — leave appendOutlierReasoning unfired.
 		applyGridExploration(&out, in, profile, len(rows))
 	} else if len(rows) > 0 {
+		// Tier 2/3 fallback consumes the regime-filtered cohort —
+		// emit its drops as the audit trail for the chosen output.
+		appendOutlierReasoning(&out, regimeFilter)
 		applyHistorySelection(&out, in, profile, rows)
 		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
 			applyEpsilonPerturbation(&out, profile)

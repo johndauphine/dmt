@@ -646,6 +646,61 @@ func TestTune_ExactIdentityCohortTooThin_FallsThroughToTier2(t *testing.T) {
 	}
 }
 
+// TestTune_OutlierReasoningEmittedOnce_Tier1 guards the P3 codex-review
+// finding on PR #225: when Tier 1 (identity) wins, the regime cohort
+// is filtered up-front but its drops must NOT be reported — only the
+// identity cohort's drops (the ones the selector actually consumed)
+// belong in Output.Reasoning. Without the fix, both passes appended
+// summaries, double-counting drops to the operator.
+func TestTune_OutlierReasoningEmittedOnce_Tier1(t *testing.T) {
+	current := mkIdentity()
+	current.SourceDBType = "mssql"
+	current.TargetDBType = "postgres"
+	current.AvgRowBytes = 500
+
+	mkRow := func(host string, throughput float64, waw int) HistoryRecord {
+		return HistoryRecord{
+			SourceHost: host, SourcePort: current.SourcePort, SourceDatabase: current.SourceDatabase, SourceSchema: current.SourceSchema,
+			TargetHost: current.TargetHost, TargetPort: current.TargetPort, TargetDatabase: current.TargetDatabase, TargetSchema: current.TargetSchema,
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			CPUCores: 16, MemoryGB: 48,
+			WriteAheadWriters: waw, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4, // baseline defaults (#220/#222)
+			FinalThroughput: throughput,
+		}
+	}
+
+	// 60 matching-identity rows — clusters tightly around 1.0M rows/s
+	// EXCEPT one host-throttled outlier at 200K rows/s. The residual
+	// filter should drop the outlier; the regression-selected line
+	// should fire.
+	rows := make([]HistoryRecord, 0, 120)
+	for i := 0; i < 59; i++ {
+		waw := (i % 6) + 1
+		rows = append(rows, mkRow(current.SourceHost, 1_000_000+float64(i*1000), waw))
+	}
+	rows = append(rows, mkRow(current.SourceHost, 200_000, 1)) // outlier in identity cohort
+	// 60 different-host rows — regime-comparable but excluded by identity.
+	for i := 0; i < 60; i++ {
+		waw := (i % 6) + 1
+		rows = append(rows, mkRow("other-host.example.com", 900_000+float64(i*1000), waw))
+	}
+
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Fatalf("expected Tier 1 regression to fire; got: %q", out.Reasoning)
+	}
+	// The outlier summary must appear AT MOST once. Pre-fix it appeared
+	// twice (once for the regime cohort, once for the identity cohort).
+	occurrences := strings.Count(out.Reasoning, "outlier filter dropped")
+	if occurrences > 1 {
+		t.Errorf("outlier reasoning emitted %d times, want at most 1 (Tier 1 should only report its own cohort's drops): %q",
+			occurrences, out.Reasoning)
+	}
+}
+
 // TestTune_NoIdentityInInput_FallsThroughToTier2 — when the caller
 // doesn't populate the identity fields (e.g., test fixtures or
 // pre-#215 callers that haven't been updated), Tier 1 is skipped
