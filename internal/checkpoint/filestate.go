@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,23 @@ type fileStateData struct {
 	//	    Orders:
 	//	      public: 2026-05-12T08:00:00Z
 	SyncTimestamps map[string]map[string]map[string]time.Time `yaml:"sync_timestamps,omitempty"`
+
+	// FallbackEvents persists AI fallback occurrences (#176) for
+	// cross-process status visibility — the Airflow polling case where
+	// ``dmt status'' is invoked in a separate process from ``dmt run''
+	// and would otherwise see only an empty in-memory counter. Keyed as
+	// run_id → surface → fingerprint → record, mirroring the SQLite
+	// schema. Empty fingerprints collapse to a single record per surface.
+	FallbackEvents map[string]map[string]map[string]fallbackEventState `yaml:"fallback_events,omitempty"`
+}
+
+// fallbackEventState is one persisted fallback record. Mirrors
+// FallbackEventRecord but without RunID/Surface/Fingerprint, which
+// are encoded in the parent map keys.
+type fallbackEventState struct {
+	Count     int64     `yaml:"count"`
+	FirstSeen time.Time `yaml:"first_seen"`
+	LastSeen  time.Time `yaml:"last_seen"`
 }
 
 // tableState tracks per-table progress.
@@ -689,6 +707,85 @@ func (fs *FileState) GetAITuningAggregatesByWaw(sourceType, targetType string) (
 // GetAITuningAggregatesByChunkSize returns nil for file state — no history persisted.
 func (fs *FileState) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
 	return nil, nil
+}
+
+// SaveFallbackEvent persists an AI fallback occurrence (#176) so a
+// separate “dmt status” poll can read counts even though the running
+// migration's in-memory counters are inaccessible. UPSERTs into the
+// nested run_id → surface → fingerprint map. Fingerprint may be ""
+// (call sites with no fingerprint still accumulate under one record
+// for the surface).
+//
+// The file backend is the Airflow path; cross-process visibility is
+// the whole reason this method exists rather than being a no-op like
+// the other AI-history methods on FileState.
+func (fs *FileState) SaveFallbackEvent(runID, surface, fingerprint string) error {
+	if runID == "" || surface == "" {
+		return nil
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.state.FallbackEvents == nil {
+		fs.state.FallbackEvents = map[string]map[string]map[string]fallbackEventState{}
+	}
+	bySurface, ok := fs.state.FallbackEvents[runID]
+	if !ok {
+		bySurface = map[string]map[string]fallbackEventState{}
+		fs.state.FallbackEvents[runID] = bySurface
+	}
+	byFP, ok := bySurface[surface]
+	if !ok {
+		byFP = map[string]fallbackEventState{}
+		bySurface[surface] = byFP
+	}
+	now := time.Now().UTC()
+	rec, ok := byFP[fingerprint]
+	if !ok {
+		rec = fallbackEventState{FirstSeen: now}
+	}
+	rec.Count++
+	rec.LastSeen = now
+	byFP[fingerprint] = rec
+	return fs.save()
+}
+
+// GetFallbackEventsByRun returns the persisted fallback events for a
+// run, sorted by (surface, fingerprint) for deterministic status
+// rendering. Empty slice (not nil) when nothing has been recorded.
+func (fs *FileState) GetFallbackEventsByRun(runID string) ([]FallbackEventRecord, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	out := make([]FallbackEventRecord, 0)
+	bySurface, ok := fs.state.FallbackEvents[runID]
+	if !ok {
+		return out, nil
+	}
+	surfaces := make([]string, 0, len(bySurface))
+	for s := range bySurface {
+		surfaces = append(surfaces, s)
+	}
+	sort.Strings(surfaces)
+	for _, surface := range surfaces {
+		byFP := bySurface[surface]
+		fps := make([]string, 0, len(byFP))
+		for fp := range byFP {
+			fps = append(fps, fp)
+		}
+		sort.Strings(fps)
+		for _, fp := range fps {
+			rec := byFP[fp]
+			out = append(out, FallbackEventRecord{
+				RunID:       runID,
+				Surface:     surface,
+				Fingerprint: fp,
+				Count:       rec.Count,
+				FirstSeen:   rec.FirstSeen,
+				LastSeen:    rec.LastSeen,
+			})
+		}
+	}
+	return out, nil
 }
 
 // Close is a no-op for file state.
