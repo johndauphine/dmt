@@ -274,6 +274,15 @@ type SmartConfigAnalyzer struct {
 	uncappedAvgRowBytes int64       // pre-cap average row size from sampled tables (#166)
 	maxSampledRowBytes  int64       // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
 
+	// tableNameFilter restricts Analyze to a caller-supplied set of table
+	// names (#241). The orchestrator applies include/exclude filters
+	// before tuning runs; without scoping Analyze to that same set, an
+	// excluded-but-wide table (e.g. an archive blob) would still drive
+	// the packet cap and clamp chunk_size for the narrow tables that
+	// actually ship. nil means "no filter — analyze every table the
+	// schema returned" (e.g. the `analyze` CLI subcommand).
+	tableNameFilter map[string]bool
+
 	// Workload identity (#215). Populated by SetWorkloadIdentity from
 	// the orchestrator's cfg.Source / cfg.Target. Flows through
 	// buildAutoTuneInput → toTuningInput → tuning.Input where the
@@ -383,6 +392,27 @@ func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
 	s.exploreMode = mode
 }
 
+// SetTableNameFilter restricts Analyze to the given set of table names
+// (#241). Names are compared case-insensitively. Passing an empty or nil
+// set clears any prior filter (all schema tables are analyzed).
+//
+// Wired from the orchestrator after include/exclude filters have been
+// applied to the extracted schema, so derived values that go global
+// across the migration — the @@max_allowed_packet-derived chunk cap and
+// the memory-budget row-size assumptions — reflect only the tables that
+// will actually be transferred.
+func (s *SmartConfigAnalyzer) SetTableNameFilter(allowed []string) {
+	if len(allowed) == 0 {
+		s.tableNameFilter = nil
+		return
+	}
+	filter := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		filter[strings.ToLower(name)] = true
+	}
+	s.tableNameFilter = filter
+}
+
 // SetWorkloadIdentity wires the (source endpoint, target endpoint) tuple
 // from cfg.Source / cfg.Target into the analyzer so the Tier 1 exact-
 // identity classifier (#215) can find historically-comparable rows.
@@ -407,6 +437,13 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	if err != nil {
 		return nil, fmt.Errorf("getting tables: %w", err)
 	}
+
+	// Scope to caller-supplied table set if one was wired in (#241).
+	// The orchestrator filters with include/exclude before tuning runs;
+	// applying the same scope here keeps the packet cap, avg/max row
+	// sizes, and memory-budget math aligned with the actual workload —
+	// otherwise an excluded wide table can still drive the global cap.
+	tables = s.applyTableNameFilter(tables)
 
 	s.suggestions.TotalTables = len(tables)
 	var totalRows int64
@@ -785,6 +822,23 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// applyTableNameFilter trims the schema-returned table list to those
+// the caller declared in-scope (#241). nil/empty filter is a no-op so
+// the analyze CLI subcommand (which has no filtering context) behaves
+// identically to the pre-#241 codepath.
+func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableInfo {
+	if len(s.tableNameFilter) == 0 {
+		return tables
+	}
+	kept := make([]tableInfo, 0, len(tables))
+	for _, t := range tables {
+		if s.tableNameFilter[strings.ToLower(t.Name)] {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 // calculateAvgRowSize returns the average row size from the largest

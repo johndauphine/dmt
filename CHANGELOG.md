@@ -9,6 +9,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Packet cap and memory budget scoped to filtered tables** (#241).
+  When `applyAITuning` runs, the orchestrator's
+  include/exclude-filtered table set is now passed into the
+  smartconfig analyzer via a new `SetTableNameFilter`. Every
+  workload-wide derivation — `@@max_allowed_packet`-derived chunk
+  cap, avg/max row size, `TotalRows`, `TotalTables`, `LargestTables`,
+  `EstimatedMemMB`, the deterministic tuner's `HardChunkLimit` —
+  now reflects only the tables that will actually be transferred.
+  Previously an excluded wide table (e.g. an archive blob at 16 KB
+  rows) still drove the packet cap and clamped chunk_size for the
+  narrow tables that DO ship. The `analyze` CLI subcommand keeps its
+  pre-#241 unscoped behavior (no filter context to apply).
+
 ### Added
 
 - **AI fallback observability** (#176). Every AI-fallback call site

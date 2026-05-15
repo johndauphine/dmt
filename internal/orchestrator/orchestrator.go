@@ -1022,6 +1022,23 @@ func (o *Orchestrator) markTableComplete(runID, taskKey string) {
 	o.state.MarkTaskComplete(runID, taskKey)
 }
 
+// tableNamesForTuning collects table names from the filtered table set
+// so the smartconfig analyzer can scope its workload-wide derivations
+// (packet cap, avg/max row size, memory budget) to what's actually in
+// the run (#241). Returns nil when tables is empty so the analyzer's
+// "no filter" path is taken — that keeps the analyze CLI subcommand
+// (which has no filter context) on the pre-#241 behavior.
+func tableNamesForTuning(tables []source.Table) []string {
+	if len(tables) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(tables))
+	for _, t := range tables {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
 // filterTables filters tables based on include/exclude patterns
 func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 	include := o.config.Migration.IncludeTables
@@ -1121,6 +1138,17 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 
 	// Create analyzer (same pattern as AnalyzeConfig in healthcheck.go).
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
+
+	// Scope the analyzer to the post-filter table set (#241). Both Run
+	// and Resume have already applied include/exclude filters into
+	// o.tables by the time we get here; pinning the same scope on the
+	// analyzer keeps the packet cap and memory-budget math aligned with
+	// what the run will actually transfer. Without this, an excluded
+	// wide table still drives the global @@max_allowed_packet cap and
+	// clamps chunk_size for the narrow tables that DO ship.
+	if names := tableNamesForTuning(o.tables); len(names) > 0 {
+		analyzer.SetTableNameFilter(names)
+	}
 
 	// Set up history provider for learning from past runs
 	if o.state != nil {

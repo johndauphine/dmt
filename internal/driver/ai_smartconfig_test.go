@@ -341,3 +341,128 @@ func TestCalculateAvgRowSize_MaxIncludesTablesOutsideTop5(t *testing.T) {
 			analyzer.maxSampledRowBytes)
 	}
 }
+
+// TestApplyTableNameFilter_ExcludedWideTableDoesNotDrivePacketCap guards
+// #241: the orchestrator filters include/exclude before tuning runs, and
+// the analyzer must scope to that same set. Otherwise an excluded wide
+// table (e.g. an archive blob) drives @@max_allowed_packet → chunk_size
+// derivation and clamps chunk_size for the narrow tables that actually
+// ship. Worked example from the issue body: five 100-byte narrow tables
+// + one excluded 16KB blob table → cap must derive from 140-byte max
+// (the narrow set's widest), not 16384.
+func TestApplyTableNameFilter_ExcludedWideTableDoesNotDrivePacketCap(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	allTables := []tableInfo{
+		{Name: "narrow1", RowCount: 1_000_000, AvgRowSizeBytes: 100},
+		{Name: "narrow2", RowCount: 900_000, AvgRowSizeBytes: 110},
+		{Name: "narrow3", RowCount: 800_000, AvgRowSizeBytes: 120},
+		{Name: "narrow4", RowCount: 700_000, AvgRowSizeBytes: 130},
+		{Name: "narrow5", RowCount: 600_000, AvgRowSizeBytes: 140},
+		{Name: "blob_archive", RowCount: 50_000, AvgRowSizeBytes: 16384},
+	}
+
+	// Orchestrator excluded blob_archive — the analyzer should never see it.
+	analyzer.SetTableNameFilter([]string{
+		"narrow1", "narrow2", "narrow3", "narrow4", "narrow5",
+	})
+	kept := analyzer.applyTableNameFilter(allTables)
+	if len(kept) != 5 {
+		t.Fatalf("applyTableNameFilter kept %d tables, want 5", len(kept))
+	}
+	for _, k := range kept {
+		if k.Name == "blob_archive" {
+			t.Fatalf("applyTableNameFilter leaked excluded blob_archive into the in-scope set")
+		}
+	}
+
+	// Run the same packet-cap derivation that calculateAutoTuneParams
+	// does, but only over the in-scope tables.
+	analyzer.calculateAvgRowSize(kept)
+	if analyzer.maxSampledRowBytes != 140 {
+		t.Errorf("maxSampledRowBytes = %d, want 140 (widest narrow row); the excluded 16384-byte blob_archive must not drive the packet cap",
+			analyzer.maxSampledRowBytes)
+	}
+}
+
+// TestApplyTableNameFilter_NoFilterIsIdentity is the regression test
+// called out in #241: existing migrations with no include/exclude
+// filters must produce identical caps before and after this change.
+// Same input through both code paths must yield the same maxSampledRowBytes
+// and same uncappedAvgRowBytes.
+func TestApplyTableNameFilter_NoFilterIsIdentity(t *testing.T) {
+	tables := []tableInfo{
+		{Name: "narrow1", RowCount: 1_000_000, AvgRowSizeBytes: 100},
+		{Name: "narrow2", RowCount: 900_000, AvgRowSizeBytes: 150},
+		{Name: "wide_json", RowCount: 500_000, AvgRowSizeBytes: 8192},
+		{Name: "narrow3", RowCount: 100_000, AvgRowSizeBytes: 200},
+	}
+
+	// Baseline: never set a filter.
+	baseline := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	baselineTables := baseline.applyTableNameFilter(tables)
+	baseline.calculateAvgRowSize(baselineTables)
+
+	// Mirror the orchestrator behavior when the user has no filters
+	// configured: filterTables returns the full set, and the
+	// orchestrator passes that full set into SetTableNameFilter.
+	// (tableNamesForTuning never returns nil except for empty input.)
+	filtered := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	filtered.SetTableNameFilter([]string{"narrow1", "narrow2", "wide_json", "narrow3"})
+	filteredTables := filtered.applyTableNameFilter(tables)
+	filtered.calculateAvgRowSize(filteredTables)
+
+	if baseline.maxSampledRowBytes != filtered.maxSampledRowBytes {
+		t.Errorf("maxSampledRowBytes differs: baseline=%d, filtered=%d (no-filter behavior changed)",
+			baseline.maxSampledRowBytes, filtered.maxSampledRowBytes)
+	}
+	if baseline.uncappedAvgRowBytes != filtered.uncappedAvgRowBytes {
+		t.Errorf("uncappedAvgRowBytes differs: baseline=%d, filtered=%d (no-filter behavior changed)",
+			baseline.uncappedAvgRowBytes, filtered.uncappedAvgRowBytes)
+	}
+	if len(baselineTables) != len(filteredTables) {
+		t.Errorf("table count differs: baseline=%d, filtered=%d", len(baselineTables), len(filteredTables))
+	}
+}
+
+// TestSetTableNameFilter_EmptyClears verifies passing an empty slice
+// clears any prior filter, returning the analyzer to the unscoped
+// path used by the analyze CLI subcommand.
+func TestSetTableNameFilter_EmptyClears(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	analyzer.SetTableNameFilter([]string{"foo", "bar"})
+	if analyzer.tableNameFilter == nil {
+		t.Fatal("filter was not set")
+	}
+	analyzer.SetTableNameFilter(nil)
+	if analyzer.tableNameFilter != nil {
+		t.Errorf("nil input did not clear filter; got %v", analyzer.tableNameFilter)
+	}
+	analyzer.SetTableNameFilter([]string{"foo"})
+	analyzer.SetTableNameFilter([]string{})
+	if analyzer.tableNameFilter != nil {
+		t.Errorf("empty input did not clear filter; got %v", analyzer.tableNameFilter)
+	}
+}
+
+// TestApplyTableNameFilter_CaseInsensitive confirms the filter matches
+// table names regardless of case — getTables results come straight from
+// information_schema and casing can differ from what the user typed in
+// config.Migration.IncludeTables/ExcludeTables (which filterTables also
+// already lowercases for matching).
+func TestApplyTableNameFilter_CaseInsensitive(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	analyzer.SetTableNameFilter([]string{"MyTable"})
+	kept := analyzer.applyTableNameFilter([]tableInfo{
+		{Name: "mytable", AvgRowSizeBytes: 100},
+		{Name: "MYTABLE", AvgRowSizeBytes: 200},
+		{Name: "other", AvgRowSizeBytes: 300},
+	})
+	if len(kept) != 2 {
+		t.Fatalf("expected 2 case-insensitive matches, got %d: %+v", len(kept), kept)
+	}
+	for _, k := range kept {
+		if k.Name == "other" {
+			t.Errorf("non-matching table %q kept", k.Name)
+		}
+	}
+}

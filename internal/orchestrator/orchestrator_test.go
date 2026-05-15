@@ -10,6 +10,7 @@ import (
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/exitcodes"
+	"github.com/johndauphine/dmt/internal/source"
 )
 
 func TestComputeConfigHash(t *testing.T) {
@@ -640,4 +641,38 @@ func TestComputeConfigHash_AllowPartialInvariant(t *testing.T) {
 			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
 			baseHash, otherHash)
 	}
+}
+
+// TestTableNamesForTuning covers the small helper that bridges
+// filterTables and SmartConfigAnalyzer.SetTableNameFilter (#241).
+// The helper must (a) return nil for an empty input — that hands the
+// analyzer back to its pre-#241 "no filter" path — and (b) preserve
+// names verbatim so the analyzer's case-insensitive match still works.
+func TestTableNamesForTuning(t *testing.T) {
+	t.Run("nil for empty input keeps analyze CLI path unchanged", func(t *testing.T) {
+		if got := tableNamesForTuning(nil); got != nil {
+			t.Errorf("nil input: got %v, want nil", got)
+		}
+		if got := tableNamesForTuning([]source.Table{}); got != nil {
+			t.Errorf("empty slice: got %v, want nil", got)
+		}
+	})
+
+	t.Run("returns names in input order", func(t *testing.T) {
+		tables := []source.Table{
+			{Name: "orders"},
+			{Name: "Customers"},
+			{Name: "audit_log"},
+		}
+		got := tableNamesForTuning(tables)
+		want := []string{"orders", "Customers", "audit_log"}
+		if len(got) != len(want) {
+			t.Fatalf("got %d names, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("got[%d]=%q, want %q", i, got[i], want[i])
+			}
+		}
+	})
 }
