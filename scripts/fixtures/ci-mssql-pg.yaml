@@ -34,7 +34,7 @@ migration:
   create_foreign_keys: false
   create_check_constraints: false
   target_mode: drop_recreate
-  ai_adjust: false
+  runtime_tuning: false
   # Tight checkpoint settings so the resume path exercises in CI even on
   # the tiny fixture (~30 rows).
   chunk_size: 10

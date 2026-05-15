@@ -58,9 +58,20 @@ type MigrationDefaults struct {
 	MaxRetries           int `yaml:"max_retries,omitempty"`            // Retry failed tables N times
 	HistoryRetentionDays int `yaml:"history_retention_days,omitempty"` // Keep run history for N days
 
-	// AI features (enabled by default when AI provider is configured)
-	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"`          // Enable AI-driven parameter adjustment (default: true)
-	AIAdjustInterval string `yaml:"ai_adjust_interval,omitempty"` // How often AI evaluates metrics (default: 30s)
+	// Rule-based runtime tuning (#211 rename from `ai_adjust`). The
+	// new fields are canonical; the old AIAdjust* fields below are
+	// preserved during the deprecation cycle so existing global
+	// secrets files keep working unchanged.
+	RuntimeTuning         *bool  `yaml:"runtime_tuning,omitempty"`          // Enable rule-based parameter adjustment (default: true)
+	RuntimeTuningInterval string `yaml:"runtime_tuning_interval,omitempty"` // How often the controller evaluates metrics (default: 5s)
+
+	// Legacy alias for RuntimeTuning. Renamed in #211; still parsed so
+	// existing secrets files keep working. config.applyGlobalDefaults
+	// reads this field if RuntimeTuning is unset. Slated for removal
+	// in a future release.
+	AIAdjust *bool `yaml:"ai_adjust,omitempty"`
+	// Legacy alias for RuntimeTuningInterval. See AIAdjust above.
+	AIAdjustInterval string `yaml:"ai_adjust_interval,omitempty"`
 
 	// Data directory
 	DataDir string `yaml:"data_dir,omitempty"` // Directory for state/checkpoint files
@@ -365,6 +376,9 @@ func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
 	if updates.AIAdjustInterval != "" {
 		existing.AIAdjustInterval = updates.AIAdjustInterval
 	}
+	if updates.RuntimeTuningInterval != "" {
+		existing.RuntimeTuningInterval = updates.RuntimeTuningInterval
+	}
 	// Boolean pointers - only update if explicitly set
 	if updates.CreateIndexes != nil {
 		existing.CreateIndexes = updates.CreateIndexes
@@ -383,6 +397,9 @@ func mergeMigrationDefaults(existing, updates *MigrationDefaults) {
 	}
 	if updates.AIAdjust != nil {
 		existing.AIAdjust = updates.AIAdjust
+	}
+	if updates.RuntimeTuning != nil {
+		existing.RuntimeTuning = updates.RuntimeTuning
 	}
 }
 
@@ -459,26 +476,27 @@ func (c *Config) GetMasterKey() string {
 func (c *Config) GetMigrationDefaults() *MigrationDefaults {
 	defaults := c.MigrationDefaults
 
-	// Apply smart defaults for runtime adjust:
-	// If ai_adjust wasn't explicitly set (nil pointer), enable it by
-	// default. Pre-#172 this was gated on an AI provider being
-	// configured (the AI runtime monitor needed an LLM); post-#172
-	// the rule-based controller runs without any AI dependency, so
-	// the default-enable is unconditional.
+	// Apply smart defaults for runtime tuning (#211 rename):
+	// If neither runtime_tuning nor the legacy ai_adjust is set,
+	// enable it by default. Pre-#172 this was gated on an AI provider
+	// being configured (the AI runtime monitor needed an LLM); post-#172
+	// the rule-based controller runs without any AI dependency, so the
+	// default-enable is unconditional.
 	//
-	// The yaml field name `ai_adjust` is preserved for config
-	// backward compat; behavior is now rule-based regardless of
-	// AI configuration (Codex review on PR #195).
-	if defaults.AIAdjust == nil && defaults.AIAdjustInterval == "" {
-		aiAdjust := true
-		defaults.AIAdjust = &aiAdjust
+	// We check both fields here because the secrets file may carry
+	// either name during the deprecation cycle; either being set
+	// counts as "user intent recorded, don't auto-enable."
+	if defaults.RuntimeTuning == nil && defaults.AIAdjust == nil &&
+		defaults.RuntimeTuningInterval == "" && defaults.AIAdjustInterval == "" {
+		enabled := true
+		defaults.RuntimeTuning = &enabled
 		// 5s tick is appropriate for the rule-based controller — near-
 		// zero per-tick cost (no LLM round-trip) so we can poll at
 		// fine resolution. Gives 3-tick rules (queue growth, throughput
 		// stability) ~15s of accumulated history, which fits within
 		// short migration runtimes (18-27s for SO2010). Pre-#172 the
 		// default was 30s, gated on AI-call latency budget.
-		defaults.AIAdjustInterval = "5s"
+		defaults.RuntimeTuningInterval = "5s"
 	}
 
 	return &defaults

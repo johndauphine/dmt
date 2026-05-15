@@ -25,4 +25,4 @@ target:
 
 migration:
   target_mode: drop_recreate
-  ai_adjust: true
+  runtime_tuning: true
