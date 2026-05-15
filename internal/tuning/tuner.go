@@ -39,6 +39,14 @@ type Input struct {
 	TotalRows    int64
 	AvgRowBytes  int64
 
+	// LargestTableBytes is the size of the single largest table in the
+	// source dataset, used by ClassifyRegime (#214) to assign a skew tier
+	// (EvenlyDistributed / Skewed / Dominant). Zero short-circuits the
+	// skew gate as "unknown" on this side — callers that don't populate
+	// it skip the skew axis for that comparison rather than mismatching
+	// every current input.
+	LargestTableBytes int64
+
 	// Workload identity (#215). Together these form the tuple the
 	// Tier 1 exact-identity classifier uses to find historically-
 	// comparable runs. Empty fields skip the Tier 1 lookup entirely —
@@ -163,12 +171,25 @@ type HistoryRecord struct {
 	AvgRowBytes int64
 
 	// TotalRows is the row count of the dataset this run migrated.
-	// Used by ClassifyRegime (#198) to drop rows from datasets materially
-	// different in size from the current run — without this filter, a
-	// 19M-row dataset and a 106M-row dataset classify as the same regime,
-	// contaminating the regression's training set with rows from a
-	// different operating point.
+	// Used by ClassifyRegime (#198, #214) to assign a total-bytes band
+	// (Tiny / Small / Medium / Large / Huge) together with AvgRowBytes;
+	// rows in a different band are dropped from the regression's
+	// training set.
 	TotalRows int64
+
+	// TotalTables is the number of tables this run migrated. Used by
+	// ClassifyRegime (#214) as the tertiary axis (Few / Many / Massive).
+	// Zero is treated as "unknown" — pre-#214 rows leave this empty and
+	// classify as a single (current) tier so they aren't excluded on
+	// the count axis alone.
+	TotalTables int
+
+	// LargestTableBytes is the size of the largest table this run
+	// migrated. Used by ClassifyRegime (#214) for the secondary skew
+	// axis (EvenlyDistributed / Skewed / Dominant). Zero is treated as
+	// "unknown" — pre-#214 rows didn't persist this so they fall into
+	// a neutral skew tier rather than mismatching every current input.
+	LargestTableBytes int64
 
 	// What happened
 	FinalThroughput float64

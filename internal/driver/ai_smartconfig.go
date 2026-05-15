@@ -259,15 +259,15 @@ type AITuningRecord struct {
 // tuner doesn't need them. PR2 added forceExplore + exploreMode for the
 // exploration policy in internal/tuning (#179).
 type SmartConfigAnalyzer struct {
-	db              *sql.DB
-	dbType          string
-	targetDBType    string
-	targetMode      string
-	suggestions     *SmartConfigSuggestions
-	historyProvider TuningHistoryProvider
-	maxMemoryMB     int64
-	pendingSave     *pendingTuningSave
-	currentTuning   DBTuningSnapshot
+	db                  *sql.DB
+	dbType              string
+	targetDBType        string
+	targetMode          string
+	suggestions         *SmartConfigSuggestions
+	historyProvider     TuningHistoryProvider
+	maxMemoryMB         int64
+	pendingSave         *pendingTuningSave
+	currentTuning       DBTuningSnapshot
 	forceExplore        bool        // mirrors cfg.Migration.Explore
 	exploreMode         string      // mirrors cfg.Migration.ExploreMode
 	targetProbe         TargetProbe // populated via SetTargetProbe (#166)
@@ -513,6 +513,7 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		TotalTables:       in.TotalTables,
 		TotalRows:         in.TotalRows,
 		AvgRowBytes:       in.AvgRowBytes,
+		LargestTableBytes: largestTableBytes(in.LargestTables),
 		// Workload identity passthrough (#215).
 		SourceHost:         in.SourceHost,
 		SourcePort:         in.SourcePort,
@@ -525,6 +526,26 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		ForceExplore:       s.forceExplore,
 		ExplorationEpsilon: explorationEpsilon(s.exploreMode),
 	}
+}
+
+// largestTableBytes returns the size in bytes of the single largest
+// table among the sampled set, derived from rows × avg_row_bytes for
+// each table. Used by ClassifyRegime (#214) for the skew secondary
+// axis. Returns 0 when the sample is empty or no row carries valid
+// (rows, avg_row_bytes) — caller treats 0 as "unknown skew" and the
+// regime classifier skips the skew gate for that comparison.
+func largestTableBytes(stats []TableStats) int64 {
+	var maxBytes int64
+	for _, t := range stats {
+		if t.RowCount <= 0 || t.AvgRowBytes <= 0 {
+			continue
+		}
+		bytes := t.RowCount * t.AvgRowBytes
+		if bytes > maxBytes {
+			maxBytes = bytes
+		}
+	}
+	return maxBytes
 }
 
 // ExplorationEpsilon is the package-public version of explorationEpsilon
@@ -644,16 +665,21 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{
-			Timestamp:               r.Timestamp,
-			SourceDBType:            r.SourceDBType,
-			TargetDBType:            r.TargetDBType,
-			Workers:                 r.Workers,
-			ChunkSize:               r.ChunkSize,
-			WriteAheadWriters:       r.WriteAheadWriters,
-			ParallelReaders:         r.ParallelReaders,
-			ReadAheadBuffers:        r.ReadAheadBuffers,
-			AvgRowBytes:             r.AvgRowSizeBytes,
-			TotalRows:               r.TotalRows,
+			Timestamp:         r.Timestamp,
+			SourceDBType:      r.SourceDBType,
+			TargetDBType:      r.TargetDBType,
+			Workers:           r.Workers,
+			ChunkSize:         r.ChunkSize,
+			WriteAheadWriters: r.WriteAheadWriters,
+			ParallelReaders:   r.ParallelReaders,
+			ReadAheadBuffers:  r.ReadAheadBuffers,
+			AvgRowBytes:       r.AvgRowSizeBytes,
+			TotalRows:         r.TotalRows,
+			TotalTables:       r.TotalTables,
+			// LargestTableBytes is not persisted yet (#214 follow-up will
+			// add the column); historical rows leave it zero, which the
+			// regime classifier treats as "unknown skew" — neutral on
+			// the secondary axis rather than mismatching every input.
 			FinalThroughput:         r.FinalThroughput,
 			ChunkRetryCount:         r.ChunkRetryCount,
 			CPUCores:                r.CPUCores,

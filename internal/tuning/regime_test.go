@@ -157,31 +157,27 @@ func TestClassifyRegime_DifferentHWAndTuning(t *testing.T) {
 	}
 }
 
-// TestClassifyRegime_WorkloadDiffers covers the #198 workload-population
-// check: identical hardware and DB tuning, but the dataset shape differs
-// materially.
-func TestClassifyRegime_WorkloadDiffers(t *testing.T) {
+// TestClassifyRegime_WorkloadBands locks in the #214 bucket-based
+// workload gate. Two runs are workload-comparable when they share a
+// total-bytes band; ratio comparisons no longer apply. The current
+// dataset is 100M × 1000 = 100 GB → Large band.
+func TestClassifyRegime_WorkloadBands(t *testing.T) {
 	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
 	cases := []struct {
 		name     string
 		hist     HistoryRecord
 		wantSame bool
 	}{
-		// Row-count axis. 3.0× tolerance.
-		// "just inside 3×" uses 34M not the round 100M/3 = 33,333,333: that
-		// integer truncates down so the float ratio comes out as
-		// 3.0000000003, tripping the inclusive (≤) boundary. 34M gives ratio
-		// 2.94 — comfortably within tolerance and verifies the boundary
-		// without depending on float precision.
-		{"rows within 1.5×", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 67_000_000, AvgRowBytes: 1000}, true},
-		{"rows just inside 3×", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 34_000_000, AvgRowBytes: 1000}, true},
-		{"rows beyond 3× (5×)", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 20_000_000, AvgRowBytes: 1000}, false},
-		// Avg-row-bytes axis. 2.0× tolerance.
-		{"avg_row_bytes within 1.5×", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 600}, true},
-		{"avg_row_bytes at 2× exactly", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 500}, true},
-		{"avg_row_bytes beyond 2× (3×)", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 333}, false},
-		// Missing values fall through (don't fire the rule).
+		// Same Large band, different points within the band.
+		{"another 100 GB run", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}, true},
+		{"different rows, same band", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 500_000_000, AvgRowBytes: 1000}, true},
+		// Different band: Medium (50 GB).
+		{"medium-band history", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 50_000_000, AvgRowBytes: 1000}, false},
+		// Different band: Huge (>1 TB).
+		{"huge-band history", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 2_000_000_000, AvgRowBytes: 1000}, false},
+		// Missing values fall through to bandUnknown — gate skipped.
 		{"hist rows missing", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 0, AvgRowBytes: 1000}, true},
+		{"hist avg_row_bytes missing", HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 0}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,19 +194,154 @@ func TestClassifyRegime_WorkloadDiffers(t *testing.T) {
 	}
 }
 
+// TestClassifyRegime_BoundaryNoLongerDiscontinuous is the #214
+// motivating case: under the old 3× ratio gate, 100M and 305M rows
+// flagged as different but 100M and 295M flagged as same — a sharp
+// discontinuity at an arbitrary multiplier. With bucket gating both
+// pairs land in the same band (each ~100–305 GB at 1000 B/row →
+// Large), so neither flags as different_workload. Performance physics
+// is smooth across the band.
+func TestClassifyRegime_BoundaryNoLongerDiscontinuous(t *testing.T) {
+	// All three runs are in the Large band (100 GB – 1 TB).
+	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
+	hist295 := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 295_000_000, AvgRowBytes: 1000}
+	hist305 := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 305_000_000, AvgRowBytes: 1000}
+
+	label295, _ := ClassifyRegime(hist295, current, DBTuning{})
+	label305, _ := ClassifyRegime(hist305, current, DBTuning{})
+
+	if label295 != RegimeSame {
+		t.Errorf("295M and 100M should share Large band, got %q", label295)
+	}
+	if label305 != RegimeSame {
+		t.Errorf("305M and 100M should share Large band, got %q", label305)
+	}
+}
+
+// TestClassifyRegime_AsymmetryAcrossBands is the second #214 motivating
+// case. Under the old ratio gate, 1M→3M was the same ratio (3×) as
+// 30M→90M, and both were "same regime." The physics is entirely
+// different: 1M→3M is Tiny↔Small (network-bound either way), while
+// 30M→90M crosses Medium→Large (page-cache regime change).
+func TestClassifyRegime_AsymmetryAcrossBands(t *testing.T) {
+	t.Run("1M to 3M stays in same band", func(t *testing.T) {
+		// 1M × 1000 = 1 GB → Small; 3M × 1000 = 3 GB → Small. Same band.
+		current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 3_000_000, AvgRowBytes: 1000}
+		hist := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 1_000_000, AvgRowBytes: 1000}
+		label, deltas := ClassifyRegime(hist, current, DBTuning{})
+		if label != RegimeSame {
+			t.Errorf("1M and 3M share Small band, expected same; got %q deltas=%v", label, deltas)
+		}
+	})
+	t.Run("30M to 90M crosses Medium→Large", func(t *testing.T) {
+		// 30M × 1000 = 30 GB → Medium; 90M × 1000 = 90 GB → Medium.
+		// To cross the cliff we need a hist on the other side of the
+		// 100 GB boundary. The motivating asymmetry is "same ratio,
+		// different physics" — use 120M as the larger so we land in
+		// Large while 30M sits in Medium.
+		current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 120_000_000, AvgRowBytes: 1000}
+		hist := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 30_000_000, AvgRowBytes: 1000}
+		label, _ := ClassifyRegime(hist, current, DBTuning{})
+		if label != RegimeDifferentWorkload {
+			t.Errorf("30M (Medium) vs 120M (Large) should be different workload; got %q", label)
+		}
+	})
+}
+
+// TestClassifyRegime_SkewSecondaryGate verifies the #214 secondary
+// axis fires only when the primary band agrees. Two runs at the same
+// band but with very different skew distributions are classified
+// different_workload; runs missing largest-table data fall through.
+func TestClassifyRegime_SkewSecondaryGate(t *testing.T) {
+	// 100 GB → Large band. Vary the largest-table share to flip the
+	// skew tier.
+	totalBytes := int64(100_000_000) * 1000 // 100 GB
+	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000,
+		LargestTableBytes: int64(float64(totalBytes) * 0.10)} // EvenlyDistributed
+	cases := []struct {
+		name     string
+		histLT   int64
+		wantSame bool
+	}{
+		{"both evenly distributed", int64(float64(totalBytes) * 0.15), true},
+		{"history is dominant", int64(float64(totalBytes) * 0.85), false},
+		{"history is skewed", int64(float64(totalBytes) * 0.50), false},
+		// 0 → skewUnknown — gate skipped, falls through to count or same.
+		{"history missing largest_table_bytes", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hist := HistoryRecord{
+				CPUCores: 16, MemoryGB: 48,
+				TotalRows: 100_000_000, AvgRowBytes: 1000,
+				LargestTableBytes: tc.histLT,
+			}
+			label, deltas := ClassifyRegime(hist, current, DBTuning{})
+			isSame := label == RegimeSame
+			if isSame != tc.wantSame {
+				t.Errorf("got label=%q, isSame=%v, wantSame=%v, deltas=%v",
+					label, isSame, tc.wantSame, deltas)
+			}
+		})
+	}
+}
+
+// TestClassifyRegime_CountTertiaryGate verifies the #214 tertiary
+// axis: with primary and secondary aligned, a Few-vs-Massive table-
+// count difference still flips the row to different_workload. Runs
+// missing table count fall through (the gate is skipped).
+func TestClassifyRegime_CountTertiaryGate(t *testing.T) {
+	// Identical band + skew; only TotalTables varies.
+	totalBytes := int64(100_000_000) * 1000
+	largest := int64(float64(totalBytes) * 0.50) // Skewed on both sides
+	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000,
+		LargestTableBytes: largest, TotalTables: 5} // Few
+	cases := []struct {
+		name     string
+		histCnt  int
+		wantSame bool
+	}{
+		{"both few", 7, true},
+		{"history is massive", 250, false},
+		{"history is many", 50, false},
+		// 0 → countUnknown — gate skipped.
+		{"history missing TotalTables", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hist := HistoryRecord{
+				CPUCores: 16, MemoryGB: 48,
+				TotalRows: 100_000_000, AvgRowBytes: 1000,
+				LargestTableBytes: largest,
+				TotalTables:       tc.histCnt,
+			}
+			label, deltas := ClassifyRegime(hist, current, DBTuning{})
+			isSame := label == RegimeSame
+			if isSame != tc.wantSame {
+				t.Errorf("got label=%q, isSame=%v, wantSame=%v, deltas=%v",
+					label, isSame, tc.wantSame, deltas)
+			}
+		})
+	}
+}
+
 // TestClassifyRegime_WorkloadWinsOverHwAndTuning verifies that when
 // workload differs alongside hw and/or tuning, the label collapses to
 // DifferentWorkload — filterByRegime drops all three semantics so the
 // combo distinction would only matter for diagnostics, and the deltas
 // slice still carries each axis's delta.
 func TestClassifyRegime_WorkloadWinsOverHwAndTuning(t *testing.T) {
+	// 100M × 1000 = 100 GB → Large; 10M × 1000 = 10 GB → boundary
+	// (exactly bandSmallMaxBytes). The "<" comparator in workloadBand
+	// puts 10 GB exactly into Medium (not Small). Pick a hist that's
+	// unambiguously a different band: 1M × 1000 = 1 GB → Small.
 	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
 	hist := HistoryRecord{
-		CPUCores:              4,             // hw differs
+		CPUCores:              4, // hw differs
 		MemoryGB:              48,
-		TotalRows:             10_000_000,    // workload differs (10×)
+		TotalRows:             1_000_000, // workload differs (Small vs Large band)
 		AvgRowBytes:           1000,
-		TargetSharedBuffersMB: 1024,          // tuning differs (vs 8192)
+		TargetSharedBuffersMB: 1024, // tuning differs (vs 8192)
 	}
 	tuning := DBTuning{TargetSharedBuffersMB: 8192}
 	label, deltas := ClassifyRegime(hist, current, tuning)
@@ -223,14 +354,15 @@ func TestClassifyRegime_WorkloadWinsOverHwAndTuning(t *testing.T) {
 }
 
 // TestClassifyRegime_WorkloadDeltaReadable spot-checks the human-readable
-// delta string for the workload axis.
+// delta string for the workload axis under bucket gating (#214).
 func TestClassifyRegime_WorkloadDeltaReadable(t *testing.T) {
+	// 100M × 1000 = 100 GB → Large; 1M × 1000 = 1 GB → Small.
 	current := Input{CPUCores: 16, MemoryGB: 48, TotalRows: 100_000_000, AvgRowBytes: 1000}
-	hist := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 19_000_000, AvgRowBytes: 1000}
+	hist := HistoryRecord{CPUCores: 16, MemoryGB: 48, TotalRows: 1_000_000, AvgRowBytes: 1000}
 	_, deltas := ClassifyRegime(hist, current, DBTuning{})
 	joined := strings.Join(deltas, "|")
-	if !strings.Contains(joined, "total_rows: 19000000→100000000") {
-		t.Errorf("workload delta missing or malformed: %q", joined)
+	if !strings.Contains(joined, "workload_band: small→large") {
+		t.Errorf("workload band delta missing or malformed: %q", joined)
 	}
 }
 
