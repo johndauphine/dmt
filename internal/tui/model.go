@@ -115,6 +115,15 @@ type Model struct {
 
 	// Setup wizard state
 	setupState *setup.State
+
+	// Explore policy (#182). exploreArmed is a one-shot flag set by
+	// `/explore on` (or bare `/explore`) and consumed by the next `/run`
+	// — it surfaces as cfg.Migration.Explore on that run, forcing the
+	// tuner's planned-grid probe. exploreMode mirrors
+	// cfg.Migration.ExploreMode and persists for the session; empty means
+	// "don't override what the config/secrets layer set."
+	exploreArmed bool
+	exploreMode  string
 }
 
 type commandInfo struct {
@@ -135,6 +144,7 @@ var availableCommands = []commandInfo{
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
 	{"/verbosity", "Set log level (debug, info, warn, error)"},
+	{"/explore", "Force exploration probe (on/off) or set steady-state ε (low/balanced/high)"},
 	{"/about", "Show application information"},
 	{"/help", "Show available commands"},
 	{"/clear", "Clear screen"},
@@ -665,7 +675,7 @@ func (m *Model) autocompleteCommand() {
 		}
 	}
 
-	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/setup", "/wizard", "/logs", "/profile", "/verbosity", "/clear", "/quit", "/help"}
+	commands := []string{"/run", "/resume", "/validate", "/analyze", "/status", "/history", "/setup", "/wizard", "/logs", "/profile", "/verbosity", "/explore", "/clear", "/quit", "/help"}
 
 	for _, cmd := range commands {
 		if strings.HasPrefix(cmd, input) {
@@ -830,6 +840,10 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /profile delete NAME  Delete a saved profile
   /profile export NAME  Export a profile to a config file
   /verbosity [LEVEL]    Set log level (debug, info, warn, error)
+  /explore              Show current exploration state
+  /explore on|off       Arm/disarm next-run exploration probe
+  /explore low|balanced|high
+                        Set steady-state ε strength for this session
   /logs                 Save session logs to a file
   /clear                Clear screen
   /quit                 Exit application
@@ -865,6 +879,9 @@ Note: You can use @/path/to/file for config files.`
 		return func() tea.Msg {
 			return OutputMsg(fmt.Sprintf("Log level set to: %s\n", levelStr))
 		}
+
+	case "/explore":
+		return m.handleExploreCommand(parts)
 
 	case "/about":
 		about := fmt.Sprintf(`dmt v%s
@@ -981,7 +998,11 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 			}
 		}
 		configFile, profileName := parseConfigArgs(parts)
-		return m.runMigrationCmd(configFile, profileName)
+		// Consume the one-shot Explore arm (#182): subsequent /run calls
+		// don't re-trigger it unless the user re-arms.
+		exploreOnce := m.exploreArmed
+		m.exploreArmed = false
+		return m.runMigrationCmd(configFile, profileName, exploreOnce, m.exploreMode)
 
 	case "/resume":
 		// Block if migration already running
@@ -1023,7 +1044,7 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 
 // Migration commands
 
-func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
+func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool, exploreMode string) tea.Cmd {
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -1039,6 +1060,17 @@ func (m Model) runMigrationCmd(configFile, profileName string) tea.Cmd {
 		cfg, err := loadConfigFromOrigin(configFile, profileName)
 		if err != nil {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
+		}
+
+		// Apply /explore session state (#182). Arm overrides cfg.Migration.Explore
+		// for THIS run only; mode overrides cfg.Migration.ExploreMode for as long
+		// as it's set in the session. Empty mode leaves the loaded value alone so
+		// per-config / secrets-file values still take effect.
+		if exploreOnce {
+			cfg.Migration.Explore = true
+		}
+		if exploreMode != "" {
+			cfg.Migration.ExploreMode = exploreMode
 		}
 
 		orch, err := orchestrator.New(cfg)
@@ -1462,6 +1494,52 @@ func (m Model) runShellCmd(shellCmd string) tea.Cmd {
 		}()
 
 		return nil
+	}
+}
+
+// Exploration policy commands (#182). Arms a one-shot probe on the next
+// /run, or sets the steady-state ε mode for this session. Both surfaces
+// mirror cfg.Migration.Explore / cfg.Migration.ExploreMode and are
+// applied by runMigrationCmd at run time.
+func (m *Model) handleExploreCommand(parts []string) tea.Cmd {
+	if len(parts) < 2 {
+		armed := "off"
+		if m.exploreArmed {
+			armed = "on"
+		}
+		mode := m.exploreMode
+		if mode == "" {
+			mode = "(unset — config/secrets value applies)"
+		}
+		return func() tea.Msg {
+			return OutputMsg(fmt.Sprintf(
+				"Explore state:\n  next-run probe: %s\n  steady-state ε mode: %s\nUsage: /explore on|off | /explore low|balanced|high\n",
+				armed, mode,
+			))
+		}
+	}
+	arg := strings.ToLower(parts[1])
+	switch arg {
+	case "on":
+		m.exploreArmed = true
+		return func() tea.Msg {
+			return OutputMsg("Explore armed — next /run will force an exploration probe.\n")
+		}
+	case "off":
+		m.exploreArmed = false
+		m.exploreMode = ""
+		return func() tea.Msg {
+			return OutputMsg("Explore disarmed; steady-state ε mode cleared.\n")
+		}
+	case "low", "balanced", "high":
+		m.exploreMode = arg
+		return func() tea.Msg {
+			return OutputMsg(fmt.Sprintf("Explore mode set to %s for this session.\n", arg))
+		}
+	default:
+		return func() tea.Msg {
+			return OutputMsg(fmt.Sprintf("Unknown /explore argument: %s\nUsage: /explore on|off | /explore low|balanced|high\n", arg))
+		}
 	}
 }
 

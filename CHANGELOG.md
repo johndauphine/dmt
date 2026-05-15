@@ -9,6 +9,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **TUI `/explore` control** (#182). Adds a slash command to the
+  interactive TUI for the tuner's exploration policy. `/explore on`
+  arms a one-shot probe consumed by the next `/run` (sets
+  `cfg.Migration.Explore=true` for that run only). `/explore
+  low|balanced|high` sets the steady-state ε strength for the
+  session, mirroring `cfg.Migration.ExploreMode`. `/explore off`
+  clears both. Bare `/explore` reports current state. Empty mode
+  leaves the loaded config / secrets value alone — the TUI overrides
+  only when the operator explicitly sets a mode this session.
+  Completes the deferred TUI surface from #179 (PR2).
+
 ### Changed
 
 - **Drop `R²=` from regression-tier reasoning line** (#293). The
