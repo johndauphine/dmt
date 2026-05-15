@@ -45,13 +45,45 @@ func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) s
 	}
 
 	if pk := primaryKeyConstraint(table.Constraints); pk != nil {
-		parts = append(parts, formatPrimaryKey(*pk, targetDialect))
+		// SQLite emits the PRIMARY KEY inline on auto-increment columns
+		// (INTEGER PRIMARY KEY AUTOINCREMENT). Skip the table-level PK
+		// constraint in that case to avoid a duplicate declaration.
+		if !(targetDialect == DialectSQLite && hasInlineAutoIncPK(table, sourceDialect)) {
+			parts = append(parts, formatPrimaryKey(*pk, targetDialect))
+		}
 	}
 
 	body := strings.Join(parts, ",\n")
 	tableSuffix := mysqlInlineTableComment(table, targetDialect)
 
 	return fmt.Sprintf("CREATE TABLE %s (\n%s\n)%s;", qname, body, tableSuffix)
+}
+
+// hasInlineAutoIncPK returns true when SQLite will emit the column-
+// level `INTEGER PRIMARY KEY AUTOINCREMENT` clause, in which case the
+// table-level PK constraint must be suppressed to avoid a duplicate
+// declaration.
+//
+// The inline form is only emitted when:
+//   - the PK is single-column (composite PKs can't use AUTOINCREMENT)
+//   - the sole PK column is auto-increment in the source
+//
+// Anything else falls back to the table-level CONSTRAINT PRIMARY KEY
+// clause — the column itself emits as plain INTEGER with no inline PK.
+// This matches autoIncrementSuffix's SQLite branch (the two paths
+// must agree).
+func hasInlineAutoIncPK(table TableInfo, sourceDialect string) bool {
+	pk := primaryKeyConstraint(table.Constraints)
+	if pk == nil || len(pk.Columns) != 1 {
+		return false
+	}
+	pkCol := pk.Columns[0]
+	for _, col := range table.Columns {
+		if col.Name == pkCol && isAutoIncrementColumn(col, sourceDialect) {
+			return true
+		}
+	}
+	return false
 }
 
 // primaryKeyConstraint returns the PK constraint from the table's

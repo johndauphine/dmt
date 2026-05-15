@@ -72,7 +72,21 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 
 	parts := []string{fmt.Sprintf("    %s %s", quoted, typeStr)}
 
-	if !col.IsNullable && !(isAuto && isPK) {
+	// NOT NULL suppression: PG/MSSQL/MySQL all imply NOT NULL on PK
+	// columns via the table-level PRIMARY KEY constraint, and identity
+	// types (SERIAL, IDENTITY, AUTO_INCREMENT) imply it too. SQLite is
+	// the exception: a column in a table-level composite PK is NOT
+	// implicitly NOT NULL (only INTEGER PRIMARY KEY rowid aliases get
+	// the implicit constraint). So on SQLite we only suppress when the
+	// column will receive the inline `PRIMARY KEY AUTOINCREMENT` form
+	// — autoIncrementSuffix returning a non-empty string is the signal.
+	suppressNotNull := isAuto && isPK
+	if targetDialect == DialectSQLite && suppressNotNull {
+		if autoIncrementSuffix(col, constraints, targetDialect) == "" {
+			suppressNotNull = false
+		}
+	}
+	if !col.IsNullable && !suppressNotNull {
 		parts = append(parts, "NOT NULL")
 	}
 
@@ -84,7 +98,7 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 	}
 
 	if isAuto {
-		if suffix := autoIncrementSuffix(col, targetDialect); suffix != "" {
+		if suffix := autoIncrementSuffix(col, constraints, targetDialect); suffix != "" {
 			parts = append(parts, suffix)
 		}
 	}
@@ -149,6 +163,16 @@ func autoIncrementType(col Column, sourceDialect, targetDialect string) string {
 			return "SERIAL"
 		}
 	}
+	if targetDialect == DialectSQLite {
+		// SQLite's autoincrement is INTEGER PRIMARY KEY AUTOINCREMENT.
+		// The type MUST be exactly "INTEGER" (case-sensitive in some
+		// builds) for the rowid alias to kick in; AUTOINCREMENT keyword
+		// is appended in autoIncrementSuffix. The PRIMARY KEY clause
+		// itself is emitted by formatPrimaryKey later, which is fine —
+		// SQLite accepts both column-level and table-level PK
+		// declarations.
+		return "INTEGER"
+	}
 	return baseType
 }
 
@@ -160,7 +184,7 @@ func autoIncrementType(col Column, sourceDialect, targetDialect string) string {
 //	         present; (1, 1) is the documented MSSQL default.
 //	MySQL  → AUTO_INCREMENT
 //	PG     → empty (the type itself is SERIAL/BIGSERIAL)
-func autoIncrementSuffix(col Column, targetDialect string) string {
+func autoIncrementSuffix(col Column, constraints []Constraint, targetDialect string) string {
 	switch targetDialect {
 	case DialectPostgres:
 		return ""
@@ -172,8 +196,40 @@ func autoIncrementSuffix(col Column, targetDialect string) string {
 			start, inc = col.Identity.Start, col.Identity.Increment
 		}
 		return fmt.Sprintf("IDENTITY(%d, %d)", start, inc)
+	case DialectSQLite:
+		// SQLite's `INTEGER PRIMARY KEY AUTOINCREMENT` form is only
+		// valid for a single-column integer primary key — sole PK,
+		// integer-affinity type. For composite PKs or for an
+		// auto-increment column that isn't part of the PK at all,
+		// SQLite has no equivalent declaration (AUTOINCREMENT requires
+		// a rowid alias). In those cases, emit no inline suffix; the
+		// table-level PK constraint will still be emitted normally,
+		// and the column behaves as a plain INTEGER. The
+		// auto-increment semantics on SQLite are best-effort here —
+		// inserting NULL into an INTEGER PK still gets a unique value
+		// via SQLite's rowid mechanism (without the strict-monotonic
+		// AUTOINCREMENT guarantee, which only matters for rolled-back
+		// inserts).
+		if isSoleColumnPK(col.Name, constraints) {
+			return "PRIMARY KEY AUTOINCREMENT"
+		}
+		return ""
 	}
 	return ""
+}
+
+// isSoleColumnPK reports whether the named column is the only column
+// in the table's primary-key constraint. Used by the SQLite branch of
+// autoIncrementSuffix to decide whether the strict-rowid
+// `INTEGER PRIMARY KEY AUTOINCREMENT` form is safe to emit.
+func isSoleColumnPK(colName string, constraints []Constraint) bool {
+	for _, c := range constraints {
+		if c.Type != ConstraintPrimaryKey {
+			continue
+		}
+		return len(c.Columns) == 1 && c.Columns[0] == colName
+	}
+	return false
 }
 
 // isAutoIncrementColumn unifies the four dialects' ways of marking a

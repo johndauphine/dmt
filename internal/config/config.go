@@ -19,6 +19,7 @@ import (
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
+	_ "github.com/johndauphine/dmt/internal/driver/sqlite"
 )
 
 // Type aliases for database configuration types.

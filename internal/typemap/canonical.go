@@ -119,6 +119,7 @@ const (
 	DialectPostgres = "postgres"
 	DialectMSSQL    = "mssql"
 	DialectMySQL    = "mysql"
+	DialectSQLite   = "sqlite"
 )
 
 // ColumnInfo is the per-column metadata the mappers consume. Mirrors the
@@ -180,6 +181,8 @@ func ToCanonical(col ColumnInfo, dialect string) CanonicalType {
 		return mssqlToCanonical(col)
 	case DialectMySQL:
 		return mysqlToCanonical(col)
+	case DialectSQLite:
+		return sqliteToCanonical(col)
 	default:
 		return CanonicalType{Kind: KindRaw, TypeName: col.UDTName}
 	}
@@ -201,6 +204,8 @@ func FromCanonical(ct CanonicalType, dialect string) DdlType {
 		return mssqlFromCanonical(ct)
 	case DialectMySQL:
 		return mysqlFromCanonical(ct)
+	case DialectSQLite:
+		return sqliteFromCanonical(ct)
 	default:
 		if ct.TypeName != "" {
 			return exactDDL(ct.TypeName)

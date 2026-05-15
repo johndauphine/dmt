@@ -1585,10 +1585,11 @@ func TestIsValidDriverType(t *testing.T) {
 		"mssql", "sqlserver", "sql-server",
 		"postgres", "postgresql", "pg",
 		"mysql", "mariadb", "maria",
-		"MSSQL", "PG", "MYSQL", // Case insensitive
+		"sqlite", "sqlite3", "sqlitedb",
+		"MSSQL", "PG", "MYSQL", "SQLITE", // Case insensitive
 	}
 	invalidTypes := []string{
-		"oracle", "sqlite", "unknown", "",
+		"oracle", "unknown", "",
 	}
 
 	for _, dbType := range validTypes {

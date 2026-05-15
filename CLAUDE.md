@@ -63,9 +63,11 @@ Each driver implements:
 - **`TypeMapper`** (`driver/typemapper.go`) — Column-level type mapping; `TableTypeMapper` for full-table DDL via AI
 - **`Dialect`** (`driver/dialect.go`) — SQL syntax: `QuoteIdentifier()`, `BuildKeysetQuery()`, `BuildRowNumberQuery()`, `AIPromptAugmentation()`
 
-Driver aliases: `mssql` (sqlserver, sql-server), `postgres` (postgresql, pg), `mysql` (mariadb, maria).
+Driver aliases: `mssql` (sqlserver, sql-server), `postgres` (postgresql, pg), `mysql` (mariadb, maria), `sqlite` (sqlite3, sqlitedb).
 
-MSSQL sets `ScaleWritersWithCores: false` (TABLOCK serializes bulk inserts); PostgreSQL/MySQL set `true`.
+MSSQL sets `ScaleWritersWithCores: false` (TABLOCK serializes bulk inserts); PostgreSQL/MySQL set `true`; SQLite sets `false` and pins to a single writer (file-based, single-writer constraint).
+
+SQLite is intended primarily for testing dmt end-to-end without external database servers — fixtures live in `.db` files and round-trip through the same pipeline. Cross-engine type mapping is supported: sqlite→{mssql,postgres,mysql} and {mssql,postgres,mysql}→sqlite both go through the deterministic typemap. `GetPartitionBoundaries` always returns a single partition for SQLite (no parallelism benefit from splitting). FK and CHECK constraints can only be declared inline at CREATE TABLE time on SQLite, so `CreateForeignKey` / `CreateCheckConstraint` log a warning and skip; users who need FK enforcement should run sqlite as source rather than target.
 
 ### Data Transfer Pipeline
 

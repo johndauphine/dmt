@@ -20,6 +20,7 @@ const (
 	DialectPostgres = typemap.DialectPostgres
 	DialectMSSQL    = typemap.DialectMSSQL
 	DialectMySQL    = typemap.DialectMySQL
+	DialectSQLite   = typemap.DialectSQLite
 )
 
 // QuoteIdentifier wraps an identifier in the target dialect's quoting
@@ -29,7 +30,7 @@ const (
 // (escape the closing bracket).
 func QuoteIdentifier(name, dialect string) string {
 	switch dialect {
-	case DialectPostgres:
+	case DialectPostgres, DialectSQLite:
 		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 	case DialectMySQL:
 		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
@@ -71,7 +72,9 @@ func QualifiedTableName(schema, table, targetDialect string) string {
 		return QuoteIdentifier(table, targetDialect)
 	}
 
-	if targetDialect == DialectMySQL {
+	if targetDialect == DialectMySQL || targetDialect == DialectSQLite {
+		// SQLite has no schema concept distinct from attached databases;
+		// the "main" database is implicit.
 		return QuoteIdentifier(table, targetDialect)
 	}
 
@@ -87,7 +90,7 @@ func defaultSchema(dialect string) string {
 		return "public"
 	case DialectMSSQL:
 		return "dbo"
-	case DialectMySQL:
+	case DialectMySQL, DialectSQLite:
 		return ""
 	default:
 		return ""
