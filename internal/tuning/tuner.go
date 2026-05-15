@@ -37,7 +37,17 @@ type Input struct {
 	TargetMode   string // "drop_recreate" | "upsert"
 	TotalTables  int
 	TotalRows    int64
-	AvgRowBytes  int64
+	AvgRowBytes  int64 // capped at 2000B for memory-budget math
+
+	// UncappedAvgRowBytes is the pre-cap average row size in bytes
+	// (#214 Copilot fix on PR #288). ClassifyRegime reads this for
+	// total-bytes band classification so wide-row workloads land in
+	// the right band — using AvgRowBytes alone would mis-bucket an
+	// 8KB-row workload as Small because the 2KB cap shrinks
+	// `rows × avg_row_bytes` below the band boundary. Zero falls back
+	// to AvgRowBytes (callers that don't compute it separately keep
+	// the pre-#214 behavior).
+	UncappedAvgRowBytes int64
 
 	// LargestTableBytes is the size of the single largest table in the
 	// source dataset, used by ClassifyRegime (#214) to assign a skew tier
@@ -167,8 +177,15 @@ type HistoryRecord struct {
 	// AvgRowBytes is the avg_row_size_bytes the analyzer recorded for
 	// the migration that produced this row. Used by PR2's regression to
 	// derive chunk_size in bytes (chunk_rows × avg_row_bytes) for the
-	// quadratic CS feature.
+	// quadratic CS feature. Capped at 2KB by the smartconfig analyzer.
 	AvgRowBytes int64
+
+	// UncappedAvgRowBytes is the pre-cap row size (Copilot fix on PR
+	// #288). Mirrors tuning.Input — ClassifyRegime prefers this for
+	// band classification when set. Not persisted to ai_tuning_history
+	// yet (separate schema migration); pre-#214 rows leave it zero and
+	// the classifier falls back to AvgRowBytes.
+	UncappedAvgRowBytes int64
 
 	// TotalRows is the row count of the dataset this run migrated.
 	// Used by ClassifyRegime (#198, #214) to assign a total-bytes band

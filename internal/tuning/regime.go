@@ -174,9 +174,20 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 	// align with the actual cost cliffs (fits-in-RAM, fits-in-page-
 	// cache, spills-to-disk) so they remain stable through smooth
 	// dataset growth and fire only when a real regime boundary crosses.
+	// Use the uncapped row size when the caller computed it (Copilot
+	// fix on PR #288). AvgRowBytes is capped at 2KB by the smartconfig
+	// analyzer for memory-budget math; using the capped value for
+	// regime classification would mis-bucket wide-row workloads (8KB
+	// rows → looks like 2KB rows → undercount total_bytes → wrong
+	// band). Historical rows don't carry the uncapped value yet
+	// (persistence migration is deferred), so they fall back to
+	// AvgRowBytes — conservative bias for wide-row history (under-band)
+	// reduces false-positive matches, which is the safer failure mode.
 	workloadDiffer := false
-	histBand := workloadBand(history.TotalRows, history.AvgRowBytes)
-	currBand := workloadBand(current.TotalRows, current.AvgRowBytes)
+	histAvg := effectiveAvgRowBytes(history.UncappedAvgRowBytes, history.AvgRowBytes)
+	currAvg := effectiveAvgRowBytes(current.UncappedAvgRowBytes, current.AvgRowBytes)
+	histBand := workloadBand(history.TotalRows, histAvg)
+	currBand := workloadBand(current.TotalRows, currAvg)
 	if histBand != bandUnknown && currBand != bandUnknown && histBand != currBand {
 		workloadDiffer = true
 		deltas = append(deltas, fmt.Sprintf("workload_band: %s→%s", histBand, currBand))
@@ -186,8 +197,8 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 	// matches (or one side is unknown); a mismatched band already gates
 	// the row out, and stacking deltas there is just noise.
 	if !workloadDiffer {
-		histSkew := skewTier(history.LargestTableBytes, totalBytes(history.TotalRows, history.AvgRowBytes))
-		currSkew := skewTier(current.LargestTableBytes, totalBytes(current.TotalRows, current.AvgRowBytes))
+		histSkew := skewTier(history.LargestTableBytes, totalBytes(history.TotalRows, histAvg))
+		currSkew := skewTier(current.LargestTableBytes, totalBytes(current.TotalRows, currAvg))
 		if histSkew != skewUnknown && currSkew != skewUnknown && histSkew != currSkew {
 			workloadDiffer = true
 			deltas = append(deltas, fmt.Sprintf("workload_skew: %s→%s", histSkew, currSkew))
@@ -219,6 +230,21 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 	default:
 		return RegimeSame, nil
 	}
+}
+
+// effectiveAvgRowBytes returns the row-size value the band classifier
+// should multiply against TotalRows: prefer the uncapped value when
+// populated, fall back to the capped one. The cap (2KB, applied in
+// the smartconfig analyzer for memory-budget math) understates total
+// bytes for wide-row workloads — using it for regime classification
+// would mis-bucket an 8KB-row migration as Small instead of Medium.
+// Zero on both sides falls through to bandUnknown (caller short-
+// circuits the gate).
+func effectiveAvgRowBytes(uncapped, capped int64) int64 {
+	if uncapped > 0 {
+		return uncapped
+	}
+	return capped
 }
 
 // totalBytes computes the physical dataset size used for workload-band

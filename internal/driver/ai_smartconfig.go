@@ -123,7 +123,21 @@ type AutoTuneInput struct {
 	TargetMode   string
 	TotalTables  int
 	TotalRows    int64
-	AvgRowBytes  int64
+	AvgRowBytes  int64 // capped at 2000B (memory-budget math)
+
+	// UncappedAvgRowBytes is the same average without the 2KB cap (#214).
+	// Used by the regime classifier so wide-row workloads get bucketed
+	// by their actual physical size; AvgRowBytes alone would mis-bucket
+	// an 8KB-row workload into a smaller band. Zero is "unknown" and the
+	// classifier falls through to AvgRowBytes.
+	UncappedAvgRowBytes int64
+
+	// LargestTableBytes is max(RowCount × AvgRowSizeBytes) across ALL
+	// tables in the workload (#214). Used by the skew tier classifier.
+	// Calculated alongside the avg/max-row passes in calculateAvgRowSize
+	// so it sees every table, not just the top-5-by-row-count slice
+	// surfaced via LargestTables.
+	LargestTableBytes int64
 
 	// Workload identity (#215). Together these form the tuple the
 	// Tier 1 exact-identity classifier uses to find historically-
@@ -271,8 +285,9 @@ type SmartConfigAnalyzer struct {
 	forceExplore        bool        // mirrors cfg.Migration.Explore
 	exploreMode         string      // mirrors cfg.Migration.ExploreMode
 	targetProbe         TargetProbe // populated via SetTargetProbe (#166)
-	uncappedAvgRowBytes int64       // pre-cap average row size from sampled tables (#166)
-	maxSampledRowBytes  int64       // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
+	uncappedAvgRowBytes      int64 // pre-cap average row size from sampled tables (#166)
+	maxSampledRowBytes       int64 // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
+	largestSampledTableBytes int64 // max RowCount × AvgRowSizeBytes across ALL tables (#214) — feeds skew-tier classifier; iterating LargestTables[:5] alone would miss a wide-row low-row-count outlier
 
 	// tableNameFilter restricts Analyze to a caller-supplied set of table
 	// names (#241). The orchestrator applies include/exclude filters
@@ -510,10 +525,11 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		SourceDBType:      in.DatabaseType,
 		TargetDBType:      in.TargetType,
 		TargetMode:        in.TargetMode,
-		TotalTables:       in.TotalTables,
-		TotalRows:         in.TotalRows,
-		AvgRowBytes:       in.AvgRowBytes,
-		LargestTableBytes: largestTableBytes(in.LargestTables),
+		TotalTables:         in.TotalTables,
+		TotalRows:           in.TotalRows,
+		AvgRowBytes:         in.AvgRowBytes,
+		UncappedAvgRowBytes: in.UncappedAvgRowBytes,
+		LargestTableBytes:   in.LargestTableBytes,
 		// Workload identity passthrough (#215).
 		SourceHost:         in.SourceHost,
 		SourcePort:         in.SourcePort,
@@ -526,26 +542,6 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		ForceExplore:       s.forceExplore,
 		ExplorationEpsilon: explorationEpsilon(s.exploreMode),
 	}
-}
-
-// largestTableBytes returns the size in bytes of the single largest
-// table among the sampled set, derived from rows × avg_row_bytes for
-// each table. Used by ClassifyRegime (#214) for the skew secondary
-// axis. Returns 0 when the sample is empty or no row carries valid
-// (rows, avg_row_bytes) — caller treats 0 as "unknown skew" and the
-// regime classifier skips the skew gate for that comparison.
-func largestTableBytes(stats []TableStats) int64 {
-	var maxBytes int64
-	for _, t := range stats {
-		if t.RowCount <= 0 || t.AvgRowBytes <= 0 {
-			continue
-		}
-		bytes := t.RowCount * t.AvgRowBytes
-		if bytes > maxBytes {
-			maxBytes = bytes
-		}
-	}
-	return maxBytes
 }
 
 // ExplorationEpsilon is the package-public version of explorationEpsilon
@@ -872,14 +868,22 @@ func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableIn
 // keeps a single wide table from inflating the per-chunk memory
 // estimate beyond what it would actually consume in practice).
 //
-// Side effects (both used by the #166 MySQL packet calculation):
+// Side effects (#166 and #214):
 //   - s.uncappedAvgRowBytes: pre-cap average across sampled tables.
-//   - s.maxSampledRowBytes: widest row in sampled tables. The packet
-//     cap must hold for the worst-case row, not the average — chunk_size
-//     is global across all tables in a migration, so a mix of narrow
-//     and wide tables would otherwise allow chunks that exceed
-//     @@max_allowed_packet when inserting the wide one (Codex review
-//     on #166).
+//     Used by the regime classifier (#214) so wide-row workloads land
+//     in the right band; ClassifyRegime would otherwise see a 2KB-
+//     capped value and undercount total_bytes.
+//   - s.maxSampledRowBytes: widest row in sampled tables (#166). The
+//     packet cap must hold for the worst-case row, not the average —
+//     chunk_size is global across all tables in a migration, so a mix
+//     of narrow and wide tables would otherwise allow chunks that
+//     exceed @@max_allowed_packet when inserting the wide one (Codex
+//     review on #166).
+//   - s.largestSampledTableBytes: max RowCount × AvgRowSizeBytes across
+//     ALL tables (#214). Used by the skew tier classifier — picking
+//     "largest table" from a slice ordered by row count would miss a
+//     low-row but extremely wide table that's actually the bytes
+//     heavyweight (Copilot review on PR #288).
 func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
 	// Average: top-5 largest tables only — they dominate runtime, so
 	// averaging across them approximates the steady-state row size
@@ -901,19 +905,25 @@ func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
 	}
 	s.uncappedAvgRowBytes = uncapped
 
-	// Max: ALL tables in the workload (Codex review on #166).
-	// chunk_size is global; the packet cap must hold for the worst-case
-	// row even if that row lives in a small, low-row-count outlier table
-	// outside the top 5. Without this, a workload with four narrow
-	// tables plus one tiny 8KB-row table can still pick a chunk_size
-	// that overflows @@max_allowed_packet when inserting the wide one.
+	// Max-row-size AND max-table-bytes both walk all tables (Codex
+	// review on #166 + Copilot review on PR #288). For #214, ordering
+	// LargestTables by row count and picking [0] would miss a small-
+	// row-count, wide-row table that's the actual bytes heavyweight.
 	var maxRow int64
+	var maxTableBytes int64
 	for _, t := range tables {
 		if t.AvgRowSizeBytes > maxRow {
 			maxRow = t.AvgRowSizeBytes
 		}
+		if t.RowCount > 0 && t.AvgRowSizeBytes > 0 {
+			bytes := t.RowCount * t.AvgRowSizeBytes
+			if bytes > maxTableBytes {
+				maxTableBytes = bytes
+			}
+		}
 	}
 	s.maxSampledRowBytes = maxRow
+	s.largestSampledTableBytes = maxTableBytes
 
 	if uncapped > 2000 {
 		return 2000
@@ -950,19 +960,21 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 	}
 
 	return AutoTuneInput{
-		CPUCores:          cores,
-		MemoryGB:          memoryGB,
-		AvailableMemoryMB: availableMemoryMB,
-		SwapTotalMB:       swapTotalMB,
-		Platform:          DetectPlatform(),
-		MaxMemoryMB:       s.maxMemoryMB,
-		DatabaseType:      s.dbType,
-		TargetType:        s.targetDBType,
-		TargetMode:        s.targetMode,
-		TotalTables:       s.suggestions.TotalTables,
-		TotalRows:         s.suggestions.TotalRows,
-		AvgRowBytes:       avgRowSize,
-		LargestTables:     largestTables,
+		CPUCores:            cores,
+		MemoryGB:            memoryGB,
+		AvailableMemoryMB:   availableMemoryMB,
+		SwapTotalMB:         swapTotalMB,
+		Platform:            DetectPlatform(),
+		MaxMemoryMB:         s.maxMemoryMB,
+		DatabaseType:        s.dbType,
+		TargetType:          s.targetDBType,
+		TargetMode:          s.targetMode,
+		TotalTables:         s.suggestions.TotalTables,
+		TotalRows:           s.suggestions.TotalRows,
+		AvgRowBytes:         avgRowSize,
+		UncappedAvgRowBytes: s.uncappedAvgRowBytes,
+		LargestTableBytes:   s.largestSampledTableBytes,
+		LargestTables:       largestTables,
 		// Workload identity passthrough (#215).
 		SourceHost:     s.identitySourceHost,
 		SourcePort:     s.identitySourcePort,

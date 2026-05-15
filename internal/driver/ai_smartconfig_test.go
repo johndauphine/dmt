@@ -466,3 +466,30 @@ func TestApplyTableNameFilter_CaseInsensitive(t *testing.T) {
 		}
 	}
 }
+
+// TestCalculateAvgRowSize_LargestSampledTableBytesUsesAllTables pins
+// the Copilot fix on PR #288: largestSampledTableBytes must consider
+// ALL tables, not just the top-5-by-row-count slice used for the
+// average. A low-row-count table with very wide rows can be the true
+// bytes heavyweight, and the regime classifier's skew tier needs to
+// reflect that.
+func TestCalculateAvgRowSize_LargestSampledTableBytesUsesAllTables(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	tables := []tableInfo{
+		// Top-5 by row count. The widest by bytes is narrow1: 5M × 100 = 500M.
+		{Name: "narrow1", RowCount: 5_000_000, AvgRowSizeBytes: 100},
+		{Name: "narrow2", RowCount: 4_000_000, AvgRowSizeBytes: 110},
+		{Name: "narrow3", RowCount: 3_000_000, AvgRowSizeBytes: 120},
+		{Name: "narrow4", RowCount: 2_000_000, AvgRowSizeBytes: 130},
+		{Name: "narrow5", RowCount: 1_000_000, AvgRowSizeBytes: 140},
+		// Outside top-5: 100K rows × 16KB = 1.6 GB. Real heavyweight by
+		// bytes but easy to miss if largestTable is read off LargestTables[:5].
+		{Name: "tiny_but_wide_archive", RowCount: 100_000, AvgRowSizeBytes: 16384},
+	}
+	analyzer.calculateAvgRowSize(tables)
+	const want = int64(100_000) * 16384 // 1.6 GB
+	if analyzer.largestSampledTableBytes != want {
+		t.Errorf("largestSampledTableBytes = %d, want %d (the tiny_but_wide_archive table; top-5-by-rows must not gate the bytes max)",
+			analyzer.largestSampledTableBytes, want)
+	}
+}

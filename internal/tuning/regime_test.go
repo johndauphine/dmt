@@ -248,6 +248,49 @@ func TestClassifyRegime_AsymmetryAcrossBands(t *testing.T) {
 	})
 }
 
+// TestClassifyRegime_UncappedAvgRowBytesUsedForBand pins the Copilot
+// fix on PR #288: AvgRowBytes is capped at 2KB by calculateAvgRowSize
+// for memory-budget math, but using that capped value for band
+// classification mis-buckets wide-row workloads. A 2M-row workload at
+// 8KB/row (16 GB physical → Medium band) would otherwise look like
+// 2M × 2KB (4 GB → Small) and never match a 16 GB Medium-band history.
+//
+// With UncappedAvgRowBytes populated, the classifier uses it; both
+// runs land in Medium and the regime gate accepts.
+func TestClassifyRegime_UncappedAvgRowBytesUsedForBand(t *testing.T) {
+	// Both current and history are 2M × 8KB = 16 GB → Medium band.
+	current := Input{
+		CPUCores: 16, MemoryGB: 48,
+		TotalRows:           2_000_000,
+		AvgRowBytes:         2000, // capped value
+		UncappedAvgRowBytes: 8000, // real value
+	}
+	hist := HistoryRecord{
+		CPUCores: 16, MemoryGB: 48,
+		TotalRows:           2_000_000,
+		AvgRowBytes:         2000,
+		UncappedAvgRowBytes: 8000,
+	}
+	label, deltas := ClassifyRegime(hist, current, DBTuning{})
+	if label != RegimeSame {
+		t.Errorf("wide-row workloads at same uncapped size should share band; got %q deltas=%v",
+			label, deltas)
+	}
+
+	// Sanity check: dropping UncappedAvgRowBytes on the history side
+	// falls back to AvgRowBytes (capped). 2M × 2KB = 4 GB lands in
+	// Small, while current 2M × 8KB = 16 GB lands in Medium → different
+	// workload. That's the under-band bias documented as the
+	// conservative failure mode for un-backfilled history rows.
+	histLegacy := hist
+	histLegacy.UncappedAvgRowBytes = 0
+	label2, _ := ClassifyRegime(histLegacy, current, DBTuning{})
+	if label2 != RegimeDifferentWorkload {
+		t.Errorf("history without uncapped value should fall back to capped (Small) and mismatch current (Medium); got %q",
+			label2)
+	}
+}
+
 // TestClassifyRegime_SkewSecondaryGate verifies the #214 secondary
 // axis fires only when the primary band agrees. Two runs at the same
 // band but with very different skew distributions are classified
