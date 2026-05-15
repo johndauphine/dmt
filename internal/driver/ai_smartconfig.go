@@ -32,6 +32,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"runtime"
@@ -273,21 +274,21 @@ type AITuningRecord struct {
 // tuner doesn't need them. PR2 added forceExplore + exploreMode for the
 // exploration policy in internal/tuning (#179).
 type SmartConfigAnalyzer struct {
-	db                  *sql.DB
-	dbType              string
-	targetDBType        string
-	targetMode          string
-	suggestions         *SmartConfigSuggestions
-	historyProvider     TuningHistoryProvider
-	maxMemoryMB         int64
-	pendingSave         *pendingTuningSave
-	currentTuning       DBTuningSnapshot
-	forceExplore        bool        // mirrors cfg.Migration.Explore
-	exploreMode         string      // mirrors cfg.Migration.ExploreMode
-	targetProbe         TargetProbe // populated via SetTargetProbe (#166)
-	uncappedAvgRowBytes      int64 // pre-cap average row size from sampled tables (#166)
-	maxSampledRowBytes       int64 // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
-	largestSampledTableBytes int64 // max RowCount × AvgRowSizeBytes across ALL tables (#214) — feeds skew-tier classifier; iterating LargestTables[:5] alone would miss a wide-row low-row-count outlier
+	db                       *sql.DB
+	dbType                   string
+	targetDBType             string
+	targetMode               string
+	suggestions              *SmartConfigSuggestions
+	historyProvider          TuningHistoryProvider
+	maxMemoryMB              int64
+	pendingSave              *pendingTuningSave
+	currentTuning            DBTuningSnapshot
+	forceExplore             bool        // mirrors cfg.Migration.Explore
+	exploreMode              string      // mirrors cfg.Migration.ExploreMode
+	targetProbe              TargetProbe // populated via SetTargetProbe (#166)
+	uncappedAvgRowBytes      int64       // pre-cap average row size from sampled tables (#166)
+	maxSampledRowBytes       int64       // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
+	largestSampledTableBytes int64       // max RowCount × AvgRowSizeBytes across ALL tables (#214) — feeds skew-tier classifier; iterating LargestTables[:5] alone would miss a wide-row low-row-count outlier
 
 	// tableNameFilter restricts Analyze to a caller-supplied set of table
 	// names (#241). The orchestrator applies include/exclude filters
@@ -517,14 +518,14 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 // adding the exploration fields from the analyzer's configured state.
 func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 	return tuning.Input{
-		CPUCores:          in.CPUCores,
-		MemoryGB:          in.MemoryGB,
-		AvailableMemoryMB: in.AvailableMemoryMB,
-		MaxMemoryMB:       in.MaxMemoryMB,
-		Platform:          in.Platform,
-		SourceDBType:      in.DatabaseType,
-		TargetDBType:      in.TargetType,
-		TargetMode:        in.TargetMode,
+		CPUCores:            in.CPUCores,
+		MemoryGB:            in.MemoryGB,
+		AvailableMemoryMB:   in.AvailableMemoryMB,
+		MaxMemoryMB:         in.MaxMemoryMB,
+		Platform:            in.Platform,
+		SourceDBType:        in.DatabaseType,
+		TargetDBType:        in.TargetType,
+		TargetMode:          in.TargetMode,
 		TotalTables:         in.TotalTables,
 		TotalRows:           in.TotalRows,
 		AvgRowBytes:         in.AvgRowBytes,
@@ -676,7 +677,15 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			// add the column); historical rows leave it zero, which the
 			// regime classifier treats as "unknown skew" — neutral on
 			// the secondary axis rather than mismatching every input.
-			FinalThroughput:         r.FinalThroughput,
+			FinalThroughput: r.FinalThroughput,
+			// FinalThroughputBytes is the bytes/sec form the regression
+			// trains on (#224). rows/sec stays the canonical persisted
+			// value (existing ai_tuning_history rows + non-regression
+			// consumers); the multiplication happens here, at the single
+			// adapter boundary, so a pre-#215 row with AvgRowSizeBytes==0
+			// gets the safeAvgRowBytes fallback consistently with the
+			// rest of the tuning pipeline.
+			FinalThroughputBytes:    throughputBytesForHistory(r.FinalThroughput, r.AvgRowSizeBytes),
 			ChunkRetryCount:         r.ChunkRetryCount,
 			CPUCores:                r.CPUCores,
 			MemoryGB:                r.MemoryGB,
@@ -703,6 +712,33 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 		})
 	}
 	return out, nil
+}
+
+// throughputBytesForHistory converts a persisted rows/sec value into
+// the bytes/sec form the regression trains on, guarding the cast
+// against the pathological inputs that would otherwise produce
+// undefined int64 values (Copilot review on PR #289):
+//
+//   - FinalThroughput ≤ 0 (incomplete or corrupt run): return 0 so
+//     the row is dropped at the regression's FinalThroughput-positive
+//     filter anyway, and the bytes field doesn't carry a meaningless
+//     negative int64 in the meantime.
+//   - NaN: `x > 0` is false for NaN, caught by the same branch.
+//   - +Inf: caught explicitly via the IsInf check before multiply, so
+//     the multiplication doesn't produce another +Inf that overflows
+//     the int64 cast.
+//   - Cap at math.MaxInt64 just in case the multiplied float is past
+//     the int64 range (a hypothetical 10²⁰ bytes/s, which couldn't
+//     happen in practice but doesn't cost us to guard).
+func throughputBytesForHistory(throughputRowsPerSec float64, avgRowBytes int64) int64 {
+	if !(throughputRowsPerSec > 0) || math.IsInf(throughputRowsPerSec, 0) {
+		return 0
+	}
+	bytes := throughputRowsPerSec * float64(tuning.SafeAvgRowBytes(avgRowBytes))
+	if bytes >= float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(bytes)
 }
 
 // applyTuningOutput copies the tuner's recommendations onto the

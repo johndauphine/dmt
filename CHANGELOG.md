@@ -43,6 +43,23 @@ All notable changes to this project will be documented in this file.
   field fall through as `skewUnknown` — neutral on the secondary
   axis until they get backfilled.
 
+- **Regression predicts bytes/sec, not rows/sec** (#224). The
+  deterministic tuner's quadratic regression in
+  `internal/tuning/regression.go` now trains on
+  `HistoryRecord.FinalThroughputBytes` (rows/sec × avg_row_bytes,
+  populated by the smartconfig adapter with the existing
+  `safeAvgRowBytes` fallback). Aligns the dependent variable with
+  the chunk_size_bytes input feature, drops the dual role
+  `log(avg_row_bytes)` was playing as an implicit unit conversion,
+  and should measurably improve cross-workload R² in Tier 2.
+  Within-workload Tier 1 R² is unchanged (linear y rescaling). The
+  reasoning log now reads "predicted 537 MB/s [95% CI: 412 MB/s–663
+  MB/s]" via a new `formatBytesPerSec` helper that picks GB/s for
+  ≥1 GB/s rates. Other readers of `FinalThroughput` (filterOutliers,
+  smoothed-bins aggregator, regime_drift, selectWAW) stay in
+  rows/sec — they're within-workload comparators where rows/sec is
+  the natural unit.
+
 ### Added
 
 - **AI fallback observability** (#176). Every AI-fallback call site
