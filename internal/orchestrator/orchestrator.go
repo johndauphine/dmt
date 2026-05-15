@@ -216,6 +216,15 @@ type StatusResult struct {
 	TablesFailed    int       `json:"tables_failed"`
 	RowsTransferred int64     `json:"rows_transferred"`
 	ProgressPercent float64   `json:"progress_percent"`
+
+	// AIFallbacks reports per-surface AI fallback counts for the run
+	// referenced by RunID (#176). Keys are observability.Surface* values
+	// (typemap | ddl | errordiag). Omitted from JSON when empty so the
+	// no-fallback case stays clean. Source is the checkpoint backend
+	// (SQLite or YAML/FileState), so a separate-process `dmt status`
+	// poll sees the running migration's counts. Rows persist until
+	// CleanupOldRuns purges them with the rest of the run-scoped state.
+	AIFallbacks map[string]int64 `json:"ai_fallbacks,omitempty"`
 }
 
 // HealthCheckResult contains connection health information and preflight
@@ -631,6 +640,18 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		"phase":     "starting",
 	})
 	o.metrics.RunStarted(runID, o.sourcePool.DBType(), o.targetPool.DBType())
+	// Clear any AI-fallback counts left over from a prior run in the
+	// same process (TUI, sidecar) so this run's `dmt status` numbers
+	// reflect *this* run only. Prometheus counters are intentionally
+	// monotonic and are not cleared here (#176).
+	observability.ResetFallbackState()
+	// Register a checkpoint-backed sink so RecordFallback writes also
+	// land in the state file. Cross-process `dmt status` reads from
+	// the state file, so without persistence the Airflow polling case
+	// (separate-process status) would always see empty (#176, codex
+	// review).
+	observability.SetFallbackSink(newFallbackSink(o.state, runID))
+	defer observability.SetFallbackSink(nil)
 	defer logging.ClearBaseAttrs()
 	defer o.metrics.RunComplete(runID)
 
@@ -1271,6 +1292,12 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		"phase":     "starting",
 	})
 	o.metrics.RunStarted(run.ID, o.sourcePool.DBType(), o.targetPool.DBType())
+	// Same per-process counter reset as Run() (#176). A resume is a new
+	// status window — counts from the original Run() call live in the
+	// Prometheus counter and audit log, not in the per-process map.
+	observability.ResetFallbackState()
+	observability.SetFallbackSink(newFallbackSink(o.state, run.ID))
+	defer observability.SetFallbackSink(nil)
 	defer logging.ClearBaseAttrs()
 	defer o.metrics.RunComplete(run.ID)
 

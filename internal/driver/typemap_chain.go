@@ -28,6 +28,7 @@ import (
 	"fmt"
 
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/typemap"
 )
 
@@ -136,6 +137,8 @@ func (c *FallbackChain) MapType(info TypeInfo) string {
 	if canonical.Kind == typemap.KindRaw {
 		if c.fallback != nil {
 			logging.Debug("typemap chain: routing Raw type %q to AI fallback", info.DataType)
+			observability.RecordFallback(observability.SurfaceTypemap,
+				fmt.Sprintf("%s:%s", info.SourceDBType, info.DataType))
 			return c.fallback.MapType(info)
 		}
 		return c.handleUnmapped(info)
@@ -205,6 +208,7 @@ func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLReques
 		if c.fallback != nil {
 			if tableMapper, ok := c.fallback.(TableTypeMapper); ok {
 				logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback (Raw columns: %v)", rawCols)
+				observability.RecordFallback(observability.SurfaceDDL, "raw_columns")
 				return tableMapper.GenerateTableDDL(ctx, req)
 			}
 		}
@@ -225,6 +229,7 @@ func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLReques
 		if c.approxAction == ApproxActionAIFallback && c.fallback != nil {
 			if tableMapper, ok := c.fallback.(TableTypeMapper); ok {
 				logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback (approx columns: %v)", approxCols)
+				observability.RecordFallback(observability.SurfaceDDL, "approx_columns")
 				return tableMapper.GenerateTableDDL(ctx, req)
 			}
 		}
@@ -263,6 +268,7 @@ func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLReques
 		return nil, fmt.Errorf("deterministic GenerateTableDDL failed (%w) and AI fallback doesn't implement TableTypeMapper", err)
 	}
 	logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback after deterministic error: %v", err)
+	observability.RecordFallback(observability.SurfaceDDL, "table_ddl_error")
 	return tableMapper.GenerateTableDDL(ctx, req)
 }
 
@@ -358,6 +364,7 @@ func (c *FallbackChain) GenerateFinalizationDDL(ctx context.Context, req Finaliz
 		return "", fmt.Errorf("deterministic flagged unsupported DDL (%w) and AI fallback doesn't implement FinalizationDDLMapper", err)
 	}
 	logging.Debug("typemap chain: routing %s DDL to AI fallback (deterministic flagged unsupported)", req.Type)
+	observability.RecordFallback(observability.SurfaceDDL, "finalization:"+string(req.Type))
 	return finalMapper.GenerateFinalizationDDL(ctx, req)
 }
 

@@ -63,6 +63,29 @@ type StateBackend interface {
 	// FULL ai_tuning_history. Same rationale as GetAITuningAggregatesByWaw.
 	GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error)
 	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
+
+	// AI fallback events (#176). UPSERT semantics: each call bumps the
+	// count for (run_id, surface, fingerprint). The file backend is the
+	// Airflow-friendly path and must persist these so a separate
+	// ``dmt status'' poll sees the running migration's counters; the
+	// SQLite backend covers the same need for TUI / desktop use.
+	SaveFallbackEvent(runID, surface, fingerprint string) error
+	GetFallbackEventsByRun(runID string) ([]FallbackEventRecord, error)
+}
+
+// FallbackEventRecord is one (run, surface, fingerprint) row from
+// fallback_events. Surface is one of observability.Surface* values
+// (typemap | ddl | errordiag). Count is the number of times that
+// exact fingerprint fired during the run. Fingerprint is "" for
+// call sites that pass no fingerprint (the counter still aggregates
+// under one row for that surface).
+type FallbackEventRecord struct {
+	RunID       string    `json:"run_id"`
+	Surface     string    `json:"surface"`
+	Fingerprint string    `json:"fingerprint"`
+	Count       int64     `json:"count"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
 }
 
 // PartitionProgressSummary summarizes saved progress across a table's

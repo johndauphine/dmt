@@ -10,6 +10,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/driver/errordiag"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/observability"
 )
 
 // LookupDeterministicDiagnosis returns a diagnosis if the target driver's
@@ -54,7 +55,9 @@ func DiagnoseError(ctx context.Context, errCtx *ErrorContext) *ErrorDiagnosis {
 
 	if diag, pattern := LookupDeterministicDiagnosis(errCtx.TargetDBType, errCtx.ErrorMessage); diag != nil {
 		logging.Debug("error diagnosis: deterministic match pattern=%q", pattern)
-		// TODO(#176): record observability event {surface: "errordiag", source: "deterministic", pattern}.
+		// Deterministic match — no fallback fired, nothing to record.
+		// The errordiag fallback counter only fires on the unmatched
+		// path below (#176 — surface is a catalog-growth signal).
 		return diag
 	}
 
@@ -68,7 +71,16 @@ func DiagnoseError(ctx context.Context, errCtx *ErrorContext) *ErrorDiagnosis {
 	prefix, hash := errorFingerprint(errCtx.ErrorMessage)
 	logging.Debug("error diagnosis: no deterministic pattern for driver=%q prefix=%q hash=%s",
 		Canonicalize(errCtx.TargetDBType), prefix, hash)
-	// TODO(#176): record observability event {surface: "errordiag", source: "unmatched", hash, prefix}.
+	// Persist only the normalized (driver, scrubbed prefix) pair —
+	// the SHA-256 hash is row-message-specific and a bulk load that
+	// fails on 10K rows would produce one fingerprint per row,
+	// exploding fallback_events. The prefix is already scrubbed and
+	// rune-truncated upstream, so it groups the same catalog gap
+	// across distinct row values. The hash stays in the debug log
+	// for "we saw this exact message N times" forensics where the
+	// row content is acceptable to retain (codex review on #176).
+	observability.RecordFallback(observability.SurfaceErrordiag,
+		fmt.Sprintf("%s|%s", Canonicalize(errCtx.TargetDBType), prefix))
 
 	return noDiagnosisAvailable()
 }

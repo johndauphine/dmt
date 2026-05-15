@@ -11,6 +11,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **AI fallback observability** (#176). Every AI-fallback call site
+  (column- and table-level type mapping, finalization DDL, errordiag
+  catalog miss) now flows through `observability.RecordFallback`,
+  which fans an event out to three surfaces in lockstep: the existing
+  `dmt_ai_fallback_total{surface=...}` Prometheus counter (#229), an
+  in-process counter for the running migration, and a new per-run
+  `fallback_events` row on both the SQLite and YAML/FileState
+  checkpoint backends. Persisting to the backend means a separate-
+  process `dmt status` poll (Airflow's documented workflow) sees the
+  running migration's counts. UPSERT keys are
+  `(run_id, surface, fingerprint)` so a 10K-Raw-column migration
+  produces O(distinct types) rows, not O(occurrences). Errordiag
+  fingerprints are normalized to `driver|scrubbed_prefix` (the
+  SHA-256 hash stays in the debug log) so a bulk load that fails
+  on row-specific error details doesn't explode the table. The
+  detailed-status view sorts fingerprints by count and caps the
+  inline display at 10 with an "and N more" suffix.
+  `CleanupOldRuns` purges the new table alongside the rest of the
+  run-scoped state.
+
 - **Setup wizard prompts for Slack webhook URL** (#281). New Phase 1b
   step (`StepSlackWebhook`) interposes between the AI prompts and the
   Phase 2 source database configuration. Runs unconditionally — the

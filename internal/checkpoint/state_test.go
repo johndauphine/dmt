@@ -60,6 +60,10 @@ func TestCleanupOldRuns(t *testing.T) {
 		if _, err := state.db.Exec(`INSERT INTO task_outputs (task_id, key, value) VALUES (?, ?, ?)`, taskID, "k", "v"); err != nil {
 			t.Fatalf("insert task_outputs(%s) error: %v", runID, err)
 		}
+		// One fallback event per run so cleanup has something to purge.
+		if err := state.SaveFallbackEvent(runID, "typemap", "postgres:inet"); err != nil {
+			t.Fatalf("SaveFallbackEvent(%s) error: %v", runID, err)
+		}
 	}
 
 	deleted, err := state.CleanupOldRuns(30)
@@ -84,6 +88,12 @@ func TestCleanupOldRuns(t *testing.T) {
 	}
 	if got := countRows(t, state.db, `SELECT COUNT(*) FROM task_outputs`); got != 2 {
 		t.Fatalf("task_outputs remaining = %d, want 2", got)
+	}
+	// #176: cleanup must purge fallback_events for old runs even
+	// though SQLite foreign-key cascade isn't enabled on this connection
+	// (codex review).
+	if got := countRows(t, state.db, `SELECT COUNT(*) FROM fallback_events`); got != 2 {
+		t.Fatalf("fallback_events remaining = %d, want 2 (one per surviving run)", got)
 	}
 }
 
