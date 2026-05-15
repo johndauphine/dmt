@@ -33,18 +33,72 @@ const hardwareMemoryTolerancePct = 80
 // regime change).
 const dbTuningSizeTolerancePct = 10
 
-// workloadRowsToleranceRatio is the max ratio between historical and
-// current TotalRows before the row is treated as different_workload.
-// 3× is loose enough that week-over-week table growth doesn't trip it
-// (a 25% week-over-week grower takes ~5 weeks to exceed 3×); tight enough
-// that a 19M-row vs 106M-row mix-up (the #198 repro: 5.5×) is caught.
-const workloadRowsToleranceRatio = 3.0
+// Physical-regime bands by total bytes (rows × avg_row_bytes). Replaces
+// the original ratio-based row-count/avg-row-bytes thresholds (#214)
+// because ratios get the danger zone wrong: 1M→3M is the same ratio as
+// 30M→90M but very different physics, and there's a discontinuity at
+// the threshold (100M vs 305M flags; 100M vs 295M doesn't). What
+// actually drives the throughput surface is the physical regime — does
+// it fit in RAM, in the target buffer pool, in page cache, or does it
+// spill to disk on one or both sides.
+//
+// Boundaries are decimal multiples (10^9 for GB, 10^12 for TB), aligned
+// with the typical buffer-pool / page-cache sizing on the hardware dmt
+// targets (8–256 GB RAM hosts). The cost-cliff physics the bands model
+// (buffer-pool size, page-cache spill, disk-bound regime) is order-of-
+// magnitude, so decimal vs binary doesn't change which cliff a workload
+// sits behind. Two runs with the same band are comparable on the
+// workload axis regardless of how their raw row counts compare.
+const (
+	bandTinyMaxBytes   int64 = 100 * 1000 * 1000         // 100 MB
+	bandSmallMaxBytes  int64 = 10 * 1000 * 1000 * 1000   // 10 GB
+	bandMediumMaxBytes int64 = 100 * 1000 * 1000 * 1000  // 100 GB
+	bandLargeMaxBytes  int64 = 1000 * 1000 * 1000 * 1000 // 1 TB
+)
 
-// workloadAvgRowBytesToleranceRatio is the equivalent ratio for
-// AvgRowBytes. 2× catches schema swaps (a wide row-size shift signals
-// a different table mix) while still tolerating the natural variance
-// across tables within one dataset.
-const workloadAvgRowBytesToleranceRatio = 2.0
+// Workload bands (#214). Returned via the regime delta string for
+// diagnostics; not exported because no caller outside this package
+// needs to switch on them.
+const (
+	bandTiny    = "tiny"    // < 100 MB — fits any RAM, network-bound
+	bandSmall   = "small"   // 100 MB – 10 GB — fits target buffer pool
+	bandMedium  = "medium"  // 10 GB – 100 GB — spills target page cache
+	bandLarge   = "large"   // 100 GB – 1 TB — spills to disk both sides
+	bandHuge    = "huge"    // > 1 TB — streaming-only, network bottleneck
+	bandUnknown = "unknown" // missing total_rows or avg_row_bytes
+)
+
+// Skew tiers (#214) bucket largest_table_bytes / total_bytes. The
+// secondary axis: a 100 GB dataset with one 90 GB table runs very
+// differently from a 100 GB dataset with 200 evenly-sized tables
+// (parallel-readers utilization, head-of-line blocking).
+const (
+	skewEven     = "evenly_distributed" // largest < 25% of total
+	skewSkewed   = "skewed"             // 25% – 75%
+	skewDominant = "dominant"           // > 75%
+	skewUnknown  = "unknown"            // largest table size not recorded
+)
+
+const (
+	skewEvenMaxPct   = 0.25
+	skewSkewedMaxPct = 0.75
+)
+
+// Count tiers (#214) bucket TotalTables. The tertiary axis — used only
+// when band and skew also agree. A 50-table migration and a 5-table
+// migration of the same total-bytes can still differ in DDL overhead,
+// connection-pool pressure, and scheduling cost.
+const (
+	countFew     = "few"     // < 10
+	countMany    = "many"    // 10 – 100
+	countMassive = "massive" // > 100
+	countUnknown = "unknown" // TotalTables not recorded
+)
+
+const (
+	countFewMax  = 10
+	countManyMax = 100
+)
 
 // ClassifyRegime decides which similarity bucket a historical row falls
 // into relative to the current run's host + DB-tuning context. Returns
@@ -102,31 +156,67 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 	addStr("pg_wal_level", history.TargetWALLevel, currentTuning.TargetWALLevel)
 	addSize("mssql_max_server_memory", history.SourceMaxServerMemoryMB, currentTuning.SourceMaxServerMemoryMB, dbTuningSizeTolerancePct)
 
-	// Workload-population check (#198). Rows whose dataset shape differs
-	// materially from the current run are dropped: their throughput-vs-
-	// config surface fits a different operating regime (a 40s migration
-	// is dominated by startup overhead; a 5m migration is dominated by
-	// transfer cost). When workload differs, we return DifferentWorkload
-	// alone — the combo with hw/tuning is intentionally collapsed because
-	// filterByRegime drops any of these outcomes, and the per-axis detail
-	// is preserved in the deltas slice for diagnostics.
+	// Workload-population check (#198 / #214). Rows whose dataset shape
+	// differs materially from the current run are dropped: their
+	// throughput-vs-config surface fits a different operating regime
+	// (a 40s migration is dominated by startup overhead; a 5m migration
+	// is dominated by transfer cost). When workload differs, we return
+	// DifferentWorkload alone — the combo with hw/tuning is intentionally
+	// collapsed because filterByRegime drops any of these outcomes, and
+	// the per-axis detail is preserved in the deltas slice for
+	// diagnostics.
+	//
+	// #214 replaced the original per-field ratio gate (3× rows, 2× avg
+	// row bytes) with bucket gating on derived metrics. Ratios were the
+	// wrong shape — same ratio in different regimes has different physics
+	// (1M→3M ≠ 30M→90M), and there's a discontinuity at the threshold
+	// (100M and 305M flag; 100M and 295M don't). Bands on total_bytes
+	// align with the actual cost cliffs (fits-in-RAM, fits-in-page-
+	// cache, spills-to-disk) so they remain stable through smooth
+	// dataset growth and fire only when a real regime boundary crosses.
+	// Use the uncapped row size when the caller computed it (Copilot
+	// fix on PR #288). AvgRowBytes is capped at 2KB by the smartconfig
+	// analyzer for memory-budget math; using the capped value for
+	// regime classification would mis-bucket wide-row workloads (8KB
+	// rows → looks like 2KB rows → undercount total_bytes → wrong
+	// band). Historical rows don't carry the uncapped value yet
+	// (persistence migration is deferred), so they fall back to
+	// AvgRowBytes — conservative bias for wide-row history (under-band)
+	// reduces false-positive matches, which is the safer failure mode.
 	workloadDiffer := false
-	addRatio := func(label string, hist, curr int64, maxRatio float64) {
-		if hist <= 0 || curr <= 0 {
-			return
-		}
-		lo, hi := hist, curr
-		if lo > hi {
-			lo, hi = hi, lo
-		}
-		if float64(hi)/float64(lo) <= maxRatio {
-			return
-		}
+	histAvg := effectiveAvgRowBytes(history.UncappedAvgRowBytes, history.AvgRowBytes)
+	currAvg := effectiveAvgRowBytes(current.UncappedAvgRowBytes, current.AvgRowBytes)
+	histBand := workloadBand(history.TotalRows, histAvg)
+	currBand := workloadBand(current.TotalRows, currAvg)
+	if histBand != bandUnknown && currBand != bandUnknown && histBand != currBand {
 		workloadDiffer = true
-		deltas = append(deltas, fmt.Sprintf("%s: %d→%d", label, hist, curr))
+		deltas = append(deltas, fmt.Sprintf("workload_band: %s→%s", histBand, currBand))
 	}
-	addRatio("total_rows", history.TotalRows, current.TotalRows, workloadRowsToleranceRatio)
-	addRatio("avg_row_bytes", history.AvgRowBytes, current.AvgRowBytes, workloadAvgRowBytesToleranceRatio)
+
+	// Secondary axis: skew tier. Only consulted when the primary band
+	// matches (or one side is unknown); a mismatched band already gates
+	// the row out, and stacking deltas there is just noise.
+	if !workloadDiffer {
+		histSkew := skewTier(history.LargestTableBytes, totalBytes(history.TotalRows, histAvg))
+		currSkew := skewTier(current.LargestTableBytes, totalBytes(current.TotalRows, currAvg))
+		if histSkew != skewUnknown && currSkew != skewUnknown && histSkew != currSkew {
+			workloadDiffer = true
+			deltas = append(deltas, fmt.Sprintf("workload_skew: %s→%s", histSkew, currSkew))
+		}
+	}
+
+	// Tertiary axis: table-count tier. Only consulted when band and
+	// skew both agree (or skew is unknown on either side) — DDL/
+	// scheduling cost is a smaller perturbation than the physical-
+	// regime cliff or the skew distribution.
+	if !workloadDiffer {
+		histCount := countTier(history.TotalTables)
+		currCount := countTier(current.TotalTables)
+		if histCount != countUnknown && currCount != countUnknown && histCount != currCount {
+			workloadDiffer = true
+			deltas = append(deltas, fmt.Sprintf("workload_count: %s→%s", histCount, currCount))
+		}
+	}
 
 	switch {
 	case workloadDiffer:
@@ -139,6 +229,92 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 		return RegimeDifferentTuning, deltas
 	default:
 		return RegimeSame, nil
+	}
+}
+
+// effectiveAvgRowBytes returns the row-size value the band classifier
+// should multiply against TotalRows: prefer the uncapped value when
+// populated, fall back to the capped one. The cap (2KB, applied in
+// the smartconfig analyzer for memory-budget math) understates total
+// bytes for wide-row workloads — using it for regime classification
+// would mis-bucket an 8KB-row migration as Small instead of Medium.
+// Zero on both sides falls through to bandUnknown (caller short-
+// circuits the gate).
+func effectiveAvgRowBytes(uncapped, capped int64) int64 {
+	if uncapped > 0 {
+		return uncapped
+	}
+	return capped
+}
+
+// totalBytes computes the physical dataset size used for workload-band
+// classification (#214). Returns 0 when either input is non-positive so
+// the caller can fall through to "unknown band" rather than coalescing
+// a missing field with a tiny-dataset.
+func totalBytes(rows, avgRowBytes int64) int64 {
+	if rows <= 0 || avgRowBytes <= 0 {
+		return 0
+	}
+	return rows * avgRowBytes
+}
+
+// workloadBand returns the bucket label for the given dataset
+// dimensions. Returns bandUnknown when total_bytes can't be computed —
+// pre-#214 callers and tests that don't set both fields fall through
+// to this case and the regime classifier skips the workload axis for
+// that comparison.
+func workloadBand(rows, avgRowBytes int64) string {
+	tb := totalBytes(rows, avgRowBytes)
+	if tb <= 0 {
+		return bandUnknown
+	}
+	switch {
+	case tb < bandTinyMaxBytes:
+		return bandTiny
+	case tb < bandSmallMaxBytes:
+		return bandSmall
+	case tb < bandMediumMaxBytes:
+		return bandMedium
+	case tb < bandLargeMaxBytes:
+		return bandLarge
+	default:
+		return bandHuge
+	}
+}
+
+// skewTier returns the bucket label for largest_table_bytes / total_bytes.
+// Returns skewUnknown when either input is non-positive — pre-#214
+// callers don't have a recorded largest-table size and we don't want
+// to treat zero as "evenly distributed."
+func skewTier(largestTableBytes, totalBytes int64) string {
+	if largestTableBytes <= 0 || totalBytes <= 0 {
+		return skewUnknown
+	}
+	pct := float64(largestTableBytes) / float64(totalBytes)
+	switch {
+	case pct < skewEvenMaxPct:
+		return skewEven
+	case pct < skewSkewedMaxPct:
+		return skewSkewed
+	default:
+		return skewDominant
+	}
+}
+
+// countTier returns the bucket label for total table count. Returns
+// countUnknown when the count is non-positive so pre-#214 rows that
+// didn't persist a count don't false-trip the tertiary gate.
+func countTier(tableCount int) string {
+	if tableCount <= 0 {
+		return countUnknown
+	}
+	switch {
+	case tableCount < countFewMax:
+		return countFew
+	case tableCount <= countManyMax:
+		return countMany
+	default:
+		return countMassive
 	}
 }
 

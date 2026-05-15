@@ -37,7 +37,25 @@ type Input struct {
 	TargetMode   string // "drop_recreate" | "upsert"
 	TotalTables  int
 	TotalRows    int64
-	AvgRowBytes  int64
+	AvgRowBytes  int64 // capped at 2000B for memory-budget math
+
+	// UncappedAvgRowBytes is the pre-cap average row size in bytes
+	// (#214 Copilot fix on PR #288). ClassifyRegime reads this for
+	// total-bytes band classification so wide-row workloads land in
+	// the right band — using AvgRowBytes alone would mis-bucket an
+	// 8KB-row workload as Small because the 2KB cap shrinks
+	// `rows × avg_row_bytes` below the band boundary. Zero falls back
+	// to AvgRowBytes (callers that don't compute it separately keep
+	// the pre-#214 behavior).
+	UncappedAvgRowBytes int64
+
+	// LargestTableBytes is the size of the single largest table in the
+	// source dataset, used by ClassifyRegime (#214) to assign a skew tier
+	// (EvenlyDistributed / Skewed / Dominant). Zero short-circuits the
+	// skew gate as "unknown" on this side — callers that don't populate
+	// it skip the skew axis for that comparison rather than mismatching
+	// every current input.
+	LargestTableBytes int64
 
 	// Workload identity (#215). Together these form the tuple the
 	// Tier 1 exact-identity classifier uses to find historically-
@@ -159,16 +177,36 @@ type HistoryRecord struct {
 	// AvgRowBytes is the avg_row_size_bytes the analyzer recorded for
 	// the migration that produced this row. Used by PR2's regression to
 	// derive chunk_size in bytes (chunk_rows × avg_row_bytes) for the
-	// quadratic CS feature.
+	// quadratic CS feature. Capped at 2KB by the smartconfig analyzer.
 	AvgRowBytes int64
 
+	// UncappedAvgRowBytes is the pre-cap row size (Copilot fix on PR
+	// #288). Mirrors tuning.Input — ClassifyRegime prefers this for
+	// band classification when set. Not persisted to ai_tuning_history
+	// yet (separate schema migration); pre-#214 rows leave it zero and
+	// the classifier falls back to AvgRowBytes.
+	UncappedAvgRowBytes int64
+
 	// TotalRows is the row count of the dataset this run migrated.
-	// Used by ClassifyRegime (#198) to drop rows from datasets materially
-	// different in size from the current run — without this filter, a
-	// 19M-row dataset and a 106M-row dataset classify as the same regime,
-	// contaminating the regression's training set with rows from a
-	// different operating point.
+	// Used by ClassifyRegime (#198, #214) to assign a total-bytes band
+	// (Tiny / Small / Medium / Large / Huge) together with AvgRowBytes;
+	// rows in a different band are dropped from the regression's
+	// training set.
 	TotalRows int64
+
+	// TotalTables is the number of tables this run migrated. Used by
+	// ClassifyRegime (#214) as the tertiary axis (Few / Many / Massive).
+	// Zero is treated as "unknown" — pre-#214 rows leave this empty and
+	// classify as a single (current) tier so they aren't excluded on
+	// the count axis alone.
+	TotalTables int
+
+	// LargestTableBytes is the size of the largest table this run
+	// migrated. Used by ClassifyRegime (#214) for the secondary skew
+	// axis (EvenlyDistributed / Skewed / Dominant). Zero is treated as
+	// "unknown" — pre-#214 rows didn't persist this so they fall into
+	// a neutral skew tier rather than mismatching every current input.
+	LargestTableBytes int64
 
 	// What happened
 	FinalThroughput float64

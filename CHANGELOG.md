@@ -24,6 +24,25 @@ All notable changes to this project will be documented in this file.
   narrow tables that DO ship. The `analyze` CLI subcommand keeps its
   pre-#241 unscoped behavior (no filter context to apply).
 
+- **Physical-regime buckets for ClassifyRegime** (#214). Replaces the
+  per-field ratio gates (3× total_rows, 2× avg_row_bytes) the
+  workload-similarity check used to drop historical rows from the
+  regression's training set. Three-axis bucket gating now applies:
+  total-bytes band (Tiny < 100 MB / Small < 10 GB / Medium < 100 GB
+  / Large < 1 TB / Huge), then largest-table-share skew tier, then
+  total-table-count tier. Each axis only triggers when the higher
+  axis matches and either side has a defined value. Fixes the two
+  failure modes the ratios produced: the boundary discontinuity
+  (100M and 305M rows artificially partitioned even though they're
+  on the same physical cliff) and the asymmetry (1M→3M and 30M→90M
+  have the same ratio but very different physics).
+  `LargestTableBytes` and `TotalTables` are added to the
+  `tuning.HistoryRecord` IR for the new axes; persistence of
+  `LargestTableBytes` to `ai_tuning_history` is deferred to a
+  follow-up schema migration. Historical rows that don't carry the
+  field fall through as `skewUnknown` — neutral on the secondary
+  axis until they get backfilled.
+
 ### Added
 
 - **AI fallback observability** (#176). Every AI-fallback call site
