@@ -804,6 +804,15 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 	if !strings.Contains(out.Reasoning, "regression-selected") {
 		t.Errorf("Reasoning should record regression tier; got %q", out.Reasoning)
 	}
+	// Negative guard: R²= was removed from the operator-facing reasoning
+	// line because on noisy real workloads it reads structurally low
+	// (~0.13) while regression decisions are near-optimal — operators
+	// thought the tuner was broken. The 95% CI carries the relevant
+	// point-level confidence in units operators understand. If R²= comes
+	// back, this assertion catches the regression.
+	if strings.Contains(out.Reasoning, "R²=") {
+		t.Errorf("Reasoning should not include R²= (removed from operator-facing log); got %q", out.Reasoning)
+	}
 }
 
 // TestApplyHistory_RegressionRefusesUncoveredCubeCorner (#221) pins
