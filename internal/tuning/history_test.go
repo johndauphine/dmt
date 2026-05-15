@@ -383,9 +383,9 @@ func TestCellSkipsInGrid_EmptyInput(t *testing.T) {
 // schema change or corrupted history row shouldn't poison the log.
 func TestCellSkipsInGrid_FiltersOutOfRangeWAW(t *testing.T) {
 	cellSkip := map[retryCellKey]bool{
-		{WAW: 0, ParallelReaders: 2, ReadAheadBuffers: 4}:                  true, // below floor
-		{WAW: maxWAWForGrid + 1, ParallelReaders: 2, ReadAheadBuffers: 4}:  true, // above cap
-		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}:                  true, // in range
+		{WAW: 0, ParallelReaders: 2, ReadAheadBuffers: 4}:                 true, // below floor
+		{WAW: maxWAWForGrid + 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true, // above cap
+		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}:                 true, // in range
 	}
 	got := cellSkipsInGrid(cellSkip)
 	if len(got) != 1 {
@@ -439,6 +439,7 @@ func TestFormatRetryCellSkips_EmptyMapEmitsNone(t *testing.T) {
 //     (the bad combo).
 //   - 10 rows at WAW=2 / PR=2/RAB=4 clean at 800K rows/s
 //     (the current run's reader settings).
+//
 // Expected: smoothed bins picks WAW=2 — it should ignore the PR=4/RAB=8
 // rows because the current run uses PR=2/RAB=4. Pre-fix the contaminated
 // bin's retry rate would have excluded WAW=2 entirely.
@@ -1307,5 +1308,21 @@ func TestFormatPredictionInterval_ZeroPredAllowsAnyHigh(t *testing.T) {
 	got := formatPredictionInterval(0, 0, 25_000_000_000)
 	if strings.Contains(got, "wide") {
 		t.Errorf("pred=0 should bypass relative ratio cap (high < absolute ceiling); got %q", got)
+	}
+}
+
+// TestFormatPredictionInterval_EndpointsShareUnit pins the Copilot
+// fix on PR #289: when the PI straddles the 1 GB/s switchover, both
+// endpoints must render in the same unit. Pre-fix this rendered as
+// "500 MB/s–2.00 GB/s" which makes the range hard to compare. With
+// the upper-bound-driven unit selection it should render in GB/s for
+// both sides.
+func TestFormatPredictionInterval_EndpointsShareUnit(t *testing.T) {
+	got := formatPredictionInterval(1_200_000_000, 500_000_000, 2_000_000_000)
+	if strings.Contains(got, "MB/s") && strings.Contains(got, "GB/s") {
+		t.Errorf("PI endpoints must share a unit; got %q (mixes MB/s and GB/s)", got)
+	}
+	if !strings.Contains(got, "GB/s") {
+		t.Errorf("PI with high ≥ 1 GB/s should render both endpoints in GB/s; got %q", got)
 	}
 }

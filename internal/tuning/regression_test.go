@@ -657,11 +657,13 @@ func TestFormatBytesPerSec_PicksUnit(t *testing.T) {
 		in   float64
 		want string
 	}{
-		{500_000_000, "500 MB/s"},          // typical disk-bound
-		{999_999_999, "1000 MB/s"},         // boundary; %.0f rounds, but stays MB/s
-		{1_000_000_000, "1.00 GB/s"},       // exactly at switchover
-		{2_500_000_000, "2.50 GB/s"},       // fast NVMe
-		{0, "0 MB/s"},                      // zero — render, don't blank
+		{500_000_000, "500 MB/s"},    // typical disk-bound
+		{999_999_999, "1000 MB/s"},   // boundary; %.0f rounds, but stays MB/s
+		{1_000_000_000, "1.00 GB/s"}, // exactly at switchover
+		{2_500_000_000, "2.50 GB/s"}, // fast NVMe
+		{0, "0 MB/s"},                // zero — render, don't blank
+		{-50_000_000, "0 MB/s"},      // Copilot review on PR #289 — negative clamps to 0
+		{-1_500_000_000, "0 MB/s"},   // negative magnitude doesn't matter; still 0
 	}
 	for _, tc := range cases {
 		got := formatBytesPerSec(tc.in)

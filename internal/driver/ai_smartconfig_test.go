@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"math"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/tuning"
@@ -491,5 +492,37 @@ func TestCalculateAvgRowSize_LargestSampledTableBytesUsesAllTables(t *testing.T)
 	if analyzer.largestSampledTableBytes != want {
 		t.Errorf("largestSampledTableBytes = %d, want %d (the tiny_but_wide_archive table; top-5-by-rows must not gate the bytes max)",
 			analyzer.largestSampledTableBytes, want)
+	}
+}
+
+// TestThroughputBytesForHistory_GuardsBadValues pins the Copilot fix
+// on PR #289: the rows/sec → bytes/sec adapter conversion must not
+// feed garbage into the regression's int64 y vector when a persisted
+// row carries a non-positive, NaN, or +Inf throughput value.
+func TestThroughputBytesForHistory_GuardsBadValues(t *testing.T) {
+	cases := []struct {
+		name         string
+		rowsPerSec   float64
+		avgRowBytes  int64
+		wantZero     bool
+		wantPositive bool
+	}{
+		{name: "negative throughput", rowsPerSec: -100, avgRowBytes: 500, wantZero: true},
+		{name: "zero throughput", rowsPerSec: 0, avgRowBytes: 500, wantZero: true},
+		{name: "NaN throughput", rowsPerSec: math.NaN(), avgRowBytes: 500, wantZero: true},
+		{name: "+Inf throughput", rowsPerSec: math.Inf(1), avgRowBytes: 500, wantZero: true},
+		{name: "normal value", rowsPerSec: 500_000, avgRowBytes: 1000, wantPositive: true},
+		{name: "avgRowBytes=0 uses safeAvgRowBytes fallback", rowsPerSec: 1000, avgRowBytes: 0, wantPositive: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := throughputBytesForHistory(tc.rowsPerSec, tc.avgRowBytes)
+			if tc.wantZero && got != 0 {
+				t.Errorf("got %d, want 0 (defensive zero for bad inputs)", got)
+			}
+			if tc.wantPositive && got <= 0 {
+				t.Errorf("got %d, want positive int64", got)
+			}
+		})
 	}
 }

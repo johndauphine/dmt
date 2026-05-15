@@ -304,7 +304,13 @@ func formatPredictionInterval(pred, low, high float64) string {
 	if low < 0 {
 		low = 0
 	}
-	return fmt.Sprintf("%s–%s", formatBytesPerSec(low), formatBytesPerSec(high))
+	// Pick the unit from the upper bound so both endpoints render at
+	// the same scale (Copilot review on PR #289). Without this a PI
+	// of [500 MB/s, 2 GB/s] rendered as "500 MB/s–2.00 GB/s" — same
+	// quantity in mixed units defeats the visual comparison the docs
+	// above promised.
+	unit := bytesPerSecUnit(high)
+	return fmt.Sprintf("%s–%s", formatBytesPerSecAs(low, unit), formatBytesPerSecAs(high, unit))
 }
 
 // formatBytesPerSec renders a bytes/sec value with units the operator
@@ -314,8 +320,35 @@ func formatPredictionInterval(pred, low, high float64) string {
 // with two decimal places rather than collapsing to KB/s — operators
 // care about the order of magnitude more than the last digit, and a
 // uniform unit makes side-by-side comparison easier.
+//
+// Negative inputs are clamped to 0 (Copilot review on PR #289): the
+// regression can predict a negative bytes/sec when poorly conditioned,
+// and "-3 MB/s" in the operator's reasoning log erodes trust without
+// communicating the underlying model-confidence problem any better
+// than "0 MB/s" does (the PI's "wide" marker is the real signal).
 func formatBytesPerSec(bytesPerSec float64) string {
-	if bytesPerSec >= 1_000_000_000 { // >= 1 GB/s
+	if bytesPerSec < 0 {
+		bytesPerSec = 0
+	}
+	return formatBytesPerSecAs(bytesPerSec, bytesPerSecUnit(bytesPerSec))
+}
+
+// bytesPerSecUnit picks "GB/s" or "MB/s" by magnitude. Extracted so
+// formatPredictionInterval can choose one unit for both endpoints.
+func bytesPerSecUnit(bytesPerSec float64) string {
+	if bytesPerSec >= 1_000_000_000 {
+		return "GB/s"
+	}
+	return "MB/s"
+}
+
+// formatBytesPerSecAs formats with a caller-supplied unit. Used by
+// formatPredictionInterval to force matching units across endpoints.
+func formatBytesPerSecAs(bytesPerSec float64, unit string) string {
+	if bytesPerSec < 0 {
+		bytesPerSec = 0
+	}
+	if unit == "GB/s" {
 		return fmt.Sprintf("%.2f GB/s", bytesPerSec/1_000_000_000)
 	}
 	return fmt.Sprintf("%.0f MB/s", bytesPerSec/1_000_000)
