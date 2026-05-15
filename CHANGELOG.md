@@ -22,6 +22,22 @@ All notable changes to this project will be documented in this file.
   only when the operator explicitly sets a mode this session.
   Completes the deferred TUI surface from #179 (PR2).
 
+- **Type cache: partition by source + `cache clear --ai-only`** (#177).
+  The on-disk `~/.dmt/type-cache.json` format now records per-entry
+  provenance (`source`, `model`, `cached_at`) wrapped in a versioned
+  envelope (`{"version": 2, "mappings": {...}}`). Read path is
+  backward-compatible: pre-#177 flat-map files are sniffed and
+  migrated as `source: "ai"` on the next load (defensive — the old
+  code only ever wrote AI mappings). AI write sites (column-level,
+  table DDL, drop DDL) record the current effective model so
+  `dmt cache clear --ai-only` can invalidate after a model upgrade
+  without disturbing other entries. Entries tagged `source:
+  "deterministic"` are bypassed on read as defense-in-depth — the
+  deterministic mapper is the source of truth for those mappings. New
+  CLI: `dmt cache clear` (full wipe) and `dmt cache clear --ai-only`;
+  the file-level helper operates directly on the JSON so the CLI
+  doesn't need an AI provider configured to invalidate.
+
 ### Changed
 
 - **Drop `R²=` from regression-tier reasoning line** (#293). The

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -594,6 +595,201 @@ func TestAITypeMapper_CachePersistence(t *testing.T) {
 	if !ok || val != "varchar(100)" {
 		t.Errorf("expected 'varchar(100)', got '%s'", val)
 	}
+}
+
+// #177: loading a pre-#177 flat-map cache file should migrate each entry
+// into a SourceAI CacheEntry so `cache clear --ai-only` can find them.
+func TestLoadCache_LegacyFlatMapFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheFile := filepath.Join(tmpDir, "type-cache.json")
+
+	// Write the legacy flat-map format directly.
+	legacy := `{"mssql:postgres:int:0:0:0":"integer","mssql:postgres:bit:0:0:0":"boolean"}`
+	if err := os.WriteFile(cacheFile, []byte(legacy), 0600); err != nil {
+		t.Fatalf("seeding legacy cache: %v", err)
+	}
+
+	mapper := &AITypeMapper{
+		providerName: "anthropic",
+		provider:     testProvider("test-key"),
+		cache:        NewTypeMappingCache(),
+		cacheFile:    cacheFile,
+	}
+	if err := mapper.loadCache(); err != nil {
+		t.Fatalf("loadCache: %v", err)
+	}
+
+	if mapper.CacheSize() != 2 {
+		t.Fatalf("expected 2 entries migrated, got %d", mapper.CacheSize())
+	}
+	entries := mapper.cache.AllEntries()
+	for k, e := range entries {
+		if e.Source != SourceAI {
+			t.Errorf("entry %q migrated with Source=%q; want %q (legacy entries should be tagged AI)", k, e.Source, SourceAI)
+		}
+		if e.Result == "" {
+			t.Errorf("entry %q lost Result during migration", k)
+		}
+	}
+}
+
+// #177: round-trip the v2+ on-disk format and verify provenance fields
+// survive save/load.
+func TestSaveLoadCache_V2FormatRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheFile := filepath.Join(tmpDir, "type-cache.json")
+
+	src := &AITypeMapper{
+		providerName: "anthropic",
+		provider:     testProvider("test-key"),
+		cache:        NewTypeMappingCache(),
+		cacheFile:    cacheFile,
+	}
+	src.cache.SetAI("mssql:postgres:hierarchyid:0:0:0", "varchar(255)", "claude-haiku-4-5")
+	src.cache.Set("plain:no-provenance", "text")
+	if err := src.saveCache(); err != nil {
+		t.Fatalf("saveCache: %v", err)
+	}
+
+	// Verify on-disk shape is the versioned envelope, not the legacy flat map.
+	raw, err := os.ReadFile(cacheFile)
+	if err != nil {
+		t.Fatalf("reading saved cache: %v", err)
+	}
+	if !strings.Contains(string(raw), `"version"`) || !strings.Contains(string(raw), `"mappings"`) {
+		t.Fatalf("saved cache should use versioned envelope; got:\n%s", string(raw))
+	}
+
+	dst := &AITypeMapper{
+		providerName: "anthropic",
+		provider:     testProvider("test-key"),
+		cache:        NewTypeMappingCache(),
+		cacheFile:    cacheFile,
+	}
+	if err := dst.loadCache(); err != nil {
+		t.Fatalf("loadCache: %v", err)
+	}
+
+	got := dst.cache.AllEntries()
+	ai, ok := got["mssql:postgres:hierarchyid:0:0:0"]
+	if !ok {
+		t.Fatal("AI entry missing after round-trip")
+	}
+	if ai.Source != SourceAI || ai.Model != "claude-haiku-4-5" || ai.Result != "varchar(255)" {
+		t.Errorf("AI entry corrupted: %+v", ai)
+	}
+	if ai.CachedAt.IsZero() {
+		t.Errorf("AI entry should have cached_at populated")
+	}
+}
+
+// #177: deterministic-tagged entries are bypassed on read (defense in
+// depth — nothing writes them today, but if a legacy run did, ignore).
+func TestCacheGet_SkipsDeterministicEntries(t *testing.T) {
+	c := NewTypeMappingCache()
+	c.LoadEntries(map[string]CacheEntry{
+		"d-entry": {Result: "int", Source: SourceDeterministic},
+		"a-entry": {Result: "varchar(255)", Source: SourceAI, Model: "test"},
+	})
+
+	if _, ok := c.Get("d-entry"); ok {
+		t.Error("deterministic entry should be invisible to Get")
+	}
+	if v, ok := c.Get("a-entry"); !ok || v != "varchar(255)" {
+		t.Errorf("AI entry should return its Result; got %q ok=%v", v, ok)
+	}
+	if got := c.All(); len(got) != 1 {
+		t.Errorf("All should filter out deterministic; got %d entries", len(got))
+	}
+}
+
+// #177: ClearAICacheEntries removes only AI entries; if any non-AI
+// entries remain, the file is rewritten in the v2+ format; if nothing
+// remains, the file is removed.
+func TestClearAICacheEntries(t *testing.T) {
+	t.Run("removes_file_when_no_non_ai_entries_remain", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cacheFile := filepath.Join(tmpDir, "type-cache.json")
+		c := NewTypeMappingCache()
+		c.SetAI("k1", "v1", "model-a")
+		c.SetAI("k2", "v2", "model-a")
+		payload := cacheFilePayload{Version: cacheFileFormatVersion, Mappings: c.AllEntries()}
+		data, _ := json.MarshalIndent(payload, "", "  ")
+		if err := os.WriteFile(cacheFile, data, 0600); err != nil {
+			t.Fatalf("seed cache: %v", err)
+		}
+
+		cleared, err := ClearAICacheEntries(cacheFile)
+		if err != nil {
+			t.Fatalf("ClearAICacheEntries: %v", err)
+		}
+		if cleared != 2 {
+			t.Errorf("expected 2 cleared, got %d", cleared)
+		}
+		if _, err := os.Stat(cacheFile); !os.IsNotExist(err) {
+			t.Errorf("cache file should be removed when nothing remains; stat err=%v", err)
+		}
+	})
+
+	t.Run("rewrites_when_non_ai_entries_remain", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cacheFile := filepath.Join(tmpDir, "type-cache.json")
+		c := NewTypeMappingCache()
+		c.SetAI("ai-1", "varchar(255)", "model-a")
+		c.LoadEntries(map[string]CacheEntry{
+			"keep-1": {Result: "int", Source: SourceDeterministic},
+		})
+		payload := cacheFilePayload{Version: cacheFileFormatVersion, Mappings: c.AllEntries()}
+		data, _ := json.MarshalIndent(payload, "", "  ")
+		if err := os.WriteFile(cacheFile, data, 0600); err != nil {
+			t.Fatalf("seed cache: %v", err)
+		}
+
+		cleared, err := ClearAICacheEntries(cacheFile)
+		if err != nil {
+			t.Fatalf("ClearAICacheEntries: %v", err)
+		}
+		if cleared != 1 {
+			t.Errorf("expected 1 cleared, got %d", cleared)
+		}
+
+		raw, err := os.ReadFile(cacheFile)
+		if err != nil {
+			t.Fatalf("post-clear read: %v", err)
+		}
+		if strings.Contains(string(raw), "ai-1") {
+			t.Errorf("AI entry should be gone from file; got:\n%s", string(raw))
+		}
+		if !strings.Contains(string(raw), "keep-1") {
+			t.Errorf("non-AI entry should be preserved; got:\n%s", string(raw))
+		}
+	})
+
+	t.Run("noop_when_file_missing", func(t *testing.T) {
+		cleared, err := ClearAICacheEntries(filepath.Join(t.TempDir(), "nope.json"))
+		if err != nil {
+			t.Fatalf("missing file should be a clean noop; got err=%v", err)
+		}
+		if cleared != 0 {
+			t.Errorf("expected 0 cleared on missing file, got %d", cleared)
+		}
+	})
+
+	t.Run("handles_legacy_flat_map_format", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cacheFile := filepath.Join(tmpDir, "type-cache.json")
+		legacy := `{"mssql:postgres:int:0:0:0":"integer"}`
+		if err := os.WriteFile(cacheFile, []byte(legacy), 0600); err != nil {
+			t.Fatalf("seed legacy cache: %v", err)
+		}
+		cleared, err := ClearAICacheEntries(cacheFile)
+		if err != nil {
+			t.Fatalf("ClearAICacheEntries legacy: %v", err)
+		}
+		if cleared != 1 {
+			t.Errorf("expected legacy entry cleared as AI; got %d", cleared)
+		}
+	})
 }
 
 // Tests for retry logic
