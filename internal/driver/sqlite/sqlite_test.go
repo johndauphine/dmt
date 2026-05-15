@@ -537,6 +537,72 @@ func TestGenerateTableDDL_SqliteTarget_AutoIncrementPK(t *testing.T) {
 	}
 }
 
+// ---------- Edge cases for SQLite DDL emission ----------
+
+// SQLite's `INTEGER PRIMARY KEY AUTOINCREMENT` form is valid ONLY for a
+// single-column integer PK. Composite PKs and identity-columns-outside-PK
+// must NOT use the inline form, otherwise the generated DDL is invalid
+// or silently loses the composite PK shape.
+func TestGenerateTableDDL_SqliteTarget_CompositePKWithIdentity(t *testing.T) {
+	m := driver.NewDeterministicMapper()
+	resp, err := m.GenerateTableDDL(context.Background(), driver.TableDDLRequest{
+		SourceDBType: "postgres",
+		TargetDBType: "sqlite",
+		SourceTable: &driver.Table{
+			Name: "audit",
+			Columns: []driver.Column{
+				{Name: "id", DataType: "int4", IsNullable: false, IsIdentity: true},
+				{Name: "tenant", DataType: "int4", IsNullable: false},
+			},
+			PrimaryKey: []string{"tenant", "id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateTableDDL: %v", err)
+	}
+	ddl := resp.CreateTableDDL
+
+	// Inline AUTOINCREMENT must NOT appear — composite PK is incompatible.
+	if contains(ddl, "AUTOINCREMENT") {
+		t.Errorf("composite PK must not use AUTOINCREMENT inline; got:\n%s", ddl)
+	}
+	// Table-level composite PK must be present.
+	if !contains(ddl, `PRIMARY KEY ("tenant", "id")`) {
+		t.Errorf("composite PK missing from DDL; got:\n%s", ddl)
+	}
+}
+
+func TestGenerateTableDDL_SqliteTarget_IdentityOutsidePK(t *testing.T) {
+	m := driver.NewDeterministicMapper()
+	resp, err := m.GenerateTableDDL(context.Background(), driver.TableDDLRequest{
+		SourceDBType: "postgres",
+		TargetDBType: "sqlite",
+		SourceTable: &driver.Table{
+			Name: "events",
+			Columns: []driver.Column{
+				// PK is "uuid"; "seq" is identity but NOT in the PK.
+				{Name: "uuid", DataType: "uuid", IsNullable: false},
+				{Name: "seq", DataType: "int4", IsNullable: false, IsIdentity: true},
+			},
+			PrimaryKey: []string{"uuid"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateTableDDL: %v", err)
+	}
+	ddl := resp.CreateTableDDL
+
+	// Identity column outside PK must NOT use AUTOINCREMENT.
+	if contains(ddl, "AUTOINCREMENT") {
+		t.Errorf("identity column outside PK must not use AUTOINCREMENT; got:\n%s", ddl)
+	}
+	// The PK on "uuid" must be present (table-level since it's not the
+	// identity column path).
+	if !contains(ddl, `PRIMARY KEY ("uuid")`) {
+		t.Errorf("PK on uuid missing; got:\n%s", ddl)
+	}
+}
+
 // ---------- End-to-end: postgres source schema → sqlite target ----------
 
 func TestEndToEnd_PostgresSchemaToSqlite(t *testing.T) {
@@ -582,6 +648,112 @@ func TestEndToEnd_PostgresSchemaToSqlite(t *testing.T) {
 	count, _ := w.GetRowCount(ctx, "", "orders")
 	if count != 1 {
 		t.Errorf("expected 1 row; got %d", count)
+	}
+}
+
+// ---------- PRAGMA type parameter parsing ----------
+
+func TestParseSqliteType(t *testing.T) {
+	tests := []struct {
+		in        string
+		wantBase  string
+		wantMax   int
+		wantPrec  int
+		wantScale int
+	}{
+		{"INTEGER", "integer", 0, 0, 0},
+		{"VARCHAR(255)", "varchar", 255, 0, 0},
+		{"varchar (100)", "varchar", 100, 0, 0},
+		{"NUMERIC(10, 2)", "numeric", 10, 10, 2},
+		{"DECIMAL(18,4)", "decimal", 18, 18, 4},
+		{"TEXT", "text", 0, 0, 0},
+		{"", "", 0, 0, 0},
+		{"BLOB(garbage)", "blob", 0, 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			b, m, p, s := parseSqliteType(tc.in)
+			if b != tc.wantBase || m != tc.wantMax || p != tc.wantPrec || s != tc.wantScale {
+				t.Errorf("parseSqliteType(%q) = (%q, %d, %d, %d); want (%q, %d, %d, %d)",
+					tc.in, b, m, p, s, tc.wantBase, tc.wantMax, tc.wantPrec, tc.wantScale)
+			}
+		})
+	}
+}
+
+// SQLite source with bounded VARCHAR and NUMERIC should preserve length
+// and precision when mapped to a postgres target. Pre-fix, the reader
+// stored only the raw type string and the typemap collapsed bounded
+// types to unbounded (VARCHAR(255) → TEXT).
+func TestReader_BoundedTypesPreserved(t *testing.T) {
+	path := memoryDBPath(t, "bounded_types")
+
+	dsn := (&Dialect{}).BuildDSN("", 0, path, "", "", nil)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		CREATE TABLE items (
+			id INTEGER PRIMARY KEY,
+			label VARCHAR(50) NOT NULL,
+			price NUMERIC(10, 2) NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	r := newTestReader(t, path)
+	defer r.Close()
+	tables, err := r.ExtractSchema(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ExtractSchema: %v", err)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("expected 1 table; got %d", len(tables))
+	}
+	cols := tables[0].Columns
+	if len(cols) != 3 {
+		t.Fatalf("expected 3 columns; got %d", len(cols))
+	}
+
+	var label, price *driver.Column
+	for i := range cols {
+		switch cols[i].Name {
+		case "label":
+			label = &cols[i]
+		case "price":
+			price = &cols[i]
+		}
+	}
+	if label == nil || price == nil {
+		t.Fatal("label or price column missing")
+	}
+	if label.MaxLength != 50 {
+		t.Errorf("label.MaxLength: got %d, want 50", label.MaxLength)
+	}
+	if price.Precision != 10 || price.Scale != 2 {
+		t.Errorf("price (Precision, Scale): got (%d, %d), want (10, 2)", price.Precision, price.Scale)
+	}
+
+	// Now confirm the deterministic mapper preserves the bounds across
+	// engines (sqlite → postgres).
+	m := driver.NewDeterministicMapper()
+	gotLabel := m.MapType(driver.TypeInfo{
+		SourceDBType: "sqlite", TargetDBType: "postgres",
+		DataType: label.DataType, MaxLength: label.MaxLength,
+	})
+	if gotLabel != "VARCHAR(50)" {
+		t.Errorf("sqlite VARCHAR(50) → postgres: got %q, want VARCHAR(50)", gotLabel)
+	}
+	gotPrice := m.MapType(driver.TypeInfo{
+		SourceDBType: "sqlite", TargetDBType: "postgres",
+		DataType: price.DataType, Precision: price.Precision, Scale: price.Scale,
+	})
+	if gotPrice != "NUMERIC(10, 2)" {
+		t.Errorf("sqlite NUMERIC(10,2) → postgres: got %q, want NUMERIC(10, 2)", gotPrice)
 	}
 }
 

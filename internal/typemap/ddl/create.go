@@ -59,23 +59,28 @@ func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) s
 	return fmt.Sprintf("CREATE TABLE %s (\n%s\n)%s;", qname, body, tableSuffix)
 }
 
-// hasInlineAutoIncPK returns true when at least one column in the table is
-// both auto-increment and part of the PK. For SQLite, that column carries
-// the PRIMARY KEY AUTOINCREMENT clause inline, so the table-level PK
-// constraint must be suppressed.
+// hasInlineAutoIncPK returns true when SQLite will emit the column-
+// level `INTEGER PRIMARY KEY AUTOINCREMENT` clause, in which case the
+// table-level PK constraint must be suppressed to avoid a duplicate
+// declaration.
+//
+// The inline form is only emitted when:
+//   - the PK is single-column (composite PKs can't use AUTOINCREMENT)
+//   - the sole PK column is auto-increment in the source
+//
+// Anything else falls back to the table-level CONSTRAINT PRIMARY KEY
+// clause — the column itself emits as plain INTEGER with no inline PK.
+// This matches autoIncrementSuffix's SQLite branch (the two paths
+// must agree).
 func hasInlineAutoIncPK(table TableInfo, sourceDialect string) bool {
 	pk := primaryKeyConstraint(table.Constraints)
-	if pk == nil {
+	if pk == nil || len(pk.Columns) != 1 {
 		return false
 	}
+	pkCol := pk.Columns[0]
 	for _, col := range table.Columns {
-		if !isAutoIncrementColumn(col, sourceDialect) {
-			continue
-		}
-		for _, pkCol := range pk.Columns {
-			if pkCol == col.Name {
-				return true
-			}
+		if col.Name == pkCol && isAutoIncrementColumn(col, sourceDialect) {
+			return true
 		}
 	}
 	return false

@@ -359,6 +359,15 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 			schema, job.Table.Name, pkCol, pkCol,
 		)
 		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
+	case "sqlite":
+		// SQLite target - double-quoted identifiers, ? placeholders, no
+		// schema qualification (SQLite has no schemas distinct from
+		// attached databases).
+		query = fmt.Sprintf(
+			`DELETE FROM "%s" WHERE "%s" >= ? AND "%s" <= ?`,
+			job.Table.Name, pkCol, pkCol,
+		)
+		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
 	default:
 		// SQL Server target - use bracket identifiers and @p parameters
 		query = fmt.Sprintf(
@@ -401,6 +410,18 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 		} else {
 			deleteQuery = fmt.Sprintf("DELETE FROM `%s`.`%s` WHERE `%s` > ?",
 				schema, tableName, pkCol)
+			args = []any{lastPK}
+		}
+	case "sqlite":
+		// SQLite target - double-quoted identifiers, ? placeholders, no
+		// schema qualification.
+		if maxPK != nil {
+			deleteQuery = fmt.Sprintf(`DELETE FROM "%s" WHERE "%s" > ? AND "%s" <= ?`,
+				tableName, pkCol, pkCol)
+			args = []any{lastPK, maxPK}
+		} else {
+			deleteQuery = fmt.Sprintf(`DELETE FROM "%s" WHERE "%s" > ?`,
+				tableName, pkCol)
 			args = []any{lastPK}
 		}
 	default:
