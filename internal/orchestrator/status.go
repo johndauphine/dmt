@@ -98,11 +98,22 @@ func (o *Orchestrator) fallbackCountsForRun(runID string) map[string]int64 {
 	return counts
 }
 
-// fallbackBreakdownForRun returns the per-surface counts and the
-// distinct fingerprint set per surface. Used by the detailed-status
-// view to show maintainers which inputs triggered each fallback
-// surface for catalog-growth review.
-func (o *Orchestrator) fallbackBreakdownForRun(runID string) (map[string]int64, map[string][]string) {
+// fingerprintCount pairs a fingerprint string with its per-(run, surface,
+// fingerprint) count so the detailed-status view can render
+// "postgres:inet (47)" instead of just "postgres:inet" — a maintainer
+// reviewing a catalog-growth signal needs to know whether each entry
+// fired once or 10K times.
+type fingerprintCount struct {
+	Fingerprint string
+	Count       int64
+}
+
+// fallbackBreakdownForRun returns per-surface counts plus the
+// fingerprint+count list for each surface, ordered by count descending
+// (heavy hitters first) then alphabetically for ties. Used by the
+// detailed-status view to show maintainers which inputs triggered each
+// fallback surface and how often, for catalog-growth review.
+func (o *Orchestrator) fallbackBreakdownForRun(runID string) (map[string]int64, map[string][]fingerprintCount) {
 	if o == nil || o.state == nil || runID == "" {
 		return nil, nil
 	}
@@ -115,13 +126,24 @@ func (o *Orchestrator) fallbackBreakdownForRun(runID string) (map[string]int64, 
 		return nil, nil
 	}
 	counts := map[string]int64{}
-	fingerprints := map[string][]string{}
+	fingerprints := map[string][]fingerprintCount{}
 	for _, e := range events {
 		counts[e.Surface] += e.Count
 		if e.Fingerprint == "" {
 			continue
 		}
-		fingerprints[e.Surface] = append(fingerprints[e.Surface], e.Fingerprint)
+		fingerprints[e.Surface] = append(fingerprints[e.Surface],
+			fingerprintCount{Fingerprint: e.Fingerprint, Count: e.Count})
+	}
+	for surface := range fingerprints {
+		fps := fingerprints[surface]
+		sort.Slice(fps, func(i, j int) bool {
+			if fps[i].Count != fps[j].Count {
+				return fps[i].Count > fps[j].Count
+			}
+			return fps[i].Fingerprint < fps[j].Fingerprint
+		})
+		fingerprints[surface] = fps
 	}
 	return counts, fingerprints
 }
@@ -135,6 +157,39 @@ func sortedKeys(m map[string]int64) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// fingerprintDisplayCap bounds the number of distinct fingerprints
+// the detailed-status view prints inline for a single surface. The
+// checkpoint table is unbounded by design (the source-schema vocabulary
+// is finite but the prefix space is not), so without a cap a migration
+// with 500 distinct unmapped types would emit one comma-joined line
+// running into the kilobytes — unreadable in a terminal. 10 is enough
+// to identify the heaviest hitters; the rest collapse into "and N more"
+// and remain queryable via fallback_events directly for forensic work.
+const fingerprintDisplayCap = 10
+
+// formatFingerprintList renders a sorted (heavy-first) fingerprint
+// slice as "fp1 (47), fp2 (12), … and N more", capped at
+// fingerprintDisplayCap entries. Count is appended so maintainers can
+// see which catalog gaps fired hardest without going to the SQL.
+func formatFingerprintList(fps []fingerprintCount) string {
+	if len(fps) == 0 {
+		return ""
+	}
+	limit := len(fps)
+	if limit > fingerprintDisplayCap {
+		limit = fingerprintDisplayCap
+	}
+	parts := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		parts = append(parts, fmt.Sprintf("%s (%d)", fps[i].Fingerprint, fps[i].Count))
+	}
+	out := strings.Join(parts, ", ")
+	if remaining := len(fps) - limit; remaining > 0 {
+		out += fmt.Sprintf(", and %d more", remaining)
+	}
 	return out
 }
 
@@ -197,7 +252,7 @@ func (o *Orchestrator) ShowDetailedStatus() error {
 		printFallbackCounts(counts)
 		for _, surface := range sortedKeys(counts) {
 			if fps := fingerprints[surface]; len(fps) > 0 {
-				fmt.Printf("  %s fingerprints: %s\n", surface, strings.Join(fps, ", "))
+				fmt.Printf("  %s fingerprints: %s\n", surface, formatFingerprintList(fps))
 			}
 		}
 	}

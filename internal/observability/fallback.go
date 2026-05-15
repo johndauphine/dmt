@@ -43,12 +43,14 @@ const (
 )
 
 // fallbackCounts is the process-wide counter map surfaced by Counts()
-// for the `dmt status` JSON / human renderer. Stored in an atomic
-// pointer so reads (the status path) are lock-free; writes take a
-// brief mutex to mutate a copy and swap.
+// for the in-memory side of `dmt status` (the durable cross-process
+// view goes through the checkpoint backend). Guarded by fallbackMu —
+// the prior atomic-pointer / copy-on-write design churned a fresh map
+// per increment for no measurable benefit, since `dmt status` is not
+// latency-critical (Copilot review on PR #285).
 var (
 	fallbackMu     sync.Mutex
-	fallbackCounts atomic.Pointer[map[string]int64]
+	fallbackCounts = map[string]int64{}
 )
 
 // FallbackSink is the persistence hook a caller registers so
@@ -74,6 +76,17 @@ type fallbackSinkHolder struct{ sink FallbackSink }
 // run doesn't keep writing to the prior run's state file). Safe to
 // call concurrently; only the most recently installed sink receives
 // events.
+//
+// Single-run-per-process assumption: dmt's Run/Resume orchestration
+// is one migration at a time inside any single process (CLI, TUI,
+// k8s sidecar). The package-level sink reflects that: if two Run()
+// goroutines ever overlap, the second SetFallbackSink replaces the
+// first and the first run's late events would route to the second
+// run's row in the state file. The Run code path opens a fresh
+// orchestrator per migration, so concurrent runs would require a
+// caller architectural change first; this contract documents the
+// assumption so a future multi-tenant rework knows to revisit the
+// sink plumbing (Copilot review on PR #285).
 func SetFallbackSink(s FallbackSink) {
 	if s == nil {
 		fallbackSink.Store(nil)
@@ -101,10 +114,10 @@ var (
 // for errordiag, when the deterministic catalog has no match — the
 // "fallback" there is the human reviewer who adds a pattern later).
 //
-// It does three things, in order of cost:
+// It does four things, in order of cost:
 //
 //  1. Bumps a process-local counter keyed by surface so `dmt status`
-//     can report "AI fallback fired N times this run."
+//     (in-process callers) can report "AI fallback fired N times."
 //  2. Bumps the Prometheus dmt_ai_fallback_total{surface=...} counter
 //     for external observability (#229). Cheap and lock-free in the
 //     hot path (atomic.Value load).
@@ -112,6 +125,17 @@ var (
 //     emits a debug log line. Debug-level so the catalog-growth
 //     pipeline can grep it without flooding INFO-level operator
 //     output during a large migration.
+//  4. If a FallbackSink is installed, persists the event to the
+//     checkpoint backend so cross-process `dmt status` polling sees
+//     the running migration's counts (#176).
+//
+// Call-site frequency: fires per-column at DDL-emit time for typemap
+// surfaces and per-error for errordiag, NOT per-row. Bound is the
+// source schema's vocabulary, not the row count — so even a 100K-table
+// migration produces O(distinct unmapped types) calls, typically <100.
+// The synchronous SQLite UPSERT / YAML rewrite is acceptable at that
+// scale; if a future surface fires per-row, the sink should batch
+// (Copilot review on PR #285).
 //
 // surface must be one of the Surface* constants; an unknown surface
 // is still recorded but the counter will appear under that label,
@@ -144,16 +168,8 @@ func RecordFallback(surface, fingerprint string) {
 
 func incCount(surface string) {
 	fallbackMu.Lock()
-	defer fallbackMu.Unlock()
-	prev := fallbackCounts.Load()
-	next := map[string]int64{}
-	if prev != nil {
-		for k, v := range *prev {
-			next[k] = v
-		}
-	}
-	next[surface]++
-	fallbackCounts.Store(&next)
+	fallbackCounts[surface]++
+	fallbackMu.Unlock()
 }
 
 func recordFingerprint(surface, fp string) {
@@ -182,12 +198,10 @@ func recordFingerprint(surface, fp string) {
 // includes per-surface counts alongside row counts; the Prometheus
 // counter is the source of truth for external dashboards.
 func Counts() map[string]int64 {
-	prev := fallbackCounts.Load()
-	out := map[string]int64{}
-	if prev == nil {
-		return out
-	}
-	for k, v := range *prev {
+	fallbackMu.Lock()
+	defer fallbackMu.Unlock()
+	out := make(map[string]int64, len(fallbackCounts))
+	for k, v := range fallbackCounts {
 		out[k] = v
 	}
 	return out
@@ -220,8 +234,7 @@ func Fingerprints(surface string) []string {
 // represents "since process start" for external dashboards.
 func ResetFallbackState() {
 	fallbackMu.Lock()
-	empty := map[string]int64{}
-	fallbackCounts.Store(&empty)
+	fallbackCounts = map[string]int64{}
 	fallbackMu.Unlock()
 
 	fingerprintsMu.Lock()

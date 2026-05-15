@@ -217,13 +217,13 @@ type StatusResult struct {
 	RowsTransferred int64     `json:"rows_transferred"`
 	ProgressPercent float64   `json:"progress_percent"`
 
-	// AIFallbacks reports per-surface AI fallback counts for the current
-	// process (#176). Keys are observability.Surface* values
+	// AIFallbacks reports per-surface AI fallback counts for the run
+	// referenced by RunID (#176). Keys are observability.Surface* values
 	// (typemap | ddl | errordiag). Omitted from JSON when empty so the
-	// no-fallback case stays clean. The map is populated from in-process
-	// counters, not the SQLite checkpoint — a fresh `dmt status` invocation
-	// after the migration finishes will see zero, by design (the Prometheus
-	// counter is the durable across-runs surface).
+	// no-fallback case stays clean. Source is the checkpoint backend
+	// (SQLite or YAML/FileState), so a separate-process `dmt status`
+	// poll sees the running migration's counts. Rows persist until
+	// CleanupOldRuns purges them with the rest of the run-scoped state.
 	AIFallbacks map[string]int64 `json:"ai_fallbacks,omitempty"`
 }
 
