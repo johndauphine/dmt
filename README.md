@@ -113,13 +113,19 @@ Enable in `config.yaml`:
 
 ```yaml
 migration:
-  ai_adjust: true
-  ai_adjust_interval: 30s
+  runtime_tuning: true
+  runtime_tuning_interval: 5s
 
 ai:
   api_key: ${ANTHROPIC_API_KEY}
   provider: anthropic
 ```
+
+> Pre-#211 these fields were named `ai_adjust` / `ai_adjust_interval`.
+> The old names are still accepted but emit a deprecation warning;
+> rename to `runtime_tuning` to silence it. The runtime tuner is
+> deterministic and rule-based — it does not call out to the AI
+> provider.
 
 ### How It Works
 
@@ -168,10 +174,10 @@ AI startup tuning analyzes source schema and system resources to set optimal ini
 
 ```yaml
 migration:
-  ai_adjust: true                  # Enable/disable (default: true when AI configured)
-  ai_adjust_interval: 30s          # Evaluation interval (default: 30s)
+  runtime_tuning: true             # Enable/disable rule-based runtime controller (default: true)
+  runtime_tuning_interval: 5s      # Evaluation interval (default: 5s)
 
-  # Initial parameters (AI adjusts from here)
+  # Initial parameters (runtime tuner adjusts from here)
   chunk_size: 10000
   workers: 4
   read_ahead_buffers: 8
@@ -193,16 +199,15 @@ ai:
 
 ### Troubleshooting
 
-**AI adjustment not happening:**
-- Check logs for "AI monitoring started" message
-- Verify `ai_adjust: true` in config
-- Verify API key: `echo $ANTHROPIC_API_KEY`
-- Tuner skips adjustments when >90% complete or during 90s post-adjustment cooldown
+**Runtime tuning not happening:**
+- Check logs for the controller-startup message
+- Verify `runtime_tuning: true` in config (legacy alias `ai_adjust` still works)
+- Tuner skips adjustments when >90% complete or during the post-adjustment cooldown
 
 **Performance degradation:**
-- The effectiveness tracker will automatically pause after 3 negative adjustments
-- Check `--verbosity debug` logs for "AI adjustment effect" measurements
-- Disable with `ai_adjust: false` to use fixed parameters
+- The effectiveness tracker will automatically pause after consecutive negative adjustments
+- Check `--verbosity debug` logs for adjustment-effect measurements
+- Disable with `runtime_tuning: false` to use fixed parameters
 
 ## Encrypted Profiles (SQLite)
 

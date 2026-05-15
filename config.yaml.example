@@ -64,6 +64,15 @@ migration:
   sample_validation: false      # Enable sample data validation after row count check
   sample_size: 100              # Number of random rows to sample per table
 
+  # Runtime parameter tuning. Enabled by default — a deterministic
+  # rule-based controller polls metrics every runtime_tuning_interval
+  # and adjusts chunk_size / write_ahead_writers / etc. in response to
+  # memory pressure, queue growth, write errors, and CPU headroom.
+  # No AI dependency. Pre-#211 this knob was named `ai_adjust`; the
+  # old name is still accepted but logs a deprecation warning.
+  runtime_tuning: true
+  runtime_tuning_interval: 5s
+
   # Validation pass/fail policy (#253). Default is "fail loud" on any
   # missing-evidence outcome; flip individual flags to false for
   # log-only behavior during initial roll-out.

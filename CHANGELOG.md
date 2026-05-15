@@ -74,6 +74,21 @@ All notable changes to this project will be documented in this file.
   an unrelated missing template on the other side never poisons the
   test (issue noted by codex review pass 3).
 
+### Changed
+
+- **Rename `migration.ai_adjust` → `migration.runtime_tuning`** (#211).
+  The knob controls a deterministic rule-based controller (post-#172);
+  the old name implied AI involvement that no longer exists, which was
+  recurring user-facing confusion. Companion field
+  `ai_adjust_interval` is renamed to `runtime_tuning_interval`. Both
+  names are accepted during a deprecation cycle: a config that still
+  uses `ai_adjust` continues to work and emits a one-time WARN log
+  pointing at the new name. When both names are present with
+  conflicting values, the new field wins and a clarifying WARN names
+  both. The legacy fields are slated for removal in a future release.
+  The same rename applies to `migration_defaults` in
+  `~/.secrets/dmt-config.yaml`.
+
 ### Fixed
 
 - **TUI viewport now auto-scrolls to follow new output** (#280). The

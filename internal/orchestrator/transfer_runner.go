@@ -128,19 +128,19 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	})
 
 	// Setup runtime parameter adjustment via the rule-based controller
-	// (#172). Replaced the AI-driven monitor in PR 172b — same lifecycle
-	// shape, same migration.ai_adjust config knob (kept for config
-	// backward compat; no longer requires AI configured). The controller
+	// (#172). Replaced the AI-driven monitor in PR 172b. The controller
 	// reads the same MetricsCollector + tuner the AI loop used and
 	// applies adjustments per a fixed rule set; no LLM round-trip.
+	// Config knob is migration.runtime_tuning (#211 rename from
+	// ai_adjust; the legacy name is still parsed and warns).
 	var runtimeMonitor *monitor.Controller
 	adjustEnabled := false
 	adjustInterval := 5 * time.Second
-	if r.config.Migration.AIAdjust != nil {
-		adjustEnabled = *r.config.Migration.AIAdjust
+	if r.config.Migration.RuntimeTuning != nil {
+		adjustEnabled = *r.config.Migration.RuntimeTuning
 	}
-	if r.config.Migration.AIAdjustInterval != "" {
-		if d, err := time.ParseDuration(r.config.Migration.AIAdjustInterval); err == nil {
+	if r.config.Migration.RuntimeTuningInterval != "" {
+		if d, err := time.ParseDuration(r.config.Migration.RuntimeTuningInterval); err == nil {
 			adjustInterval = d
 		}
 	}

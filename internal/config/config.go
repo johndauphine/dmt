@@ -295,20 +295,41 @@ type MigrationConfig struct {
 	// Real-time parameter adjustment via the rule-based runtime
 	// controller (#172 of the AI-optional epic).
 	//
-	// The field is named AIAdjust for backward compatibility with
-	// existing user configs — pre-#172 it controlled the AI-driven
-	// runtime monitor; post-#172 it controls the deterministic
-	// rule-based controller (no AI dependency, no LLM round-trip).
-	// Users with `ai_adjust: true` in YAML automatically get the new
-	// controller; the knob's behavior changed but its name + default
-	// are preserved.
+	// Two parallel field sets exist during the #211 deprecation cycle:
 	//
-	// AIAdjust is *bool so the parser can distinguish "user explicitly
-	// set false" from "field unset" (which inherits the secrets
-	// default). A plain bool would silently revert false → true at the
-	// auto-enable step (issue #149).
-	AIAdjust         *bool  `yaml:"ai_adjust,omitempty"` // Enable rule-based runtime parameter adjustment during migration (default: true)
-	AIAdjustInterval string `yaml:"ai_adjust_interval"`  // How often the controller evaluates metrics (default: 5s)
+	//   - RuntimeTuning / RuntimeTuningInterval (new, canonical) —
+	//     the current names. Post-#172 the controller is deterministic
+	//     and rule-based; no AI dependency, no LLM round-trip.
+	//   - AIAdjust / AIAdjustInterval (deprecated) — preserved for
+	//     backward compat. normalizeRuntimeTuningFields migrates these
+	//     into the new fields at config-load time and emits a one-time
+	//     WARN log. Slated for removal in a future release.
+	//
+	// Both fields use *bool so the parser can distinguish "user explicitly
+	// set false" from "field unset" (which inherits the secrets default).
+	// A plain bool would silently revert false → true at the auto-enable
+	// step (issue #149).
+	//
+	// JSON tags use the legacy names (AIAdjust / AIAdjustInterval) so
+	// the resume config hash stays stable across the rename. Pre-#211
+	// runs had `"AIAdjust": <bool>` and `"AIAdjustInterval": "<dur>"`
+	// in their stored hash JSON; with the tags below, post-#211 emits
+	// exactly the same wire shape from the renamed Go fields. The
+	// legacy AIAdjust / AIAdjustInterval Go fields below get `json:"-"`
+	// so they don't double-write (normalizeRuntimeTuningFields clears
+	// them anyway, but the tag belt-and-suspenders prevents accidental
+	// JSON collisions if normalize is ever skipped).
+	RuntimeTuning         *bool  `yaml:"runtime_tuning,omitempty" json:"AIAdjust"`
+	RuntimeTuningInterval string `yaml:"runtime_tuning_interval,omitempty" json:"AIAdjustInterval"`
+
+	// Legacy alias for RuntimeTuning. Renamed in #211; still parsed so
+	// existing user configs keep working. normalizeRuntimeTuningFields
+	// migrates the value into RuntimeTuning at config-load time and
+	// clears this field; downstream code reads RuntimeTuning only.
+	// Slated for removal in a future release.
+	AIAdjust *bool `yaml:"ai_adjust,omitempty" json:"-"`
+	// Legacy alias for RuntimeTuningInterval. See AIAdjust above.
+	AIAdjustInterval string `yaml:"ai_adjust_interval,omitempty" json:"-"`
 
 	// TargetHardChunkLimit is the runtime-discovered hard cap on chunk_size
 	// from target-side probes (today: MySQL @@max_allowed_packet, see
@@ -653,16 +674,43 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.SampleSize = defaults.SampleSize
 	}
 
-	// AI adjust: inherit from secrets only if the per-migration field is unset.
-	// Both layers use *bool so we can correctly distinguish unset (nil) from
-	// explicit-false (issue #149). Without this, the auto-enable site downstream
-	// fills nil → &true and silently overrides any global `ai_adjust: false`.
-	if c.Migration.AIAdjust == nil && defaults.AIAdjust != nil {
-		v := *defaults.AIAdjust
-		c.Migration.AIAdjust = &v
+	// Runtime tuning: inherit from secrets only if NEITHER the new
+	// `runtime_tuning` field nor the deprecated `ai_adjust` alias is
+	// set per-migration. Both layers use *bool so we can correctly
+	// distinguish unset (nil) from explicit-false (issue #149).
+	// Without this, the auto-enable site downstream fills nil → &true
+	// and silently overrides any per-migration `runtime_tuning: false`.
+	//
+	// Checking BOTH per-migration names matters during the #211
+	// deprecation cycle: a config that still uses `ai_adjust: false`
+	// must keep that user-intent through the inherit step so
+	// normalizeRuntimeTuningFields (which runs after) can copy it
+	// into RuntimeTuning unchanged. Without this two-name guard, a
+	// secrets file's auto-applied `runtime_tuning: true` default
+	// would silently flip the per-migration `ai_adjust: false`.
+	//
+	// On the secrets side, prefer the new field; fall through to the
+	// legacy field if the secrets file is still using the old name.
+	// The secrets-layer legacy field is migrated silently here to
+	// avoid one warning per per-migration config that inherits from
+	// the same secrets file.
+	if c.Migration.RuntimeTuning == nil && c.Migration.AIAdjust == nil {
+		switch {
+		case defaults.RuntimeTuning != nil:
+			v := *defaults.RuntimeTuning
+			c.Migration.RuntimeTuning = &v
+		case defaults.AIAdjust != nil:
+			v := *defaults.AIAdjust
+			c.Migration.RuntimeTuning = &v
+		}
 	}
-	if c.Migration.AIAdjustInterval == "" && defaults.AIAdjustInterval != "" {
-		c.Migration.AIAdjustInterval = defaults.AIAdjustInterval
+	if c.Migration.RuntimeTuningInterval == "" && c.Migration.AIAdjustInterval == "" {
+		switch {
+		case defaults.RuntimeTuningInterval != "":
+			c.Migration.RuntimeTuningInterval = defaults.RuntimeTuningInterval
+		case defaults.AIAdjustInterval != "":
+			c.Migration.RuntimeTuningInterval = defaults.AIAdjustInterval
+		}
 	}
 
 	// Checkpoint and recovery
@@ -682,9 +730,80 @@ func (c *Config) applyGlobalDefaults() {
 	}
 }
 
+// normalizeRuntimeTuningFields handles the #211 ai_adjust →
+// runtime_tuning rename deprecation cycle.
+//
+// Semantics (per the issue's acceptance criteria):
+//
+//   - If runtime_tuning is set, it wins (canonical). If ai_adjust is
+//     also set with a conflicting value, emit a WARN naming both
+//     fields; the new field's value is used.
+//   - If only ai_adjust is set (legacy configs), copy it into
+//     runtime_tuning and emit a one-time deprecation WARN.
+//   - If both are set with the same value, emit the deprecation WARN
+//     for the legacy field only (the user already migrated the
+//     intent; they just left the old field around).
+//   - If neither is set, leave both nil — downstream auto-enable
+//     handles that case.
+//
+// Same rules apply to the interval pair.
+//
+// After this function returns, all downstream code should read
+// RuntimeTuning / RuntimeTuningInterval exclusively; the AIAdjust*
+// fields are cleared so a later reader can't accidentally pick them
+// up and bypass the rename.
+func (c *Config) normalizeRuntimeTuningFields() {
+	const deprecatedBoolMsg = "migration.ai_adjust is deprecated; rename to migration.runtime_tuning. " +
+		"ai_adjust will be removed in a future release."
+	const deprecatedIntervalMsg = "migration.ai_adjust_interval is deprecated; rename to migration.runtime_tuning_interval. " +
+		"ai_adjust_interval will be removed in a future release."
+
+	// Boolean enable knob.
+	switch {
+	case c.Migration.RuntimeTuning != nil && c.Migration.AIAdjust != nil:
+		if *c.Migration.AIAdjust != *c.Migration.RuntimeTuning {
+			logging.Warn("migration.ai_adjust=%t conflicts with migration.runtime_tuning=%t; "+
+				"using runtime_tuning. Remove ai_adjust from your config to silence this warning; "+
+				"it will be removed in a future release.",
+				*c.Migration.AIAdjust, *c.Migration.RuntimeTuning)
+		} else {
+			logging.Warn(deprecatedBoolMsg)
+		}
+	case c.Migration.RuntimeTuning == nil && c.Migration.AIAdjust != nil:
+		v := *c.Migration.AIAdjust
+		c.Migration.RuntimeTuning = &v
+		logging.Warn(deprecatedBoolMsg)
+	}
+	c.Migration.AIAdjust = nil
+
+	// Interval.
+	switch {
+	case c.Migration.RuntimeTuningInterval != "" && c.Migration.AIAdjustInterval != "":
+		if c.Migration.AIAdjustInterval != c.Migration.RuntimeTuningInterval {
+			logging.Warn("migration.ai_adjust_interval=%q conflicts with "+
+				"migration.runtime_tuning_interval=%q; using runtime_tuning_interval. "+
+				"Remove ai_adjust_interval from your config to silence this warning.",
+				c.Migration.AIAdjustInterval, c.Migration.RuntimeTuningInterval)
+		} else {
+			logging.Warn(deprecatedIntervalMsg)
+		}
+	case c.Migration.RuntimeTuningInterval == "" && c.Migration.AIAdjustInterval != "":
+		c.Migration.RuntimeTuningInterval = c.Migration.AIAdjustInterval
+		logging.Warn(deprecatedIntervalMsg)
+	}
+	c.Migration.AIAdjustInterval = ""
+}
+
 func (c *Config) applyDefaults() error {
 	// Apply global defaults from secrets file first
 	c.applyGlobalDefaults()
+
+	// #211: resolve the rename deprecation cycle before any downstream
+	// code reads runtime-tuning fields. After this call, the canonical
+	// RuntimeTuning / RuntimeTuningInterval fields carry the user's
+	// intent regardless of which name the YAML used; AIAdjust* are
+	// drained.
+	c.normalizeRuntimeTuningFields()
 
 	// Capture original values before auto-tuning
 	c.autoConfig.OriginalWorkers = c.Migration.Workers
@@ -841,7 +960,7 @@ func (c *Config) applyDefaults() error {
 	// deterministic when AI isn't configured. Users who want the
 	// pre-#209 behavior can set approx_type_action: deterministic
 	// explicitly in their YAML.
-	if c.Migration.AIAdjust == nil {
+	if c.Migration.RuntimeTuning == nil {
 		// Default-enable the rule-based runtime controller (#172).
 		// Belt-and-suspenders fallback in case the secrets layer
 		// didn't populate it (e.g., no secrets file at all). The
@@ -849,7 +968,7 @@ func (c *Config) applyDefaults() error {
 		// the right behavior even in no-AI environments (Codex review
 		// on PR #195).
 		v := true
-		c.Migration.AIAdjust = &v
+		c.Migration.RuntimeTuning = &v
 	}
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
@@ -1024,16 +1143,16 @@ func (c *Config) applyDefaults() error {
 			c.AI.TypeMapping.Enabled = &enabled
 		}
 
-		// AI adjust: auto-enable when AI is configured, but only if the user
+		// Runtime tuning: auto-enable when AI is configured, but only if the user
 		// didn't explicitly set it. nil means "unset by user" — fill in true.
 		// Pre-#149 this was a `bool` field with `if !c.Migration.AIAdjust { ...
 		// = true }` which clobbered any explicit `ai_adjust: false`.
-		if c.Migration.AIAdjust == nil {
+		if c.Migration.RuntimeTuning == nil {
 			enabled := true
-			c.Migration.AIAdjust = &enabled
+			c.Migration.RuntimeTuning = &enabled
 		}
-		if c.Migration.AIAdjustInterval == "" {
-			c.Migration.AIAdjustInterval = "30s"
+		if c.Migration.RuntimeTuningInterval == "" {
+			c.Migration.RuntimeTuningInterval = "30s"
 		}
 	}
 
@@ -1719,16 +1838,26 @@ func (c *Config) DebugDump() string {
 				b.WriteString("  Type Mapping: deterministic only (no AI fallback)\n")
 			}
 			b.WriteString("  Error Diagnosis: deterministic catalog (no AI)\n")
-			// AI adjust settings from migration_defaults
+			// Runtime tuning settings from migration_defaults (#211).
+			// Prefer the new name; fall back to the deprecated AIAdjust
+			// field so a secrets file using the legacy name still renders
+			// correctly during the deprecation cycle.
 			defaults := secretsCfg.GetMigrationDefaults()
-			if defaults.AIAdjust != nil && *defaults.AIAdjust {
-				interval := defaults.AIAdjustInterval
+			enabled := defaults.RuntimeTuning
+			if enabled == nil {
+				enabled = defaults.AIAdjust
+			}
+			interval := defaults.RuntimeTuningInterval
+			if interval == "" {
+				interval = defaults.AIAdjustInterval
+			}
+			if enabled != nil && *enabled {
 				if interval == "" {
-					interval = "30s"
+					interval = "5s"
 				}
-				b.WriteString(fmt.Sprintf("  AI Adjust: enabled (interval: %s)\n", interval))
+				fmt.Fprintf(&b, "  Runtime Tuning: enabled (interval: %s)\n", interval)
 			} else {
-				b.WriteString("  AI Adjust: disabled\n")
+				b.WriteString("  Runtime Tuning: disabled\n")
 			}
 		} else {
 			b.WriteString("  Disabled (no provider configured in ~/.secrets/dmt-config.yaml)\n")

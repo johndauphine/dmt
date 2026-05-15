@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -719,64 +720,246 @@ func TestApplyAISuggestions_AppliesPRRABWhenUnset(t *testing.T) {
 	}
 }
 
-// TestAIAdjustExplicitFalseRespected pins issue #149: setting
-// `migration.ai_adjust: false` in a per-migration YAML config must not be
-// silently flipped back to true by the auto-enable logic. Pre-fix, the field
-// was a plain `bool` and the parser couldn't distinguish "explicit false"
-// from "unset", so the auto-enable code always overrode false→true.
-func TestAIAdjustExplicitFalseRespected(t *testing.T) {
+// withEmptySecretsFile points secrets loading at a tmp file with no
+// migration_defaults so the dev machine's real
+// ~/.secrets/dmt-config.yaml (which may carry `ai_adjust: true` or
+// the renamed field) doesn't leak into tests that need a known
+// baseline.
+func withEmptySecretsFile(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	secretsPath := filepath.Join(tmp, "dmt-config.yaml")
+	if err := os.WriteFile(secretsPath, []byte("ai:\n  default_provider: \"\"\n"), 0600); err != nil {
+		t.Fatalf("write empty secrets: %v", err)
+	}
+	t.Setenv("DMT_SECRETS_FILE", secretsPath)
+	secrets.Reset()
+	t.Cleanup(secrets.Reset)
+}
+
+// TestRuntimeTuningExplicitFalseRespected pins issue #149: setting
+// `migration.runtime_tuning: false` (or its deprecated alias) in a
+// per-migration YAML config must not be silently flipped back to true
+// by the auto-enable logic. Pre-fix, the field was a plain `bool` and
+// the parser couldn't distinguish "explicit false" from "unset", so
+// the auto-enable code always overrode false→true.
+func TestRuntimeTuningExplicitFalseRespected(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	enabled := false
+	cfg := minConfigWithAI()
+	cfg.Migration.RuntimeTuning = &enabled
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.RuntimeTuning == nil {
+		t.Fatal("RuntimeTuning was nil after applyDefaults — auto-enable should preserve explicit pointer")
+	}
+	if *cfg.Migration.RuntimeTuning != false {
+		t.Error("explicit runtime_tuning: false was overridden to true (issue #149 regression)")
+	}
+}
+
+// TestRuntimeTuningExplicitTrueRespected verifies the symmetric case
+// — explicit `runtime_tuning: true` must also stick (no special-case
+// behavior).
+func TestRuntimeTuningExplicitTrueRespected(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	enabled := true
+	cfg := minConfigWithAI()
+	cfg.Migration.RuntimeTuning = &enabled
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.RuntimeTuning == nil || *cfg.Migration.RuntimeTuning != true {
+		t.Errorf("explicit runtime_tuning: true should stick; got %v", cfg.Migration.RuntimeTuning)
+	}
+}
+
+// TestRuntimeTuningUnsetAutoEnabled covers the third state — the
+// field is unset (nil) and the user has AI configured, so the auto-
+// enable kicks in.
+func TestRuntimeTuningUnsetAutoEnabled(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	cfg := minConfigWithAI()
+	// Migration.RuntimeTuning left nil (zero value for *bool).
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.RuntimeTuning == nil {
+		t.Fatal("RuntimeTuning still nil after auto-enable — auto-enable should have populated it")
+	}
+	if *cfg.Migration.RuntimeTuning != true {
+		t.Error("auto-enable should set RuntimeTuning to true when unset and AI is configured")
+	}
+}
+
+// TestRuntimeTuningInheritsSecretsFalse pins the second-tier
+// precedence from PR #150 review: when the per-migration YAML doesn't
+// set runtime_tuning but the secrets file's migration_defaults sets
+// it explicitly to false, the per-migration field must inherit that
+// false (not get auto-enabled to true). Pre-Copilot-fix this was
+// broken — applyGlobalDefaults didn't copy the field, then the
+// auto-enable site flipped nil → true, silently overriding the
+// secrets default.
+func TestRuntimeTuningInheritsSecretsFalse(t *testing.T) {
+	tmp := t.TempDir()
+	secretsPath := filepath.Join(tmp, "dmt-config.yaml")
+	if err := os.WriteFile(secretsPath, []byte(`
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "sk-ant-test"
+
+migration_defaults:
+  runtime_tuning: false
+  runtime_tuning_interval: "60s"
+`), 0600); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	t.Setenv("DMT_SECRETS_FILE", secretsPath)
+	secrets.Reset()
+	t.Cleanup(secrets.Reset)
+
+	cfg := minConfigWithoutAI()
+	// Migration.RuntimeTuning left nil; secrets defaults should fill it with false.
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults() failed: %v", err)
+	}
+	if cfg.Migration.RuntimeTuning == nil {
+		t.Fatal("RuntimeTuning still nil — applyGlobalDefaults should have inherited the secrets value")
+	}
+	if *cfg.Migration.RuntimeTuning != false {
+		t.Errorf("RuntimeTuning = true; expected false (from migration_defaults.runtime_tuning). Auto-enable site clobbered the secrets default.")
+	}
+	if cfg.Migration.RuntimeTuningInterval != "60s" {
+		t.Errorf("RuntimeTuningInterval = %q; expected \"60s\" (from migration_defaults)", cfg.Migration.RuntimeTuningInterval)
+	}
+}
+
+// TestAIAdjustLegacyAliasMigratesToRuntimeTuning pins the #211
+// deprecation cycle: a per-migration config that still uses the old
+// `ai_adjust` name has its value silently migrated into the new
+// RuntimeTuning field by normalizeRuntimeTuningFields. The deprecated
+// field is cleared so no downstream reader can pick up the stale
+// value.
+//
+// Uses a tmp secrets file so the dev machine's real
+// ~/.secrets/dmt-config.yaml doesn't pre-populate RuntimeTuning via
+// the secrets inheritance path and mask the per-migration migration.
+func TestAIAdjustLegacyAliasMigratesToRuntimeTuning(t *testing.T) {
+	withEmptySecretsFile(t)
+
 	enabled := false
 	cfg := minConfigWithAI()
 	cfg.Migration.AIAdjust = &enabled
+	cfg.Migration.AIAdjustInterval = "42s"
 	if err := cfg.applyDefaults(); err != nil {
 		t.Fatalf("applyDefaults() failed: %v", err)
 	}
-	if cfg.Migration.AIAdjust == nil {
-		t.Fatal("AIAdjust was nil after applyDefaults — auto-enable should preserve explicit pointer")
+	if cfg.Migration.RuntimeTuning == nil || *cfg.Migration.RuntimeTuning != false {
+		t.Errorf("legacy ai_adjust=false should migrate to runtime_tuning=false; got %v",
+			cfg.Migration.RuntimeTuning)
 	}
-	if *cfg.Migration.AIAdjust != false {
-		t.Error("explicit ai_adjust: false was overridden to true (issue #149 regression)")
+	if cfg.Migration.RuntimeTuningInterval != "42s" {
+		t.Errorf("legacy ai_adjust_interval should migrate to runtime_tuning_interval; got %q",
+			cfg.Migration.RuntimeTuningInterval)
+	}
+	if cfg.Migration.AIAdjust != nil {
+		t.Errorf("legacy AIAdjust field should be cleared after normalization; got %v",
+			cfg.Migration.AIAdjust)
+	}
+	if cfg.Migration.AIAdjustInterval != "" {
+		t.Errorf("legacy AIAdjustInterval should be cleared after normalization; got %q",
+			cfg.Migration.AIAdjustInterval)
 	}
 }
 
-// TestAIAdjustExplicitTrueRespected verifies the symmetric case — explicit
-// `ai_adjust: true` must also stick (no special-case behavior).
-func TestAIAdjustExplicitTrueRespected(t *testing.T) {
-	enabled := true
+// TestRuntimeTuningWinsOverLegacyAlias covers the simultaneous-set
+// case: when both names are present in YAML, the new (canonical) name
+// wins, regardless of whether the values agree.
+func TestRuntimeTuningWinsOverLegacyAlias(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	legacy := true
+	canonical := false
 	cfg := minConfigWithAI()
-	cfg.Migration.AIAdjust = &enabled
+	cfg.Migration.AIAdjust = &legacy
+	cfg.Migration.AIAdjustInterval = "30s"
+	cfg.Migration.RuntimeTuning = &canonical
+	cfg.Migration.RuntimeTuningInterval = "10s"
 	if err := cfg.applyDefaults(); err != nil {
 		t.Fatalf("applyDefaults() failed: %v", err)
 	}
-	if cfg.Migration.AIAdjust == nil || *cfg.Migration.AIAdjust != true {
-		t.Errorf("explicit ai_adjust: true should stick; got %v", cfg.Migration.AIAdjust)
+	if cfg.Migration.RuntimeTuning == nil || *cfg.Migration.RuntimeTuning != false {
+		t.Errorf("runtime_tuning=false should win over conflicting ai_adjust=true; got %v",
+			cfg.Migration.RuntimeTuning)
+	}
+	if cfg.Migration.RuntimeTuningInterval != "10s" {
+		t.Errorf("runtime_tuning_interval=10s should win over ai_adjust_interval=30s; got %q",
+			cfg.Migration.RuntimeTuningInterval)
+	}
+	if cfg.Migration.AIAdjust != nil || cfg.Migration.AIAdjustInterval != "" {
+		t.Errorf("legacy fields must be cleared after normalization; got AIAdjust=%v AIAdjustInterval=%q",
+			cfg.Migration.AIAdjust, cfg.Migration.AIAdjustInterval)
 	}
 }
 
-// TestAIAdjustUnsetAutoEnabled covers the third state — the field is unset
-// (nil) and the user has AI configured, so the auto-enable kicks in.
-func TestAIAdjustUnsetAutoEnabled(t *testing.T) {
-	cfg := minConfigWithAI()
-	// Migration.AIAdjust left nil (zero value for *bool).
-	if err := cfg.applyDefaults(); err != nil {
-		t.Fatalf("applyDefaults() failed: %v", err)
+// TestRuntimeTuningResumeHashStableAcrossRename pins the #211 codex-
+// review fix: the resume config hash (json.Marshal(cfg.Sanitized()))
+// must produce identical output regardless of which YAML field name
+// the user wrote — otherwise an in-flight migration started before
+// the upgrade can't be resumed after it without --force-resume. The
+// JSON tags on RuntimeTuning / RuntimeTuningInterval pin the legacy
+// wire names (AIAdjust / AIAdjustInterval) for exactly this reason.
+//
+// Compares JSON shape directly (no applyDefaults) so the test isn't
+// dependent on system-state-driven auto-tune values that vary
+// between calls.
+func TestRuntimeTuningResumeHashStableAcrossRename(t *testing.T) {
+	v := false
+
+	legacy := &Config{}
+	legacy.Migration.AIAdjust = &v
+	legacy.Migration.AIAdjustInterval = "7s"
+	legacy.normalizeRuntimeTuningFields()
+
+	renamed := &Config{}
+	v2 := false
+	renamed.Migration.RuntimeTuning = &v2
+	renamed.Migration.RuntimeTuningInterval = "7s"
+	renamed.normalizeRuntimeTuningFields()
+
+	legacyJSON, err := json.Marshal(legacy.Migration)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
 	}
-	if cfg.Migration.AIAdjust == nil {
-		t.Fatal("AIAdjust still nil after auto-enable — auto-enable should have populated it")
+	renamedJSON, err := json.Marshal(renamed.Migration)
+	if err != nil {
+		t.Fatalf("marshal renamed: %v", err)
 	}
-	if *cfg.Migration.AIAdjust != true {
-		t.Error("auto-enable should set AIAdjust to true when unset and AI is configured")
+	if string(legacyJSON) != string(renamedJSON) {
+		t.Errorf("resume hash JSON diverges across rename — pre-#211 migrations would fail to resume after upgrade.\n  legacy:  %s\n  renamed: %s",
+			legacyJSON, renamedJSON)
+	}
+	// Belt-and-suspenders: the JSON must use the legacy wire names so
+	// stored hashes from pre-#211 runs continue to match.
+	if !strings.Contains(string(renamedJSON), `"AIAdjust":false`) {
+		t.Errorf("renamed JSON missing legacy AIAdjust wire name; resume hash will break for pre-#211 users.\n  got: %s", renamedJSON)
+	}
+	if !strings.Contains(string(renamedJSON), `"AIAdjustInterval":"7s"`) {
+		t.Errorf("renamed JSON missing legacy AIAdjustInterval wire name; resume hash will break for pre-#211 users.\n  got: %s", renamedJSON)
 	}
 }
 
-// TestAIAdjustInheritsSecretsFalse pins the second-tier precedence from PR #150
-// review: when the per-migration YAML doesn't set ai_adjust but the secrets
-// file's migration_defaults.ai_adjust is explicitly false, the per-migration
-// field must inherit that false (not get auto-enabled to true). Pre-Copilot-fix
-// this was broken — applyGlobalDefaults didn't copy AIAdjust, then the
-// AI auto-enable site flipped nil → true, silently overriding the secrets
-// default.
-func TestAIAdjustInheritsSecretsFalse(t *testing.T) {
+// TestAIAdjustLegacyAliasInSecrets covers the secrets-layer side of
+// the deprecation cycle: a global secrets file using the legacy
+// `ai_adjust` field name continues to be honored by
+// applyGlobalDefaults until the user migrates the file.
+func TestAIAdjustLegacyAliasInSecrets(t *testing.T) {
 	tmp := t.TempDir()
 	secretsPath := filepath.Join(tmp, "dmt-config.yaml")
 	if err := os.WriteFile(secretsPath, []byte(`
@@ -788,7 +971,7 @@ ai:
 
 migration_defaults:
   ai_adjust: false
-  ai_adjust_interval: "60s"
+  ai_adjust_interval: "45s"
 `), 0600); err != nil {
 		t.Fatalf("write secrets: %v", err)
 	}
@@ -797,18 +980,16 @@ migration_defaults:
 	t.Cleanup(secrets.Reset)
 
 	cfg := minConfigWithoutAI()
-	// Migration.AIAdjust left nil; secrets defaults should fill it with false.
 	if err := cfg.applyDefaults(); err != nil {
 		t.Fatalf("applyDefaults() failed: %v", err)
 	}
-	if cfg.Migration.AIAdjust == nil {
-		t.Fatal("AIAdjust still nil — applyGlobalDefaults should have inherited the secrets value")
+	if cfg.Migration.RuntimeTuning == nil || *cfg.Migration.RuntimeTuning != false {
+		t.Errorf("legacy migration_defaults.ai_adjust=false should inherit into RuntimeTuning; got %v",
+			cfg.Migration.RuntimeTuning)
 	}
-	if *cfg.Migration.AIAdjust != false {
-		t.Errorf("AIAdjust = true; expected false (from migration_defaults.ai_adjust). Auto-enable site clobbered the secrets default.")
-	}
-	if cfg.Migration.AIAdjustInterval != "60s" {
-		t.Errorf("AIAdjustInterval = %q; expected \"60s\" (from migration_defaults)", cfg.Migration.AIAdjustInterval)
+	if cfg.Migration.RuntimeTuningInterval != "45s" {
+		t.Errorf("legacy migration_defaults.ai_adjust_interval should inherit; got %q",
+			cfg.Migration.RuntimeTuningInterval)
 	}
 }
 
