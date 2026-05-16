@@ -197,7 +197,7 @@ INSERT INTO users (id, aboutme, age, creationdate, displayname, downvotes, email
     (4,  'Test user with non-ASCII: 日本語 🚀', NULL, '2009-01-01 00:00:00', 'TestUser',      0, NULL, '2010-12-30 12:00:00', 'München, Deutschland', 10, 1,   5,    NULL,                                4);
 
 INSERT INTO posts (id, acceptedanswerid, answercount, body, closeddate, commentcount, communityowneddate, creationdate, favoritecount, lastactivitydate, lasteditdate, lasteditordisplayname, lasteditoruserid, owneruserid, parentid, posttypeid, score, tags, title, viewcount) VALUES
-    (1, 2,    1, 'Sample question body. Could be very long in real data — testing the LONGTEXT path.', NULL, 0, NULL,                  '2008-08-01 12:11:31', 5,    '2010-06-15 09:30:00', NULL,                  NULL, NULL, 1,    NULL, 1, 100, '<sql><database>', 'Sample SO2010 question title', 1500),
+    (1, 2,    1, 'Sample question body. Could be very long in real data — testing the wide-text path.', NULL, 0, NULL,                  '2008-08-01 12:11:31', 5,    '2010-06-15 09:30:00', NULL,                  NULL, NULL, 1,    NULL, 1, 100, '<sql><database>', 'Sample SO2010 question title', 1500),
     (2, NULL, 0, 'Sample answer body.',                                                                NULL, 0, NULL,                  '2008-08-01 12:30:00', NULL, '2008-08-01 12:30:00', NULL,                  NULL, NULL, 2,    1,    2, 50,  NULL,              NULL,                           500),
     (3, NULL, 0, 'A wiki page body with some content.',                                                NULL, 1, '2009-01-01 00:00:00', '2009-01-01 00:00:00', NULL, '2010-06-15 09:30:00', '2010-06-15 09:30:00', NULL, 3,    3,    NULL, 3, 0,   '<wiki>',          'Wiki entry',                   10);
 

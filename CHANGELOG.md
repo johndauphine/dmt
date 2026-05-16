@@ -11,6 +11,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SO2010-minimal posts.body text aligned across all four engine
+  fixtures** (part of #291). Previously the mssql, pg, sqlite, and
+  mysql fixtures each used engine-specific phrasing for the row-1
+  `posts.body` value (`NVARCHAR(MAX) path`, `TEXT path`, `LONGTEXT
+  path`). The per-engine type-mapping context lives in the file
+  header comments where it belongs; the seeded data itself is now
+  engine-neutral (`testing the wide-text path`) so cross-engine
+  row-parity assertions in the upcoming integration matrix won't
+  fail on documentary text alone. The sqlite fixture drift predated
+  this PR but is fixed here to keep the four files in lockstep.
+
 - **SO2010-minimal PG + MySQL source-side fixtures** (part of #291).
   New `scripts/fixtures/so2010-minimal-pg.sql` and
   `scripts/fixtures/so2010-minimal-mysql.sql` mirror the existing MSSQL

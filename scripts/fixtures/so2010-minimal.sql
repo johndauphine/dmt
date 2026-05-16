@@ -176,7 +176,7 @@ INSERT INTO dbo.Users (Id, AboutMe, Age, CreationDate, DisplayName, DownVotes, E
 
 -- Posts: questions + answers, includes NVARCHAR(MAX) bodies.
 INSERT INTO dbo.Posts (Id, AcceptedAnswerId, AnswerCount, Body, ClosedDate, CommentCount, CommunityOwnedDate, CreationDate, FavoriteCount, LastActivityDate, LastEditDate, LastEditorDisplayName, LastEditorUserId, OwnerUserId, ParentId, PostTypeId, Score, Tags, Title, ViewCount) VALUES
-    (1, 2, 1, N'Sample question body. Could be very long in real data — testing NVARCHAR(MAX) path.', NULL, 0, NULL, '2008-08-01 12:11:31', 5, '2010-06-15 09:30:00', NULL, NULL, NULL, 1, NULL, 1, 100, N'<sql><database>', N'Sample SO2010 question title', 1500),
+    (1, 2, 1, N'Sample question body. Could be very long in real data — testing the wide-text path.', NULL, 0, NULL, '2008-08-01 12:11:31', 5, '2010-06-15 09:30:00', NULL, NULL, NULL, 1, NULL, 1, 100, N'<sql><database>', N'Sample SO2010 question title', 1500),
     (2, NULL, 0, N'Sample answer body.', NULL, 0, NULL, '2008-08-01 12:30:00', NULL, '2008-08-01 12:30:00', NULL, NULL, NULL, 2, 1, 2, 50, NULL, NULL, 500),
     (3, NULL, 0, N'A wiki page body with some content.', NULL, 1, '2009-01-01 00:00:00', '2009-01-01 00:00:00', NULL, '2010-06-15 09:30:00', '2010-06-15 09:30:00', NULL, 3, 3, NULL, 3, 0, N'<wiki>', N'Wiki entry', 10);
 
