@@ -1047,6 +1047,9 @@ func analyzeConfig(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if c.Bool("apply") && configPath == "" {
+		return fmt.Errorf("analyze --apply requires a config file; profile %q cannot be updated in place", profileName)
+	}
 
 	// Try full orchestrator first (with both source and target)
 	orch, err := orchestrator.New(cfg)
@@ -1088,9 +1091,6 @@ func analyzeConfig(c *cli.Context) error {
 
 	// Apply AI-tuned parameters to the analyzed config file if requested.
 	if c.Bool("apply") {
-		if configPath == "" {
-			return fmt.Errorf("analyze --apply requires a config file; profile %q cannot be updated in place", profileName)
-		}
 		if err := config.ApplyTuningToConfigFile(configPath, suggestions); err != nil {
 			return fmt.Errorf("failed to apply tuning: %w", err)
 		}

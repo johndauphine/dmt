@@ -846,6 +846,7 @@ func TestApplyTuningToConfigFileUpdatesMigrationOnly(t *testing.T) {
   user: ${env:SRC_USER}
   password: ${env:SRC_PASS}
 
+# migration settings
 migration: # workload tuning
   target_mode: upsert
   max_memory_mb: 8192
@@ -926,6 +927,9 @@ notifications:
 	}
 	if !strings.Contains(string(updated), "migration: # workload tuning\n") {
 		t.Fatalf("migration line comment was not preserved:\n%s", updated)
+	}
+	if count := strings.Count(string(updated), "# migration settings"); count != 1 {
+		t.Fatalf("migration head comment count = %d, want 1:\n%s", count, updated)
 	}
 	if !strings.Contains(string(updated), "\n\ntarget:\n") {
 		t.Fatalf("blank line before target block was not preserved:\n%s", updated)

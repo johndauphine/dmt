@@ -47,7 +47,7 @@ func ApplyTuningToConfigFile(path string, suggestions *driver.SmartConfigSuggest
 		return fmt.Errorf("updating config file %s: %w", path, err)
 	}
 
-	return atomicWriteFile(path, updated, info.Mode().Perm())
+	return atomicWriteFile(path, updated, info)
 }
 
 func applyTuningToConfigYAML(data []byte, suggestions *driver.SmartConfigSuggestions) ([]byte, error) {
@@ -145,12 +145,18 @@ func setMigrationScalar(mapping *yaml.Node, key, value string) {
 }
 
 func renderMigrationBlock(migrationKey, migration *yaml.Node) ([]byte, error) {
+	key := *migrationKey
+	// Head/foot comments are already present in the original text outside the
+	// replaced block. Re-emitting them here would duplicate the comment block.
+	key.HeadComment = ""
+	key.FootComment = ""
+
 	doc := &yaml.Node{
 		Kind: yaml.DocumentNode,
 		Content: []*yaml.Node{{
 			Kind: yaml.MappingNode,
 			Content: []*yaml.Node{
-				migrationKey,
+				&key,
 				migration,
 			},
 		}},
@@ -219,7 +225,7 @@ func appendMigrationBlock(data, block []byte) []byte {
 	return buf.Bytes()
 }
 
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+func atomicWriteFile(path string, data []byte, info os.FileInfo) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -228,9 +234,13 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	if err := tmp.Chmod(perm); err != nil {
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
 		tmp.Close()
 		return fmt.Errorf("setting temp file mode: %w", err)
+	}
+	if err := preserveFileOwnership(tmp.Name(), info); err != nil {
+		tmp.Close()
+		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
