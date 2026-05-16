@@ -1,6 +1,6 @@
 .PHONY: build clean test test-short test-coverage run install check setup-hooks \
         load-fixture-pgbench load-fixture-so2010-minimal test-fixtures-load \
-        integration-test
+        integration-test integration-test-sqlite
 
 # Build variables
 BINARY_NAME=dmt
@@ -211,6 +211,20 @@ test-fixtures-load: load-fixture-pgbench load-fixture-so2010-minimal
 #   - PG container reachable at localhost:5432
 integration-test: build
 	./scripts/integration-test.sh
+
+# integration-test-sqlite runs the sqlite → sqlite migration end-to-end.
+# No service containers, no client tools beyond the sqlite3 CLI — finishes
+# in seconds. Used by .github/workflows/integration.yml's sqlite job and
+# invokable locally:
+#
+#   make build && make integration-test-sqlite
+#
+# Expects:
+#   - dmt binary built (./dmt) — make depends on `build`
+#   - sqlite3 CLI on PATH (preinstalled on ubuntu-latest GHA runners and
+#     macOS; install with `apt-get install sqlite3` on bare Linux)
+integration-test-sqlite: build
+	./scripts/integration-test-sqlite.sh
 
 # Pre-commit hooks
 setup-hooks:
