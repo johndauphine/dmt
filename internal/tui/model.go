@@ -1372,6 +1372,10 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 
 			// Apply AI-tuned parameters to the analyzed config file if requested.
 			if apply {
+				if profileName != "" {
+					p.Send(OutputMsg(fmt.Sprintf("\n❌ Failed to apply tuning: analyze --apply requires a config file; profile %q cannot be updated in place\n", profileName)))
+					return
+				}
 				if err := config.ApplyTuningToConfigFile(configFile, suggestions); err != nil {
 					p.Send(OutputMsg(fmt.Sprintf("\n❌ Failed to apply tuning: %v\n", err)))
 				} else {

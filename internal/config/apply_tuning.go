@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -68,6 +69,11 @@ func applyTuningToConfigYAML(data []byte, suggestions *driver.SmartConfigSuggest
 		migrationKey = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "migration"}
 		migration = &yaml.Node{Kind: yaml.MappingNode}
 		root.Content = append(root.Content, migrationKey, migration)
+	} else if isYAMLNull(migration) {
+		migration.Kind = yaml.MappingNode
+		migration.Tag = ""
+		migration.Value = ""
+		migration.Content = nil
 	} else if migration.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("migration section must be a mapping")
 	}
@@ -76,7 +82,7 @@ func applyTuningToConfigYAML(data []byte, suggestions *driver.SmartConfigSuggest
 		setMigrationScalar(migration, setting.key, strconv.FormatInt(setting.value, 10))
 	}
 
-	renderedMigration, err := renderMigrationBlock(migration)
+	renderedMigration, err := renderMigrationBlock(migrationKey, migration)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +98,6 @@ func tuningFileSettings(s *driver.SmartConfigSuggestions) []tuningFileSetting {
 		{key: "workers", value: int64(s.Workers)},
 		{key: "max_source_connections", value: int64(s.MaxSourceConnections)},
 		{key: "max_target_connections", value: int64(s.MaxTargetConnections)},
-		{key: "max_memory_mb", value: s.EstimatedMemMB},
 		{key: "chunk_size", value: int64(s.ChunkSizeRecommendation)},
 		{key: "max_partitions", value: int64(s.MaxPartitions)},
 		{key: "large_table_threshold", value: s.LargeTableThreshold},
@@ -112,6 +117,10 @@ func findMappingValue(mapping *yaml.Node, key string) (*yaml.Node, *yaml.Node) {
 		}
 	}
 	return nil, nil
+}
+
+func isYAMLNull(node *yaml.Node) bool {
+	return node.Kind == yaml.ScalarNode && node.Tag == "!!null"
 }
 
 func setMigrationScalar(mapping *yaml.Node, key, value string) {
@@ -135,18 +144,28 @@ func setMigrationScalar(mapping *yaml.Node, key, value string) {
 	)
 }
 
-func renderMigrationBlock(migration *yaml.Node) ([]byte, error) {
+func renderMigrationBlock(migrationKey, migration *yaml.Node) ([]byte, error) {
 	doc := &yaml.Node{
 		Kind: yaml.DocumentNode,
 		Content: []*yaml.Node{{
 			Kind: yaml.MappingNode,
 			Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "migration"},
+				migrationKey,
 				migration,
 			},
 		}},
 	}
-	return yaml.Marshal(doc)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		enc.Close()
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func replaceTopLevelBlock(data []byte, startLine int, replacement []byte) ([]byte, error) {
@@ -169,6 +188,9 @@ func replaceTopLevelBlock(data []byte, startLine int, replacement []byte) ([]byt
 		}
 		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
 			end = i
+			for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
+				end--
+			}
 			break
 		}
 	}
@@ -214,11 +236,26 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		tmp.Close()
 		return fmt.Errorf("writing temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fsync temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp file: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("renaming temp file: %w", err)
+	}
+	if runtime.GOOS != "windows" {
+		dirFile, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("opening config dir for fsync: %w", err)
+		}
+		syncErr := dirFile.Sync()
+		_ = dirFile.Close()
+		if syncErr != nil {
+			return fmt.Errorf("fsync config dir: %w", syncErr)
+		}
 	}
 	return nil
 }

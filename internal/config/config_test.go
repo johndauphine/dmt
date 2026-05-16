@@ -846,8 +846,9 @@ func TestApplyTuningToConfigFileUpdatesMigrationOnly(t *testing.T) {
   user: ${env:SRC_USER}
   password: ${env:SRC_PASS}
 
-migration:
+migration: # workload tuning
   target_mode: upsert
+  max_memory_mb: 8192
 
 target:
   type: postgres
@@ -907,7 +908,7 @@ notifications:
 		"workers":                 8,
 		"max_source_connections":  12,
 		"max_target_connections":  10,
-		"max_memory_mb":           2048,
+		"max_memory_mb":           8192,
 		"chunk_size":              50000,
 		"max_partitions":          16,
 		"large_table_threshold":   1000000,
@@ -922,6 +923,42 @@ notifications:
 		if got := yamlInt64(t, migration[key]); got != value {
 			t.Fatalf("migration.%s = %d, want %d", key, got, value)
 		}
+	}
+	if !strings.Contains(string(updated), "migration: # workload tuning\n") {
+		t.Fatalf("migration line comment was not preserved:\n%s", updated)
+	}
+	if !strings.Contains(string(updated), "\n\ntarget:\n") {
+		t.Fatalf("blank line before target block was not preserved:\n%s", updated)
+	}
+	if strings.Contains(string(updated), "    workers:") {
+		t.Fatalf("migration block was rendered with 4-space child indentation:\n%s", updated)
+	}
+}
+
+func TestApplyTuningToConfigFileTreatsNullMigrationAsMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := []byte(`source:
+  type: postgres
+
+migration:
+
+target:
+  type: sqlite
+`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if err := ApplyTuningToConfigFile(path, testTuningSuggestions()); err != nil {
+		t.Fatalf("ApplyTuningToConfigFile: %v", err)
+	}
+
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	if !strings.Contains(string(updated), "migration:\n  workers: 8\n") {
+		t.Fatalf("null migration section was not replaced with mapping:\n%s", updated)
 	}
 }
 
