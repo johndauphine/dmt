@@ -3,6 +3,7 @@ package tuning
 import (
 	"fmt"
 	"math/rand/v2"
+	"strings"
 )
 
 // PR2 exploration (#179). Two complementary modes layered on top of the
@@ -188,17 +189,21 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 }
 
 // applyEpsilonPerturbation nudges the picked (WAW, ChunkSize, PR, RAB)
-// by one step in a randomly-chosen direction. The nudge is bounded by
-// the WAW grid, HardChunkLimit, and the reader-grid caps; if the chosen
-// direction would violate a bound, falls through to the next direction
-// so we always generate *some* variance.
+// by one or two randomly-chosen directions. The first nudge is always
+// attempted because the caller already made the ε decision. A second
+// direction on a different knob is attempted with probability ε, so
+// composite probes occur with total probability ε² (#295).
+//
+// Each nudge is bounded by the WAW grid, HardChunkLimit, and the
+// reader-grid caps; if the chosen direction would violate a bound, falls
+// through to the next direction so we always generate *some* variance.
 //
 // Historical-retry exclusions are intentionally NOT applied (same
 // reasoning as applyGridExploration — #186). ε-perturbation is an
 // exploration mechanism; its job is to occasionally probe non-argmax
 // points so the regression's training data stays representative.
 //
-// Picks one of eight directions:
+// Picks from these eight directions:
 //
 //	WAW + 1   (capped at maxWAWForGrid)
 //	WAW − 1   (floored at 1)
@@ -208,13 +213,14 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 //	PR ÷ 2    (floored at 1)                        #219
 //	RAB × 2   (capped at perturbRABMax)             #219
 //	RAB ÷ 2   (floored at perturbRABMin)            #219
-func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
+func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float64) {
 	type direction struct {
+		knob  string
 		name  string
 		apply func(*Output) bool // returns true when the nudge was actually applied
 	}
 	dirs := []direction{
-		{"WAW+1", func(o *Output) bool {
+		{"waw", "WAW+1", func(o *Output) bool {
 			next := o.WriteAheadWriters + 1
 			if next > maxWAWForGrid {
 				return false
@@ -222,7 +228,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.WriteAheadWriters = next
 			return true
 		}},
-		{"WAW-1", func(o *Output) bool {
+		{"waw", "WAW-1", func(o *Output) bool {
 			next := o.WriteAheadWriters - 1
 			if next < 1 {
 				return false
@@ -230,7 +236,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.WriteAheadWriters = next
 			return true
 		}},
-		{"CS×1.5", func(o *Output) bool {
+		{"cs", "CS×1.5", func(o *Output) bool {
 			next := int(float64(o.ChunkSize) * 1.5)
 			if profile.HardChunkLimit > 0 && next > profile.HardChunkLimit {
 				return false
@@ -241,7 +247,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.ChunkSize = next
 			return true
 		}},
-		{"CS×0.67", func(o *Output) bool {
+		{"cs", "CS×0.67", func(o *Output) bool {
 			next := int(float64(o.ChunkSize) * 0.67)
 			if next < 1 {
 				next = 1
@@ -252,7 +258,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.ChunkSize = next
 			return true
 		}},
-		{"PR×2", func(o *Output) bool {
+		{"pr", "PR×2", func(o *Output) bool {
 			next := o.ParallelReaders * 2
 			if next > perturbPRMax || next == o.ParallelReaders {
 				return false
@@ -260,7 +266,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.ParallelReaders = next
 			return true
 		}},
-		{"PR÷2", func(o *Output) bool {
+		{"pr", "PR÷2", func(o *Output) bool {
 			next := o.ParallelReaders / 2
 			if next < 1 || next == o.ParallelReaders {
 				return false
@@ -268,7 +274,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.ParallelReaders = next
 			return true
 		}},
-		{"RAB×2", func(o *Output) bool {
+		{"rab", "RAB×2", func(o *Output) bool {
 			next := o.ReadAheadBuffers * 2
 			if next > perturbRABMax || next == o.ReadAheadBuffers {
 				return false
@@ -276,7 +282,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			o.ReadAheadBuffers = next
 			return true
 		}},
-		{"RAB÷2", func(o *Output) bool {
+		{"rab", "RAB÷2", func(o *Output) bool {
 			next := o.ReadAheadBuffers / 2
 			if next < perturbRABMin || next == o.ReadAheadBuffers {
 				return false
@@ -285,21 +291,36 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile) {
 			return true
 		}},
 	}
-	// Try directions in random order until one applies.
-	order := rand.Perm(len(dirs))
-	for _, idx := range order {
-		if dirs[idx].apply(out) {
-			// A successful nudge means the *final* (WAW, ChunkSize)
-			// values came from exploration, not from the upstream
-			// selector — overwrite Tier so the tier tag matches what
-			// actually shipped to the migration (Codex review on #202).
-			// The chained Reasoning preserves the upstream tier's
-			// note ("regression-selected ... ; ε-perturbation X applied")
-			// so no provenance is lost.
-			out.Tier = TierExploration
-			out.Reasoning = appendReasoning(out.Reasoning, "ε-perturbation %s applied", dirs[idx].name)
-			return
+	applied := make([]string, 0, 2)
+	usedKnobs := map[string]bool{}
+	applyOne := func() bool {
+		order := rand.Perm(len(dirs))
+		for _, idx := range order {
+			if usedKnobs[dirs[idx].knob] {
+				continue
+			}
+			if dirs[idx].apply(out) {
+				usedKnobs[dirs[idx].knob] = true
+				applied = append(applied, dirs[idx].name)
+				return true
+			}
 		}
+		return false
 	}
-	// All directions blocked by filters (rare) — leave argmax untouched.
+
+	if !applyOne() {
+		return
+	}
+	if shouldEpsilonPerturb(epsilon) {
+		applyOne()
+	}
+
+	// A successful nudge means the *final* values came from exploration,
+	// not from the upstream selector — overwrite Tier so the tier tag
+	// matches what actually shipped to the migration (Codex review on
+	// #202). The chained Reasoning preserves the upstream tier's note
+	// ("regression-selected ... ; ε-perturbation X applied") so no
+	// provenance is lost.
+	out.Tier = TierExploration
+	out.Reasoning = appendReasoning(out.Reasoning, "ε-perturbation %s applied", strings.Join(applied, "+"))
 }
