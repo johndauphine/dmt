@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
+	"gopkg.in/yaml.v3"
 )
 
 func TestMSSQLDSNURLEncoding(t *testing.T) {
@@ -767,7 +769,7 @@ func TestApplyAISuggestions_UserOverridesPRRAB(t *testing.T) {
 		Source: SourceConfig{Type: "postgres", Host: "localhost", Port: 5432, Database: "s", User: "u", Password: "p"},
 		Target: TargetConfig{Type: "mssql", Host: "localhost", Port: 1433, Database: "t", User: "u", Password: "p"},
 		Migration: MigrationConfig{
-			ParallelReaders:  6, // user-specified
+			ParallelReaders:  6,  // user-specified
 			ReadAheadBuffers: 12, // user-specified
 		},
 	}
@@ -831,6 +833,185 @@ func TestApplyAISuggestions_AppliesPRRABWhenUnset(t *testing.T) {
 	}
 	if cfg.Migration.ReadAheadBuffers != 8 {
 		t.Errorf("tuner suggestion not applied: ReadAheadBuffers=%d, want 8 (suggested)", cfg.Migration.ReadAheadBuffers)
+	}
+}
+
+func TestApplyTuningToConfigFileUpdatesMigrationOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := []byte(`source:
+  type: mssql
+  host: ${env:SRC_HOST}
+  port: 1433
+  database: so2010
+  user: ${env:SRC_USER}
+  password: ${env:SRC_PASS}
+
+migration:
+  target_mode: upsert
+
+target:
+  type: postgres
+  host: ${env:TGT_HOST}
+  port: 5432
+  database: so2010_pg
+  user: ${env:TGT_USER}
+  password: ${env:TGT_PASS}
+
+notifications:
+  slack:
+    webhook_url: ${env:SLACK_WEBHOOK}
+`)
+	if err := os.WriteFile(path, original, 0640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.Chmod(path, 0640); err != nil {
+		t.Fatalf("chmod config: %v", err)
+	}
+
+	suggestions := testTuningSuggestions()
+	if err := ApplyTuningToConfigFile(path, suggestions); err != nil {
+		t.Fatalf("ApplyTuningToConfigFile: %v", err)
+	}
+
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	if got, want := topLevelYAMLBlock(updated, "source"), topLevelYAMLBlock(original, "source"); got != want {
+		t.Fatalf("source block changed:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if got, want := topLevelYAMLBlock(updated, "target"), topLevelYAMLBlock(original, "target"); got != want {
+		t.Fatalf("target block changed:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if got, want := topLevelYAMLBlock(updated, "notifications"), topLevelYAMLBlock(original, "notifications"); got != want {
+		t.Fatalf("notifications block changed:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat updated config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0640 {
+		t.Fatalf("file mode = %v, want 0640", got)
+	}
+
+	var parsed map[string]interface{}
+	if err := yaml.Unmarshal(updated, &parsed); err != nil {
+		t.Fatalf("parse updated config: %v", err)
+	}
+	migration, ok := parsed["migration"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("migration section has type %T, want map", parsed["migration"])
+	}
+	want := map[string]int64{
+		"workers":                 8,
+		"max_source_connections":  12,
+		"max_target_connections":  10,
+		"max_memory_mb":           2048,
+		"chunk_size":              50000,
+		"max_partitions":          16,
+		"large_table_threshold":   1000000,
+		"upsert_merge_chunk_size": 7000,
+		"read_ahead_buffers":      6,
+		"write_ahead_writers":     3,
+		"parallel_readers":        4,
+		"checkpoint_frequency":    20,
+		"max_retries":             5,
+	}
+	for key, value := range want {
+		if got := yamlInt64(t, migration[key]); got != value {
+			t.Fatalf("migration.%s = %d, want %d", key, got, value)
+		}
+	}
+}
+
+func TestApplyTuningToConfigFileWarnsOnOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`migration:
+  workers: 2
+  chunk_size: 1000
+`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var logs bytes.Buffer
+	logging.SetOutput(&logs)
+	t.Cleanup(func() { logging.SetOutput(os.Stdout) })
+
+	if err := ApplyTuningToConfigFile(path, testTuningSuggestions()); err != nil {
+		t.Fatalf("ApplyTuningToConfigFile: %v", err)
+	}
+
+	got := logs.String()
+	for _, want := range []string{
+		"migration.workers: 2 -> 8",
+		"migration.chunk_size: 1000 -> 50000",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning log missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func testTuningSuggestions() *driver.SmartConfigSuggestions {
+	return &driver.SmartConfigSuggestions{
+		Workers:                 8,
+		MaxSourceConnections:    12,
+		MaxTargetConnections:    10,
+		EstimatedMemMB:          2048,
+		ChunkSizeRecommendation: 50000,
+		MaxPartitions:           16,
+		LargeTableThreshold:     1000000,
+		UpsertMergeChunkSize:    7000,
+		ReadAheadBuffers:        6,
+		WriteAheadWriters:       3,
+		ParallelReaders:         4,
+		CheckpointFrequency:     20,
+		MaxRetries:              5,
+	}
+}
+
+func topLevelYAMLBlock(data []byte, name string) string {
+	lines := strings.SplitAfter(string(data), "\n")
+	start := -1
+	prefix := name + ":"
+	for i, line := range lines {
+		if strings.TrimSpace(line) == prefix {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return ""
+	}
+
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			end = i
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "")
+}
+
+func yamlInt64(t *testing.T, value interface{}) int64 {
+	t.Helper()
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case uint64:
+		return int64(v)
+	default:
+		t.Fatalf("value %v has type %T, want integer", value, value)
+		return 0
 	}
 }
 

@@ -299,7 +299,7 @@ func main() {
 				Flags: []cli.Flag{
 					&cli.BoolFlag{
 						Name:  "apply",
-						Usage: "Apply AI-tuned parameters to ~/.secrets/dmt-config.yaml",
+						Usage: "Apply AI-tuned parameters to the analyzed config file",
 					},
 				},
 			},
@@ -1043,7 +1043,7 @@ func preflightExitError(result *orchestrator.HealthCheckResult) error {
 }
 
 func analyzeConfig(c *cli.Context) error {
-	cfg, _, _, err := loadConfigWithOrigin(c)
+	cfg, profileName, configPath, err := loadConfigWithOrigin(c)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -1086,34 +1086,18 @@ func analyzeConfig(c *cli.Context) error {
 	// Output suggestions
 	fmt.Println(suggestions.FormatYAML())
 
-	// Apply AI-tuned parameters to secrets file if requested
+	// Apply AI-tuned parameters to the analyzed config file if requested.
 	if c.Bool("apply") {
-		if err := applyTuningToSecrets(suggestions); err != nil {
+		if configPath == "" {
+			return fmt.Errorf("analyze --apply requires a config file; profile %q cannot be updated in place", profileName)
+		}
+		if err := config.ApplyTuningToConfigFile(configPath, suggestions); err != nil {
 			return fmt.Errorf("failed to apply tuning: %w", err)
 		}
-		fmt.Printf("\n✓ Applied AI-tuned parameters to %s\n", secrets.GetSecretsPath())
+		fmt.Printf("\n✓ Applied AI-tuned parameters to %s\n", configPath)
 	}
 
 	return nil
-}
-
-// applyTuningToSecrets writes AI-tuned parameters to the secrets file.
-func applyTuningToSecrets(suggestions *driver.SmartConfigSuggestions) error {
-	updates := &secrets.Config{
-		MigrationDefaults: secrets.MigrationDefaults{
-			Workers:              suggestions.Workers,
-			MaxSourceConnections: suggestions.MaxSourceConnections,
-			MaxTargetConnections: suggestions.MaxTargetConnections,
-			MaxMemoryMB:          suggestions.EstimatedMemMB,
-			ReadAheadBuffers:     suggestions.ReadAheadBuffers,
-			WriteAheadWriters:    suggestions.WriteAheadWriters,
-			ParallelReaders:      suggestions.ParallelReaders,
-			CheckpointFrequency:  suggestions.CheckpointFrequency,
-			MaxRetries:           suggestions.MaxRetries,
-		},
-	}
-
-	return secrets.Save(updates)
 }
 
 func boolToStatus(connected bool) string {
@@ -1516,12 +1500,12 @@ func runSetup(c *cli.Context) error {
 
 		fmt.Println(suggestions.FormatYAML())
 
-		answer := cliPrompt(reader, "Apply tuning to secrets? (y/n)", "n")
+		answer := cliPrompt(reader, "Apply tuning to config file? (y/n)", "n")
 		if strings.ToLower(answer) == "y" {
-			if err := applyTuningToSecrets(suggestions); err != nil {
+			if err := config.ApplyTuningToConfigFile(state.ConfigPath, suggestions); err != nil {
 				fmt.Printf("Error applying tuning: %v\n", err)
 			} else {
-				fmt.Printf("Applied AI-tuned parameters to %s\n", secrets.GetSecretsPath())
+				fmt.Printf("Applied AI-tuned parameters to %s\n", state.ConfigPath)
 			}
 		}
 	}

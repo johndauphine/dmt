@@ -326,7 +326,7 @@ func NewSmartConfigAnalyzer(db *sql.DB, dbType string) *SmartConfigAnalyzer {
 	}
 }
 
-// SetHistoryProvider sets the history provider for learning from past analyses.
+// SetHistoryProvider sets the history provider for learning from completed migrations.
 func (s *SmartConfigAnalyzer) SetHistoryProvider(provider TuningHistoryProvider) {
 	s.historyProvider = provider
 }

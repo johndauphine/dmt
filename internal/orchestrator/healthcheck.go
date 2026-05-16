@@ -213,7 +213,7 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	// Create the smart config analyzer
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
 
-	// Set up history provider using the state backend for learning from past analyses
+	// Set up history provider using the state backend for learning from past completed migrations.
 	if o.state != nil {
 		analyzer.SetHistoryProvider(&stateHistoryAdapter{state: o.state})
 	}
@@ -252,16 +252,13 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		})
 	}
 
-	// Wire workload identity (#215) so analyze-mode tuning records
-	// carry the (source endpoint, target endpoint) tuple. Without
-	// this, records saved via analyze would have empty identity and
-	// fail to match Tier 1 lookups — wasting otherwise-valid training
-	// data (Codex review on PR #218).
+	// Wire workload identity (#215) so analyze can read the same
+	// identity-scoped history that migration runs persist.
 	//
 	// The source schema comes from the `schema` parameter that the
 	// caller passed to Analyze — that's what actually gets analyzed,
-	// so it's the right value to persist on the identity tuple. Fall
-	// back to cfg.Source.Schema only when the caller passed an empty
+	// so it's the right identity value. Fall back to cfg.Source.Schema
+	// only when the caller passed an empty
 	// string (Copilot review on PR #223).
 	sourceSchema := schema
 	if sourceSchema == "" {
@@ -280,15 +277,9 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 		return nil, fmt.Errorf("analyzing config: %w", err)
 	}
 
-	// Save tuning history with AI's recommended values (no user overrides for analyze)
-	analyzer.SaveTuningWithActualParams(driver.ActualParams{
-		Workers:           suggestions.Workers,
-		ChunkSize:         suggestions.ChunkSizeRecommendation,
-		ReadAheadBuffers:  suggestions.ReadAheadBuffers,
-		WriteAheadWriters: suggestions.WriteAheadWriters,
-		ParallelReaders:   suggestions.ParallelReaders,
-		MaxPartitions:     suggestions.MaxPartitions,
-	})
+	// Analyze is advisory. Do not persist synthetic rows to
+	// ai_tuning_history; that table is training data from completed
+	// migrations with real throughput, retry, and duration measurements.
 
 	// Add database tuning recommendations using the same AI mapper
 	o.addDatabaseTuningRecommendations(ctx, suggestions)

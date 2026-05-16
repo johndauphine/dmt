@@ -306,6 +306,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Analyze tuning no longer pollutes global secrets or training history**
+  (#246, #247). `dmt analyze --apply` now writes workload-specific
+  tuning values into the analyzed config file's `migration:` section
+  instead of `~/.secrets/dmt-config.yaml`, preserving unrelated
+  config sections and file permissions. Analyze mode is also advisory
+  only: it can read prior `ai_tuning_history` rows for recommendations,
+  but only completed migration runs persist new training rows.
+
 - **TUI viewport now auto-scrolls to follow new output** (#280). The
   first `WindowSizeMsg` wrote the welcome message into the viewport
   but never called `GotoBottom`, so `YOffset` stayed at 0 with the

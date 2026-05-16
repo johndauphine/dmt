@@ -136,7 +136,7 @@ var availableCommands = []commandInfo{
 	{"/resume", "Resume an interrupted migration"},
 	{"/validate", "Validate migration row counts"},
 	{"/config", "Show configuration details"},
-	{"/analyze", "Analyze source database and suggest config (--apply to save)"},
+	{"/analyze", "Analyze source database and suggest config (--apply writes config)"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/setup", "Guided setup: secrets, config, connection test, AI analysis"},
@@ -832,7 +832,7 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume --profile NAME Resume using a saved profile
   /validate             Validate migration
   /config [config_file] Show configuration details
-  /analyze [--apply]     Analyze source database and suggest configuration
+  /analyze [--apply]     Analyze source database and suggest configuration (--apply writes config)
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
@@ -1370,12 +1370,12 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 
 			p.Send(BoxedOutputMsg(suggestions.FormatYAML()))
 
-			// Apply AI-tuned parameters to secrets file if requested
+			// Apply AI-tuned parameters to the analyzed config file if requested.
 			if apply {
-				if err := applyTuningToSecrets(suggestions); err != nil {
+				if err := config.ApplyTuningToConfigFile(configFile, suggestions); err != nil {
 					p.Send(OutputMsg(fmt.Sprintf("\n❌ Failed to apply tuning: %v\n", err)))
 				} else {
-					p.Send(OutputMsg(fmt.Sprintf("\n✓ Applied AI-tuned parameters to %s\n", secrets.GetSecretsPath())))
+					p.Send(OutputMsg(fmt.Sprintf("\n✓ Applied AI-tuned parameters to %s\n", configFile)))
 				}
 			}
 		}()
@@ -2267,25 +2267,6 @@ func parseAnalyzeArgs(parts []string) (string, string, bool) {
 	}
 
 	return configFile, profileName, apply
-}
-
-// applyTuningToSecrets saves AI-tuned parameters to the secrets config file.
-func applyTuningToSecrets(suggestions *driver.SmartConfigSuggestions) error {
-	updates := &secrets.Config{
-		MigrationDefaults: secrets.MigrationDefaults{
-			Workers:              suggestions.Workers,
-			MaxSourceConnections: suggestions.MaxSourceConnections,
-			MaxTargetConnections: suggestions.MaxTargetConnections,
-			MaxMemoryMB:          suggestions.EstimatedMemMB,
-			ReadAheadBuffers:     suggestions.ReadAheadBuffers,
-			WriteAheadWriters:    suggestions.WriteAheadWriters,
-			ParallelReaders:      suggestions.ParallelReaders,
-			CheckpointFrequency:  suggestions.CheckpointFrequency,
-			MaxRetries:           suggestions.MaxRetries,
-		},
-	}
-
-	return secrets.Save(updates)
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {
