@@ -142,3 +142,47 @@ jobs:
             /tmp/dmt-ci.log
             ${{ env.DMT_STATE_DIR }}
           if-no-files-found: ignore
+
+  sqlite-to-sqlite:
+    name: sqlite → sqlite
+    # Self-contained: no service containers, no client tools beyond the
+    # sqlite3 CLI (preinstalled on ubuntu-latest). Finishes in seconds,
+    # which makes this the fastest signal in the integration matrix —
+    # catches SQLite driver and shared-pipeline regressions without
+    # needing the heavier mssql/pg setup to be healthy.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-sqlite-state
+      SQLITE_WORK_DIR: ${{ github.workspace }}/.dmt-ci-sqlite-work
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build dmt
+        run: make build
+
+      - name: Verify sqlite3 CLI present
+        # sqlite3 is preinstalled on ubuntu-latest GHA images; verify
+        # and fail loud if a future runner image change removes it.
+        run: which sqlite3 && sqlite3 --version
+
+      - name: Run dmt sqlite → sqlite migration
+        run: make integration-test-sqlite
+
+      - name: Upload dmt logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmt-sqlite-logs-${{ github.run_id }}
+          path: |
+            /tmp/dmt-ci-sqlite.log
+            ${{ env.DMT_STATE_DIR }}
+            ${{ env.SQLITE_WORK_DIR }}
+          if-no-files-found: ignore

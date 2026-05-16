@@ -1,0 +1,41 @@
+# CI-only config for the sqlite → sqlite integration test.
+#
+# This is the cheapest cross-DB-shape coverage dmt has — both endpoints
+# are file-based SQLite databases, so there are no service containers,
+# no client tools to install, no auth, and no network. CI completes in
+# seconds. Pair this with the mssql → postgres job for real-server
+# coverage; this one catches schema-handling and pipeline regressions
+# fast.
+#
+# Source path is loaded by `scripts/integration-test-sqlite.sh` from
+# scripts/fixtures/so2010-minimal-sqlite.sql before dmt runs.
+#
+# Local reproduction:
+#   make build
+#   make integration-test-sqlite
+
+source:
+  type: sqlite
+  database: ${SQLITE_SOURCE_DB}
+
+target:
+  type: sqlite
+  database: ${SQLITE_TARGET_DB}
+
+migration:
+  # SQLite can't ADD CONSTRAINT FK / CHECK / INDEX via ALTER TABLE; these
+  # would log warnings from the driver and skip. Disabled here for
+  # cleaner CI logs and to match the mssql→pg CI config's shape.
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
+  runtime_tuning: false
+  # Tight checkpoint settings so the resume path exercises in CI even on
+  # the tiny fixture (~47 rows total). The chunk-size and frequency match
+  # ci-mssql-pg.yaml so the two CI jobs cover the same code paths.
+  chunk_size: 10
+  checkpoint_frequency: 1
+  # Isolate state so a local run doesn't clobber the operator's
+  # ~/.dmt/migrate.db. The CI workflow + the script set DMT_STATE_DIR.
+  data_dir: ${DMT_STATE_DIR}

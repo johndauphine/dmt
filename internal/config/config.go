@@ -49,6 +49,24 @@ func availableDriverTypes() []string {
 	return driver.Available()
 }
 
+// isFileBasedDriver returns true when the driver connects to a file
+// rather than a network endpoint, in which case `host` is meaningless
+// and the connection identity is carried on `database` (the path).
+//
+// Today the only file-based driver is sqlite (registered as primary
+// name "sqlite" with aliases "sqlite3" / "sqlitedb" — see
+// internal/driver/sqlite/driver.go Aliases()). The alias forms are
+// handled correctly here because canonicalDriverName resolves through
+// driver.Get(...).Name(), which collapses aliases to the canonical
+// primary name before comparison.
+//
+// Used by validate() to skip the `host is required` check for file
+// drivers — without this, a config like `type: sqlite, database:
+// ./foo.db` would error at load time even though sqlite has no host.
+func isFileBasedDriver(dbType string) bool {
+	return canonicalDriverName(dbType) == "sqlite"
+}
+
 // expandTilde expands ~ or ~/ at the start of a path to the user's home directory
 func expandTilde(path string) string {
 	if path == "" {
@@ -1239,7 +1257,13 @@ func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool
 
 func (c *Config) validate() error {
 	// Validate source
-	if c.Source.Host == "" {
+	//
+	// File-based drivers (sqlite) don't use host — their connection
+	// identity is the file path, carried on `database`. Network drivers
+	// (mssql/postgres/mysql) require both host and database. Branch on
+	// the canonical type before checking `host` so a sqlite source with
+	// only `database: ./foo.db` validates cleanly.
+	if !isFileBasedDriver(c.Source.Type) && c.Source.Host == "" {
 		return fmt.Errorf("source.host is required")
 	}
 	if c.Source.Database == "" {
@@ -1259,8 +1283,8 @@ func (c *Config) validate() error {
 		return fmt.Errorf("source.auth: kerberos is not currently supported; tracking re-enable in #251")
 	}
 
-	// Validate target
-	if c.Target.Host == "" {
+	// Validate target — same file-based-driver carve-out as source.
+	if !isFileBasedDriver(c.Target.Type) && c.Target.Host == "" {
 		return fmt.Errorf("target.host is required")
 	}
 	if c.Target.Database == "" {

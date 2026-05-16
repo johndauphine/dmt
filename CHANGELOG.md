@@ -11,6 +11,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SQLite → SQLite integration test in CI.** New `sqlite-to-sqlite`
+  job in `.github/workflows/integration.yml` runs an end-to-end dmt
+  migration between two on-disk SQLite databases on every PR. No
+  service containers, no client tools beyond the preinstalled
+  `sqlite3` CLI, and finishes in seconds — the fastest signal in the
+  integration matrix. Fixture (`scripts/fixtures/so2010-minimal-sqlite.sql`)
+  mirrors the existing MSSQL SO2010-minimal fixture schema and seed
+  rows so the two CI jobs cover the same surface area from different
+  driver angles. Includes value spot-checks (UTF-8 round-trip, NULL
+  preservation, negative integer PK, canonical lookup-table contents)
+  beyond the row-count parity check. Local repro: `make integration-test-sqlite`.
+
 - **SQLite driver for test-only migrations** (#298). New driver under
   `internal/driver/sqlite/` uses the pure-Go `modernc.org/sqlite`
   (already a transitive dependency of the checkpoint store) so dmt can
@@ -58,6 +70,16 @@ All notable changes to this project will be documented in this file.
   doesn't need an AI provider configured to invalidate.
 
 ### Changed
+
+- **Config validation: skip `host` requirement for file-based drivers.**
+  `config.validate()` previously required `source.host` and
+  `target.host` unconditionally, which rejected valid sqlite configs
+  whose connection identity is a file path on `database`. Added an
+  `isFileBasedDriver` helper that branches on canonical driver name
+  (currently just `sqlite`) so file-driver configs validate cleanly.
+  Caught by the new sqlite → sqlite integration test on first local
+  run — the network-driver assumption was load-bearing for the
+  3-driver world but invalid once a file driver landed.
 
 - **Drop `R²=` from regression-tier reasoning line** (#293). The
   operator-facing log line emitted from
