@@ -25,6 +25,10 @@ target:
   database: so2010_minimal_ci
   user: root
   password: ${MYSQL_ROOT_PASSWORD}
+  # Per #252 the MySQL driver defaults to tls=true; the mysql:8.0 CI
+  # service container has no trusted cert chain, so explicit disable
+  # is required for the connection to succeed.
+  ssl_mode: disable
 
 migration:
   create_indexes: false
