@@ -52,7 +52,13 @@ func availableDriverTypes() []string {
 // isFileBasedDriver returns true when the driver connects to a file
 // rather than a network endpoint, in which case `host` is meaningless
 // and the connection identity is carried on `database` (the path).
-// Today this is just sqlite (and its aliases sqlite3 / sqlitedb).
+//
+// Today the only file-based driver is sqlite (registered as primary
+// name "sqlite" with aliases "sqlite3" / "sqlitedb" — see
+// internal/driver/sqlite/driver.go Aliases()). The alias forms are
+// handled correctly here because canonicalDriverName resolves through
+// driver.Get(...).Name(), which collapses aliases to the canonical
+// primary name before comparison.
 //
 // Used by validate() to skip the `host is required` check for file
 // drivers — without this, a config like `type: sqlite, database:

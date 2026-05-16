@@ -68,6 +68,12 @@ echo ""
 rm -rf "$WORK_DIR" "$DMT_STATE_DIR"
 mkdir -p "$WORK_DIR" "$DMT_STATE_DIR"
 
+# Truncate the log explicitly so a writability problem surfaces here
+# (with a clear shell error) rather than as a confusing pipe failure
+# inside the `tee` below. Matches the hermetic-reset intent above:
+# every artifact this script touches starts fresh.
+: > "$LOG"
+
 # Load the SO2010-minimal fixture into the source database. sqlite3 reads
 # the .sql file on stdin; CREATE TABLE statements create the schema,
 # INSERT statements populate the seed rows. The fixture's `DROP TABLE

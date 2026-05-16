@@ -450,6 +450,119 @@ func TestValidate_RejectsKerberosAuth(t *testing.T) {
 	})
 }
 
+// TestValidate_FileBasedDriverSkipsHost locks in the isFileBasedDriver
+// carve-out added so sqlite configs validate without `host`. Without
+// this test, a future refactor of canonicalDriverName or
+// isFileBasedDriver could silently re-reject sqlite configs (the
+// integration test would catch it, but unit tests catch it on every
+// `go test` invocation, much earlier). The companion assertion
+// (non-file drivers still require host) prevents the inverse
+// regression: an over-eager relaxation that accidentally lets
+// host-less postgres/mssql/mysql configs through.
+func TestValidate_FileBasedDriverSkipsHost(t *testing.T) {
+	t.Run("sqlite_source_no_host_validates", func(t *testing.T) {
+		cfg := &Config{
+			Source: SourceConfig{
+				Type:     "sqlite",
+				Database: "./testdata/source.db",
+			},
+			Target: TargetConfig{
+				Type: "postgres", Host: "tgt", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Migration: MigrationConfig{TargetMode: "drop_recreate"},
+		}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("sqlite source with empty Host should validate; got error: %v", err)
+		}
+	})
+
+	t.Run("sqlite_target_no_host_validates", func(t *testing.T) {
+		cfg := &Config{
+			Source: SourceConfig{
+				Type: "postgres", Host: "src", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Target: TargetConfig{
+				Type:     "sqlite",
+				Database: "./testdata/target.db",
+			},
+			Migration: MigrationConfig{TargetMode: "drop_recreate"},
+		}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("sqlite target with empty Host should validate; got error: %v", err)
+		}
+	})
+
+	t.Run("sqlite_alias_no_host_validates", func(t *testing.T) {
+		// canonicalDriverName collapses "sqlite3" → "sqlite", so the
+		// carve-out must apply to alias forms too.
+		cfg := &Config{
+			Source: SourceConfig{
+				Type:     "sqlite3",
+				Database: "./testdata/source.db",
+			},
+			Target: TargetConfig{
+				Type: "postgres", Host: "tgt", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Migration: MigrationConfig{TargetMode: "drop_recreate"},
+		}
+		if err := cfg.validate(); err != nil {
+			t.Errorf("sqlite3 alias source should also skip host; got error: %v", err)
+		}
+	})
+
+	t.Run("postgres_source_no_host_still_rejected", func(t *testing.T) {
+		// Inverse: the carve-out must NOT have relaxed host validation
+		// for network drivers.
+		cfg := &Config{
+			Source: SourceConfig{
+				Type:     "postgres",
+				Database: "d",
+				User:     "u",
+				Password: "p",
+				// Host intentionally empty.
+			},
+			Target: TargetConfig{
+				Type: "postgres", Host: "tgt", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Migration: MigrationConfig{TargetMode: "drop_recreate"},
+		}
+		err := cfg.validate()
+		if err == nil {
+			t.Fatal("postgres source with empty Host validated; expected source.host required error")
+		}
+		if !strings.Contains(err.Error(), "source.host is required") {
+			t.Errorf("expected 'source.host is required'; got %v", err)
+		}
+	})
+
+	t.Run("mssql_target_no_host_still_rejected", func(t *testing.T) {
+		cfg := &Config{
+			Source: SourceConfig{
+				Type: "sqlite", Database: "./src.db",
+			},
+			Target: TargetConfig{
+				Type:     "mssql",
+				Database: "d",
+				User:     "u",
+				Password: "p",
+				// Host intentionally empty.
+			},
+			Migration: MigrationConfig{TargetMode: "drop_recreate"},
+		}
+		err := cfg.validate()
+		if err == nil {
+			t.Fatal("mssql target with empty Host validated; expected target.host required error")
+		}
+		if !strings.Contains(err.Error(), "target.host is required") {
+			t.Errorf("expected 'target.host is required'; got %v", err)
+		}
+	})
+}
+
 func TestAutoTuneWriteAheadWriters(t *testing.T) {
 	// Test that write-ahead writers get set to a reasonable value
 	// (may be from auto-tuning or global defaults)
