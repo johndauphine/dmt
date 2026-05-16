@@ -1,0 +1,184 @@
+# Nightly cross-engine integration matrix (#291).
+#
+# Companion to .github/workflows/integration.yml (the per-PR anchors).
+# That workflow runs mssql→postgres and sqlite→sqlite on every PR; this
+# one runs all 11 *cross*-engine directed pairs once a night, plus on
+# manual dispatch, so the broader matrix doesn't burn ~50 min/PR of
+# runner time but still catches cross-driver regressions within 24 h.
+#
+# Pairs covered (11 of the 12 cross-engine combinations across 4 engines —
+# mssql→postgres is excluded because it's already the per-PR anchor):
+#
+#   mssql →           {mysql, sqlite}
+#   postgres →        {mssql, mysql, sqlite}
+#   mysql →           {mssql, postgres, sqlite}
+#   sqlite →          {mssql, postgres, mysql}
+#
+# Same-engine pairs (mssql→mssql etc.) are intentionally out of scope:
+# round-tripping through the same engine doesn't exercise the cross-DB
+# type-mapping surface, which is what this matrix is for.
+#
+# Service-container strategy: each matrix job spins up all three live-server
+# engines (mssql + postgres + mysql) regardless of which pair it runs. The
+# alternative — conditionalizing services per matrix entry — isn't well
+# supported by GitHub Actions. The waste is ~30s of unused service startup
+# per sqlite-only-adjacent pair; the parallelism amortizes it.
+#
+# Local reproduction of any single pair (no GHA required):
+#   make build && make test-dbs-up && make mysql-bench-up
+#   ./scripts/integration-test-pair.sh --pair <source>-<target>
+
+name: integration-nightly
+
+on:
+  schedule:
+    # 05:00 UTC daily — overnight in the Americas, early morning in EU,
+    # mid-afternoon in APAC. Keeps the matrix off the workday critical
+    # path.
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    # Manual trigger for ad-hoc re-runs (e.g. after a driver refactor
+    # that touches multiple engines and warrants the full matrix before
+    # the next overnight).
+
+concurrency:
+  # Don't auto-cancel an overnight run if a manual one fires while it's
+  # running — overlapping runs are cheap (independent runners) and the
+  # manual run usually wants its own results without waiting.
+  group: integration-nightly-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  cross-db:
+    name: ${{ matrix.pair.src }} → ${{ matrix.pair.tgt }}
+    runs-on: ubuntu-latest
+    # 20 min covers slow mssql first-boot (~60s) + service waits +
+    # the actual migration. Each pair typically finishes in 4-5 min.
+    timeout-minutes: 20
+
+    strategy:
+      # One failing pair shouldn't cancel the other 10. Each pair tests
+      # an independent driver combination, and we want every result.
+      fail-fast: false
+      # 11 pairs in parallel — GHA's free tier limits matter on
+      # public/private orgs; on this repo we have headroom and the
+      # whole matrix completes in roughly one pair's wall-clock.
+      max-parallel: 11
+      matrix:
+        pair:
+          - { src: mssql,  tgt: mysql }
+          - { src: mssql,  tgt: sqlite }
+          - { src: pg,     tgt: mssql }
+          - { src: pg,     tgt: mysql }
+          - { src: pg,     tgt: sqlite }
+          - { src: mysql,  tgt: mssql }
+          - { src: mysql,  tgt: pg }
+          - { src: mysql,  tgt: sqlite }
+          - { src: sqlite, tgt: mssql }
+          - { src: sqlite, tgt: pg }
+          - { src: sqlite, tgt: mysql }
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: TestPass2024
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        # No HEALTHCHECK on the upstream image; the explicit poll step
+        # below handles readiness — same pattern as integration.yml.
+
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: TestPass2024
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: TestPass2024
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -pTestPass2024 --silent"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      MSSQL_PASSWORD: TestPass2024
+      PG_PASSWORD: TestPass2024
+      MYSQL_ROOT_PASSWORD: TestPass2024
+      DMT_CI_MODE: "1"
+      # Per-pair state dir so two matrix jobs sharing a workspace path
+      # (they don't actually share — each gets its own runner — but
+      # belt-and-suspenders) wouldn't clobber each other.
+      DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-${{ matrix.pair.src }}-${{ matrix.pair.tgt }}-state
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build dmt
+        run: make build
+
+      - name: Install DB clients (sqlcmd + mysql client)
+        # mssql-tools18 ships sqlcmd; mysql-client provides the `mysql`
+        # CLI. psql and sqlite3 are preinstalled on ubuntu-latest.
+        # `apt-get install -y` fails the job on missing tools — we
+        # don't want the next step to run against a missing client.
+        run: |
+          set -euo pipefail
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc mysql-client
+          echo "/opt/mssql-tools18/bin" >> "$GITHUB_PATH"
+          which psql
+          which sqlite3
+
+      - name: Wait for MSSQL to accept connections
+        # SQL Server's container reports "Started up" before sqlcmd
+        # works, and the upstream image has no HEALTHCHECK directive,
+        # so the GHA `services:` health gate can't help here. Poll
+        # explicitly. PG/MySQL services already have healthcheck options
+        # above, so GHA gates them for us.
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            if sqlcmd -S "localhost,1433" -U sa -P "$MSSQL_PASSWORD" -C -l 3 \
+                   -Q "SELECT 1" >/dev/null 2>&1; then
+              echo "MSSQL ready after $((i * 3))s"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "MSSQL did not become ready within 90s"
+          docker ps -a
+          exit 1
+
+      - name: Run dmt ${{ matrix.pair.src }} → ${{ matrix.pair.tgt }}
+        run: ./scripts/integration-test-pair.sh --pair ${{ matrix.pair.src }}-${{ matrix.pair.tgt }}
+
+      - name: Upload dmt logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmt-logs-${{ matrix.pair.src }}-${{ matrix.pair.tgt }}-${{ github.run_id }}
+          path: |
+            /tmp/dmt-ci-${{ matrix.pair.src }}-${{ matrix.pair.tgt }}.log
+            ${{ env.DMT_STATE_DIR }}
+          if-no-files-found: ignore

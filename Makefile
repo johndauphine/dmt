@@ -2,7 +2,7 @@
         load-fixture-pgbench load-fixture-so2010-minimal \
         load-fixture-so2010-minimal-mssql load-fixture-so2010-minimal-pg \
         load-fixture-so2010-minimal-mysql test-fixtures-load \
-        integration-test integration-test-sqlite
+        integration-test integration-test-sqlite integration-test-pair
 
 # Build variables
 BINARY_NAME=dmt
@@ -232,6 +232,30 @@ test-fixtures-load: load-fixture-pgbench load-fixture-so2010-minimal
 #   - PG container reachable at localhost:5432
 integration-test: build
 	./scripts/integration-test.sh
+
+# integration-test-pair runs any of the 11 cross-engine directed pairs
+# from the nightly matrix (#291), end-to-end against real DB containers.
+# Pair name is required; engines: mssql|pg|mysql|sqlite (same-engine
+# pairs are out of scope — the matrix only covers cross-engine combos).
+#
+# Examples:
+#   make integration-test-pair PAIR=mssql-mysql
+#   make integration-test-pair PAIR=pg-sqlite
+#
+# Expects:
+#   - dmt binary built (./dmt) — make depends on `build`
+#   - whatever service containers the pair needs running locally:
+#       mssql pairs:  make test-dbs-up
+#       pg pairs:     make test-dbs-up
+#       mysql pairs:  make mysql-bench-up
+#       sqlite pairs: no container needed
+#   - Per-engine clients on PATH: sqlcmd, psql, mysql, sqlite3
+integration-test-pair: build
+	@if [ -z "$(PAIR)" ]; then \
+		echo "ERROR: PAIR is required, e.g. make integration-test-pair PAIR=mssql-mysql" >&2; \
+		exit 2; \
+	fi
+	./scripts/integration-test-pair.sh --pair "$(PAIR)"
 
 # integration-test-sqlite runs the sqlite → sqlite migration end-to-end.
 # No service containers, no client tools beyond the sqlite3 CLI — finishes

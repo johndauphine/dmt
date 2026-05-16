@@ -1,0 +1,40 @@
+# CI-only config for the mysql → postgres cross-engine integration test (#291).
+# Loaded by the nightly matrix in .github/workflows/integration-nightly.yml
+# via scripts/integration-test-pair.sh --pair mysql-pg.
+#
+# Local reproduction:
+#   make build && make test-dbs-up && make mysql-bench-up
+#   ./scripts/load-fixture-so2010-minimal.sh --source mysql
+#   ./scripts/integration-test-pair.sh --pair mysql-pg
+
+source:
+  type: mysql
+  host: localhost
+  port: 3306
+  database: so2010_minimal_src
+  user: root
+  password: ${MYSQL_ROOT_PASSWORD}
+  # Per #252 the MySQL driver defaults to tls=true; the mysql:8.0 CI
+  # service container has no trusted cert chain, so explicit disable
+  # is required for the connection to succeed.
+  ssl_mode: disable
+
+target:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2010_minimal_ci
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
+  runtime_tuning: false
+  chunk_size: 10
+  checkpoint_frequency: 1
+  data_dir: ${DMT_STATE_DIR}
