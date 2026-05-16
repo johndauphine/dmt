@@ -322,5 +322,5 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float6
 	// ("regression-selected ... ; ε-perturbation X applied") so no
 	// provenance is lost.
 	out.Tier = TierExploration
-	out.Reasoning = appendReasoning(out.Reasoning, "ε-perturbation %s applied", strings.Join(applied, "+"))
+	out.Reasoning = appendReasoning(out.Reasoning, "ε-perturbation %s applied", strings.Join(applied, ", "))
 }

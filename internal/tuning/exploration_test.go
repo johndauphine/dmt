@@ -239,7 +239,7 @@ func TestApplyEpsilonPerturbation_CanComposeTwoDirections(t *testing.T) {
 	}
 	applyEpsilonPerturbation(&out, DriverProfile{Name: "postgres", HardChunkLimit: 100_000}, 1)
 
-	if !strings.Contains(out.Reasoning, "+") {
+	if !strings.Contains(out.Reasoning, ", ") {
 		t.Fatalf("expected composite ε-perturbation reasoning, got %q", out.Reasoning)
 	}
 	if out.Tier != TierExploration {
