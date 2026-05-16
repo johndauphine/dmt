@@ -1,0 +1,32 @@
+# CI-only config for the postgres → sqlite cross-engine integration test (#291).
+# Loaded by the nightly matrix in .github/workflows/integration-nightly.yml
+# via scripts/integration-test-pair.sh --pair pg-sqlite.
+#
+# Local reproduction:
+#   make build && make test-dbs-up
+#   ./scripts/load-fixture-so2010-minimal.sh --source pg
+#   ./scripts/integration-test-pair.sh --pair pg-sqlite
+
+source:
+  type: postgres
+  host: localhost
+  port: 5432
+  database: so2010_minimal_src
+  user: postgres
+  password: ${PG_PASSWORD}
+  schema: public
+  ssl_mode: disable
+
+target:
+  type: sqlite
+  database: ${SQLITE_TARGET_DB}
+
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: drop_recreate
+  runtime_tuning: false
+  chunk_size: 10
+  checkpoint_frequency: 1
+  data_dir: ${DMT_STATE_DIR}
