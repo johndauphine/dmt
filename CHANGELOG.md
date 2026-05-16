@@ -11,6 +11,35 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **SO2010-minimal posts.body text aligned across all four engine
+  fixtures** (part of #291). Previously the mssql, pg, sqlite, and
+  mysql fixtures each used engine-specific phrasing for the row-1
+  `posts.body` value (`NVARCHAR(MAX) path`, `TEXT path`, `LONGTEXT
+  path`). The per-engine type-mapping context lives in the file
+  header comments where it belongs; the seeded data itself is now
+  engine-neutral (`testing the wide-text path`) so cross-engine
+  row-parity assertions in the upcoming integration matrix won't
+  fail on documentary text alone. The sqlite fixture drift predated
+  this PR but is fixed here to keep the four files in lockstep.
+
+- **SO2010-minimal PG + MySQL source-side fixtures** (part of #291).
+  New `scripts/fixtures/so2010-minimal-pg.sql` and
+  `scripts/fixtures/so2010-minimal-mysql.sql` mirror the existing MSSQL
+  fixture's 9 tables, 61 columns, and 47 seed rows — translated to
+  each engine's dialect (PG: `TIMESTAMP`/`TEXT`/`VARCHAR`; MySQL:
+  `DATETIME`/`LONGTEXT`/`VARCHAR` on InnoDB+utf8mb4). Same canonical
+  lookup-table values (including the canonical `TagWikiExerpt` typo)
+  so cross-engine round-trip tests can assert byte-identical row
+  parity regardless of which engine is the source. `scripts/load-fixture-so2010-minimal.sh`
+  gained a `--source mssql|pg|mysql` flag (default `mssql` preserves
+  the original signature) and discovers a running container for each
+  engine (`pg-test`/`pg-bench` for PG, `mysql-bench` for MySQL).
+  Three new Make targets — `load-fixture-so2010-minimal-{mssql,pg,mysql}`
+  — make the choice explicit at the command line; the bare
+  `load-fixture-so2010-minimal` target stays as an alias for the
+  mssql case. This is the fixture half of #291; the CI matrix wiring
+  that actually exercises these is the follow-up PR.
+
 - **SQLite → SQLite integration test in CI.** New `sqlite-to-sqlite`
   job in `.github/workflows/integration.yml` runs an end-to-end dmt
   migration between two on-disk SQLite databases on every PR. No
