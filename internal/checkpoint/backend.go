@@ -114,8 +114,8 @@ type HistoryBackend interface {
 // Ensure State implements HistoryBackend
 var _ HistoryBackend = (*State)(nil)
 
-// AITuningRecord represents a historical AI tuning recommendation from analyze command.
-// This stores the context and recommendations for learning from past analyses.
+// AITuningRecord represents historical tuning data from completed migrations.
+// These completed migration measurements feed future tuning recommendations.
 type AITuningRecord struct {
 	ID              int64     `json:"id"`
 	Timestamp       time.Time `json:"timestamp"`
