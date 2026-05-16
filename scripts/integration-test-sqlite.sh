@@ -144,10 +144,23 @@ check_value() {
 }
 
 # Non-ASCII string preserved end-to-end (the UTF-8 path through the
-# pipeline).
-check_value "Users.DisplayName for AccountId=4 = 'TestUser'" \
-    "SELECT DisplayName FROM Users WHERE AccountId = 4" \
-    "TestUser"
+# pipeline). User Id=4's AboutMe column carries Japanese characters
+# (日本語) and an emoji (🚀); the LIKE form yields a clean YES/NO so the
+# whitespace-stripping inside check_value doesn't mangle the assertion
+# value, and BOTH substrings have to survive for the check to pass.
+# Asserting on plain ASCII (e.g. DisplayName='TestUser') would not
+# catch a UTF-8 encoding regression — Copilot review caught this on the
+# initial commit, fix moved the assertion onto the actually-non-ASCII
+# column.
+check_value "Users.AboutMe for Id=4 preserves Japanese + emoji" \
+    "SELECT CASE WHEN AboutMe LIKE '%日本語%' AND AboutMe LIKE '%🚀%' THEN 'YES' ELSE 'NO' END FROM Users WHERE Id = 4" \
+    "YES"
+
+# Non-ASCII Location preserved as well (the umlaut path — Latin-1
+# supplement chars, distinct from CJK and emoji code points).
+check_value "Users.Location for Id=4 preserves 'München'" \
+    "SELECT CASE WHEN Location LIKE '%München%' THEN 'YES' ELSE 'NO' END FROM Users WHERE Id = 4" \
+    "YES"
 
 # NULL preserved (Users.AboutMe for Geoff Dalgas is NULL in source).
 check_value "Users.AboutMe IS NULL for Id=2" \
@@ -166,8 +179,10 @@ check_value "PostTypes.Type for Id=4 = 'TagWikiExerpt'" \
     "SELECT Type FROM PostTypes WHERE Id = 4" \
     "TagWikiExerpt"
 
-# Sparse columns: PostTypes is missing Id 14 in the canonical dataset.
-# A target with Id 14 present would indicate dmt fabricated rows.
+# Sparse PKs: VoteTypes legitimately skips Id 14 between 13 and 15 in
+# the canonical StackOverflow dataset. A target with Id 14 present
+# would indicate dmt fabricated rows. (Comment in the initial commit
+# said "PostTypes" — wrong table; Copilot review caught the typo.)
 check_value "VoteTypes has no Id=14 (canonical gap)" \
     "SELECT COUNT(*) FROM VoteTypes WHERE Id = 14" \
     "0"
