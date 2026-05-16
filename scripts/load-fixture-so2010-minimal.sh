@@ -165,11 +165,14 @@ load_pg() {
         psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q \
         -c "DROP DATABASE IF EXISTS $db;" -c "CREATE DATABASE $db;"
 
-    # Copy the SQL into the container then execute it. -1 wraps the
-    # entire script in a single transaction *in addition to* the
-    # BEGIN/COMMIT in the file itself — psql treats nested BEGINs as
-    # warnings, which is harmless and ensures a single-tx load regardless
-    # of whether the file's BEGIN is present.
+    # Copy the SQL into the container then execute it. Single-tx
+    # semantics come from the explicit BEGIN/COMMIT inside the
+    # .sql file itself (see scripts/fixtures/so2010-minimal-pg.sql),
+    # so we deliberately do not pass psql's `-1` flag here — that
+    # would create a nested transaction and produce a harmless but
+    # noisy "WARNING: there is already a transaction in progress"
+    # on every run. ON_ERROR_STOP=1 still aborts the load on any
+    # T-SQL error, which is what CI wants.
     docker cp "$sql_file" "$container:/tmp/so2010-minimal-pg.sql"
     docker exec -e PGPASSWORD="$password" "$container" \
         psql -U postgres -d "$db" -v ON_ERROR_STOP=1 \
