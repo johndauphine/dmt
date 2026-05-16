@@ -1,5 +1,7 @@
 .PHONY: build clean test test-short test-coverage run install check setup-hooks \
-        load-fixture-pgbench load-fixture-so2010-minimal test-fixtures-load \
+        load-fixture-pgbench load-fixture-so2010-minimal \
+        load-fixture-so2010-minimal-mssql load-fixture-so2010-minimal-pg \
+        load-fixture-so2010-minimal-mysql test-fixtures-load \
         integration-test integration-test-sqlite
 
 # Build variables
@@ -183,10 +185,29 @@ load-fixture-pgbench:
 	./scripts/load-fixture-pgbench.sh
 
 # SO2010-minimal: synthesized DDL + tiny seed for the StackOverflow2010
-# schema (~30 rows total, 9 tables). Covers the type-mapping surface
-# without the 10 GB .bak download.
-load-fixture-so2010-minimal:
-	./scripts/load-fixture-so2010-minimal.sh
+# schema (47 rows across 9 tables). Covers the type-mapping surface
+# without the 10 GB .bak download. Per-source variants (#291) let the
+# cross-engine integration matrix exercise each engine as the source
+# side: see scripts/fixtures/so2010-minimal{,-pg,-mysql,-sqlite}.sql.
+#
+# The bare `load-fixture-so2010-minimal` target keeps the historical
+# mssql-default behavior so existing callers (docs/FIXTURES.md, dev
+# scripts) don't break.
+load-fixture-so2010-minimal: load-fixture-so2010-minimal-mssql
+
+load-fixture-so2010-minimal-mssql:
+	./scripts/load-fixture-so2010-minimal.sh --source mssql
+
+# Requires a running pg-test or pg-bench container (make test-dbs-up
+# or make bench-dbs-up). The loader drops + recreates the fixture DB
+# `so2010_minimal_src` before loading so re-runs are hermetic.
+load-fixture-so2010-minimal-pg:
+	./scripts/load-fixture-so2010-minimal.sh --source pg
+
+# Requires a running mysql-bench container (make mysql-bench-up). The
+# fixture SQL creates `so2010_minimal_src` itself, then USEs it.
+load-fixture-so2010-minimal-mysql:
+	./scripts/load-fixture-so2010-minimal.sh --source mysql
 
 # Convenience: load every CI-friendly fixture in one shot. SO2013 and
 # WWI are explicitly excluded — they require a manual .bak restore;
