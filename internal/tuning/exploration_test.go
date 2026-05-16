@@ -126,7 +126,7 @@ func TestApplyEpsilonPerturbation_CanNudgeReaderAxes(t *testing.T) {
 			ParallelReaders:   2,
 			ReadAheadBuffers:  4,
 		}
-		applyEpsilonPerturbation(&out, profile)
+		applyEpsilonPerturbation(&out, profile, 0)
 		if out.ParallelReaders != 2 || out.ReadAheadBuffers != 4 {
 			sawReaderNudge = true
 			break
@@ -210,7 +210,7 @@ func TestApplyEpsilonPerturbation_NudgesOneStep(t *testing.T) {
 	for trial := 0; trial < 50; trial++ {
 		out := Output{WriteAheadWriters: 3, ChunkSize: 30000}
 		original := out
-		applyEpsilonPerturbation(&out, profile)
+		applyEpsilonPerturbation(&out, profile, 0)
 		changed := out.WriteAheadWriters != original.WriteAheadWriters || out.ChunkSize != original.ChunkSize
 		if !changed {
 			t.Errorf("trial %d: perturbation didn't change anything (WAW=%d, CS=%d)",
@@ -223,6 +223,27 @@ func TestApplyEpsilonPerturbation_NudgesOneStep(t *testing.T) {
 		if out.ChunkSize < 1 {
 			t.Errorf("trial %d: ChunkSize=%d below 1", trial, out.ChunkSize)
 		}
+	}
+}
+
+// TestApplyEpsilonPerturbation_CanComposeTwoDirections (#295) verifies
+// a perturbed run can move along two axes in one probe. With ε=1 the
+// second-step conditional probability is forced on, so the reasoning
+// must record a composite direction.
+func TestApplyEpsilonPerturbation_CanComposeTwoDirections(t *testing.T) {
+	out := Output{
+		WriteAheadWriters: 3,
+		ChunkSize:         30_000,
+		ParallelReaders:   2,
+		ReadAheadBuffers:  8,
+	}
+	applyEpsilonPerturbation(&out, DriverProfile{Name: "postgres", HardChunkLimit: 100_000}, 1)
+
+	if !strings.Contains(out.Reasoning, ", ") {
+		t.Fatalf("expected composite ε-perturbation reasoning, got %q", out.Reasoning)
+	}
+	if out.Tier != TierExploration {
+		t.Fatalf("composite perturbation Tier = %q, want %q", out.Tier, TierExploration)
 	}
 }
 

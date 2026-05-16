@@ -118,6 +118,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Deterministic tuning searches reader settings and composes epsilon probes** (#294, #295).
+  Regression selection now has explicit coverage proving the argmax path
+  searches learned `parallel_readers` / `read_ahead_buffers` cells rather
+  than carrying baseline reader settings through unchanged. Steady-state
+  epsilon exploration can also apply a second nudge on a different knob
+  with conditional probability `epsilon`, making multi-knob neighbors
+  reachable after cold-start. Composite perturbation reasoning now uses
+  an unambiguous comma-separated direction list.
+
 - **Config validation: skip `host` requirement for file-based drivers.**
   `config.validate()` previously required `source.host` and
   `target.host` unconditionally, which rejected valid sqlite configs

@@ -815,6 +815,61 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 	}
 }
 
+// TestApplyHistoryRegression_ArgmaxSearchesReaderGrid (#294) pins the
+// regression selection side, not just the fit side: when history shows
+// a faster (PR, RAB) combination at the same WAW/chunk surface, argmax
+// must select that reader cell instead of carrying baseline PR/RAB
+// through unchanged.
+func TestApplyHistoryRegression_ArgmaxSearchesReaderGrid(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+
+	rows := make([]HistoryRecord, 0, 32)
+	for _, reader := range readerGrid {
+		for i := 0; i < 8; i++ {
+			throughput := 900_000.0
+			if reader.ParallelReaders == 4 {
+				throughput += 100_000
+			}
+			if reader.ReadAheadBuffers == 4 {
+				throughput += 50_000
+			}
+			rows = append(rows, HistoryRecord{
+				SourceDBType:      "mssql",
+				TargetDBType:      "postgres",
+				WriteAheadWriters: 3,
+				ChunkSize:         50_000,
+				AvgRowBytes:       500,
+				ParallelReaders:   reader.ParallelReaders,
+				ReadAheadBuffers:  reader.ReadAheadBuffers,
+				FinalThroughput:   throughput + float64(i),
+				CPUCores:          16,
+				MemoryGB:          48,
+			})
+		}
+	}
+
+	if !applyHistoryRegression(&out, in, profile, rows) {
+		t.Fatalf("expected regression tier to select a reader-grid argmax; reasoning: %s", out.Reasoning)
+	}
+	if out.WriteAheadWriters != 3 {
+		t.Errorf("WAW = %d, want 3", out.WriteAheadWriters)
+	}
+	if out.ParallelReaders != 4 || out.ReadAheadBuffers != 4 {
+		t.Errorf("reader argmax = PR=%d/RAB=%d, want PR=4/RAB=4; reasoning: %s",
+			out.ParallelReaders, out.ReadAheadBuffers, out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "PR=4, RAB=4") {
+		t.Errorf("reasoning should surface selected reader settings; got %q", out.Reasoning)
+	}
+}
+
 // TestApplyHistory_RegressionRefusesUncoveredCubeCorner (#221) pins
 // the cube-corner extrapolation gate. Reproduces the exact failure
 // mode measured live on SO2010: history has WAW=1 only at PR=2 and
@@ -1228,7 +1283,7 @@ func TestApplyEpsilonPerturbation_OverridesTierToExploration(t *testing.T) {
 		Reasoning:         "regression-selected WAW=4, chunk_size=50000",
 	}
 	profile := DriverProfile{Name: "postgres"}
-	applyEpsilonPerturbation(out, profile)
+	applyEpsilonPerturbation(out, profile, 0)
 
 	if out.Tier != TierExploration {
 		t.Errorf("ε-perturbation should override Tier to %q (upstream regression's pick was nudged); got %q",

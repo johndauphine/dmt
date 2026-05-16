@@ -363,7 +363,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			appendOutlierReasoning(&out, identityFilter)
 			applyHistorySelection(&out, in, profile, identityFilter.kept)
 			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-				applyEpsilonPerturbation(&out, profile)
+				applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
 			}
 			finalizeTierAndReasoning(&out, history, historyAvailable)
 			applyMemoryClamp(&out, in)
@@ -399,7 +399,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		appendOutlierReasoning(&out, regimeFilter)
 		applyHistorySelection(&out, in, profile, rows)
 		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-			applyEpsilonPerturbation(&out, profile)
+			applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
 		}
 	}
 
