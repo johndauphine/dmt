@@ -81,7 +81,7 @@ func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) 
 			}
 
 			for _, row := range subBatch {
-				if err := bulk.AddRow(convertRowForBulkCopy(row)); err != nil {
+				if err := bulk.AddRow(convertRowForBulkCopy(row, opts.ColumnTypes)); err != nil {
 					return fmt.Errorf("adding row: %w", err)
 				}
 			}

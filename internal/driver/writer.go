@@ -91,6 +91,9 @@ type WriteBatchOptions struct {
 	// Columns is the list of columns to write.
 	Columns []string
 
+	// ColumnTypes contains the data types for each column when known.
+	ColumnTypes []string
+
 	// Rows is the data to write.
 	Rows [][]any
 

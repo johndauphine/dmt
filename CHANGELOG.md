@@ -66,6 +66,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- SQL Server bulk-copy writes now convert UTF-8 text values scanned as
+  `[]byte` into strings while preserving binary bytes, avoiding odd-byte
+  Unicode failures in MySQL-to-SQL Server transfers (#303).
 - SQLite incremental sync now accepts explicitly configured `TEXT` date
   columns so ISO-8601 timestamp strings do not silently fall back to full
   sync (#311).
