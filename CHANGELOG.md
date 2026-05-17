@@ -66,6 +66,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Runtime Slack notifications now honor the effective per-config
+  `slack` settings instead of rereading only global secrets (#284).
 - `dmt analyze --apply` now writes `migration.max_memory_mb` alongside
   the other analyzed tuning fields so applied config files preserve the
   full memory-budget recommendation (#246).
