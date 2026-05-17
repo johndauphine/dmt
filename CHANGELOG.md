@@ -13,6 +13,9 @@ All notable changes to this project will be documented in this file.
 
 - Split the P1 oversized production files into focused same-package
   files to improve code readability without changing behavior (#212).
+- Split the PostgreSQL writer into focused same-package files for DDL,
+  row counts, COPY batching, upsert, raw SQL helpers, and writer lifecycle
+  so the first P2 readability story is easier to review and maintain (#212).
 
 ### Fixed
 
