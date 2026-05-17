@@ -51,6 +51,9 @@ All notable changes to this project will be documented in this file.
   same-package files for dry-run health checks, config analysis, offline
   system suggestions, tuning history, and DB tuning recommendations as the
   next P2 readability story (#212).
+- Split the runtime monitor controller into focused same-package files for
+  decision evaluation, action application, and controller helpers as the
+  next P2 readability story (#212).
 
 ### Fixed
 
