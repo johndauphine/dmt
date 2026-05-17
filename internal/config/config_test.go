@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -893,7 +894,7 @@ notifications:
 	if err != nil {
 		t.Fatalf("stat updated config: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0640 {
+	if got := info.Mode().Perm(); runtime.GOOS != "windows" && got != 0640 {
 		t.Fatalf("file mode = %v, want 0640", got)
 	}
 
@@ -909,7 +910,7 @@ notifications:
 		"workers":                 8,
 		"max_source_connections":  12,
 		"max_target_connections":  10,
-		"max_memory_mb":           8192,
+		"max_memory_mb":           2049,
 		"chunk_size":              50000,
 		"max_partitions":          16,
 		"large_table_threshold":   1000000,
@@ -937,6 +938,22 @@ notifications:
 	if strings.Contains(string(updated), "    workers:") {
 		t.Fatalf("migration block was rendered with 4-space child indentation:\n%s", updated)
 	}
+}
+
+func TestAppliedMaxMemoryMBCeilsFlooredEstimate(t *testing.T) {
+	t.Run("positive_estimate_gets_one_mb_headroom", func(t *testing.T) {
+		got := appliedMaxMemoryMB(&driver.SmartConfigSuggestions{EstimatedMemMB: 2048})
+		if got != 2049 {
+			t.Fatalf("appliedMaxMemoryMB() = %d, want 2049", got)
+		}
+	})
+
+	t.Run("non_positive_estimate_stays_unset", func(t *testing.T) {
+		got := appliedMaxMemoryMB(&driver.SmartConfigSuggestions{EstimatedMemMB: 0})
+		if got != 0 {
+			t.Fatalf("appliedMaxMemoryMB() = %d, want 0", got)
+		}
+	})
 }
 
 func TestApplyTuningToConfigFileTreatsNullMigrationAsMissing(t *testing.T) {
