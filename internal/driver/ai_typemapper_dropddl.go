@@ -72,14 +72,14 @@ func (m *AITypeMapper) buildDropTableDDLPrompt(req DropTableDDLRequest) string {
 
 	// Target database context
 	sb.WriteString("=== TARGET DATABASE ===\n")
-	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	fmt.Fprintf(&sb, "Type: %s\n", req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+		fmt.Fprintf(&sb, "Schema: %s\n", req.TargetSchema)
 	}
 	if req.TargetContext != nil {
-		sb.WriteString(fmt.Sprintf("Version: %s\n", req.TargetContext.Version))
+		fmt.Fprintf(&sb, "Version: %s\n", req.TargetContext.Version)
 		if req.TargetContext.MaxIdentifierLength > 0 {
-			sb.WriteString(fmt.Sprintf("Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength))
+			fmt.Fprintf(&sb, "Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength)
 		}
 	}
 	sb.WriteString("\n")
@@ -87,9 +87,9 @@ func (m *AITypeMapper) buildDropTableDDLPrompt(req DropTableDDLRequest) string {
 	// Table to drop
 	sb.WriteString("=== TABLE TO DROP ===\n")
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+		fmt.Fprintf(&sb, "Schema: %s\n", req.TargetSchema)
 	}
-	sb.WriteString(fmt.Sprintf("Table: %s\n", req.TableName))
+	fmt.Fprintf(&sb, "Table: %s\n", req.TableName)
 	sb.WriteString("\n")
 
 	// Output requirements

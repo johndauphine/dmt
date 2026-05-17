@@ -322,7 +322,7 @@ func (wp *writerPool) acks() <-chan pool.WriteAck {
 
 // startAckProcessor starts a goroutine to process acks with the given handler.
 func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
-	wp.WriterPool.StartAckProcessor(func(ack pool.WriteAck) {
+	wp.StartAckProcessor(func(ack pool.WriteAck) {
 		handler(writeAck{
 			readerID: ack.ReaderID,
 			seq:      ack.Seq,
@@ -334,7 +334,7 @@ func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
 
 // start begins the writer worker goroutines.
 func (wp *writerPool) start() {
-	wp.WriterPool.Start()
+	wp.Start()
 }
 
 // buildTargetPKCols sanitizes PK columns for the target database.
