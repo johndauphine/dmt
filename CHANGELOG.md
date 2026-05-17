@@ -29,6 +29,9 @@ All notable changes to this project will be documented in this file.
   persistence, runs, tasks/progress, sync timestamps, AI-history no-ops,
   fallback events, and lifecycle helpers as the next P2 readability story
   (#212).
+- Split the tuning regression model into focused same-package files for
+  model definitions, fitting, prediction intervals, math helpers, and
+  residual outlier filtering as the next P2 readability story (#212).
 
 ### Fixed
 
