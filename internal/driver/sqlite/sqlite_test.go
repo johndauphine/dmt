@@ -364,6 +364,39 @@ func TestReader_SchemaExtraction(t *testing.T) {
 	}
 }
 
+func TestReader_GetDateColumnInfo_AcceptsConfiguredTextColumn(t *testing.T) {
+	path := memoryDBPath(t, "date_column_text")
+	dsn := (&Dialect{}).BuildDSN("", 0, path, "", "", nil)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		CREATE TABLE events (
+			id INTEGER PRIMARY KEY,
+			updated_at TEXT NOT NULL,
+			note TEXT
+		)
+	`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	r := newTestReader(t, path)
+	defer r.Close()
+
+	col, dataType, found := r.GetDateColumnInfo(
+		context.Background(), "", "events", []string{"missing", "updated_at"})
+	if !found {
+		t.Fatal("expected configured TEXT date column to be found")
+	}
+	if col != "updated_at" || dataType != "text" {
+		t.Fatalf("GetDateColumnInfo = (%q, %q, true), want (%q, %q, true)",
+			col, dataType, "updated_at", "text")
+	}
+}
+
 func TestReader_ReadTable_Keyset(t *testing.T) {
 	path := memoryDBPath(t, "read_keyset")
 
@@ -479,12 +512,12 @@ func TestTypemap_CrossEngine_SqliteSourceToMSSQLTarget(t *testing.T) {
 func TestTypemap_CrossEngine_AnySourceToSqliteTarget(t *testing.T) {
 	m := driver.NewDeterministicMapper()
 	cases := []struct {
-		source       string
-		sourceType   string
-		wantSqlite   string
+		source     string
+		sourceType string
+		wantSqlite string
 	}{
 		{"postgres", "int4", "INTEGER"},
-		{"postgres", "varchar", "TEXT"},  // unbounded varchar
+		{"postgres", "varchar", "TEXT"}, // unbounded varchar
 		{"postgres", "bytea", "BLOB"},
 		{"postgres", "uuid", "TEXT"},
 		{"mssql", "uniqueidentifier", "TEXT"},
