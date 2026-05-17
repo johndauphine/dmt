@@ -60,6 +60,9 @@ All notable changes to this project will be documented in this file.
 - Split orchestrator status rendering into focused same-package files for
   summary output, detailed status, fallback reporting, history display, and
   result reconstruction as an additional readability cleanup (#212).
+- Split the audit logger into focused same-package files for logger
+  lifecycle, path resolution, field scrubbing, canonical JSON, and hash
+  chaining as an additional readability cleanup (#212).
 
 ### Fixed
 
