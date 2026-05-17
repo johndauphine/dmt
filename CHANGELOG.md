@@ -35,6 +35,9 @@ All notable changes to this project will be documented in this file.
 - Split the MySQL writer into focused same-package files for DDL,
   batch/upsert writes, row counts, raw SQL helpers, and value conversion
   as the next P2 readability story (#212).
+- Split the SQLite reader into focused same-package files for schema
+  introspection, streaming reads, row counts, partitioning, and sampling
+  as the next P2 readability story (#212).
 
 ### Fixed
 
