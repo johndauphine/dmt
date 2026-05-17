@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
 
@@ -532,6 +534,9 @@ notifications:
 	})
 
 	t.Run("secrets with webhook returns enabled notifier", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows reports temp secrets files with permissive mode bits")
+		}
 		secrets.Reset() // Clear cached secrets
 		// Create temp secrets file with webhook
 		tmpDir := t.TempDir()
@@ -557,6 +562,69 @@ notifications:
 		}
 		if !n.IsEnabled() {
 			t.Error("expected notifier to be enabled when webhook URL configured")
+		}
+	})
+}
+
+func TestNewFromConfig(t *testing.T) {
+	t.Run("config webhook overrides global secrets", func(t *testing.T) {
+		secrets.Reset()
+		tmpDir := t.TempDir()
+		secretsPath := tmpDir + "/secrets.yaml"
+		secretsContent := `
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/GLOBAL"
+`
+		if err := writeTestFile(t, secretsPath, secretsContent); err != nil {
+			t.Fatalf("failed to write secrets file: %v", err)
+		}
+		t.Setenv("DMT_SECRETS_FILE", secretsPath)
+
+		n := NewFromConfig(&config.SlackConfig{
+			WebhookURL: "https://hooks.slack.com/services/CONFIG",
+			Channel:    "#ops",
+			Username:   "dmt-ci",
+			Enabled:    true,
+		})
+
+		if got := n.config.WebhookURL; got != "https://hooks.slack.com/services/CONFIG" {
+			t.Fatalf("WebhookURL = %q, want config override", got)
+		}
+		if got := n.config.Channel; got != "#ops" {
+			t.Fatalf("Channel = %q, want #ops", got)
+		}
+		if got := n.config.Username; got != "dmt-ci" {
+			t.Fatalf("Username = %q, want dmt-ci", got)
+		}
+		if !n.IsEnabled() {
+			t.Fatal("expected config-backed notifier to be enabled")
+		}
+	})
+
+	t.Run("missing config webhook falls back to global secrets", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows reports temp secrets files with permissive mode bits")
+		}
+		secrets.Reset()
+		tmpDir := t.TempDir()
+		secretsPath := tmpDir + "/secrets.yaml"
+		secretsContent := `
+notifications:
+  slack:
+    webhook_url: "https://hooks.slack.com/services/GLOBAL"
+`
+		if err := writeTestFile(t, secretsPath, secretsContent); err != nil {
+			t.Fatalf("failed to write secrets file: %v", err)
+		}
+		t.Setenv("DMT_SECRETS_FILE", secretsPath)
+
+		n := NewFromConfig(nil)
+		if got := n.config.WebhookURL; got != "https://hooks.slack.com/services/GLOBAL" {
+			t.Fatalf("WebhookURL = %q, want global fallback", got)
+		}
+		if !n.IsEnabled() {
+			t.Fatal("expected global-secrets notifier to be enabled")
 		}
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
 )
@@ -77,6 +78,21 @@ func NewFromSecrets() *Notifier {
 		Enabled:    secretsCfg.Notifications.Slack.WebhookURL != "",
 	}
 	return New(slackCfg)
+}
+
+// NewFromConfig creates a Slack notifier from the effective migration config.
+// Falls back to global secrets only when config has no webhook.
+func NewFromConfig(cfg *config.SlackConfig) *Notifier {
+	if cfg == nil || cfg.WebhookURL == "" {
+		return NewFromSecrets()
+	}
+
+	return New(&SlackConfig{
+		WebhookURL: cfg.WebhookURL,
+		Channel:    cfg.Channel,
+		Username:   cfg.Username,
+		Enabled:    cfg.Enabled,
+	})
 }
 
 // IsEnabled returns true if notifications are enabled

@@ -101,8 +101,9 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		state = sqliteState
 	}
 
-	// Create notifier from global secrets
-	notifier := notify.NewFromSecrets()
+	// Create notifier from the effective config. Config defaults already
+	// merge global secrets when no per-config Slack webhook is set.
+	notifier := notify.NewFromConfig(cfg.Slack)
 
 	// Create target mode strategy
 	targetModeStrategy := NewTargetModeStrategy(
