@@ -99,6 +99,31 @@ func TestErrorDiagnosis_FormatBox(t *testing.T) {
 	}
 }
 
+func TestErrorDiagnosis_FormatBox_RuneSafeTruncation(t *testing.T) {
+	diag := &ErrorDiagnosis{
+		Cause:       strings.Repeat("a", 57) + "é after boundary",
+		Suggestions: []string{"plain suggestion"},
+		Confidence:  "high",
+		Category:    "other",
+	}
+
+	got := diag.FormatBox()
+	if !utf8.ValidString(got) {
+		t.Fatalf("FormatBox() returned invalid UTF-8: %q", got)
+	}
+	if strings.Contains(got, "é") {
+		t.Fatalf("FormatBox() should truncate before the split rune; got:\n%s", got)
+	}
+	if !strings.Contains(got, strings.Repeat("a", 57)+"...") {
+		t.Fatalf("FormatBox() should preserve the valid prefix and ellipsis; got:\n%s", got)
+	}
+
+	plain := diag.Format()
+	if !strings.Contains(plain, "é after boundary") {
+		t.Fatalf("Format() should remain untruncated; got:\n%s", plain)
+	}
+}
+
 func TestEmitDiagnosis_HandlerReceives(t *testing.T) {
 	var received *ErrorDiagnosis
 

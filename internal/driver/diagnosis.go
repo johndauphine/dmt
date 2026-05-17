@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/johndauphine/dmt/internal/logging"
 )
@@ -109,7 +110,7 @@ func (diag *ErrorDiagnosis) FormatBox() string {
 
 	writePadded := func(content string) {
 		if len(content) > width-4 {
-			content = content[:width-7] + "..."
+			content = truncateUTF8Bytes(content, width-7) + "..."
 		}
 		padding := width - 4 - len(content)
 		if padding < 0 {
@@ -135,4 +136,18 @@ func (diag *ErrorDiagnosis) FormatBox() string {
 	sb.WriteString(bottomLeft + strings.Repeat(horizontal, width-2) + bottomRight)
 
 	return sb.String()
+}
+
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	if maxBytes <= 0 {
+		return ""
+	}
+
+	for maxBytes > 0 && !utf8.ValidString(s[:maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }

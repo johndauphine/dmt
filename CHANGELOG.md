@@ -69,6 +69,8 @@ All notable changes to this project will be documented in this file.
 - SQLite incremental sync now accepts explicitly configured `TEXT` date
   columns so ISO-8601 timestamp strings do not silently fall back to full
   sync (#311).
+- Diagnosis boxes now truncate long non-ASCII messages on UTF-8 boundaries
+  instead of slicing through multibyte runes (#238).
 - Runtime Slack notifications now honor the effective per-config
   `slack` settings instead of rereading only global secrets (#284).
 - `dmt analyze --apply` now writes `migration.max_memory_mb` alongside
