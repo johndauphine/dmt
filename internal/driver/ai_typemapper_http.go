@@ -26,12 +26,6 @@ const (
 	defaultMaxDelay = 10 * time.Second
 )
 
-func init() {
-	// Seed the random number generator for jitter in backoff calculations.
-	// Go 1.20+ seeds automatically, but this ensures compatibility with older versions.
-	rand.Seed(time.Now().UnixNano())
-}
-
 // sanitizeErrorResponse truncates and sanitizes API error response bodies.
 func sanitizeErrorResponse(body []byte, maxLen int) string {
 	if maxLen <= 0 {

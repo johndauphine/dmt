@@ -9,6 +9,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Split the P1 oversized production files into focused same-package
+  files to improve code readability without changing behavior (#212).
+
 ### Fixed
 
 - `dmt analyze --apply` now writes `migration.max_memory_mb` alongside

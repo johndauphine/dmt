@@ -241,12 +241,6 @@ func checkPrivilegesPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequ
 		return findings
 	}
 
-	// req.Side == target
-	mode := strings.ToLower(strings.TrimSpace(req.TargetMode))
-	if mode == "" {
-		mode = "drop_recreate"
-	}
-
 	// Both target modes need USAGE + CREATE on the schema (for either
 	// CREATE TABLE in drop_recreate or temp staging in upsert).
 	if f := pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side); f != nil {

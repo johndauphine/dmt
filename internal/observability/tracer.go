@@ -72,6 +72,6 @@ func SetupTracer(ctx context.Context, endpoint string) (func(context.Context) er
 // Tracer returns the dmt tracer for span creation. Use this everywhere
 // you'd otherwise call otel.Tracer("dmt") so the instrumentation library
 // name stays consistent across the codebase.
-func Tracer() Tracer_t {
-	return Tracer_t{t: otel.Tracer("dmt")}
+func Tracer() TracerT {
+	return TracerT{t: otel.Tracer("dmt")}
 }

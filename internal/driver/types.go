@@ -139,12 +139,13 @@ func (c *Column) GoValueBytes() int64 {
 
 	// sizeof constants derived from Go's type system (not magic numbers)
 	const (
-		sizeofStringHeader = int64(unsafe.Sizeof(""))       // 16: pointer + length
-		sizeofSliceHeader  = int64(unsafe.Sizeof([]byte{})) // 24: pointer + length + cap
+		sizeofStringHeader = int64(unsafe.Sizeof(""))          // 16: pointer + length
+		sizeofSliceHeader  = int64(unsafe.Sizeof([]byte{}))    // 24: pointer + length + cap
 		sizeofTimeStruct   = int64(unsafe.Sizeof(time.Time{})) // time.Time: wall + ext + loc
-		sizeofScalar       = 8                              // int64, float64, etc.
+		sizeofScalar       = 8                                 // int64, float64, etc.
 	)
 
+	//nolint:staticcheck // predicate form keeps related type aliases grouped by storage family.
 	switch {
 	// Fixed-size integer types → int64 (8 bytes)
 	case dt == "int" || dt == "integer" || dt == "bigint" || dt == "smallint" ||
@@ -252,8 +253,8 @@ func (t *Table) GoHeapBytesPerRow() int64 {
 	n := int64(len(t.Columns))
 
 	// []any slice: header + backing array of interface{} values
-	sliceHeader := int64(unsafe.Sizeof([]any{}))                   // 24 bytes
-	ifaceSlots := n * int64(2*unsafe.Sizeof(uintptr(0)))           // N × 16 bytes
+	sliceHeader := int64(unsafe.Sizeof([]any{}))         // 24 bytes
+	ifaceSlots := n * int64(2*unsafe.Sizeof(uintptr(0))) // N × 16 bytes
 
 	// Sum of heap-allocated values pointed to by each interface
 	var valueBytes int64

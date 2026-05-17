@@ -136,11 +136,12 @@ func FormatResult(r Result) string {
 	for _, t := range r.Tables {
 		for _, p := range t.Passes {
 			marker := "OK   "
-			if p.Status == "fail" {
+			switch p.Status {
+			case "fail":
 				marker = "FAIL "
-			} else if p.Status == "skipped" {
+			case "skipped":
 				marker = "SKIP "
-			} else if p.Status == "warn" {
+			case "warn":
 				marker = "WARN "
 			}
 			out += fmt.Sprintf("  %s%-30s %-12s %s\n", marker, t.TableName, p.Pass, p.Detail)

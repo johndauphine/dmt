@@ -134,9 +134,10 @@ func (m *AITypeMapper) writeVarcharGuidance(sb *strings.Builder, ctx *DatabaseCo
 		return
 	}
 
-	if ctx.VarcharSemantics == "char" {
+	switch ctx.VarcharSemantics {
+	case "char":
 		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in CHARACTERS\n", capitalizeFirst(role)))
-	} else if ctx.VarcharSemantics == "byte" {
+	case "byte":
 		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in BYTES\n", capitalizeFirst(role)))
 		if ctx.BytesPerChar > 1 {
 			sb.WriteString(fmt.Sprintf("- Each character may take up to %d bytes\n", ctx.BytesPerChar))

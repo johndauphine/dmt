@@ -317,7 +317,7 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 
 				orch, err = orchestrator.NewWithOptions(cfg, orchestrator.Options{SourceOnly: true})
 				if err != nil {
-					p.Send(OutputMsg(fmt.Sprintf("❌ Error: Cannot connect to source database\n")))
+					p.Send(OutputMsg("❌ Error: Cannot connect to source database\n"))
 					p.Send(OutputMsg(fmt.Sprintf("   %v\n", err)))
 					return
 				}

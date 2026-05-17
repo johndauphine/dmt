@@ -98,7 +98,7 @@ func TestComputeConfigHash(t *testing.T) {
 
 		// Should be valid hex
 		for _, c := range hash {
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				t.Errorf("hash contains non-hex character: %c", c)
 			}
 		}

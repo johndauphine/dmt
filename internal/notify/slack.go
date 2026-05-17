@@ -284,7 +284,7 @@ func (n *Notifier) send(msg SlackMessage) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Slack returned status %d", resp.StatusCode)
+		return fmt.Errorf("slack returned status %d", resp.StatusCode)
 	}
 
 	return nil

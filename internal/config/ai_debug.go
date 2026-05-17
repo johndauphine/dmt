@@ -83,11 +83,11 @@ func (c *Config) DebugDump() string {
 
 	// System Resources
 	b.WriteString("System Resources:\n")
-	b.WriteString(fmt.Sprintf("  Available Memory: %d MB\n", ac.AvailableMemoryMB))
+	fmt.Fprintf(&b, "  Available Memory: %d MB\n", ac.AvailableMemoryMB)
 	if c.Migration.MaxMemoryMB > 0 {
-		b.WriteString(fmt.Sprintf("  Max Memory Limit: %d MB (user configured)\n", c.Migration.MaxMemoryMB))
+		fmt.Fprintf(&b, "  Max Memory Limit: %d MB (user configured)\n", c.Migration.MaxMemoryMB)
 	}
-	b.WriteString(fmt.Sprintf("  Effective Max Memory: %d MB (hard cap 70%%)\n", ac.EffectiveMaxMemoryMB))
+	fmt.Fprintf(&b, "  Effective Max Memory: %d MB (hard cap 70%%)\n", ac.EffectiveMaxMemoryMB)
 	b.WriteString(fmt.Sprintf("  CPU Cores: %d\n", ac.CPUCores))
 
 	// Source Database
