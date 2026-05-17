@@ -25,6 +25,10 @@ All notable changes to this project will be documented in this file.
 - Split the SQL Server reader into focused same-package files for schema
   extraction, constraints, row counts, partitioning, sampling, reads, and
   compatibility checks as the next P2 readability story (#212).
+- Split the file checkpoint backend into focused same-package files for
+  persistence, runs, tasks/progress, sync timestamps, AI-history no-ops,
+  fallback events, and lifecycle helpers as the next P2 readability story
+  (#212).
 
 ### Fixed
 
