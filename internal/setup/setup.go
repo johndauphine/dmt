@@ -107,10 +107,10 @@ type State struct {
 	SlackWebhookOriginal string
 	// EditMode is true when the wizard was launched against an existing
 	// config file (caller set CurrentStep=StepEditOrNew + populated Config).
-	// Bool-typed prompt defaults (create_indexes, create_foreign_keys)
-	// can't otherwise distinguish "user set false" from "field unset", so
-	// they look at this flag to decide whether to honor the loaded value
-	// or fall back to dmt's documented defaults.
+	// Pointer-bool prompt defaults (create_indexes, create_foreign_keys)
+	// use this flag to decide whether a nil loaded value means "field
+	// omitted in an existing config" or "fresh setup"; both fall back to
+	// dmt's documented defaults.
 	EditMode bool
 }
 

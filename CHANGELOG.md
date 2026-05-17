@@ -66,6 +66,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Setup edit mode now distinguishes omitted `create_indexes` and
+  `create_foreign_keys` from explicit `false`, preserving the documented
+  default when raw-loading and round-tripping existing configs (#282).
 - SQL Server bulk-copy writes now convert UTF-8 text values scanned as
   `[]byte` into strings while preserving binary bytes, avoiding odd-byte
   Unicode failures in MySQL-to-SQL Server transfers (#303).

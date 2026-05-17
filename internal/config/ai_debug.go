@@ -217,8 +217,8 @@ func (c *Config) DebugDump() string {
 		}
 	}
 	fmt.Fprintf(&b, "  StrictConsistency: %v\n", c.Migration.StrictConsistency)
-	fmt.Fprintf(&b, "  CreateIndexes: %v\n", c.Migration.CreateIndexes)
-	fmt.Fprintf(&b, "  CreateForeignKeys: %v\n", c.Migration.CreateForeignKeys)
+	fmt.Fprintf(&b, "  CreateIndexes: %v\n", c.Migration.CreateIndexesEnabled())
+	fmt.Fprintf(&b, "  CreateForeignKeys: %v\n", c.Migration.CreateForeignKeysEnabled())
 	fmt.Fprintf(&b, "  CreateCheckConstraints: %v\n", c.Migration.CreateCheckConstraints)
 	fmt.Fprintf(&b, "  SampleValidation: %v\n", c.Migration.SampleValidation)
 	fmt.Fprintf(&b, "  SampleSize: %s\n", formatAutoValue(c.Migration.SampleSize, ac.OriginalSampleSize, "default 100"))

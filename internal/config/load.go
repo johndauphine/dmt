@@ -86,12 +86,6 @@ func Expand(s string) (string, error) {
 //     wizard's edit path then falls back to fresh-setup mode for such
 //     configs. Fixing requires yaml.Node-level expansion of non-string
 //     fields while preserving placeholders for string secrets.
-//   - YAML omission of an optional bool (e.g. `create_indexes`) is
-//     indistinguishable from explicit `false` in the resulting Config.
-//     The wizard's EditMode currently treats both as `false`, which can
-//     flip the documented `y` default to `n` on round-trip. The fix
-//     mirrors the AIAdjust precedent: change the field to *bool so nil
-//     means "absent".
 func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

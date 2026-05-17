@@ -125,7 +125,7 @@ func TestHappyPath(t *testing.T) {
 	if s.Config.Migration.TargetMode != "drop_recreate" {
 		t.Fatalf("expected drop_recreate, got %s", s.Config.Migration.TargetMode)
 	}
-	if s.Config.Migration.CreateIndexes != true {
+	if !s.Config.Migration.CreateIndexesEnabled() {
 		t.Fatal("expected CreateIndexes true")
 	}
 }
@@ -910,29 +910,52 @@ func TestEditModePreservesBoolFalseDefaults(t *testing.T) {
 	// show "n" as default and Enter should preserve false.
 	s := NewState()
 	s.EditMode = true
-	s.Config.Migration.CreateIndexes = false
-	s.Config.Migration.CreateForeignKeys = false
+	createIndexes := false
+	createForeignKeys := false
+	s.Config.Migration.CreateIndexes = &createIndexes
+	s.Config.Migration.CreateForeignKeys = &createForeignKeys
 	s.CurrentStep = StepCreateIndexes
 
 	if got := s.Prompt().Default; got != "n" {
 		t.Fatalf("EditMode + loaded false: expected default 'n', got %q", got)
 	}
 	s.Process("")
-	if s.Config.Migration.CreateIndexes {
+	if s.Config.Migration.CreateIndexesEnabled() {
 		t.Fatal("Enter on 'n' default should preserve CreateIndexes=false")
 	}
 	if got := s.Prompt().Default; got != "n" {
 		t.Fatalf("EditMode + loaded FKs false: expected default 'n', got %q", got)
 	}
 	s.Process("")
-	if s.Config.Migration.CreateForeignKeys {
+	if s.Config.Migration.CreateForeignKeysEnabled() {
 		t.Fatal("Enter on 'n' default should preserve CreateForeignKeys=false")
+	}
+}
+
+func TestEditModeOmittedBoolDefaultsToFreshDefault(t *testing.T) {
+	s := NewState()
+	s.EditMode = true
+	s.CurrentStep = StepCreateIndexes
+
+	if got := s.Prompt().Default; got != "y" {
+		t.Fatalf("EditMode + omitted create_indexes: expected default 'y', got %q", got)
+	}
+	s.Process("")
+	if !s.Config.Migration.CreateIndexesEnabled() {
+		t.Fatal("Enter on omitted create_indexes should materialize true")
+	}
+	if got := s.Prompt().Default; got != "y" {
+		t.Fatalf("EditMode + omitted create_foreign_keys: expected default 'y', got %q", got)
+	}
+	s.Process("")
+	if !s.Config.Migration.CreateForeignKeysEnabled() {
+		t.Fatal("Enter on omitted create_foreign_keys should materialize true")
 	}
 }
 
 func TestFreshModeBoolDefaults(t *testing.T) {
 	// No config loaded — bool prompts should default to "y" (dmt's fresh
-	// default) even though the zero-value bool is false.
+	// default) even though the pointer is nil.
 	s := NewState()
 	s.CurrentStep = StepCreateIndexes
 	if got := s.Prompt().Default; got != "y" {

@@ -383,7 +383,8 @@ func (s *State) Process(input string) string {
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
 		}
-		s.Config.Migration.CreateIndexes = (v == "y")
+		enabled := v == "y"
+		s.Config.Migration.CreateIndexes = &enabled
 		s.CurrentStep = StepCreateFKs
 
 	case StepCreateFKs:
@@ -394,7 +395,8 @@ func (s *State) Process(input string) string {
 		if v != "y" && v != "n" {
 			return "Please enter y or n"
 		}
-		s.Config.Migration.CreateForeignKeys = (v == "y")
+		enabled := v == "y"
+		s.Config.Migration.CreateForeignKeys = &enabled
 		s.CurrentStep = StepWorkers
 
 	case StepWorkers:

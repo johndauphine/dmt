@@ -162,6 +162,14 @@ func (c *Config) applyDefaults() error {
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
+	if c.Migration.CreateIndexes == nil {
+		v := true
+		c.Migration.CreateIndexes = &v
+	}
+	if c.Migration.CreateForeignKeys == nil {
+		v := true
+		c.Migration.CreateForeignKeys = &v
+	}
 	if c.Migration.UnmappedTypeAction == "" {
 		// Default: fail visibly when an unmapped type appears and no AI
 		// fallback is configured. Users opt into degraded modes

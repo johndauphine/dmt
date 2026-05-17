@@ -193,8 +193,10 @@ func runCLIWizard(advanced bool) (*config.Config, error) {
 
 	fmt.Println("\n=== Migration Settings ===")
 	cfg.Migration.TargetMode = cliPromptChoice(reader, "Target mode (drop_recreate/upsert)", targetModes, "drop_recreate")
-	cfg.Migration.CreateIndexes = cliPromptBool(reader, "Create indexes", false)
-	cfg.Migration.CreateForeignKeys = cliPromptBool(reader, "Create foreign keys", false)
+	createIndexes := cliPromptBool(reader, "Create indexes", false)
+	cfg.Migration.CreateIndexes = &createIndexes
+	createForeignKeys := cliPromptBool(reader, "Create foreign keys", false)
+	cfg.Migration.CreateForeignKeys = &createForeignKeys
 
 	if advanced {
 		fmt.Println("\n=== Advanced Settings ===")

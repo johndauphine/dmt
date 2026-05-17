@@ -40,23 +40,15 @@ func (c *Config) applyGlobalDefaults() {
 		c.Migration.ParallelReaders = defaults.ParallelReaders
 	}
 
-	// Boolean settings - apply from global defaults when explicitly set (non-nil pointer)
-	// and the migration config value is false.
-	//
-	// Limitation: Go's bool defaults to false, so we cannot distinguish between
-	// "user didn't set this" and "user explicitly set to false". This means:
-	//   - Global true  + migration unset/false → true  (global wins)
-	//   - Global true  + migration true        → true  (both agree)
-	//   - Global false + migration unset/false → false (both agree)
-	//   - Global false + migration true        → true  (migration wins)
-	//
-	// In practice: you CAN override a global "false" to "true" per-migration,
-	// but you CANNOT override a global "true" to "false" per-migration.
-	if defaults.CreateIndexes != nil && !c.Migration.CreateIndexes {
-		c.Migration.CreateIndexes = *defaults.CreateIndexes
+	// Pointer bool settings inherit from global defaults only when the
+	// per-migration config omitted the field. Explicit false remains false.
+	if defaults.CreateIndexes != nil && c.Migration.CreateIndexes == nil {
+		v := *defaults.CreateIndexes
+		c.Migration.CreateIndexes = &v
 	}
-	if defaults.CreateForeignKeys != nil && !c.Migration.CreateForeignKeys {
-		c.Migration.CreateForeignKeys = *defaults.CreateForeignKeys
+	if defaults.CreateForeignKeys != nil && c.Migration.CreateForeignKeys == nil {
+		v := *defaults.CreateForeignKeys
+		c.Migration.CreateForeignKeys = &v
 	}
 	if defaults.CreateCheckConstraints != nil && !c.Migration.CreateCheckConstraints {
 		c.Migration.CreateCheckConstraints = *defaults.CreateCheckConstraints
