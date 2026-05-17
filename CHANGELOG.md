@@ -57,6 +57,9 @@ All notable changes to this project will be documented in this file.
 - Split the orchestrator transfer runner into focused same-package files for
   pre-transfer setup, job execution, error diagnosis, and transfer logging as
   the final original P2 readability story (#212).
+- Split orchestrator status rendering into focused same-package files for
+  summary output, detailed status, fallback reporting, history display, and
+  result reconstruction as an additional readability cleanup (#212).
 
 ### Fixed
 
