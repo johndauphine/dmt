@@ -47,6 +47,10 @@ All notable changes to this project will be documented in this file.
 - Split the PostgreSQL reader into focused same-package files for schema
   introspection, streaming reads, row counts, partitioning, and sampling
   as the next P2 readability story (#212).
+- Split orchestrator healthcheck and analysis code into focused
+  same-package files for dry-run health checks, config analysis, offline
+  system suggestions, tuning history, and DB tuning recommendations as the
+  next P2 readability story (#212).
 
 ### Fixed
 
