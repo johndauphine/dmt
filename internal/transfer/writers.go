@@ -307,17 +307,17 @@ func (wp *writerPool) error() error {
 
 // writeTime returns the total time spent writing.
 func (wp *writerPool) writeTime() time.Duration {
-	return wp.WriterPool.WriteTime()
+	return wp.WriteTime()
 }
 
 // written returns the total rows written.
 func (wp *writerPool) written() int64 {
-	return wp.WriterPool.Written()
+	return wp.Written()
 }
 
 // acks returns the ack channel for checkpoint coordination.
 func (wp *writerPool) acks() <-chan pool.WriteAck {
-	return wp.WriterPool.Acks()
+	return wp.Acks()
 }
 
 // startAckProcessor starts a goroutine to process acks with the given handler.

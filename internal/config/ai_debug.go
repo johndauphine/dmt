@@ -88,65 +88,65 @@ func (c *Config) DebugDump() string {
 		fmt.Fprintf(&b, "  Max Memory Limit: %d MB (user configured)\n", c.Migration.MaxMemoryMB)
 	}
 	fmt.Fprintf(&b, "  Effective Max Memory: %d MB (hard cap 70%%)\n", ac.EffectiveMaxMemoryMB)
-	b.WriteString(fmt.Sprintf("  CPU Cores: %d\n", ac.CPUCores))
+	fmt.Fprintf(&b, "  CPU Cores: %d\n", ac.CPUCores)
 
 	// Source Database
-	b.WriteString(fmt.Sprintf("\nSource (%s):\n", c.Source.Type))
-	b.WriteString(fmt.Sprintf("  Host: %s\n", c.Source.Host))
-	b.WriteString(fmt.Sprintf("  Port: %d\n", c.Source.Port))
-	b.WriteString(fmt.Sprintf("  Database: %s\n", c.Source.Database))
-	b.WriteString(fmt.Sprintf("  Schema: %s\n", c.Source.Schema))
-	b.WriteString(fmt.Sprintf("  User: %s\n", c.Source.User))
+	fmt.Fprintf(&b, "\nSource (%s):\n", c.Source.Type)
+	fmt.Fprintf(&b, "  Host: %s\n", c.Source.Host)
+	fmt.Fprintf(&b, "  Port: %d\n", c.Source.Port)
+	fmt.Fprintf(&b, "  Database: %s\n", c.Source.Database)
+	fmt.Fprintf(&b, "  Schema: %s\n", c.Source.Schema)
+	fmt.Fprintf(&b, "  User: %s\n", c.Source.User)
 	b.WriteString("  Password: [REDACTED]\n")
 	if canonicalDriverName(c.Source.Type) == "mssql" {
 		encrypt := c.Source.Encrypt != nil && *c.Source.Encrypt
-		b.WriteString(fmt.Sprintf("  Encrypt: %v\n", encrypt))
-		b.WriteString(fmt.Sprintf("  TrustServerCert: %v\n", c.Source.TrustServerCert))
-		b.WriteString(fmt.Sprintf("  PacketSize: %d\n", c.Source.PacketSize))
+		fmt.Fprintf(&b, "  Encrypt: %v\n", encrypt)
+		fmt.Fprintf(&b, "  TrustServerCert: %v\n", c.Source.TrustServerCert)
+		fmt.Fprintf(&b, "  PacketSize: %d\n", c.Source.PacketSize)
 	} else {
-		b.WriteString(fmt.Sprintf("  SSLMode: %s\n", c.Source.SSLMode))
+		fmt.Fprintf(&b, "  SSLMode: %s\n", c.Source.SSLMode)
 	}
 	auth := c.Source.Auth
 	if auth == "" {
 		auth = "password"
 	}
-	b.WriteString(fmt.Sprintf("  Auth: %s\n", auth))
+	fmt.Fprintf(&b, "  Auth: %s\n", auth)
 	if c.Source.Auth == "kerberos" {
 		if c.Source.Krb5Conf != "" {
-			b.WriteString(fmt.Sprintf("  Krb5Conf: %s\n", c.Source.Krb5Conf))
+			fmt.Fprintf(&b, "  Krb5Conf: %s\n", c.Source.Krb5Conf)
 		}
 		if c.Source.Realm != "" {
-			b.WriteString(fmt.Sprintf("  Realm: %s\n", c.Source.Realm))
+			fmt.Fprintf(&b, "  Realm: %s\n", c.Source.Realm)
 		}
 	}
 
 	// Target Database
-	b.WriteString(fmt.Sprintf("\nTarget (%s):\n", c.Target.Type))
-	b.WriteString(fmt.Sprintf("  Host: %s\n", c.Target.Host))
-	b.WriteString(fmt.Sprintf("  Port: %d\n", c.Target.Port))
-	b.WriteString(fmt.Sprintf("  Database: %s\n", c.Target.Database))
-	b.WriteString(fmt.Sprintf("  Schema: %s\n", c.Target.Schema))
-	b.WriteString(fmt.Sprintf("  User: %s\n", c.Target.User))
+	fmt.Fprintf(&b, "\nTarget (%s):\n", c.Target.Type)
+	fmt.Fprintf(&b, "  Host: %s\n", c.Target.Host)
+	fmt.Fprintf(&b, "  Port: %d\n", c.Target.Port)
+	fmt.Fprintf(&b, "  Database: %s\n", c.Target.Database)
+	fmt.Fprintf(&b, "  Schema: %s\n", c.Target.Schema)
+	fmt.Fprintf(&b, "  User: %s\n", c.Target.User)
 	b.WriteString("  Password: [REDACTED]\n")
 	if canonicalDriverName(c.Target.Type) == "mssql" {
 		encrypt := c.Target.Encrypt != nil && *c.Target.Encrypt
-		b.WriteString(fmt.Sprintf("  Encrypt: %v\n", encrypt))
-		b.WriteString(fmt.Sprintf("  TrustServerCert: %v\n", c.Target.TrustServerCert))
-		b.WriteString(fmt.Sprintf("  PacketSize: %d\n", c.Target.PacketSize))
+		fmt.Fprintf(&b, "  Encrypt: %v\n", encrypt)
+		fmt.Fprintf(&b, "  TrustServerCert: %v\n", c.Target.TrustServerCert)
+		fmt.Fprintf(&b, "  PacketSize: %d\n", c.Target.PacketSize)
 	} else {
-		b.WriteString(fmt.Sprintf("  SSLMode: %s\n", c.Target.SSLMode))
+		fmt.Fprintf(&b, "  SSLMode: %s\n", c.Target.SSLMode)
 	}
 	auth = c.Target.Auth
 	if auth == "" {
 		auth = "password"
 	}
-	b.WriteString(fmt.Sprintf("  Auth: %s\n", auth))
+	fmt.Fprintf(&b, "  Auth: %s\n", auth)
 	if c.Target.Auth == "kerberos" {
 		if c.Target.Krb5Conf != "" {
-			b.WriteString(fmt.Sprintf("  Krb5Conf: %s\n", c.Target.Krb5Conf))
+			fmt.Fprintf(&b, "  Krb5Conf: %s\n", c.Target.Krb5Conf)
 		}
 		if c.Target.Realm != "" {
-			b.WriteString(fmt.Sprintf("  Realm: %s\n", c.Target.Realm))
+			fmt.Fprintf(&b, "  Realm: %s\n", c.Target.Realm)
 		}
 	}
 
@@ -155,27 +155,27 @@ func (c *Config) DebugDump() string {
 
 	// Workers
 	workersExpl := fmt.Sprintf("(cores-2) clamped 4-12, %d cores", ac.CPUCores)
-	b.WriteString(fmt.Sprintf("  Workers: %s\n", formatAutoValue(c.Migration.Workers, ac.OriginalWorkers, workersExpl)))
+	fmt.Fprintf(&b, "  Workers: %s\n", formatAutoValue(c.Migration.Workers, ac.OriginalWorkers, workersExpl))
 
 	// ChunkSize
 	ramGB := float64(ac.AvailableMemoryMB) / 1024.0
 	chunkExpl := fmt.Sprintf("75K + %.1fGB*3.1K", ramGB)
-	b.WriteString(fmt.Sprintf("  ChunkSize: %s\n", formatAutoValue(c.Migration.ChunkSize, ac.OriginalChunkSize, chunkExpl)))
+	fmt.Fprintf(&b, "  ChunkSize: %s\n", formatAutoValue(c.Migration.ChunkSize, ac.OriginalChunkSize, chunkExpl))
 
 	// ReadAheadBuffers
 	buffersExpl := fmt.Sprintf("memory/%d workers/chunk bytes", c.Migration.Workers)
-	b.WriteString(fmt.Sprintf("  ReadAheadBuffers: %s\n", formatAutoValue(c.Migration.ReadAheadBuffers, ac.OriginalReadAheadBuffers, buffersExpl)))
+	fmt.Fprintf(&b, "  ReadAheadBuffers: %s\n", formatAutoValue(c.Migration.ReadAheadBuffers, ac.OriginalReadAheadBuffers, buffersExpl))
 
 	// MaxPartitions
 	partitionsExpl := "matches workers"
-	b.WriteString(fmt.Sprintf("  MaxPartitions: %s\n", formatAutoValue(c.Migration.MaxPartitions, ac.OriginalMaxPartitions, partitionsExpl)))
+	fmt.Fprintf(&b, "  MaxPartitions: %s\n", formatAutoValue(c.Migration.MaxPartitions, ac.OriginalMaxPartitions, partitionsExpl))
 
 	// Connection pools
 	sourceConnsExpl := fmt.Sprintf("%d workers * %d readers + 4", c.Migration.Workers, c.Migration.ParallelReaders)
-	b.WriteString(fmt.Sprintf("  MaxSourceConnections: %s\n", formatAutoValue(c.Migration.MaxSourceConnections, ac.OriginalMaxSourceConns, sourceConnsExpl)))
+	fmt.Fprintf(&b, "  MaxSourceConnections: %s\n", formatAutoValue(c.Migration.MaxSourceConnections, ac.OriginalMaxSourceConns, sourceConnsExpl))
 
 	targetConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
-	b.WriteString(fmt.Sprintf("  MaxTargetConnections: %s\n", formatAutoValue(c.Migration.MaxTargetConnections, ac.OriginalMaxTargetConns, targetConnsExpl)))
+	fmt.Fprintf(&b, "  MaxTargetConnections: %s\n", formatAutoValue(c.Migration.MaxTargetConnections, ac.OriginalMaxTargetConns, targetConnsExpl))
 
 	// WriteAheadWriters - use driver defaults for explanation
 	var writersExpl string
@@ -189,56 +189,56 @@ func (c *Config) DebugDump() string {
 	} else {
 		writersExpl = "fallback default"
 	}
-	b.WriteString(fmt.Sprintf("  WriteAheadWriters: %s\n", formatAutoValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, writersExpl)))
+	fmt.Fprintf(&b, "  WriteAheadWriters: %s\n", formatAutoValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, writersExpl))
 
 	// ParallelReaders
 	readersExpl := fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
-	b.WriteString(fmt.Sprintf("  ParallelReaders: %s\n", formatAutoValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, readersExpl)))
+	fmt.Fprintf(&b, "  ParallelReaders: %s\n", formatAutoValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, readersExpl))
 
 	// LargeTableThreshold
-	b.WriteString(fmt.Sprintf("  LargeTableThreshold: %s\n", formatAutoValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, "default 5M")))
+	fmt.Fprintf(&b, "  LargeTableThreshold: %s\n", formatAutoValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, "default 5M"))
 
 	// Source/Target ChunkSize
 	sourceChunkExpl := "defaults to migration chunk_size"
-	b.WriteString(fmt.Sprintf("  Source.ChunkSize: %s\n", formatAutoValue(c.Source.ChunkSize, ac.OriginalSourceChunkSize, sourceChunkExpl)))
+	fmt.Fprintf(&b, "  Source.ChunkSize: %s\n", formatAutoValue(c.Source.ChunkSize, ac.OriginalSourceChunkSize, sourceChunkExpl))
 	targetChunkExpl := "defaults to migration chunk_size"
-	b.WriteString(fmt.Sprintf("  Target.ChunkSize: %s\n", formatAutoValue(c.Target.ChunkSize, ac.OriginalTargetChunkSize, targetChunkExpl)))
+	fmt.Fprintf(&b, "  Target.ChunkSize: %s\n", formatAutoValue(c.Target.ChunkSize, ac.OriginalTargetChunkSize, targetChunkExpl))
 
 	// Other settings
-	b.WriteString(fmt.Sprintf("  TargetMode: %s\n", c.Migration.TargetMode))
+	fmt.Fprintf(&b, "  TargetMode: %s\n", c.Migration.TargetMode)
 
 	// UpsertMergeChunkSize - only show in upsert mode
 	if c.Migration.TargetMode == "upsert" {
 		upsertExpl := "auto: memory-scaled 5K-20K"
-		b.WriteString(fmt.Sprintf("  UpsertMergeChunkSize: %s\n", formatAutoValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, upsertExpl)))
+		fmt.Fprintf(&b, "  UpsertMergeChunkSize: %s\n", formatAutoValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, upsertExpl))
 		// DateUpdatedColumns - only show in upsert mode if configured
 		if len(c.Migration.DateUpdatedColumns) > 0 {
-			b.WriteString(fmt.Sprintf("  DateUpdatedColumns: %v\n", c.Migration.DateUpdatedColumns))
+			fmt.Fprintf(&b, "  DateUpdatedColumns: %v\n", c.Migration.DateUpdatedColumns)
 		}
 	}
-	b.WriteString(fmt.Sprintf("  StrictConsistency: %v\n", c.Migration.StrictConsistency))
-	b.WriteString(fmt.Sprintf("  CreateIndexes: %v\n", c.Migration.CreateIndexes))
-	b.WriteString(fmt.Sprintf("  CreateForeignKeys: %v\n", c.Migration.CreateForeignKeys))
-	b.WriteString(fmt.Sprintf("  CreateCheckConstraints: %v\n", c.Migration.CreateCheckConstraints))
-	b.WriteString(fmt.Sprintf("  SampleValidation: %v\n", c.Migration.SampleValidation))
-	b.WriteString(fmt.Sprintf("  SampleSize: %s\n", formatAutoValue(c.Migration.SampleSize, ac.OriginalSampleSize, "default 100")))
-	b.WriteString(fmt.Sprintf("  DataDir: %s\n", c.Migration.DataDir))
+	fmt.Fprintf(&b, "  StrictConsistency: %v\n", c.Migration.StrictConsistency)
+	fmt.Fprintf(&b, "  CreateIndexes: %v\n", c.Migration.CreateIndexes)
+	fmt.Fprintf(&b, "  CreateForeignKeys: %v\n", c.Migration.CreateForeignKeys)
+	fmt.Fprintf(&b, "  CreateCheckConstraints: %v\n", c.Migration.CreateCheckConstraints)
+	fmt.Fprintf(&b, "  SampleValidation: %v\n", c.Migration.SampleValidation)
+	fmt.Fprintf(&b, "  SampleSize: %s\n", formatAutoValue(c.Migration.SampleSize, ac.OriginalSampleSize, "default 100"))
+	fmt.Fprintf(&b, "  DataDir: %s\n", c.Migration.DataDir)
 
 	// Restartability Settings
 	b.WriteString("\nRestartability:\n")
-	b.WriteString(fmt.Sprintf("  CheckpointFrequency: %d chunks\n", c.Migration.CheckpointFrequency))
-	b.WriteString(fmt.Sprintf("  MaxRetries: %d\n", c.Migration.MaxRetries))
-	b.WriteString(fmt.Sprintf("  HistoryRetentionDays: %d\n", c.Migration.HistoryRetentionDays))
+	fmt.Fprintf(&b, "  CheckpointFrequency: %d chunks\n", c.Migration.CheckpointFrequency)
+	fmt.Fprintf(&b, "  MaxRetries: %d\n", c.Migration.MaxRetries)
+	fmt.Fprintf(&b, "  HistoryRetentionDays: %d\n", c.Migration.HistoryRetentionDays)
 
 	// Table Filters
 	b.WriteString("\nTable Filters:\n")
 	if len(c.Migration.IncludeTables) > 0 {
-		b.WriteString(fmt.Sprintf("  IncludeTables: %v\n", c.Migration.IncludeTables))
+		fmt.Fprintf(&b, "  IncludeTables: %v\n", c.Migration.IncludeTables)
 	} else {
 		b.WriteString("  IncludeTables: [all]\n")
 	}
 	if len(c.Migration.ExcludeTables) > 0 {
-		b.WriteString(fmt.Sprintf("  ExcludeTables: %v\n", c.Migration.ExcludeTables))
+		fmt.Fprintf(&b, "  ExcludeTables: %v\n", c.Migration.ExcludeTables)
 	} else {
 		b.WriteString("  ExcludeTables: [none]\n")
 	}
@@ -247,22 +247,22 @@ func (c *Config) DebugDump() string {
 	b.WriteString("\nMemory Estimate:\n")
 	bytesPerRow := int64(500) // conservative default - actual sizes queried during schema extraction
 	bufferMemory := int64(c.Migration.Workers) * int64(c.Migration.ReadAheadBuffers) * int64(c.Migration.ChunkSize) * bytesPerRow
-	b.WriteString(fmt.Sprintf("  Buffer Memory: ~%s (%d workers * %d buffers * %d rows * %d bytes/row)\n",
+	fmt.Fprintf(&b, "  Buffer Memory: ~%s (%d workers * %d buffers * %d rows * %d bytes/row)\n",
 		formatMemorySize(bufferMemory),
 		c.Migration.Workers,
 		c.Migration.ReadAheadBuffers,
 		c.Migration.ChunkSize,
-		bytesPerRow))
+		bytesPerRow)
 	b.WriteString("  Note: Actual memory depends on row sizes. Tables with large text columns use more.\n")
 
 	// Profile (if set)
 	if c.Profile.Name != "" || c.Profile.Description != "" {
 		b.WriteString("\nProfile:\n")
 		if c.Profile.Name != "" {
-			b.WriteString(fmt.Sprintf("  Name: %s\n", c.Profile.Name))
+			fmt.Fprintf(&b, "  Name: %s\n", c.Profile.Name)
 		}
 		if c.Profile.Description != "" {
-			b.WriteString(fmt.Sprintf("  Description: %s\n", c.Profile.Description))
+			fmt.Fprintf(&b, "  Description: %s\n", c.Profile.Description)
 		}
 	}
 
@@ -282,17 +282,17 @@ func (c *Config) DebugDump() string {
 		provider, providerName, err := secretsCfg.GetDefaultProvider()
 		// Check for valid provider: API-key-based (Anthropic, OpenAI) or local with BaseURL (Ollama, LMStudio)
 		if err == nil && provider != nil && (provider.APIKey != "" || provider.BaseURL != "") {
-			b.WriteString(fmt.Sprintf("  Provider: %s\n", providerName))
+			fmt.Fprintf(&b, "  Provider: %s\n", providerName)
 			if provider.APIKey != "" {
 				b.WriteString("  APIKey: [REDACTED]\n")
 			}
 			if provider.BaseURL != "" {
-				b.WriteString(fmt.Sprintf("  BaseURL: %s\n", provider.BaseURL))
+				fmt.Fprintf(&b, "  BaseURL: %s\n", provider.BaseURL)
 			}
 			if provider.Model != "" {
-				b.WriteString(fmt.Sprintf("  Model: %s\n", provider.Model))
+				fmt.Fprintf(&b, "  Model: %s\n", provider.Model)
 			} else {
-				b.WriteString(fmt.Sprintf("  Model: %s (default)\n", provider.GetEffectiveModel(providerName)))
+				fmt.Fprintf(&b, "  Model: %s (default)\n", provider.GetEffectiveModel(providerName))
 			}
 			// AI features status - check each feature separately.
 			// Type mapping always works (deterministic since #170);
