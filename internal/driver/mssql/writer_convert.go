@@ -2,13 +2,16 @@ package mssql
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
-func convertRowForBulkCopy(row []any) []any {
+func convertRowForBulkCopy(row []any, columnTypes []string) []any {
 	result := make([]any, len(row))
 	for i, v := range row {
 		if b, ok := v.([]byte); ok {
-			if isASCIINumeric(b) {
+			if isTextColumn(columnTypes, i) && utf8.Valid(b) {
+				result[i] = string(b)
+			} else if isASCIINumeric(b) {
 				result[i] = string(b)
 			} else {
 				result[i] = v
@@ -18,6 +21,30 @@ func convertRowForBulkCopy(row []any) []any {
 		}
 	}
 	return result
+}
+
+func isTextColumn(columnTypes []string, index int) bool {
+	if index >= len(columnTypes) {
+		return false
+	}
+
+	columnType := normalizeColumnType(columnTypes[index])
+	switch columnType {
+	case "char", "varchar", "text", "tinytext", "mediumtext", "longtext",
+		"nchar", "nvarchar", "ntext", "string", "uniqueidentifier", "uuid",
+		"json", "jsonb", "xml", "enum", "set":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeColumnType(columnType string) string {
+	columnType = strings.ToLower(strings.TrimSpace(columnType))
+	if idx := strings.IndexAny(columnType, "( \t\r\n"); idx >= 0 {
+		columnType = columnType[:idx]
+	}
+	return columnType
 }
 
 func isASCIINumeric(b []byte) bool {

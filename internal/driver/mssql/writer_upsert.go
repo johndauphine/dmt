@@ -109,7 +109,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 
 	// Bulk insert to staging
-	if err := w.bulkInsertToTemp(ctx, conn, stagingTable, mappedCols, opts.Rows); err != nil {
+	if err := w.bulkInsertToTemp(ctx, conn, stagingTable, mappedCols, opts.ColumnTypes, opts.Rows); err != nil {
 		return fmt.Errorf("bulk insert to staging: %w", err)
 	}
 
@@ -128,9 +128,9 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 // present become silent no-ops without overwriting existing values.
 //
 // It reuses the staging/bulk-load/MERGE machinery from UpsertBatch but
-// supplies its own column metadata path because callers of WriteBatch don't
-// pass ColumnTypes/SRIDs (UpsertBatch does). Spatial columns are still
-// detected from the staging table once it exists.
+// supplies its own spatial metadata path because WriteBatch does not pass
+// ColumnSRIDs (UpsertBatch does). Spatial columns are still detected from
+// the staging table once it exists.
 func (w *Writer) writeBatchIdempotent(ctx context.Context, opts driver.WriteBatchOptions) error {
 	if len(opts.PKColumns) == 0 {
 		return fmt.Errorf("IdempotentOnDup requires PKColumns to be set")
@@ -200,7 +200,7 @@ func (w *Writer) writeBatchIdempotent(ctx context.Context, opts driver.WriteBatc
 		hasIdentity = false
 	}
 
-	if err := w.bulkInsertToTemp(ctx, conn, stagingTable, mappedCols, opts.Rows); err != nil {
+	if err := w.bulkInsertToTemp(ctx, conn, stagingTable, mappedCols, opts.ColumnTypes, opts.Rows); err != nil {
 		return fmt.Errorf("bulk insert to idempotent staging: %w", err)
 	}
 
@@ -309,7 +309,7 @@ func (w *Writer) alterSpatialColumnsToText(ctx context.Context, conn *sql.Conn, 
 	return nil
 }
 
-func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable string, cols []string, rows [][]any) error {
+func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable string, cols, colTypes []string, rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -329,7 +329,7 @@ func (w *Writer) bulkInsertToTemp(ctx context.Context, conn *sql.Conn, tempTable
 	defer stmt.Close()
 
 	for _, row := range rows {
-		if _, err := stmt.ExecContext(ctx, convertRowForBulkCopy(row)...); err != nil {
+		if _, err := stmt.ExecContext(ctx, convertRowForBulkCopy(row, colTypes)...); err != nil {
 			return err
 		}
 	}

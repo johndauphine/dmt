@@ -35,11 +35,12 @@ func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string,
 }
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool
-func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols []string, rows [][]any, batchSize int, orderCols ...string) error {
+func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols, colTypes []string, rows [][]any, batchSize int, orderCols ...string) error {
 	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
 		Schema:       schema,
 		Table:        table,
 		Columns:      cols,
+		ColumnTypes:  colTypes,
 		Rows:         rows,
 		BatchSize:    batchSize,
 		OrderColumns: orderCols,
@@ -52,11 +53,12 @@ func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, tab
 // for PG/MSSQL, INSERT ... ON DUPLICATE KEY UPDATE pk = pk for MySQL) so a
 // replayed chunk is a silent no-op for already-committed rows.
 func writeChunkIdempotent(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
-	cols, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
+	cols, colTypes, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
 	return tgtPool.WriteBatch(ctx, pool.WriteBatchOptions{
 		Schema:          schema,
 		Table:           table,
 		Columns:         cols,
+		ColumnTypes:     colTypes,
 		Rows:            rows,
 		BatchSize:       batchSize,
 		IdempotentOnDup: true,

@@ -132,9 +132,9 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 	case wp.idempotentOnDup:
 		// #227: ROW_NUMBER resume — driver handles staging + idempotent insert.
 		err = writeChunkIdempotent(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
-			wp.targetCols, wp.targetPKCols, rows, writerID, wp.partitionID, batchSize)
+			wp.targetCols, wp.colTypes, wp.targetPKCols, rows, writerID, wp.partitionID, batchSize)
 	default:
-		err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, rows, batchSize, wp.targetPKCols...)
+		err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, wp.colTypes, rows, batchSize, wp.targetPKCols...)
 	}
 
 	if err == nil {
@@ -236,9 +236,9 @@ func (wp *writerPool) retryWithChunkSize(ctx context.Context, writerID int, rows
 				wp.targetCols, wp.colTypes, wp.colSRIDs, wp.targetPKCols, chunk, writerID, wp.partitionID, batchSize)
 		case wp.idempotentOnDup:
 			err = writeChunkIdempotent(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable,
-				wp.targetCols, wp.targetPKCols, chunk, writerID, wp.partitionID, batchSize)
+				wp.targetCols, wp.colTypes, wp.targetPKCols, chunk, writerID, wp.partitionID, batchSize)
 		default:
-			err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, chunk, batchSize, wp.targetPKCols...)
+			err = writeChunkGeneric(ctx, wp.tgtPool, wp.targetSchema, wp.targetTable, wp.targetCols, wp.colTypes, chunk, batchSize, wp.targetPKCols...)
 		}
 
 		if err != nil {
