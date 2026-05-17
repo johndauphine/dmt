@@ -114,13 +114,13 @@ type MigrationConfig struct {
 	IncludeTables          []string `yaml:"include_tables"` // Only migrate these tables (glob patterns)
 	ExcludeTables          []string `yaml:"exclude_tables"` // Skip these tables (glob patterns)
 	DataDir                string   `yaml:"data_dir"`
-	TargetMode             string   `yaml:"target_mode"`              // "drop_recreate" (default) or "upsert"
-	StrictConsistency      bool     `yaml:"strict_consistency"`       // Use table locks instead of NOLOCK
-	CreateIndexes          bool     `yaml:"create_indexes"`           // Create non-PK indexes
-	CreateForeignKeys      bool     `yaml:"create_foreign_keys"`      // Create foreign key constraints
-	CreateCheckConstraints bool     `yaml:"create_check_constraints"` // Create CHECK constraints
-	SampleValidation       bool     `yaml:"sample_validation"`        // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
-	SampleSize             int      `yaml:"sample_size"`              // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+	TargetMode             string   `yaml:"target_mode"`                   // "drop_recreate" (default) or "upsert"
+	StrictConsistency      bool     `yaml:"strict_consistency"`            // Use table locks instead of NOLOCK
+	CreateIndexes          *bool    `yaml:"create_indexes,omitempty"`      // Create non-PK indexes (default: true)
+	CreateForeignKeys      *bool    `yaml:"create_foreign_keys,omitempty"` // Create foreign key constraints (default: true)
+	CreateCheckConstraints bool     `yaml:"create_check_constraints"`      // Create CHECK constraints
+	SampleValidation       bool     `yaml:"sample_validation"`             // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
+	SampleSize             int      `yaml:"sample_size"`                   // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
 	// AllowPartial controls the exit-code contract when one or more
 	// tables fail to transfer. Default (false) returns a
 	// PartialMigrationError so unattended automation (Airflow, k8s
@@ -282,6 +282,23 @@ type MigrationConfig struct {
 	// "deterministic" with AI configured can set the field explicitly.
 	// Issues #197, #209.
 	ApproxTypeAction string `yaml:"approx_type_action,omitempty"`
+}
+
+// CreateIndexesEnabled returns the effective create_indexes setting.
+func (m MigrationConfig) CreateIndexesEnabled() bool {
+	return boolPtrDefault(m.CreateIndexes, true)
+}
+
+// CreateForeignKeysEnabled returns the effective create_foreign_keys setting.
+func (m MigrationConfig) CreateForeignKeysEnabled() bool {
+	return boolPtrDefault(m.CreateForeignKeys, true)
+}
+
+func boolPtrDefault(v *bool, def bool) bool {
+	if v == nil {
+		return def
+	}
+	return *v
 }
 
 // ValidationConfig configures the post-transfer validation passes

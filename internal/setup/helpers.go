@@ -164,13 +164,12 @@ func defaultIfEmpty(val, def string) string {
 }
 
 // boolDefault returns "y"/"n" for prompt display.
-// In EditMode (config was loaded), the loaded value wins regardless of its
-// zero-ness: a user who explicitly set `create_indexes: false` must see
-// "n" as the default and Enter must preserve it. In fresh-setup mode,
-// fall back to the supplied dmt default ("y" for create_indexes/FKs).
-func (s *State) boolDefault(loaded bool, freshDefault string) string {
-	if s.EditMode {
-		if loaded {
+// In EditMode (config was loaded), an explicit loaded value wins: a user who
+// set `create_indexes: false` must see "n" as the default and Enter must
+// preserve it. If the field was omitted, fall back to the supplied dmt default.
+func (s *State) boolDefault(loaded *bool, freshDefault string) string {
+	if s.EditMode && loaded != nil {
+		if *loaded {
 			return "y"
 		}
 		return "n"

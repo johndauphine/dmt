@@ -165,13 +165,13 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	for i := range tables {
 		t := &tables[i]
 
-		if o.config.Migration.CreateIndexes {
+		if o.config.Migration.CreateIndexesEnabled() {
 			if err := o.sourcePool.LoadIndexes(ctx, t); err != nil {
 				logging.Warn("Warning: loading indexes for %s: %v", t.Name, err)
 			}
 		}
 
-		if o.config.Migration.CreateForeignKeys {
+		if o.config.Migration.CreateForeignKeysEnabled() {
 			if err := o.sourcePool.LoadForeignKeys(ctx, t); err != nil {
 				logging.Warn("Warning: loading FKs for %s: %v", t.Name, err)
 			}
