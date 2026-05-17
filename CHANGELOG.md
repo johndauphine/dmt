@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 - Split the runtime monitor controller into focused same-package files for
   decision evaluation, action application, and controller helpers as the
   next P2 readability story (#212).
+- Split the orchestrator transfer runner into focused same-package files for
+  pre-transfer setup, job execution, error diagnosis, and transfer logging as
+  the final original P2 readability story (#212).
 
 ### Fixed
 
