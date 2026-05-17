@@ -32,6 +32,9 @@ All notable changes to this project will be documented in this file.
 - Split the tuning regression model into focused same-package files for
   model definitions, fitting, prediction intervals, math helpers, and
   residual outlier filtering as the next P2 readability story (#212).
+- Split the MySQL writer into focused same-package files for DDL,
+  batch/upsert writes, row counts, raw SQL helpers, and value conversion
+  as the next P2 readability story (#212).
 
 ### Fixed
 
