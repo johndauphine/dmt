@@ -98,6 +98,7 @@ func tuningFileSettings(s *driver.SmartConfigSuggestions) []tuningFileSetting {
 		{key: "workers", value: int64(s.Workers)},
 		{key: "max_source_connections", value: int64(s.MaxSourceConnections)},
 		{key: "max_target_connections", value: int64(s.MaxTargetConnections)},
+		{key: "max_memory_mb", value: appliedMaxMemoryMB(s)},
 		{key: "chunk_size", value: int64(s.ChunkSizeRecommendation)},
 		{key: "max_partitions", value: int64(s.MaxPartitions)},
 		{key: "large_table_threshold", value: s.LargeTableThreshold},
@@ -108,6 +109,15 @@ func tuningFileSettings(s *driver.SmartConfigSuggestions) []tuningFileSetting {
 		{key: "checkpoint_frequency", value: int64(s.CheckpointFrequency)},
 		{key: "max_retries", value: int64(s.MaxRetries)},
 	}
+}
+
+func appliedMaxMemoryMB(s *driver.SmartConfigSuggestions) int64 {
+	if s.EstimatedMemMB <= 0 {
+		return 0
+	}
+	// EstimatedMemMB is floored, while max_memory_mb is a hard budget.
+	// Persist the smallest whole-MiB ceiling that cannot re-clamp this tuning.
+	return s.EstimatedMemMB + 1
 }
 
 func findMappingValue(mapping *yaml.Node, key string) (*yaml.Node, *yaml.Node) {

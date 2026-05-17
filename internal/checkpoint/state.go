@@ -1309,7 +1309,7 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]AIAdjustmentRecord, error) 
 	return records, rows.Err()
 }
 
-// SaveAITuning saves an AI tuning recommendation from the analyze command.
+// SaveAITuning saves tuning parameters from a migration run.
 func (s *State) SaveAITuning(record AITuningRecord) error {
 	wasAIUsed := 0
 	if record.WasAIUsed {

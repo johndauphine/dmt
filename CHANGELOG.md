@@ -9,6 +9,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `dmt analyze --apply` now writes `migration.max_memory_mb` alongside
+  the other analyzed tuning fields so applied config files preserve the
+  full memory-budget recommendation (#246).
+
 ### Added
 
 - **Nightly cross-engine integration matrix in CI** (closes #291).
