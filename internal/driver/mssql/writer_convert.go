@@ -32,7 +32,7 @@ func isTextColumn(columnTypes []string, index int) bool {
 	switch columnType {
 	case "char", "varchar", "text", "tinytext", "mediumtext", "longtext",
 		"nchar", "nvarchar", "ntext", "string", "uniqueidentifier", "uuid",
-		"json", "jsonb", "xml":
+		"json", "jsonb", "xml", "enum", "set":
 		return true
 	default:
 		return false

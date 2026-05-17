@@ -10,11 +10,13 @@ func TestConvertRowForBulkCopyConvertsUTF8TextBytes(t *testing.T) {
 		[]byte("M\u00fcnchen"),
 		[]byte("\u65e5\u672c\u8a9e \U0001f680"),
 		[]byte("plain ASCII"),
+		[]byte("active"),
+		[]byte("read,write"),
 	}
 
-	got := convertRowForBulkCopy(row, []string{"varchar(255)", "longtext", "nvarchar(max)"})
+	got := convertRowForBulkCopy(row, []string{"varchar(255)", "longtext", "nvarchar(max)", "enum", "set"})
 
-	want := []string{"M\u00fcnchen", "\u65e5\u672c\u8a9e \U0001f680", "plain ASCII"}
+	want := []string{"M\u00fcnchen", "\u65e5\u672c\u8a9e \U0001f680", "plain ASCII", "active", "read,write"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("column %d = %#v, want %#v", i, got[i], want[i])
