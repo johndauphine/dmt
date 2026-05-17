@@ -101,7 +101,7 @@ func yamlFieldTypes(typ reflect.Type) map[string]reflect.Type {
 }
 
 func derefType(typ reflect.Type) reflect.Type {
-	for typ.Kind() == reflect.Ptr {
+	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
 	return typ

@@ -80,7 +80,6 @@ func Expand(s string) (string, error) {
 //
 // This is intentionally narrow: the migration runtime must always use Load /
 // LoadWithOptions so that templates resolve before connection attempts.
-//
 func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -97,7 +96,7 @@ func LoadRaw(path string) (*Config, error) {
 
 	var cfg Config
 	if err := node.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+		return nil, fmt.Errorf("decoding config: %w", err)
 	}
 	return &cfg, nil
 }
