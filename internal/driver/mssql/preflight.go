@@ -207,7 +207,7 @@ func checkPrivilegesMSSQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 		// HAS_PERMS_BY_NAME at database scope with 'SELECT' checks the
 		// blanket SELECT (typical for read-only logins) — granular per-
 		// table grants will surface at extract time if missing.
-		return mssqlCheckDbPerm(ctx, db, "SELECT", "read source schema", req.Side)
+		return mssqlCheckDBPerm(ctx, db, "SELECT", "read source schema", req.Side)
 	}
 
 	mode := strings.ToLower(strings.TrimSpace(req.TargetMode))
@@ -217,11 +217,11 @@ func checkPrivilegesMSSQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 	var findings []driver.PreFlightFinding
 	switch mode {
 	case "drop_recreate":
-		findings = append(findings, mssqlCheckDbPerm(ctx, db, "CREATE TABLE", "create target tables", req.Side)...)
-		findings = append(findings, mssqlCheckDbPerm(ctx, db, "INSERT", "bulk-load target tables", req.Side)...)
+		findings = append(findings, mssqlCheckDBPerm(ctx, db, "CREATE TABLE", "create target tables", req.Side)...)
+		findings = append(findings, mssqlCheckDBPerm(ctx, db, "INSERT", "bulk-load target tables", req.Side)...)
 	case "upsert":
-		findings = append(findings, mssqlCheckDbPerm(ctx, db, "INSERT", "merge new rows", req.Side)...)
-		findings = append(findings, mssqlCheckDbPerm(ctx, db, "UPDATE", "merge existing rows", req.Side)...)
+		findings = append(findings, mssqlCheckDBPerm(ctx, db, "INSERT", "merge new rows", req.Side)...)
+		findings = append(findings, mssqlCheckDBPerm(ctx, db, "UPDATE", "merge existing rows", req.Side)...)
 		// Upsert also creates temp staging tables; in MSSQL temp objects
 		// live in tempdb and don't require schema CREATE TABLE perms, so
 		// we don't probe for it here.
@@ -229,7 +229,7 @@ func checkPrivilegesMSSQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 	return findings
 }
 
-func mssqlCheckDbPerm(ctx context.Context, db *sql.DB, perm, intent string, side driver.PreFlightSide) []driver.PreFlightFinding {
+func mssqlCheckDBPerm(ctx context.Context, db *sql.DB, perm, intent string, side driver.PreFlightSide) []driver.PreFlightFinding {
 	var ok int
 	if err := db.QueryRowContext(ctx,
 		"SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', @p1)", perm).Scan(&ok); err != nil {

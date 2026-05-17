@@ -44,9 +44,9 @@ type writerPool struct {
 type writerPoolConfig struct {
 	NumWriters             int
 	BufferSize             int
-	JobBufferSize          int   // computed by pool.CalculateJobBufferSize
+	JobBufferSize          int // computed by pool.CalculateJobBufferSize
 	UseUpsert              bool
-	IdempotentOnDup        bool       // #227: ROW_NUMBER resume — writer should skip rows already in target instead of erroring on duplicate PK
+	IdempotentOnDup        bool // #227: ROW_NUMBER resume — writer should skip rows already in target instead of erroring on duplicate PK
 	UpsertMergeChunkSizeFn func() int
 	BatchSizeFn            func() int // dynamic writer batch size
 	TargetSchema           string
@@ -286,7 +286,7 @@ func (wp *writerPool) executeUpsertWithChunking(ctx context.Context, writerID in
 
 // submit sends a write job to the pool. Returns false if context is cancelled.
 func (wp *writerPool) submit(job writeJob) bool {
-	return wp.WriterPool.Submit(pool.WriteJob{
+	return wp.Submit(pool.WriteJob{
 		Rows:     job.rows,
 		ReaderID: job.readerID,
 		Seq:      job.seq,
@@ -297,32 +297,32 @@ func (wp *writerPool) submit(job writeJob) bool {
 
 // wait closes the job channel and waits for all workers to complete.
 func (wp *writerPool) wait() {
-	wp.WriterPool.Wait()
+	wp.Wait()
 }
 
 // error returns any write error that occurred.
 func (wp *writerPool) error() error {
-	return wp.WriterPool.Error()
+	return wp.Error()
 }
 
 // writeTime returns the total time spent writing.
 func (wp *writerPool) writeTime() time.Duration {
-	return wp.WriterPool.WriteTime()
+	return wp.WriteTime()
 }
 
 // written returns the total rows written.
 func (wp *writerPool) written() int64 {
-	return wp.WriterPool.Written()
+	return wp.Written()
 }
 
 // acks returns the ack channel for checkpoint coordination.
 func (wp *writerPool) acks() <-chan pool.WriteAck {
-	return wp.WriterPool.Acks()
+	return wp.Acks()
 }
 
 // startAckProcessor starts a goroutine to process acks with the given handler.
 func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
-	wp.WriterPool.StartAckProcessor(func(ack pool.WriteAck) {
+	wp.StartAckProcessor(func(ack pool.WriteAck) {
 		handler(writeAck{
 			readerID: ack.ReaderID,
 			seq:      ack.Seq,
@@ -334,7 +334,7 @@ func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
 
 // start begins the writer worker goroutines.
 func (wp *writerPool) start() {
-	wp.WriterPool.Start()
+	wp.Start()
 }
 
 // buildTargetPKCols sanitizes PK columns for the target database.

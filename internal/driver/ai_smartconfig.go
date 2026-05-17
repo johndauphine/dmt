@@ -1,19 +1,13 @@
-// Package driver — smartconfig analyzer.
+// Package driver - smartconfig analyzer.
 //
 // PR1 of #175 replaced the AI-driven prompt path with the deterministic
 // internal/tuning package. The "AI" prefix on file names and exported
 // types is preserved to minimize the public-API churn in this PR; a
-// follow-up cleanup will rename ai_smartconfig.go → smartconfig.go and
+// follow-up cleanup will rename ai_smartconfig.go -> smartconfig.go and
 // drop the unused AISuggestions field on SmartConfigSuggestions.
 //
 // What lives in this file:
-//   - SmartConfigAnalyzer scaffolding: connection wiring, schema-stats
-//     collection, date-column / exclude-table heuristics
-//   - The bridge that converts the analyzer's collected stats into a
-//     tuning.Input and applies tuning.Output back onto SmartConfigSuggestions
-//   - AITuningRecord persistence (the SQL ai_tuning_history schema is
-//     unchanged; was_ai_used now always records false)
-//   - SmartConfigSuggestions.FormatYAML for human-readable output
+//   - SmartConfigAnalyzer scaffolding and schema-stats collection entrypoint
 //
 // What got lifted out (now in internal/tuning/):
 //   - effectiveMemoryBudgetMB, computeSafeChunkSize, ComputeEstimatedMemMB,
@@ -32,23 +26,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
-	"os"
-	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/tuning"
-	"github.com/shirou/gopsutil/v3/mem"
 )
 
-// DBTuningSnapshot is the per-run effective DB-tuning capture used for
-// regime classification (#144). Aliased to tuning.DBTuning so external
-// callers (orchestrator, healthcheck) keep the existing type name while
-// the new tuner consumes the same struct directly.
 type DBTuningSnapshot = tuning.DBTuning
 
 // SmartConfigSuggestions contains the analyzer's recommendations for
@@ -97,7 +82,7 @@ type SmartConfigSuggestions struct {
 
 	// Reasoning is the tuning engine's short explanation of the picking
 	// path, populated from tuning.Output.Reasoning. Always non-empty after
-	// the deterministic tuner runs (#202 — silence is not a valid signal).
+	// the deterministic tuner runs (#202 â€” silence is not a valid signal).
 	Reasoning string
 
 	// Tier names which selector picked the WAW/ChunkSize values, populated
@@ -133,7 +118,7 @@ type AutoTuneInput struct {
 	// classifier falls through to AvgRowBytes.
 	UncappedAvgRowBytes int64
 
-	// LargestTableBytes is max(RowCount × AvgRowSizeBytes) across ALL
+	// LargestTableBytes is max(RowCount Ã— AvgRowSizeBytes) across ALL
 	// tables in the workload (#214). Used by the skew tier classifier.
 	// Calculated alongside the avg/max-row passes in calculateAvgRowSize
 	// so it sees every table, not just the top-5-by-row-count slice
@@ -164,7 +149,7 @@ type TableStats struct {
 	AvgRowBytes int64
 }
 
-// AutoTuneOutput is preserved for backwards compatibility — see the
+// AutoTuneOutput is preserved for backwards compatibility â€” see the
 // SmartConfigSuggestions.AISuggestions field. PR1 doesn't populate it;
 // a follow-up cleanup PR removes the type entirely.
 type AutoTuneOutput struct {
@@ -185,7 +170,7 @@ type AutoTuneOutput struct {
 }
 
 // TuningHistoryProvider supplies past-run data to the analyzer. PR1
-// trimmed the interface — the per-WAW / per-chunk_size aggregate methods
+// trimmed the interface â€” the per-WAW / per-chunk_size aggregate methods
 // the AI prompt used were dropped; the new tuner reads raw records and
 // does its own aggregation in-package.
 type TuningHistoryProvider interface {
@@ -257,7 +242,7 @@ type AITuningRecord struct {
 	SourceMaxServerMemoryMB int64  `json:"source_max_server_memory_mb,omitempty"`
 
 	// Workload identity (#215). Mirrors the matching fields on
-	// checkpoint.AITuningRecord — the orchestrator's stateHistoryAdapter
+	// checkpoint.AITuningRecord â€” the orchestrator's stateHistoryAdapter
 	// copies between the two struct shapes.
 	SourceHost     string `json:"source_host,omitempty"`
 	SourcePort     int    `json:"source_port,omitempty"`
@@ -270,7 +255,7 @@ type AITuningRecord struct {
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal
-// configuration. PR1 dropped the aiMapper / useAI fields — the deterministic
+// configuration. PR1 dropped the aiMapper / useAI fields â€” the deterministic
 // tuner doesn't need them. PR2 added forceExplore + exploreMode for the
 // exploration policy in internal/tuning (#179).
 type SmartConfigAnalyzer struct {
@@ -287,21 +272,21 @@ type SmartConfigAnalyzer struct {
 	exploreMode              string      // mirrors cfg.Migration.ExploreMode
 	targetProbe              TargetProbe // populated via SetTargetProbe (#166)
 	uncappedAvgRowBytes      int64       // pre-cap average row size from sampled tables (#166)
-	maxSampledRowBytes       int64       // widest row in sampled tables (#166) — used for the packet cap so wide tables can't exceed @@max_allowed_packet
-	largestSampledTableBytes int64       // max RowCount × AvgRowSizeBytes across ALL tables (#214) — feeds skew-tier classifier; iterating LargestTables[:5] alone would miss a wide-row low-row-count outlier
+	maxSampledRowBytes       int64       // widest row in sampled tables (#166) â€” used for the packet cap so wide tables can't exceed @@max_allowed_packet
+	largestSampledTableBytes int64       // max RowCount Ã— AvgRowSizeBytes across ALL tables (#214) â€” feeds skew-tier classifier; iterating LargestTables[:5] alone would miss a wide-row low-row-count outlier
 
 	// tableNameFilter restricts Analyze to a caller-supplied set of table
 	// names (#241). The orchestrator applies include/exclude filters
 	// before tuning runs; without scoping Analyze to that same set, an
 	// excluded-but-wide table (e.g. an archive blob) would still drive
 	// the packet cap and clamp chunk_size for the narrow tables that
-	// actually ship. nil means "no filter — analyze every table the
+	// actually ship. nil means "no filter â€” analyze every table the
 	// schema returned" (e.g. the `analyze` CLI subcommand).
 	tableNameFilter map[string]bool
 
 	// Workload identity (#215). Populated by SetWorkloadIdentity from
 	// the orchestrator's cfg.Source / cfg.Target. Flows through
-	// buildAutoTuneInput → toTuningInput → tuning.Input where the
+	// buildAutoTuneInput â†’ toTuningInput â†’ tuning.Input where the
 	// Tier 1 classifier reads it.
 	identitySourceHost     string
 	identitySourcePort     int
@@ -359,21 +344,21 @@ func (s *SmartConfigAnalyzer) SetTargetProbe(probe TargetProbe) {
 // TargetHardChunkLimit returns the effective chunk_size cap that the
 // orchestrator carries past smartconfig into the runtime controller
 // (which would otherwise grow chunks above the packet limit during
-// mid-migration tuning — Codex review on #166).
+// mid-migration tuning â€” Codex review on #166).
 //
 // Resolution order:
 //   - If a target-side probe surfaced a protocol cap (today: MySQL
 //     @@max_allowed_packet), the packet-derived limit wins.
 //   - Otherwise the driver's static HardChunkLimit applies (0 for all
-//     drivers today — the runtime controller treats 0 as "no cap").
+//     drivers today â€” the runtime controller treats 0 as "no cap").
 //
 // Returns 0 only when neither a probe nor a static limit applies,
 // which is the common case for PG and MSSQL targets. (Copilot review
-// on #166 — earlier doc claimed "returns 0 when no probe is set",
+// on #166 â€” earlier doc claimed "returns 0 when no probe is set",
 // which understated the static-limit fallthrough path.)
 //
 // The packet calc uses s.maxSampledRowBytes (the widest row across
-// sampled tables) rather than the average — chunk_size is global
+// sampled tables) rather than the average â€” chunk_size is global
 // across all tables in a migration, so a workload that mixes narrow
 // and wide tables would otherwise let chunks for the wide table
 // exceed @@max_allowed_packet. Falls back to the uncapped average if
@@ -401,7 +386,7 @@ func (s *SmartConfigAnalyzer) SetTargetMode(mode string) {
 
 // SetExploration wires the exploration policy fields from config into the
 // analyzer. force corresponds to cfg.Migration.Explore (--explore CLI
-// flag); mode corresponds to cfg.Migration.ExploreMode (ε strength —
+// flag); mode corresponds to cfg.Migration.ExploreMode (Îµ strength â€”
 // "off" | "low" | "balanced" | "high"). See #179.
 func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
 	s.forceExplore = force
@@ -414,8 +399,8 @@ func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
 //
 // Wired from the orchestrator after include/exclude filters have been
 // applied to the extracted schema, so derived values that go global
-// across the migration — the @@max_allowed_packet-derived chunk cap and
-// the memory-budget row-size assumptions — reflect only the tables that
+// across the migration â€” the @@max_allowed_packet-derived chunk cap and
+// the memory-budget row-size assumptions â€” reflect only the tables that
 // will actually be transferred.
 func (s *SmartConfigAnalyzer) SetTableNameFilter(allowed []string) {
 	if len(allowed) == 0 {
@@ -457,7 +442,7 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	// Scope to caller-supplied table set if one was wired in (#241).
 	// The orchestrator filters with include/exclude before tuning runs;
 	// applying the same scope here keeps the packet cap, avg/max row
-	// sizes, and memory-budget math aligned with the actual workload —
+	// sizes, and memory-budget math aligned with the actual workload â€”
 	// otherwise an excluded wide table can still drive the global cap.
 	tables = s.applyTableNameFilter(tables)
 
@@ -496,958 +481,4 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 }
 
 // calculateAutoTuneParams runs the deterministic tuner and applies its
-// output to s.suggestions. Replaces the AI/default branch — there's no
-// AI path anymore; the tuner returns a complete parameter set every time.
-func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
-	avgRowSize := s.calculateAvgRowSize(tables)
-	s.suggestions.AvgRowSizeBytes = avgRowSize
-
-	input := s.buildAutoTuneInput(tables, avgRowSize)
-	output := tuning.Tune(
-		s.toTuningInput(input),
-		s.toTuningProfile(),
-		s.toTuningHistory(),
-		s.currentTuning,
-	)
-	s.applyTuningOutput(output)
-
-	s.pendingSave = &pendingTuningSave{input: input, reasoning: output.Reasoning}
-}
-
-// toTuningInput maps the analyzer's AutoTuneInput onto tuning.Input,
-// adding the exploration fields from the analyzer's configured state.
-func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
-	return tuning.Input{
-		CPUCores:            in.CPUCores,
-		MemoryGB:            in.MemoryGB,
-		AvailableMemoryMB:   in.AvailableMemoryMB,
-		MaxMemoryMB:         in.MaxMemoryMB,
-		Platform:            in.Platform,
-		SourceDBType:        in.DatabaseType,
-		TargetDBType:        in.TargetType,
-		TargetMode:          in.TargetMode,
-		TotalTables:         in.TotalTables,
-		TotalRows:           in.TotalRows,
-		AvgRowBytes:         in.AvgRowBytes,
-		UncappedAvgRowBytes: in.UncappedAvgRowBytes,
-		LargestTableBytes:   in.LargestTableBytes,
-		// Workload identity passthrough (#215).
-		SourceHost:         in.SourceHost,
-		SourcePort:         in.SourcePort,
-		SourceDatabase:     in.SourceDatabase,
-		SourceSchema:       in.SourceSchema,
-		TargetHost:         in.TargetHost,
-		TargetPort:         in.TargetPort,
-		TargetDatabase:     in.TargetDatabase,
-		TargetSchema:       in.TargetSchema,
-		ForceExplore:       s.forceExplore,
-		ExplorationEpsilon: explorationEpsilon(s.exploreMode),
-	}
-}
-
-// ExplorationEpsilon is the package-public version of explorationEpsilon
-// for callers outside the smartconfig analyzer (e.g. healthcheck's
-// offline path). Same mapping; same fallback behavior.
-func ExplorationEpsilon(mode string) float64 {
-	return explorationEpsilon(mode)
-}
-
-// explorationEpsilon maps the user-facing ExploreMode string to the
-// numeric ε used by the tuner's perturbation policy (#179). Empty
-// defaults to "balanced" (0.15) — the documented PR2 default. Unknown
-// values fall back to "balanced" rather than failing, since this is
-// configuration data and a typo shouldn't break tuning.
-func explorationEpsilon(mode string) float64 {
-	switch mode {
-	case "off":
-		return 0
-	case "low":
-		return 0.10
-	case "high":
-		return 0.25
-	case "", "balanced":
-		return 0.15
-	default:
-		return 0.15
-	}
-}
-
-// toTuningProfile builds the per-target DriverProfile from the registered
-// driver. Unknown target → zero-valued profile, which the tuner treats as
-// "use 10 MB conservative chunk fallback + WAW=1 floor."
-//
-// For MySQL targets, the probed @@max_allowed_packet (from
-// SetTargetProbe) drives HardChunkLimit instead of the driver's static
-// HardChunkLimit method — the protocol cap is server-configurable and
-// can only be determined at runtime (#166).
-func (s *SmartConfigAnalyzer) toTuningProfile() tuning.DriverProfile {
-	profile := tuning.DriverProfile{Name: s.targetDBType, BaselineWAW: 2}
-	d, err := Get(s.targetDBType)
-	if err != nil {
-		return profile
-	}
-	defaults := d.Defaults()
-	profile.BaselineWAW = defaults.WriteAheadWriters
-	profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
-	profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
-
-	avgRowBytes := s.suggestions.AvgRowSizeBytes
-	// For the packet calculation, use the *widest sampled* row, not
-	// the average. chunk_size is global across all tables in a
-	// migration; the protocol cap must hold for the worst-case row.
-	// Falls back to uncapped average and then to capped average for
-	// code paths that don't run calculateAvgRowSize (Codex review on
-	// #166).
-	packetRowBytes := s.maxSampledRowBytes
-	if packetRowBytes == 0 {
-		packetRowBytes = s.uncappedAvgRowBytes
-	}
-	if packetRowBytes == 0 {
-		packetRowBytes = avgRowBytes
-	}
-	profile.HardChunkLimit = chunkLimitFromProbe(d.HardChunkLimit(avgRowBytes), s.targetProbe, packetRowBytes)
-	return profile
-}
-
-// chunkLimitFromProbe picks the HardChunkLimit value used in the
-// DriverProfile. When a target-side probe surfaces a protocol cap
-// (today: MySQL @@max_allowed_packet), that wins — it's the hard
-// physical limit, server-configurable, and only knowable at runtime.
-// Otherwise the driver's static HardChunkLimit applies. Extracted as
-// a pure function so smartconfig tests can exercise the math without
-// depending on driver-registry state (#166).
-func chunkLimitFromProbe(driverStaticLimit int, probe TargetProbe, avgRowBytes int64) int {
-	if probe.MaxAllowedPacket > 0 && avgRowBytes > 0 {
-		const safetyMarginPct = 80
-		safeBytes := probe.MaxAllowedPacket * safetyMarginPct / 100
-		limit := int(safeBytes / avgRowBytes)
-		// Clamp to at least 1 — when avgRowBytes exceeds 80% of the
-		// packet, integer division returns 0 and downstream code would
-		// treat that as "no cap," which is the opposite of the intent.
-		// One row per chunk is the smallest meaningful unit, and
-		// matches what the protocol permits in this scenario (Codex
-		// review on #166).
-		if limit < 1 {
-			limit = 1
-		}
-		return limit
-	}
-	return driverStaticLimit
-}
-
-// toTuningHistory wraps the analyzer's TuningHistoryProvider in an
-// adapter that satisfies tuning.HistoryProvider. Returns nil when no
-// provider is configured so Tune treats it as cold-start.
-func (s *SmartConfigAnalyzer) toTuningHistory() tuning.HistoryProvider {
-	if s.historyProvider == nil {
-		return nil
-	}
-	return &tuningHistoryAdapter{base: s.historyProvider}
-}
-
-// tuningHistoryAdapter converts the analyzer's TuningHistoryProvider into
-// the tuning package's HistoryProvider — fetches AITuningRecord rows and
-// translates each into a tuning.HistoryRecord.
-type tuningHistoryAdapter struct {
-	base TuningHistoryProvider
-}
-
-// Records returns all history rows for the (source, target) pair. limit=0
-// = no bound; the tuner does its own filtering downstream.
-func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tuning.HistoryRecord, error) {
-	rows, err := a.base.GetAITuningHistory(0, sourceDBType, targetDBType)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]tuning.HistoryRecord, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, tuning.HistoryRecord{
-			Timestamp:         r.Timestamp,
-			SourceDBType:      r.SourceDBType,
-			TargetDBType:      r.TargetDBType,
-			Workers:           r.Workers,
-			ChunkSize:         r.ChunkSize,
-			WriteAheadWriters: r.WriteAheadWriters,
-			ParallelReaders:   r.ParallelReaders,
-			ReadAheadBuffers:  r.ReadAheadBuffers,
-			AvgRowBytes:       r.AvgRowSizeBytes,
-			TotalRows:         r.TotalRows,
-			TotalTables:       r.TotalTables,
-			// LargestTableBytes is not persisted yet (#214 follow-up will
-			// add the column); historical rows leave it zero, which the
-			// regime classifier treats as "unknown skew" — neutral on
-			// the secondary axis rather than mismatching every input.
-			FinalThroughput: r.FinalThroughput,
-			// FinalThroughputBytes is the bytes/sec form the regression
-			// trains on (#224). rows/sec stays the canonical persisted
-			// value (existing ai_tuning_history rows + non-regression
-			// consumers); the multiplication happens here, at the single
-			// adapter boundary, so a pre-#215 row with AvgRowSizeBytes==0
-			// gets the safeAvgRowBytes fallback consistently with the
-			// rest of the tuning pipeline.
-			FinalThroughputBytes:    throughputBytesForHistory(r.FinalThroughput, r.AvgRowSizeBytes),
-			ChunkRetryCount:         r.ChunkRetryCount,
-			CPUCores:                r.CPUCores,
-			MemoryGB:                r.MemoryGB,
-			Platform:                r.Platform,
-			TargetSharedBuffersMB:   r.TargetSharedBuffersMB,
-			TargetSyncCommit:        r.TargetSyncCommit,
-			TargetFsync:             r.TargetFsync,
-			TargetFullPageWrites:    r.TargetFullPageWrites,
-			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
-			TargetWALLevel:          r.TargetWALLevel,
-			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
-			// Workload identity passthrough (#215). Pre-#215 rows
-			// have empty values for these — exact-identity match is
-			// equality on strings/ints, so empties fail to match the
-			// user's input and the row falls through to Tier 2.
-			SourceHost:     r.SourceHost,
-			SourcePort:     r.SourcePort,
-			SourceDatabase: r.SourceDatabase,
-			SourceSchema:   r.SourceSchema,
-			TargetHost:     r.TargetHost,
-			TargetPort:     r.TargetPort,
-			TargetDatabase: r.TargetDatabase,
-			TargetSchema:   r.TargetSchema,
-		})
-	}
-	return out, nil
-}
-
-// throughputBytesForHistory converts a persisted rows/sec value into
-// the bytes/sec form the regression trains on, guarding the cast
-// against the pathological inputs that would otherwise produce
-// undefined int64 values (Copilot review on PR #289):
-//
-//   - FinalThroughput ≤ 0 (incomplete or corrupt run): return 0 so
-//     the row is dropped at the regression's FinalThroughput-positive
-//     filter anyway, and the bytes field doesn't carry a meaningless
-//     negative int64 in the meantime.
-//   - NaN: `x > 0` is false for NaN, caught by the same branch.
-//   - +Inf: caught explicitly via the IsInf check before multiply, so
-//     the multiplication doesn't produce another +Inf that overflows
-//     the int64 cast.
-//   - Cap at math.MaxInt64 just in case the multiplied float is past
-//     the int64 range (a hypothetical 10²⁰ bytes/s, which couldn't
-//     happen in practice but doesn't cost us to guard).
-func throughputBytesForHistory(throughputRowsPerSec float64, avgRowBytes int64) int64 {
-	if !(throughputRowsPerSec > 0) || math.IsInf(throughputRowsPerSec, 0) {
-		return 0
-	}
-	bytes := throughputRowsPerSec * float64(tuning.SafeAvgRowBytes(avgRowBytes))
-	if bytes >= float64(math.MaxInt64) {
-		return math.MaxInt64
-	}
-	return int64(bytes)
-}
-
-// applyTuningOutput copies the tuner's recommendations onto the
-// analyzer's suggestions struct.
-func (s *SmartConfigAnalyzer) applyTuningOutput(out tuning.Output) {
-	s.suggestions.Workers = out.Workers
-	s.suggestions.ChunkSizeRecommendation = out.ChunkSize
-	s.suggestions.ReadAheadBuffers = out.ReadAheadBuffers
-	s.suggestions.WriteAheadWriters = out.WriteAheadWriters
-	s.suggestions.ParallelReaders = out.ParallelReaders
-	s.suggestions.MaxPartitions = out.MaxPartitions
-	s.suggestions.LargeTableThreshold = out.LargeTableThreshold
-	s.suggestions.MaxSourceConnections = out.MaxSourceConnections
-	s.suggestions.MaxTargetConnections = out.MaxTargetConnections
-	s.suggestions.UpsertMergeChunkSize = out.UpsertMergeChunkSize
-	s.suggestions.CheckpointFrequency = out.CheckpointFrequency
-	s.suggestions.MaxRetries = out.MaxRetries
-	s.suggestions.EstimatedMemMB = out.EstimatedMemMB
-	s.suggestions.Reasoning = out.Reasoning
-	s.suggestions.Tier = out.Tier
-}
-
-// pendingTuningSave holds data for deferred tuning history save.
-type pendingTuningSave struct {
-	input     AutoTuneInput
-	reasoning string
-}
-
-// ActualParams holds the actual migration parameters used after user overrides,
-// plus effective DB tuning captured at run start (#144).
-type ActualParams struct {
-	Workers           int
-	ChunkSize         int
-	ReadAheadBuffers  int
-	WriteAheadWriters int
-	ParallelReaders   int
-	MaxPartitions     int
-
-	// Regime fields (#144). Populated by the orchestrator from
-	// captureDBTuning before this struct reaches SaveTuningWithActualParams.
-	Platform                string
-	TargetSharedBuffersMB   int64
-	TargetSyncCommit        string
-	TargetFsync             string
-	TargetFullPageWrites    string
-	TargetMaxWALSizeMB      int64
-	TargetWALLevel          string
-	SourceMaxServerMemoryMB int64
-}
-
-// SaveTuningWithActualParams saves tuning history with the actual params
-// used (after user overrides), not the recommendations.
-func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
-	if s.pendingSave == nil {
-		return
-	}
-	ps := s.pendingSave
-	s.pendingSave = nil
-
-	s.suggestions.Workers = actual.Workers
-	s.suggestions.ChunkSizeRecommendation = actual.ChunkSize
-	s.suggestions.ReadAheadBuffers = actual.ReadAheadBuffers
-	s.suggestions.WriteAheadWriters = actual.WriteAheadWriters
-	s.suggestions.ParallelReaders = actual.ParallelReaders
-	s.suggestions.MaxPartitions = actual.MaxPartitions
-	// Re-derive EstimatedMemMB so the persisted history reflects the
-	// post-override params, not the pre-override estimate (#160).
-	s.suggestions.EstimatedMemMB = tuning.EstimatedMemMB(
-		actual.Workers,
-		actual.ReadAheadBuffers,
-		actual.WriteAheadWriters,
-		actual.ChunkSize,
-		ps.input.AvgRowBytes,
-	)
-
-	s.saveTuningResult(ps.input, ps.reasoning, actual)
-}
-
-// saveTuningResult saves the tuning recommendation to history.
-func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning string, actual ActualParams) {
-	if s.historyProvider == nil {
-		return
-	}
-
-	record := AITuningRecord{
-		Timestamp:               time.Now(),
-		SourceDBType:            s.dbType,
-		TargetDBType:            s.targetDBType,
-		TotalTables:             s.suggestions.TotalTables,
-		TotalRows:               s.suggestions.TotalRows,
-		AvgRowSizeBytes:         s.suggestions.AvgRowSizeBytes,
-		CPUCores:                input.CPUCores,
-		MemoryGB:                input.MemoryGB,
-		Workers:                 s.suggestions.Workers,
-		ChunkSize:               s.suggestions.ChunkSizeRecommendation,
-		ReadAheadBuffers:        s.suggestions.ReadAheadBuffers,
-		WriteAheadWriters:       s.suggestions.WriteAheadWriters,
-		ParallelReaders:         s.suggestions.ParallelReaders,
-		MaxPartitions:           s.suggestions.MaxPartitions,
-		LargeTableThreshold:     s.suggestions.LargeTableThreshold,
-		MaxSourceConnections:    s.suggestions.MaxSourceConnections,
-		MaxTargetConnections:    s.suggestions.MaxTargetConnections,
-		EstimatedMemoryMB:       s.suggestions.EstimatedMemMB,
-		AIReasoning:             reasoning, // deterministic tuner's reasoning string
-		WasAIUsed:               false,     // PR1 dropped the AI path entirely
-		Platform:                firstNonEmpty(actual.Platform, input.Platform),
-		TargetSharedBuffersMB:   actual.TargetSharedBuffersMB,
-		TargetSyncCommit:        actual.TargetSyncCommit,
-		TargetFsync:             actual.TargetFsync,
-		TargetFullPageWrites:    actual.TargetFullPageWrites,
-		TargetMaxWALSizeMB:      actual.TargetMaxWALSizeMB,
-		TargetWALLevel:          actual.TargetWALLevel,
-		SourceMaxServerMemoryMB: actual.SourceMaxServerMemoryMB,
-		// Workload identity passthrough (#215). The values come from
-		// the AutoTuneInput the orchestrator built when calling Tune,
-		// so they reflect THIS run's exact endpoints. Pre-#215 callers
-		// that don't set these fields leave them empty in the record,
-		// which is the correct outcome — empty values can't satisfy
-		// Tier 1's equality check.
-		SourceHost:     input.SourceHost,
-		SourcePort:     input.SourcePort,
-		SourceDatabase: input.SourceDatabase,
-		SourceSchema:   input.SourceSchema,
-		TargetHost:     input.TargetHost,
-		TargetPort:     input.TargetPort,
-		TargetDatabase: input.TargetDatabase,
-		TargetSchema:   input.TargetSchema,
-	}
-
-	if err := s.historyProvider.SaveAITuning(record); err != nil {
-		logging.Debug("Failed to save tuning history: %v", err)
-	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// applyTableNameFilter trims the schema-returned table list to those
-// the caller declared in-scope (#241). nil/empty filter is a no-op so
-// the analyze CLI subcommand (which has no filtering context) behaves
-// identically to the pre-#241 codepath.
-func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableInfo {
-	if len(s.tableNameFilter) == 0 {
-		return tables
-	}
-	kept := make([]tableInfo, 0, len(tables))
-	for _, t := range tables {
-		if s.tableNameFilter[strings.ToLower(t.Name)] {
-			kept = append(kept, t)
-		}
-	}
-	return kept
-}
-
-// calculateAvgRowSize returns the average row size from the largest
-// tables, capped at 2000 bytes for the memory-budget math (the cap
-// keeps a single wide table from inflating the per-chunk memory
-// estimate beyond what it would actually consume in practice).
-//
-// Side effects (#166 and #214):
-//   - s.uncappedAvgRowBytes: pre-cap average across sampled tables.
-//     Used by the regime classifier (#214) so wide-row workloads land
-//     in the right band; ClassifyRegime would otherwise see a 2KB-
-//     capped value and undercount total_bytes.
-//   - s.maxSampledRowBytes: widest row in sampled tables (#166). The
-//     packet cap must hold for the worst-case row, not the average —
-//     chunk_size is global across all tables in a migration, so a mix
-//     of narrow and wide tables would otherwise allow chunks that
-//     exceed @@max_allowed_packet when inserting the wide one (Codex
-//     review on #166).
-//   - s.largestSampledTableBytes: max RowCount × AvgRowSizeBytes across
-//     ALL tables (#214). Used by the skew tier classifier — picking
-//     "largest table" from a slice ordered by row count would miss a
-//     low-row but extremely wide table that's actually the bytes
-//     heavyweight (Copilot review on PR #288).
-func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
-	// Average: top-5 largest tables only — they dominate runtime, so
-	// averaging across them approximates the steady-state row size
-	// for memory-budget purposes.
-	var totalSize int64
-	var count int
-	for i, t := range tables {
-		if i >= 5 || t.RowCount == 0 {
-			break
-		}
-		if t.AvgRowSizeBytes > 0 {
-			totalSize += t.AvgRowSizeBytes
-			count++
-		}
-	}
-	uncapped := int64(500)
-	if count > 0 {
-		uncapped = totalSize / int64(count)
-	}
-	s.uncappedAvgRowBytes = uncapped
-
-	// Max-row-size AND max-table-bytes both walk all tables (Codex
-	// review on #166 + Copilot review on PR #288). For #214, ordering
-	// LargestTables by row count and picking [0] would miss a small-
-	// row-count, wide-row table that's the actual bytes heavyweight.
-	var maxRow int64
-	var maxTableBytes int64
-	for _, t := range tables {
-		if t.AvgRowSizeBytes > maxRow {
-			maxRow = t.AvgRowSizeBytes
-		}
-		if t.RowCount > 0 && t.AvgRowSizeBytes > 0 {
-			bytes := t.RowCount * t.AvgRowSizeBytes
-			if bytes > maxTableBytes {
-				maxTableBytes = bytes
-			}
-		}
-	}
-	s.maxSampledRowBytes = maxRow
-	s.largestSampledTableBytes = maxTableBytes
-
-	if uncapped > 2000 {
-		return 2000
-	}
-	return uncapped
-}
-
-// buildAutoTuneInput constructs input for the tuner.
-func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize int64) AutoTuneInput {
-	cores := runtime.NumCPU()
-	memoryGB := 8
-	var availableMemoryMB, swapTotalMB int64
-	if v, err := mem.VirtualMemory(); err == nil {
-		memoryGB = int(v.Total / (1024 * 1024 * 1024))
-		availableMemoryMB = int64(v.Available / (1024 * 1024))
-	}
-	if availableMemoryMB == 0 {
-		availableMemoryMB = int64(memoryGB) * 1024 / 2
-	}
-	if sw, err := mem.SwapMemory(); err == nil {
-		swapTotalMB = int64(sw.Total / (1024 * 1024))
-	}
-
-	var largestTables []TableStats
-	for i, t := range tables {
-		if i >= 5 {
-			break
-		}
-		largestTables = append(largestTables, TableStats{
-			Name:        t.Name,
-			RowCount:    t.RowCount,
-			AvgRowBytes: t.AvgRowSizeBytes,
-		})
-	}
-
-	return AutoTuneInput{
-		CPUCores:            cores,
-		MemoryGB:            memoryGB,
-		AvailableMemoryMB:   availableMemoryMB,
-		SwapTotalMB:         swapTotalMB,
-		Platform:            DetectPlatform(),
-		MaxMemoryMB:         s.maxMemoryMB,
-		DatabaseType:        s.dbType,
-		TargetType:          s.targetDBType,
-		TargetMode:          s.targetMode,
-		TotalTables:         s.suggestions.TotalTables,
-		TotalRows:           s.suggestions.TotalRows,
-		AvgRowBytes:         avgRowSize,
-		UncappedAvgRowBytes: s.uncappedAvgRowBytes,
-		LargestTableBytes:   s.largestSampledTableBytes,
-		LargestTables:       largestTables,
-		// Workload identity passthrough (#215).
-		SourceHost:     s.identitySourceHost,
-		SourcePort:     s.identitySourcePort,
-		SourceDatabase: s.identitySourceDatabase,
-		SourceSchema:   s.identitySourceSchema,
-		TargetHost:     s.identityTargetHost,
-		TargetPort:     s.identityTargetPort,
-		TargetDatabase: s.identityTargetDatabase,
-		TargetSchema:   s.identityTargetSchema,
-	}
-}
-
-// DetectPlatform returns the runtime platform, detecting WSL2 specifically.
-// Exported for callers (e.g. healthcheck.GetSystemBasedSuggestions) that
-// build a tuning.Input without going through the analyzer.
-func DetectPlatform() string {
-	if runtime.GOOS != "linux" {
-		return runtime.GOOS
-	}
-	data, err := os.ReadFile("/proc/version")
-	if err == nil && strings.Contains(strings.ToLower(string(data)), "microsoft") {
-		return "wsl2"
-	}
-	return "linux"
-}
-
-// formatRowCount formats large row counts with K/M/B suffixes.
-func formatRowCount(count int64) string {
-	if count >= 1000000000 {
-		return fmt.Sprintf("%.1fB", float64(count)/1000000000)
-	}
-	if count >= 1000000 {
-		return fmt.Sprintf("%.1fM", float64(count)/1000000)
-	}
-	if count >= 1000 {
-		return fmt.Sprintf("%.1fK", float64(count)/1000)
-	}
-	return fmt.Sprintf("%d", count)
-}
-
-// tableInfo holds basic table metadata.
-type tableInfo struct {
-	Name            string
-	RowCount        int64
-	AvgRowSizeBytes int64
-}
-
-// getTables retrieves table metadata from the source database.
-func (s *SmartConfigAnalyzer) getTables(ctx context.Context, schema string) ([]tableInfo, error) {
-	var query string
-	switch s.dbType {
-	case "mssql":
-		query = `
-			SELECT
-				t.name AS table_name,
-				p.rows AS row_count,
-				ISNULL(SUM(a.total_pages) * 8 * 1024 / NULLIF(p.rows, 0), 0) AS avg_row_size
-			FROM sys.tables t
-			INNER JOIN sys.indexes i ON t.object_id = i.object_id
-			INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
-			INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
-			INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-			WHERE s.name = @p1 AND i.index_id <= 1
-			GROUP BY t.name, p.rows
-			ORDER BY p.rows DESC`
-	case "postgres":
-		query = `
-			SELECT
-				relname AS table_name,
-				COALESCE(n_live_tup, 0) AS row_count,
-				CASE WHEN n_live_tup > 0
-					THEN pg_relation_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
-					ELSE 0
-				END AS avg_row_size
-			FROM pg_stat_user_tables
-			WHERE schemaname = $1
-			ORDER BY n_live_tup DESC`
-	case "mysql":
-		query = `
-			SELECT
-				TABLE_NAME AS table_name,
-				IFNULL(TABLE_ROWS, 0) AS row_count,
-				IFNULL(AVG_ROW_LENGTH, 0) AS avg_row_size
-			FROM information_schema.TABLES
-			WHERE TABLE_SCHEMA = ?
-			  AND TABLE_TYPE = 'BASE TABLE'
-			ORDER BY TABLE_ROWS DESC`
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
-	}
-
-	rows, err := s.db.QueryContext(ctx, query, schema)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var tables []tableInfo
-	for rows.Next() {
-		var t tableInfo
-		if err := rows.Scan(&t.Name, &t.RowCount, &t.AvgRowSizeBytes); err != nil {
-			return nil, err
-		}
-		tables = append(tables, t)
-	}
-
-	return tables, rows.Err()
-}
-
-// detectDateColumns finds columns that could be used for incremental sync.
-func (s *SmartConfigAnalyzer) detectDateColumns(ctx context.Context, schema, table string) ([]string, error) {
-	var query string
-	switch s.dbType {
-	case "mssql":
-		query = `
-			SELECT c.name
-			FROM sys.columns c
-			INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-			INNER JOIN sys.tables tbl ON c.object_id = tbl.object_id
-			INNER JOIN sys.schemas s ON tbl.schema_id = s.schema_id
-			WHERE s.name = @p1 AND tbl.name = @p2
-			  AND t.name IN ('datetime', 'datetime2', 'datetimeoffset', 'date', 'timestamp')
-			ORDER BY c.column_id`
-	case "postgres":
-		query = `
-			SELECT column_name
-			FROM information_schema.columns
-			WHERE table_schema = $1 AND table_name = $2
-			  AND data_type IN ('timestamp without time zone', 'timestamp with time zone', 'date')
-			ORDER BY ordinal_position`
-	case "mysql":
-		query = `
-			SELECT COLUMN_NAME
-			FROM information_schema.COLUMNS
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-			  AND DATA_TYPE IN ('datetime', 'timestamp', 'date')
-			ORDER BY ORDINAL_POSITION`
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
-	}
-
-	rows, err := s.db.QueryContext(ctx, query, schema, table)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var dateColumns []string
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			return nil, err
-		}
-		dateColumns = append(dateColumns, col)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return s.rankDateColumns(dateColumns), nil
-}
-
-// rankDateColumns sorts date columns by likelihood of being update timestamps.
-func (s *SmartConfigAnalyzer) rankDateColumns(columns []string) []string {
-	patterns := []string{
-		`(?i)^updated_?at$`,
-		`(?i)^modified_?(at|date|time)?$`,
-		`(?i)^last_?modified`,
-		`(?i)^changed_?(at|date)?$`,
-		`(?i)update`,
-		`(?i)modif`,
-		`(?i)^created_?at$`,
-		`(?i)^creation_?date$`,
-		`(?i)create`,
-	}
-
-	type rankedCol struct {
-		name  string
-		score int
-	}
-
-	ranked := make([]rankedCol, 0, len(columns))
-	for _, col := range columns {
-		score := len(patterns) + 1
-		for i, pattern := range patterns {
-			if matched, _ := regexp.MatchString(pattern, col); matched {
-				score = i
-				break
-			}
-		}
-		ranked = append(ranked, rankedCol{name: col, score: score})
-	}
-
-	for i := 0; i < len(ranked)-1; i++ {
-		for j := i + 1; j < len(ranked); j++ {
-			if ranked[j].score < ranked[i].score {
-				ranked[i], ranked[j] = ranked[j], ranked[i]
-			}
-		}
-	}
-
-	result := make([]string, len(ranked))
-	for i, r := range ranked {
-		result[i] = r.name
-	}
-	return result
-}
-
-// shouldExcludeTable determines if a table should be excluded from migration.
-func (s *SmartConfigAnalyzer) shouldExcludeTable(tableName string) bool {
-	lower := strings.ToLower(tableName)
-
-	excludePatterns := []string{
-		`^temp_`, `_temp$`, `^tmp_`, `_tmp$`,
-		`^log_`, `_log$`, `_logs$`,
-		`^audit_`, `_audit$`,
-		`^archive_`, `_archive$`, `_archived$`,
-		`^backup_`, `_backup$`, `_bak$`,
-		`^staging_`, `_staging$`,
-		`^test_`, `_test$`,
-		`^__`, `_history$`, `^sysdiagrams$`, `^aspnet_`, `^elmah`,
-	}
-
-	for _, pattern := range excludePatterns {
-		if matched, _ := regexp.MatchString(pattern, lower); matched {
-			return true
-		}
-	}
-	return false
-}
-
-// FormatYAML returns the suggestions formatted as YAML config.
-func (s *SmartConfigSuggestions) FormatYAML() string {
-	var sb strings.Builder
-
-	sb.WriteString("# Smart Configuration Suggestions\n")
-	sb.WriteString(fmt.Sprintf("# Database: %d tables, %s rows, ~%d bytes/row avg\n\n",
-		s.TotalTables, formatRowCount(s.TotalRows), s.AvgRowSizeBytes))
-
-	sb.WriteString("migration:\n")
-	sb.WriteString("  # Deterministic tuner (internal/tuning) — see #175\n")
-
-	sb.WriteString(fmt.Sprintf("  workers: %d\n", s.Workers))
-	sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", s.ChunkSizeRecommendation))
-	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d\n", s.ReadAheadBuffers))
-	sb.WriteString(fmt.Sprintf("  write_ahead_writers: %d\n", s.WriteAheadWriters))
-	sb.WriteString(fmt.Sprintf("  parallel_readers: %d\n", s.ParallelReaders))
-	sb.WriteString(fmt.Sprintf("  max_partitions: %d\n", s.MaxPartitions))
-	sb.WriteString(fmt.Sprintf("  large_table_threshold: %d\n", s.LargeTableThreshold))
-	sb.WriteString(fmt.Sprintf("  max_source_connections: %d\n", s.MaxSourceConnections))
-	sb.WriteString(fmt.Sprintf("  max_target_connections: %d\n", s.MaxTargetConnections))
-	sb.WriteString(fmt.Sprintf("  upsert_merge_chunk_size: %d\n", s.UpsertMergeChunkSize))
-	sb.WriteString(fmt.Sprintf("  checkpoint_frequency: %d\n", s.CheckpointFrequency))
-	sb.WriteString(fmt.Sprintf("  max_retries: %d\n", s.MaxRetries))
-	sb.WriteString(fmt.Sprintf("  # Estimated memory: ~%dMB\n", s.EstimatedMemMB))
-
-	if s.Reasoning != "" {
-		sb.WriteString(fmt.Sprintf("  # Tuning reasoning: %s\n", s.Reasoning))
-	}
-	sb.WriteString("\n")
-
-	if len(s.DateColumns) > 0 {
-		sb.WriteString("  # Date columns for incremental sync (priority order)\n")
-		sb.WriteString("  date_updated_columns:\n")
-		seen := make(map[string]bool)
-		var columns []string
-		for _, cols := range s.DateColumns {
-			for _, col := range cols {
-				if !seen[col] {
-					seen[col] = true
-					columns = append(columns, col)
-				}
-			}
-		}
-		for _, col := range columns {
-			sb.WriteString(fmt.Sprintf("    - %s\n", col))
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(s.ExcludeTables) > 0 {
-		sb.WriteString("  # Tables to exclude (temp/log/archive patterns)\n")
-		sb.WriteString("  exclude_tables:\n")
-		for _, table := range s.ExcludeTables {
-			sb.WriteString(fmt.Sprintf("    - %s\n", table))
-		}
-		sb.WriteString("\n")
-	}
-
-	if s.SourceTuning != nil {
-		sb.WriteString(s.formatDatabaseTuning(s.SourceTuning))
-	}
-	if s.TargetTuning != nil {
-		sb.WriteString(s.formatDatabaseTuning(s.TargetTuning))
-	}
-
-	if len(s.Warnings) > 0 {
-		sb.WriteString("# Warnings:\n")
-		for _, w := range s.Warnings {
-			sb.WriteString(fmt.Sprintf("# - %s\n", w))
-		}
-	}
-
-	return sb.String()
-}
-
-// formatDatabaseTuning formats database tuning recommendations in a
-// human-readable format.
-func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseTuning) string {
-	var sb strings.Builder
-
-	sb.WriteString("\n")
-	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
-	sb.WriteString(fmt.Sprintf("# %s DATABASE TUNING (%s)\n", strings.ToUpper(tuning.Role), strings.ToUpper(tuning.DatabaseType)))
-	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
-	sb.WriteString(fmt.Sprintf("# Tuning Potential: %s\n", strings.ToUpper(tuning.TuningPotential)))
-	sb.WriteString(fmt.Sprintf("# Impact: %s\n", tuning.EstimatedImpact))
-	sb.WriteString("#" + strings.Repeat("-", 78) + "\n\n")
-
-	if len(tuning.Recommendations) == 0 {
-		if tuning.TuningPotential == "unknown" {
-			sb.WriteString(fmt.Sprintf("# ⚠ Unable to analyze %s database tuning\n", tuning.Role))
-			sb.WriteString(fmt.Sprintf("# Reason: %s\n\n", tuning.EstimatedImpact))
-		} else {
-			sb.WriteString(fmt.Sprintf("# ✓ No tuning needed - %s database is already well-configured!\n\n", tuning.Role))
-		}
-		return sb.String()
-	}
-
-	priority1 := []dbtuning.TuningRecommendation{}
-	priority2 := []dbtuning.TuningRecommendation{}
-	priority3 := []dbtuning.TuningRecommendation{}
-
-	for _, rec := range tuning.Recommendations {
-		switch rec.Priority {
-		case 1:
-			priority1 = append(priority1, rec)
-		case 2:
-			priority2 = append(priority2, rec)
-		case 3:
-			priority3 = append(priority3, rec)
-		}
-	}
-
-	if len(priority1) > 0 {
-		sb.WriteString("# 🔴 CRITICAL (Priority 1) - High Impact Changes\n")
-		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
-		for i, rec := range priority1 {
-			sb.WriteString(s.formatRecommendation(i+1, rec))
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(priority2) > 0 {
-		sb.WriteString("# 🟡 IMPORTANT (Priority 2) - Medium Impact Changes\n")
-		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
-		for i, rec := range priority2 {
-			sb.WriteString(s.formatRecommendation(i+1, rec))
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(priority3) > 0 {
-		sb.WriteString("# 🟢 OPTIONAL (Priority 3) - Nice to Have\n")
-		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
-		for i, rec := range priority3 {
-			sb.WriteString(s.formatRecommendation(i+1, rec))
-		}
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
-}
-
-// formatRecommendation formats a single tuning recommendation.
-func (s *SmartConfigSuggestions) formatRecommendation(num int, rec dbtuning.TuningRecommendation) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("#\n# %d. %s\n", num, rec.Parameter))
-	sb.WriteString(fmt.Sprintf("#    Current:     %v\n", rec.CurrentValue))
-	sb.WriteString(fmt.Sprintf("#    Recommended: %v\n", rec.RecommendedValue))
-	sb.WriteString(fmt.Sprintf("#    Impact:      %s\n", strings.ToUpper(rec.Impact)))
-	sb.WriteString("#\n")
-	sb.WriteString("#    Why: " + s.wrapText(rec.Reason, 75, "#         ") + "\n")
-
-	if rec.CanApplyRuntime && rec.SQLCommand != "" {
-		sb.WriteString("#\n")
-		sb.WriteString("#    ✓ Can apply at runtime (no restart needed):\n")
-		sqlLines := strings.Split(rec.SQLCommand, ";")
-		for _, line := range sqlLines {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				sb.WriteString("#      " + line + ";\n")
-			}
-		}
-	} else if rec.RequiresRestart {
-		sb.WriteString("#\n")
-		sb.WriteString("#    ⚠ Requires database restart\n")
-		if rec.ConfigFile != "" {
-			sb.WriteString("#    Add to config file:\n")
-			lines := strings.Split(rec.ConfigFile, "\n")
-			for _, line := range lines {
-				if line != "" {
-					sb.WriteString("#      " + line + "\n")
-				}
-			}
-		}
-	}
-
-	return sb.String()
-}
-
-// wrapText wraps text to maxWidth characters with the given prefix for
-// continuation lines.
-func (s *SmartConfigSuggestions) wrapText(text string, maxWidth int, contPrefix string) string {
-	if len(text) <= maxWidth {
-		return text
-	}
-
-	var result strings.Builder
-	words := strings.Fields(text)
-	lineLen := 0
-
-	for i, word := range words {
-		wordLen := len(word)
-
-		if i == 0 {
-			result.WriteString(word)
-			lineLen = wordLen
-		} else if lineLen+1+wordLen > maxWidth {
-			result.WriteString("\n" + contPrefix + word)
-			lineLen = len(contPrefix) + wordLen
-		} else {
-			result.WriteString(" " + word)
-			lineLen += 1 + wordLen
-		}
-	}
-
-	return result.String()
-}
+// output to s.suggestions. Replaces the AI/default branch â€” there's no

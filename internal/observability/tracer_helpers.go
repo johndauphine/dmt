@@ -9,10 +9,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Tracer_t wraps the OTel tracer with dmt-flavored helpers so call sites
-// don't have to import OTel themselves. The trailing _t avoids the name
-// collision with the Tracer() factory in tracer.go.
-type Tracer_t struct {
+// TracerT wraps the OTel tracer with dmt-flavored helpers so call sites
+// don't have to import OTel themselves.
+type TracerT struct {
 	t trace.Tracer
 }
 
@@ -34,7 +33,7 @@ type Span = trace.Span
 //
 // Odd-length kvs is tolerated: the dangling value lands under "_dangling"
 // (same as Event()).
-func (t Tracer_t) StartSpan(ctx context.Context, name string, kvs ...any) (context.Context, Span) {
+func (t TracerT) StartSpan(ctx context.Context, name string, kvs ...any) (context.Context, Span) {
 	if t.t == nil {
 		// Should never happen — Tracer() always returns a valid OTel
 		// tracer (no-op when the global provider isn't set). Be defensive
@@ -142,12 +141,12 @@ func anyToString(v any) string {
 // All methods are no-ops — call sites can blindly call span.End() etc.
 type noopSpan struct{ trace.Span }
 
-func (noopSpan) End(...trace.SpanEndOption)                   {}
-func (noopSpan) AddEvent(string, ...trace.EventOption)        {}
-func (noopSpan) IsRecording() bool                            { return false }
-func (noopSpan) RecordError(error, ...trace.EventOption)      {}
-func (noopSpan) SetStatus(codes.Code, string)                 {}
-func (noopSpan) SetName(string)                               {}
-func (noopSpan) SetAttributes(...attribute.KeyValue)          {}
-func (noopSpan) SpanContext() trace.SpanContext               { return trace.SpanContext{} }
-func (noopSpan) TracerProvider() trace.TracerProvider         { return nil }
+func (noopSpan) End(...trace.SpanEndOption)              {}
+func (noopSpan) AddEvent(string, ...trace.EventOption)   {}
+func (noopSpan) IsRecording() bool                       { return false }
+func (noopSpan) RecordError(error, ...trace.EventOption) {}
+func (noopSpan) SetStatus(codes.Code, string)            {}
+func (noopSpan) SetName(string)                          {}
+func (noopSpan) SetAttributes(...attribute.KeyValue)     {}
+func (noopSpan) SpanContext() trace.SpanContext          { return trace.SpanContext{} }
+func (noopSpan) TracerProvider() trace.TracerProvider    { return nil }

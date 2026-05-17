@@ -170,9 +170,10 @@ func (w *Writer) gatherDatabaseContext() *driver.DatabaseContext {
 	if w.pool.QueryRow(ctx, "SHOW server_encoding").Scan(&encoding) == nil {
 		dbCtx.Charset = encoding
 		dbCtx.Encoding = encoding
-		if encoding == "UTF8" {
+		switch encoding {
+		case "UTF8":
 			dbCtx.BytesPerChar = 4
-		} else if encoding == "LATIN1" || encoding == "SQL_ASCII" {
+		case "LATIN1", "SQL_ASCII":
 			dbCtx.BytesPerChar = 1
 		}
 	}
