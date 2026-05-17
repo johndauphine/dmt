@@ -194,6 +194,7 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 		"datetime":  true,
 		"timestamp": true,
 		"date":      true,
+		"text":      true,
 	}
 }
 
