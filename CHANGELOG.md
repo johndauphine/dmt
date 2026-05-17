@@ -16,6 +16,9 @@ All notable changes to this project will be documented in this file.
 - Split the PostgreSQL writer into focused same-package files for DDL,
   row counts, COPY batching, upsert, raw SQL helpers, and writer lifecycle
   so the first P2 readability story is easier to review and maintain (#212).
+- Split the setup wizard state machine into focused same-package files for
+  prompts, input processing, connection config expansion, and helper defaults
+  so the next P2 readability story is easier to maintain (#212).
 
 ### Fixed
 
