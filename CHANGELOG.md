@@ -66,6 +66,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Setup edit mode now raw-loads configs with templated non-string scalars
+  such as `${env:DB_PORT}` while still preserving placeholders in string
+  fields for safe round-tripping (#283).
 - Setup edit mode now distinguishes omitted `create_indexes` and
   `create_foreign_keys` from explicit `false`, preserving the documented
   default when raw-loading and round-tripping existing configs (#282).

@@ -71,28 +71,32 @@ func Expand(s string) (string, error) {
 	return expandTemplateValue(s)
 }
 
-// LoadRaw reads a config YAML for *editing* — no secret-template expansion,
-// no defaults application, no validation. Placeholders like ${env:DB_PASSWORD}
-// and ${file:/run/secrets/x} survive as literal strings so the setup wizard
-// can re-marshal them back to disk without exposing resolved secrets.
+// LoadRaw reads a config YAML for *editing* — no defaults application and no
+// validation. Placeholders in string fields like ${env:DB_PASSWORD} and
+// ${file:/run/secrets/x} survive as literal strings so the setup wizard can
+// re-marshal them back to disk without exposing resolved secrets.
+// Placeholders in non-string scalar fields are expanded just enough for typed
+// unmarshal to succeed.
 //
 // This is intentionally narrow: the migration runtime must always use Load /
 // LoadWithOptions so that templates resolve before connection attempts.
 //
-// Known limitations (each tracked as a follow-up):
-//   - Templated non-string scalars (e.g. `source.port: ${env:DB_PORT}` or
-//     `migration.workers: ${env:DMT_WORKERS}`) fail YAML unmarshal here
-//     because the int/bool field cannot hold the placeholder string. The
-//     wizard's edit path then falls back to fresh-setup mode for such
-//     configs. Fixing requires yaml.Node-level expansion of non-string
-//     fields while preserving placeholders for string secrets.
 func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
+
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if err := expandRawNonStringTemplates(&node); err != nil {
+		return nil, fmt.Errorf("expanding non-string templates: %w", err)
+	}
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := node.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	return &cfg, nil
