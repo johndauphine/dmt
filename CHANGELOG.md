@@ -38,6 +38,9 @@ All notable changes to this project will be documented in this file.
 - Split the SQLite reader into focused same-package files for schema
   introspection, streaming reads, row counts, partitioning, and sampling
   as the next P2 readability story (#212).
+- Split secrets configuration handling into focused same-package files for
+  config file persistence, validation/defaults, and generated templates as
+  the next P2 readability story (#212).
 
 ### Fixed
 
