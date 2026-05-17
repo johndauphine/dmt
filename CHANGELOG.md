@@ -44,6 +44,9 @@ All notable changes to this project will be documented in this file.
 - Split the MySQL reader into focused same-package files for schema
   introspection, streaming reads, row counts, partitioning, and sampling
   as the next P2 readability story (#212).
+- Split the PostgreSQL reader into focused same-package files for schema
+  introspection, streaming reads, row counts, partitioning, and sampling
+  as the next P2 readability story (#212).
 
 ### Fixed
 
