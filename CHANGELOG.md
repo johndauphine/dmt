@@ -22,6 +22,9 @@ All notable changes to this project will be documented in this file.
 - Split the tuning history selector into focused same-package files for
   dispatch, regression argmax, formatting, retry filters, outlier filters,
   and WAW-bin selection as the next P2 readability story (#212).
+- Split the SQL Server reader into focused same-package files for schema
+  extraction, constraints, row counts, partitioning, sampling, reads, and
+  compatibility checks as the next P2 readability story (#212).
 
 ### Fixed
 
