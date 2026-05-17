@@ -48,6 +48,8 @@
 
 ## Configuration & Secrets
 - Use `config.yaml.example` as the starting point; keep real credentials out of the repo.
+- Local/CI Docker database credentials use the shared test password `TestPass2024` (`SA_PASSWORD`, `MSSQL_PASSWORD`, `POSTGRES_PASSWORD`, `PG_PASSWORD`, and `MYSQL_ROOT_PASSWORD`). Prefer this value for disposable local containers so shell quoting and driver parsing stay boring.
+- Local Postgres test and benchmark containers should use the `postgres` user unless a fixture or issue explicitly calls for a different role.
 - Sensitive credentials (API keys, encryption keys, webhook URLs) should be stored in `~/.secrets/dmt-config.yaml`.
 - AI provider configuration uses the secrets file for API keys and provider settings.
 - Slack webhook URLs should be stored in the secrets file under `notifications.slack.webhook_url`.
