@@ -19,6 +19,9 @@ All notable changes to this project will be documented in this file.
 - Split the setup wizard state machine into focused same-package files for
   prompts, input processing, connection config expansion, and helper defaults
   so the next P2 readability story is easier to maintain (#212).
+- Split the tuning history selector into focused same-package files for
+  dispatch, regression argmax, formatting, retry filters, outlier filters,
+  and WAW-bin selection as the next P2 readability story (#212).
 
 ### Fixed
 
