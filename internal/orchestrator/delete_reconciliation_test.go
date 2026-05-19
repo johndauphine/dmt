@@ -9,7 +9,9 @@ import (
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
 	_ "modernc.org/sqlite"
 )
@@ -260,6 +262,58 @@ func TestRunDeleteReconciliationSummarizesAllNoPKTables(t *testing.T) {
 	}
 }
 
+func TestReconcileDeletesIfDueSetsStrictValidation(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	defer sourceDB.Close()
+	targetDB := openDeleteRuntimeDB(t)
+	defer targetDB.Close()
+	execDeleteRuntimeSQL(t, sourceDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1);
+	`)
+	execDeleteRuntimeSQL(t, targetDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1), (2);
+	`)
+
+	state := &deletePreviewState{}
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, state)
+	if err := orch.reconcileDeletesIfDue(
+		context.Background(),
+		"run-delete",
+		[]source.Table{{Name: "items", PrimaryKey: []string{"id"}}},
+	); err != nil {
+		t.Fatalf("reconcileDeletesIfDue() error: %v", err)
+	}
+	if !orch.deleteReconciliationStrictValidation {
+		t.Fatal("deleteReconciliationStrictValidation = false, want true after successful reconciliation")
+	}
+}
+
+func TestReconcileDeletesIfDueDoesNotSetStrictValidationWhenNotDue(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	defer sourceDB.Close()
+	targetDB := openDeleteRuntimeDB(t)
+	defer targetDB.Close()
+	state := &deletePreviewState{
+		state: &checkpoint.DeleteReconciliationState{
+			LastRunID:     "prior-run",
+			LastSuccessAt: time.Now().UTC(),
+		},
+	}
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, state)
+	if err := orch.reconcileDeletesIfDue(
+		context.Background(),
+		"run-not-due",
+		[]source.Table{{Name: "items", PrimaryKey: []string{"id"}}},
+	); err != nil {
+		t.Fatalf("reconcileDeletesIfDue() error: %v", err)
+	}
+	if orch.deleteReconciliationStrictValidation {
+		t.Fatal("deleteReconciliationStrictValidation = true, want false when current run did not reconcile")
+	}
+}
+
 func deletePreviewConfig(enabled bool) *config.Config {
 	cfg := &config.Config{}
 	cfg.Source.Schema = "dbo"
@@ -310,8 +364,19 @@ func (s *deletePreviewState) RecordDeleteReconciliationSuccess(
 ) error {
 	s.recordCalls++
 	s.recordRunID = runID
+	s.state = &checkpoint.DeleteReconciliationState{
+		SourceSchema:  sourceSchema,
+		TargetSchema:  targetSchema,
+		LastRunID:     runID,
+		LastSuccessAt: completedAt,
+		UpdatedAt:     completedAt,
+	}
 	_, _, _ = sourceSchema, targetSchema, completedAt
 	return s.recordErr
+}
+
+func (s *deletePreviewState) UpdatePhase(string, string) error {
+	return nil
 }
 
 func (s *deletePreviewState) SaveDeleteReconciliationTable(
@@ -326,7 +391,7 @@ func (s *deletePreviewState) SaveDeleteReconciliationTable(
 func (s *deletePreviewState) GetDeleteReconciliationTables(
 	string,
 ) ([]checkpoint.DeleteReconciliationTableRecord, error) {
-	return nil, nil
+	return s.savedTables, nil
 }
 
 type deleteRuntimeSourcePool struct {
@@ -367,6 +432,8 @@ func deleteRuntimeOrchestrator(
 		sourcePool: &deleteRuntimeSourcePool{db: sourceDB},
 		targetPool: &deleteRuntimeTargetPool{db: targetDB},
 		state:      state,
+		progress:   progress.New(),
+		metrics:    observability.Noop(),
 	}
 }
 

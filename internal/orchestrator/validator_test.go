@@ -16,7 +16,7 @@ func boolPtr(b bool) *bool { return &b }
 // failures unless the operator explicitly opts in to log-only via
 // the two new fail_on_* flags.
 func TestValidationPolicy_Defaults(t *testing.T) {
-	p := newValidationPolicy(config.ValidationConfig{}, "drop_recreate")
+	p := newValidationPolicy(config.ValidationConfig{}, "drop_recreate", false)
 	if !p.FailOnTimeout {
 		t.Error("default policy doesn't fail on timeout; #253 requires it does")
 	}
@@ -32,7 +32,7 @@ func TestValidationPolicy_ExplicitOptOut(t *testing.T) {
 	p := newValidationPolicy(config.ValidationConfig{
 		FailOnTimeout:          boolPtr(false),
 		FailOnEstimateMismatch: boolPtr(false),
-	}, "drop_recreate")
+	}, "drop_recreate", false)
 	if p.FailOnTimeout {
 		t.Error("FailOnTimeout: false should disable")
 	}
@@ -42,9 +42,16 @@ func TestValidationPolicy_ExplicitOptOut(t *testing.T) {
 }
 
 func TestValidationPolicy_UpsertEnablesTargetSuperset(t *testing.T) {
-	p := newValidationPolicy(config.ValidationConfig{}, " upsert ")
+	p := newValidationPolicy(config.ValidationConfig{}, " upsert ", false)
 	if !p.AllowTargetSuperset {
 		t.Error("upsert mode should allow target row counts greater than source row counts")
+	}
+}
+
+func TestValidationPolicy_DeleteReconciliationDisablesTargetSuperset(t *testing.T) {
+	p := newValidationPolicy(config.ValidationConfig{}, "upsert", true)
+	if p.AllowTargetSuperset {
+		t.Error("upsert mode should require row-count parity after delete reconciliation runs")
 	}
 }
 

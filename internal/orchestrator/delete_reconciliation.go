@@ -84,6 +84,7 @@ func (o *Orchestrator) reconcileDeletesIfDue(
 	runID string,
 	tables []source.Table,
 ) error {
+	o.deleteReconciliationStrictValidation = false
 	if !o.config.Migration.DeletesEnabled() {
 		return nil
 	}
@@ -92,8 +93,16 @@ func (o *Orchestrator) reconcileDeletesIfDue(
 	if err := o.state.UpdatePhase(runID, "delete_reconciliation"); err != nil {
 		logging.Debug("failed to update delete reconciliation phase: %v", err)
 	}
-	_, err := o.runDeleteReconciliation(ctx, runID, tables)
-	return err
+	if _, err := o.runDeleteReconciliation(ctx, runID, tables); err != nil {
+		return err
+	}
+
+	strict, err := o.deleteReconciliationSucceededForRun(runID)
+	if err != nil {
+		return err
+	}
+	o.deleteReconciliationStrictValidation = strict
+	return nil
 }
 
 func (o *Orchestrator) runDeleteReconciliation(
@@ -230,6 +239,30 @@ func skippedNoPKDeleteReconciliationResult(table source.Table) DeleteReconciliat
 		Skipped:    true,
 		SkipReason: "no primary key",
 	}
+}
+
+func (o *Orchestrator) deleteReconciliationSucceededForRun(runID string) (bool, error) {
+	state, err := o.state.GetDeleteReconciliationState(
+		o.config.Source.Schema,
+		o.config.Target.Schema,
+	)
+	if err != nil {
+		return false, fmt.Errorf("loading delete reconciliation state: %w", err)
+	}
+	if state == nil || state.LastRunID != runID {
+		return false, nil
+	}
+
+	records, err := o.state.GetDeleteReconciliationTables(runID)
+	if err != nil {
+		return false, fmt.Errorf("loading delete reconciliation tables: %w", err)
+	}
+	for _, record := range records {
+		if !record.Skipped {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (o *Orchestrator) saveDeleteReconciliationTable(

@@ -27,7 +27,11 @@ type validationPolicy struct {
 	AllowTargetSuperset    bool
 }
 
-func newValidationPolicy(cfg config.ValidationConfig, targetMode string) validationPolicy {
+func newValidationPolicy(
+	cfg config.ValidationConfig,
+	targetMode string,
+	deleteReconciliationStrict bool,
+) validationPolicy {
 	p := validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true}
 	if v := cfg.FailOnTimeout; v != nil {
 		p.FailOnTimeout = *v
@@ -35,7 +39,8 @@ func newValidationPolicy(cfg config.ValidationConfig, targetMode string) validat
 	if v := cfg.FailOnEstimateMismatch; v != nil {
 		p.FailOnEstimateMismatch = *v
 	}
-	p.AllowTargetSuperset = strings.EqualFold(strings.TrimSpace(targetMode), "upsert")
+	p.AllowTargetSuperset = strings.EqualFold(strings.TrimSpace(targetMode), "upsert") &&
+		!deleteReconciliationStrict
 	return p
 }
 
@@ -173,7 +178,11 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 	// failures, which combined with #248 (silent partial-success
 	// exit) let a run be reported successful even when validation
 	// never completed or compared approximate counts that disagreed.
-	policy := newValidationPolicy(o.config.Migration.Validation, o.config.Migration.TargetMode)
+	policy := newValidationPolicy(
+		o.config.Migration.Validation,
+		o.config.Migration.TargetMode,
+		o.deleteReconciliationStrictValidation,
+	)
 
 	// Report results
 	var failed bool
