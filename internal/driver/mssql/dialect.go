@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -105,7 +106,7 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string,
 	if dateFilter != nil {
 		// Only include rows newer than the last successful sync timestamp.
 		// Rows with NULL dates are excluded (they haven't been modified).
-		dateClause = fmt.Sprintf(" AND [%s] > @lastSyncDate", dateFilter.Column)
+		dateClause = " AND " + d.dateFilterPredicate(dateFilter.Column)
 	}
 
 	if hasMaxPK {
@@ -132,7 +133,7 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 			sql.Named("maxPK", maxPK),
 		}
 		if dateFilter != nil {
-			args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
+			args = append(args, sql.Named("lastSyncDate", formatDateFilterTimestamp(dateFilter.Timestamp)))
 		}
 		return args
 	}
@@ -141,7 +142,7 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 		sql.Named("lastPK", lastPK),
 	}
 	if dateFilter != nil {
-		args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
+		args = append(args, sql.Named("lastSyncDate", formatDateFilterTimestamp(dateFilter.Timestamp)))
 	}
 	return args
 }
@@ -155,7 +156,7 @@ func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint st
 	if dateFilter != nil {
 		// Only include rows newer than the last successful sync timestamp.
 		// Rows with NULL dates are excluded (they haven't been modified).
-		whereClause = fmt.Sprintf(" WHERE [%s] > @lastSyncDate", dateFilter.Column)
+		whereClause = " WHERE " + d.dateFilterPredicate(dateFilter.Column)
 	}
 
 	return fmt.Sprintf(`
@@ -196,9 +197,18 @@ func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver
 		sql.Named("rowNumEnd", rowNum+int64(limit)),
 	}
 	if dateFilter != nil {
-		args = append(args, sql.Named("lastSyncDate", dateFilter.Timestamp))
+		args = append(args, sql.Named("lastSyncDate", formatDateFilterTimestamp(dateFilter.Timestamp)))
 	}
 	return args
+}
+
+func (d *Dialect) dateFilterPredicate(column string) string {
+	return fmt.Sprintf("CONVERT(datetime2(7), %s) > CONVERT(datetime2(7), @lastSyncDate, 126)",
+		d.QuoteIdentifier(column))
+}
+
+func formatDateFilterTimestamp(ts time.Time) string {
+	return ts.UTC().Format("2006-01-02T15:04:05.9999999")
 }
 
 func (d *Dialect) PartitionBoundariesQuery(pkCol, schema, table string, numPartitions int) string {

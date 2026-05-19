@@ -3,6 +3,7 @@ package mssql
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -121,6 +122,16 @@ func TestBuildDropColumnNotNullSQL(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("SQL %q missing %q", got, want)
 		}
+	}
+}
+
+func TestFormatDateFilterTimestamp(t *testing.T) {
+	ts := time.Date(2024, 6, 15, 10, 30, 0, 123456700, time.FixedZone("CDT", -5*60*60))
+
+	got := formatDateFilterTimestamp(ts)
+	want := "2024-06-15T15:30:00.1234567"
+	if got != want {
+		t.Fatalf("formatDateFilterTimestamp() = %q, want %q", got, want)
 	}
 }
 
