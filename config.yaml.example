@@ -100,7 +100,7 @@ migration:
   # missing-evidence outcome; flip individual flags to false for
   # log-only behavior during initial roll-out. In upsert mode, row-count
   # validation permits extra target rows because source-side deletes are
-  # intentionally retained unless delete propagation is configured later.
+  # retained until DMT supports delete propagation.
   validation:
     # When fail_on_timeout: true (default), a row-count query that
     # exceeds ValidationTimeout fails the run. When false, it logs a
