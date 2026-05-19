@@ -5,8 +5,8 @@
 # to run any of the 12 cross-engine directed pairs through dmt end-to-end.
 # The two per-PR anchor scripts (integration-test.sh for mssql→postgres and
 # integration-test-sqlite.sh for sqlite→sqlite) remain authoritative for
-# those pairs — this script is intentionally not a refactor that absorbs
-# them; it's the matrix-specific runner.
+# the per-PR checks; this matrix runner stays separate but also covers
+# mssql→postgres in the nightly schedule.
 #
 # Usage:
 #   integration-test-pair.sh --pair <source>-<target>
