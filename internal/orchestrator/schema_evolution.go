@@ -221,6 +221,12 @@ func planNullabilityEvolution(
 				table.Name, column.Name,
 			)
 		}
+		if hasColumnDefaultDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-relax nullability for %s.%s while default drift is also present",
+				table.Name, column.Name,
+			)
+		}
 		if hasPrimaryKeyDrift(report, change) {
 			return nil, nil, fmt.Errorf(
 				"schema evolution cannot auto-relax nullability for %s.%s while primary-key drift is also present",
@@ -275,6 +281,18 @@ func hasColumnTypeDrift(report drift.Report, candidate drift.Change) bool {
 		}
 		switch change.Kind {
 		case drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			return true
+		}
+	}
+	return false
+}
+
+func hasColumnDefaultDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Kind == drift.DefaultChange &&
+			change.Schema == candidate.Schema &&
+			change.TableName == candidate.TableName &&
+			change.ObjectName == candidate.ObjectName {
 			return true
 		}
 	}

@@ -61,6 +61,8 @@ schema.
   tables from the current source schema.
 - Identity columns and primary-key columns are not auto-added.
 - Identity columns and primary-key columns are not auto-relaxed.
+- Nullability is not auto-relaxed when the same column also has type/default
+  drift, or when the table has primary-key drift.
 - Other drift categories remain report-only, including dropped columns, type
   changes, defaults, indexes, foreign keys, checks, and table-level changes.
 - Existing type mapping is reused for the new target column type and for

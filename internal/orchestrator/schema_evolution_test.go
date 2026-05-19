@@ -277,6 +277,42 @@ func TestPlanNullabilityEvolutionRejectsSameColumnTypeDrift(t *testing.T) {
 	}
 }
 
+func TestPlanNullabilityEvolutionRejectsSameColumnDefaultDrift(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{
+			Kind:       drift.DefaultChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "'old'",
+			Current:    "'new'",
+		},
+		{
+			Kind:       drift.NullabilityChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "NOT NULL",
+			Current:    "NULL",
+		},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true, DefaultValue: "'new'"},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "default drift") {
+		t.Fatalf("error = %q, want default drift rejection", err.Error())
+	}
+}
+
 func TestPlanNullabilityEvolutionRejectsPrimaryKeyDrift(t *testing.T) {
 	report := drift.Report{Changes: []drift.Change{
 		{
