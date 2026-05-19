@@ -64,7 +64,7 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	err := s.db.QueryRow(`
 		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash
 		FROM runs WHERE status = 'running'
-		ORDER BY started_at DESC LIMIT 1
+		ORDER BY started_at DESC, rowid DESC LIMIT 1
 	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -110,12 +110,17 @@ func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
 
 	var count int
 	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM runs
-		WHERE status = 'success'
-		AND source_schema = ?
-		AND target_schema = ?
-		AND started_at > ?
-	`, run.SourceSchema, run.TargetSchema, run.StartedAt.Format("2006-01-02 15:04:05")).Scan(&count)
+		SELECT COUNT(*)
+		FROM runs AS later
+		JOIN runs AS current ON current.id = ?
+		WHERE later.status = 'success'
+		AND later.source_schema = ?
+		AND later.target_schema = ?
+		AND (
+			later.started_at > current.started_at
+			OR (later.started_at = current.started_at AND later.rowid > current.rowid)
+		)
+	`, run.ID, run.SourceSchema, run.TargetSchema).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -126,7 +131,7 @@ func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
 		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
-		FROM runs ORDER BY started_at DESC LIMIT 20
+		FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 20
 	`)
 	if err != nil {
 		return nil, err
