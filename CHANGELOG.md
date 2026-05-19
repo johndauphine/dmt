@@ -68,6 +68,9 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Centralized shared driver raw SQL and row-count helper plumbing across
+  matching SQL-backed readers and writers, reducing duplicate driver code
+  while keeping engine-specific fast paths local (#338).
 - Split the P1 oversized production files into focused same-package
   files to improve code readability without changing behavior (#212).
 - Split the PostgreSQL writer into focused same-package files for DDL,
