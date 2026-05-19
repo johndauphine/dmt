@@ -43,6 +43,12 @@ type StateBackend interface {
 	GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error)
 	UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error
 
+	// Delete reconciliation state (#351). Stores the last successful
+	// reconciliation per source/target schema pair so interval scheduling is
+	// stable across retries, resumes, and separate CLI invocations.
+	GetDeleteReconciliationState(sourceSchema, targetSchema string) (*DeleteReconciliationState, error)
+	RecordDeleteReconciliationSuccess(runID, sourceSchema, targetSchema string, completedAt time.Time) error
+
 	// Source schema drift snapshots (#305). Stored per source schema/table so a
 	// fresh run can compare the current source definition to the last successful
 	// source definition before it transfers data.
@@ -102,6 +108,16 @@ type SchemaSnapshotRecord struct {
 	TableName    string    `json:"table_name"`
 	CapturedAt   time.Time `json:"captured_at"`
 	SchemaJSON   string    `json:"schema_json"`
+}
+
+// DeleteReconciliationState records the latest successful hard-delete
+// reconciliation for a source/target schema pair.
+type DeleteReconciliationState struct {
+	SourceSchema  string    `json:"source_schema"`
+	TargetSchema  string    `json:"target_schema"`
+	LastRunID     string    `json:"last_run_id"`
+	LastSuccessAt time.Time `json:"last_success_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // PartitionProgressSummary summarizes saved progress across a table's

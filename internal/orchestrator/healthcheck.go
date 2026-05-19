@@ -171,6 +171,12 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 		result.EstimatedDurationSeconds = float64(result.TotalRows) / float64(result.EstimatedRowsPerSecond)
 	}
 
+	deletePreview, err := o.previewDeleteReconciliation(tables, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	result.DeleteReconciliation = deletePreview
+
 	return result, nil
 }
 

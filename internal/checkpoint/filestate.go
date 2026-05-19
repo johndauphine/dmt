@@ -67,6 +67,12 @@ type fileStateData struct {
 	// snapshot so the file backend keeps the same run-to-run safety
 	// contract as SQLite in Airflow/k8s deployments.
 	SchemaSnapshots map[string]map[string]schemaSnapshotState `yaml:"schema_snapshots,omitempty"`
+
+	// DeleteReconciliations persists the latest successful delete
+	// reconciliation per source/target schema pair (#351). Keyed as
+	// sourceSchema -> targetSchema to avoid delimiter collisions in
+	// quoted identifiers.
+	DeleteReconciliations map[string]map[string]deleteReconciliationState `yaml:"delete_reconciliations,omitempty"`
 }
 
 // fallbackEventState is one persisted fallback record. Mirrors
@@ -84,6 +90,12 @@ type schemaSnapshotState struct {
 	RunID      string    `yaml:"run_id"`
 	CapturedAt time.Time `yaml:"captured_at"`
 	SchemaJSON string    `yaml:"schema_json"`
+}
+
+type deleteReconciliationState struct {
+	LastRunID     string    `yaml:"last_run_id"`
+	LastSuccessAt time.Time `yaml:"last_success_at"`
+	UpdatedAt     time.Time `yaml:"updated_at"`
 }
 
 // tableState tracks per-table progress.
