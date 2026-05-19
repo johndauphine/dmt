@@ -23,12 +23,19 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	}
 	defer conn.Release()
 
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(context.Background())
+
 	// Create staging table name (unique per writer)
 	hash := sha256.Sum256([]byte(fmt.Sprintf("%s.%s.%d", opts.Schema, opts.Table, opts.WriterID)))
 	stagingTable := fmt.Sprintf("_stg_%x", hash[:8])
 
-	// Create temp table
-	_, err = conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE IF NOT EXISTS %s (LIKE %s INCLUDING ALL) ON COMMIT DELETE ROWS",
+	// Create temp table. COPY and INSERT must run in the same transaction
+	// because the staging table uses ON COMMIT DELETE ROWS.
+	_, err = tx.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE IF NOT EXISTS %s (LIKE %s INCLUDING ALL) ON COMMIT DELETE ROWS",
 		w.dialect.QuoteIdentifier(stagingTable),
 		w.dialect.QualifyTable(opts.Schema, opts.Table)))
 	if err != nil {
@@ -50,7 +57,7 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 			upsertTimeoutSecs = 30
 		}
 		copyCtx, cancel := context.WithTimeout(ctx, time.Duration(upsertTimeoutSecs)*time.Second)
-		_, err = conn.Conn().CopyFrom(
+		_, err = tx.CopyFrom(
 			copyCtx,
 			pgx.Identifier{stagingTable},
 			opts.Columns,
@@ -65,15 +72,12 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 	// Build INSERT ... ON CONFLICT
 	upsertSQL := w.buildUpsertSQL(opts, stagingTable)
 
-	_, err = conn.Exec(ctx, upsertSQL)
+	_, err = tx.Exec(ctx, upsertSQL)
 	if err != nil {
 		return fmt.Errorf("upserting: %w", err)
 	}
 
-	// Truncate staging (for safety, though ON COMMIT DELETE ROWS should handle it)
-	_, _ = conn.Exec(ctx, fmt.Sprintf("TRUNCATE %s", w.dialect.QuoteIdentifier(stagingTable)))
-
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (w *Writer) buildUpsertSQL(opts driver.UpsertBatchOptions, stagingTable string) string {
