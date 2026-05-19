@@ -24,9 +24,10 @@ import (
 type validationPolicy struct {
 	FailOnTimeout          bool
 	FailOnEstimateMismatch bool
+	AllowTargetSuperset    bool
 }
 
-func newValidationPolicy(cfg config.ValidationConfig) validationPolicy {
+func newValidationPolicy(cfg config.ValidationConfig, targetMode string) validationPolicy {
 	p := validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true}
 	if v := cfg.FailOnTimeout; v != nil {
 		p.FailOnTimeout = *v
@@ -34,6 +35,7 @@ func newValidationPolicy(cfg config.ValidationConfig) validationPolicy {
 	if v := cfg.FailOnEstimateMismatch; v != nil {
 		p.FailOnEstimateMismatch = *v
 	}
+	p.AllowTargetSuperset = strings.EqualFold(strings.TrimSpace(targetMode), "upsert")
 	return p
 }
 
@@ -70,6 +72,16 @@ func (p validationPolicy) evaluate(r tableValidationResult) bool {
 			logging.Info("%-30s OK %d rows", r.tableName, r.targetCount)
 		}
 		return false
+	case p.AllowTargetSuperset && r.targetCount > r.sourceCount:
+		extraRows := r.targetCount - r.sourceCount
+		if r.usedEstimate {
+			logging.Warn("%-30s OK source=~%d target=~%d (%d extra target %s allowed in upsert mode; estimated)",
+				r.tableName, r.sourceCount, r.targetCount, extraRows, rowNoun(extraRows))
+		} else {
+			logging.Info("%-30s OK source=%d target=%d (%d extra target %s allowed in upsert mode)",
+				r.tableName, r.sourceCount, r.targetCount, extraRows, rowNoun(extraRows))
+		}
+		return false
 	case r.usedEstimate:
 		if p.FailOnEstimateMismatch {
 			logging.Error("%-30s FAIL source=~%d target=~%d (estimated counts disagree, diff=%d)",
@@ -84,6 +96,13 @@ func (p validationPolicy) evaluate(r tableValidationResult) bool {
 			r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
 		return true
 	}
+}
+
+func rowNoun(count int64) string {
+	if count == 1 {
+		return "row"
+	}
+	return "rows"
 }
 
 // ValidationTimeout is the maximum time to wait for a single table's row count query.
@@ -154,7 +173,7 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 	// failures, which combined with #248 (silent partial-success
 	// exit) let a run be reported successful even when validation
 	// never completed or compared approximate counts that disagreed.
-	policy := newValidationPolicy(o.config.Migration.Validation)
+	policy := newValidationPolicy(o.config.Migration.Validation, o.config.Migration.TargetMode)
 
 	// Report results
 	var failed bool
@@ -168,7 +187,7 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 		return fmt.Errorf("validation failed")
 	}
 
-	// After row-count parity, run the deeper validation passes
+	// After row-count validation, run the deeper validation passes
 	// configured by Migration.Validation.Mode (#226). Empty mode
 	// or "count_only" → no additional passes; pre-#226 behavior.
 	if err := o.runDeepValidation(ctx); err != nil {

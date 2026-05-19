@@ -96,6 +96,9 @@ All notable changes to this project will be documented in this file.
 - SQLite incremental sync now accepts explicitly configured `TEXT` date
   columns so ISO-8601 timestamp strings do not silently fall back to full
   sync (#311).
+- Upsert count-only validation now permits target row counts greater than the
+  source count, so source-side deletes retained on the target do not fail daily
+  incremental runs; target counts below source still fail (#310).
 - Diagnosis boxes now truncate long non-ASCII messages on UTF-8 boundaries
   instead of slicing through multibyte runes (#238).
 - Runtime Slack notifications now honor the effective per-config
