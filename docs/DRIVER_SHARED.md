@@ -48,6 +48,8 @@ multiple drivers and do not hide engine-specific behavior:
   dialect-specific query strings
 - partition-boundary result scanning when concrete readers already return the
   same row shape
+- reader channel lifecycle, pagination loops, query timing, and batch `Done`
+  semantics when query construction is already delegated to concrete dialects
 - batch slicing and effective batch-size selection
 - stable preflight finding builders
 - reader control-flow helpers when pagination semantics are already delegated
@@ -95,9 +97,11 @@ later PR proves that the shared form is clearer and behavior-preserving:
    its engine-specific casts and query shape.
 7. Centralize partition-boundary result scanning for engines whose partition
    queries return the same row shape.
-8. Look for reader pagination and preflight result-building helpers after the
-   writer duplication is smaller.
-9. Revisit catalog-driven engine work after the native driver code is drier, so
+8. Move the closest reader streaming pair onto shared pagination control flow
+   once the dialect query builders already own the database-specific SQL.
+9. Look for preflight result-building helpers after reader duplication is
+   smaller.
+10. Revisit catalog-driven engine work after the native driver code is drier, so
    any configuration or catalog approach builds on a cleaner foundation.
 
 ## Acceptance Criteria For Each Slice
