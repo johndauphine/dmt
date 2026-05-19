@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -26,16 +27,10 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 // GetRowCount returns the row count for a table.
 // It first tries a fast statistics-based count, then falls back to COUNT(*) if needed.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
-	// Try fast stats-based count first
-	count, err := w.GetRowCountFast(ctx, schema, table)
-	if err == nil && count > 0 {
-		return count, nil
-	}
-
-	// Fall back to COUNT(*)
-	sanitizedTable := sanitizePGTableName(table)
-	err = w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)
-	return count, err
+	return shared.RowCountWithFallback(
+		func() (int64, error) { return w.GetRowCountFast(ctx, schema, table) },
+		func() (int64, error) { return w.GetRowCountExact(ctx, schema, table, false) },
+	)
 }
 
 // GetRowCountFast returns an approximate row count using system statistics.
@@ -54,7 +49,11 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
 	sanitizedTable := sanitizePGTableName(table)
 	var count int64
-	err := w.pool.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, sanitizedTable))).Scan(&count)
+	query, err := shared.ExactRowCountQuery(w.dialect, schema, sanitizedTable)
+	if err != nil {
+		return 0, err
+	}
+	err = w.pool.QueryRow(ctx, query).Scan(&count)
 	return count, err
 }
 

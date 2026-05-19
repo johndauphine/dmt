@@ -2,21 +2,16 @@ package mysql
 
 import (
 	"context"
-	"fmt"
+
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // GetRowCount returns the row count for a table.
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
-	// Try fast stats-based count first
-	count, err := w.GetRowCountFast(ctx, schema, table)
-	if err == nil && count > 0 {
-		return count, nil
-	}
-
-	// Fall back to COUNT(*). MySQL has no NOLOCK equivalent so
-	// strictConsistency doesn't change the query — pass false to
-	// satisfy the interface signature (#253).
-	return w.GetRowCountExact(ctx, schema, table, false)
+	return shared.RowCountWithFallback(
+		func() (int64, error) { return w.GetRowCountFast(ctx, schema, table) },
+		func() (int64, error) { return w.GetRowCountExact(ctx, schema, table, false) },
+	)
 }
 
 // GetRowCountFast returns an approximate row count using system statistics.
@@ -38,7 +33,5 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 // MySQL has no NOLOCK equivalent (uses MVCC); strictConsistency is
 // accepted for interface symmetry and ignored here.
 func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
-	var count int64
-	err := w.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, table))).Scan(&count)
-	return count, err
+	return shared.ExactRowCount(ctx, w.db, w.dialect, schema, table)
 }

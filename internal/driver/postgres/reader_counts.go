@@ -6,21 +6,16 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // GetRowCount returns the row count for a table.
 // It first tries a fast statistics-based count, then falls back to COUNT(*) if needed.
 func (r *Reader) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
-	// Try fast stats-based count first
-	count, err := r.GetRowCountFast(ctx, schema, table)
-	if err == nil && count > 0 {
-		return count, nil
-	}
-
-	// Fall back to COUNT(*)
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
-	err = r.sqlDB.QueryRowContext(ctx, query).Scan(&count)
-	return count, err
+	return shared.RowCountWithFallback(
+		func() (int64, error) { return r.GetRowCountFast(ctx, schema, table) },
+		func() (int64, error) { return r.GetRowCountExact(ctx, schema, table, false) },
+	)
 }
 
 // GetRowCountFast returns an approximate row count using system statistics.
@@ -37,10 +32,7 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 // Postgres has no NOLOCK equivalent (uses MVCC); strictConsistency
 // is accepted for interface symmetry and ignored here.
 func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
-	var count int64
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
-	err := r.sqlDB.QueryRowContext(ctx, query).Scan(&count)
-	return count, err
+	return shared.ExactRowCount(ctx, r.sqlDB, r.dialect, schema, table)
 }
 
 // GetPartitionBoundaries returns partition boundaries for parallel processing.
