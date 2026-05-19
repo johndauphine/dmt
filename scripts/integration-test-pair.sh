@@ -2,7 +2,7 @@
 # Generic cross-engine integration test driver (#291).
 #
 # Used by the nightly matrix job in .github/workflows/integration-nightly.yml
-# to run any of the 11 cross-engine directed pairs through dmt end-to-end.
+# to run any of the 12 cross-engine directed pairs through dmt end-to-end.
 # The two per-PR anchor scripts (integration-test.sh for mssql→postgres and
 # integration-test-sqlite.sh for sqlite→sqlite) remain authoritative for
 # those pairs — this script is intentionally not a refactor that absorbs
@@ -13,8 +13,8 @@
 #
 #   <source>, <target> ∈ {mssql, pg, mysql, sqlite}
 #
-# Supported pairs (the 11 nightly cross-engine pairs):
-#   mssql-mysql    mssql-sqlite
+# Supported pairs (the 12 nightly cross-engine pairs):
+#   mssql-pg       mssql-mysql    mssql-sqlite
 #   pg-mssql       pg-mysql       pg-sqlite
 #   mysql-mssql    mysql-pg       mysql-sqlite
 #   sqlite-mssql   sqlite-pg      sqlite-mysql
