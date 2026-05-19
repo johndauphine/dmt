@@ -85,9 +85,9 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, _ string, hasMaxP
 		if hasMaxPK {
 			paramNum = 4
 		}
-		// Only include rows where the date column is >= the filter timestamp.
+		// Only include rows newer than the last successful sync timestamp.
 		// Rows with NULL dates are excluded (they haven't been modified).
-		dateClause = fmt.Sprintf(" AND %s >= $%d",
+		dateClause = fmt.Sprintf(" AND %s > $%d",
 			d.QuoteIdentifier(dateFilter.Column), paramNum)
 	}
 
@@ -129,9 +129,9 @@ func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, da
 	// Build WHERE clause for date filter
 	whereClause := ""
 	if dateFilter != nil {
-		// Only include rows where the date column is >= the filter timestamp.
+		// Only include rows newer than the last successful sync timestamp.
 		// Rows with NULL dates are excluded (they haven't been modified).
-		whereClause = fmt.Sprintf(" WHERE %s >= $3", d.QuoteIdentifier(dateFilter.Column))
+		whereClause = fmt.Sprintf(" WHERE %s > $3", d.QuoteIdentifier(dateFilter.Column))
 	}
 
 	return fmt.Sprintf(`

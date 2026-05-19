@@ -35,6 +35,7 @@ type Reader interface {
 	GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error)
 	GetPartitionBoundaries(ctx context.Context, t *Table, numPartitions int) ([]Partition, error)
 	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
+	GetMaxDateColumnValue(ctx context.Context, schema, table, column string) (*time.Time, error)
 
 	// Data sampling for AI type mapping
 	SampleColumnValues(ctx context.Context, schema, table, column string, limit int) ([]string, error)
