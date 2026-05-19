@@ -187,6 +187,46 @@ func TestRunDeleteReconciliationDeletesTargetOnlyRows(t *testing.T) {
 	}
 }
 
+func TestCountDeleteReconciliationCandidates(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	defer sourceDB.Close()
+	targetDB := openDeleteRuntimeDB(t)
+	defer targetDB.Close()
+	execDeleteRuntimeSQL(t, sourceDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1), (3);
+	`)
+	execDeleteRuntimeSQL(t, targetDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1), (2), (3), (4);
+	`)
+
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, &deletePreviewState{})
+	preview := &DeleteReconciliationPreview{Due: true}
+	if err := orch.countDeleteReconciliationCandidates(
+		context.Background(),
+		[]source.Table{
+			{Name: "items", PrimaryKey: []string{"id"}},
+			{Name: "logs"},
+		},
+		preview,
+	); err != nil {
+		t.Fatalf("countDeleteReconciliationCandidates() error: %v", err)
+	}
+	if preview.CandidateRows == nil || *preview.CandidateRows != 2 {
+		t.Fatalf("CandidateRows = %v, want 2", preview.CandidateRows)
+	}
+	if len(preview.Tables) != 2 {
+		t.Fatalf("table previews = %d, want 2", len(preview.Tables))
+	}
+	if preview.Tables[0].Table != ".items" || preview.Tables[0].CandidateRows != 2 {
+		t.Fatalf("items preview = %#v, want 2 candidates", preview.Tables[0])
+	}
+	if preview.Tables[1].Table != ".logs" || !preview.Tables[1].Skipped {
+		t.Fatalf("logs preview = %#v, want skipped no-PK table", preview.Tables[1])
+	}
+}
+
 func TestRunDeleteReconciliationSkipsWhenIntervalNotDue(t *testing.T) {
 	sourceDB := openDeleteRuntimeDB(t)
 	targetDB := openDeleteRuntimeDB(t)

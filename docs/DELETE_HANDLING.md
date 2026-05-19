@@ -175,7 +175,8 @@ Runtime implementations should expose delete handling clearly:
 - validation in upsert mode requires source/target count parity after the
   current run completes delete reconciliation, while still allowing extra target
   rows when reconciliation is disabled or not due
-- dry-run output should list candidate delete counts without mutating the target
+- dry-run output lists candidate delete counts without mutating the target when
+  reconciliation is due
 
 ## Follow-up Implementation Issues
 
@@ -183,8 +184,8 @@ Track implementation in separate issues:
 
 1. Add notification-specific delete metrics if Slack or other sinks need a more
    structured payload than the shared completion summary.
-2. Add candidate delete counts to dry-run output when a full key scan is
-   acceptable for the operator.
+2. Add a lower-cost dry-run estimate mode if full key scans are too expensive
+   for very large reconciliation tables.
 3. Add `target_behavior: soft` with explicit target soft-delete column
    validation and batched updates.
 4. Add tombstone source support for `deleted_at IS NOT NULL` and boolean marker
