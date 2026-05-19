@@ -162,6 +162,7 @@ func (c *Config) applyDefaults() error {
 	if c.Migration.TargetMode == "" {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
+	c.Migration.applyDeleteDefaults()
 	if c.Migration.CreateIndexes == nil {
 		v := true
 		c.Migration.CreateIndexes = &v

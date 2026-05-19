@@ -5,9 +5,10 @@ detect source-side deletes. A row hard-deleted from the source can remain on the
 target forever unless the target is rebuilt with `drop_recreate` or another
 process removes it.
 
-This document compares the design options for delete propagation and proposes a
-configuration surface for a future implementation. It is design-only; no delete
-handling is implemented yet.
+This document compares the design options for delete propagation and records
+the staged implementation plan. The `migration.deletes` config surface is parsed
+and validated as of #351's first slice, but runtime reconciliation and target
+mutation still land in follow-up work.
 
 ## Recommendation
 
@@ -37,37 +38,23 @@ source engine after the simpler modes are stable.
 | Periodic key-set reconciliation | On a schedule, scan source primary keys and target primary keys, then remove or mark target rows whose keys are absent from source. | Works for hard deletes; engine-agnostic; no source schema changes; no replication privileges; simple correctness model. | O(row count) key scans on both sides; delete visibility lags the reconciliation schedule; requires primary keys or a configured stable key. | Default opt-in mode for daily-driver convergence where near-real-time delete latency is not required. |
 | CDC | Read source database change logs and apply delete events from native change streams. | Lowest latency; captures hard deletes directly; avoids periodic full key diff. | Engine-specific readers and state tracking; source-side DBA setup; additional permissions; operational complexity around log retention and restart positions. | High-freshness pipelines where database teams can support native change capture. |
 
-## Proposed Configuration
+## Configuration
 
-The proposed config block is nested under `migration`:
+The supported first-slice config block is nested under `migration`:
 
 ```yaml
 migration:
   target_mode: upsert
 
   deletes:
-    mode: off              # off | reconcile | tombstone | cdc
-    target_behavior: hard  # hard | soft
-
-    soft_delete:
-      column: deleted_at
-      value: now
+    mode: off              # off | reconcile
+    target_behavior: hard  # hard
 
     reconcile:
-      schedule: interval   # every_run | every_n_runs | interval | manual
-      every_n_runs: 7
+      schedule: interval   # interval
       interval: 168h
       batch_size: 10000
       require_primary_key: true
-
-    tombstone:
-      column: deleted_at
-      marker: non_null     # non_null | boolean_true | value
-      value: null
-
-    cdc:
-      engine: auto         # auto | sqlserver_change_tracking | sqlserver_cdc | postgres_logical | mysql_binlog
-      state_name: default
 ```
 
 Defaults:
@@ -80,12 +67,19 @@ Defaults:
 | `reconcile.interval` | `168h` | Weekly reconciliation is a conservative starting point. |
 | `reconcile.batch_size` | `10000` | Applies target deletes or updates in bounded batches. |
 | `reconcile.require_primary_key` | `true` | Reconciliation should fail fast unless DMT has a stable key to compare. |
-| `tombstone.marker` | `non_null` | Fits timestamp-style `deleted_at` columns. Boolean and sentinel-value markers are opt-in. |
-| `cdc.engine` | `auto` | DMT chooses the source engine's configured CDC reader once CDC support exists. |
 
 `migration.deletes` should only be valid with `target_mode: upsert`.
 `drop_recreate` already removes target-only rows by rebuilding the table from the
 current source snapshot.
+
+The broader design still reserves these future options, but current config
+validation rejects them until implemented:
+
+- `mode: tombstone`
+- `mode: cdc`
+- `target_behavior: soft`
+- `reconcile.schedule: every_run|every_n_runs|manual`
+- `reconcile.require_primary_key: false`
 
 ### Reconciliation Scheduling
 
@@ -162,9 +156,9 @@ Initial setup expectations:
 
 ## Validation and Observability
 
-Future implementations should expose delete handling clearly:
+Runtime implementations should expose delete handling clearly:
 
-- config validation should reject unsupported combinations before transfer
+- config validation rejects unsupported combinations before transfer
 - run logs should report delete mode, target behavior, tables evaluated, rows
   marked or deleted, and skipped tables
 - reconciliation should distinguish "not due" from "ran and found zero deletes"
@@ -174,17 +168,15 @@ Future implementations should expose delete handling clearly:
 
 ## Follow-up Implementation Issues
 
-File separate implementation issues after this design lands:
+Track implementation in separate issues:
 
-1. Implement `migration.deletes` config parsing and validation for `mode: off`,
-   `mode: reconcile`, and `target_behavior: hard`.
-2. Implement interval-based key-set reconciliation for primary-key tables in
+1. Implement interval-based key-set reconciliation for primary-key tables in
    upsert mode, including checkpointed last-success metadata.
-3. Add reconciliation dry-run reporting and structured per-table delete metrics.
-4. Add `target_behavior: soft` with explicit target soft-delete column
+2. Add reconciliation dry-run reporting and structured per-table delete metrics.
+3. Add `target_behavior: soft` with explicit target soft-delete column
    validation and batched updates.
-5. Add tombstone source support for `deleted_at IS NOT NULL` and boolean marker
+4. Add tombstone source support for `deleted_at IS NOT NULL` and boolean marker
    columns, with per-table override design if global config is insufficient.
-6. Update upsert validation semantics when delete propagation is enabled.
-7. Design CDC state and setup requirements per engine, then file one
+5. Update upsert validation semantics when delete propagation is enabled.
+6. Design CDC state and setup requirements per engine, then file one
    implementation issue each for SQL Server, PostgreSQL, and MySQL.

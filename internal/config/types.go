@@ -132,20 +132,21 @@ type NotifyConfig struct {
 
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
-	MaxSourceConnections   int      `yaml:"max_source_connections"` // Max source database connections
-	MaxTargetConnections   int      `yaml:"max_target_connections"` // Max target database connections
-	ChunkSize              int      `yaml:"chunk_size"`
-	MaxPartitions          int      `yaml:"max_partitions"`
-	Workers                int      `yaml:"workers"`
-	LargeTableThreshold    int64    `yaml:"large_table_threshold"`
-	IncludeTables          []string `yaml:"include_tables"` // Only migrate these tables (glob patterns)
-	ExcludeTables          []string `yaml:"exclude_tables"` // Skip these tables (glob patterns)
-	DataDir                string   `yaml:"data_dir"`
-	TargetMode             string   `yaml:"target_mode"`                   // "drop_recreate" (default) or "upsert"
-	StrictConsistency      bool     `yaml:"strict_consistency"`            // Use table locks instead of NOLOCK
-	CreateIndexes          *bool    `yaml:"create_indexes,omitempty"`      // Create non-PK indexes (default: true)
-	CreateForeignKeys      *bool    `yaml:"create_foreign_keys,omitempty"` // Create foreign key constraints (default: true)
-	CreateCheckConstraints bool     `yaml:"create_check_constraints"`      // Create CHECK constraints
+	MaxSourceConnections   int           `yaml:"max_source_connections"` // Max source database connections
+	MaxTargetConnections   int           `yaml:"max_target_connections"` // Max target database connections
+	ChunkSize              int           `yaml:"chunk_size"`
+	MaxPartitions          int           `yaml:"max_partitions"`
+	Workers                int           `yaml:"workers"`
+	LargeTableThreshold    int64         `yaml:"large_table_threshold"`
+	IncludeTables          []string      `yaml:"include_tables"` // Only migrate these tables (glob patterns)
+	ExcludeTables          []string      `yaml:"exclude_tables"` // Skip these tables (glob patterns)
+	DataDir                string        `yaml:"data_dir"`
+	TargetMode             string        `yaml:"target_mode"` // "drop_recreate" (default) or "upsert"
+	Deletes                *DeleteConfig `yaml:"deletes,omitempty" json:"deletes,omitempty"`
+	StrictConsistency      bool          `yaml:"strict_consistency"`            // Use table locks instead of NOLOCK
+	CreateIndexes          *bool         `yaml:"create_indexes,omitempty"`      // Create non-PK indexes (default: true)
+	CreateForeignKeys      *bool         `yaml:"create_foreign_keys,omitempty"` // Create foreign key constraints (default: true)
+	CreateCheckConstraints bool          `yaml:"create_check_constraints"`      // Create CHECK constraints
 	// FailOnSchemaDrift turns the #305 read-only drift report into a hard
 	// pre-transfer gate. It is exit policy, not data-plane behavior, so it
 	// must stay out of the resume config hash.

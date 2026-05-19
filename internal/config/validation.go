@@ -65,6 +65,9 @@ func (c *Config) validate() error {
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
+	if err := c.validateDeletes(); err != nil {
+		return err
+	}
 	switch c.Migration.UnmappedTypeAction {
 	case "", "fail", "skip", "conservative-text":
 		// Valid. Empty is allowed because applyDefaults sets it to

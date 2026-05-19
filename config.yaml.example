@@ -63,6 +63,19 @@ migration:
   # - upsert: Incremental sync (INSERT new rows, UPDATE changed rows, preserve target-only rows)
   target_mode: drop_recreate
 
+  # Delete propagation (#351, opt-in). Runtime reconciliation lands in
+  # follow-up slices; this block documents the validated config surface.
+  # Existing behavior is mode: off. Reconcile is only valid with
+  # target_mode: upsert and currently supports hard deletes only.
+  deletes:
+    mode: off                    # off | reconcile
+    target_behavior: hard        # hard
+    reconcile:
+      schedule: interval         # interval
+      interval: 168h
+      batch_size: 10000
+      require_primary_key: true
+
   # Schema object creation options
   create_indexes: true          # Create non-PK indexes after data transfer
   create_foreign_keys: true     # Create foreign key constraints
