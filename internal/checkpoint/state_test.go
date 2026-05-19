@@ -606,6 +606,103 @@ func TestUpdateRunConfig(t *testing.T) {
 	}
 }
 
+func TestGetAllRunsOrdersSameSecondByInsertion(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	for _, id := range []string{"first-run", "second-run"} {
+		if err := state.CreateRun(id, "dbo", "public", nil, "", ""); err != nil {
+			t.Fatalf("CreateRun(%s): %v", id, err)
+		}
+		if err := state.CompleteRun(id, "success", ""); err != nil {
+			t.Fatalf("CompleteRun(%s): %v", id, err)
+		}
+	}
+	if _, err := state.db.Exec(`
+		UPDATE runs
+		SET started_at = '2026-05-19 15:00:00',
+		    completed_at = '2026-05-19 15:00:00'
+		WHERE id IN ('first-run', 'second-run')
+	`); err != nil {
+		t.Fatalf("normalize run timestamps: %v", err)
+	}
+
+	runs, err := state.GetAllRuns()
+	if err != nil {
+		t.Fatalf("GetAllRuns: %v", err)
+	}
+	if len(runs) < 2 {
+		t.Fatalf("GetAllRuns returned %d runs, want at least 2", len(runs))
+	}
+	if runs[0].ID != "second-run" {
+		t.Fatalf("latest run = %q, want second-run", runs[0].ID)
+	}
+}
+
+func TestHasSuccessfulRunAfterOrdersSameSecondByInsertion(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	if err := state.CreateRun("earlier-success", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun(earlier-success): %v", err)
+	}
+	if err := state.CompleteRun("earlier-success", "success", ""); err != nil {
+		t.Fatalf("CompleteRun(earlier-success): %v", err)
+	}
+	if err := state.CreateRun("running", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun(running): %v", err)
+	}
+	if _, err := state.db.Exec(`
+		UPDATE runs
+		SET started_at = '2026-05-19 15:00:00',
+		    completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE '2026-05-19 15:00:00' END
+		WHERE id IN ('earlier-success', 'running')
+	`); err != nil {
+		t.Fatalf("normalize initial timestamps: %v", err)
+	}
+
+	running, err := state.GetRunByID("running")
+	if err != nil {
+		t.Fatalf("GetRunByID(running): %v", err)
+	}
+	superseded, err := state.HasSuccessfulRunAfter(running)
+	if err != nil {
+		t.Fatalf("HasSuccessfulRunAfter before later success: %v", err)
+	}
+	if superseded {
+		t.Fatal("earlier same-second success superseded running run")
+	}
+
+	if err := state.CreateRun("later-success", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun(later-success): %v", err)
+	}
+	if err := state.CompleteRun("later-success", "success", ""); err != nil {
+		t.Fatalf("CompleteRun(later-success): %v", err)
+	}
+	if _, err := state.db.Exec(`
+		UPDATE runs
+		SET started_at = '2026-05-19 15:00:00',
+		    completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE '2026-05-19 15:00:00' END
+		WHERE id IN ('earlier-success', 'running', 'later-success')
+	`); err != nil {
+		t.Fatalf("normalize final timestamps: %v", err)
+	}
+
+	superseded, err = state.HasSuccessfulRunAfter(running)
+	if err != nil {
+		t.Fatalf("HasSuccessfulRunAfter after later success: %v", err)
+	}
+	if !superseded {
+		t.Fatal("later same-second success did not supersede running run")
+	}
+}
+
 func TestCountPartitionTasks(t *testing.T) {
 	state, err := New(t.TempDir())
 	if err != nil {

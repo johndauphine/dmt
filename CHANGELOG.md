@@ -98,6 +98,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Run summaries and superseded-run detection now use newest-inserted ordering
+  when multiple runs share the same SQLite timestamp second, avoiding stale
+  completion output and same-second resume ambiguity (#308).
 - Setup edit mode now raw-loads configs with templated non-string scalars
   such as `${env:DB_PORT}` while still preserving placeholders in string
   fields for safe round-tripping (#283).
