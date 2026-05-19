@@ -9,6 +9,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added read-only source schema drift detection with persisted snapshots,
+  structured change reports, and an optional `migration.fail_on_schema_drift`
+  pre-transfer safety gate (#305).
+
 ### Changed
 
 - Split the P1 oversized production files into focused same-package

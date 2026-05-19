@@ -119,8 +119,12 @@ type MigrationConfig struct {
 	CreateIndexes          *bool    `yaml:"create_indexes,omitempty"`      // Create non-PK indexes (default: true)
 	CreateForeignKeys      *bool    `yaml:"create_foreign_keys,omitempty"` // Create foreign key constraints (default: true)
 	CreateCheckConstraints bool     `yaml:"create_check_constraints"`      // Create CHECK constraints
-	SampleValidation       bool     `yaml:"sample_validation"`             // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
-	SampleSize             int      `yaml:"sample_size"`                   // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+	// FailOnSchemaDrift turns the #305 read-only drift report into a hard
+	// pre-transfer gate. It is exit policy, not data-plane behavior, so it
+	// must stay out of the resume config hash.
+	FailOnSchemaDrift bool `yaml:"fail_on_schema_drift" json:"-"`
+	SampleValidation  bool `yaml:"sample_validation"` // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
+	SampleSize        int  `yaml:"sample_size"`       // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
 	// AllowPartial controls the exit-code contract when one or more
 	// tables fail to transfer. Default (false) returns a
 	// PartialMigrationError so unattended automation (Airflow, k8s

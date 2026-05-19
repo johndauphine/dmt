@@ -71,6 +71,11 @@ migration:
   # Consistency options
   strict_consistency: false     # Set true to disable NOLOCK (slower but consistent reads)
 
+  # Schema drift reporting (#305). DMT compares the current source
+  # schema to the last successful run's snapshot and logs a structured
+  # report before transfer. Set true to abort when any drift is detected.
+  fail_on_schema_drift: false
+
   # Validation options
   sample_validation: false      # Enable sample data validation after row count check
   sample_size: 100              # Number of random rows to sample per table

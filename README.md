@@ -942,6 +942,7 @@ The `migration` section controls how data is transferred.
 | `create_indexes` | No | `true` | Create non-primary key indexes after data transfer |
 | `create_foreign_keys` | No | `true` | Create foreign key constraints after data transfer |
 | `create_check_constraints` | No | `true` | Create CHECK constraints after data transfer |
+| `fail_on_schema_drift` | No | `false` | Abort before transfer if the source schema differs from the last successful run's snapshot. By default, dmt reports drift and continues. |
 
 **Consistency Settings:**
 
@@ -1040,6 +1041,7 @@ migration:
   create_indexes: true               # Recreate indexes
   create_foreign_keys: true          # Recreate foreign keys
   target_mode: drop_recreate         # Drop and recreate tables
+  fail_on_schema_drift: false        # Report source schema drift and continue
 ```
 
 ### Example 2: PostgreSQL to SQL Server (Password Authentication)

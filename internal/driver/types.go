@@ -114,6 +114,7 @@ type Column struct {
 	Scale        int      `json:"scale"`
 	IsNullable   bool     `json:"is_nullable"`
 	IsIdentity   bool     `json:"is_identity"`
+	DefaultValue string   `json:"default_value,omitempty"`
 	OrdinalPos   int      `json:"ordinal_position"`
 	SRID         int      `json:"srid,omitempty"`          // Spatial Reference ID for geography/geometry columns (0 = default/unset)
 	SampleValues []string `json:"sample_values,omitempty"` // Sample data values for AI type mapping context

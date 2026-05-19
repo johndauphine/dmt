@@ -43,6 +43,12 @@ type StateBackend interface {
 	GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error)
 	UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error
 
+	// Source schema drift snapshots (#305). Stored per source schema/table so a
+	// fresh run can compare the current source definition to the last successful
+	// source definition before it transfers data.
+	SaveSchemaSnapshot(runID, sourceSchema, tableName, schemaJSON string) error
+	GetLatestSchemaSnapshots(sourceSchema string) ([]SchemaSnapshotRecord, error)
+
 	// Lifecycle
 	Close() error
 
@@ -86,6 +92,16 @@ type FallbackEventRecord struct {
 	Count       int64     `json:"count"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
+}
+
+// SchemaSnapshotRecord is the latest persisted source schema shape for
+// one table. SchemaJSON is deterministic JSON produced by the drift package.
+type SchemaSnapshotRecord struct {
+	RunID        string    `json:"run_id"`
+	SourceSchema string    `json:"source_schema"`
+	TableName    string    `json:"table_name"`
+	CapturedAt   time.Time `json:"captured_at"`
+	SchemaJSON   string    `json:"schema_json"`
 }
 
 // PartitionProgressSummary summarizes saved progress across a table's

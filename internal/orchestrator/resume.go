@@ -136,12 +136,18 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("extracting schema: %w", err)
 	}
+	o.loadSchemaMetadata(ctx, tables)
 
 	// Apply table filters
 	tables = o.filterTables(tables)
 	if len(tables) == 0 {
 		o.state.CompleteRun(run.ID, "failed", "no tables to migrate after applying filters")
 		return fmt.Errorf("no tables to migrate after applying filters")
+	}
+	if err := o.reportSchemaDrift(tables); err != nil {
+		o.state.CompleteRun(run.ID, "failed", err.Error())
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return err
 	}
 
 	o.tables = tables
@@ -206,6 +212,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		}
 
 		o.state.CompleteRun(run.ID, "success", "")
+		o.captureSchemaSnapshots(run.ID, tables)
 		duration := time.Since(startTime)
 		if err := o.state.UpdateAITuningResult(0, duration.Seconds(), o.lastChunkRetryCount); err != nil {
 			logging.Debug("Failed to update AI tuning result: %v", err)
@@ -404,6 +411,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	} else {
 		// Full success
 		o.state.CompleteRun(run.ID, "success", "")
+		o.captureSchemaSnapshots(run.ID, tables)
 		o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)

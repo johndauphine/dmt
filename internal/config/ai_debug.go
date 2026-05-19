@@ -220,6 +220,7 @@ func (c *Config) DebugDump() string {
 	fmt.Fprintf(&b, "  CreateIndexes: %v\n", c.Migration.CreateIndexesEnabled())
 	fmt.Fprintf(&b, "  CreateForeignKeys: %v\n", c.Migration.CreateForeignKeysEnabled())
 	fmt.Fprintf(&b, "  CreateCheckConstraints: %v\n", c.Migration.CreateCheckConstraints)
+	fmt.Fprintf(&b, "  FailOnSchemaDrift: %v\n", c.Migration.FailOnSchemaDrift)
 	fmt.Fprintf(&b, "  SampleValidation: %v\n", c.Migration.SampleValidation)
 	fmt.Fprintf(&b, "  SampleSize: %s\n", formatAutoValue(c.Migration.SampleSize, ac.OriginalSampleSize, "default 100"))
 	fmt.Fprintf(&b, "  DataDir: %s\n", c.Migration.DataDir)

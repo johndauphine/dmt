@@ -116,6 +116,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			ISNULL(NUMERIC_SCALE, 0),
 			CASE WHEN IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
 			COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity'),
+			ISNULL(COLUMN_DEFAULT, ''),
 			ORDINAL_POSITION
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
@@ -130,7 +131,17 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var col driver.Column
 		var isNullable, isIdentity int
-		if err := rows.Scan(&col.Name, &col.DataType, &col.MaxLength, &col.Precision, &col.Scale, &isNullable, &isIdentity, &col.OrdinalPos); err != nil {
+		if err := rows.Scan(
+			&col.Name,
+			&col.DataType,
+			&col.MaxLength,
+			&col.Precision,
+			&col.Scale,
+			&isNullable,
+			&isIdentity,
+			&col.DefaultValue,
+			&col.OrdinalPos,
+		); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
 		col.IsNullable = isNullable == 1

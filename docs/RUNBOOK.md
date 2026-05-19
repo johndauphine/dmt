@@ -382,6 +382,42 @@ Then:
 
 **Verify the fix**: `dmt validate` passes.
 
+### Source schema drift detected
+
+**Exit code / log signature**: By default, exit code 0 if the migration
+otherwise succeeds. Logs start with `Schema drift detected`. If
+`migration.fail_on_schema_drift: true` is set, dmt aborts before
+transfer with exit code **3 (`TransferError`)**.
+
+**What it means**: The source schema no longer matches the schema
+snapshot captured after the last successful run for the same source
+schema. This is a read-only guard: dmt reports the difference before
+transfer, but it does not alter the target schema for you.
+
+The report groups changes by table and labels the category:
+`table_added`, `table_dropped`, `added_column`, `dropped_column`,
+`type_widened`, `type_narrowed`, `type_changed_lossy`,
+`nullability_change`, `default_change`, `pk_change`, `index_added`,
+`index_dropped`, `fk_added`, `fk_dropped`, `check_added`, and
+`check_dropped`.
+
+**Recover by**:
+
+1. For additive, safe changes in `drop_recreate` mode, confirm the
+   target can be rebuilt and run normally.
+2. For `upsert` mode, add the corresponding target columns or run a
+   controlled `drop_recreate` refresh before trusting the incremental
+   run.
+3. For dropped columns, narrowed types, lossy type changes, or primary
+   key changes, pause promotion and get an explicit schema migration
+   decision from the data owner.
+4. Set `migration.fail_on_schema_drift: true` in unattended jobs when
+   the operator should review every source-side schema change before
+   data moves.
+
+**Verify the fix**: The next run logs `No schema drift detected`, or
+the remaining drift is explicitly approved and documented.
+
 ### Partial migration: exit code 3
 
 **Exit code / log signature**: Exit code **3 (`TransferError`)**.

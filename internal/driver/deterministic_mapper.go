@@ -270,18 +270,15 @@ func typeInfoToTypemapColumn(info TypeInfo) typemap.ColumnInfo {
 	}
 }
 
-// driverColumnToDDL projects a driver.Column to ddl.Column. dmt's
-// reader doesn't currently expose column_default / identity start +
-// increment / autoincrement flag / column comment — those fields are
-// left at zero values, which the ddl emitter handles correctly
-// (no DEFAULT clause, no IDENTITY metadata, no inline COMMENT).
+// driverColumnToDDL projects a driver.Column to ddl.Column. DefaultValue is
+// intentionally not passed through here: #305 uses source defaults for
+// read-only drift reporting, while target DEFAULT preservation remains a
+// separate DDL behavior decision. dmt's reader also doesn't currently expose
+// identity start + increment / autoincrement flag / column comment, so those
+// fields are left at zero values.
 //
 // IsIdentity flows through, so PG / MSSQL identity columns still get
-// SERIAL / IDENTITY emission. PG legacy SERIAL detection (via
-// nextval(...) in the default expression) won't fire because dmt
-// doesn't carry the default — those columns will emit as plain INT
-// with no auto-increment. Acceptable today; #170's AI fallback can
-// pick up the legacy-serial case if it matters in practice.
+// SERIAL / IDENTITY emission.
 //
 // Column name is sanitized for PG targets (lowercase) to match the
 // rest of dmt's PG flow which uses ident.SanitizePG. Without this,
