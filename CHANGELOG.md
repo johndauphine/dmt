@@ -77,6 +77,8 @@ All notable changes to this project will be documented in this file.
   queries already return the same row shape (#338).
 - Moved the Postgres and MySQL readers onto shared streaming/pagination
   control flow while keeping dialect-specific SQL generation local (#338).
+- Moved the SQLite reader onto shared streaming/pagination control flow while
+  preserving its dialect-owned query generation (#338).
 - Split the P1 oversized production files into focused same-package
   files to improve code readability without changing behavior (#212).
 - Split the PostgreSQL writer into focused same-package files for DDL,

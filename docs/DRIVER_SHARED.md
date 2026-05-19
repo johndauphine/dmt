@@ -97,7 +97,7 @@ later PR proves that the shared form is clearer and behavior-preserving:
    its engine-specific casts and query shape.
 7. Centralize partition-boundary result scanning for engines whose partition
    queries return the same row shape.
-8. Move the closest reader streaming pair onto shared pagination control flow
+8. Move the closest reader streaming paths onto shared pagination control flow
    once the dialect query builders already own the database-specific SQL.
 9. Look for preflight result-building helpers after reader duplication is
    smaller.
