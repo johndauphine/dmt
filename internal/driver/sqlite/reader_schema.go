@@ -125,7 +125,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	// supported since SQLite 3.16. The named-parameter form is
 	// pragma_table_info('table_name').
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT cid, name, type, "notnull", pk FROM pragma_table_info(?)`,
+		`SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)`,
 		t.Name)
 	if err != nil {
 		return fmt.Errorf("querying columns for %s: %w", t.Name, err)
@@ -144,9 +144,10 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			name     string
 			declType sql.NullString
 			notnull  int
+			dflt     sql.NullString
 			pkOrd    int
 		)
-		if err := rows.Scan(&cid, &name, &declType, &notnull, &pkOrd); err != nil {
+		if err := rows.Scan(&cid, &name, &declType, &notnull, &dflt, &pkOrd); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
 
@@ -159,13 +160,14 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		baseType, maxLen, prec, scale := parseSqliteType(declType.String)
 
 		col := driver.Column{
-			Name:       name,
-			DataType:   baseType,
-			MaxLength:  maxLen,
-			Precision:  prec,
-			Scale:      scale,
-			IsNullable: notnull == 0,
-			OrdinalPos: cid + 1,
+			Name:         name,
+			DataType:     baseType,
+			MaxLength:    maxLen,
+			Precision:    prec,
+			Scale:        scale,
+			IsNullable:   notnull == 0,
+			DefaultValue: dflt.String,
+			OrdinalPos:   cid + 1,
 		}
 		t.Columns = append(t.Columns, col)
 

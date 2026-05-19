@@ -61,6 +61,12 @@ type fileStateData struct {
 	// run_id -> surface -> fingerprint -> record, mirroring the SQLite
 	// schema. Empty fingerprints collapse to a single record per surface.
 	FallbackEvents map[string]map[string]map[string]fallbackEventState `yaml:"fallback_events,omitempty"`
+
+	// SchemaSnapshots persists the latest successful source schema shape
+	// for drift detection (#305). Keyed as source_schema -> table ->
+	// snapshot so the file backend keeps the same run-to-run safety
+	// contract as SQLite in Airflow/k8s deployments.
+	SchemaSnapshots map[string]map[string]schemaSnapshotState `yaml:"schema_snapshots,omitempty"`
 }
 
 // fallbackEventState is one persisted fallback record. Mirrors
@@ -70,6 +76,14 @@ type fallbackEventState struct {
 	Count     int64     `yaml:"count"`
 	FirstSeen time.Time `yaml:"first_seen"`
 	LastSeen  time.Time `yaml:"last_seen"`
+}
+
+// schemaSnapshotState is one persisted source schema snapshot. The source
+// schema and table name are encoded in parent map keys.
+type schemaSnapshotState struct {
+	RunID      string    `yaml:"run_id"`
+	CapturedAt time.Time `yaml:"captured_at"`
+	SchemaJSON string    `yaml:"schema_json"`
 }
 
 // tableState tracks per-table progress.

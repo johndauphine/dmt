@@ -27,18 +27,23 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 	if fs.state != nil && len(fs.state.SyncTimestamps) > 0 {
 		carriedTimestamps = fs.state.SyncTimestamps
 	}
+	var carriedSnapshots map[string]map[string]schemaSnapshotState
+	if fs.state != nil && len(fs.state.SchemaSnapshots) > 0 {
+		carriedSnapshots = fs.state.SchemaSnapshots
+	}
 
 	fs.state = &fileStateData{
-		RunID:          id,
-		StartedAt:      time.Now(),
-		Status:         "running",
-		SourceSchema:   sourceSchema,
-		TargetSchema:   targetSchema,
-		ConfigHash:     hex.EncodeToString(hash[:8]), // First 8 bytes
-		ProfileName:    profileName,
-		ConfigPath:     configPath,
-		Tables:         make(map[string]tableState),
-		SyncTimestamps: carriedTimestamps,
+		RunID:           id,
+		StartedAt:       time.Now(),
+		Status:          "running",
+		SourceSchema:    sourceSchema,
+		TargetSchema:    targetSchema,
+		ConfigHash:      hex.EncodeToString(hash[:8]), // First 8 bytes
+		ProfileName:     profileName,
+		ConfigPath:      configPath,
+		Tables:          make(map[string]tableState),
+		SyncTimestamps:  carriedTimestamps,
+		SchemaSnapshots: carriedSnapshots,
 	}
 
 	return fs.save()

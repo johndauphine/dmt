@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/audit"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/source"
 )
@@ -640,6 +642,140 @@ func TestComputeConfigHash_AllowPartialInvariant(t *testing.T) {
 		t.Errorf("flipping MigrationConfig.AllowPartial changed the resume config hash; "+
 			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
 			baseHash, otherHash)
+	}
+}
+
+func TestComputeConfigHash_FailOnSchemaDriftInvariant(t *testing.T) {
+	base := &config.Config{
+		Source: config.SourceConfig{Type: "mssql", Host: "h", Port: 1433, Database: "d", User: "u", Password: "p"},
+		Target: config.TargetConfig{Type: "postgres", Host: "h", Port: 5432, Database: "d", User: "u", Password: "p"},
+	}
+	other := *base
+	other.Migration.FailOnSchemaDrift = true
+
+	baseHash := computeConfigHash(base)
+	otherHash := computeConfigHash(&other)
+	if baseHash != otherHash {
+		t.Errorf("flipping MigrationConfig.FailOnSchemaDrift changed the resume config hash; "+
+			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
+			baseHash, otherHash)
+	}
+}
+
+func TestReportSchemaDrift_FailOnSchemaDriftReturnsError(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New state: %v", err)
+	}
+	defer state.Close()
+
+	previous := source.Table{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false, OrdinalPos: 1},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	snapshotJSON, err := drift.MarshalTableSnapshot(drift.BuildTableSnapshot(previous))
+	if err != nil {
+		t.Fatalf("MarshalTableSnapshot: %v", err)
+	}
+	if err := state.SaveSchemaSnapshot("run-1", "mssql|source_db|dbo", "Users", snapshotJSON); err != nil {
+		t.Fatalf("SaveSchemaSnapshot: %v", err)
+	}
+
+	current := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false, OrdinalPos: 1},
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true, OrdinalPos: 2},
+		},
+		PrimaryKey: []string{"id"},
+	}}
+	o := &Orchestrator{
+		config: &config.Config{
+			Source:    config.SourceConfig{Type: "mssql", Database: "source_db", Schema: "dbo"},
+			Migration: config.MigrationConfig{FailOnSchemaDrift: true},
+		},
+		state:   state,
+		auditor: audit.Disabled(),
+	}
+
+	err = o.reportSchemaDrift(current)
+	var driftErr *SchemaDriftError
+	if !errors.As(err, &driftErr) {
+		t.Fatalf("reportSchemaDrift error = %T (%v), want *SchemaDriftError", err, err)
+	}
+	if driftErr.ExitCode() != exitcodes.TransferError {
+		t.Fatalf("ExitCode = %d, want TransferError", driftErr.ExitCode())
+	}
+	if len(driftErr.Report.Changes) != 1 || driftErr.Report.Changes[0].Kind != drift.AddedColumn {
+		t.Fatalf("changes = %+v, want one added_column", driftErr.Report.Changes)
+	}
+}
+
+func TestReportSchemaDrift_IgnoresSnapshotsExcludedByCurrentFilters(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New state: %v", err)
+	}
+	defer state.Close()
+
+	for _, tableName := range []string{"Users", "Archive"} {
+		table := source.Table{
+			Schema: "dbo",
+			Name:   tableName,
+			Columns: []source.Column{
+				{Name: "id", DataType: "int", IsNullable: false, OrdinalPos: 1},
+			},
+			PrimaryKey: []string{"id"},
+		}
+		snapshotJSON, err := drift.MarshalTableSnapshot(drift.BuildTableSnapshot(table))
+		if err != nil {
+			t.Fatalf("MarshalTableSnapshot(%s): %v", tableName, err)
+		}
+		if err := state.SaveSchemaSnapshot("run-1", "mssql|source_db|dbo", tableName, snapshotJSON); err != nil {
+			t.Fatalf("SaveSchemaSnapshot(%s): %v", tableName, err)
+		}
+	}
+
+	o := &Orchestrator{
+		config: &config.Config{
+			Source: config.SourceConfig{Type: "mssql", Database: "source_db", Schema: "dbo"},
+			Migration: config.MigrationConfig{
+				ExcludeTables:     []string{"Archive"},
+				FailOnSchemaDrift: true,
+			},
+		},
+		state:   state,
+		auditor: audit.Disabled(),
+	}
+
+	current := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false, OrdinalPos: 1},
+		},
+		PrimaryKey: []string{"id"},
+	}}
+	if err := o.reportSchemaDrift(current); err != nil {
+		t.Fatalf("reportSchemaDrift returned excluded-table drift: %v", err)
+	}
+}
+
+func TestSchemaSnapshotNamespaceIncludesSourceDatabase(t *testing.T) {
+	first := &Orchestrator{config: &config.Config{
+		Source: config.SourceConfig{Type: "mysql", Database: "tenant_a"},
+	}}
+	second := &Orchestrator{config: &config.Config{
+		Source: config.SourceConfig{Type: "mysql", Database: "tenant_b"},
+	}}
+
+	if first.schemaSnapshotNamespace() == second.schemaSnapshotNamespace() {
+		t.Fatalf("schema-less sources with different databases share namespace %q", first.schemaSnapshotNamespace())
 	}
 }
 

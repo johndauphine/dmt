@@ -122,6 +122,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			COALESCE(numeric_scale, 0),
 			CASE WHEN is_nullable = 'YES' THEN true ELSE false END,
 			CASE WHEN column_default LIKE 'nextval%' THEN true ELSE false END,
+			COALESCE(column_default, ''),
 			ordinal_position
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2
@@ -135,7 +136,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var c driver.Column
 		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision, &c.Scale,
-			&c.IsNullable, &c.IsIdentity, &c.OrdinalPos); err != nil {
+			&c.IsNullable, &c.IsIdentity, &c.DefaultValue, &c.OrdinalPos); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
 		t.Columns = append(t.Columns, c)

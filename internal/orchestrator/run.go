@@ -161,35 +161,19 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("extracting schema: %w", err)
 	}
 
-	// Load additional metadata if enabled
-	for i := range tables {
-		t := &tables[i]
-
-		if o.config.Migration.CreateIndexesEnabled() {
-			if err := o.sourcePool.LoadIndexes(ctx, t); err != nil {
-				logging.Warn("Warning: loading indexes for %s: %v", t.Name, err)
-			}
-		}
-
-		if o.config.Migration.CreateForeignKeysEnabled() {
-			if err := o.sourcePool.LoadForeignKeys(ctx, t); err != nil {
-				logging.Warn("Warning: loading FKs for %s: %v", t.Name, err)
-			}
-		}
-
-		if o.config.Migration.CreateCheckConstraints {
-			if err := o.sourcePool.LoadCheckConstraints(ctx, t); err != nil {
-				logging.Warn("Warning: loading check constraints for %s: %v", t.Name, err)
-			}
-		}
-
-	}
+	// Load source metadata for drift reporting and post-transfer DDL.
+	o.loadSchemaMetadata(ctx, tables)
 
 	// Apply table filters
 	tables = o.filterTables(tables)
 	if len(tables) == 0 {
 		o.state.CompleteRun(runID, "failed", "no tables to migrate after applying filters")
 		return fmt.Errorf("no tables to migrate after applying filters")
+	}
+	if err := o.reportSchemaDrift(tables); err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
 	}
 
 	o.tables = tables
@@ -344,6 +328,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	} else {
 		// Full success
 		o.state.CompleteRun(runID, "success", "")
+		o.captureSchemaSnapshots(runID, tables)
 		o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
 		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tables), totalRows, duration.Round(time.Second), throughput)

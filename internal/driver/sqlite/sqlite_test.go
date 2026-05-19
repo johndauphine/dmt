@@ -276,7 +276,7 @@ func TestReader_SchemaExtraction(t *testing.T) {
 		`CREATE TABLE users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			email VARCHAR(255) NOT NULL,
-			age INTEGER
+			age INTEGER DEFAULT 0
 		)`,
 		`CREATE TABLE posts (
 			id INTEGER PRIMARY KEY,
@@ -335,6 +335,9 @@ func TestReader_SchemaExtraction(t *testing.T) {
 	}
 	if users.RowCount != 2 {
 		t.Errorf("users RowCount: got %d, want 2", users.RowCount)
+	}
+	if users.Columns[2].DefaultValue != "0" {
+		t.Errorf("users.age DefaultValue: got %q, want 0", users.Columns[2].DefaultValue)
 	}
 
 	// Indexes

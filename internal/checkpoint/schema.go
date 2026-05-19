@@ -69,6 +69,18 @@ func (s *State) migrate() error {
 		PRIMARY KEY (source_schema, table_name, target_schema)
 	);
 
+	CREATE TABLE IF NOT EXISTS schema_snapshots (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		source_schema TEXT NOT NULL,
+		table_name TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		captured_at TEXT NOT NULL,
+		schema_json TEXT NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_schema_snapshots_source_table
+		ON schema_snapshots(source_schema, table_name, id);
+
 	CREATE INDEX IF NOT EXISTS idx_tasks_run_status ON tasks(run_id, status);
 	CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type);
 
@@ -311,6 +323,7 @@ var validTableNames = map[string]bool{
 	"tasks":                 true,
 	"profiles":              true,
 	"table_sync_timestamps": true,
+	"schema_snapshots":      true,
 	"ai_adjustments":        true,
 	"ai_tuning_history":     true,
 }
