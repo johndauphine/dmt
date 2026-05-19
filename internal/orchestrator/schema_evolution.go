@@ -28,12 +28,22 @@ type addedColumnEvolution struct {
 	SourceNullable bool
 }
 
+type nullabilityEvolution struct {
+	Table  source.Table
+	Column source.Column
+}
+
 func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
-	return report.HasChanges() &&
-		o.config.Migration.SchemaEvolutionEnabled() &&
-		o.config.Migration.TargetMode == "upsert" &&
-		o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionLog &&
-		len(addedColumnChanges(report)) > 0
+	if !report.HasChanges() ||
+		!o.config.Migration.SchemaEvolutionEnabled() ||
+		o.config.Migration.TargetMode != "upsert" {
+		return false
+	}
+
+	addedColumnPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
+	nullabilityPolicy := o.config.Migration.NullabilityChangeSchemaEvolutionPolicy()
+	return (addedColumnPolicy != config.SchemaEvolutionLog && len(addedColumnChanges(report)) > 0) ||
+		(nullabilityPolicy != config.SchemaEvolutionLog && len(nullabilityChanges(report)) > 0)
 }
 
 func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
@@ -46,7 +56,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		return nil
 	}
 
-	actions, logOnly, err := planAddedColumnEvolution(
+	addedActions, addedLogOnly, err := planAddedColumnEvolution(
 		report,
 		tables,
 		o.config.Migration.AddedColumnSchemaEvolutionPolicy(),
@@ -54,16 +64,30 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	if err != nil {
 		return &SchemaEvolutionError{Message: err.Error()}
 	}
-	if len(logOnly) > 0 {
-		logging.Warn("schema evolution: %d added column(s) detected; policy added_column=log leaves target unchanged",
-			len(logOnly))
+	nullabilityActions, nullabilityLogOnly, err := planNullabilityEvolution(
+		report,
+		tables,
+		o.config.Migration.NullabilityChangeSchemaEvolutionPolicy(),
+	)
+	if err != nil {
+		return &SchemaEvolutionError{Message: err.Error()}
 	}
-	if len(actions) == 0 {
+	if len(addedLogOnly) > 0 {
+		logging.Warn("schema evolution: %d added column(s) detected; policy added_column=log leaves target unchanged",
+			len(addedLogOnly))
+	}
+	if len(nullabilityLogOnly) > 0 {
+		logging.Warn("schema evolution: %d nullability change(s) detected; policy nullability_change=log leaves target unchanged",
+			len(nullabilityLogOnly))
+	}
+	if len(addedActions) == 0 && len(nullabilityActions) == 0 {
 		return nil
 	}
 
-	logging.Info("schema evolution: adding %d nullable column(s) to target", len(actions))
-	for _, action := range actions {
+	if len(addedActions) > 0 {
+		logging.Info("schema evolution: adding %d nullable column(s) to target", len(addedActions))
+	}
+	for _, action := range addedActions {
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
 		if err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", action.Table.Name, err)}
@@ -86,8 +110,31 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		}
 	}
 
+	if len(nullabilityActions) > 0 {
+		logging.Info("schema evolution: relaxing %d target column(s) from NOT NULL to NULL", len(nullabilityActions))
+	}
+	for _, action := range nullabilityActions {
+		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
+		if err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", action.Table.Name, err)}
+		}
+		if !exists {
+			return &SchemaEvolutionError{Message: fmt.Sprintf(
+				"schema evolution cannot relax nullability for %s.%s: target table does not exist",
+				action.Table.Name, action.Column.Name,
+			)}
+		}
+		if err := o.targetPool.DropColumnNotNull(ctx, &action.Table, &action.Column, o.config.Target.Schema); err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf(
+				"relaxing target column nullability %s.%s: %v",
+				action.Table.Name, action.Column.Name, err,
+			)}
+		}
+	}
+
 	o.auditEvent("schema_evolution_applied", map[string]any{
-		"added_columns": len(actions),
+		"added_columns":           len(addedActions),
+		"nullability_relaxations": len(nullabilityActions),
 	})
 	return nil
 }
@@ -140,6 +187,71 @@ func planAddedColumnEvolution(
 	return actions, nil, nil
 }
 
+func planNullabilityEvolution(
+	report drift.Report,
+	tables []source.Table,
+	policy config.SchemaEvolutionPolicy,
+) ([]nullabilityEvolution, []drift.Change, error) {
+	changes := nullabilityChanges(report)
+	if len(changes) == 0 {
+		return nil, nil, nil
+	}
+
+	switch policy {
+	case config.SchemaEvolutionLog:
+		return nil, changes, nil
+	case config.SchemaEvolutionFail:
+		return nil, nil, fmt.Errorf("schema evolution policy nullability_change=fail; %d nullability change(s) detected",
+			len(changes))
+	case config.SchemaEvolutionAuto:
+		// Continue below.
+	default:
+		return nil, nil, fmt.Errorf("unknown schema evolution nullability_change policy %q", policy)
+	}
+
+	actions := make([]nullabilityEvolution, 0, len(changes))
+	for _, change := range changes {
+		table, column, err := findSourceColumn(tables, change)
+		if err != nil {
+			return nil, nil, err
+		}
+		if hasColumnTypeDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-relax nullability for %s.%s while type drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if hasColumnDefaultDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-relax nullability for %s.%s while default drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if hasPrimaryKeyDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-relax nullability for %s.%s while primary-key drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if change.Previous != "NOT NULL" || change.Current != "NULL" || !column.IsNullable {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-tighten nullability for %s.%s (%s -> %s); set nullability_change=log to report only",
+				table.Name, column.Name, change.Previous, change.Current,
+			)
+		}
+		if column.IsIdentity {
+			return nil, nil, fmt.Errorf("schema evolution cannot auto-relax identity column %s.%s",
+				table.Name, column.Name)
+		}
+		if tablePrimaryKeyContains(table, column.Name) {
+			return nil, nil, fmt.Errorf("schema evolution cannot auto-relax primary-key column %s.%s",
+				table.Name, column.Name)
+		}
+		actions = append(actions, nullabilityEvolution{Table: table, Column: column})
+	}
+	return actions, nil, nil
+}
+
 func addedColumnChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
@@ -148,6 +260,54 @@ func addedColumnChanges(report drift.Report) []drift.Change {
 		}
 	}
 	return changes
+}
+
+func nullabilityChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		if change.Kind == drift.NullabilityChange {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func hasColumnTypeDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Schema != candidate.Schema ||
+			change.TableName != candidate.TableName ||
+			change.ObjectName != candidate.ObjectName {
+			continue
+		}
+		switch change.Kind {
+		case drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			return true
+		}
+	}
+	return false
+}
+
+func hasColumnDefaultDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Kind == drift.DefaultChange &&
+			change.Schema == candidate.Schema &&
+			change.TableName == candidate.TableName &&
+			change.ObjectName == candidate.ObjectName {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPrimaryKeyDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Kind == drift.PKChange &&
+			change.Schema == candidate.Schema &&
+			change.TableName == candidate.TableName {
+			return true
+		}
+	}
+	return false
 }
 
 func findSourceColumn(tables []source.Table, change drift.Change) (source.Table, source.Column, error) {

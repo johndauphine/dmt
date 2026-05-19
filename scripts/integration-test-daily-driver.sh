@@ -197,7 +197,7 @@ UPDATE dbo.Users
 SET
     DisplayName = N'Geoff Dalgas Equal Watermark',
     Reputation = 9999,
-    LastAccessDate = CONVERT(datetime, N'${watermark%Z}', 126)
+    LastAccessDate = CONVERT(datetime2(7), N'${watermark%Z}', 126)
 WHERE Id = 2;
 GO
 SQL

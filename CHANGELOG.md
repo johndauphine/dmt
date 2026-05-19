@@ -20,6 +20,9 @@ All notable changes to this project will be documented in this file.
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).
+- Added opt-in schema evolution for safe `nullability_change` drift, relaxing
+  target columns from `NOT NULL` to `NULL` while leaving tightening out of
+  auto-apply (#306).
 - Added the MSSQL → Postgres pair to the nightly cross-engine integration
   matrix so the primary migration path has scheduled coverage as well as
   per-PR coverage (#342).

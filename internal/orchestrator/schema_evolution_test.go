@@ -136,8 +136,227 @@ func TestPlanAddedColumnEvolutionRejectsUnsafeColumns(t *testing.T) {
 	}
 }
 
+func TestPlanNullabilityEvolutionAutoRelaxesNotNull(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.NullabilityChange,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "email",
+		Previous:   "NOT NULL",
+		Current:    "NULL",
+	}}}
+	tables := []source.Table{{
+		Schema:     "dbo",
+		Name:       "Users",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false},
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true},
+		},
+	}}
+
+	actions, logOnly, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err != nil {
+		t.Fatalf("planNullabilityEvolution returned error: %v", err)
+	}
+	if len(logOnly) != 0 {
+		t.Fatalf("logOnly = %+v, want empty", logOnly)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("actions = %+v, want one action", actions)
+	}
+	action := actions[0]
+	if action.Table.Name != "Users" || action.Column.Name != "email" {
+		t.Fatalf("action = %+v, want Users.email", action)
+	}
+	if !action.Column.IsNullable {
+		t.Fatal("source column should be nullable for a relaxation")
+	}
+}
+
+func TestPlanNullabilityEvolutionLogOnly(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.NullabilityChange,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "email",
+		Previous:   "NOT NULL",
+		Current:    "NULL",
+	}}}
+
+	actions, logOnly, err := planNullabilityEvolution(report, nil, config.SchemaEvolutionLog)
+	if err != nil {
+		t.Fatalf("planNullabilityEvolution returned error: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("actions = %+v, want empty", actions)
+	}
+	if len(logOnly) != 1 {
+		t.Fatalf("logOnly = %+v, want one change", logOnly)
+	}
+}
+
+func TestPlanNullabilityEvolutionFailPolicy(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.NullabilityChange,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "email",
+		Previous:   "NOT NULL",
+		Current:    "NULL",
+	}}}
+
+	_, _, err := planNullabilityEvolution(report, nil, config.SchemaEvolutionFail)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "nullability_change=fail") {
+		t.Fatalf("error = %q, want nullability_change=fail", err.Error())
+	}
+}
+
+func TestPlanNullabilityEvolutionRejectsTightening(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.NullabilityChange,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "email",
+		Previous:   "NULL",
+		Current:    "NOT NULL",
+	}}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: false},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "cannot auto-tighten") {
+		t.Fatalf("error = %q, want auto-tighten rejection", err.Error())
+	}
+}
+
+func TestPlanNullabilityEvolutionRejectsSameColumnTypeDrift(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{
+			Kind:       drift.TypeNarrowed,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "varchar(255)",
+			Current:    "varchar(50)",
+		},
+		{
+			Kind:       drift.NullabilityChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "NOT NULL",
+			Current:    "NULL",
+		},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 50, IsNullable: true},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "type drift") {
+		t.Fatalf("error = %q, want type drift rejection", err.Error())
+	}
+}
+
+func TestPlanNullabilityEvolutionRejectsSameColumnDefaultDrift(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{
+			Kind:       drift.DefaultChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "'old'",
+			Current:    "'new'",
+		},
+		{
+			Kind:       drift.NullabilityChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "NOT NULL",
+			Current:    "NULL",
+		},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true, DefaultValue: "'new'"},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "default drift") {
+		t.Fatalf("error = %q, want default drift rejection", err.Error())
+	}
+}
+
+func TestPlanNullabilityEvolutionRejectsPrimaryKeyDrift(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{
+			Kind:      drift.PKChange,
+			Schema:    "dbo",
+			TableName: "Users",
+			Previous:  "email",
+			Current:   "id",
+		},
+		{
+			Kind:       drift.NullabilityChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "NOT NULL",
+			Current:    "NULL",
+		},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "primary-key drift") {
+		t.Fatalf("error = %q, want primary-key drift rejection", err.Error())
+	}
+}
+
 func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
+	nullabilityReport := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.NullabilityChange,
+		TableName:  "Users",
+		ObjectName: "email",
+		Previous:   "NOT NULL",
+		Current:    "NULL",
+	}}}
 
 	tests := []struct {
 		name      string
@@ -166,6 +385,16 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 				AddedColumn: config.SchemaEvolutionFail,
 			},
 		}, want: true},
+		{name: "nullability enabled", migration: config.MigrationConfig{
+			TargetMode:      "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{},
+		}, want: true, report: nullabilityReport},
+		{name: "nullability log policy reports only", migration: config.MigrationConfig{
+			TargetMode: "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{
+				NullabilityChange: config.SchemaEvolutionLog,
+			},
+		}, want: false, report: nullabilityReport},
 		{name: "unsupported drift only", migration: config.MigrationConfig{
 			TargetMode:      "upsert",
 			SchemaEvolution: &config.SchemaEvolutionConfig{},
@@ -188,6 +417,7 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 
 func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *testing.T) {
 	addedColumnReport := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
+	nullabilityReport := drift.Report{Changes: []drift.Change{{Kind: drift.NullabilityChange, TableName: "Users"}}}
 	unsupportedReport := drift.Report{Changes: []drift.Change{{Kind: drift.DroppedColumn, TableName: "Users"}}}
 
 	tests := []struct {
@@ -210,6 +440,13 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			allow:     true,
 			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
 			want:      "added_column=auto",
+		},
+		{
+			name:      "auto nullability changes may apply",
+			report:    nullabilityReport,
+			allow:     true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
+			want:      "nullability_change=auto",
 		},
 		{
 			name:   "log policy reports only",

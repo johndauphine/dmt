@@ -42,8 +42,13 @@ func (r *Reader) GetMaxDateColumnValue(ctx context.Context, schema, table, colum
 		return nil, fmt.Errorf("invalid column name: %w", err)
 	}
 
+	// SQL Server datetime stores values on 3.33ms ticks. go-mssqldb scans
+	// MAX(datetime) rounded to milliseconds, which can make an equal source
+	// row compare greater than the persisted watermark on the next run. Cast
+	// to datetime2(7) so the scanned high watermark keeps SQL Server's full
+	// comparable precision.
 	query := fmt.Sprintf(
-		"SELECT MAX(%s) FROM %s",
+		"SELECT CONVERT(datetime2(7), MAX(%s)) FROM %s",
 		r.dialect.QuoteIdentifier(column),
 		r.dialect.QualifyTable(schema, table),
 	)

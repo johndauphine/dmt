@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
@@ -186,6 +187,22 @@ func TestWriter_AddColumn(t *testing.T) {
 	}
 	if notNull != 0 {
 		t.Fatalf("added column notnull = %d, want 0", notNull)
+	}
+}
+
+func TestWriter_DropColumnNotNullUnsupported(t *testing.T) {
+	w := &Writer{}
+	err := w.DropColumnNotNull(
+		context.Background(),
+		&driver.Table{Name: "users"},
+		&driver.Column{Name: "email"},
+		"",
+	)
+	if err == nil {
+		t.Fatal("DropColumnNotNull returned nil error")
+	}
+	if !strings.Contains(err.Error(), "cannot relax NOT NULL") {
+		t.Fatalf("error = %q, want unsupported message", err.Error())
 	}
 }
 

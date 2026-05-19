@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -56,14 +57,14 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "mssql",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "[ModifiedDate] > @lastSyncDate",
+			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @lastSyncDate, 126)",
 		},
 		{
 			name:       "mssql with date filter no maxPK",
 			dbType:     "mssql",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "[ModifiedDate] > @lastSyncDate",
+			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @lastSyncDate, 126)",
 		},
 		{
 			name:       "mysql with date filter",
@@ -130,7 +131,7 @@ func TestBuildRowNumberQueryWithDateFilter(t *testing.T) {
 			name:       "mssql with date filter",
 			dbType:     "mssql",
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "[ModifiedDate] > @lastSyncDate",
+			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @lastSyncDate, 126)",
 		},
 		{
 			name:       "mysql with date filter",
@@ -276,6 +277,19 @@ func TestBuildKeysetArgsWithDateFilter(t *testing.T) {
 				// For postgres, timestamp is passed directly
 				if tt.dbType == "postgres" && !found {
 					t.Error("Expected timestamp argument for postgres with date filter")
+				}
+				if tt.dbType == "mssql" {
+					foundString := false
+					for _, arg := range args {
+						named, ok := arg.(sql.NamedArg)
+						if !ok || named.Name != "lastSyncDate" {
+							continue
+						}
+						_, foundString = named.Value.(string)
+					}
+					if !foundString {
+						t.Error("Expected MSSQL lastSyncDate argument as a datetime2 string")
+					}
 				}
 			}
 		})

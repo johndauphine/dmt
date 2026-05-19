@@ -6,22 +6,25 @@ evolution can apply compatible changes to the target before transfer.
 
 ## Current Scope
 
-The first implementation slice supports one safe change type:
+The current implementation supports two safe change types:
 
 - `added_column` in `target_mode: upsert`
+- `nullability_change` in `target_mode: upsert`, only when the source relaxes a
+  column from `NOT NULL` to `NULL`
 
-When enabled with `auto`, DMT adds the new target column before transfer:
+When enabled with `auto`, DMT applies compatible target ALTERs before transfer:
 
 ```yaml
 migration:
   target_mode: upsert
   schema_evolution:
     added_column: auto
+    nullability_change: auto
 ```
 
 Omitting `migration.schema_evolution` keeps drift reporting read-only. If the
-section is present and `added_column` is omitted, the added-column policy
-defaults to `auto`.
+section is present and a supported policy is omitted, that policy defaults to
+`auto`.
 
 ## Added Column Policy
 
@@ -36,6 +39,20 @@ column is `NOT NULL`. Existing target rows need a value, and DMT does not
 backfill historical rows during schema evolution. A later slice can add
 backfill-aware policies.
 
+## Nullability Change Policy
+
+| Policy | Behavior |
+|--------|----------|
+| `auto` | Relax target columns from `NOT NULL` to `NULL`, then continue transfer. |
+| `log` | Leave the target unchanged and continue with the normal drift report. |
+| `fail` | Abort before transfer if any nullability change is detected. |
+
+`auto` does not tighten `NULL` columns to `NOT NULL`. Tightening requires
+proving every existing target row has a non-NULL value and coordinating with
+indexes, constraints, and application writes. DMT reports tightening as an
+unsupported auto-apply change and stops rather than risking a partially applied
+schema.
+
 ## Guardrails
 
 - Schema evolution is evaluated during a fresh migration run. `dmt resume`
@@ -43,11 +60,16 @@ backfill-aware policies.
 - Schema evolution only runs in `upsert` mode. `drop_recreate` already rebuilds
   tables from the current source schema.
 - Identity columns and primary-key columns are not auto-added.
-- Other drift categories remain report-only in this slice, including dropped
-  columns, type changes, nullability changes, defaults, indexes, foreign keys,
-  checks, and table-level changes.
-- Existing type mapping is reused for the new target column type.
+- Identity columns and primary-key columns are not auto-relaxed.
+- Nullability is not auto-relaxed when the same column also has type/default
+  drift, or when the table has primary-key drift.
+- Other drift categories remain report-only, including dropped columns, type
+  changes, defaults, indexes, foreign keys, checks, and table-level changes.
+- Existing type mapping is reused for the new target column type and for
+  engines that require the type while relaxing nullability.
 - The target table must already exist.
+- SQLite targets cannot relax `NOT NULL` in place; that requires a table
+  rebuild and is intentionally not part of this slice.
 
 ## Rollback
 
