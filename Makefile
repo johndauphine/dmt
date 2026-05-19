@@ -2,7 +2,8 @@
         load-fixture-pgbench load-fixture-so2010-minimal \
         load-fixture-so2010-minimal-mssql load-fixture-so2010-minimal-pg \
         load-fixture-so2010-minimal-mysql test-fixtures-load \
-        integration-test integration-test-sqlite integration-test-pair
+        integration-test integration-test-schema-evolution \
+        integration-test-sqlite integration-test-pair
 
 # Build variables
 BINARY_NAME=dmt
@@ -233,7 +234,23 @@ test-fixtures-load: load-fixture-pgbench load-fixture-so2010-minimal
 integration-test: build
 	./scripts/integration-test.sh
 
-# integration-test-pair runs any of the 11 cross-engine directed pairs
+# integration-test-schema-evolution proves added-column schema evolution
+# end-to-end for mssql → postgres (#306). It performs a baseline
+# drop_recreate run, mutates the MSSQL source schema, then runs upsert
+# with migration.schema_evolution.added_column=auto and asserts the new
+# column value reaches PostgreSQL.
+#
+#   make build && make test-dbs-up
+#   make integration-test-schema-evolution
+#
+# Expects:
+#   - dmt binary built (./dmt) — make depends on `build`
+#   - CI: sqlcmd/psql on PATH and services on localhost:1433/5432
+#   - Local: running mssql-test/pg-test or mssql-bench/pg-bench containers
+integration-test-schema-evolution: build
+	./scripts/integration-test-schema-evolution.sh
+
+# integration-test-pair runs any of the 12 cross-engine directed pairs
 # from the nightly matrix (#291), end-to-end against real DB containers.
 # Pair name is required; engines: mssql|pg|mysql|sqlite (same-engine
 # pairs are out of scope — the matrix only covers cross-engine combos).
