@@ -25,6 +25,9 @@ All notable changes to this project will be documented in this file.
   limited to upsert-mode hard-delete settings (#351).
 - Added checkpoint-backed delete reconciliation scheduling state and dry-run
   due/not-due preview output for the #351 runtime rollout.
+- Added reusable primary-key reconciliation primitives that scan source/target
+  key sets, identify target-only keys, and execute parameter-bounded hard
+  deletes for the #351 runtime path.
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).

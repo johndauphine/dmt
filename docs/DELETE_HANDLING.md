@@ -10,7 +10,10 @@ the staged implementation plan. The `migration.deletes` config surface is parsed
 and validated as of #351's first slice, but runtime reconciliation and target
 mutation still land in follow-up work. DMT also records the latest successful
 delete reconciliation in checkpoint state and includes due/not-due scheduling
-metadata in dry-run output when reconciliation is enabled.
+metadata in dry-run output when reconciliation is enabled. The shared
+reconciliation package can already scan source/target primary-key sets,
+identify target-only keys, and execute parameter-bounded target hard deletes;
+the remaining work is wiring that primitive into the run lifecycle.
 
 ## Recommendation
 
@@ -175,7 +178,8 @@ Runtime implementations should expose delete handling clearly:
 Track implementation in separate issues:
 
 1. Implement interval-based key-set reconciliation for primary-key tables in
-   upsert mode, using the existing checkpointed last-success metadata.
+   upsert mode, using the existing checkpointed last-success metadata and
+   shared key reconciliation primitives.
 2. Add structured per-table delete metrics once runtime deletion lands.
 3. Add `target_behavior: soft` with explicit target soft-delete column
    validation and batched updates.
