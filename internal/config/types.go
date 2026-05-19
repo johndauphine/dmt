@@ -195,7 +195,7 @@ type MigrationConfig struct {
 
 	// Validation configures the cross-DB validation passes that run
 	// after data transfer completes (#226). Zero value preserves the
-	// pre-#226 behavior (row-count parity only). See the Validation
+	// pre-#226 behavior (row-count validation only). See the Validation
 	// struct's field docs for the full mode taxonomy.
 	Validation           ValidationConfig `yaml:"validation"`
 	ReadAheadBuffers     int              `yaml:"read_ahead_buffers"`      // Number of chunks to read ahead (default=8)
@@ -346,12 +346,12 @@ func boolPtrDefault(v *bool, def bool) bool {
 
 // ValidationConfig configures the post-transfer validation passes
 // added in #226. The default zero value preserves pre-#226 behavior
-// (row-count parity only); higher modes layer on additional checks
+// (row-count validation only); higher modes layer on additional checks
 // and cost more wall time in proportion to table size.
 //
 // Modes (inclusive — each one runs everything below it):
 //
-//	count_only   row-count parity only (legacy default)
+//	count_only   row-count only (legacy default)
 //	null_parity  + per-column NULL count parity (one query/table)
 //	sample       + N random rows fetched + canonicalized + compared
 //	full         RESERVED for a future iteration; rejected at runtime

@@ -16,12 +16,15 @@ func boolPtr(b bool) *bool { return &b }
 // failures unless the operator explicitly opts in to log-only via
 // the two new fail_on_* flags.
 func TestValidationPolicy_Defaults(t *testing.T) {
-	p := newValidationPolicy(config.ValidationConfig{})
+	p := newValidationPolicy(config.ValidationConfig{}, "drop_recreate")
 	if !p.FailOnTimeout {
 		t.Error("default policy doesn't fail on timeout; #253 requires it does")
 	}
 	if !p.FailOnEstimateMismatch {
 		t.Error("default policy doesn't fail on estimate mismatch; #253 requires it does")
+	}
+	if p.AllowTargetSuperset {
+		t.Error("drop_recreate must keep strict source/target count parity")
 	}
 }
 
@@ -29,12 +32,19 @@ func TestValidationPolicy_ExplicitOptOut(t *testing.T) {
 	p := newValidationPolicy(config.ValidationConfig{
 		FailOnTimeout:          boolPtr(false),
 		FailOnEstimateMismatch: boolPtr(false),
-	})
+	}, "drop_recreate")
 	if p.FailOnTimeout {
 		t.Error("FailOnTimeout: false should disable")
 	}
 	if p.FailOnEstimateMismatch {
 		t.Error("FailOnEstimateMismatch: false should disable")
+	}
+}
+
+func TestValidationPolicy_UpsertEnablesTargetSuperset(t *testing.T) {
+	p := newValidationPolicy(config.ValidationConfig{}, " upsert ")
+	if !p.AllowTargetSuperset {
+		t.Error("upsert mode should allow target row counts greater than source row counts")
 	}
 }
 
@@ -61,6 +71,24 @@ func TestValidationPolicy_Evaluate(t *testing.T) {
 			wantFailed: true,
 		},
 		{
+			name:       "drop_recreate_target_superset_fails",
+			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true},
+			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 101},
+			wantFailed: true,
+		},
+		{
+			name:       "upsert_target_superset_passes",
+			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true, AllowTargetSuperset: true},
+			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 101},
+			wantFailed: false,
+		},
+		{
+			name:       "upsert_target_under_source_fails",
+			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true, AllowTargetSuperset: true},
+			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 99},
+			wantFailed: true,
+		},
+		{
 			// Estimates can match for reasons unrelated to a timeout
 			// (e.g. a future smartconfig that prefers estimates for
 			// huge tables). When exactTimedOut is false, the
@@ -68,6 +96,12 @@ func TestValidationPolicy_Evaluate(t *testing.T) {
 			name:       "estimate_match_passes_when_not_timeout_driven",
 			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true},
 			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 100, usedEstimate: true},
+			wantFailed: false,
+		},
+		{
+			name:       "upsert_estimated_target_superset_passes",
+			policy:     validationPolicy{FailOnTimeout: true, FailOnEstimateMismatch: true, AllowTargetSuperset: true},
+			result:     tableValidationResult{tableName: "t", sourceCount: 100, targetCount: 101, usedEstimate: true},
 			wantFailed: false,
 		},
 		{

@@ -1,13 +1,14 @@
 // Package validation implements cross-DB deep validation passes
-// layered on top of the orchestrator's existing row-count parity
-// check (#226). The package is deliberately independent of the
+// layered on top of the orchestrator's existing row-count check
+// (#226). The package is deliberately independent of the
 // rest of the orchestrator: it takes plain *sql.DB handles +
 // table metadata and returns a structured Result the orchestrator
 // can render.
 //
 // The validation pipeline runs as a sequence of independent passes:
 //
-//   - count_only (existing behavior): COUNT(*) parity per table.
+//   - count_only (existing behavior): COUNT(*) per table. drop_recreate
+//     requires parity; upsert permits the target to be a superset.
 //     Provided by the orchestrator, not this package.
 //   - null_parity: per-column NULL count parity. One aggregation
 //     query per side. Catches systematic NULL drift with strict
@@ -38,9 +39,9 @@ import (
 type Mode string
 
 const (
-	// ModeCountOnly is the legacy behavior — COUNT(*) parity per
-	// table. The default; preserves pre-#226 behavior for
-	// upgrades.
+	// ModeCountOnly is the default COUNT(*) row-count check.
+	// drop_recreate requires parity; upsert permits the target
+	// to be a superset.
 	ModeCountOnly Mode = "count_only"
 	// ModeNullParity adds per-column "how many NULLs?" check.
 	// Cheap: one aggregation per table.
