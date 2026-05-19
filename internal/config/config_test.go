@@ -1961,6 +1961,58 @@ func TestIsValidDriverType(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaEvolutionAddedColumnPolicy(t *testing.T) {
+	base := func(policy SchemaEvolutionPolicy) *Config {
+		return &Config{
+			Source: SourceConfig{
+				Type: "postgres", Host: "src", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Target: TargetConfig{
+				Type: "mssql", Host: "tgt", Port: 1433, Database: "d",
+				User: "u", Password: "p",
+			},
+			Migration: MigrationConfig{
+				TargetMode: "upsert",
+				SchemaEvolution: &SchemaEvolutionConfig{
+					AddedColumn: policy,
+				},
+			},
+		}
+	}
+
+	for _, policy := range []SchemaEvolutionPolicy{"", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail} {
+		t.Run(string(policy), func(t *testing.T) {
+			if err := base(policy).validate(); err != nil {
+				t.Fatalf("validate returned error: %v", err)
+			}
+		})
+	}
+
+	cfg := base("oops")
+	if err := cfg.validate(); err == nil {
+		t.Fatal("validate returned nil error for invalid policy")
+	}
+}
+
+func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
+	disabled := MigrationConfig{}
+	if disabled.SchemaEvolutionEnabled() {
+		t.Fatal("SchemaEvolutionEnabled() = true, want false")
+	}
+	if got := disabled.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("disabled added-column policy = %q, want %q", got, SchemaEvolutionLog)
+	}
+
+	enabled := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{}}
+	if !enabled.SchemaEvolutionEnabled() {
+		t.Fatal("SchemaEvolutionEnabled() = false, want true")
+	}
+	if got := enabled.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
+		t.Fatalf("enabled default added-column policy = %q, want %q", got, SchemaEvolutionAuto)
+	}
+}
+
 func TestConfigValidationWithAliases(t *testing.T) {
 	// Test that config validation accepts driver aliases
 	tests := []struct {

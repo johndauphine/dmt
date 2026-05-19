@@ -60,6 +60,56 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	return nil
 }
 
+// AddColumn adds a nullable column to an existing target table. It is
+// idempotent so interrupted schema-evolution runs can be retried safely.
+func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return fmt.Errorf("column is required")
+	}
+
+	exists, err := w.columnExists(ctx, targetSchema, t.Name, column.Name)
+	if err != nil {
+		return fmt.Errorf("checking column %s.%s.%s: %w", targetSchema, t.Name, column.Name, err)
+	}
+	if exists {
+		return nil
+	}
+
+	ddl, err := w.buildAddColumnSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Adding SQL Server column with DDL: %s", ddl)
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) columnExists(ctx context.Context, schema, table, column string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT CASE WHEN EXISTS (
+			SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table AND COLUMN_NAME = @column
+		) THEN 1 ELSE 0 END
+	`, sql.Named("schema", schema), sql.Named("table", table), sql.Named("column", column)).Scan(&exists)
+	return exists == 1, err
+}
+
+func (w *Writer) buildAddColumnSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "mssql", *column)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("ALTER TABLE %s ADD %s %s NULL",
+		w.dialect.QualifyTable(targetSchema, t.Name),
+		w.dialect.QuoteIdentifier(column.Name),
+		mappedType), nil
+}
+
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	_, err := w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", w.dialect.QualifyTable(schema, table)))

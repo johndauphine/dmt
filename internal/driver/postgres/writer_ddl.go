@@ -59,6 +59,60 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	return nil
 }
 
+// AddColumn adds a nullable column to an existing target table. It is
+// idempotent so interrupted schema-evolution runs can be retried safely.
+func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return fmt.Errorf("column is required")
+	}
+
+	sanitizedTable := sanitizePGTableName(t.Name)
+	sanitizedColumn := sanitizePGIdentifier(column.Name)
+	exists, err := w.columnExists(ctx, targetSchema, sanitizedTable, sanitizedColumn)
+	if err != nil {
+		return fmt.Errorf("checking column %s.%s.%s: %w", targetSchema, sanitizedTable, sanitizedColumn, err)
+	}
+	if exists {
+		return nil
+	}
+
+	ddl, err := w.buildAddColumnSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Adding PostgreSQL column with DDL: %s", ddl)
+	_, err = w.pool.Exec(ctx, ddl)
+	return err
+}
+
+func (w *Writer) columnExists(ctx context.Context, schema, table, column string) (bool, error) {
+	var exists bool
+	err := w.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+		)
+	`, schema, table, column).Scan(&exists)
+	return exists, err
+}
+
+func (w *Writer) buildAddColumnSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "postgres", *column)
+	if err != nil {
+		return "", err
+	}
+
+	sanitizedTable := sanitizePGTableName(t.Name)
+	sanitizedColumn := sanitizePGIdentifier(column.Name)
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s NULL",
+		w.dialect.QualifyTable(targetSchema, sanitizedTable),
+		w.dialect.QuoteIdentifier(sanitizedColumn),
+		mappedType), nil
+}
+
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	sanitizedTable := sanitizePGTableName(table)

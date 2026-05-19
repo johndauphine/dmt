@@ -144,7 +144,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		o.state.CompleteRun(run.ID, "failed", "no tables to migrate after applying filters")
 		return fmt.Errorf("no tables to migrate after applying filters")
 	}
-	if err := o.reportSchemaDrift(tables); err != nil {
+	if _, err := o.reportSchemaDrift(tables, false); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return err

@@ -93,6 +93,16 @@ func (c *Config) validate() error {
 			c.Migration.ApproxTypeAction)
 	}
 
+	if c.Migration.SchemaEvolution != nil {
+		switch c.Migration.SchemaEvolution.AddedColumn {
+		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail:
+			// Valid. Empty means the section-level default: auto.
+		default:
+			return fmt.Errorf("migration.schema_evolution.added_column must be 'auto', 'log', or 'fail'; got %q",
+				c.Migration.SchemaEvolution.AddedColumn)
+		}
+	}
+
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
 	return nil

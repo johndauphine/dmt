@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -23,21 +24,21 @@ func (e *SchemaDriftError) Error() string {
 
 func (e *SchemaDriftError) ExitCode() int { return exitcodes.TransferError }
 
-func (o *Orchestrator) reportSchemaDrift(tables []source.Table) error {
+func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolution bool) (drift.Report, error) {
 	records, err := o.state.GetLatestSchemaSnapshots(o.schemaSnapshotNamespace())
 	if err != nil {
-		return fmt.Errorf("loading schema snapshots: %w", err)
+		return drift.Report{}, fmt.Errorf("loading schema snapshots: %w", err)
 	}
 	if len(records) == 0 {
 		logging.Debug("No previous schema snapshot found; baseline will be captured after a successful run")
-		return nil
+		return drift.Report{}, nil
 	}
 
 	previous := make([]drift.TableSnapshot, 0, len(records))
 	for _, record := range records {
 		snapshot, err := drift.UnmarshalTableSnapshot(record.SchemaJSON)
 		if err != nil {
-			return fmt.Errorf("decoding schema snapshot for %s.%s: %w",
+			return drift.Report{}, fmt.Errorf("decoding schema snapshot for %s.%s: %w",
 				record.SourceSchema, record.TableName, err)
 		}
 		if o.tableInCurrentFilterScope(snapshot.Name) {
@@ -48,18 +49,50 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table) error {
 	report := drift.Compare(previous, drift.BuildTableSnapshots(tables))
 	if !report.HasChanges() {
 		logging.Debug("No schema drift detected")
-		return nil
+		return drift.Report{}, nil
 	}
 
-	logging.Warn("%s", report.Format())
+	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooter(report, allowSchemaEvolution)))
 	o.auditEvent("schema_drift_detected", map[string]any{
 		"tables_affected": report.TablesAffected(),
 		"changes":         len(report.Changes),
 	})
 	if o.config.Migration.FailOnSchemaDrift {
-		return &SchemaDriftError{Report: report}
+		return report, &SchemaDriftError{Report: report}
 	}
-	return nil
+	return report, nil
+}
+
+func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
+	if !allowSchemaEvolution || !o.config.Migration.SchemaEvolutionEnabled() {
+		return "No automatic schema alignment will be applied (read-only mode)."
+	}
+	if o.config.Migration.FailOnSchemaDrift {
+		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
+	}
+	if o.config.Migration.TargetMode != "upsert" {
+		return fmt.Sprintf("Schema evolution is configured, but target_mode=%s will not apply target ALTERs.",
+			o.config.Migration.TargetMode)
+	}
+
+	addedColumns := len(addedColumnChanges(report))
+	if addedColumns == 0 {
+		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
+	}
+
+	switch o.config.Migration.AddedColumnSchemaEvolutionPolicy() {
+	case config.SchemaEvolutionAuto:
+		return fmt.Sprintf("Schema evolution added_column=auto; %d added column(s) may be applied before transfer.",
+			addedColumns)
+	case config.SchemaEvolutionLog:
+		return fmt.Sprintf("Schema evolution added_column=log; %d added column(s) will be reported only.",
+			addedColumns)
+	case config.SchemaEvolutionFail:
+		return fmt.Sprintf("Schema evolution added_column=fail; %d added column(s) will abort before transfer.",
+			addedColumns)
+	default:
+		return "Schema evolution is configured, but the added_column policy is invalid."
+	}
 }
 
 func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Table) {

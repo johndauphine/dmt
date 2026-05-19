@@ -76,6 +76,13 @@ migration:
   # report before transfer. Set true to abort when any drift is detected.
   fail_on_schema_drift: false
 
+  # Schema evolution (#306). Omit this section to keep schema drift
+  # reporting read-only. In upsert mode, adding this section opts into
+  # compatible target ALTERs before transfer. For this first slice,
+  # only added_column is implemented.
+  # schema_evolution:
+  #   added_column: auto  # auto | log | fail (section default: auto)
+
   # Validation options
   sample_validation: false      # Enable sample data validation after row count check
   sample_size: 100              # Number of random rows to sample per table

@@ -103,6 +103,23 @@ type AITypeMappingConfig struct {
 	CacheFile string `yaml:"cache_file"`
 }
 
+// SchemaEvolutionPolicy controls how DMT handles one schema drift category.
+type SchemaEvolutionPolicy string
+
+const (
+	SchemaEvolutionAuto SchemaEvolutionPolicy = "auto"
+	SchemaEvolutionLog  SchemaEvolutionPolicy = "log"
+	SchemaEvolutionFail SchemaEvolutionPolicy = "fail"
+)
+
+// SchemaEvolutionConfig controls opt-in target schema changes after source
+// schema drift is detected. A nil config keeps drift reporting read-only.
+type SchemaEvolutionConfig struct {
+	// AddedColumn controls added source columns. When the section is present
+	// but this field is omitted, added columns default to auto-apply.
+	AddedColumn SchemaEvolutionPolicy `yaml:"added_column,omitempty" json:"added_column,omitempty"`
+}
+
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
 	MaxSourceConnections   int      `yaml:"max_source_connections"` // Max source database connections
@@ -123,8 +140,11 @@ type MigrationConfig struct {
 	// pre-transfer gate. It is exit policy, not data-plane behavior, so it
 	// must stay out of the resume config hash.
 	FailOnSchemaDrift bool `yaml:"fail_on_schema_drift" json:"-"`
-	SampleValidation  bool `yaml:"sample_validation"` // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
-	SampleSize        int  `yaml:"sample_size"`       // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+	// SchemaEvolution applies compatible source drift to the target before
+	// transfer. Omit the section to keep drift reporting read-only.
+	SchemaEvolution  *SchemaEvolutionConfig `yaml:"schema_evolution,omitempty" json:"schema_evolution,omitempty"`
+	SampleValidation bool                   `yaml:"sample_validation"` // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
+	SampleSize       int                    `yaml:"sample_size"`       // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
 	// AllowPartial controls the exit-code contract when one or more
 	// tables fail to transfer. Default (false) returns a
 	// PartialMigrationError so unattended automation (Airflow, k8s
@@ -296,6 +316,25 @@ func (m MigrationConfig) CreateIndexesEnabled() bool {
 // CreateForeignKeysEnabled returns the effective create_foreign_keys setting.
 func (m MigrationConfig) CreateForeignKeysEnabled() bool {
 	return boolPtrDefault(m.CreateForeignKeys, true)
+}
+
+// SchemaEvolutionEnabled returns true when the operator opted into target-side
+// schema evolution by adding migration.schema_evolution to the config.
+func (m MigrationConfig) SchemaEvolutionEnabled() bool {
+	return m.SchemaEvolution != nil
+}
+
+// AddedColumnSchemaEvolutionPolicy returns the effective added-column policy.
+// The absent section preserves read-only drift reporting. Once the section is
+// present, omitted added_column defaults to auto.
+func (m MigrationConfig) AddedColumnSchemaEvolutionPolicy() SchemaEvolutionPolicy {
+	if m.SchemaEvolution == nil {
+		return SchemaEvolutionLog
+	}
+	if m.SchemaEvolution.AddedColumn == "" {
+		return SchemaEvolutionAuto
+	}
+	return m.SchemaEvolution.AddedColumn
 }
 
 func boolPtrDefault(v *bool, def bool) bool {

@@ -703,7 +703,7 @@ func TestReportSchemaDrift_FailOnSchemaDriftReturnsError(t *testing.T) {
 		auditor: audit.Disabled(),
 	}
 
-	err = o.reportSchemaDrift(current)
+	_, err = o.reportSchemaDrift(current, true)
 	var driftErr *SchemaDriftError
 	if !errors.As(err, &driftErr) {
 		t.Fatalf("reportSchemaDrift error = %T (%v), want *SchemaDriftError", err, err)
@@ -761,7 +761,7 @@ func TestReportSchemaDrift_IgnoresSnapshotsExcludedByCurrentFilters(t *testing.T
 		},
 		PrimaryKey: []string{"id"},
 	}}
-	if err := o.reportSchemaDrift(current); err != nil {
+	if _, err := o.reportSchemaDrift(current, true); err != nil {
 		t.Fatalf("reportSchemaDrift returned excluded-table drift: %v", err)
 	}
 }

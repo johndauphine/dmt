@@ -70,6 +70,32 @@ func TestAvailableDrivers(t *testing.T) {
 	}
 }
 
+func TestBuildAddColumnSQL(t *testing.T) {
+	w := &Writer{
+		dialect:    &Dialect{},
+		typeMapper: driver.NewDeterministicMapper(),
+		sourceType: "postgres",
+	}
+	got, err := w.buildAddColumnSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email Address", DataType: "varchar", MaxLength: 255},
+		"public",
+	)
+	if err != nil {
+		t.Fatalf("buildAddColumnSQL returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		`ALTER TABLE "public"."users" ADD COLUMN`,
+		`"email_address"`,
+		"NULL",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SQL %q missing %q", got, want)
+		}
+	}
+}
+
 func TestEstimateRowBytes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -77,8 +103,8 @@ func TestEstimateRowBytes(t *testing.T) {
 		want int // minimum expected
 	}{
 		{"empty rows", nil, 64},
-		{"narrow int rows", [][]any{{1, 2, 3}}, 64},            // 3*8=24, clamped to 64
-		{"string rows", [][]any{{"hello world", 42}}, 64},      // 11+8=19, clamped to 64
+		{"narrow int rows", [][]any{{1, 2, 3}}, 64},       // 3*8=24, clamped to 64
+		{"string rows", [][]any{{"hello world", 42}}, 64}, // 11+8=19, clamped to 64
 		{"wide rows", [][]any{{string(make([]byte, 10000))}}, 10000},
 		{"mixed", [][]any{
 			{string(make([]byte, 500)), 1, true},

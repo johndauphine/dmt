@@ -71,6 +71,32 @@ func TestAvailableDrivers(t *testing.T) {
 	}
 }
 
+func TestBuildAddColumnSQL(t *testing.T) {
+	w := &Writer{
+		dialect:    &Dialect{},
+		typeMapper: driver.NewDeterministicMapper(),
+		sourceType: "postgres",
+	}
+	got, err := w.buildAddColumnSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email", DataType: "varchar", MaxLength: 255},
+		"dbo",
+	)
+	if err != nil {
+		t.Fatalf("buildAddColumnSQL returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		"ALTER TABLE [dbo].[Users] ADD",
+		"[Email]",
+		"NULL",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SQL %q missing %q", got, want)
+		}
+	}
+}
+
 func TestQuoteIdentifierWithSpecialChars(t *testing.T) {
 	dialect := &Dialect{}
 

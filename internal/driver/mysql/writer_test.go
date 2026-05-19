@@ -1,7 +1,10 @@
 package mysql
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/johndauphine/dmt/internal/driver"
 )
 
 func TestConvertRowValues(t *testing.T) {
@@ -73,5 +76,31 @@ func TestConvertRowValues(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildAddColumnSQL(t *testing.T) {
+	w := &Writer{
+		dialect:    &Dialect{},
+		typeMapper: driver.NewDeterministicMapper(),
+		sourceType: "postgres",
+	}
+	got, err := w.buildAddColumnSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email", DataType: "varchar", MaxLength: 255},
+		"app",
+	)
+	if err != nil {
+		t.Fatalf("buildAddColumnSQL returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		"ALTER TABLE `app`.`Users` ADD COLUMN",
+		"`Email`",
+		"NULL",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SQL %q missing %q", got, want)
+		}
 	}
 }
