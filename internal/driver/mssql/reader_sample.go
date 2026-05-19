@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 func (r *Reader) GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool) {
@@ -85,27 +86,10 @@ func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column s
 		WHERE %s IS NOT NULL
 	`, r.dialect.QuoteIdentifier(column), r.dialect.QualifyTable(schema, table), r.dialect.QuoteIdentifier(column))
 
-	rows, err := r.db.QueryContext(ctx, query, sql.Named("limit", limit))
+	samples, err := shared.QuerySampleColumnValues(ctx, r.db, query, sql.Named("limit", limit))
 	if err != nil {
 		return nil, fmt.Errorf("sampling column %s: %w", column, err)
 	}
-	defer rows.Close()
-
-	var samples []string
-	for rows.Next() {
-		var val sql.NullString
-		if err := rows.Scan(&val); err != nil {
-			return nil, fmt.Errorf("scanning sample value: %w", err)
-		}
-		if val.Valid {
-			samples = append(samples, val.String)
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reading samples: %w", err)
-	}
-
 	return samples, nil
 }
 
@@ -141,7 +125,7 @@ func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns [
 		strings.Join(quotedCols, ", "),
 		r.dialect.QualifyTable(schema, table))
 
-	result, err := driver.SampleRowsHelper(ctx, r.db, query, columns, limit, sql.Named("limit", limit))
+	result, err := shared.QuerySampleRows(ctx, r.db, query, columns, limit, sql.Named("limit", limit))
 	if err != nil {
 		return nil, fmt.Errorf("sampling rows from %s: %w", table, err)
 	}
