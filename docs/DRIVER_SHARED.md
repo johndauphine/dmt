@@ -37,6 +37,8 @@ multiple drivers and do not hide engine-specific behavior:
 - quoted identifier lists built from a dialect's existing quoting rules
 - multi-row placeholder groups built from a dialect's placeholder rules
 - row-shape validation and argument flattening
+- ordered primary-key scan statements for engine-agnostic key-set comparison
+- bounded primary-key delete predicates for reconciliation-style cleanup
 - batch slicing and effective batch-size selection
 - stable preflight finding builders
 - reader control-flow helpers when pagination semantics are already delegated
@@ -71,13 +73,16 @@ later PR proves that the shared form is clearer and behavior-preserving:
 1. Add `internal/driver/shared` with tested SQL-shape primitives and this
    architecture note. Do not migrate concrete driver behavior in this first
    slice.
-2. Migrate one low-risk writer path, likely MySQL or SQLite multi-row INSERT
+2. Add reconciliation-oriented SQL-shape helpers for ordered key scans and
+   bounded key deletes so delete propagation (#351) can reuse one tested shape
+   across target engines.
+3. Migrate one low-risk writer path, likely MySQL or SQLite multi-row INSERT
    construction, to the shared helpers.
-3. Extract shared batch slicing and row-shape validation once the first writer
+4. Extract shared batch slicing and row-shape validation once the first writer
    migration proves the API shape.
-4. Look for reader pagination and preflight result-building helpers after the
+5. Look for reader pagination and preflight result-building helpers after the
    writer duplication is smaller.
-5. Revisit catalog-driven engine work after the native driver code is drier, so
+6. Revisit catalog-driven engine work after the native driver code is drier, so
    any configuration or catalog approach builds on a cleaner foundation.
 
 ## Acceptance Criteria For Each Slice

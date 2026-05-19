@@ -17,6 +17,12 @@ type PlaceholderFormatter interface {
 	ParameterPlaceholder(index int) string
 }
 
+// TableQualifier is implemented by driver dialects that can render a fully
+// qualified table reference.
+type TableQualifier interface {
+	QualifyTable(schema, table string) string
+}
+
 // QuotedColumnList returns a comma-separated list of quoted column names.
 func QuotedColumnList(quoter IdentifierQuoter, columns []string) string {
 	if len(columns) == 0 {
@@ -28,6 +34,31 @@ func QuotedColumnList(quoter IdentifierQuoter, columns []string) string {
 		quoted[i] = quoter.QuoteIdentifier(column)
 	}
 	return strings.Join(quoted, ", ")
+}
+
+// OrderedKeySelect returns a SELECT statement that scans primary-key columns in
+// deterministic key order.
+func OrderedKeySelect(
+	qualifier TableQualifier,
+	quoter IdentifierQuoter,
+	schema, table string,
+	keyColumns []string,
+) (string, error) {
+	if qualifier == nil {
+		return "", fmt.Errorf("ordered key select: qualifier is nil")
+	}
+	if quoter == nil {
+		return "", fmt.Errorf("ordered key select: quoter is nil")
+	}
+	if len(keyColumns) == 0 {
+		return "", fmt.Errorf("ordered key select: key columns are required")
+	}
+	if table == "" {
+		return "", fmt.Errorf("ordered key select: table is required")
+	}
+
+	keyList := QuotedColumnList(quoter, keyColumns)
+	return fmt.Sprintf("SELECT %s FROM %s ORDER BY %s", keyList, qualifier.QualifyTable(schema, table), keyList), nil
 }
 
 // MultiRowPlaceholders returns comma-separated placeholder groups for a
@@ -67,6 +98,89 @@ func MultiRowPlaceholdersFrom(formatter PlaceholderFormatter, firstIndex, rowCou
 	}
 
 	return strings.Join(rows, ", "), nil
+}
+
+// KeyEqualityPredicate returns an equality predicate for one key tuple and the
+// next 1-based parameter index.
+func KeyEqualityPredicate(
+	quoter IdentifierQuoter,
+	formatter PlaceholderFormatter,
+	keyColumns []string,
+	firstIndex int,
+) (string, int, error) {
+	if quoter == nil {
+		return "", firstIndex, fmt.Errorf("key equality predicate: quoter is nil")
+	}
+	if formatter == nil {
+		return "", firstIndex, fmt.Errorf("key equality predicate: formatter is nil")
+	}
+	if firstIndex < 1 {
+		return "", firstIndex, fmt.Errorf("key equality predicate: first index must be positive")
+	}
+	if len(keyColumns) == 0 {
+		return "", firstIndex, fmt.Errorf("key equality predicate: key columns are required")
+	}
+
+	nextIndex := firstIndex
+	parts := make([]string, len(keyColumns))
+	for i, column := range keyColumns {
+		parts[i] = fmt.Sprintf("%s = %s", quoter.QuoteIdentifier(column), formatter.ParameterPlaceholder(nextIndex))
+		nextIndex++
+	}
+	return strings.Join(parts, " AND "), nextIndex, nil
+}
+
+// KeyBatchPredicate returns an OR-of-ANDs predicate for a batch of key tuples
+// and the next 1-based parameter index.
+func KeyBatchPredicate(
+	quoter IdentifierQuoter,
+	formatter PlaceholderFormatter,
+	keyColumns []string,
+	rowCount, firstIndex int,
+) (string, int, error) {
+	if rowCount <= 0 {
+		return "", firstIndex, fmt.Errorf("key batch predicate: row count must be positive")
+	}
+
+	nextIndex := firstIndex
+	rows := make([]string, rowCount)
+	for row := range rows {
+		predicate, next, err := KeyEqualityPredicate(quoter, formatter, keyColumns, nextIndex)
+		if err != nil {
+			return "", firstIndex, err
+		}
+		if len(keyColumns) > 1 {
+			rows[row] = "(" + predicate + ")"
+		} else {
+			rows[row] = predicate
+		}
+		nextIndex = next
+	}
+	return "(" + strings.Join(rows, " OR ") + ")", nextIndex, nil
+}
+
+// DeleteByKeyBatch returns a DELETE statement for a bounded batch of key tuples
+// and the next 1-based parameter index.
+func DeleteByKeyBatch(
+	qualifier TableQualifier,
+	quoter IdentifierQuoter,
+	formatter PlaceholderFormatter,
+	schema, table string,
+	keyColumns []string,
+	rowCount, firstIndex int,
+) (string, int, error) {
+	if qualifier == nil {
+		return "", firstIndex, fmt.Errorf("delete by key batch: qualifier is nil")
+	}
+	if table == "" {
+		return "", firstIndex, fmt.Errorf("delete by key batch: table is required")
+	}
+
+	predicate, nextIndex, err := KeyBatchPredicate(quoter, formatter, keyColumns, rowCount, firstIndex)
+	if err != nil {
+		return "", firstIndex, fmt.Errorf("delete by key batch: %w", err)
+	}
+	return fmt.Sprintf("DELETE FROM %s WHERE %s", qualifier.QualifyTable(schema, table), predicate), nextIndex, nil
 }
 
 // FlattenRows validates and flattens row-major values into a single argument
