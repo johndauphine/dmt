@@ -48,6 +48,8 @@ type StateBackend interface {
 	// stable across retries, resumes, and separate CLI invocations.
 	GetDeleteReconciliationState(sourceSchema, targetSchema string) (*DeleteReconciliationState, error)
 	RecordDeleteReconciliationSuccess(runID, sourceSchema, targetSchema string, completedAt time.Time) error
+	SaveDeleteReconciliationTable(runID string, record DeleteReconciliationTableRecord) error
+	GetDeleteReconciliationTables(runID string) ([]DeleteReconciliationTableRecord, error)
 
 	// Source schema drift snapshots (#305). Stored per source schema/table so a
 	// fresh run can compare the current source definition to the last successful
@@ -117,6 +119,18 @@ type DeleteReconciliationState struct {
 	TargetSchema  string    `json:"target_schema"`
 	LastRunID     string    `json:"last_run_id"`
 	LastSuccessAt time.Time `json:"last_success_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// DeleteReconciliationTableRecord records one table's delete reconciliation
+// result for a run.
+type DeleteReconciliationTableRecord struct {
+	RunID         string    `json:"run_id"`
+	TableName     string    `json:"table_name"`
+	CandidateRows int64     `json:"candidate_rows"`
+	DeletedRows   int64     `json:"deleted_rows"`
+	Skipped       bool      `json:"skipped"`
+	SkipReason    string    `json:"skip_reason,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 

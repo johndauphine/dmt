@@ -14,7 +14,9 @@ metadata in dry-run output when reconciliation is enabled. The shared
 reconciliation package can already scan source/target primary-key sets,
 identify target-only keys, and execute parameter-bounded target hard deletes;
 the runtime path now invokes that primitive before validation when interval
-scheduling says reconciliation is due.
+scheduling says reconciliation is due. Reconciliation results are persisted per
+table and included in run summaries so operators can see candidate, deleted, and
+skipped counts after a reconciliation pass.
 
 ## Recommendation
 
@@ -167,8 +169,8 @@ Runtime implementations should expose delete handling clearly:
 - config validation rejects unsupported combinations before transfer
 - dry-run output reports whether reconciliation is due, the prior successful
   reconciliation time, and primary-key table eligibility
-- run logs should report delete mode, target behavior, tables evaluated, rows
-  marked or deleted, and skipped tables
+- run logs and completion summaries should report delete mode, target behavior,
+  tables evaluated, rows marked or deleted, and skipped tables
 - reconciliation should distinguish "not due" from "ran and found zero deletes"
 - validation in upsert mode should account for enabled delete propagation instead
   of always permitting extra target rows
@@ -178,8 +180,8 @@ Runtime implementations should expose delete handling clearly:
 
 Track implementation in separate issues:
 
-1. Add structured per-table delete metrics and summary output for runtime
-   reconciliation.
+1. Add notification-specific delete metrics if Slack or other sinks need a more
+   structured payload than the shared completion summary.
 2. Add candidate delete counts to dry-run output when a full key scan is
    acceptable for the operator.
 3. Add `target_behavior: soft` with explicit target soft-delete column

@@ -173,6 +173,13 @@ func TestRunDeleteReconciliationDeletesTargetOnlyRows(t *testing.T) {
 		t.Fatalf("record success calls/run = %d/%q, want 1/run-delete",
 			state.recordCalls, state.recordRunID)
 	}
+	if len(state.savedTables) != 1 {
+		t.Fatalf("saved table records = %d, want 1", len(state.savedTables))
+	}
+	if state.savedTables[0].CandidateRows != 2 || state.savedTables[0].DeletedRows != 2 {
+		t.Fatalf("saved candidate/deleted = %d/%d, want 2/2",
+			state.savedTables[0].CandidateRows, state.savedTables[0].DeletedRows)
+	}
 	if got := countDeleteRuntimeRows(t, targetDB); got != 2 {
 		t.Fatalf("target row count = %d, want 2", got)
 	}
@@ -218,6 +225,41 @@ func TestRunDeleteReconciliationSkipsWhenIntervalNotDue(t *testing.T) {
 	}
 }
 
+func TestRunDeleteReconciliationSummarizesAllNoPKTables(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	defer sourceDB.Close()
+	targetDB := openDeleteRuntimeDB(t)
+	defer targetDB.Close()
+
+	state := &deletePreviewState{}
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, state)
+	result, err := orch.runDeleteReconciliation(
+		context.Background(),
+		"run-delete",
+		[]source.Table{{Name: "logs"}},
+	)
+	if err != nil {
+		t.Fatalf("runDeleteReconciliation() error: %v", err)
+	}
+	if result.Preview == nil || result.Preview.Due {
+		t.Fatalf("Preview.Due = %v, want false for no eligible tables", result.Preview)
+	}
+	if len(result.TableResults) != 1 || !result.TableResults[0].Skipped {
+		t.Fatalf("table results = %#v, want one skipped result", result.TableResults)
+	}
+	if len(state.savedTables) != 1 {
+		t.Fatalf("saved table records = %d, want 1", len(state.savedTables))
+	}
+	if state.savedTables[0].TableName != ".logs" ||
+		!state.savedTables[0].Skipped ||
+		state.savedTables[0].SkipReason != "no primary key" {
+		t.Fatalf("saved no-PK record = %#v, want skipped .logs", state.savedTables[0])
+	}
+	if state.recordCalls != 0 {
+		t.Fatalf("record success calls = %d, want 0", state.recordCalls)
+	}
+}
+
 func deletePreviewConfig(enabled bool) *config.Config {
 	cfg := &config.Config{}
 	cfg.Source.Schema = "dbo"
@@ -249,6 +291,7 @@ type deletePreviewState struct {
 	calls       int
 	recordCalls int
 	recordRunID string
+	savedTables []checkpoint.DeleteReconciliationTableRecord
 }
 
 func (s *deletePreviewState) GetDeleteReconciliationState(
@@ -269,6 +312,21 @@ func (s *deletePreviewState) RecordDeleteReconciliationSuccess(
 	s.recordRunID = runID
 	_, _, _ = sourceSchema, targetSchema, completedAt
 	return s.recordErr
+}
+
+func (s *deletePreviewState) SaveDeleteReconciliationTable(
+	runID string,
+	record checkpoint.DeleteReconciliationTableRecord,
+) error {
+	record.RunID = runID
+	s.savedTables = append(s.savedTables, record)
+	return nil
+}
+
+func (s *deletePreviewState) GetDeleteReconciliationTables(
+	string,
+) ([]checkpoint.DeleteReconciliationTableRecord, error) {
+	return nil, nil
 }
 
 type deleteRuntimeSourcePool struct {

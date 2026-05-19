@@ -271,6 +271,17 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 		return 0, fmt.Errorf("deleting old fallback events: %w", err)
 	}
 
+	// Delete old delete-reconciliation table summaries.
+	_, err = s.db.Exec(`
+		DELETE FROM delete_reconciliation_tables WHERE run_id IN (
+			SELECT id FROM runs
+			WHERE completed_at < ? AND status IN ('success', 'failed')
+		)
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old delete reconciliation tables: %w", err)
+	}
+
 	// Delete old tasks
 	_, err = s.db.Exec(`
 		DELETE FROM tasks WHERE run_id IN (

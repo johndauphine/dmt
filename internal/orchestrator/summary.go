@@ -8,19 +8,20 @@ import (
 
 // MigrationSummary is the human-readable daily-ops view of a completed run.
 type MigrationSummary struct {
-	RunID           string
-	Status          string
-	StartedAt       time.Time
-	CompletedAt     time.Time
-	Duration        time.Duration
-	TablesTotal     int
-	TablesSuccess   int
-	TablesFailed    int
-	RowsTransferred int64
-	RowsPerSecond   int64
-	TableStats      []TableResult
-	FailedTables    []string
-	Error           string
+	RunID                string
+	Status               string
+	StartedAt            time.Time
+	CompletedAt          time.Time
+	Duration             time.Duration
+	TablesTotal          int
+	TablesSuccess        int
+	TablesFailed         int
+	RowsTransferred      int64
+	RowsPerSecond        int64
+	TableStats           []TableResult
+	DeleteReconciliation *DeleteReconciliationSummary
+	FailedTables         []string
+	Error                string
 }
 
 // BuildMigrationSummary projects persisted run result data into the summary
@@ -42,8 +43,11 @@ func BuildMigrationSummary(result *MigrationResult) *MigrationSummary {
 		RowsTransferred: result.RowsTransferred,
 		RowsPerSecond:   result.RowsPerSecond,
 		TableStats:      append([]TableResult(nil), result.TableStats...),
-		FailedTables:    append([]string(nil), result.FailedTables...),
-		Error:           result.Error,
+		DeleteReconciliation: cloneDeleteReconciliationSummary(
+			result.DeleteReconciliation,
+		),
+		FailedTables: append([]string(nil), result.FailedTables...),
+		Error:        result.Error,
 	}
 }
 
@@ -96,6 +100,29 @@ func FormatSummary(summary *MigrationSummary) string {
 		}
 	}
 
+	if summary.DeleteReconciliation != nil {
+		writeSummaryLine(&sb, "Deletes", fmt.Sprintf("%s candidate, %s deleted",
+			FormatCount(summary.DeleteReconciliation.CandidateRows),
+			FormatCount(summary.DeleteReconciliation.DeletedRows)))
+		if len(summary.DeleteReconciliation.Tables) > 0 {
+			sb.WriteString("\nDelete reconciliation:\n")
+			for _, table := range summary.DeleteReconciliation.Tables {
+				line := fmt.Sprintf("  %-30s %12s candidate  %12s deleted",
+					table.Table,
+					FormatCount(table.CandidateRows),
+					FormatCount(table.DeletedRows))
+				if table.Skipped {
+					line += "  skipped"
+					if table.SkipReason != "" {
+						line += ": " + table.SkipReason
+					}
+				}
+				sb.WriteString(line)
+				sb.WriteByte('\n')
+			}
+		}
+	}
+
 	if len(summary.FailedTables) > 0 {
 		sb.WriteString("\nFailed tables:\n")
 		for _, table := range summary.FailedTables {
@@ -107,6 +134,17 @@ func FormatSummary(summary *MigrationSummary) string {
 	}
 	sb.WriteString("==========================================\n")
 	return sb.String()
+}
+
+func cloneDeleteReconciliationSummary(
+	summary *DeleteReconciliationSummary,
+) *DeleteReconciliationSummary {
+	if summary == nil {
+		return nil
+	}
+	out := *summary
+	out.Tables = append([]DeleteReconciliationTableSummary(nil), summary.Tables...)
+	return &out
 }
 
 func writeSummaryLine(sb *strings.Builder, label, value string) {

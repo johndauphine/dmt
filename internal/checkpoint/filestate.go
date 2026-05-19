@@ -73,6 +73,10 @@ type fileStateData struct {
 	// sourceSchema -> targetSchema to avoid delimiter collisions in
 	// quoted identifiers.
 	DeleteReconciliations map[string]map[string]deleteReconciliationState `yaml:"delete_reconciliations,omitempty"`
+
+	// DeleteReconciliationTables records per-table delete reconciliation
+	// results for the current run.
+	DeleteReconciliationTables map[string]deleteReconciliationTableState `yaml:"delete_reconciliation_tables,omitempty"`
 }
 
 // fallbackEventState is one persisted fallback record. Mirrors
@@ -95,6 +99,14 @@ type schemaSnapshotState struct {
 type deleteReconciliationState struct {
 	LastRunID     string    `yaml:"last_run_id"`
 	LastSuccessAt time.Time `yaml:"last_success_at"`
+	UpdatedAt     time.Time `yaml:"updated_at"`
+}
+
+type deleteReconciliationTableState struct {
+	CandidateRows int64     `yaml:"candidate_rows"`
+	DeletedRows   int64     `yaml:"deleted_rows"`
+	Skipped       bool      `yaml:"skipped,omitempty"`
+	SkipReason    string    `yaml:"skip_reason,omitempty"`
 	UpdatedAt     time.Time `yaml:"updated_at"`
 }
 

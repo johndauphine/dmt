@@ -31,6 +31,9 @@ All notable changes to this project will be documented in this file.
 - Added the first runtime delete-reconciliation pass for upsert mode, wiring
   interval-gated primary-key reconciliation into run and resume before
   validation.
+- Added persisted per-table delete-reconciliation counts to run results and
+  operator summaries so delete runs report candidate and deleted row counts
+  by table (#351).
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).

@@ -66,3 +66,77 @@ func (s *State) RecordDeleteReconciliationSuccess(
 	`, sourceSchema, targetSchema, runID, ts, ts)
 	return err
 }
+
+func (s *State) SaveDeleteReconciliationTable(
+	runID string,
+	record DeleteReconciliationTableRecord,
+) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	skipReason := sql.NullString{
+		String: record.SkipReason,
+		Valid:  record.SkipReason != "",
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO delete_reconciliation_tables
+			(run_id, table_name, candidate_rows, deleted_rows, skipped, skip_reason, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, table_name) DO UPDATE SET
+			candidate_rows = excluded.candidate_rows,
+			deleted_rows = excluded.deleted_rows,
+			skipped = excluded.skipped,
+			skip_reason = excluded.skip_reason,
+			updated_at = excluded.updated_at
+	`, runID, record.TableName, record.CandidateRows, record.DeletedRows,
+		boolToInt(record.Skipped), skipReason, now)
+	return err
+}
+
+func (s *State) GetDeleteReconciliationTables(runID string) ([]DeleteReconciliationTableRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT run_id, table_name, candidate_rows, deleted_rows, skipped, skip_reason, updated_at
+		FROM delete_reconciliation_tables
+		WHERE run_id = ?
+		ORDER BY table_name
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []DeleteReconciliationTableRecord
+	for rows.Next() {
+		var record DeleteReconciliationTableRecord
+		var skipped int
+		var skipReason sql.NullString
+		var updatedAt string
+		if err := rows.Scan(
+			&record.RunID,
+			&record.TableName,
+			&record.CandidateRows,
+			&record.DeletedRows,
+			&skipped,
+			&skipReason,
+			&updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		record.Skipped = skipped != 0
+		if skipReason.Valid {
+			record.SkipReason = skipReason.String
+		}
+		ts, err := time.Parse(time.RFC3339Nano, updatedAt)
+		if err != nil {
+			return nil, err
+		}
+		record.UpdatedAt = ts
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}

@@ -135,7 +135,37 @@ func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult
 		result.FailedTables = []string{}
 	}
 
+	deleteRecords, err := o.state.GetDeleteReconciliationTables(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	result.DeleteReconciliation = buildDeleteReconciliationSummary(deleteRecords)
+
 	return result, nil
+}
+
+func buildDeleteReconciliationSummary(
+	records []checkpoint.DeleteReconciliationTableRecord,
+) *DeleteReconciliationSummary {
+	if len(records) == 0 {
+		return nil
+	}
+
+	summary := &DeleteReconciliationSummary{
+		Tables: make([]DeleteReconciliationTableSummary, 0, len(records)),
+	}
+	for _, record := range records {
+		summary.CandidateRows += record.CandidateRows
+		summary.DeletedRows += record.DeletedRows
+		summary.Tables = append(summary.Tables, DeleteReconciliationTableSummary{
+			Table:         record.TableName,
+			CandidateRows: record.CandidateRows,
+			DeletedRows:   record.DeletedRows,
+			Skipped:       record.Skipped,
+			SkipReason:    record.SkipReason,
+		})
+	}
+	return summary
 }
 
 // GetStatusResult builds a StatusResult for the current/last run.

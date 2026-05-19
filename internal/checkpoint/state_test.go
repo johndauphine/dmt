@@ -64,6 +64,13 @@ func TestCleanupOldRuns(t *testing.T) {
 		if err := state.SaveFallbackEvent(runID, "typemap", "postgres:inet"); err != nil {
 			t.Fatalf("SaveFallbackEvent(%s) error: %v", runID, err)
 		}
+		if err := state.SaveDeleteReconciliationTable(runID, DeleteReconciliationTableRecord{
+			TableName:     "dbo.Users",
+			CandidateRows: 1,
+			DeletedRows:   1,
+		}); err != nil {
+			t.Fatalf("SaveDeleteReconciliationTable(%s) error: %v", runID, err)
+		}
 	}
 
 	deleted, err := state.CleanupOldRuns(30)
@@ -94,6 +101,9 @@ func TestCleanupOldRuns(t *testing.T) {
 	// (codex review).
 	if got := countRows(t, state.db, `SELECT COUNT(*) FROM fallback_events`); got != 2 {
 		t.Fatalf("fallback_events remaining = %d, want 2 (one per surviving run)", got)
+	}
+	if got := countRows(t, state.db, `SELECT COUNT(*) FROM delete_reconciliation_tables`); got != 2 {
+		t.Fatalf("delete_reconciliation_tables remaining = %d, want 2 (one per surviving run)", got)
 	}
 }
 
