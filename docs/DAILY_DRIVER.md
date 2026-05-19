@@ -100,8 +100,9 @@ validation permits target row counts greater than source row counts so a
 source-side delete does not fail the daily run.
 
 Delete handling is staged separately. `migration.deletes` is now parsed and
-validated with `mode: off` as the default and `mode: reconcile` reserved for
-the key-set reconciliation implementation tracked in #351. See
+validated with `mode: off` as the default, and dry-run output reports whether
+the configured reconciliation interval is due. `mode: reconcile` remains
+reserved for the key-set reconciliation implementation tracked in #351. See
 [DELETE_HANDLING.md](DELETE_HANDLING.md) for the configuration and rollout
 plan.
 

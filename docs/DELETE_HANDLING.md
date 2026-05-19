@@ -8,7 +8,9 @@ process removes it.
 This document compares the design options for delete propagation and records
 the staged implementation plan. The `migration.deletes` config surface is parsed
 and validated as of #351's first slice, but runtime reconciliation and target
-mutation still land in follow-up work.
+mutation still land in follow-up work. DMT also records the latest successful
+delete reconciliation in checkpoint state and includes due/not-due scheduling
+metadata in dry-run output when reconciliation is enabled.
 
 ## Recommendation
 
@@ -159,6 +161,8 @@ Initial setup expectations:
 Runtime implementations should expose delete handling clearly:
 
 - config validation rejects unsupported combinations before transfer
+- dry-run output reports whether reconciliation is due, the prior successful
+  reconciliation time, and primary-key table eligibility
 - run logs should report delete mode, target behavior, tables evaluated, rows
   marked or deleted, and skipped tables
 - reconciliation should distinguish "not due" from "ran and found zero deletes"
@@ -171,8 +175,8 @@ Runtime implementations should expose delete handling clearly:
 Track implementation in separate issues:
 
 1. Implement interval-based key-set reconciliation for primary-key tables in
-   upsert mode, including checkpointed last-success metadata.
-2. Add reconciliation dry-run reporting and structured per-table delete metrics.
+   upsert mode, using the existing checkpointed last-success metadata.
+2. Add structured per-table delete metrics once runtime deletion lands.
 3. Add `target_behavior: soft` with explicit target soft-delete column
    validation and batched updates.
 4. Add tombstone source support for `deleted_at IS NOT NULL` and boolean marker

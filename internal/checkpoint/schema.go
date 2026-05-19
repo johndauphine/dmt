@@ -69,6 +69,15 @@ func (s *State) migrate() error {
 		PRIMARY KEY (source_schema, table_name, target_schema)
 	);
 
+	CREATE TABLE IF NOT EXISTS delete_reconciliations (
+		source_schema TEXT NOT NULL,
+		target_schema TEXT NOT NULL,
+		last_run_id TEXT NOT NULL,
+		last_success_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		PRIMARY KEY (source_schema, target_schema)
+	);
+
 	CREATE TABLE IF NOT EXISTS schema_snapshots (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		source_schema TEXT NOT NULL,
@@ -319,13 +328,14 @@ func (s *State) ensureTuningResultColumns() error {
 // validTableNames is a whitelist of allowed table names for schema queries.
 // This prevents SQL injection via the table parameter in tableColumns().
 var validTableNames = map[string]bool{
-	"runs":                  true,
-	"tasks":                 true,
-	"profiles":              true,
-	"table_sync_timestamps": true,
-	"schema_snapshots":      true,
-	"ai_adjustments":        true,
-	"ai_tuning_history":     true,
+	"runs":                   true,
+	"tasks":                  true,
+	"profiles":               true,
+	"table_sync_timestamps":  true,
+	"delete_reconciliations": true,
+	"schema_snapshots":       true,
+	"ai_adjustments":         true,
+	"ai_tuning_history":      true,
 }
 
 func (s *State) tableColumns(table string) ([]string, error) {

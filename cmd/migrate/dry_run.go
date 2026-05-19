@@ -33,4 +33,30 @@ func printDryRunResult(r *orchestrator.DryRunResult) {
 		fmt.Printf("Estimated Duration: ~%s at %s rows/sec from recent history\n",
 			eta, orchestrator.FormatCount(r.EstimatedRowsPerSecond))
 	}
+	printDeleteReconciliationPreview(r.DeleteReconciliation)
+}
+
+func printDeleteReconciliationPreview(p *orchestrator.DeleteReconciliationPreview) {
+	if p == nil {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("Delete Reconciliation:")
+	fmt.Printf("  Due: %t", p.Due)
+	if p.Reason != "" {
+		fmt.Printf(" (%s)", p.Reason)
+	}
+	fmt.Println()
+	fmt.Printf("  Interval: %s\n", p.Interval)
+	if p.LastSuccessAt != nil {
+		fmt.Printf("  Last Success: %s\n", p.LastSuccessAt.Format(time.RFC3339))
+	}
+	if p.NextDueAt != nil {
+		fmt.Printf("  Next Due: %s\n", p.NextDueAt.Format(time.RFC3339))
+	}
+	fmt.Printf("  Eligible Tables: %d\n", p.EligibleTables)
+	if p.SkippedNoPKTables > 0 {
+		fmt.Printf("  Skipped Tables Without PK: %d\n", p.SkippedNoPKTables)
+	}
 }

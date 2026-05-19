@@ -252,11 +252,25 @@ type DryRunResult struct {
 	EstimatedMemMB int64         `json:"estimated_memory_mb"`
 	// EstimatedDurationSeconds is populated when recent same-direction
 	// throughput history is available.
-	EstimatedDurationSeconds float64 `json:"estimated_duration_seconds,omitempty"`
-	EstimatedRowsPerSecond   int64   `json:"estimated_rows_per_second,omitempty"`
-	Workers                  int     `json:"workers"`
-	ChunkSize                int     `json:"chunk_size"`
-	TargetMode               string  `json:"target_mode"`
+	EstimatedDurationSeconds float64                      `json:"estimated_duration_seconds,omitempty"`
+	EstimatedRowsPerSecond   int64                        `json:"estimated_rows_per_second,omitempty"`
+	Workers                  int                          `json:"workers"`
+	ChunkSize                int                          `json:"chunk_size"`
+	TargetMode               string                       `json:"target_mode"`
+	DeleteReconciliation     *DeleteReconciliationPreview `json:"delete_reconciliation,omitempty"`
+}
+
+// DeleteReconciliationPreview describes whether the opt-in #351 delete
+// reconciliation pass would run for this migration.
+type DeleteReconciliationPreview struct {
+	Enabled           bool       `json:"enabled"`
+	Due               bool       `json:"due"`
+	Reason            string     `json:"reason,omitempty"`
+	Interval          string     `json:"interval,omitempty"`
+	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
+	NextDueAt         *time.Time `json:"next_due_at,omitempty"`
+	EligibleTables    int        `json:"eligible_tables"`
+	SkippedNoPKTables int        `json:"skipped_no_pk_tables"`
 }
 
 // DryRunTable contains preview information for a single table.
