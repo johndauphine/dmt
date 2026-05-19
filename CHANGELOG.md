@@ -14,6 +14,9 @@ All notable changes to this project will be documented in this file.
 - Added read-only source schema drift detection with persisted snapshots,
   structured change reports, and an optional `migration.fail_on_schema_drift`
   pre-transfer safety gate (#305).
+- Added initial shared driver SQL-shape helpers and a shared-driver
+  architecture note to guide behavior-preserving DRY work across database
+  engines (#338).
 
 ### Changed
 
