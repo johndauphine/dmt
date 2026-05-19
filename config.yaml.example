@@ -63,10 +63,9 @@ migration:
   # - upsert: Incremental sync (INSERT new rows, UPDATE changed rows, preserve target-only rows)
   target_mode: drop_recreate
 
-  # Delete propagation (#351, opt-in). Runtime reconciliation lands in
-  # follow-up slices; this block documents the validated config surface.
-  # Existing behavior is mode: off. Reconcile is only valid with
-  # target_mode: upsert and currently supports hard deletes only.
+  # Delete propagation (#351, opt-in). Existing behavior is mode: off.
+  # Reconcile is only valid with target_mode: upsert and currently supports
+  # interval-gated hard deletes only.
   deletes:
     mode: off                    # off | reconcile
     target_behavior: hard        # hard

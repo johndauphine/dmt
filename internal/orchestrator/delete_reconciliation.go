@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/reconcile"
@@ -109,6 +110,11 @@ func (o *Orchestrator) runDeleteReconciliation(
 		return result, nil
 	}
 	if !preview.Due {
+		if preview.EligibleTables == 0 && preview.SkippedNoPKTables > 0 {
+			if err := o.saveSkippedNoPKDeleteTables(runID, tables, result); err != nil {
+				return result, err
+			}
+		}
 		logging.Info("Delete reconciliation not due: %s", preview.Reason)
 		return result, nil
 	}
@@ -125,15 +131,17 @@ func (o *Orchestrator) runDeleteReconciliation(
 	logging.Info("Running delete reconciliation for %d eligible table(s)", preview.EligibleTables)
 	batchSize := o.config.Migration.DeleteReconcileBatchSize()
 	for _, table := range tables {
-		tableResult := DeleteReconciliationTableResult{Table: table.FullName()}
 		if !table.HasPK() {
-			tableResult.Skipped = true
-			tableResult.SkipReason = "no primary key"
+			tableResult := skippedNoPKDeleteReconciliationResult(table)
 			result.TableResults = append(result.TableResults, tableResult)
+			if err := o.saveDeleteReconciliationTable(runID, tableResult); err != nil {
+				return result, err
+			}
 			logging.Warn("Delete reconciliation skipped %s: no primary key", table.FullName())
 			continue
 		}
 
+		tableResult := DeleteReconciliationTableResult{Table: table.FullName()}
 		keyColumns := append([]string(nil), table.PrimaryKey...)
 		var targetOnlyKeys [][]any
 		missing, err := reconcile.FindTargetOnlyKeys(
@@ -176,6 +184,9 @@ func (o *Orchestrator) runDeleteReconciliation(
 		result.CandidateRows += tableResult.CandidateRows
 		result.DeletedRows += tableResult.DeletedRows
 		result.TableResults = append(result.TableResults, tableResult)
+		if err := o.saveDeleteReconciliationTable(runID, tableResult); err != nil {
+			return result, err
+		}
 		logging.Info("Delete reconciliation %s: %d candidate(s), %d deleted",
 			table.FullName(), tableResult.CandidateRows, tableResult.DeletedRows)
 	}
@@ -192,6 +203,50 @@ func (o *Orchestrator) runDeleteReconciliation(
 	logging.Info("Delete reconciliation complete: %d candidate(s), %d deleted",
 		result.CandidateRows, result.DeletedRows)
 	return result, nil
+}
+
+func (o *Orchestrator) saveSkippedNoPKDeleteTables(
+	runID string,
+	tables []source.Table,
+	result *DeleteReconciliationRunResult,
+) error {
+	for _, table := range tables {
+		if table.HasPK() {
+			continue
+		}
+		tableResult := skippedNoPKDeleteReconciliationResult(table)
+		result.TableResults = append(result.TableResults, tableResult)
+		if err := o.saveDeleteReconciliationTable(runID, tableResult); err != nil {
+			return err
+		}
+		logging.Warn("Delete reconciliation skipped %s: no primary key", table.FullName())
+	}
+	return nil
+}
+
+func skippedNoPKDeleteReconciliationResult(table source.Table) DeleteReconciliationTableResult {
+	return DeleteReconciliationTableResult{
+		Table:      table.FullName(),
+		Skipped:    true,
+		SkipReason: "no primary key",
+	}
+}
+
+func (o *Orchestrator) saveDeleteReconciliationTable(
+	runID string,
+	result DeleteReconciliationTableResult,
+) error {
+	err := o.state.SaveDeleteReconciliationTable(runID, checkpoint.DeleteReconciliationTableRecord{
+		TableName:     result.Table,
+		CandidateRows: result.CandidateRows,
+		DeletedRows:   result.DeletedRows,
+		Skipped:       result.Skipped,
+		SkipReason:    result.SkipReason,
+	})
+	if err != nil {
+		return fmt.Errorf("saving delete reconciliation result for %s: %w", result.Table, err)
+	}
+	return nil
 }
 
 func cloneKeyBatch(keys [][]any) [][]any {

@@ -171,19 +171,20 @@ func isRetryableError(err error) bool {
 
 // MigrationResult contains the outcome of a migration run.
 type MigrationResult struct {
-	RunID           string        `json:"run_id"`
-	Status          string        `json:"status"`
-	StartedAt       time.Time     `json:"started_at"`
-	CompletedAt     time.Time     `json:"completed_at"`
-	DurationSeconds float64       `json:"duration_seconds"`
-	TablesTotal     int           `json:"tables_total"`
-	TablesSuccess   int           `json:"tables_success"`
-	TablesFailed    int           `json:"tables_failed"`
-	RowsTransferred int64         `json:"rows_transferred"`
-	RowsPerSecond   int64         `json:"rows_per_second"`
-	FailedTables    []string      `json:"failed_tables"`
-	TableStats      []TableResult `json:"table_stats"`
-	Error           string        `json:"error,omitempty"`
+	RunID                string                       `json:"run_id"`
+	Status               string                       `json:"status"`
+	StartedAt            time.Time                    `json:"started_at"`
+	CompletedAt          time.Time                    `json:"completed_at"`
+	DurationSeconds      float64                      `json:"duration_seconds"`
+	TablesTotal          int                          `json:"tables_total"`
+	TablesSuccess        int                          `json:"tables_success"`
+	TablesFailed         int                          `json:"tables_failed"`
+	RowsTransferred      int64                        `json:"rows_transferred"`
+	RowsPerSecond        int64                        `json:"rows_per_second"`
+	FailedTables         []string                     `json:"failed_tables"`
+	TableStats           []TableResult                `json:"table_stats"`
+	DeleteReconciliation *DeleteReconciliationSummary `json:"delete_reconciliation,omitempty"`
+	Error                string                       `json:"error,omitempty"`
 }
 
 // TableResult contains the outcome for a single table.
@@ -192,6 +193,23 @@ type TableResult struct {
 	Rows   int64  `json:"rows"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+}
+
+// DeleteReconciliationSummary contains per-run hard-delete reconciliation
+// counts.
+type DeleteReconciliationSummary struct {
+	CandidateRows int64                              `json:"candidate_rows"`
+	DeletedRows   int64                              `json:"deleted_rows"`
+	Tables        []DeleteReconciliationTableSummary `json:"tables"`
+}
+
+// DeleteReconciliationTableSummary contains one table's reconciliation counts.
+type DeleteReconciliationTableSummary struct {
+	Table         string `json:"table"`
+	CandidateRows int64  `json:"candidate_rows"`
+	DeletedRows   int64  `json:"deleted_rows"`
+	Skipped       bool   `json:"skipped,omitempty"`
+	SkipReason    string `json:"skip_reason,omitempty"`
 }
 
 // StatusResult contains the current status of a migration.

@@ -54,6 +54,37 @@ func TestFormatMigrationSummaryNil(t *testing.T) {
 	}
 }
 
+func TestFormatMigrationSummaryDeleteReconciliation(t *testing.T) {
+	result := &MigrationResult{
+		RunID:           "run-delete",
+		Status:          "success",
+		RowsTransferred: 100,
+		DeleteReconciliation: &DeleteReconciliationSummary{
+			CandidateRows: 3,
+			DeletedRows:   2,
+			Tables: []DeleteReconciliationTableSummary{
+				{Table: "dbo.users", CandidateRows: 2, DeletedRows: 2},
+				{Table: "dbo.logs", Skipped: true, SkipReason: "no primary key"},
+			},
+		},
+	}
+
+	output := FormatMigrationSummary(result)
+
+	for _, want := range []string{
+		"Deletes         : 3 candidate, 2 deleted",
+		"Delete reconciliation:",
+		"dbo.users",
+		"2 candidate             2 deleted",
+		"dbo.logs",
+		"0 candidate             0 deleted  skipped: no primary key",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("summary missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestFormatCount(t *testing.T) {
 	tests := []struct {
 		n    int64

@@ -31,19 +31,24 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 	if fs.state != nil && len(fs.state.SchemaSnapshots) > 0 {
 		carriedSnapshots = fs.state.SchemaSnapshots
 	}
+	var carriedDeleteReconciliations map[string]map[string]deleteReconciliationState
+	if fs.state != nil && len(fs.state.DeleteReconciliations) > 0 {
+		carriedDeleteReconciliations = fs.state.DeleteReconciliations
+	}
 
 	fs.state = &fileStateData{
-		RunID:           id,
-		StartedAt:       time.Now(),
-		Status:          "running",
-		SourceSchema:    sourceSchema,
-		TargetSchema:    targetSchema,
-		ConfigHash:      hex.EncodeToString(hash[:8]), // First 8 bytes
-		ProfileName:     profileName,
-		ConfigPath:      configPath,
-		Tables:          make(map[string]tableState),
-		SyncTimestamps:  carriedTimestamps,
-		SchemaSnapshots: carriedSnapshots,
+		RunID:                 id,
+		StartedAt:             time.Now(),
+		Status:                "running",
+		SourceSchema:          sourceSchema,
+		TargetSchema:          targetSchema,
+		ConfigHash:            hex.EncodeToString(hash[:8]), // First 8 bytes
+		ProfileName:           profileName,
+		ConfigPath:            configPath,
+		Tables:                make(map[string]tableState),
+		SyncTimestamps:        carriedTimestamps,
+		SchemaSnapshots:       carriedSnapshots,
+		DeleteReconciliations: carriedDeleteReconciliations,
 	}
 
 	return fs.save()
