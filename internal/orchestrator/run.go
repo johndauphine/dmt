@@ -297,6 +297,12 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("finalizing: %w", err)
 	}
 
+	if err := o.reconcileDeletesIfDue(ctx, runID, successTables); err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return fmt.Errorf("delete reconciliation: %w", err)
+	}
+
 	// Validate (only for successful tables)
 	o.setPhase("validating")
 	logging.Debug("Validating...")

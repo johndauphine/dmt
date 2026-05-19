@@ -28,6 +28,9 @@ All notable changes to this project will be documented in this file.
 - Added reusable primary-key reconciliation primitives that scan source/target
   key sets, identify target-only keys, and execute parameter-bounded hard
   deletes for the #351 runtime path.
+- Added the first runtime delete-reconciliation pass for upsert mode, wiring
+  interval-gated primary-key reconciliation into run and resume before
+  validation.
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).

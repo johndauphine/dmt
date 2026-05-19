@@ -13,7 +13,8 @@ delete reconciliation in checkpoint state and includes due/not-due scheduling
 metadata in dry-run output when reconciliation is enabled. The shared
 reconciliation package can already scan source/target primary-key sets,
 identify target-only keys, and execute parameter-bounded target hard deletes;
-the remaining work is wiring that primitive into the run lifecycle.
+the runtime path now invokes that primitive before validation when interval
+scheduling says reconciliation is due.
 
 ## Recommendation
 
@@ -177,10 +178,10 @@ Runtime implementations should expose delete handling clearly:
 
 Track implementation in separate issues:
 
-1. Implement interval-based key-set reconciliation for primary-key tables in
-   upsert mode, using the existing checkpointed last-success metadata and
-   shared key reconciliation primitives.
-2. Add structured per-table delete metrics once runtime deletion lands.
+1. Add structured per-table delete metrics and summary output for runtime
+   reconciliation.
+2. Add candidate delete counts to dry-run output when a full key scan is
+   acceptable for the operator.
 3. Add `target_behavior: soft` with explicit target soft-delete column
    validation and batched updates.
 4. Add tombstone source support for `deleted_at IS NOT NULL` and boolean marker

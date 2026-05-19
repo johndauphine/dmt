@@ -1,13 +1,17 @@
 package orchestrator
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/source"
+	_ "modernc.org/sqlite"
 )
 
 func TestPreviewDeleteReconciliationDisabled(t *testing.T) {
@@ -136,6 +140,84 @@ func TestPreviewDeleteReconciliationPropagatesStateErrors(t *testing.T) {
 	}
 }
 
+func TestRunDeleteReconciliationDeletesTargetOnlyRows(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	targetDB := openDeleteRuntimeDB(t)
+	execDeleteRuntimeSQL(t, sourceDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+		INSERT INTO items (id, name) VALUES (1, 'one'), (3, 'three');
+	`)
+	execDeleteRuntimeSQL(t, targetDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT);
+		INSERT INTO items (id, name) VALUES
+			(1, 'one'), (2, 'two'), (3, 'three'), (4, 'four');
+	`)
+
+	state := &deletePreviewState{}
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, state)
+	result, err := orch.runDeleteReconciliation(
+		context.Background(),
+		"run-delete",
+		[]source.Table{{Name: "items", PrimaryKey: []string{"id"}}},
+	)
+	if err != nil {
+		t.Fatalf("runDeleteReconciliation() error: %v", err)
+	}
+	if result.CandidateRows != 2 {
+		t.Fatalf("CandidateRows = %d, want 2", result.CandidateRows)
+	}
+	if result.DeletedRows != 2 {
+		t.Fatalf("DeletedRows = %d, want 2", result.DeletedRows)
+	}
+	if state.recordCalls != 1 || state.recordRunID != "run-delete" {
+		t.Fatalf("record success calls/run = %d/%q, want 1/run-delete",
+			state.recordCalls, state.recordRunID)
+	}
+	if got := countDeleteRuntimeRows(t, targetDB); got != 2 {
+		t.Fatalf("target row count = %d, want 2", got)
+	}
+}
+
+func TestRunDeleteReconciliationSkipsWhenIntervalNotDue(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	targetDB := openDeleteRuntimeDB(t)
+	execDeleteRuntimeSQL(t, sourceDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1);
+	`)
+	execDeleteRuntimeSQL(t, targetDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1), (2);
+	`)
+
+	state := &deletePreviewState{
+		state: &checkpoint.DeleteReconciliationState{
+			LastSuccessAt: time.Now().UTC(),
+		},
+	}
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, state)
+	result, err := orch.runDeleteReconciliation(
+		context.Background(),
+		"run-not-due",
+		[]source.Table{{Name: "items", PrimaryKey: []string{"id"}}},
+	)
+	if err != nil {
+		t.Fatalf("runDeleteReconciliation() error: %v", err)
+	}
+	if result.Preview == nil || result.Preview.Due {
+		t.Fatalf("Preview.Due = %v, want false", result.Preview)
+	}
+	if result.DeletedRows != 0 {
+		t.Fatalf("DeletedRows = %d, want 0", result.DeletedRows)
+	}
+	if state.recordCalls != 0 {
+		t.Fatalf("record success calls = %d, want 0", state.recordCalls)
+	}
+	if got := countDeleteRuntimeRows(t, targetDB); got != 2 {
+		t.Fatalf("target row count = %d, want unchanged 2", got)
+	}
+}
+
 func deletePreviewConfig(enabled bool) *config.Config {
 	cfg := &config.Config{}
 	cfg.Source.Schema = "dbo"
@@ -161,9 +243,12 @@ func deletePreviewTables() []source.Table {
 
 type deletePreviewState struct {
 	checkpoint.StateBackend
-	state *checkpoint.DeleteReconciliationState
-	err   error
-	calls int
+	state       *checkpoint.DeleteReconciliationState
+	err         error
+	recordErr   error
+	calls       int
+	recordCalls int
+	recordRunID string
 }
 
 func (s *deletePreviewState) GetDeleteReconciliationState(
@@ -172,4 +257,86 @@ func (s *deletePreviewState) GetDeleteReconciliationState(
 ) (*checkpoint.DeleteReconciliationState, error) {
 	s.calls++
 	return s.state, s.err
+}
+
+func (s *deletePreviewState) RecordDeleteReconciliationSuccess(
+	runID string,
+	sourceSchema string,
+	targetSchema string,
+	completedAt time.Time,
+) error {
+	s.recordCalls++
+	s.recordRunID = runID
+	_, _, _ = sourceSchema, targetSchema, completedAt
+	return s.recordErr
+}
+
+type deleteRuntimeSourcePool struct {
+	pool.SourcePool
+	db *sql.DB
+}
+
+func (p *deleteRuntimeSourcePool) DB() *sql.DB { return p.db }
+func (p *deleteRuntimeSourcePool) DBType() string {
+	return "sqlite"
+}
+
+type deleteRuntimeTargetPool struct {
+	pool.TargetPool
+	db *sql.DB
+}
+
+func (p *deleteRuntimeTargetPool) DB() *sql.DB { return p.db }
+func (p *deleteRuntimeTargetPool) DBType() string {
+	return "sqlite"
+}
+
+func deleteRuntimeOrchestrator(
+	sourceDB,
+	targetDB *sql.DB,
+	state checkpoint.StateBackend,
+) *Orchestrator {
+	cfg := &config.Config{}
+	cfg.Migration.Deletes = &config.DeleteConfig{
+		Mode: config.DeleteModeReconcile,
+		Reconcile: config.DeleteReconcileConfig{
+			Interval:  "24h",
+			BatchSize: 1,
+		},
+	}
+	return &Orchestrator{
+		config:     cfg,
+		sourcePool: &deleteRuntimeSourcePool{db: sourceDB},
+		targetPool: &deleteRuntimeTargetPool{db: targetDB},
+		state:      state,
+	}
+}
+
+func openDeleteRuntimeDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func execDeleteRuntimeSQL(t *testing.T, db *sql.DB, query string) {
+	t.Helper()
+	if _, err := db.Exec(query); err != nil {
+		t.Fatalf("exec SQL: %v", err)
+	}
+}
+
+func countDeleteRuntimeRows(t *testing.T, db *sql.DB) int {
+	t.Helper()
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	return count
 }
