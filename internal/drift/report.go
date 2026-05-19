@@ -19,6 +19,10 @@ func (r Report) TablesAffected() int {
 }
 
 func (r Report) Format() string {
+	return r.FormatWithFooter("No automatic schema alignment will be applied (read-only mode).")
+}
+
+func (r Report) FormatWithFooter(footer string) string {
 	if !r.HasChanges() {
 		return "No schema drift detected."
 	}
@@ -36,7 +40,10 @@ func (r Report) Format() string {
 			fmt.Fprintf(&b, "    %s\n", change.format())
 		}
 	}
-	b.WriteString("\nNo automatic schema alignment will be applied (read-only mode).")
+	if footer != "" {
+		b.WriteString("\n")
+		b.WriteString(footer)
+	}
 	return b.String()
 }
 

@@ -23,21 +23,21 @@ func (e *SchemaDriftError) Error() string {
 
 func (e *SchemaDriftError) ExitCode() int { return exitcodes.TransferError }
 
-func (o *Orchestrator) reportSchemaDrift(tables []source.Table) error {
+func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolution bool) (drift.Report, error) {
 	records, err := o.state.GetLatestSchemaSnapshots(o.schemaSnapshotNamespace())
 	if err != nil {
-		return fmt.Errorf("loading schema snapshots: %w", err)
+		return drift.Report{}, fmt.Errorf("loading schema snapshots: %w", err)
 	}
 	if len(records) == 0 {
 		logging.Debug("No previous schema snapshot found; baseline will be captured after a successful run")
-		return nil
+		return drift.Report{}, nil
 	}
 
 	previous := make([]drift.TableSnapshot, 0, len(records))
 	for _, record := range records {
 		snapshot, err := drift.UnmarshalTableSnapshot(record.SchemaJSON)
 		if err != nil {
-			return fmt.Errorf("decoding schema snapshot for %s.%s: %w",
+			return drift.Report{}, fmt.Errorf("decoding schema snapshot for %s.%s: %w",
 				record.SourceSchema, record.TableName, err)
 		}
 		if o.tableInCurrentFilterScope(snapshot.Name) {
@@ -48,18 +48,27 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table) error {
 	report := drift.Compare(previous, drift.BuildTableSnapshots(tables))
 	if !report.HasChanges() {
 		logging.Debug("No schema drift detected")
-		return nil
+		return drift.Report{}, nil
 	}
 
-	logging.Warn("%s", report.Format())
+	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooter(allowSchemaEvolution)))
 	o.auditEvent("schema_drift_detected", map[string]any{
 		"tables_affected": report.TablesAffected(),
 		"changes":         len(report.Changes),
 	})
 	if o.config.Migration.FailOnSchemaDrift {
-		return &SchemaDriftError{Report: report}
+		return report, &SchemaDriftError{Report: report}
 	}
-	return nil
+	return report, nil
+}
+
+func (o *Orchestrator) schemaDriftReportFooter(allowSchemaEvolution bool) string {
+	if allowSchemaEvolution &&
+		o.config.Migration.SchemaEvolutionEnabled() &&
+		o.config.Migration.TargetMode == "upsert" {
+		return "Schema evolution is enabled; configured compatible changes may be applied before transfer."
+	}
+	return "No automatic schema alignment will be applied (read-only mode)."
 }
 
 func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Table) {

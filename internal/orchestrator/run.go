@@ -170,7 +170,8 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.state.CompleteRun(runID, "failed", "no tables to migrate after applying filters")
 		return fmt.Errorf("no tables to migrate after applying filters")
 	}
-	if err := o.reportSchemaDrift(tables); err != nil {
+	schemaDriftReport, err := o.reportSchemaDrift(tables, true)
+	if err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return err
@@ -232,6 +233,16 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return err
+	}
+
+	if o.shouldApplySchemaEvolution(schemaDriftReport) {
+		o.setPhase("schema_evolution")
+		o.state.UpdatePhase(runID, "schema_evolution")
+		if err := o.applySchemaEvolution(ctx, schemaDriftReport, tables); err != nil {
+			o.state.CompleteRun(runID, "failed", err.Error())
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
+		}
 	}
 
 	// Transfer data

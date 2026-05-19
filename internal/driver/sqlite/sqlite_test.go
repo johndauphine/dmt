@@ -148,6 +148,47 @@ func TestWriter_CreateAndInsert_SqliteToSqlite(t *testing.T) {
 	}
 }
 
+func TestWriter_AddColumn(t *testing.T) {
+	path := memoryDBPath(t, "add_column")
+	w := newTestWriter(t, path)
+	defer w.Close()
+	ctx := context.Background()
+
+	table := &driver.Table{
+		Name: "users",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "integer", IsNullable: false, IsIdentity: true, OrdinalPos: 1},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	if err := w.CreateTable(ctx, table, ""); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	email := &driver.Column{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: false}
+	if err := w.AddColumn(ctx, table, email, ""); err != nil {
+		t.Fatalf("AddColumn: %v", err)
+	}
+	if err := w.AddColumn(ctx, table, email, ""); err != nil {
+		t.Fatalf("AddColumn second call should be idempotent: %v", err)
+	}
+
+	var colType string
+	var notNull int
+	err := w.db.QueryRowContext(ctx,
+		`SELECT type, "notnull" FROM pragma_table_info(?) WHERE name = ?`,
+		"users", "email").Scan(&colType, &notNull)
+	if err != nil {
+		t.Fatalf("querying added column: %v", err)
+	}
+	if colType == "" {
+		t.Fatal("added column type is empty")
+	}
+	if notNull != 0 {
+		t.Fatalf("added column notnull = %d, want 0", notNull)
+	}
+}
+
 func TestWriter_IdempotentOnDup(t *testing.T) {
 	path := memoryDBPath(t, "idempotent")
 	w := newTestWriter(t, path)

@@ -56,6 +56,62 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	return nil
 }
 
+// AddColumn adds a nullable column to an existing target table. It is
+// idempotent so interrupted schema-evolution runs can be retried safely.
+func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return fmt.Errorf("column is required")
+	}
+
+	exists, err := w.columnExists(ctx, targetSchema, t.Name, column.Name)
+	if err != nil {
+		return fmt.Errorf("checking column %s.%s.%s: %w", targetSchema, t.Name, column.Name, err)
+	}
+	if exists {
+		return nil
+	}
+
+	ddl, err := w.buildAddColumnSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Adding MySQL column with DDL: %s", ddl)
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) columnExists(ctx context.Context, schema, table, column string) (bool, error) {
+	dbName := schema
+	if dbName == "" {
+		dbName = w.config.Database
+	}
+
+	var exists int
+	err := w.db.QueryRowContext(ctx, `
+		SELECT 1 FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+	`, dbName, table, column).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (w *Writer) buildAddColumnSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "mysql", *column)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s NULL",
+		w.dialect.QualifyTable(targetSchema, t.Name),
+		w.dialect.QuoteIdentifier(column.Name),
+		mappedType), nil
+}
+
 // DropTable drops a table using AI-generated DDL that handles foreign key constraints.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	// Use AI-generated DROP DDL if available

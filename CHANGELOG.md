@@ -17,6 +17,9 @@ All notable changes to this project will be documented in this file.
 - Added initial shared driver SQL-shape helpers and a shared-driver
   architecture note to guide behavior-preserving DRY work across database
   engines (#338).
+- Added opt-in schema evolution for `added_column` drift in upsert mode,
+  including per-policy config, nullable target `ADD COLUMN` support across
+  drivers, and operator documentation (#306).
 
 ### Changed
 
