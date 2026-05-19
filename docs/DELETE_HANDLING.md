@@ -16,7 +16,9 @@ identify target-only keys, and execute parameter-bounded target hard deletes;
 the runtime path now invokes that primitive before validation when interval
 scheduling says reconciliation is due. Reconciliation results are persisted per
 table and included in run summaries so operators can see candidate, deleted, and
-skipped counts after a reconciliation pass.
+skipped counts after a reconciliation pass. The SQLite integration test now
+proves an upsert run removes a source-side hard delete from the target and
+records the per-table delete counts in checkpoint state.
 
 ## Recommendation
 

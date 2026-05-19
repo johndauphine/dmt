@@ -1,0 +1,31 @@
+# CI-only follow-up config for the sqlite -> sqlite integration test.
+#
+# The baseline config seeds the target with drop_recreate. This one reruns in
+# upsert mode with delete reconciliation enabled so the integration test can
+# prove a source-side hard delete is removed from the target.
+
+source:
+  type: sqlite
+  database: ${SQLITE_SOURCE_DB}
+
+target:
+  type: sqlite
+  database: ${SQLITE_TARGET_DB}
+
+migration:
+  create_indexes: false
+  create_foreign_keys: false
+  create_check_constraints: false
+  target_mode: upsert
+  runtime_tuning: false
+  chunk_size: 10
+  checkpoint_frequency: 1
+  data_dir: ${DMT_STATE_DIR}
+  deletes:
+    mode: reconcile
+    target_behavior: hard
+    reconcile:
+      schedule: interval
+      interval: 1ns
+      batch_size: 2
+      require_primary_key: true
