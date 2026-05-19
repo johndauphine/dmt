@@ -20,6 +20,9 @@ All notable changes to this project will be documented in this file.
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).
+- Added the MSSQL → Postgres pair to the nightly cross-engine integration
+  matrix so the primary migration path has scheduled coverage as well as
+  per-PR coverage (#342).
 
 ### Changed
 
@@ -101,22 +104,21 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - **Nightly cross-engine integration matrix in CI** (closes #291).
-  New `.github/workflows/integration-nightly.yml` runs 11 cross-engine
+  New `.github/workflows/integration-nightly.yml` runs 12 cross-engine
   directed pairs once a night (`cron: 0 5 * * *`) and on manual
   `workflow_dispatch`. Pairs cover every {mssql, postgres, mysql, sqlite}
-  combination *except* `mssql → postgres` (already the per-PR anchor
-  in `integration.yml`) and the four same-engine round-trips (which
+  combination and exclude only the four same-engine round-trips (which
   don't exercise the cross-DB type-mapping surface). Matrix runs with
-  `fail-fast: false` and `max-parallel: 11` so one driver's failure
+  `fail-fast: false` and `max-parallel: 12` so one driver's failure
   doesn't mask the rest, and the whole matrix wraps in roughly the
   wall-clock of a single pair. New generic runner
   `scripts/integration-test-pair.sh --pair <src>-<tgt>` dispatches
   source-side fixture loading and target-side DB prep per engine,
   then validates via `dmt run` + `dmt validate` (trusts dmt's own
   validate logic as the canonical row-count check rather than
-  re-encoding case sanitization per target). 11 new per-pair configs
+  re-encoding case sanitization per target). Per-pair configs live
   under `scripts/fixtures/ci-{src}-{tgt}.yaml`. Local repro:
-  `make integration-test-pair PAIR=pg-mssql`.
+  `make integration-test-pair PAIR=mssql-pg`.
 
 - **SO2010-minimal posts.body text aligned across all four engine
   fixtures** (part of #291). Previously the mssql, pg, sqlite, and

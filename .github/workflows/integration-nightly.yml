@@ -2,14 +2,13 @@
 #
 # Companion to .github/workflows/integration.yml (the per-PR anchors).
 # That workflow runs mssql→postgres and sqlite→sqlite on every PR; this
-# one runs all 11 *cross*-engine directed pairs once a night, plus on
+# one runs all 12 *cross*-engine directed pairs once a night, plus on
 # manual dispatch, so the broader matrix doesn't burn ~50 min/PR of
 # runner time but still catches cross-driver regressions within 24 h.
 #
-# Pairs covered (11 of the 12 cross-engine combinations across 4 engines —
-# mssql→postgres is excluded because it's already the per-PR anchor):
+# Pairs covered (all 12 cross-engine combinations across 4 engines):
 #
-#   mssql →           {mysql, sqlite}
+#   mssql →           {postgres, mysql, sqlite}
 #   postgres →        {mssql, mysql, sqlite}
 #   mysql →           {mssql, postgres, sqlite}
 #   sqlite →          {mssql, postgres, mysql}
@@ -57,15 +56,16 @@ jobs:
     timeout-minutes: 20
 
     strategy:
-      # One failing pair shouldn't cancel the other 10. Each pair tests
+      # One failing pair shouldn't cancel the other 11. Each pair tests
       # an independent driver combination, and we want every result.
       fail-fast: false
-      # 11 pairs in parallel — GHA's free tier limits matter on
+      # 12 pairs in parallel — GHA's free tier limits matter on
       # public/private orgs; on this repo we have headroom and the
       # whole matrix completes in roughly one pair's wall-clock.
-      max-parallel: 11
+      max-parallel: 12
       matrix:
         pair:
+          - { src: mssql,  tgt: pg }
           - { src: mssql,  tgt: mysql }
           - { src: mssql,  tgt: sqlite }
           - { src: pg,     tgt: mssql }
