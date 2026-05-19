@@ -23,6 +23,9 @@ All notable changes to this project will be documented in this file.
 - Added the MSSQL → Postgres pair to the nightly cross-engine integration
   matrix so the primary migration path has scheduled coverage as well as
   per-PR coverage (#342).
+- Added an MSSQL → Postgres schema-evolution integration test that proves
+  `added_column: auto` alters the target and transfers the new column value
+  during a follow-up upsert run (#306).
 
 ### Changed
 

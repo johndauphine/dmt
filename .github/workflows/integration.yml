@@ -133,6 +133,12 @@ jobs:
         # is the production-shape check, so we run it too.
         run: ./dmt -c scripts/fixtures/ci-mssql-pg.yaml validate
 
+      - name: Run added-column schema evolution integration
+        env:
+          DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-schema-evolution-state
+          INTEGRATION_TEST_LOG: /tmp/dmt-ci-schema-evolution.log
+        run: make integration-test-schema-evolution
+
       - name: Upload dmt logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -140,7 +146,9 @@ jobs:
           name: dmt-logs-${{ github.run_id }}
           path: |
             /tmp/dmt-ci.log
+            /tmp/dmt-ci-schema-evolution.log
             ${{ env.DMT_STATE_DIR }}
+            ${{ github.workspace }}/.dmt-ci-schema-evolution-state
           if-no-files-found: ignore
 
   sqlite-to-sqlite:
