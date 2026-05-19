@@ -26,6 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONFIG="$REPO_ROOT/scripts/fixtures/ci-sqlite-sqlite.yaml"
+UPSERT_DELETE_CONFIG="$REPO_ROOT/scripts/fixtures/ci-sqlite-sqlite-upsert-deletes.yaml"
 FIXTURE="$REPO_ROOT/scripts/fixtures/so2010-minimal-sqlite.sql"
 LOG="${INTEGRATION_TEST_SQLITE_LOG:-/tmp/dmt-ci-sqlite.log}"
 
@@ -55,6 +56,7 @@ fi
 
 echo "=== dmt sqlite → sqlite (CI integration test) ==="
 echo "  config:    $CONFIG"
+echo "  upsert:    $UPSERT_DELETE_CONFIG"
 echo "  fixture:   $FIXTURE"
 echo "  source DB: $SQLITE_SOURCE_DB"
 echo "  target DB: $SQLITE_TARGET_DB"
@@ -196,6 +198,50 @@ check_value "VoteTypes has no Id=14 (canonical gap)" \
 if [[ "$fail" -ne 0 ]]; then
     echo ""
     echo "Integration test FAILED on value spot-check — see $LOG."
+    exit 1
+fi
+
+echo ""
+echo "=== Hard-delete reconciliation check ==="
+sqlite3 "$SQLITE_SOURCE_DB" "DELETE FROM Users WHERE Id = 4;"
+src_users_after_delete="$(sqlite3 "$SQLITE_SOURCE_DB" "SELECT COUNT(*) FROM Users")"
+if [[ "$src_users_after_delete" != "4" ]]; then
+    echo "ERROR: source Users count after delete = $src_users_after_delete, expected 4" >&2
+    exit 1
+fi
+echo "  source hard delete applied: Users=$src_users_after_delete"
+
+"$REPO_ROOT/dmt" -c "$UPSERT_DELETE_CONFIG" run 2>&1 | tee -a "$LOG"
+
+target_users_after_delete="$(sqlite3 "$SQLITE_TARGET_DB" "SELECT COUNT(*) FROM Users" | tr -d '[:space:]')"
+if [[ "$target_users_after_delete" != "4" ]]; then
+    echo "  FAIL: target Users after reconciliation got=$target_users_after_delete want=4"
+    fail=1
+else
+    echo "  OK:   target Users = 4 after reconciliation"
+fi
+
+target_deleted_row="$(sqlite3 "$SQLITE_TARGET_DB" "SELECT COUNT(*) FROM Users WHERE Id = 4" | tr -d '[:space:]')"
+if [[ "$target_deleted_row" != "0" ]]; then
+    echo "  FAIL: target Users.Id=4 count=$target_deleted_row want=0"
+    fail=1
+else
+    echo "  OK:   target Users.Id=4 was removed"
+fi
+
+delete_counts="$(sqlite3 "$DMT_STATE_DIR/migrate.db" \
+    "SELECT COALESCE(SUM(candidate_rows),0) || '|' || COALESCE(SUM(deleted_rows),0) FROM delete_reconciliation_tables WHERE table_name = '.Users';" \
+    | tr -d '[:space:]')"
+if [[ "$delete_counts" != "1|1" ]]; then
+    echo "  FAIL: checkpoint delete counts for .Users got=$delete_counts want=1|1"
+    fail=1
+else
+    echo "  OK:   checkpoint delete counts for .Users = candidate 1 / deleted 1"
+fi
+
+if [[ "$fail" -ne 0 ]]; then
+    echo ""
+    echo "Integration test FAILED on hard-delete reconciliation — see $LOG."
     exit 1
 fi
 
