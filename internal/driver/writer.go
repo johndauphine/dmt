@@ -22,6 +22,9 @@ type Writer interface {
 	// AddColumn adds a nullable target column from source metadata. It should
 	// be idempotent when the target column already exists.
 	AddColumn(ctx context.Context, t *Table, column *Column, targetSchema string) error
+	// DropColumnNotNull relaxes an existing target column from NOT NULL to
+	// NULL using source column metadata for dialects that require a full type.
+	DropColumnNotNull(ctx context.Context, t *Table, column *Column, targetSchema string) error
 	DropTable(ctx context.Context, schema, table string) error
 	TruncateTable(ctx context.Context, schema, table string) error
 	TableExists(ctx context.Context, schema, table string) (bool, error)

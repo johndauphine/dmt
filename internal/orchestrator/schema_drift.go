@@ -75,23 +75,43 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 			o.config.Migration.TargetMode)
 	}
 
-	addedColumns := len(addedColumnChanges(report))
-	if addedColumns == 0 {
+	var parts []string
+	if part := schemaEvolutionFooterPart(
+		"added_column",
+		len(addedColumnChanges(report)),
+		"added column(s)",
+		o.config.Migration.AddedColumnSchemaEvolutionPolicy(),
+	); part != "" {
+		parts = append(parts, part)
+	}
+	if part := schemaEvolutionFooterPart(
+		"nullability_change",
+		len(nullabilityChanges(report)),
+		"nullability change(s)",
+		o.config.Migration.NullabilityChangeSchemaEvolutionPolicy(),
+	); part != "" {
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
 		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
 	}
+	return "Schema evolution " + strings.Join(parts, "; ") + "."
+}
 
-	switch o.config.Migration.AddedColumnSchemaEvolutionPolicy() {
+func schemaEvolutionFooterPart(kind string, count int, noun string, policy config.SchemaEvolutionPolicy) string {
+	if count == 0 {
+		return ""
+	}
+
+	switch policy {
 	case config.SchemaEvolutionAuto:
-		return fmt.Sprintf("Schema evolution added_column=auto; %d added column(s) may be applied before transfer.",
-			addedColumns)
+		return fmt.Sprintf("%s=auto; %d %s may be applied before transfer", kind, count, noun)
 	case config.SchemaEvolutionLog:
-		return fmt.Sprintf("Schema evolution added_column=log; %d added column(s) will be reported only.",
-			addedColumns)
+		return fmt.Sprintf("%s=log; %d %s will be reported only", kind, count, noun)
 	case config.SchemaEvolutionFail:
-		return fmt.Sprintf("Schema evolution added_column=fail; %d added column(s) will abort before transfer.",
-			addedColumns)
+		return fmt.Sprintf("%s=fail; %d %s will abort before transfer", kind, count, noun)
 	default:
-		return "Schema evolution is configured, but the added_column policy is invalid."
+		return fmt.Sprintf("%s policy is invalid", kind)
 	}
 }
 

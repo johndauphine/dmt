@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
+	typeddl "github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
 // CreateSchema creates the target schema (database) if it doesn't exist.
@@ -110,6 +112,87 @@ func (w *Writer) buildAddColumnSQL(t *driver.Table, column *driver.Column, targe
 		w.dialect.QualifyTable(targetSchema, t.Name),
 		w.dialect.QuoteIdentifier(column.Name),
 		mappedType), nil
+}
+
+// DropColumnNotNull relaxes a target column from NOT NULL to NULL.
+func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	ddl, err := w.buildDropColumnNotNullSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Relaxing MySQL column nullability with DDL: %s", ddl)
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) buildDropColumnNotNullSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	if t == nil {
+		return "", fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return "", fmt.Errorf("column is required")
+	}
+
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "mysql", *column)
+	if err != nil {
+		return "", err
+	}
+
+	defaultClause := mysqlDefaultClause(w.sourceType, mappedType, column)
+	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s NULL%s",
+		w.dialect.QualifyTable(targetSchema, t.Name),
+		w.dialect.QuoteIdentifier(column.Name),
+		mappedType,
+		defaultClause), nil
+}
+
+func mysqlDefaultClause(sourceType string, mappedType string, column *driver.Column) string {
+	if column.DefaultValue == "" {
+		return ""
+	}
+
+	expr := typeddl.FormatDDLDefault(
+		column.DefaultValue,
+		sourceDialectForDDL(sourceType),
+		typeddl.DialectMySQL,
+		isBooleanSourceColumn(column),
+	)
+	if expr == "" {
+		return ""
+	}
+	if needsParenthesizedMySQLDefault(mappedType) {
+		expr = "(" + expr + ")"
+	}
+	return " DEFAULT " + expr
+}
+
+func sourceDialectForDDL(sourceType string) string {
+	switch strings.ToLower(driver.Canonicalize(sourceType)) {
+	case "postgres", "postgresql", "pg":
+		return typeddl.DialectPostgres
+	case "mssql", "sqlserver", "sql-server":
+		return typeddl.DialectMSSQL
+	case "mysql", "mariadb", "maria":
+		return typeddl.DialectMySQL
+	case "sqlite", "sqlite3", "sqlitedb":
+		return typeddl.DialectSQLite
+	default:
+		return strings.ToLower(sourceType)
+	}
+}
+
+func isBooleanSourceColumn(column *driver.Column) bool {
+	switch strings.ToLower(column.DataType) {
+	case "bool", "boolean", "bit":
+		return true
+	default:
+		return false
+	}
+}
+
+func needsParenthesizedMySQLDefault(mappedType string) bool {
+	upperType := strings.ToUpper(mappedType)
+	return strings.Contains(upperType, "TEXT") || strings.Contains(upperType, "BLOB")
 }
 
 // DropTable drops a table using AI-generated DDL that handles foreign key constraints.

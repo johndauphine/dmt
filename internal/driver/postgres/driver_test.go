@@ -96,6 +96,23 @@ func TestBuildAddColumnSQL(t *testing.T) {
 	}
 }
 
+func TestBuildDropColumnNotNullSQL(t *testing.T) {
+	w := &Writer{dialect: &Dialect{}}
+	got, err := w.buildDropColumnNotNullSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email Address"},
+		"public",
+	)
+	if err != nil {
+		t.Fatalf("buildDropColumnNotNullSQL returned error: %v", err)
+	}
+
+	want := `ALTER TABLE "public"."users" ALTER COLUMN "email_address" DROP NOT NULL`
+	if got != want {
+		t.Fatalf("SQL = %q, want %q", got, want)
+	}
+}
+
 func TestEstimateRowBytes(t *testing.T) {
 	tests := []struct {
 		name string

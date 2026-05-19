@@ -101,6 +101,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("migration.schema_evolution.added_column must be 'auto', 'log', or 'fail'; got %q",
 				c.Migration.SchemaEvolution.AddedColumn)
 		}
+		switch c.Migration.SchemaEvolution.NullabilityChange {
+		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail:
+			// Valid. Empty means the section-level default: auto.
+		default:
+			return fmt.Errorf("migration.schema_evolution.nullability_change must be 'auto', 'log', or 'fail'; got %q",
+				c.Migration.SchemaEvolution.NullabilityChange)
+		}
 	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml

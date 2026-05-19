@@ -204,6 +204,19 @@ func (w *Writer) buildAddColumnSQL(t *driver.Table, column *driver.Column) (stri
 		mappedType), nil
 }
 
+// DropColumnNotNull returns a clear unsupported error. SQLite cannot relax a
+// NOT NULL constraint in place; doing it safely requires a table rebuild.
+func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return fmt.Errorf("column is required")
+	}
+	return fmt.Errorf("sqlite cannot relax NOT NULL for %s.%s without rebuilding the table",
+		t.Name, column.Name)
+}
+
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	qualifiedTable := w.dialect.QualifyTable(schema, table)

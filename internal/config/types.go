@@ -118,6 +118,9 @@ type SchemaEvolutionConfig struct {
 	// AddedColumn controls added source columns. When the section is present
 	// but this field is omitted, added columns default to auto-apply.
 	AddedColumn SchemaEvolutionPolicy `yaml:"added_column,omitempty" json:"added_column,omitempty"`
+	// NullabilityChange controls source nullability drift. Auto only relaxes
+	// target columns from NOT NULL to NULL; tightening remains a hard error.
+	NullabilityChange SchemaEvolutionPolicy `yaml:"nullability_change,omitempty" json:"nullability_change,omitempty"`
 }
 
 // MigrationConfig holds migration behavior settings
@@ -335,6 +338,19 @@ func (m MigrationConfig) AddedColumnSchemaEvolutionPolicy() SchemaEvolutionPolic
 		return SchemaEvolutionAuto
 	}
 	return m.SchemaEvolution.AddedColumn
+}
+
+// NullabilityChangeSchemaEvolutionPolicy returns the effective nullability
+// policy. The absent section preserves read-only drift reporting. Once the
+// section is present, omitted nullability_change defaults to auto.
+func (m MigrationConfig) NullabilityChangeSchemaEvolutionPolicy() SchemaEvolutionPolicy {
+	if m.SchemaEvolution == nil {
+		return SchemaEvolutionLog
+	}
+	if m.SchemaEvolution.NullabilityChange == "" {
+		return SchemaEvolutionAuto
+	}
+	return m.SchemaEvolution.NullabilityChange
 }
 
 func boolPtrDefault(v *bool, def bool) bool {

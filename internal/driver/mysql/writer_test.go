@@ -104,3 +104,31 @@ func TestBuildAddColumnSQL(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildDropColumnNotNullSQL(t *testing.T) {
+	w := &Writer{
+		dialect:    &Dialect{},
+		typeMapper: driver.NewDeterministicMapper(),
+		sourceType: "postgres",
+	}
+	got, err := w.buildDropColumnNotNullSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email", DataType: "varchar", MaxLength: 255, DefaultValue: "'unknown'::character varying"},
+		"app",
+	)
+	if err != nil {
+		t.Fatalf("buildDropColumnNotNullSQL returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		"ALTER TABLE `app`.`Users` MODIFY COLUMN",
+		"`Email`",
+		"VARCHAR(255)",
+		"NULL",
+		"DEFAULT 'unknown'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SQL %q missing %q", got, want)
+		}
+	}
+}

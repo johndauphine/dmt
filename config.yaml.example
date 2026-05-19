@@ -78,10 +78,11 @@ migration:
 
   # Schema evolution (#306). Omit this section to keep schema drift
   # reporting read-only. In upsert mode, adding this section opts into
-  # compatible target ALTERs before transfer. For this first slice,
-  # only added_column is implemented.
+  # compatible target ALTERs before transfer. Today this supports added
+  # columns and safe nullability relaxation (NOT NULL -> NULL).
   # schema_evolution:
-  #   added_column: auto  # auto | log | fail (section default: auto)
+  #   added_column: auto          # auto | log | fail (section default: auto)
+  #   nullability_change: auto    # auto | log | fail; auto only relaxes to NULL
 
   # Validation options
   sample_validation: false      # Enable sample data validation after row count check
