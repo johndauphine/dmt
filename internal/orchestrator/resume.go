@@ -202,6 +202,12 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 			return fmt.Errorf("finalizing: %w", err)
 		}
 
+		if err := o.reconcileDeletesIfDue(ctx, run.ID, tables); err != nil {
+			o.state.CompleteRun(run.ID, "failed", err.Error())
+			o.notifyFailure(run.ID, err, time.Since(startTime))
+			return fmt.Errorf("delete reconciliation: %w", err)
+		}
+
 		// Validate
 		o.setPhase("validating")
 		logging.Debug("Validating...")
@@ -358,6 +364,12 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
+	}
+
+	if err := o.reconcileDeletesIfDue(ctx, run.ID, successTables); err != nil {
+		o.state.CompleteRun(run.ID, "failed", err.Error())
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return fmt.Errorf("delete reconciliation: %w", err)
 	}
 
 	// Validate successful tables
