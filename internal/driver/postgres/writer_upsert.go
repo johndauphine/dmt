@@ -77,7 +77,10 @@ func (w *Writer) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions
 		return fmt.Errorf("upserting: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
 }
 
 func (w *Writer) buildUpsertSQL(opts driver.UpsertBatchOptions, stagingTable string) string {
