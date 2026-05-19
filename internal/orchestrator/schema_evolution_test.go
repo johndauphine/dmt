@@ -241,6 +241,77 @@ func TestPlanNullabilityEvolutionRejectsTightening(t *testing.T) {
 	}
 }
 
+func TestPlanNullabilityEvolutionRejectsSameColumnTypeDrift(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{
+			Kind:       drift.TypeNarrowed,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "varchar(255)",
+			Current:    "varchar(50)",
+		},
+		{
+			Kind:       drift.NullabilityChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "NOT NULL",
+			Current:    "NULL",
+		},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 50, IsNullable: true},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "type drift") {
+		t.Fatalf("error = %q, want type drift rejection", err.Error())
+	}
+}
+
+func TestPlanNullabilityEvolutionRejectsPrimaryKeyDrift(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{
+			Kind:      drift.PKChange,
+			Schema:    "dbo",
+			TableName: "Users",
+			Previous:  "email",
+			Current:   "id",
+		},
+		{
+			Kind:       drift.NullabilityChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "email",
+			Previous:   "NOT NULL",
+			Current:    "NULL",
+		},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "Users",
+		Columns: []source.Column{
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true},
+		},
+	}}
+
+	_, _, err := planNullabilityEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err == nil {
+		t.Fatal("planNullabilityEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "primary-key drift") {
+		t.Fatalf("error = %q, want primary-key drift rejection", err.Error())
+	}
+}
+
 func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
 	nullabilityReport := drift.Report{Changes: []drift.Change{{

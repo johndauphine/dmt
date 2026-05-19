@@ -215,6 +215,18 @@ func planNullabilityEvolution(
 		if err != nil {
 			return nil, nil, err
 		}
+		if hasColumnTypeDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-relax nullability for %s.%s while type drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if hasPrimaryKeyDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-relax nullability for %s.%s while primary-key drift is also present",
+				table.Name, column.Name,
+			)
+		}
 		if change.Previous != "NOT NULL" || change.Current != "NULL" || !column.IsNullable {
 			return nil, nil, fmt.Errorf(
 				"schema evolution cannot auto-tighten nullability for %s.%s (%s -> %s); set nullability_change=log to report only",
@@ -252,6 +264,32 @@ func nullabilityChanges(report drift.Report) []drift.Change {
 		}
 	}
 	return changes
+}
+
+func hasColumnTypeDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Schema != candidate.Schema ||
+			change.TableName != candidate.TableName ||
+			change.ObjectName != candidate.ObjectName {
+			continue
+		}
+		switch change.Kind {
+		case drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			return true
+		}
+	}
+	return false
+}
+
+func hasPrimaryKeyDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Kind == drift.PKChange &&
+			change.Schema == candidate.Schema &&
+			change.TableName == candidate.TableName {
+			return true
+		}
+	}
+	return false
 }
 
 func findSourceColumn(tables []source.Table, change drift.Change) (source.Table, source.Column, error) {
