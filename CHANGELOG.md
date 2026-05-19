@@ -17,6 +17,9 @@ All notable changes to this project will be documented in this file.
 - Added initial shared driver SQL-shape helpers and a shared-driver
   architecture note to guide behavior-preserving DRY work across database
   engines (#338).
+- Added shared driver SQL helpers for ordered primary-key scans and bounded
+  primary-key delete statements, giving delete reconciliation a tested
+  cross-engine SQL shape to build on (#338, #351).
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).
