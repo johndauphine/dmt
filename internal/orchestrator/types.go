@@ -287,14 +287,26 @@ type DryRunResult struct {
 // DeleteReconciliationPreview describes whether the opt-in #351 delete
 // reconciliation pass would run for this migration.
 type DeleteReconciliationPreview struct {
-	Enabled           bool       `json:"enabled"`
-	Due               bool       `json:"due"`
-	Reason            string     `json:"reason,omitempty"`
-	Interval          string     `json:"interval,omitempty"`
-	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
-	NextDueAt         *time.Time `json:"next_due_at,omitempty"`
-	EligibleTables    int        `json:"eligible_tables"`
-	SkippedNoPKTables int        `json:"skipped_no_pk_tables"`
+	Enabled           bool                               `json:"enabled"`
+	Due               bool                               `json:"due"`
+	Reason            string                             `json:"reason,omitempty"`
+	Interval          string                             `json:"interval,omitempty"`
+	LastSuccessAt     *time.Time                         `json:"last_success_at,omitempty"`
+	NextDueAt         *time.Time                         `json:"next_due_at,omitempty"`
+	EligibleTables    int                                `json:"eligible_tables"`
+	SkippedNoPKTables int                                `json:"skipped_no_pk_tables"`
+	CandidateRows     *int64                             `json:"candidate_rows,omitempty"`
+	Tables            []DeleteReconciliationTablePreview `json:"tables,omitempty"`
+}
+
+// DeleteReconciliationTablePreview describes one dry-run delete candidate
+// count. Error is set when the non-mutating key scan could not complete.
+type DeleteReconciliationTablePreview struct {
+	Table         string `json:"table"`
+	CandidateRows int64  `json:"candidate_rows"`
+	Skipped       bool   `json:"skipped,omitempty"`
+	SkipReason    string `json:"skip_reason,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // DryRunTable contains preview information for a single table.

@@ -59,4 +59,25 @@ func printDeleteReconciliationPreview(p *orchestrator.DeleteReconciliationPrevie
 	if p.SkippedNoPKTables > 0 {
 		fmt.Printf("  Skipped Tables Without PK: %d\n", p.SkippedNoPKTables)
 	}
+	if p.CandidateRows != nil {
+		fmt.Printf("  Candidate Deletes: %s\n", orchestrator.FormatCount(*p.CandidateRows))
+	}
+	if len(p.Tables) > 0 {
+		fmt.Println("  Tables:")
+		for _, table := range p.Tables {
+			line := fmt.Sprintf("    %-30s %12s candidate",
+				table.Table,
+				orchestrator.FormatCount(table.CandidateRows))
+			if table.Skipped {
+				line += "  skipped"
+				if table.SkipReason != "" {
+					line += ": " + table.SkipReason
+				}
+			}
+			if table.Error != "" {
+				line += "  count unavailable: " + table.Error
+			}
+			fmt.Println(line)
+		}
+	}
 }

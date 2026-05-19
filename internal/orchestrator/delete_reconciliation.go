@@ -79,6 +79,69 @@ func (o *Orchestrator) previewDeleteReconciliation(
 	return preview, nil
 }
 
+func (o *Orchestrator) countDeleteReconciliationCandidates(
+	ctx context.Context,
+	tables []source.Table,
+	preview *DeleteReconciliationPreview,
+) error {
+	if preview == nil || !preview.Due {
+		return nil
+	}
+
+	sourceDialect := driver.GetDialect(o.sourcePool.DBType())
+	if sourceDialect == nil {
+		return fmt.Errorf("no dialect registered for source DB type %s", o.sourcePool.DBType())
+	}
+	targetDialect := driver.GetDialect(o.targetPool.DBType())
+	if targetDialect == nil {
+		return fmt.Errorf("no dialect registered for target DB type %s", o.targetPool.DBType())
+	}
+
+	var total int64
+	batchSize := o.config.Migration.DeleteReconcileBatchSize()
+	preview.Tables = preview.Tables[:0]
+	for _, table := range tables {
+		tablePreview := DeleteReconciliationTablePreview{Table: table.FullName()}
+		if !table.HasPK() {
+			tablePreview.Skipped = true
+			tablePreview.SkipReason = "no primary key"
+			preview.Tables = append(preview.Tables, tablePreview)
+			continue
+		}
+
+		missing, err := reconcile.FindTargetOnlyKeys(
+			ctx,
+			o.sourcePool.DB(),
+			o.targetPool.DB(),
+			sourceDialect,
+			targetDialect,
+			reconcile.KeyDiffOptions{
+				SourceSchema: table.Schema,
+				TargetSchema: o.config.Target.Schema,
+				Table:        table.Name,
+				KeyColumns:   append([]string(nil), table.PrimaryKey...),
+				BatchSize:    batchSize,
+			},
+			func(_ [][]any) error {
+				return nil
+			},
+		)
+		if err != nil {
+			tablePreview.Error = err.Error()
+			logging.Warn("Dry-run delete reconciliation candidate count failed for %s: %v",
+				table.FullName(), err)
+			preview.Tables = append(preview.Tables, tablePreview)
+			continue
+		}
+
+		tablePreview.CandidateRows = missing
+		total += missing
+		preview.Tables = append(preview.Tables, tablePreview)
+	}
+	preview.CandidateRows = &total
+	return nil
+}
+
 func (o *Orchestrator) reconcileDeletesIfDue(
 	ctx context.Context,
 	runID string,

@@ -37,6 +37,8 @@ All notable changes to this project will be documented in this file.
 - Changed upsert row-count validation to require source/target parity after
   the current run completes delete reconciliation, while preserving the target
   superset allowance when reconciliation is disabled or not due (#351).
+- Added due-only dry-run candidate delete counts for delete reconciliation,
+  including per-table skipped/error reporting without mutating targets (#351).
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).

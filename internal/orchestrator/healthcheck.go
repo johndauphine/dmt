@@ -175,6 +175,9 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := o.countDeleteReconciliationCandidates(ctx, tables, deletePreview); err != nil {
+		return nil, err
+	}
 	result.DeleteReconciliation = deletePreview
 
 	return result, nil
