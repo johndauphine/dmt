@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +167,11 @@ func TestMigrationCompleted(t *testing.T) {
 		if receivedMsg.Attachments[0].Color != "#36a64f" {
 			t.Errorf("color = %q, want green (#36a64f)", receivedMsg.Attachments[0].Color)
 		}
+		for _, want := range []string{"DMT run complete", "Status     : success", "Rows       : 1,000,000 transferred"} {
+			if !strings.Contains(receivedMsg.Text, want) {
+				t.Fatalf("Slack summary missing %q:\n%s", want, receivedMsg.Text)
+			}
+		}
 	})
 }
 
@@ -205,6 +211,9 @@ func TestMigrationFailed(t *testing.T) {
 		}
 		if !found {
 			t.Error("expected 'Unknown error' field for nil error")
+		}
+		if !strings.Contains(receivedMsg.Text, "DMT run failed") {
+			t.Fatalf("failure summary missing title:\n%s", receivedMsg.Text)
 		}
 	})
 
@@ -367,6 +376,9 @@ func TestMigrationCompletedWithErrors(t *testing.T) {
 		}
 		if receivedMsg.Attachments[0].Color != "#ffc107" {
 			t.Errorf("color = %q, want yellow (#ffc107)", receivedMsg.Attachments[0].Color)
+		}
+		if !strings.Contains(receivedMsg.Text, "DMT run completed with warnings") {
+			t.Fatalf("warning summary missing title:\n%s", receivedMsg.Text)
 		}
 	})
 }

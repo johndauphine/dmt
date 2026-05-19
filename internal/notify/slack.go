@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -135,14 +136,21 @@ func (n *Notifier) MigrationCompleted(runID string, startTime time.Time, duratio
 		return nil
 	}
 
-	headerText := fmt.Sprintf("Migration pipeline completed successfully. Migrated %d tables with %s total rows. Throughput: %s rows/sec.",
-		tableCount, formatNumberWithCommas(rowCount), formatNumberWithCommas(int64(throughput)))
-
 	msg := SlackMessage{
 		Channel:   n.config.Channel,
 		Username:  n.getUsername(),
 		IconEmoji: ":white_check_mark:",
-		Text:      headerText,
+		Text: slackSummaryBlock(
+			"DMT run complete",
+			runID,
+			"success",
+			startTime,
+			duration,
+			fmt.Sprintf("%d succeeded, 0 failed", tableCount),
+			rowCount,
+			throughput,
+			"",
+		),
 		Attachments: []SlackAttachment{
 			{
 				Color: "#36a64f", // green
@@ -181,6 +189,12 @@ func (n *Notifier) MigrationFailed(runID string, err error, duration time.Durati
 		Channel:   n.config.Channel,
 		Username:  n.getUsername(),
 		IconEmoji: ":x:",
+		Text: slackFailureSummaryBlock(
+			"DMT run failed",
+			runID,
+			duration,
+			errMsg,
+		),
 		Attachments: []SlackAttachment{
 			{
 				Color: "#dc3545", // red
@@ -220,14 +234,21 @@ func (n *Notifier) MigrationCompletedWithErrors(runID string, startTime time.Tim
 		}
 	}
 
-	headerText := fmt.Sprintf("Migration completed with errors. %d tables succeeded, %d tables failed. Transferred %s rows. Throughput: %s rows/sec.",
-		successTables, failedTables, formatNumberWithCommas(rowCount), formatNumberWithCommas(int64(throughput)))
-
 	msg := SlackMessage{
 		Channel:   n.config.Channel,
 		Username:  n.getUsername(),
 		IconEmoji: ":warning:",
-		Text:      headerText,
+		Text: slackSummaryBlock(
+			"DMT run completed with warnings",
+			runID,
+			"partial",
+			startTime,
+			duration,
+			fmt.Sprintf("%d succeeded, %d failed", successTables, failedTables),
+			rowCount,
+			throughput,
+			failureSummary,
+		),
 		Attachments: []SlackAttachment{
 			{
 				Color: "#ffc107", // yellow/orange
@@ -311,6 +332,34 @@ func (n *Notifier) getUsername() string {
 		return n.config.Username
 	}
 	return "dmt"
+}
+
+func slackSummaryBlock(title, runID, status string, startTime time.Time, duration time.Duration, tables string, rowCount int64, throughput float64, note string) string {
+	lines := []string{
+		title,
+		fmt.Sprintf("Run ID     : %s", runID),
+		fmt.Sprintf("Status     : %s", status),
+		fmt.Sprintf("Started    : %s", startTime.UTC().Format("2006-01-02 15:04:05 UTC")),
+		fmt.Sprintf("Duration   : %s", formatDuration(duration)),
+		fmt.Sprintf("Tables     : %s", tables),
+		fmt.Sprintf("Rows       : %s transferred", formatNumberWithCommas(rowCount)),
+		fmt.Sprintf("Throughput : %s rows/sec", formatNumberWithCommas(int64(throughput))),
+	}
+	if note != "" {
+		lines = append(lines, fmt.Sprintf("Notes      : %s", note))
+	}
+	return "```" + strings.Join(lines, "\n") + "```"
+}
+
+func slackFailureSummaryBlock(title, runID string, duration time.Duration, errMsg string) string {
+	lines := []string{
+		title,
+		fmt.Sprintf("Run ID   : %s", runID),
+		"Status   : failed",
+		fmt.Sprintf("Duration : %s", formatDuration(duration)),
+		fmt.Sprintf("Error    : %s", errMsg),
+	}
+	return "```" + strings.Join(lines, "\n") + "```"
 }
 
 func formatNumberWithCommas(n int64) string {

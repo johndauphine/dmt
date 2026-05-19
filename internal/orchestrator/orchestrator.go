@@ -401,9 +401,38 @@ func (o *Orchestrator) logPGIdentifierChanges(tables []source.Table) {
 		report.TotalTableChanges, report.TotalColumnChanges, report.TablesWithChanges)
 }
 
-// notifyFailure sends a failure notification
+// notifyFailure sends a failure notification when migration.notify.on_failure
+// allows it.
 func (o *Orchestrator) notifyFailure(runID string, err error, duration time.Duration) {
+	if !o.config.Migration.NotifyOnFailure() {
+		return
+	}
 	o.notifier.MigrationFailed(runID, err, duration)
+}
+
+func (o *Orchestrator) notifyCompletion(runID string, startTime time.Time, duration time.Duration, tableCount int, rowCount int64, throughput float64) {
+	if !o.config.Migration.NotifyOnSuccess() {
+		return
+	}
+	o.notifier.MigrationCompleted(runID, startTime, duration, tableCount, rowCount, throughput)
+}
+
+func (o *Orchestrator) notifyCompletionWithErrors(
+	runID string,
+	startTime time.Time,
+	duration time.Duration,
+	successTables int,
+	failedTables int,
+	rowCount int64,
+	throughput float64,
+	failures []string,
+) {
+	if !o.config.Migration.NotifyOnFailure() {
+		return
+	}
+	o.notifier.MigrationCompletedWithErrors(
+		runID, startTime, duration, successTables, failedTables, rowCount, throughput, failures,
+	)
 }
 
 // markTableComplete marks a table transfer task as complete

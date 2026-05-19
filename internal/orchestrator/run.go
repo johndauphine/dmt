@@ -218,7 +218,9 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		keysetCount, rowNumberCount, len(tables)-keysetCount-rowNumberCount)
 
 	// Send start notification
-	o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
+	if o.config.Migration.NotifyOnStart() {
+		o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
+	}
 
 	// Create target schema and tables
 	o.setPhase("creating_tables")
@@ -331,7 +333,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 			failureNames[i] = f.TableName
 		}
 		o.state.CompleteRun(runID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures)))
-		o.notifier.MigrationCompletedWithErrors(runID, startTime, duration,
+		o.notifyCompletionWithErrors(runID, startTime, duration,
 			len(successTables), len(tableFailures), totalRows, throughput, failureNames)
 		logging.Warn("Migration completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
 			len(successTables), len(tableFailures), totalRows, duration.Round(time.Second), throughput)
@@ -340,7 +342,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		// Full success
 		o.state.CompleteRun(runID, "success", "")
 		o.captureSchemaSnapshots(runID, tables)
-		o.notifier.MigrationCompleted(runID, startTime, duration, len(tables), totalRows, throughput)
+		o.notifyCompletion(runID, startTime, duration, len(tables), totalRows, throughput)
 		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tables), totalRows, duration.Round(time.Second), throughput)
 		o.auditEvent("validation_complete", map[string]any{

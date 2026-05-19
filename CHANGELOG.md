@@ -33,6 +33,10 @@ All notable changes to this project will be documented in this file.
   `drop_recreate` baseline seeds date-column watermarks, one changed source
   row transfers during the next `upsert`, and an unchanged follow-up transfers
   zero rows (#304).
+- Added daily-driver ops summaries: `run`/`resume` now print a structured
+  completion summary, dry runs include preflight/drift checks and duration
+  estimates from recent history, and `migration.notify` controls completion
+  alerts (#308).
 - Added a delete-handling design proposal covering tombstones, periodic key-set
   reconciliation, CDC, and the proposed `migration.deletes` configuration
   surface (#307).
