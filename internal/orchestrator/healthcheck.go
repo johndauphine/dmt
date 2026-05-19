@@ -95,6 +95,10 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	logging.Info("Performing dry run (no data will be transferred)...")
 
+	if err := o.runPreFlight(ctx); err != nil {
+		return nil, err
+	}
+
 	// Extract schema
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
@@ -103,6 +107,9 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 
 	// Apply table filters
 	tables = o.filterTables(tables)
+	if _, err := o.reportSchemaDrift(tables, false); err != nil {
+		return nil, err
+	}
 
 	result := &DryRunResult{
 		SourceType:   o.config.Source.Type,
@@ -159,7 +166,34 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 		})
 	}
 
+	result.EstimatedRowsPerSecond = o.estimateDryRunRowsPerSecond()
+	if result.EstimatedRowsPerSecond > 0 && result.TotalRows > 0 {
+		result.EstimatedDurationSeconds = float64(result.TotalRows) / float64(result.EstimatedRowsPerSecond)
+	}
+
 	return result, nil
+}
+
+func (o *Orchestrator) estimateDryRunRowsPerSecond() int64 {
+	history, err := o.state.GetAITuningHistory(5, o.sourcePool.DBType(), o.targetPool.DBType())
+	if err != nil {
+		logging.Debug("dry-run: failed to load throughput history: %v", err)
+		return 0
+	}
+
+	var sum float64
+	var count int64
+	for _, record := range history {
+		if record.FinalThroughput <= 0 {
+			continue
+		}
+		sum += record.FinalThroughput
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return int64(sum / float64(count))
 }
 
 // isIntegerType checks if a data type is an integer type.

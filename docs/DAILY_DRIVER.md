@@ -31,6 +31,42 @@ The date-column list is ordered. For each table, DMT uses the first column
 that exists on that source table. Tables with no matching date column still
 run as full-table upserts on each daily run.
 
+## Preview and Summary
+
+Before enabling a scheduled run, preview the plan without writing data:
+
+```sh
+dmt -c config.yaml run --dry-run
+```
+
+The dry run performs connection/preflight checks, extracts the filtered source
+schema, reports schema drift using the configured fail/log policy, estimates
+row counts, and shows the planned pagination strategy. When recent same
+source/target throughput history exists, the preview includes an estimated
+duration.
+
+Every normal `run` and `resume` prints a completion summary for terminal logs:
+run ID, status, timestamps, duration, table counts, transferred rows,
+throughput, per-table results, failed tables, and the final error when present.
+JSON output modes keep their machine-readable result instead of printing the
+human summary.
+
+Slack notifications reuse the same completion data in a structured message.
+Configure the webhook under `slack` or `~/.secrets/dmt-config.yaml`, then use
+`migration.notify` to control completion alerts:
+
+```yaml
+migration:
+  notify:
+    on_success: true
+    on_failure: true
+```
+
+`on_success` controls successful completion notifications. `on_failure`
+controls hard failures, partial runs, and per-table transfer failure alerts.
+The migration-start notification is sent when either completion policy is
+enabled.
+
 ## Watermark Semantics
 
 Incremental reads use a strict `>` comparison:

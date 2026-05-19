@@ -117,6 +117,12 @@ migration:
   allow_partial: false          # When false (default), partial migrations (≥1 failed table) exit with code 3 so
                                 # Airflow/k8s/CI see them as failures. Set true to restore pre-#248 exit-0 behavior.
 
+  # Completion notification policy (#308). These only apply when Slack is
+  # enabled/configured below or via ~/.secrets/dmt-config.yaml.
+  notify:
+    on_success: true
+    on_failure: true
+
 # Slack notifications (optional)
 slack:
   enabled: false

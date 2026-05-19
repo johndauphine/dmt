@@ -65,20 +65,7 @@ func resumeMigration(c *cli.Context) error {
 
 	runErr := orch.Resume(ctx)
 
-	// Output JSON result if requested
-	if c.Bool("output-json") || c.String("output-file") != "" {
-		result, err := orch.GetLastRunResult()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to get run result: %v\n", err)
-		} else {
-			if runErr != nil {
-				result.Error = runErr.Error()
-			}
-			if err := outputJSON(c, result); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to output JSON: %v\n", err)
-			}
-		}
-	}
+	outputOrPrintMigrationResult(c, orch, runErr)
 
 	return runErr
 }

@@ -170,7 +170,9 @@ retryLoop:
 		// AI error diagnosis
 		r.diagnoseError(ctx, j, err)
 
-		r.notifier.TableTransferFailed(runID, j.Table.Name, err)
+		if r.config.Migration.NotifyOnFailure() {
+			r.notifier.TableTransferFailed(runID, j.Table.Name, err)
+		}
 		return
 	}
 

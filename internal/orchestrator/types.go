@@ -250,9 +250,13 @@ type DryRunResult struct {
 	TotalRows      int64         `json:"total_rows"`
 	TotalTables    int           `json:"total_tables"`
 	EstimatedMemMB int64         `json:"estimated_memory_mb"`
-	Workers        int           `json:"workers"`
-	ChunkSize      int           `json:"chunk_size"`
-	TargetMode     string        `json:"target_mode"`
+	// EstimatedDurationSeconds is populated when recent same-direction
+	// throughput history is available.
+	EstimatedDurationSeconds float64 `json:"estimated_duration_seconds,omitempty"`
+	EstimatedRowsPerSecond   int64   `json:"estimated_rows_per_second,omitempty"`
+	Workers                  int     `json:"workers"`
+	ChunkSize                int     `json:"chunk_size"`
+	TargetMode               string  `json:"target_mode"`
 }
 
 // DryRunTable contains preview information for a single table.

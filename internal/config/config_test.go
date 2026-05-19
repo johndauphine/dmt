@@ -2053,6 +2053,61 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	}
 }
 
+func TestNotifyPolicyDefaults(t *testing.T) {
+	cfg := MigrationConfig{}
+	if !cfg.NotifyOnSuccess() {
+		t.Fatal("NotifyOnSuccess() = false, want true")
+	}
+	if !cfg.NotifyOnFailure() {
+		t.Fatal("NotifyOnFailure() = false, want true")
+	}
+	if !cfg.NotifyOnStart() {
+		t.Fatal("NotifyOnStart() = false, want true")
+	}
+
+	disabledSuccess := false
+	enabledFailure := true
+	cfg.Notify = NotifyConfig{
+		OnSuccess: &disabledSuccess,
+		OnFailure: &enabledFailure,
+	}
+	if cfg.NotifyOnSuccess() {
+		t.Fatal("NotifyOnSuccess() = true, want false")
+	}
+	if !cfg.NotifyOnFailure() {
+		t.Fatal("NotifyOnFailure() = false, want true")
+	}
+	if !cfg.NotifyOnStart() {
+		t.Fatal("NotifyOnStart() = false when failure alerts are enabled")
+	}
+
+	cfg.Notify.OnFailure = &disabledSuccess
+	if cfg.NotifyOnStart() {
+		t.Fatal("NotifyOnStart() = true, want false when both completion policies are disabled")
+	}
+}
+
+func TestNotifyPolicyOmittedFromResumeHashJSON(t *testing.T) {
+	onSuccess := false
+	onFailure := false
+	cfg := &Config{
+		Migration: MigrationConfig{
+			Notify: NotifyConfig{
+				OnSuccess: &onSuccess,
+				OnFailure: &onFailure,
+			},
+		},
+	}
+
+	data, err := json.Marshal(cfg.Sanitized().Migration)
+	if err != nil {
+		t.Fatalf("marshal migration: %v", err)
+	}
+	if strings.Contains(string(data), "Notify") || strings.Contains(string(data), "on_success") {
+		t.Fatalf("notify policy leaked into resume hash JSON: %s", data)
+	}
+}
+
 func TestConfigValidationWithAliases(t *testing.T) {
 	// Test that config validation accepts driver aliases
 	tests := []struct {

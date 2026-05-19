@@ -403,7 +403,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 			failureNames[i] = f.TableName
 		}
 		o.state.CompleteRun(run.ID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures)))
-		o.notifier.MigrationCompletedWithErrors(run.ID, startTime, duration,
+		o.notifyCompletionWithErrors(run.ID, startTime, duration,
 			successCount, len(tableFailures), totalRows, throughput, failureNames)
 		logging.Warn("Resume completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
 			successCount, len(tableFailures), totalRows, duration.Round(time.Second), throughput)
@@ -412,7 +412,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		// Full success
 		o.state.CompleteRun(run.ID, "success", "")
 		o.captureSchemaSnapshots(run.ID, tables)
-		o.notifier.MigrationCompleted(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
+		o.notifyCompletion(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
 	}

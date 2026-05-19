@@ -123,6 +123,13 @@ type SchemaEvolutionConfig struct {
 	NullabilityChange SchemaEvolutionPolicy `yaml:"nullability_change,omitempty" json:"nullability_change,omitempty"`
 }
 
+// NotifyConfig controls migration completion notifications. Nil fields default
+// to true so existing Slack behavior is preserved when a webhook is configured.
+type NotifyConfig struct {
+	OnSuccess *bool `yaml:"on_success,omitempty" json:"on_success,omitempty"`
+	OnFailure *bool `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
+}
+
 // MigrationConfig holds migration behavior settings
 type MigrationConfig struct {
 	MaxSourceConnections   int      `yaml:"max_source_connections"` // Max source database connections
@@ -148,6 +155,10 @@ type MigrationConfig struct {
 	SchemaEvolution  *SchemaEvolutionConfig `yaml:"schema_evolution,omitempty" json:"schema_evolution,omitempty"`
 	SampleValidation bool                   `yaml:"sample_validation"` // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
 	SampleSize       int                    `yaml:"sample_size"`       // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+	// Notify controls non-data-plane completion alerts. It is omitted from
+	// the resume config hash because changing alert policy should not make a
+	// resumable migration look incompatible with its original run config.
+	Notify NotifyConfig `yaml:"notify,omitempty" json:"-"`
 	// AllowPartial controls the exit-code contract when one or more
 	// tables fail to transfer. Default (false) returns a
 	// PartialMigrationError so unattended automation (Airflow, k8s
@@ -351,6 +362,31 @@ func (m MigrationConfig) NullabilityChangeSchemaEvolutionPolicy() SchemaEvolutio
 		return SchemaEvolutionAuto
 	}
 	return m.SchemaEvolution.NullabilityChange
+}
+
+// NotifyOnSuccess reports whether successful completion notifications should
+// be sent when a notification provider is configured.
+func (m MigrationConfig) NotifyOnSuccess() bool {
+	if m.Notify.OnSuccess == nil {
+		return true
+	}
+	return *m.Notify.OnSuccess
+}
+
+// NotifyOnFailure reports whether failed or partial-run notifications should
+// be sent when a notification provider is configured.
+func (m MigrationConfig) NotifyOnFailure() bool {
+	if m.Notify.OnFailure == nil {
+		return true
+	}
+	return *m.Notify.OnFailure
+}
+
+// NotifyOnStart reports whether the existing migration-start notification
+// should be sent. Start has no separate knob; it follows whether any
+// completion notification is enabled.
+func (m MigrationConfig) NotifyOnStart() bool {
+	return m.NotifyOnSuccess() || m.NotifyOnFailure()
 }
 
 func boolPtrDefault(v *bool, def bool) bool {
