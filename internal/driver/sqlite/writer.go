@@ -11,6 +11,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/stats"
 )
@@ -302,10 +303,7 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 	return w.GetRowCountExact(ctx, schema, table, false)
 }
 func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
-	var count int64
-	err := w.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT COUNT(*) FROM %s", w.dialect.QualifyTable(schema, table))).Scan(&count)
-	return count, err
+	return shared.ExactRowCount(ctx, w.db, w.dialect, schema, table)
 }
 
 // ResetSequence resets the AUTOINCREMENT counter for the table.
@@ -583,14 +581,10 @@ func convertRowValues(row []any) []any {
 
 // ExecRaw executes a raw SQL query.
 func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64, error) {
-	result, err := w.db.ExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	return shared.ExecRaw(ctx, w.db, query, args...)
 }
 
 // QueryRowRaw executes a single-row raw SQL query.
 func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
-	return w.db.QueryRowContext(ctx, query, args...).Scan(dest)
+	return shared.QueryRowRaw(ctx, w.db, query, dest, args...)
 }

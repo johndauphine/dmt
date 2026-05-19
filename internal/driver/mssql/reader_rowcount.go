@@ -3,19 +3,15 @@ package mssql
 import (
 	"context"
 	"database/sql"
-	"fmt"
+
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 func (r *Reader) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
-	// Try fast stats-based count first
-	count, err := r.GetRowCountFast(ctx, schema, table)
-	if err == nil && count > 0 {
-		return count, nil
-	}
-
-	// Fall back to COUNT(*)
-	err = r.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))).Scan(&count)
-	return count, err
+	return shared.RowCountWithFallback(
+		func() (int64, error) { return r.GetRowCountFast(ctx, schema, table) },
+		func() (int64, error) { return r.GetRowCountExact(ctx, schema, table, false) },
+	)
 }
 
 // GetRowCountFast returns an approximate row count using system statistics.
@@ -42,9 +38,7 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 // (always NOLOCK) was a silent override of the operator's
 // strict_consistency setting.
 func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error) {
-	var count int64
-	err := r.db.QueryRowContext(ctx, buildExactRowCountQuery(r.dialect.QualifyTable(schema, table), strictConsistency)).Scan(&count)
-	return count, err
+	return shared.QueryExactRowCount(ctx, r.db, buildExactRowCountQuery(r.dialect.QualifyTable(schema, table), strictConsistency))
 }
 
 // buildExactRowCountQuery is the testable string-building half of
@@ -55,7 +49,7 @@ func buildExactRowCountQuery(qualifiedTable string, strictConsistency bool) stri
 	if strictConsistency {
 		hint = ""
 	}
-	return fmt.Sprintf("SELECT COUNT(*) FROM %s%s", qualifiedTable, hint)
+	return shared.ExactRowCountSQL(qualifiedTable, hint)
 }
 
 // GetPartitionBoundaries calculates partition boundaries using MIN/MAX.

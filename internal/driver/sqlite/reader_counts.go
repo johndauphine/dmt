@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // GetRowCount returns the row count for a table.
@@ -21,10 +22,7 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 // GetRowCountExact returns the exact row count via COUNT(*). The
 // strictConsistency flag has no meaning in SQLite (MVCC-like via WAL).
 func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
-	var count int64
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", r.dialect.QualifyTable(schema, table))
-	err := r.db.QueryRowContext(ctx, query).Scan(&count)
-	return count, err
+	return shared.ExactRowCount(ctx, r.db, r.dialect, schema, table)
 }
 
 // GetPartitionBoundaries returns a single partition spanning the full PK

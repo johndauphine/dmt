@@ -39,6 +39,11 @@ multiple drivers and do not hide engine-specific behavior:
 - row-shape validation and argument flattening
 - ordered primary-key scan statements for engine-agnostic key-set comparison
 - bounded primary-key delete predicates for reconciliation-style cleanup
+- raw `database/sql` exec/query wrappers where drivers already expose the same
+  behavior
+- exact `COUNT(*)` query construction and execution, including optional table
+  hint suffixes
+- fast-count-then-exact-count fallback control flow
 - batch slicing and effective batch-size selection
 - stable preflight finding builders
 - reader control-flow helpers when pagination semantics are already delegated
@@ -80,9 +85,11 @@ later PR proves that the shared form is clearer and behavior-preserving:
    construction, to the shared helpers.
 4. Extract shared batch slicing and row-shape validation once the first writer
    migration proves the API shape.
-5. Look for reader pagination and preflight result-building helpers after the
+5. Centralize raw writer helpers and row-count control flow where concrete
+   drivers already behave identically.
+6. Look for reader pagination and preflight result-building helpers after the
    writer duplication is smaller.
-6. Revisit catalog-driven engine work after the native driver code is drier, so
+7. Revisit catalog-driven engine work after the native driver code is drier, so
    any configuration or catalog approach builds on a cleaner foundation.
 
 ## Acceptance Criteria For Each Slice
