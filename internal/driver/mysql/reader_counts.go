@@ -52,21 +52,5 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 		ORDER BY partition_id
 	`, qPK, qPK, qPK, numPartitions, qPK, qualifiedTable)
 
-	rows, err := r.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("querying partition boundaries: %w", err)
-	}
-	defer rows.Close()
-
-	var partitions []driver.Partition
-	for rows.Next() {
-		var p driver.Partition
-		p.TableName = t.Name
-		if err := rows.Scan(&p.PartitionID, &p.MinPK, &p.MaxPK, &p.RowCount); err != nil {
-			return nil, fmt.Errorf("scanning partition: %w", err)
-		}
-		partitions = append(partitions, p)
-	}
-
-	return partitions, rows.Err()
+	return shared.QueryPartitionBoundaries(ctx, r.db, query, t.Name)
 }
