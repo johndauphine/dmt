@@ -46,6 +46,8 @@ multiple drivers and do not hide engine-specific behavior:
 - fast-count-then-exact-count fallback control flow
 - sampled column-value and sample-row scan loops after concrete readers own the
   dialect-specific query strings
+- partition-boundary result scanning when concrete readers already return the
+  same row shape
 - batch slicing and effective batch-size selection
 - stable preflight finding builders
 - reader control-flow helpers when pagination semantics are already delegated
@@ -91,9 +93,11 @@ later PR proves that the shared form is clearer and behavior-preserving:
    drivers already behave identically.
 6. Centralize reader sampling scan loops once each concrete reader still owns
    its engine-specific casts and query shape.
-7. Look for reader pagination and preflight result-building helpers after the
+7. Centralize partition-boundary result scanning for engines whose partition
+   queries return the same row shape.
+8. Look for reader pagination and preflight result-building helpers after the
    writer duplication is smaller.
-8. Revisit catalog-driven engine work after the native driver code is drier, so
+9. Revisit catalog-driven engine work after the native driver code is drier, so
    any configuration or catalog approach builds on a cleaner foundation.
 
 ## Acceptance Criteria For Each Slice
