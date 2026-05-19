@@ -172,8 +172,9 @@ Runtime implementations should expose delete handling clearly:
 - run logs and completion summaries should report delete mode, target behavior,
   tables evaluated, rows marked or deleted, and skipped tables
 - reconciliation should distinguish "not due" from "ran and found zero deletes"
-- validation in upsert mode should account for enabled delete propagation instead
-  of always permitting extra target rows
+- validation in upsert mode requires source/target count parity after the
+  current run completes delete reconciliation, while still allowing extra target
+  rows when reconciliation is disabled or not due
 - dry-run output should list candidate delete counts without mutating the target
 
 ## Follow-up Implementation Issues
@@ -188,6 +189,7 @@ Track implementation in separate issues:
    validation and batched updates.
 4. Add tombstone source support for `deleted_at IS NOT NULL` and boolean marker
    columns, with per-table override design if global config is insufficient.
-5. Update upsert validation semantics when delete propagation is enabled.
+5. Add stricter validation behavior for non-count checks after delete
+   reconciliation if sample/full validation later needs delete-aware behavior.
 6. Design CDC state and setup requirements per engine, then file one
    implementation issue each for SQL Server, PostgreSQL, and MySQL.

@@ -34,6 +34,9 @@ All notable changes to this project will be documented in this file.
 - Added persisted per-table delete-reconciliation counts to run results and
   operator summaries so delete runs report candidate and deleted row counts
   by table (#351).
+- Changed upsert row-count validation to require source/target parity after
+  the current run completes delete reconciliation, while preserving the target
+  superset allowance when reconciliation is disabled or not due (#351).
 - Added opt-in schema evolution for `added_column` drift in upsert mode,
   including per-policy config, nullable target `ADD COLUMN` support across
   drivers, and operator documentation (#306).

@@ -108,6 +108,12 @@ type Orchestrator struct {
 	// or when Run/Resume returns. Nil before the first setPhase call.
 	phaseSpan observability.Span
 
+	// deleteReconciliationStrictValidation is set when the current run has
+	// completed an eligible delete reconciliation pass. Upsert validation can
+	// then require source/target row-count parity instead of allowing extra
+	// target rows that reconciliation should have removed.
+	deleteReconciliationStrictValidation bool
+
 	// auditor writes the immutable per-run NDJSON record (#235). Always
 	// non-nil — audit.Disabled() satisfies the interface when --no-audit
 	// is set so call sites stay unconditional. Initialized in Run/Resume
