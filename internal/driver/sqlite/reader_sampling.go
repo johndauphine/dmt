@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // GetDateColumnInfo finds a date-like column among candidates.
@@ -71,23 +72,11 @@ func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column s
 		r.dialect.QuoteIdentifier(column),
 	)
 
-	rows, err := r.db.QueryContext(ctx, query, limit)
+	samples, err := shared.QuerySampleColumnValues(ctx, r.db, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sampling column %s: %w", column, err)
 	}
-	defer rows.Close()
-
-	var samples []string
-	for rows.Next() {
-		var v sql.NullString
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		if v.Valid {
-			samples = append(samples, v.String)
-		}
-	}
-	return samples, rows.Err()
+	return samples, nil
 }
 
 // SampleRows retrieves sample rows from a table.
@@ -108,5 +97,5 @@ func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns [
 	query := fmt.Sprintf("SELECT %s FROM %s LIMIT ?",
 		strings.Join(quoted, ", "),
 		r.dialect.QualifyTable(schema, table))
-	return driver.SampleRowsHelper(ctx, r.db, query, columns, limit, limit)
+	return shared.QuerySampleRows(ctx, r.db, query, columns, limit, limit)
 }

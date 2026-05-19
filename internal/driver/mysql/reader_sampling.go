@@ -2,12 +2,12 @@ package mysql
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // GetDateColumnInfo returns information about a date column for incremental sync.
@@ -80,24 +80,11 @@ func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column s
 		LIMIT ?
 	`, r.dialect.QuoteIdentifier(column), r.dialect.QualifyTable(schema, table), r.dialect.QuoteIdentifier(column))
 
-	rows, err := r.db.QueryContext(ctx, query, limit)
+	samples, err := shared.QuerySampleColumnValues(ctx, r.db, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sampling column %s: %w", column, err)
 	}
-	defer rows.Close()
-
-	var samples []string
-	for rows.Next() {
-		var val sql.NullString
-		if err := rows.Scan(&val); err != nil {
-			return nil, fmt.Errorf("scanning sample value: %w", err)
-		}
-		if val.Valid {
-			samples = append(samples, val.String)
-		}
-	}
-
-	return samples, rows.Err()
+	return samples, nil
 }
 
 // SampleRows retrieves sample rows from a table for AI type mapping context.
@@ -125,7 +112,7 @@ func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns [
 		strings.Join(quotedCols, ", "),
 		r.dialect.QualifyTable(schema, table))
 
-	result, err := driver.SampleRowsHelper(ctx, r.db, query, columns, limit, limit)
+	result, err := shared.QuerySampleRows(ctx, r.db, query, columns, limit, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sampling rows from %s: %w", table, err)
 	}

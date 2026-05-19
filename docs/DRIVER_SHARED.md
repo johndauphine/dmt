@@ -44,6 +44,8 @@ multiple drivers and do not hide engine-specific behavior:
 - exact `COUNT(*)` query construction and execution, including optional table
   hint suffixes
 - fast-count-then-exact-count fallback control flow
+- sampled column-value and sample-row scan loops after concrete readers own the
+  dialect-specific query strings
 - batch slicing and effective batch-size selection
 - stable preflight finding builders
 - reader control-flow helpers when pagination semantics are already delegated
@@ -87,9 +89,11 @@ later PR proves that the shared form is clearer and behavior-preserving:
    migration proves the API shape.
 5. Centralize raw writer helpers and row-count control flow where concrete
    drivers already behave identically.
-6. Look for reader pagination and preflight result-building helpers after the
+6. Centralize reader sampling scan loops once each concrete reader still owns
+   its engine-specific casts and query shape.
+7. Look for reader pagination and preflight result-building helpers after the
    writer duplication is smaller.
-7. Revisit catalog-driven engine work after the native driver code is drier, so
+8. Revisit catalog-driven engine work after the native driver code is drier, so
    any configuration or catalog approach builds on a cleaner foundation.
 
 ## Acceptance Criteria For Each Slice
