@@ -3,6 +3,7 @@
         load-fixture-so2010-minimal-mssql load-fixture-so2010-minimal-pg \
         load-fixture-so2010-minimal-mysql test-fixtures-load \
         integration-test integration-test-schema-evolution \
+        integration-test-daily-driver \
         integration-test-sqlite integration-test-pair
 
 # Build variables
@@ -249,6 +250,20 @@ integration-test: build
 #   - Local: running mssql-test/pg-test or mssql-bench/pg-bench containers
 integration-test-schema-evolution: build
 	./scripts/integration-test-schema-evolution.sh
+
+# integration-test-daily-driver proves the documented daily workflow (#304):
+# baseline drop_recreate seeds date-column watermarks, a follow-up upsert
+# transfers one changed row, and an unchanged follow-up transfers zero rows.
+#
+#   make build && make test-dbs-up
+#   make integration-test-daily-driver
+#
+# Expects:
+#   - dmt binary built (./dmt) — make depends on `build`
+#   - CI: sqlcmd/psql on PATH and services on localhost:1433/5432
+#   - Local: running mssql-test/pg-test or mssql-bench/pg-bench containers
+integration-test-daily-driver: build
+	./scripts/integration-test-daily-driver.sh
 
 # integration-test-pair runs any of the 12 cross-engine directed pairs
 # from the nightly matrix (#291), end-to-end against real DB containers.

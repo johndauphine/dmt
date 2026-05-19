@@ -619,7 +619,7 @@ func TestFileState_SyncTimestamps_BasicLifecycle(t *testing.T) {
 		t.Errorf("expected nil timestamp pre-sync, got %v", ts)
 	}
 
-	syncTime := time.Date(2026, 5, 12, 10, 30, 0, 0, time.UTC)
+	syncTime := time.Date(2026, 5, 12, 10, 30, 0, 123456789, time.UTC)
 	if err := fs.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, syncTime); err != nil {
 		t.Fatalf("UpdateSyncTimestamp: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestFileState_SyncTimestamps_SurviveCreateRun(t *testing.T) {
 	if err := fs1.CreateRun("run-1", "dbo", "public", map[string]any{"k": "v"}, "", ""); err != nil {
 		t.Fatalf("CreateRun #1: %v", err)
 	}
-	want := time.Date(2026, 5, 12, 8, 0, 0, 0, time.UTC)
+	want := time.Date(2026, 5, 12, 8, 0, 0, 987654321, time.UTC)
 	if err := fs1.UpdateSyncTimestamp("dbo", "Orders", "public", want); err != nil {
 		t.Fatalf("UpdateSyncTimestamp: %v", err)
 	}
@@ -758,7 +758,7 @@ func TestFileState_SyncTimestamps_PersistAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileState #1: %v", err)
 	}
-	want := time.Date(2026, 5, 12, 8, 0, 0, 0, time.UTC)
+	want := time.Date(2026, 5, 12, 8, 0, 0, 987654321, time.UTC)
 	if err := fs1.UpdateSyncTimestamp("dbo", "Users", "public", want); err != nil {
 		t.Fatalf("UpdateSyncTimestamp: %v", err)
 	}

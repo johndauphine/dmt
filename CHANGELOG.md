@@ -26,6 +26,10 @@ All notable changes to this project will be documented in this file.
 - Added an MSSQL → Postgres schema-evolution integration test that proves
   `added_column: auto` alters the target and transfers the new column value
   during a follow-up upsert run (#306).
+- Added an MSSQL → Postgres daily-driver integration test that proves a
+  `drop_recreate` baseline seeds date-column watermarks, one changed source
+  row transfers during the next `upsert`, and an unchanged follow-up transfers
+  zero rows (#304).
 
 ### Changed
 
@@ -99,6 +103,12 @@ All notable changes to this project will be documented in this file.
 - Upsert count-only validation now permits target row counts greater than the
   source count, so source-side deletes retained on the target do not fail daily
   incremental runs; target counts below source still fail (#310).
+- Incremental date filters now use strict `>` watermark comparisons across
+  dialects so unchanged rows equal to the prior sync timestamp are not replayed
+  on the next daily-driver upsert run (#304).
+- Daily-driver watermarks now persist the source table's high timestamp instead
+  of the app sync-start clock, avoiding source/app clock skew while preserving
+  strict incremental comparisons (#304).
 - Diagnosis boxes now truncate long non-ASCII messages on UTF-8 boundaries
   instead of slicing through multibyte runes (#238).
 - Runtime Slack notifications now honor the effective per-config

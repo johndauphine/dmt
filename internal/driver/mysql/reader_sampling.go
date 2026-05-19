@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -25,6 +26,35 @@ func (r *Reader) GetDateColumnInfo(ctx context.Context, schema, table string, ca
 		}
 	}
 	return "", "", false
+}
+
+// GetMaxDateColumnValue returns the current source-side high watermark for a
+// date column. A nil value means the table has no non-NULL values in that
+// column yet.
+func (r *Reader) GetMaxDateColumnValue(ctx context.Context, schema, table, column string) (*time.Time, error) {
+	if schema != "" {
+		if err := driver.ValidateIdentifier(schema); err != nil {
+			return nil, fmt.Errorf("invalid schema name: %w", err)
+		}
+	}
+	if err := driver.ValidateIdentifier(table); err != nil {
+		return nil, fmt.Errorf("invalid table name: %w", err)
+	}
+	if err := driver.ValidateIdentifier(column); err != nil {
+		return nil, fmt.Errorf("invalid column name: %w", err)
+	}
+
+	query := fmt.Sprintf(
+		"SELECT MAX(%s) FROM %s",
+		r.dialect.QuoteIdentifier(column),
+		r.dialect.QualifyTable(schema, table),
+	)
+
+	var raw any
+	if err := r.db.QueryRowContext(ctx, query).Scan(&raw); err != nil {
+		return nil, fmt.Errorf("querying max %s: %w", column, err)
+	}
+	return driver.ParseDateValue(raw)
 }
 
 // SampleColumnValues retrieves sample values from a column for AI type mapping context.

@@ -139,6 +139,12 @@ jobs:
           INTEGRATION_TEST_LOG: /tmp/dmt-ci-schema-evolution.log
         run: make integration-test-schema-evolution
 
+      - name: Run daily-driver upsert integration
+        env:
+          DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-daily-driver-state
+          INTEGRATION_TEST_LOG: /tmp/dmt-ci-daily-driver.log
+        run: make integration-test-daily-driver
+
       - name: Upload dmt logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -147,8 +153,10 @@ jobs:
           path: |
             /tmp/dmt-ci.log
             /tmp/dmt-ci-schema-evolution.log
+            /tmp/dmt-ci-daily-driver.log
             ${{ env.DMT_STATE_DIR }}
             ${{ github.workspace }}/.dmt-ci-schema-evolution-state
+            ${{ github.workspace }}/.dmt-ci-daily-driver-state
           if-no-files-found: ignore
 
   sqlite-to-sqlite:

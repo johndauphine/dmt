@@ -516,8 +516,9 @@ func TestSyncTimestamps(t *testing.T) {
 		t.Errorf("Expected nil timestamp for first sync, got %v", ts)
 	}
 
-	// Test: Update sync timestamp
-	syncTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	// Test: Update sync timestamp. Fractional seconds matter for daily-driver
+	// runs that start in the same second as the source row update.
+	syncTime := time.Date(2024, 6, 15, 10, 30, 0, 123456789, time.UTC)
 	if err := state.UpdateSyncTimestamp(sourceSchema, tableName, targetSchema, syncTime); err != nil {
 		t.Fatalf("UpdateSyncTimestamp() error: %v", err)
 	}

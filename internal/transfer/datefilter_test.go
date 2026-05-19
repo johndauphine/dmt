@@ -10,6 +10,7 @@ import (
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
+	_ "github.com/johndauphine/dmt/internal/driver/sqlite"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
@@ -34,14 +35,14 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "postgres",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `"ModifiedDate" >= $4`,
+			wantClause: `"ModifiedDate" > $4`,
 		},
 		{
 			name:       "postgres with date filter no maxPK",
 			dbType:     "postgres",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `"ModifiedDate" >= $3`,
+			wantClause: `"ModifiedDate" > $3`,
 		},
 		{
 			name:       "mssql no date filter",
@@ -55,14 +56,28 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "mssql",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "[ModifiedDate] >= @lastSyncDate",
+			wantClause: "[ModifiedDate] > @lastSyncDate",
 		},
 		{
 			name:       "mssql with date filter no maxPK",
 			dbType:     "mssql",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "[ModifiedDate] >= @lastSyncDate",
+			wantClause: "[ModifiedDate] > @lastSyncDate",
+		},
+		{
+			name:       "mysql with date filter",
+			dbType:     "mysql",
+			hasMaxPK:   true,
+			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
+			wantClause: "`ModifiedDate` > ?",
+		},
+		{
+			name:       "sqlite with date filter",
+			dbType:     "sqlite",
+			hasMaxPK:   true,
+			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
+			wantClause: `"ModifiedDate" > ?`,
 		},
 	}
 
@@ -86,12 +101,78 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 				t.Errorf("Query missing expected clause.\nWant substring: %s\nGot query: %s", tt.wantClause, query)
 			}
 
-			// Verify no date clause when filter is nil
-			// Date filter adds "column >= param" pattern
+			// Date filters use a strict "column > param" pattern.
 			if tt.dateFilter == nil {
 				if strings.Contains(query, "lastSyncDate") || strings.Contains(query, "ModifiedDate") {
 					t.Errorf("Query should not contain date filter clause when dateFilter is nil.\nGot: %s", query)
 				}
+			}
+		})
+	}
+}
+
+func TestBuildRowNumberQueryWithDateFilter(t *testing.T) {
+	testTime := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		dbType     string
+		dateFilter *DateFilter
+		wantClause string
+	}{
+		{
+			name:       "postgres with date filter",
+			dbType:     "postgres",
+			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
+			wantClause: `"ModifiedDate" > $3`,
+		},
+		{
+			name:       "mssql with date filter",
+			dbType:     "mssql",
+			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
+			wantClause: "[ModifiedDate] > @lastSyncDate",
+		},
+		{
+			name:       "mysql with date filter",
+			dbType:     "mysql",
+			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
+			wantClause: "`ModifiedDate` > ?",
+		},
+		{
+			name:       "sqlite with date filter",
+			dbType:     "sqlite",
+			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
+			wantClause: `"ModifiedDate" > ?`,
+		},
+		{
+			name:       "postgres no date filter",
+			dbType:     "postgres",
+			dateFilter: nil,
+			wantClause: "ROW_NUMBER()",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := driver.GetDialect(tt.dbType)
+			if d == nil {
+				t.Fatalf("dialect for dbType %q is not registered", tt.dbType)
+			}
+
+			query := d.BuildRowNumberQuery(
+				"col1, col2, pk",
+				"pk",
+				"dbo",
+				"Orders",
+				"", // tableHint
+				tt.dateFilter,
+			)
+
+			if !strings.Contains(query, tt.wantClause) {
+				t.Errorf("Query missing expected clause.\nWant substring: %s\nGot query: %s", tt.wantClause, query)
+			}
+			if tt.dateFilter == nil && strings.Contains(query, "ModifiedDate") {
+				t.Errorf("Query should not contain date filter clause when dateFilter is nil.\nGot: %s", query)
 			}
 		})
 	}

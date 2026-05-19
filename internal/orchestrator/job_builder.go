@@ -34,7 +34,7 @@ func NewJobBuilder(sourcePool pool.SourcePool, state checkpoint.StateBackend, cf
 type BuildResult struct {
 	Jobs                []transfer.Job
 	TableDateFilters    map[string]*transfer.DateFilter
-	TableSyncStartTimes map[string]time.Time
+	TableSyncWatermarks map[string]time.Time
 	TableJobCounts      map[string]int
 	ProgressSaver       *checkpoint.ProgressSaver
 	Summary             JobSummary
@@ -53,7 +53,7 @@ func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Ta
 	result := &BuildResult{
 		Jobs:                make([]transfer.Job, 0),
 		TableDateFilters:    make(map[string]*transfer.DateFilter),
-		TableSyncStartTimes: make(map[string]time.Time),
+		TableSyncWatermarks: make(map[string]time.Time),
 		TableJobCounts:      make(map[string]int),
 		ProgressSaver:       checkpoint.NewProgressSaver(b.state),
 	}
@@ -125,22 +125,16 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 	t.DateColumn = colName
 	t.DateColumnType = colType
 
-	// Record sync start time
-	syncStartTime := time.Now().UTC()
-	result.TableSyncStartTimes[t.Name] = syncStartTime
 	result.TableDateFilters[t.Name] = nil // Mark for timestamp recording
+
+	lastSync := b.lastSyncTimestamp(t, applyDateFilter)
+	b.recordSourceHighWatermark(ctx, t, colName, lastSync, result)
 
 	if !applyDateFilter {
 		result.Summary.TablesFirstSync++
 		logging.Debug("Table %s: full load - recording %s timestamp for future incremental syncs",
 			t.Name, colName)
 		return nil
-	}
-
-	// Get last sync timestamp
-	lastSync, err := b.state.GetLastSyncTimestamp(t.Schema, t.Name, b.config.Target.Schema)
-	if err != nil {
-		logging.Warn("Failed to get last sync timestamp for %s: %v", t.Name, err)
 	}
 
 	if lastSync != nil {
@@ -160,6 +154,38 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 	logging.Debug("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
 		t.Name, t.RowCount, colName)
 	return nil
+}
+
+func (b *JobBuilder) lastSyncTimestamp(t *source.Table, applyDateFilter bool) *time.Time {
+	if !applyDateFilter {
+		return nil
+	}
+
+	lastSync, err := b.state.GetLastSyncTimestamp(t.Schema, t.Name, b.config.Target.Schema)
+	if err != nil {
+		logging.Warn("Failed to get last sync timestamp for %s: %v", t.Name, err)
+		return nil
+	}
+	return lastSync
+}
+
+func (b *JobBuilder) recordSourceHighWatermark(ctx context.Context, t *source.Table, colName string, lastSync *time.Time, result *BuildResult) {
+	highWatermark, err := b.sourcePool.GetMaxDateColumnValue(ctx, t.Schema, t.Name, colName)
+	if err != nil {
+		logging.Warn("Failed to get source high watermark for %s.%s.%s: %v", t.Schema, t.Name, colName, err)
+		return
+	}
+	if highWatermark == nil {
+		logging.Debug("Table %s: no non-NULL %s values, leaving sync timestamp unchanged", t.Name, colName)
+		return
+	}
+	if lastSync != nil && !highWatermark.After(*lastSync) {
+		logging.Debug("Table %s: source high watermark %s did not advance past %s",
+			t.Name, highWatermark.Format(time.RFC3339Nano), lastSync.Format(time.RFC3339Nano))
+		return
+	}
+
+	result.TableSyncWatermarks[t.Name] = *highWatermark
 }
 
 // createJobsForTable creates transfer jobs for a single table.

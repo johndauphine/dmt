@@ -206,11 +206,11 @@ retryLoop:
 
 		// Update sync timestamp
 		if _, hasDateFilter := buildResult.TableDateFilters[j.Table.Name]; hasDateFilter {
-			if syncTime, ok := buildResult.TableSyncStartTimes[j.Table.Name]; ok {
-				if err := r.state.UpdateSyncTimestamp(j.Table.Schema, j.Table.Name, r.config.Target.Schema, syncTime); err != nil {
+			if watermark, ok := buildResult.TableSyncWatermarks[j.Table.Name]; ok {
+				if err := r.state.UpdateSyncTimestamp(j.Table.Schema, j.Table.Name, r.config.Target.Schema, watermark); err != nil {
 					logging.Warn("Failed to update sync timestamp for %s: %v", j.Table.Name, err)
 				} else {
-					logging.Debug("Updated sync timestamp for %s to %v", j.Table.Name, syncTime.Format(time.RFC3339))
+					logging.Debug("Updated sync timestamp for %s to %v", j.Table.Name, watermark.Format(time.RFC3339Nano))
 				}
 			}
 		}

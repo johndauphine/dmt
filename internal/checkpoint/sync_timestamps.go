@@ -21,16 +21,17 @@ func (s *State) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema strin
 		return nil, err
 	}
 
-	ts, err := time.Parse(time.RFC3339, tsStr.String)
+	ts, err := time.Parse(time.RFC3339Nano, tsStr.String)
 	if err != nil {
 		return nil, nil // Invalid timestamp format, treat as no sync
 	}
 	return &ts, nil
 }
 
-// UpdateSyncTimestamp records the sync timestamp for a table.
-// Should be called at the START of a successful sync (not end), ensuring no data loss
-// if the source is updated during the sync.
+// UpdateSyncTimestamp records the source-side high watermark for a table after
+// a successful sync. Incremental reads use a strict "date > watermark" filter,
+// so callers should only persist a watermark whose source rows have been
+// covered by the completed run.
 func (s *State) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error {
 	_, err := s.db.Exec(`
 		INSERT INTO table_sync_timestamps (source_schema, table_name, target_schema, last_sync_timestamp, updated_at)
@@ -38,6 +39,6 @@ func (s *State) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string
 		ON CONFLICT(source_schema, table_name, target_schema) DO UPDATE SET
 			last_sync_timestamp = excluded.last_sync_timestamp,
 			updated_at = excluded.updated_at
-	`, sourceSchema, tableName, targetSchema, ts.Format(time.RFC3339))
+	`, sourceSchema, tableName, targetSchema, ts.UTC().Format(time.RFC3339Nano))
 	return err
 }

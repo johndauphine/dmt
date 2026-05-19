@@ -173,9 +173,9 @@ func (d *Dialect) ColumnListForSelect(cols, colTypes []string, targetDBType stri
 func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, _ string, hasMaxPK bool, dateFilter *driver.DateFilter) string {
 	dateClause := ""
 	if dateFilter != nil {
-		// Only include rows where the date column is >= the filter timestamp.
+		// Only include rows newer than the last successful sync timestamp.
 		// Rows with NULL dates are excluded (they haven't been modified).
-		dateClause = fmt.Sprintf(" AND %s >= ?", d.QuoteIdentifier(dateFilter.Column))
+		dateClause = fmt.Sprintf(" AND %s > ?", d.QuoteIdentifier(dateFilter.Column))
 	}
 
 	qualifiedTable := d.QualifyTable(schema, table)
@@ -218,9 +218,9 @@ func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, da
 	// Build WHERE clause for date filter
 	whereClause := ""
 	if dateFilter != nil {
-		// Only include rows where the date column is >= the filter timestamp.
+		// Only include rows newer than the last successful sync timestamp.
 		// Rows with NULL dates are excluded (they haven't been modified).
-		whereClause = fmt.Sprintf(" WHERE %s >= ?", d.QuoteIdentifier(dateFilter.Column))
+		whereClause = fmt.Sprintf(" WHERE %s > ?", d.QuoteIdentifier(dateFilter.Column))
 	}
 
 	return fmt.Sprintf(`
