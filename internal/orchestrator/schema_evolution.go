@@ -32,6 +32,7 @@ func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 	return report.HasChanges() &&
 		o.config.Migration.SchemaEvolutionEnabled() &&
 		o.config.Migration.TargetMode == "upsert" &&
+		o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionLog &&
 		len(addedColumnChanges(report)) > 0
 }
 

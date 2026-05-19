@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -51,7 +52,7 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 		return drift.Report{}, nil
 	}
 
-	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooter(allowSchemaEvolution)))
+	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooter(report, allowSchemaEvolution)))
 	o.auditEvent("schema_drift_detected", map[string]any{
 		"tables_affected": report.TablesAffected(),
 		"changes":         len(report.Changes),
@@ -62,13 +63,36 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 	return report, nil
 }
 
-func (o *Orchestrator) schemaDriftReportFooter(allowSchemaEvolution bool) string {
-	if allowSchemaEvolution &&
-		o.config.Migration.SchemaEvolutionEnabled() &&
-		o.config.Migration.TargetMode == "upsert" {
-		return "Schema evolution is enabled; configured compatible changes may be applied before transfer."
+func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
+	if !allowSchemaEvolution || !o.config.Migration.SchemaEvolutionEnabled() {
+		return "No automatic schema alignment will be applied (read-only mode)."
 	}
-	return "No automatic schema alignment will be applied (read-only mode)."
+	if o.config.Migration.FailOnSchemaDrift {
+		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
+	}
+	if o.config.Migration.TargetMode != "upsert" {
+		return fmt.Sprintf("Schema evolution is configured, but target_mode=%s will not apply target ALTERs.",
+			o.config.Migration.TargetMode)
+	}
+
+	addedColumns := len(addedColumnChanges(report))
+	if addedColumns == 0 {
+		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
+	}
+
+	switch o.config.Migration.AddedColumnSchemaEvolutionPolicy() {
+	case config.SchemaEvolutionAuto:
+		return fmt.Sprintf("Schema evolution added_column=auto; %d added column(s) may be applied before transfer.",
+			addedColumns)
+	case config.SchemaEvolutionLog:
+		return fmt.Sprintf("Schema evolution added_column=log; %d added column(s) will be reported only.",
+			addedColumns)
+	case config.SchemaEvolutionFail:
+		return fmt.Sprintf("Schema evolution added_column=fail; %d added column(s) will abort before transfer.",
+			addedColumns)
+	default:
+		return "Schema evolution is configured, but the added_column policy is invalid."
+	}
 }
 
 func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Table) {

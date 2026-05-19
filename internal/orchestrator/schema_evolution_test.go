@@ -143,6 +143,7 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 		name      string
 		migration config.MigrationConfig
 		want      bool
+		report    drift.Report
 	}{
 		{name: "disabled", migration: config.MigrationConfig{TargetMode: "upsert"}, want: false},
 		{name: "drop recreate", migration: config.MigrationConfig{
@@ -153,13 +154,107 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 			TargetMode:      "upsert",
 			SchemaEvolution: &config.SchemaEvolutionConfig{},
 		}, want: true},
+		{name: "log policy reports only", migration: config.MigrationConfig{
+			TargetMode: "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionLog,
+			},
+		}, want: false},
+		{name: "fail policy runs gate", migration: config.MigrationConfig{
+			TargetMode: "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionFail,
+			},
+		}, want: true},
+		{name: "unsupported drift only", migration: config.MigrationConfig{
+			TargetMode:      "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{},
+		}, want: false, report: drift.Report{Changes: []drift.Change{{Kind: drift.DroppedColumn, TableName: "Users"}}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := report
+			if tt.report.HasChanges() {
+				report = tt.report
+			}
+			o := &Orchestrator{config: &config.Config{Migration: tt.migration}}
+			if got := o.shouldApplySchemaEvolution(report); got != tt.want {
+				t.Fatalf("shouldApplySchemaEvolution() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *testing.T) {
+	addedColumnReport := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
+	unsupportedReport := drift.Report{Changes: []drift.Change{{Kind: drift.DroppedColumn, TableName: "Users"}}}
+
+	tests := []struct {
+		name      string
+		report    drift.Report
+		allow     bool
+		migration config.MigrationConfig
+		want      string
+	}{
+		{
+			name:      "resume remains read only",
+			report:    addedColumnReport,
+			allow:     false,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
+			want:      "read-only mode",
+		},
+		{
+			name:      "auto added columns may apply",
+			report:    addedColumnReport,
+			allow:     true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
+			want:      "added_column=auto",
+		},
+		{
+			name:   "log policy reports only",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionLog,
+			}},
+			want: "reported only",
+		},
+		{
+			name:   "fail policy names abort",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionFail,
+			}},
+			want: "will abort",
+		},
+		{
+			name:      "unsupported drift only",
+			report:    unsupportedReport,
+			allow:     true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
+			want:      "no currently supported",
+		},
+		{
+			name:   "fail on schema drift wins",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:        "upsert",
+				SchemaEvolution:   &config.SchemaEvolutionConfig{},
+				FailOnSchemaDrift: true,
+			},
+			want: "fail_on_schema_drift",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			o := &Orchestrator{config: &config.Config{Migration: tt.migration}}
-			if got := o.shouldApplySchemaEvolution(report); got != tt.want {
-				t.Fatalf("shouldApplySchemaEvolution() = %v, want %v", got, tt.want)
+			got := o.schemaDriftReportFooter(tt.report, tt.allow)
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("schemaDriftReportFooter() = %q, want substring %q", got, tt.want)
 			}
 		})
 	}
