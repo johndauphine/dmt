@@ -48,6 +48,8 @@ multiple drivers and do not hide engine-specific behavior:
   dialect-specific query strings
 - partition-boundary result scanning when concrete readers already return the
   same row shape
+- schema column metadata scanning when concrete readers already normalize their
+  catalog queries to the shared `driver.Column` row shape
 - reader channel lifecycle, pagination loops, query timing, and batch `Done`
   semantics when query construction is already delegated to concrete dialects
 - reader query-error labeling when concrete drivers need stable operator-facing
@@ -81,6 +83,8 @@ later PR proves that the shared form is clearer and behavior-preserving:
 - transaction boundaries where engines have different safety or performance
   requirements
 - preflight probes that require engine-specific catalog queries
+- schema catalog SQL, type semantics, identity/default rules, and any
+  engine-specific metadata normalization
 
 ## PR Sequence
 
