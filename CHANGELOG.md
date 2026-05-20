@@ -58,6 +58,8 @@ All notable changes to this project will be documented in this file.
   `drop_recreate` baseline seeds date-column watermarks, one changed source
   row transfers during the next `upsert`, and an unchanged follow-up transfers
   zero rows (#304).
+- Added a reusable driver conformance harness and wired SQLite/Postgres into
+  the first fast contract checks for future engine work (#368).
 - Added daily-driver ops summaries: `run`/`resume` now print a structured
   completion summary, dry runs include preflight/drift checks and duration
   estimates from recent history, and `migration.notify` controls completion
