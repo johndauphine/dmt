@@ -1374,7 +1374,7 @@ This sweep evaluates how well different LLMs respect the smartconfig prompt's `c
 - **Source / Target**: SQL Server 2022 (Rosetta 2) → PostgreSQL 16, both Docker, named volumes
 - **Dataset**: SO2010 (~19.3M rows)
 - **Mode**: `drop_recreate`, `create_indexes=false`, `create_foreign_keys=false`, `create_check_constraints=false` (transfer-only — isolates AI behavior from DDL noise)
-- **Runtime AI adjuster**: disabled (`migration.ai_adjust: false`) — only the initial smartconfig call runs, no mid-migration adjustments
+- **Runtime controller**: disabled (`migration.runtime_tuning: false`) — only initial smartconfig runs, no mid-migration adjustments
 - **State directory**: wiped between every run, so smartconfig sees no historical tuning grounding
 - **Instrumentation**: a temporary `time.Since(...)` wrapper around `analyzer.Analyze(...)` in `applyAITuning` captured AI prompt latency; reverted after the sweep
 - **Code**: branch `fix/memory-budget-cliff` (`6064eb5`)
@@ -1433,7 +1433,7 @@ Counterintuitively, **Sonnet's runs were consistently the lowest-throughput** (5
 
 PR #163 (issue #162) rewrote `buildMemoryBudgetBlock` to be imperative: leads with `**CRITICAL CONSTRAINT — chunk_size MUST NOT exceed N**`, names the post-AI clamp as the consequence of violation, and emits a concrete `**Default action: set chunk_size = <default>**` line where `default = min(50000, ceiling)`. Two conflicting anchors ("50000 is a strong default", "do not under-provision") were rescoped so the budget block isn't fighting the rest of the prompt.
 
-Same matrix as the previous section (M5 Pro 48GB, SO2010, MSSQL→PG, `drop_recreate`, no DDL, `migration.ai_adjust: false`, state dir wiped per run, single run per cell). Code: `492aa08` (post-merge of #163, including the loose-budget-anchor fix from review).
+Same matrix as the previous section (M5 Pro 48GB, SO2010, MSSQL→PG, `drop_recreate`, no DDL, runtime tuning disabled, state dir wiped per run, single run per cell). Code: `492aa08` (post-merge of #163, including the loose-budget-anchor fix from review).
 
 ### Sub-budget Go-clamp engagements per model (lower = better)
 
@@ -1491,7 +1491,7 @@ PR #163's review pinned the smartconfig default at `min(50000, ceiling)`. The em
 
 ### Methodology
 
-Smartconfig and the post-AI clamp are out of the loop. `chunk_size` is set directly in YAML and locked alongside every other tunable knob (`workers=16`, `read_ahead_buffers=4`, `write_ahead_writers=2`, `parallel_readers=2`, `max_partitions=16`, all connection pools and thresholds explicit). `migration.ai_adjust: false` so the runtime monitor doesn't move parameters during the run. State directory wiped between runs; `target_mode: drop_recreate` so each run starts from a fresh PG schema. AI mapper still runs because the orchestrator requires it for type mapping during DDL — but `applyAISuggestions` produces zero changes ("AI tuning: no changes (recommendation matches current config)") because every tunable is user-set.
+Smartconfig and generated-default clamps are out of the loop. `chunk_size` is set directly in YAML and locked alongside every other tunable knob (`workers=16`, `read_ahead_buffers=4`, `write_ahead_writers=2`, `parallel_readers=2`, `max_partitions=16`, all connection pools and thresholds explicit). Runtime tuning is disabled so the controller doesn't move parameters during the run. State directory wiped between runs; `target_mode: drop_recreate` so each run starts from a fresh PG schema. AI mapper may still run for unsupported type/DDL fallback surfaces, but `applyAISuggestions` produces zero changes because every tunable is user-set.
 
 Sweep grid: `chunk_size ∈ {50000, 87896, 100000, 175792, 250000}`, **3 runs per cell** = 15 runs total. Same fixture as the rest of this section (M5 Pro 48GB, SO2010 mssql→pg, transfer-only).
 
@@ -1533,7 +1533,7 @@ Observed:
 
 ### Caveats
 
-- **Single fixture.** SO2010 mssql→pg on this hardware. PG's bulk-insert pipeline is one path; MSSQL target (TABLOCK BCP) is a different path that this experiment doesn't cover. A measurement on PG→MSSQL or sqlserver target could land differently — particularly if `write_ahead_writers=1` is in play (which already prevents the Posts-retry pattern but caps peak throughput at ~85% of `write_ahead_writers=2`).
+- **Single fixture.** SO2010 mssql→pg on this hardware. PG's bulk-insert pipeline is one path; MSSQL target parallel BCP without TABLOCK is a different path that this experiment doesn't cover. A measurement on PG→MSSQL or sqlserver target could land differently — particularly if `write_ahead_writers=1` is in play (which already prevents the Posts-retry pattern but caps peak throughput at ~85% of `write_ahead_writers=2`).
 - **`avg_row_bytes` matters.** SO2010 averages around 248–500 bytes/row. On a fixture with much larger rows (BLOBs, JSON), the same chunk_size in rows means a much larger memory footprint per chunk and the throughput curve could shift left. Out of scope here.
 - **Single-run-per-cell at 3 reps.** The +10% threshold sits inside the run-to-run noise band. A more rigorous answer would need ≥10 runs per cell; the current 3 are enough to rule out a *strong* breakthrough but not enough to confirm a marginal one. Acceptable given the decision rule's symmetric framing.
 

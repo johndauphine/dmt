@@ -5,14 +5,53 @@ import (
 	"time"
 )
 
+// BackendCapabilities names the behaviors a state backend can provide. The
+// restartability capabilities are required for every StateBackend; history and
+// profile capabilities are optional and callers must not infer support from
+// no-op methods.
+type BackendCapabilities struct {
+	// Required for restart and status correctness.
+	RunLifecycle         bool
+	TaskLifecycle        bool
+	TransferProgress     bool
+	PartitionProgress    bool
+	SyncTimestamps       bool
+	DeleteReconciliation bool
+	SchemaSnapshots      bool
+	FallbackEvents       bool
+
+	// Optional history/config features.
+	RunHistory          bool
+	RunConfigSnapshots  bool
+	Profiles            bool
+	AIAdjustmentHistory bool
+	AITuningHistory     bool
+}
+
+// HasRequiredRestartability returns true when all capabilities needed for safe
+// resume/status behavior are available.
+func (c BackendCapabilities) HasRequiredRestartability() bool {
+	return c.RunLifecycle &&
+		c.TaskLifecycle &&
+		c.TransferProgress &&
+		c.PartitionProgress &&
+		c.SyncTimestamps &&
+		c.DeleteReconciliation &&
+		c.SchemaSnapshots &&
+		c.FallbackEvents
+}
+
 // StateBackend defines the interface for state persistence.
 // Implementations include SQLite (full featured) and file-based (minimal, for Airflow).
 type StateBackend interface {
+	Capabilities() BackendCapabilities
+
 	// Run management
 	CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error
 	UpdateRunConfig(id string, config any) error // Persist post-AI-tuning config snapshot
 	CompleteRun(id string, status string, errorMsg string) error
 	GetLastIncompleteRun() (*Run, error)
+	UpdateRunHeartbeat(runID string, at time.Time) error
 	HasSuccessfulRunAfter(run *Run) (bool, error) // Check if a successful run supersedes this incomplete run
 	MarkRunAsResumed(runID string) error
 	UpdatePhase(runID, phase string) error
@@ -35,11 +74,12 @@ type StateBackend interface {
 	ClearPartitionTransferProgress(runID, tableTaskKey string) error // Clear ALL partition-level progress for a table (#227 resume preflight)
 	CountPartitionTasks(runID, taskKeyPrefix string) (int, error)    // Count partition tasks for a table
 
-	// History (optional - file backend may return empty)
+	// History. Check Capabilities().RunHistory before expecting historical
+	// runs beyond the current file-backed run.
 	GetAllRuns() ([]Run, error)
 	GetRunByID(runID string) (*Run, error)
 
-	// Date-based incremental sync (optional - file backend returns nil/no-op)
+	// Date-based incremental sync.
 	GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error)
 	UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error
 
@@ -60,12 +100,14 @@ type StateBackend interface {
 	// Lifecycle
 	Close() error
 
-	// AI adjustment history (optional - file backend returns empty/no-op)
+	// AI adjustment history. Check Capabilities().AIAdjustmentHistory before
+	// expecting durable history; unsupported backends return empty/no-op.
 	SaveAIAdjustment(runID string, record AIAdjustmentRecord) error
 	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
 	GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error)
 
-	// AI tuning history for analyze command (optional - file backend returns empty/no-op)
+	// AI tuning history for analyze command. Check Capabilities().AITuningHistory
+	// before expecting durable history; unsupported backends return empty/no-op.
 	SaveAITuning(record AITuningRecord) error
 	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
 	// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over the

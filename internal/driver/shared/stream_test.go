@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -74,6 +75,36 @@ func TestStreamTableRowNumber(t *testing.T) {
 	}
 	if got[1].RowNum != 3 || len(got[1].Rows) != 1 || !got[1].Done {
 		t.Fatalf("second batch rownum/rows/done = %d/%d/%v, want 3/1/true", got[1].RowNum, len(got[1].Rows), got[1].Done)
+	}
+}
+
+func TestStreamTableRowNumberAppliesDateFilter(t *testing.T) {
+	ctx := context.Background()
+	db := openStreamDBWithDates(t)
+
+	cutoff := time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC)
+	partition := &driver.Partition{StartRow: 1, EndRow: 2}
+	opts := streamReadOptions(partition, 10)
+	opts.DateFilter = &driver.DateFilter{Column: "updated_at", Timestamp: cutoff}
+
+	batches, err := StreamTable(ctx, StreamConfig{DB: db, Dialect: streamDialect{}}, opts)
+	if err != nil {
+		t.Fatalf("StreamTable returned error: %v", err)
+	}
+
+	got := collectStreamBatches(t, batches)
+	if len(got) != 1 {
+		t.Fatalf("batch count = %d, want 1", len(got))
+	}
+	if len(got[0].Rows) != 1 {
+		t.Fatalf("row count = %d, want 1", len(got[0].Rows))
+	}
+	id, ok := got[0].Rows[0][0].(int64)
+	if !ok {
+		t.Fatalf("row id type = %T, want int64", got[0].Rows[0][0])
+	}
+	if id != 4 {
+		t.Fatalf("row id = %d, want 4 after date filter is applied before row numbering", id)
 	}
 }
 
@@ -161,6 +192,25 @@ func openStreamDB(t *testing.T) SQLQuerier {
 	return db
 }
 
+func openStreamDBWithDates(t *testing.T) SQLQuerier {
+	t.Helper()
+
+	db := openSharedSQLite(t)
+	ctx := context.Background()
+	if _, err := ExecRaw(ctx, db, `CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, updated_at TEXT)`); err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	if _, err := ExecRaw(ctx, db,
+		`INSERT INTO users (id, name, updated_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)`,
+		1, "Ada", "2024-06-15T10:00:00Z",
+		2, "Grace", "2024-06-15T10:15:00Z",
+		3, "Katherine", "2024-06-15T10:45:00Z",
+		4, "Dorothy", "2024-06-15T11:00:00Z"); err != nil {
+		t.Fatalf("insert dated users: %v", err)
+	}
+	return db
+}
+
 func streamReadOptions(partition *driver.Partition, chunkSize int) driver.ReadOptions {
 	return driver.ReadOptions{
 		Table: driver.Table{
@@ -241,18 +291,25 @@ func (streamDialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool
 	return []any{lastPK, limit}
 }
 
-func (d streamDialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, _ *driver.DateFilter) string {
+func (d streamDialect) BuildRowNumberQuery(cols, orderBy, schema, table, _ string, dateFilter *driver.DateFilter) string {
+	whereClause := ""
+	if dateFilter != nil {
+		whereClause = fmt.Sprintf(" WHERE %s > ?", d.QuoteIdentifier(dateFilter.Column))
+	}
 	return fmt.Sprintf(`
 		SELECT %s FROM (
 			SELECT %s, ROW_NUMBER() OVER (ORDER BY %s) AS __rn
-			FROM %s
+			FROM %s%s
 		)
 		WHERE __rn > ? AND __rn <= ?
 		ORDER BY __rn
-	`, cols, cols, orderBy, d.QualifyTable(schema, table))
+	`, cols, cols, orderBy, d.QualifyTable(schema, table), whereClause)
 }
 
-func (streamDialect) BuildRowNumberArgs(rowNum int64, limit int, _ *driver.DateFilter) []any {
+func (streamDialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver.DateFilter) []any {
+	if dateFilter != nil {
+		return []any{dateFilter.Timestamp.Format(time.RFC3339Nano), rowNum, rowNum + int64(limit)}
+	}
 	return []any{rowNum, rowNum + int64(limit)}
 }
 

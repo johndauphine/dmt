@@ -1090,6 +1090,91 @@ func withEmptySecretsFile(t *testing.T) {
 	t.Cleanup(secrets.Reset)
 }
 
+func withSecretsFile(t *testing.T, body string) {
+	t.Helper()
+	tmp := t.TempDir()
+	secretsPath := filepath.Join(tmp, "dmt-config.yaml")
+	if err := os.WriteFile(secretsPath, []byte(body), 0600); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	t.Setenv("DMT_SECRETS_FILE", secretsPath)
+	secrets.Reset()
+	t.Cleanup(secrets.Reset)
+}
+
+func minConfigYAML(migration string) []byte {
+	return []byte(`
+source:
+  type: mssql
+  host: localhost
+  database: source
+  user: user
+  password: pass
+target:
+  type: postgres
+  host: localhost
+  database: target
+  user: user
+  password: pass
+migration:
+` + migration)
+}
+
+func TestDebugDumpDistinguishesUserConfigFromSecretsDefault(t *testing.T) {
+	withSecretsFile(t, `
+migration_defaults:
+  workers: 8
+`)
+
+	inherited, err := LoadBytes(minConfigYAML("  target_mode: drop_recreate\n"))
+	if err != nil {
+		t.Fatalf("LoadBytes inherited config: %v", err)
+	}
+	inheritedDump := inherited.DebugDump()
+	if !strings.Contains(inheritedDump, "Workers: 8 (source: secrets default)") {
+		t.Fatalf("debug dump should label inherited workers as secrets default:\n%s", inheritedDump)
+	}
+
+	explicit, err := LoadBytes(minConfigYAML("  target_mode: drop_recreate\n  workers: 4\n"))
+	if err != nil {
+		t.Fatalf("LoadBytes explicit config: %v", err)
+	}
+	explicitDump := explicit.DebugDump()
+	if !strings.Contains(explicitDump, "Workers: 4 (source: config)") {
+		t.Fatalf("debug dump should label explicit workers as config:\n%s", explicitDump)
+	}
+}
+
+func TestApplyAISuggestionsPinsSecretsDefaultsAndOverridesGeneratedDefaults(t *testing.T) {
+	withSecretsFile(t, `
+migration_defaults:
+  workers: 8
+`)
+
+	cfg, err := LoadBytes(minConfigYAML("  target_mode: drop_recreate\n"))
+	if err != nil {
+		t.Fatalf("LoadBytes config: %v", err)
+	}
+
+	cfg.ApplyAISuggestions(&driver.SmartConfigSuggestions{
+		Workers:                 4,
+		ChunkSizeRecommendation: 12345,
+	})
+
+	if cfg.Migration.Workers != 8 {
+		t.Fatalf("workers = %d, want pinned secrets default 8", cfg.Migration.Workers)
+	}
+	if got := cfg.tunableProvenance(provenanceMigrationWorkers); got != ProvenanceSecretsDefault {
+		t.Fatalf("workers provenance = %q, want %q", got, ProvenanceSecretsDefault)
+	}
+	if cfg.Migration.ChunkSize != 12345 {
+		t.Fatalf("chunk_size = %d, want smartconfig override 12345", cfg.Migration.ChunkSize)
+	}
+	if got := cfg.tunableProvenance(provenanceMigrationChunkSize); got != ProvenanceSmartConfig {
+		t.Fatalf("chunk_size provenance = %q, want %q", got, ProvenanceSmartConfig)
+	}
+}
+
 // TestRuntimeTuningExplicitFalseRespected pins issue #149: setting
 // `migration.runtime_tuning: false` (or its deprecated alias) in a
 // per-migration YAML config must not be silently flipped back to true
@@ -1641,6 +1726,58 @@ func TestExpandTemplateValue(t *testing.T) {
 
 			if result != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestExpandTemplateValueFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file permission bits do not reliably represent Windows ACLs")
+	}
+
+	tmpDir := t.TempDir()
+	tests := []struct {
+		name      string
+		mode      os.FileMode
+		expectErr bool
+	}{
+		{name: "0600 accepted", mode: 0600},
+		{name: "0400 accepted", mode: 0400},
+		{name: "group-readable rejected", mode: 0640, expectErr: true},
+		{name: "world-readable rejected", mode: 0604, expectErr: true},
+		{name: "group-and-world-readable rejected", mode: 0644, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secretFile := filepath.Join(tmpDir, strings.ReplaceAll(tt.name, " ", "_"))
+			if err := os.WriteFile(secretFile, []byte("file-secret"), 0600); err != nil {
+				t.Fatalf("write secret file: %v", err)
+			}
+			if err := os.Chmod(secretFile, tt.mode); err != nil {
+				t.Fatalf("chmod secret file: %v", err)
+			}
+
+			got, err := expandTemplateValue("${file:" + secretFile + "}")
+			if tt.expectErr {
+				if err == nil {
+					t.Fatal("expected permission error, got nil")
+				}
+				if !strings.Contains(err.Error(), "insecure permissions") {
+					t.Fatalf("error = %q, want insecure permissions message", err)
+				}
+				if !strings.Contains(err.Error(), "group/world permissions") {
+					t.Fatalf("error = %q, want group/world permissions message", err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != "file-secret" {
+				t.Fatalf("expanded secret = %q, want file-secret", got)
 			}
 		})
 	}

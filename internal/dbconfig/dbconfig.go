@@ -1,6 +1,8 @@
-// Package dbconfig provides database configuration types used by both
-// the config and driver packages. This package exists to break the
-// circular import between config and driver packages.
+// Package dbconfig defines the stable connection-spec types shared by
+// configuration loading, pool construction, and concrete database drivers.
+//
+// Keep this package narrow: it should describe how to connect to a database,
+// not how to validate a full migration or execute driver behavior.
 package dbconfig
 
 // SourceConfig holds source database connection settings.

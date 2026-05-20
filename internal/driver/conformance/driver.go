@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -40,6 +41,33 @@ type DriverCase struct {
 	SchemaIgnoredInQualification bool
 	RequireSchemaQualification   bool
 	RequireAIPromptAugmentation  bool
+
+	Pagination *PaginationCase
+}
+
+// PaginationCase describes dialect-specific pagination SQL/arg expectations.
+// It is intentionally exact about parameter order because incremental reads
+// combine PK bounds, limits, and date filters differently across dialects.
+type PaginationCase struct {
+	Columns    string
+	PKColumn   string
+	Schema     string
+	Table      string
+	TableHint  string
+	OrderBy    string
+	DateFilter *driver.DateFilter
+
+	LastPK any
+	MaxPK  any
+	Limit  int
+	RowNum int64
+
+	KeysetNoMaxQuery   string
+	KeysetNoMaxArgs    []any
+	KeysetWithMaxQuery string
+	KeysetWithMaxArgs  []any
+	RowNumberQuery     string
+	RowNumberArgs      []any
 }
 
 // RunDriverConformance runs the shared driver/dialect contract checks.
@@ -171,6 +199,12 @@ func RunDriverConformance(t *testing.T, tc DriverCase) {
 			t.Fatal("AIPromptAugmentation() is required for this dialect but was empty")
 		}
 	})
+
+	if tc.Pagination != nil {
+		t.Run("pagination with date filters", func(t *testing.T) {
+			runPaginationConformance(t, tc.Driver.Dialect(), *tc.Pagination)
+		})
+	}
 }
 
 func validateCase(t *testing.T, tc DriverCase) {
@@ -202,6 +236,88 @@ func validateCase(t *testing.T, tc DriverCase) {
 	}
 	if tc.RequireSchemaQualification && tc.QualifiedSchema == "" {
 		t.Fatal("DriverCase.QualifiedSchema is required when RequireSchemaQualification is true")
+	}
+}
+
+func runPaginationConformance(t *testing.T, d driver.Dialect, pc PaginationCase) {
+	t.Helper()
+	validatePaginationCase(t, pc)
+
+	t.Run("keyset without max pk", func(t *testing.T) {
+		gotQuery := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, pc.DateFilter)
+		assertSQL(t, gotQuery, pc.KeysetNoMaxQuery)
+
+		gotArgs := d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, false, pc.DateFilter)
+		assertArgs(t, gotArgs, pc.KeysetNoMaxArgs)
+	})
+
+	t.Run("keyset with max pk", func(t *testing.T) {
+		gotQuery := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, pc.DateFilter)
+		assertSQL(t, gotQuery, pc.KeysetWithMaxQuery)
+
+		gotArgs := d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, true, pc.DateFilter)
+		assertArgs(t, gotArgs, pc.KeysetWithMaxArgs)
+	})
+
+	t.Run("row number", func(t *testing.T) {
+		gotQuery := d.BuildRowNumberQuery(pc.Columns, pc.OrderBy, pc.Schema, pc.Table, pc.TableHint, pc.DateFilter)
+		assertSQL(t, gotQuery, pc.RowNumberQuery)
+
+		gotArgs := d.BuildRowNumberArgs(pc.RowNum, pc.Limit, pc.DateFilter)
+		assertArgs(t, gotArgs, pc.RowNumberArgs)
+	})
+}
+
+func validatePaginationCase(t *testing.T, pc PaginationCase) {
+	t.Helper()
+	required := map[string]string{
+		"Columns":            pc.Columns,
+		"PKColumn":           pc.PKColumn,
+		"Table":              pc.Table,
+		"OrderBy":            pc.OrderBy,
+		"KeysetNoMaxQuery":   pc.KeysetNoMaxQuery,
+		"KeysetWithMaxQuery": pc.KeysetWithMaxQuery,
+		"RowNumberQuery":     pc.RowNumberQuery,
+	}
+	for field, value := range required {
+		if value == "" {
+			t.Fatalf("PaginationCase.%s is required", field)
+		}
+	}
+	if pc.DateFilter == nil {
+		t.Fatal("PaginationCase.DateFilter is required")
+	}
+	if pc.Limit <= 0 {
+		t.Fatal("PaginationCase.Limit must be greater than zero")
+	}
+	if len(pc.KeysetNoMaxArgs) == 0 {
+		t.Fatal("PaginationCase.KeysetNoMaxArgs is required")
+	}
+	if len(pc.KeysetWithMaxArgs) == 0 {
+		t.Fatal("PaginationCase.KeysetWithMaxArgs is required")
+	}
+	if len(pc.RowNumberArgs) == 0 {
+		t.Fatal("PaginationCase.RowNumberArgs is required")
+	}
+}
+
+func assertSQL(t *testing.T, got, want string) {
+	t.Helper()
+	got = normalizeSQL(got)
+	want = normalizeSQL(want)
+	if got != want {
+		t.Fatalf("SQL = %q, want %q", got, want)
+	}
+}
+
+func normalizeSQL(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func assertArgs(t *testing.T, got, want []any) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
 

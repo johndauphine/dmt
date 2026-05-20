@@ -33,6 +33,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		return fmt.Errorf("incomplete run %s is obsolete - a later migration with the same schemas completed successfully. Use 'run' to start a new migration", run.ID)
 	}
 
+	if err := o.validateResumeHeartbeat(run, time.Now()); err != nil {
+		return err
+	}
+
 	// Validate config hash if stored (prevents resuming with different config)
 	if run.ConfigHash != "" && !o.opts.ForceResume {
 		currentHash := computeConfigHash(o.config)
@@ -110,6 +114,8 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	})
 
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
+	stopHeartbeat := o.startRunHeartbeat(ctx, run.ID)
+	defer stopHeartbeat()
 
 	// Preflight (phase 0) — same gate as Run(). A resume can fail if the
 	// environment changed between runs (privileges revoked, version
@@ -219,10 +225,6 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 
 		o.state.CompleteRun(run.ID, "success", "")
 		o.captureSchemaSnapshots(run.ID, tables)
-		duration := time.Since(startTime)
-		if err := o.state.UpdateAITuningResult(0, duration.Seconds(), o.lastChunkRetryCount); err != nil {
-			logging.Debug("Failed to update AI tuning result: %v", err)
-		}
 		logging.Info("Resume complete!")
 		return nil
 	}
@@ -427,17 +429,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		o.notifyCompletion(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)
-	}
-
-	// Record transfer-only throughput in AI tuning history for future learning
-	// transferDuration captured right after transferAll returns
-	transferDurationSecs := transferDuration.Seconds()
-	var transferThroughput float64
-	if transferDurationSecs > 0 {
-		transferThroughput = float64(totalRows) / transferDurationSecs
-	}
-	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount); err != nil {
-		logging.Debug("Failed to update AI tuning result: %v", err)
+		// Record transfer-only throughput in tuning history only for a clean
+		// resume. Partial resumes can overstate early throughput and should not
+		// become training examples.
+		o.recordSuccessfulTuningResult(totalRows, transferDuration)
 	}
 
 	// Log identifier changes for PostgreSQL targets

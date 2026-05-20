@@ -278,26 +278,16 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 		}
 
 		if wp.ackChan != nil {
-			// Non-blocking send with context check to prevent deadlock.
-			// If ackChan is full, we skip the ack rather than blocking the writer.
-			// This is safe because checkpoint coordination handles out-of-order and
-			// missing acks gracefully - the checkpoint just won't advance past this point.
-			select {
-			case wp.ackChan <- WriteAck{
+			ack := WriteAck{
 				ReaderID: job.ReaderID,
 				Seq:      job.Seq,
 				LastPK:   job.LastPK,
 				RowNum:   job.RowNum,
-			}:
-				// Ack sent successfully
+			}
+			select {
+			case wp.ackChan <- ack:
 			case <-wp.ctx.Done():
-				// Context cancelled, exit worker
 				return
-			default:
-				// Channel full, skip this ack (checkpoint won't advance past this point).
-				// This should be rare with the large buffer, but prevents deadlock.
-				// Log at debug level to help diagnose checkpoint issues if they occur.
-				logging.Debug("Ack channel full, skipping ack for reader %d seq %d (checkpoint may not advance)", job.ReaderID, job.Seq)
 			}
 		}
 

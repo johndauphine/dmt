@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/johndauphine/dmt/internal/secrets"
 )
 
 // Template patterns for secret expansion:
@@ -31,6 +33,9 @@ func expandTemplateValue(value string) (string, error) {
 	// Check for ${file:...} pattern
 	if matches := filePattern.FindStringSubmatch(value); matches != nil {
 		filePath := expandTilde(matches[1])
+		if err := secrets.ValidateFilePermissions(filePath); err != nil {
+			return "", err
+		}
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			return "", fmt.Errorf("reading secret from file %s: %w", filePath, err)

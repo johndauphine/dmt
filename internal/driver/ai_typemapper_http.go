@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ const (
 
 	// defaultMaxDelay is the maximum delay between retries (cap for exponential backoff).
 	defaultMaxDelay = 10 * time.Second
+
+	// defaultMaxRetryAfterDelay is the longest Retry-After value we honor.
+	defaultMaxRetryAfterDelay = 5 * time.Minute
 )
 
 // sanitizeErrorResponse truncates and sanitizes API error response bodies.
@@ -194,7 +198,7 @@ func (m *AITypeMapper) retryableHTTPDo(ctx context.Context, reqFunc func() (*htt
 			lastErr = fmt.Errorf("API returned status %d", resp.StatusCode)
 
 			if attempt < defaultMaxRetries {
-				delay := calculateBackoff(attempt)
+				delay := calculateRetryDelay(attempt, resp)
 				logging.Debug("AI API returned status %d (attempt %d/%d), retrying in %v",
 					resp.StatusCode, attempt+1, defaultMaxRetries+1, delay)
 
@@ -216,6 +220,45 @@ func (m *AITypeMapper) retryableHTTPDo(ctx context.Context, reqFunc func() (*htt
 		return nil, nil, fmt.Errorf("API request failed after %d attempts: %w", defaultMaxRetries+1, lastErr)
 	}
 	return nil, nil, fmt.Errorf("API request failed after %d attempts (status %d)", defaultMaxRetries+1, lastStatusCode)
+}
+
+// calculateRetryDelay returns the delay before a retry, preferring a reasonable
+// Retry-After header over local exponential backoff.
+func calculateRetryDelay(attempt int, resp *http.Response) time.Duration {
+	if resp != nil {
+		if delay, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+			return delay
+		}
+	}
+	return calculateBackoff(attempt)
+}
+
+// parseRetryAfter parses Retry-After delay-seconds and HTTP-date values.
+func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return 0, false
+		}
+		if seconds > int64(defaultMaxRetryAfterDelay/time.Second) {
+			return 0, false
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+
+	retryAt, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	delay := retryAt.Sub(now)
+	if delay < 0 || delay > defaultMaxRetryAfterDelay {
+		return 0, false
+	}
+	return delay, true
 }
 
 // calculateBackoff returns the delay for a given retry attempt using exponential backoff with jitter.

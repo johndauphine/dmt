@@ -134,6 +134,14 @@ type Options struct {
 	// ForceResume bypasses config hash validation on resume.
 	ForceResume bool
 
+	// RunHeartbeatTTL controls how old a running run heartbeat may be before
+	// resume requires --force-resume. Zero uses the default.
+	RunHeartbeatTTL time.Duration
+
+	// RunHeartbeatInterval controls how often Run/Resume refresh the heartbeat.
+	// Zero uses the default.
+	RunHeartbeatInterval time.Duration
+
 	// SourceOnly creates orchestrator with only source pool (for analyze command).
 	// When true, target pool is not created and analyze operations only work.
 	SourceOnly bool

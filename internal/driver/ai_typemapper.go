@@ -176,7 +176,7 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 
 	// Check cache first (fast path)
 	m.cacheMu.RLock()
-	if cached, ok := m.cache.Get(cacheKey); ok {
+	if cached, ok := m.cache.GetAI(cacheKey, m.providerName, m.Model()); ok {
 		m.cacheMu.RUnlock()
 		return cached, nil
 	}
@@ -202,7 +202,7 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 
 	// Double-check cache after acquiring the slot
 	m.cacheMu.RLock()
-	if cached, ok := m.cache.Get(cacheKey); ok {
+	if cached, ok := m.cache.GetAI(cacheKey, m.providerName, m.Model()); ok {
 		m.cacheMu.RUnlock()
 		req.result = cached
 		return cached, nil
@@ -223,7 +223,7 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 	// Cache the result. Tagged with current model so `dmt cache clear
 	// --ai-only` can invalidate after model upgrade (#177).
 	m.cacheMu.Lock()
-	m.cache.SetAI(cacheKey, result, m.Model())
+	m.cache.SetAIWithMetadata(cacheKey, result, m.providerName, m.Model())
 	m.cacheMu.Unlock()
 
 	// Persist cache

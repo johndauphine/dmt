@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -20,8 +21,9 @@ func (fs *FileState) CreateTask(runID, taskType, taskKey string) (int64, error) 
 	// Create new task
 	taskIDCounter++
 	fs.state.Tables[taskKey] = tableState{
-		Status: "pending",
-		TaskID: taskIDCounter,
+		Status:   "pending",
+		TaskType: taskType,
+		TaskID:   taskIDCounter,
 	}
 
 	if err := fs.save(); err != nil {
@@ -59,8 +61,9 @@ func (fs *FileState) MarkTaskComplete(runID, taskKey string) error {
 		// Create if not exists
 		taskIDCounter++
 		fs.state.Tables[taskKey] = tableState{
-			Status: "success",
-			TaskID: taskIDCounter,
+			Status:   "success",
+			TaskType: "transfer",
+			TaskID:   taskIDCounter,
 		}
 	}
 
@@ -74,7 +77,7 @@ func (fs *FileState) GetCompletedTables(runID string) (map[string]bool, error) {
 
 	completed := make(map[string]bool)
 	for key, ts := range fs.state.Tables {
-		if ts.Status == "success" {
+		if ts.Status == "success" && fileStateTaskType(ts) == "transfer" {
 			completed[key] = true
 		}
 	}
@@ -110,6 +113,13 @@ func (fs *FileState) SaveTransferProgress(taskID int64, tableName string, partit
 	// Find task by ID and update progress
 	for key, ts := range fs.state.Tables {
 		if ts.TaskID == taskID {
+			var pid *int
+			if partitionID != nil {
+				v := *partitionID
+				pid = &v
+			}
+			ts.TableName = tableName
+			ts.PartitionID = pid
 			ts.LastPK = lastPK
 			ts.RowsDone = rowsDone
 			ts.RowsTotal = rowsTotal
@@ -127,14 +137,28 @@ func (fs *FileState) GetTransferProgress(taskID int64) (*TransferProgress, error
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	for tableName, ts := range fs.state.Tables {
+	for key, ts := range fs.state.Tables {
 		if ts.TaskID == taskID && ts.LastPK != nil {
+			lastPKJSON, err := json.Marshal(ts.LastPK)
+			if err != nil {
+				return nil, fmt.Errorf("marshal last pk: %w", err)
+			}
+			tableName := ts.TableName
+			if tableName == "" {
+				tableName = key
+			}
+			var pid *int
+			if ts.PartitionID != nil {
+				v := *ts.PartitionID
+				pid = &v
+			}
 			return &TransferProgress{
-				TaskID:    taskID,
-				TableName: tableName,
-				LastPK:    fmt.Sprintf("%v", ts.LastPK), // Convert to string for compatibility
-				RowsDone:  ts.RowsDone,
-				RowsTotal: ts.RowsTotal,
+				TaskID:      taskID,
+				TableName:   tableName,
+				PartitionID: pid,
+				LastPK:      string(lastPKJSON),
+				RowsDone:    ts.RowsDone,
+				RowsTotal:   ts.RowsTotal,
 			}, nil
 		}
 	}
@@ -150,6 +174,7 @@ func (fs *FileState) ClearTransferProgress(taskID int64) error {
 	for key, ts := range fs.state.Tables {
 		if ts.TaskID == taskID {
 			ts.LastPK = nil
+			ts.PartitionID = nil
 			ts.RowsDone = 0
 			ts.RowsTotal = 0
 			ts.Status = "pending"
@@ -191,6 +216,7 @@ func (fs *FileState) ClearPartitionTransferProgress(_ string, tableTaskKey strin
 	for key, ts := range fs.state.Tables {
 		if strings.HasPrefix(key, prefix) {
 			ts.LastPK = nil
+			ts.PartitionID = nil
 			ts.RowsDone = 0
 			ts.RowsTotal = 0
 			ts.Status = "pending"
@@ -257,7 +283,7 @@ func (fs *FileState) GetTasksWithProgress(runID string) ([]TaskWithProgress, err
 		tasks = append(tasks, TaskWithProgress{
 			ID:           ts.TaskID,
 			RunID:        runID,
-			TaskType:     "transfer",
+			TaskType:     fileStateTaskType(ts),
 			TaskKey:      key,
 			Status:       ts.Status,
 			ErrorMessage: ts.Error,
@@ -266,6 +292,13 @@ func (fs *FileState) GetTasksWithProgress(runID string) ([]TaskWithProgress, err
 		})
 	}
 	return tasks, nil
+}
+
+func fileStateTaskType(ts tableState) string {
+	if ts.TaskType == "" {
+		return "transfer"
+	}
+	return ts.TaskType
 }
 
 // GetRunByID returns the run if it matches.

@@ -19,20 +19,41 @@ type FileState struct {
 	state *fileStateData
 }
 
+// Capabilities reports the file backend's supported behavior.
+func (fs *FileState) Capabilities() BackendCapabilities {
+	return BackendCapabilities{
+		RunLifecycle:         true,
+		TaskLifecycle:        true,
+		TransferProgress:     true,
+		PartitionProgress:    true,
+		SyncTimestamps:       true,
+		DeleteReconciliation: true,
+		SchemaSnapshots:      true,
+		FallbackEvents:       true,
+
+		RunHistory:          false,
+		RunConfigSnapshots:  false,
+		Profiles:            false,
+		AIAdjustmentHistory: false,
+		AITuningHistory:     false,
+	}
+}
+
 // fileStateData is the YAML structure for the state file.
 type fileStateData struct {
-	RunID        string                `yaml:"run_id"`
-	StartedAt    time.Time             `yaml:"started_at"`
-	CompletedAt  *time.Time            `yaml:"completed_at,omitempty"`
-	Status       string                `yaml:"status"` // running, success, failed
-	Phase        string                `yaml:"phase"`  // initializing, transferring, finalizing, validating, complete
-	Error        string                `yaml:"error,omitempty"`
-	SourceSchema string                `yaml:"source_schema"`
-	TargetSchema string                `yaml:"target_schema"`
-	ConfigHash   string                `yaml:"config_hash,omitempty"`
-	ProfileName  string                `yaml:"profile_name,omitempty"`
-	ConfigPath   string                `yaml:"config_path,omitempty"`
-	Tables       map[string]tableState `yaml:"tables"`
+	RunID         string                `yaml:"run_id"`
+	StartedAt     time.Time             `yaml:"started_at"`
+	CompletedAt   *time.Time            `yaml:"completed_at,omitempty"`
+	LastHeartbeat time.Time             `yaml:"last_heartbeat,omitempty"`
+	Status        string                `yaml:"status"` // running, success, failed
+	Phase         string                `yaml:"phase"`  // initializing, transferring, finalizing, validating, complete
+	Error         string                `yaml:"error,omitempty"`
+	SourceSchema  string                `yaml:"source_schema"`
+	TargetSchema  string                `yaml:"target_schema"`
+	ConfigHash    string                `yaml:"config_hash,omitempty"`
+	ProfileName   string                `yaml:"profile_name,omitempty"`
+	ConfigPath    string                `yaml:"config_path,omitempty"`
+	Tables        map[string]tableState `yaml:"tables"`
 	// SyncTimestamps records the last successful sync time per
 	// (source schema, table, target schema) triple, used by
 	// date-based incremental sync. Pre-#255 the file backend
@@ -112,12 +133,15 @@ type deleteReconciliationTableState struct {
 
 // tableState tracks per-table progress.
 type tableState struct {
-	Status    string `yaml:"status"` // pending, running, success, failed
-	LastPK    any    `yaml:"last_pk,omitempty"`
-	RowsDone  int64  `yaml:"rows_done,omitempty"`
-	RowsTotal int64  `yaml:"rows_total,omitempty"`
-	TaskID    int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility
-	Error     string `yaml:"error,omitempty"`
+	Status      string `yaml:"status"` // pending, running, success, failed
+	TaskType    string `yaml:"task_type,omitempty"`
+	TableName   string `yaml:"table_name,omitempty"`
+	PartitionID *int   `yaml:"partition_id,omitempty"`
+	LastPK      any    `yaml:"last_pk,omitempty"`
+	RowsDone    int64  `yaml:"rows_done,omitempty"`
+	RowsTotal   int64  `yaml:"rows_total,omitempty"`
+	TaskID      int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility
+	Error       string `yaml:"error,omitempty"`
 }
 
 // NewFileState creates a file-based state manager.

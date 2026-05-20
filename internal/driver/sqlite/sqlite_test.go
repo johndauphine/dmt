@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
@@ -146,6 +147,77 @@ func TestWriter_CreateAndInsert_SqliteToSqlite(t *testing.T) {
 	}
 	if count != 3 {
 		t.Errorf("expected 3 rows, got %d", count)
+	}
+}
+
+func TestWriter_ConcurrentWriteBatchSerializesSingleConnection(t *testing.T) {
+	path := memoryDBPath(t, "concurrent_write_batch")
+	w := newTestWriter(t, path)
+	defer w.Close()
+	ctx := context.Background()
+
+	if got := w.MaxConns(); got != 1 {
+		t.Fatalf("MaxConns() = %d, want 1 for SQLite single-writer serialization", got)
+	}
+	if stats := w.PoolStats(); stats.MaxConns != 1 {
+		t.Fatalf("PoolStats().MaxConns = %d, want 1 for SQLite single-writer serialization", stats.MaxConns)
+	}
+
+	src := &driver.Table{
+		Name: "concurrent_rows",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "integer", IsNullable: false, OrdinalPos: 1},
+			{Name: "label", DataType: "text", IsNullable: false, OrdinalPos: 2},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	src.PopulatePKColumns()
+	if err := w.CreateTable(ctx, src, ""); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	const workers = 8
+	const rowsPerWorker = 25
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errCh := make(chan error, workers)
+	for workerID := 0; workerID < workers; workerID++ {
+		workerID := workerID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			rows := make([][]any, rowsPerWorker)
+			baseID := workerID * rowsPerWorker
+			for i := range rows {
+				rows[i] = []any{int64(baseID + i + 1), "row"}
+			}
+			if err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+				Table:     "concurrent_rows",
+				Columns:   []string{"id", "label"},
+				Rows:      rows,
+				BatchSize: 5,
+			}); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent WriteBatch returned error: %v", err)
+	}
+
+	count, err := w.GetRowCount(ctx, "", "concurrent_rows")
+	if err != nil {
+		t.Fatalf("GetRowCount: %v", err)
+	}
+	if want := int64(workers * rowsPerWorker); count != want {
+		t.Fatalf("row count = %d, want %d", count, want)
 	}
 }
 

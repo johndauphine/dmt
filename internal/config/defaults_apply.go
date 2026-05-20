@@ -11,8 +11,11 @@ import (
 )
 
 func (c *Config) applyDefaults() error {
+	c.captureRawUserConfigSnapshot()
+
 	// Apply global defaults from secrets file first
 	c.applyGlobalDefaults()
+	c.markSecretsDefaultTunables()
 
 	// #211: resolve the rename deprecation cycle before any downstream
 	// code reads runtime-tuning fields. After this call, the canonical
@@ -402,5 +405,6 @@ func (c *Config) applyDefaults() error {
 		c.Slack.Enabled = true
 	}
 
+	c.fillDefaultTunableProvenance()
 	return nil
 }

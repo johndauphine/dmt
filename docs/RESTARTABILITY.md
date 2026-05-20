@@ -18,8 +18,29 @@ Two state backends are available:
 
 | Backend | Storage | Use Case | Config Hash | Chunk Progress |
 |---------|---------|----------|-------------|----------------|
-| SQLite (default) | `~/.dmt/migrate.db` | Desktop/interactive | ✅ Yes | ✅ Yes |
-| File-based | User-specified YAML file | Airflow/headless | ✅ Yes | ✅ Yes |
+| SQLite (default) | `~/.dmt/migrate.db` | Desktop/interactive | Yes | Yes |
+| File-based | User-specified YAML file | Airflow/headless | Yes | Yes |
+
+Both backends are required to support the restartability contract: run
+lifecycle, task lifecycle, transfer progress, partition progress, sync
+timestamps, delete reconciliation state, schema snapshots, and fallback
+event counters. This contract is exposed in code through
+`StateBackend.Capabilities()` and covered by the checkpoint conformance
+tests.
+
+Optional history features are explicit capabilities:
+
+| Capability | SQLite | File-based |
+|------------|--------|------------|
+| Full run history | Yes | No, only the current YAML run is available |
+| Post-AI run config snapshots | Yes | No |
+| Encrypted profiles | Yes | No |
+| AI adjustment history | Yes | No, save/list methods are no-op/empty |
+| AI tuning history | Yes | No, save/list methods are no-op/empty |
+
+The file backend is intended for Airflow/headless restartability rather
+than long-lived local history. Use SQLite when operators need `history`,
+encrypted `profile` storage, or AI tuning history across many runs.
 
 ### Key Files
 

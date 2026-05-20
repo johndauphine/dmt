@@ -36,9 +36,11 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 		carriedDeleteReconciliations = fs.state.DeleteReconciliations
 	}
 
+	now := time.Now()
 	fs.state = &fileStateData{
 		RunID:                 id,
-		StartedAt:             time.Now(),
+		StartedAt:             now,
+		LastHeartbeat:         now,
 		Status:                "running",
 		SourceSchema:          sourceSchema,
 		TargetSchema:          targetSchema,
@@ -76,6 +78,18 @@ func (fs *FileState) CompleteRun(id string, status string, errorMsg string) erro
 	return fs.save()
 }
 
+// UpdateRunHeartbeat records that a running process still owns a run.
+func (fs *FileState) UpdateRunHeartbeat(runID string, at time.Time) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.state.RunID != runID {
+		return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, runID)
+	}
+	fs.state.LastHeartbeat = at.UTC()
+	return fs.save()
+}
+
 // GetLastIncompleteRun returns the current run if it's incomplete.
 func (fs *FileState) GetLastIncompleteRun() (*Run, error) {
 	fs.mu.RLock()
@@ -89,16 +103,21 @@ func (fs *FileState) GetLastIncompleteRun() (*Run, error) {
 	if phase == "" {
 		phase = "initializing"
 	}
+	lastHeartbeat := fs.state.LastHeartbeat
+	if lastHeartbeat.IsZero() {
+		lastHeartbeat = fs.state.StartedAt
+	}
 	return &Run{
-		ID:           fs.state.RunID,
-		StartedAt:    fs.state.StartedAt,
-		Status:       fs.state.Status,
-		Phase:        phase,
-		SourceSchema: fs.state.SourceSchema,
-		TargetSchema: fs.state.TargetSchema,
-		ConfigHash:   fs.state.ConfigHash,
-		ProfileName:  fs.state.ProfileName,
-		ConfigPath:   fs.state.ConfigPath,
+		ID:            fs.state.RunID,
+		StartedAt:     fs.state.StartedAt,
+		LastHeartbeat: lastHeartbeat,
+		Status:        fs.state.Status,
+		Phase:         phase,
+		SourceSchema:  fs.state.SourceSchema,
+		TargetSchema:  fs.state.TargetSchema,
+		ConfigHash:    fs.state.ConfigHash,
+		ProfileName:   fs.state.ProfileName,
+		ConfigPath:    fs.state.ConfigPath,
 	}, nil
 }
 

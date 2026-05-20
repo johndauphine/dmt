@@ -142,16 +142,15 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 	case int64:
 		maxVal = v
 	default:
-		return []pkRange{{minPK: minPK, maxPK: maxPK}}
+		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
 	}
 
-	// Calculate range size per reader
-	totalRange := maxVal - minVal
-	if totalRange <= 0 {
-		return []pkRange{{minPK: minPK, maxPK: maxPK}}
+	if maxVal <= minVal {
+		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
 	}
 
-	rangeSize := totalRange / int64(n)
+	totalRange := pkRangeDistance(minVal, maxVal)
+	rangeSize := totalRange / uint64(n)
 	if rangeSize < 1 {
 		rangeSize = 1
 		n = int(totalRange) // Reduce readers if range is small
@@ -161,11 +160,11 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 	for i := 0; i < n; i++ {
 		var rangeMin, rangeMax int64
 		if i == 0 {
-			rangeMin = minVal - 1 // First range: start before minVal for > comparison
+			rangeMin = decrementInt64PK(minVal) // First range: start before minVal for > comparison
 		} else {
-			rangeMin = minVal + int64(i)*rangeSize // Subsequent ranges: start at boundary
+			rangeMin = addPKOffset(minVal, uint64(i)*rangeSize) // Subsequent ranges: start at boundary
 		}
-		rangeMax = minVal + int64(i+1)*rangeSize
+		rangeMax = addPKOffset(minVal, uint64(i+1)*rangeSize)
 		if i == n-1 {
 			rangeMax = maxVal // Last reader gets remainder
 		}
@@ -176,6 +175,21 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 	}
 
 	return ranges
+}
+
+func pkRangeDistance(minVal, maxVal int64) uint64 {
+	return uint64(maxVal) - uint64(minVal)
+}
+
+func addPKOffset(minVal int64, offset uint64) int64 {
+	return int64(uint64(minVal) + offset)
+}
+
+func decrementInt64PK(pk int64) int64 {
+	if pk == minInt64 {
+		return pk
+	}
+	return pk - 1
 }
 
 func (s *TransferStats) String() string {
@@ -190,16 +204,31 @@ func (s *TransferStats) String() string {
 		s.Rows)
 }
 
-// decrementPK returns a value that is less than the given PK value
+// decrementPK returns a value less than the given PK value when one is representable.
 func decrementPK(pk any) any {
 	switch v := pk.(type) {
 	case int64:
-		return v - 1
+		return decrementInt64PK(v)
 	case int32:
+		if v == minInt32 {
+			return v
+		}
 		return v - 1
 	case int:
+		if v == minInt() {
+			return v
+		}
 		return v - 1
 	default:
 		return pk
 	}
+}
+
+const (
+	minInt64 = -1 << 63
+	minInt32 = -1 << 31
+)
+
+func minInt() int {
+	return -int(^uint(0)>>1) - 1
 }
