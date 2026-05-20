@@ -8,29 +8,29 @@ import (
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // preFlight runs MySQL preflight checks (#228) and returns findings in
 // stable order. Individual probe failures become findings rather than
 // propagating.
 func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if db == nil {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "connection.handle",
-			Side:     req.Side,
-			Message:  "no database handle supplied to preflight",
-			Remedy:   "internal error — please report",
-		}}
-	}
-	var findings []driver.PreFlightFinding
-	findings = appendIfNonNilMySQL(findings, checkConnectionMySQL(ctx, db, req.Side))
-	findings = append(findings, checkVersionMySQL(ctx, db, req.Side)...)
-	findings = append(findings, checkEncodingMySQL(ctx, db, req.Side)...)
-	findings = append(findings, checkPoolHeadroomMySQL(ctx, db, req)...)
-	findings = append(findings, checkPrivilegesMySQL(ctx, db, req)...)
-	findings = append(findings, checkBackupAcknowledgmentMySQL(ctx, db, req)...)
-	return findings
+	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
+		NilDatabaseRemedy: "internal error — please report",
+	},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return shared.SingleFinding(checkConnectionMySQL(ctx, db, req.Side))
+		},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return checkVersionMySQL(ctx, db, req.Side)
+		},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return checkEncodingMySQL(ctx, db, req.Side)
+		},
+		checkPoolHeadroomMySQL,
+		checkPrivilegesMySQL,
+		checkBackupAcknowledgmentMySQL,
+	)
 }
 
 // checkBackupAcknowledgmentMySQL fires when target_mode is drop_recreate
@@ -39,13 +39,7 @@ func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []d
 // "is the table non-empty" question — false positives would only have
 // us be more cautious, not less.
 func checkBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if req.Side != driver.PreFlightSideTarget {
-		return nil
-	}
-	if strings.ToLower(strings.TrimSpace(req.TargetMode)) != "drop_recreate" {
-		return nil
-	}
-	if req.ConfirmBackup {
+	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
 	schema := strings.TrimSpace(req.Schema)
@@ -94,17 +88,9 @@ func checkBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.
 }
 
 func checkConnectionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
-	var one int
-	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		return &driver.PreFlightFinding{
-			Severity: driver.SeverityError,
-			Check:    "connection.ping",
-			Side:     side,
-			Message:  fmt.Sprintf("connection ping failed: %v", err),
-			Remedy:   "verify host/port/credentials in your config and that the MySQL server is reachable",
-		}
-	}
-	return nil
+	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
+		Remedy: "verify host/port/credentials in your config and that the MySQL server is reachable",
+	})
 }
 
 // checkVersionMySQL enforces MySQL 5.7 (or MariaDB 10.3) as the floor.
@@ -265,22 +251,7 @@ func checkPoolHeadroomMySQL(ctx context.Context, db *sql.DB, req driver.PreFligh
 			Message:  fmt.Sprintf("could not read Threads_connected: %v", err),
 		}}
 	}
-	needed := int64(req.Workers + 5)
-	if needed <= 0 {
-		return nil
-	}
-	available := maxConns - current
-	if available < needed {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "pool.headroom",
-			Side:     req.Side,
-			Message: fmt.Sprintf("only %d of %d connections free; need %d (workers=%d + 5 margin)",
-				available, maxConns, needed, req.Workers),
-			Remedy: "increase @@max_connections or reduce migration.workers",
-		}}
-	}
-	return nil
+	return shared.PoolHeadroomFinding(req, maxConns, current, "increase @@max_connections or reduce migration.workers")
 }
 
 // checkPrivilegesMySQL uses SHOW GRANTS rather than information_schema —
@@ -303,10 +274,7 @@ func checkPrivilegesMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 	if req.Side == driver.PreFlightSideSource {
 		required = append(required, "SELECT")
 	} else {
-		mode := strings.ToLower(strings.TrimSpace(req.TargetMode))
-		if mode == "" {
-			mode = "drop_recreate"
-		}
+		mode := shared.TargetModeOrDefault(req.TargetMode, "drop_recreate")
 		switch mode {
 		case "drop_recreate":
 			required = append(required, "CREATE", "DROP", "INSERT")
@@ -458,11 +426,4 @@ func grantHasVerb(privs, v string) bool {
 		}
 	}
 	return false
-}
-
-func appendIfNonNilMySQL(s []driver.PreFlightFinding, f *driver.PreFlightFinding) []driver.PreFlightFinding {
-	if f == nil {
-		return s
-	}
-	return append(s, *f)
 }

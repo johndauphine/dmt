@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // preFlight runs the PostgreSQL preflight checks (#228) and returns findings
@@ -15,27 +16,23 @@ import (
 // from individual checks become SeverityError findings rather than propagating,
 // so a single broken probe doesn't mask the other findings.
 func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if db == nil {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "connection.handle",
-			Side:     req.Side,
-			Message:  "no database handle supplied to preflight",
-			Remedy:   "this is an internal error — please report it with the dmt version",
-		}}
-	}
-
-	var findings []driver.PreFlightFinding
-
-	findings = appendIfNonNil(findings, checkConnectionPG(ctx, db, req.Side))
-	findings = append(findings, checkVersionPG(ctx, db, req.Side)...)
-	findings = append(findings, checkEncodingPG(ctx, db, req.Side)...)
-	findings = append(findings, checkPoolHeadroomPG(ctx, db, req)...)
-	findings = append(findings, checkPrivilegesPG(ctx, db, req)...)
-	findings = append(findings, checkDiskSpacePG(ctx, db, req)...)
-	findings = append(findings, checkBackupAcknowledgmentPG(ctx, db, req)...)
-
-	return findings
+	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
+		NilDatabaseRemedy: "this is an internal error — please report it with the dmt version",
+	},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return shared.SingleFinding(checkConnectionPG(ctx, db, req.Side))
+		},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return checkVersionPG(ctx, db, req.Side)
+		},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return checkEncodingPG(ctx, db, req.Side)
+		},
+		checkPoolHeadroomPG,
+		checkPrivilegesPG,
+		checkDiskSpacePG,
+		checkBackupAcknowledgmentPG,
+	)
 }
 
 // checkBackupAcknowledgmentPG fires only on the target side when
@@ -45,13 +42,7 @@ func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []d
 // Uses pg_class.reltuples (planner estimate) — accurate enough for
 // "is this table empty or not" without paying for COUNT(*) on large tables.
 func checkBackupAcknowledgmentPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if req.Side != driver.PreFlightSideTarget {
-		return nil
-	}
-	if strings.ToLower(strings.TrimSpace(req.TargetMode)) != "drop_recreate" {
-		return nil
-	}
-	if req.ConfirmBackup {
+	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
 	schema := strings.TrimSpace(req.Schema)
@@ -97,17 +88,9 @@ func checkBackupAcknowledgmentPG(ctx context.Context, db *sql.DB, req driver.Pre
 // connection-level error and let callers short-circuit (orchestrator may
 // choose to skip remaining checks on a hard connection failure).
 func checkConnectionPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
-	var one int
-	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		return &driver.PreFlightFinding{
-			Severity: driver.SeverityError,
-			Check:    "connection.ping",
-			Side:     side,
-			Message:  fmt.Sprintf("connection ping failed: %v", err),
-			Remedy:   "verify the host/port/credentials in your config and that the PostgreSQL server is reachable from this host",
-		}
-	}
-	return nil
+	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
+		Remedy: "verify the host/port/credentials in your config and that the PostgreSQL server is reachable from this host",
+	})
 }
 
 // checkVersionPG verifies the server is on a supported major version. PG 12
@@ -201,23 +184,12 @@ func checkPoolHeadroomPG(ctx context.Context, db *sql.DB, req driver.PreFlightRe
 			Remedy:   "grant pg_read_all_stats to the dmt role for accurate pool-headroom checks",
 		}}
 	}
-	needed := req.Workers + 5
-	if needed <= 0 {
-		// Workers unspecified — emit no finding rather than guess.
-		return nil
-	}
-	available := maxConns - current
-	if available < needed {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "pool.headroom",
-			Side:     req.Side,
-			Message: fmt.Sprintf("only %d of %d connections free; need %d (workers=%d + 5 margin)",
-				available, maxConns, needed, req.Workers),
-			Remedy: "increase max_connections, reduce migration.workers, or wait until existing connections drain",
-		}}
-	}
-	return nil
+	return shared.PoolHeadroomFinding(
+		req,
+		int64(maxConns),
+		int64(current),
+		"increase max_connections, reduce migration.workers, or wait until existing connections drain",
+	)
 }
 
 // checkPrivilegesPG verifies the connected role has the privileges
@@ -235,20 +207,14 @@ func checkPrivilegesPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequ
 		// Source needs SELECT on the schema's tables. has_schema_privilege
 		// with USAGE covers the ability to access objects in the schema at
 		// all; per-table SELECT is granular but USAGE is the cheap precondition.
-		if f := pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side); f != nil {
-			findings = append(findings, *f)
-		}
+		findings = shared.AppendNonNilFinding(findings, pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side))
 		return findings
 	}
 
 	// Both target modes need USAGE + CREATE on the schema (for either
 	// CREATE TABLE in drop_recreate or temp staging in upsert).
-	if f := pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side); f != nil {
-		findings = append(findings, *f)
-	}
-	if f := pgHasSchemaPriv(ctx, db, schema, "CREATE", req.Side); f != nil {
-		findings = append(findings, *f)
-	}
+	findings = shared.AppendNonNilFinding(findings, pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side))
+	findings = shared.AppendNonNilFinding(findings, pgHasSchemaPriv(ctx, db, schema, "CREATE", req.Side))
 	return findings
 }
 
@@ -306,10 +272,3 @@ func checkDiskSpacePG(ctx context.Context, db *sql.DB, req driver.PreFlightReque
 }
 
 func gib(b int64) float64 { return float64(b) / (1 << 30) }
-
-func appendIfNonNil(s []driver.PreFlightFinding, f *driver.PreFlightFinding) []driver.PreFlightFinding {
-	if f == nil {
-		return s
-	}
-	return append(s, *f)
-}

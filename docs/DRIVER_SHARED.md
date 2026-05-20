@@ -51,7 +51,8 @@ multiple drivers and do not hide engine-specific behavior:
 - reader channel lifecycle, pagination loops, query timing, and batch `Done`
   semantics when query construction is already delegated to concrete dialects
 - batch slicing and effective batch-size selection
-- stable preflight finding builders
+- stable preflight finding builders, connection-check plumbing, backup-ack
+  gating, and pool-headroom decisions after concrete drivers own the probe SQL
 - reader control-flow helpers when pagination semantics are already delegated
   to the dialect or concrete driver
 
@@ -99,8 +100,8 @@ later PR proves that the shared form is clearer and behavior-preserving:
    queries return the same row shape.
 8. Move the closest reader streaming paths onto shared pagination control flow
    once the dialect query builders already own the database-specific SQL.
-9. Look for preflight result-building helpers after reader duplication is
-   smaller.
+9. Centralize preflight framework helpers where driver-specific probe SQL stays
+   concrete.
 10. Revisit catalog-driven engine work after the native driver code is drier, so
    any configuration or catalog approach builds on a cleaner foundation.
 

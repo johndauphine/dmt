@@ -7,30 +7,29 @@ import (
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // preFlight runs SQL Server preflight checks (#228) and returns findings in
 // stable order. Individual probe failures become findings rather than
 // propagating, so a single broken query doesn't mask the rest.
 func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if db == nil {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "connection.handle",
-			Side:     req.Side,
-			Message:  "no database handle supplied to preflight",
-			Remedy:   "internal error — please report",
-		}}
-	}
-
-	var findings []driver.PreFlightFinding
-	findings = appendIfNonNilMSSQL(findings, checkConnectionMSSQL(ctx, db, req.Side))
-	findings = append(findings, checkVersionMSSQL(ctx, db, req.Side)...)
-	findings = append(findings, checkCollationMSSQL(ctx, db, req.Side)...)
-	findings = append(findings, checkPoolHeadroomMSSQL(ctx, db, req)...)
-	findings = append(findings, checkPrivilegesMSSQL(ctx, db, req)...)
-	findings = append(findings, checkBackupAcknowledgmentMSSQL(ctx, db, req)...)
-	return findings
+	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
+		NilDatabaseRemedy: "internal error — please report",
+	},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return shared.SingleFinding(checkConnectionMSSQL(ctx, db, req.Side))
+		},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return checkVersionMSSQL(ctx, db, req.Side)
+		},
+		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+			return checkCollationMSSQL(ctx, db, req.Side)
+		},
+		checkPoolHeadroomMSSQL,
+		checkPrivilegesMSSQL,
+		checkBackupAcknowledgmentMSSQL,
+	)
 }
 
 // checkBackupAcknowledgmentMSSQL fires when target_mode is drop_recreate
@@ -40,13 +39,7 @@ func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []d
 // the schema filter. Requires no special permissions beyond ordinary
 // database access — sys.partitions is readable by db_datareader.
 func checkBackupAcknowledgmentMSSQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if req.Side != driver.PreFlightSideTarget {
-		return nil
-	}
-	if strings.ToLower(strings.TrimSpace(req.TargetMode)) != "drop_recreate" {
-		return nil
-	}
-	if req.ConfirmBackup {
+	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
 	schema := strings.TrimSpace(req.Schema)
@@ -85,17 +78,9 @@ func checkBackupAcknowledgmentMSSQL(ctx context.Context, db *sql.DB, req driver.
 }
 
 func checkConnectionMSSQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
-	var one int
-	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		return &driver.PreFlightFinding{
-			Severity: driver.SeverityError,
-			Check:    "connection.ping",
-			Side:     side,
-			Message:  fmt.Sprintf("connection ping failed: %v", err),
-			Remedy:   "verify host/port/credentials and that the SQL Server instance is reachable; check TLS and trust_server_cert settings",
-		}
-	}
-	return nil
+	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
+		Remedy: "verify host/port/credentials and that the SQL Server instance is reachable; check TLS and trust_server_cert settings",
+	})
 }
 
 // checkVersionMSSQL enforces SQL Server 2016 (major 13) as the floor.
@@ -179,22 +164,12 @@ func checkPoolHeadroomMSSQL(ctx context.Context, db *sql.DB, req driver.PreFligh
 			Remedy:   "grant VIEW SERVER STATE to the dmt login for accurate pool-headroom checks",
 		}}
 	}
-	needed := req.Workers + 5
-	if needed <= 0 {
-		return nil
-	}
-	available := maxConns - current
-	if available < needed {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "pool.headroom",
-			Side:     req.Side,
-			Message: fmt.Sprintf("only %d of %d connections free; need %d (workers=%d + 5 margin)",
-				available, maxConns, needed, req.Workers),
-			Remedy: "lower migration.workers or wait until existing connections drain (SQL Server's default 32767 limit is usually high enough; check sp_configure 'user connections')",
-		}}
-	}
-	return nil
+	return shared.PoolHeadroomFinding(
+		req,
+		int64(maxConns),
+		int64(current),
+		"lower migration.workers or wait until existing connections drain (SQL Server's default 32767 limit is usually high enough; check sp_configure 'user connections')",
+	)
 }
 
 // checkPrivilegesMSSQL uses HAS_PERMS_BY_NAME to verify the connected login
@@ -210,10 +185,7 @@ func checkPrivilegesMSSQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 		return mssqlCheckDBPerm(ctx, db, "SELECT", "read source schema", req.Side)
 	}
 
-	mode := strings.ToLower(strings.TrimSpace(req.TargetMode))
-	if mode == "" {
-		mode = "drop_recreate"
-	}
+	mode := shared.TargetModeOrDefault(req.TargetMode, "drop_recreate")
 	var findings []driver.PreFlightFinding
 	switch mode {
 	case "drop_recreate":
@@ -269,11 +241,4 @@ func lookupDBPrincipal(ctx context.Context, db *sql.DB) string {
 		return "<user>"
 	}
 	return "[" + strings.ReplaceAll(strings.TrimSpace(name), "]", "]]") + "]"
-}
-
-func appendIfNonNilMSSQL(s []driver.PreFlightFinding, f *driver.PreFlightFinding) []driver.PreFlightFinding {
-	if f == nil {
-		return s
-	}
-	return append(s, *f)
 }

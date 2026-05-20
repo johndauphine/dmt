@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 // preFlight runs SQLite preflight checks. Returns findings in stable
@@ -14,13 +15,9 @@ import (
 // propagating.
 func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	if db == nil {
-		return []driver.PreFlightFinding{{
-			Severity: driver.SeverityError,
-			Check:    "connection.handle",
-			Side:     req.Side,
-			Message:  "no database handle supplied to preflight",
-			Remedy:   "internal error — please report",
-		}}
+		return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
+			NilDatabaseRemedy: "internal error — please report",
+		})
 	}
 
 	var findings []driver.PreFlightFinding
@@ -34,17 +31,11 @@ func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []d
 }
 
 func checkConnection(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
-	var one int
-	if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		return &driver.PreFlightFinding{
-			Severity: driver.SeverityError,
-			Check:    "connection.alive",
-			Side:     side,
-			Message:  fmt.Sprintf("could not query database: %v", err),
-			Remedy:   "verify the database file path is correct and the process has read/write permissions",
-		}
-	}
-	return nil
+	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
+		Check:         "connection.alive",
+		MessagePrefix: "could not query database",
+		Remedy:        "verify the database file path is correct and the process has read/write permissions",
+	})
 }
 
 // checkIntegrity runs PRAGMA integrity_check. It returns "ok" on a
@@ -96,13 +87,7 @@ func checkIntegrity(ctx context.Context, db *sql.DB, side driver.PreFlightSide) 
 // operator hasn't acknowledged the backup (ConfirmBackup=false), and any
 // existing table holds rows.
 func checkBackupAck(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	if req.Side != driver.PreFlightSideTarget {
-		return nil
-	}
-	if strings.ToLower(strings.TrimSpace(req.TargetMode)) != "drop_recreate" {
-		return nil
-	}
-	if req.ConfirmBackup {
+	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
 
