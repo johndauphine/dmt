@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -108,7 +109,7 @@ func (r *Reader) applyActualRowSizes(ctx context.Context, dbName string, tables 
 }
 
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
-	rows, err := r.db.QueryContext(ctx, `
+	columns, err := shared.QueryStandardColumns(ctx, r.db, `
 		SELECT
 			COLUMN_NAME,
 			DATA_TYPE,
@@ -122,21 +123,12 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
-	`, t.Schema, t.Name)
+	`, t.Name, t.Schema, t.Name)
 	if err != nil {
-		return fmt.Errorf("querying columns for %s: %w", t.Name, err)
+		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var c driver.Column
-		if err := rows.Scan(&c.Name, &c.DataType, &c.MaxLength, &c.Precision, &c.Scale,
-			&c.IsNullable, &c.IsIdentity, &c.DefaultValue, &c.OrdinalPos); err != nil {
-			return fmt.Errorf("scanning column: %w", err)
-		}
-		t.Columns = append(t.Columns, c)
-	}
-	return rows.Err()
+	t.Columns = append(t.Columns, columns...)
+	return nil
 }
 
 func (r *Reader) loadPrimaryKey(ctx context.Context, t *driver.Table) error {

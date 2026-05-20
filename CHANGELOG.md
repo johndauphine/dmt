@@ -75,6 +75,8 @@ All notable changes to this project will be documented in this file.
   engine-specific sample queries and casts in concrete drivers (#338).
 - Centralized partition-boundary result scanning for readers whose partition
   queries already return the same row shape (#338).
+- Centralized schema column metadata scanning for information_schema-backed
+  readers while keeping catalog SQL and engine semantics local (#369).
 - Moved the Postgres and MySQL readers onto shared streaming/pagination
   control flow while keeping dialect-specific SQL generation local (#338).
 - Moved the SQLite reader onto shared streaming/pagination control flow while
