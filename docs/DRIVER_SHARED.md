@@ -50,6 +50,8 @@ multiple drivers and do not hide engine-specific behavior:
   same row shape
 - reader channel lifecycle, pagination loops, query timing, and batch `Done`
   semantics when query construction is already delegated to concrete dialects
+- reader query-error labeling when concrete drivers need stable operator-facing
+  error prefixes
 - batch slicing and effective batch-size selection
 - stable preflight finding builders, connection-check plumbing, backup-ack
   gating, and pool-headroom decisions after concrete drivers own the probe SQL

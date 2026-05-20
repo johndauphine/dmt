@@ -10,10 +10,13 @@ import (
 
 // StreamConfig contains the shared database/sql read-streaming dependencies.
 type StreamConfig struct {
-	DB        SQLQuerier
-	Dialect   driver.Dialect
-	Buffer    int
-	TableHint string
+	DB                       SQLQuerier
+	Dialect                  driver.Dialect
+	Buffer                   int
+	TableHint                string
+	KeysetQueryErrorLabel    string
+	RowNumberQueryErrorLabel string
+	FullTableQueryErrorLabel string
 }
 
 // StreamTable reads table rows into batches using the dialect's query builders.
@@ -66,7 +69,7 @@ func streamKeyset(ctx context.Context, batches chan<- driver.Batch, cfg StreamCo
 		rows, err := cfg.DB.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
 		if err != nil {
-			batches <- driver.Batch{Error: fmt.Errorf("query error: %w", err), Done: true}
+			batches <- driver.Batch{Error: streamQueryError(cfg.KeysetQueryErrorLabel, err), Done: true}
 			return
 		}
 
@@ -128,7 +131,7 @@ func streamRowNumber(ctx context.Context, batches chan<- driver.Batch, cfg Strea
 		rows, err := cfg.DB.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
 		if err != nil {
-			batches <- driver.Batch{Error: fmt.Errorf("query error: %w", err), Done: true}
+			batches <- driver.Batch{Error: streamQueryError(cfg.RowNumberQueryErrorLabel, err), Done: true}
 			return
 		}
 
@@ -164,7 +167,7 @@ func streamFullTable(ctx context.Context, batches chan<- driver.Batch, cfg Strea
 	rows, err := cfg.DB.QueryContext(ctx, query)
 	queryTime := time.Since(queryStart)
 	if err != nil {
-		batches <- driver.Batch{Error: fmt.Errorf("query error: %w", err), Done: true}
+		batches <- driver.Batch{Error: streamQueryError(cfg.FullTableQueryErrorLabel, err), Done: true}
 		return
 	}
 	defer rows.Close()
@@ -201,4 +204,11 @@ func streamFullTable(ctx context.Context, batches chan<- driver.Batch, cfg Strea
 		}
 		queryTime = 0
 	}
+}
+
+func streamQueryError(label string, err error) error {
+	if label == "" {
+		label = "query error"
+	}
+	return fmt.Errorf("%s: %w", label, err)
 }

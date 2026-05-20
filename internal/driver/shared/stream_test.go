@@ -77,6 +77,74 @@ func TestStreamTableRowNumber(t *testing.T) {
 	}
 }
 
+func TestStreamTableQueryErrorLabels(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		partition *driver.Partition
+		cfg       StreamConfig
+		want      string
+	}{
+		{
+			name:      "full table",
+			partition: nil,
+			cfg: StreamConfig{
+				FullTableQueryErrorLabel: "full read query",
+			},
+			want: "full read query:",
+		},
+		{
+			name: "keyset",
+			partition: &driver.Partition{
+				MinPK: int64(0),
+			},
+			cfg: StreamConfig{
+				KeysetQueryErrorLabel: "keyset query",
+			},
+			want: "keyset query:",
+		},
+		{
+			name: "row number",
+			partition: &driver.Partition{
+				StartRow: 1,
+				EndRow:   2,
+			},
+			cfg: StreamConfig{
+				RowNumberQueryErrorLabel: "row_number query",
+			},
+			want: "row_number query:",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openSharedSQLite(t)
+			tc.cfg.DB = db
+			tc.cfg.Dialect = streamDialect{}
+
+			batches, err := StreamTable(ctx, tc.cfg, streamReadOptions(tc.partition, 2))
+			if err != nil {
+				t.Fatalf("StreamTable returned error: %v", err)
+			}
+
+			batch, ok := <-batches
+			if !ok {
+				t.Fatal("batch channel closed before error batch")
+			}
+			if batch.Error == nil {
+				t.Fatal("first batch error is nil")
+			}
+			if !strings.HasPrefix(batch.Error.Error(), tc.want) {
+				t.Fatalf("batch error = %q, want prefix %q", batch.Error.Error(), tc.want)
+			}
+			if !batch.Done {
+				t.Fatal("error batch Done = false, want true")
+			}
+		})
+	}
+}
+
 func openStreamDB(t *testing.T) SQLQuerier {
 	t.Helper()
 
