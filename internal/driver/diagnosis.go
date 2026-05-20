@@ -85,12 +85,12 @@ func EmitDiagnosis(diagnosis *ErrorDiagnosis) {
 func (diag *ErrorDiagnosis) Format() string {
 	var sb strings.Builder
 	sb.WriteString("Error Diagnosis\n\n")
-	sb.WriteString(fmt.Sprintf("Cause: %s\n\n", diag.Cause))
+	fmt.Fprintf(&sb, "Cause: %s\n\n", diag.Cause)
 	sb.WriteString("Suggestions:\n")
 	for i, s := range diag.Suggestions {
-		sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, s))
+		fmt.Fprintf(&sb, "  %d. %s\n", i+1, s)
 	}
-	sb.WriteString(fmt.Sprintf("\nConfidence: %s  |  Category: %s\n", diag.Confidence, diag.Category))
+	fmt.Fprintf(&sb, "\nConfidence: %s  |  Category: %s\n", diag.Confidence, diag.Category)
 	return sb.String()
 }
 

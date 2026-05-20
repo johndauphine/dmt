@@ -12,7 +12,6 @@ import (
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
-	"github.com/johndauphine/dmt/internal/source"
 )
 
 // Run executes a new migration.
@@ -282,12 +281,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	for _, f := range tableFailures {
 		failedTableNames[f.TableName] = true
 	}
-	var successTables []source.Table
-	for _, t := range tables {
-		if !failedTableNames[t.Name] {
-			successTables = append(successTables, t)
-		}
-	}
+	successTables := finalizableTables(tables, failedTableNames)
 
 	// Finalize (only for successful tables)
 	o.setPhase("finalizing")

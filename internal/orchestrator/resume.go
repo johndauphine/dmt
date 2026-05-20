@@ -38,11 +38,22 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	}
 
 	// Validate config hash if stored (prevents resuming with different config)
-	if run.ConfigHash != "" && !o.opts.ForceResume {
+	if run.ConfigHash != "" {
 		currentHash := computeConfigHash(o.config)
 		if run.ConfigHash != currentHash {
-			return fmt.Errorf("config changed since run started (hash %s != %s), use --force-resume to override",
-				run.ConfigHash, currentHash)
+			if !o.opts.ForceResume {
+				return fmt.Errorf("config changed since run started (hash %s != %s), use --force-resume to override",
+					run.ConfigHash, currentHash)
+			}
+			warnings, err := validateForceResumeConfigCompatibility(run, o.config)
+			if err != nil {
+				return err
+			}
+			logging.Warn("--force-resume overriding config hash mismatch for run %s (stored %s != current %s)",
+				run.ID, run.ConfigHash, currentHash)
+			for _, warning := range warnings {
+				logging.Warn("--force-resume config drift: %s", warning)
+			}
 		}
 	}
 
@@ -351,12 +362,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	for _, f := range tableFailures {
 		failedTableNames[f.TableName] = true
 	}
-	var successTables []source.Table
-	for _, t := range tables {
-		if !failedTableNames[t.Name] {
-			successTables = append(successTables, t)
-		}
-	}
+	successTables := finalizableTables(tables, failedTableNames)
 
 	// Finalize (uses successful tables for constraints)
 	o.tables = successTables

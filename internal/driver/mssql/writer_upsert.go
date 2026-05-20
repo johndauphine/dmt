@@ -413,19 +413,20 @@ func (w *Writer) buildMerge(targetTable, stagingTable string, cols, pkCols []str
 
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("MERGE INTO %s WITH (TABLOCK) AS target\n", targetTable))
-	sb.WriteString(fmt.Sprintf("USING %s AS source\n", stagingTable))
-	sb.WriteString(fmt.Sprintf("ON %s\n", strings.Join(onClauses, " AND ")))
+	fmt.Fprintf(&sb, "MERGE INTO %s WITH (TABLOCK) AS target\n", targetTable)
+	fmt.Fprintf(&sb, "USING %s AS source\n", stagingTable)
+	fmt.Fprintf(&sb, "ON %s\n", strings.Join(onClauses, " AND "))
 
 	if !insertOnly && len(setClauses) > 0 {
-		sb.WriteString(fmt.Sprintf("WHEN MATCHED AND (%s) THEN UPDATE SET %s\n",
+		fmt.Fprintf(&sb, "WHEN MATCHED AND (%s) THEN UPDATE SET %s\n",
 			strings.Join(changeDetection, " OR "),
-			strings.Join(setClauses, ", ")))
+			strings.Join(setClauses, ", "))
+
 	}
 
-	sb.WriteString(fmt.Sprintf("WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
+	fmt.Fprintf(&sb, "WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
 		strings.Join(quotedCols, ", "),
-		strings.Join(sourceCols, ", ")))
+		strings.Join(sourceCols, ", "))
 
 	return sb.String()
 }

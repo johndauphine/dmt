@@ -143,6 +143,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Hardened architecture follow-up paths after the review epic: force-resume
+  now rejects incompatible config drift, ROW_NUMBER resume/runtime tuning
+  have targeted regression coverage, drop-recreate recovery/finalization paths
+  are clearer and safer, and AI fallback calls support `max_requests` with
+  table-DDL in-flight deduplication (#388, #389, #390, #391, #392).
 - Run summaries and superseded-run detection now use newest-inserted ordering
   when multiple runs share the same SQLite timestamp second, avoiding stale
   completion output and same-second resume ambiguity (#308).

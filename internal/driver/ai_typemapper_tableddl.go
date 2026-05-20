@@ -33,6 +33,35 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 	}
 	m.cacheMu.RUnlock()
 
+	flight := &inflightRequest{done: make(chan struct{})}
+	if existing, loaded := m.inflight.LoadOrStore(cacheKey, flight); loaded {
+		existingFlight, ok := existing.(*inflightRequest)
+		if !ok {
+			m.inflight.Delete(cacheKey)
+			return nil, fmt.Errorf("invalid AI in-flight request state for %s", cacheKey)
+		}
+		<-existingFlight.done
+		if existingFlight.err != nil {
+			return nil, existingFlight.err
+		}
+		return m.parseTableDDLFromCache(existingFlight.result, req)
+	}
+
+	defer func() {
+		close(flight.done)
+		m.inflight.Delete(cacheKey)
+	}()
+
+	// Double-check cache after acquiring the in-flight slot. Another caller may
+	// have completed between the first cache read and LoadOrStore.
+	m.cacheMu.RLock()
+	if cached, ok := m.cache.GetAI(cacheKey, m.providerName, m.Model()); ok {
+		m.cacheMu.RUnlock()
+		flight.result = cached
+		return m.parseTableDDLFromCache(cached, req)
+	}
+	m.cacheMu.RUnlock()
+
 	// Build the prompt with full table context
 	prompt := m.buildTableDDLPrompt(req)
 
@@ -42,15 +71,17 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 	// Call AI API
 	result, err := m.CallAI(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("AI table DDL generation failed for %s.%s: %w",
+		flight.err = fmt.Errorf("AI table DDL generation failed for %s.%s: %w",
 			req.SourceTable.Schema, req.SourceTable.Name, err)
+		return nil, flight.err
 	}
 
 	// Parse the response to extract DDL
 	response, err := m.parseTableDDLResponse(result, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse AI response for %s.%s: %w",
+		flight.err = fmt.Errorf("failed to parse AI response for %s.%s: %w",
 			req.SourceTable.Schema, req.SourceTable.Name, err)
+		return nil, flight.err
 	}
 
 	// Cache the DDL result with AI provenance (#177).
@@ -66,6 +97,7 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 	logging.Debug("AI generated DDL for %s.%s (%d columns mapped)",
 		req.SourceTable.Schema, req.SourceTable.Name, len(response.ColumnTypes))
 
+	flight.result = response.CreateTableDDL
 	return response, nil
 }
 
@@ -74,12 +106,12 @@ func (m *AITypeMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest
 func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 	// Build a deterministic representation of the table structure
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("table:%s:%s:%s:%s.%s:",
-		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name))
+	fmt.Fprintf(&sb, "table:%s:%s:%s:%s.%s:",
+		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name)
 
 	for _, col := range req.SourceTable.Columns {
-		sb.WriteString(fmt.Sprintf("%s:%s:%d:%d:%d:%v;",
-			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable))
+		fmt.Fprintf(&sb, "%s:%s:%d:%d:%d:%v;",
+			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable)
 	}
 
 	// Add PK info
@@ -101,7 +133,7 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 
 	// === SOURCE DATABASE CONTEXT ===
 	sb.WriteString("=== SOURCE DATABASE ===\n")
-	sb.WriteString(fmt.Sprintf("Type: %s\n", req.SourceDBType))
+	fmt.Fprintf(&sb, "Type: %s\n", req.SourceDBType)
 	if req.SourceContext != nil {
 		m.writeContextDetails(&sb, req.SourceContext, "Source")
 	}
@@ -109,9 +141,9 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 
 	// === TARGET DATABASE CONTEXT ===
 	sb.WriteString("=== TARGET DATABASE ===\n")
-	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	fmt.Fprintf(&sb, "Type: %s\n", req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+		fmt.Fprintf(&sb, "Schema: %s\n", req.TargetSchema)
 	}
 	if req.TargetContext != nil {
 		m.writeContextDetails(&sb, req.TargetContext, "Target")
@@ -131,7 +163,7 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("You MUST use exactly these column names in the target CREATE TABLE. Do NOT modify, abbreviate, add, or remove any characters:\n")
 	for _, col := range req.SourceTable.Columns {
 		tgt := targetIdentifier(col.Name, req.TargetDBType)
-		sb.WriteString(fmt.Sprintf("  %q -> %q\n", col.Name, tgt))
+		fmt.Fprintf(&sb, "  %q -> %q\n", col.Name, tgt)
 	}
 	sb.WriteString("\n")
 
@@ -144,9 +176,9 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 	sb.WriteString("Generate the complete CREATE TABLE statement for the target database.\n")
 	targetTableName := targetIdentifier(req.SourceTable.Name, req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("- Use fully qualified table name: %s.%s\n", req.TargetSchema, targetTableName))
+		fmt.Fprintf(&sb, "- Use fully qualified table name: %s.%s\n", req.TargetSchema, targetTableName)
 	} else {
-		sb.WriteString(fmt.Sprintf("- Use table name: %s\n", targetTableName))
+		fmt.Fprintf(&sb, "- Use table name: %s\n", targetTableName)
 	}
 	sb.WriteString("- Use the EXACT column names from the REQUIRED TARGET COLUMN NAMES section above\n")
 	sb.WriteString("- Include all columns with appropriate target types\n")
@@ -175,11 +207,11 @@ func (m *AITypeMapper) buildTableDDLPrompt(req TableDDLRequest) string {
 		for _, rw := range reservedWords {
 			switch req.TargetDBType {
 			case "mssql":
-				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as [%s]\n", rw, rw))
+				fmt.Fprintf(&sb, "- Column '%s' must be quoted as [%s]\n", rw, rw)
 			case "mysql":
-				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as `%s`\n", rw, rw))
+				fmt.Fprintf(&sb, "- Column '%s' must be quoted as `%s`\n", rw, rw)
 			case "postgres":
-				sb.WriteString(fmt.Sprintf("- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToLower(rw)))
+				fmt.Fprintf(&sb, "- Column '%s' must be quoted as \"%s\"\n", rw, strings.ToLower(rw))
 			}
 		}
 	}

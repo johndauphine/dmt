@@ -69,12 +69,12 @@ func (s *State) UpdateRunHeartbeat(runID string, at time.Time) error {
 func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
 	var startedAtStr string
-	var profileName, configPath, phase, configHash, lastHeartbeat sql.NullString
+	var profileName, configPath, phase, configHash, lastHeartbeat, configStr sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash, last_heartbeat
+		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash, last_heartbeat, config
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC, rowid DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat, &configStr)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -100,6 +100,9 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	}
 	if configHash.Valid {
 		r.ConfigHash = configHash.String
+	}
+	if configStr.Valid {
+		r.Config = configStr.String
 	}
 	return &r, nil
 }

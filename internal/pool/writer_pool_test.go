@@ -59,6 +59,257 @@ func TestScaleDownRequeuesInFlightJobs(t *testing.T) {
 	}
 }
 
+// TestScaleDownCompletesPulledJobsAndSubmitDrains verifies the downscale path
+// with an explicit synchronization point: workers that have already pulled jobs
+// must finish those jobs even after their worker contexts are cancelled, and a
+// blocked submitter must drain once the remaining worker can make progress.
+func TestScaleDownCompletesPulledJobsAndSubmitDrains(t *testing.T) {
+	const initialWorkers = 4
+	const survivorWorkers = 1
+	const totalJobs = 24
+
+	allPulled := make(chan struct{})
+	releaseWrites := make(chan struct{})
+	var closePulled sync.Once
+	var pulled int32
+	var written int64
+
+	processed := make(map[int]int, totalJobs)
+	var processedMu sync.Mutex
+
+	wp := NewWriterPool(context.Background(), WriterPoolConfig{
+		NumWriters:    initialWorkers,
+		BufferSize:    1,
+		JobBufferSize: initialWorkers + 1,
+		WriteFunc: func(ctx context.Context, writerID int, rows [][]any) error {
+			seq := rows[0][0].(int)
+			if seq < initialWorkers {
+				if atomic.AddInt32(&pulled, 1) == initialWorkers {
+					closePulled.Do(func() { close(allPulled) })
+				}
+				select {
+				case <-releaseWrites:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+
+			processedMu.Lock()
+			processed[seq]++
+			processedMu.Unlock()
+			atomic.AddInt64(&written, 1)
+			return nil
+		},
+	})
+	wp.Start()
+
+	for i := 0; i < initialWorkers; i++ {
+		if ok := wp.Submit(WriteJob{Rows: [][]any{{i}}, Seq: int64(i)}); !ok {
+			t.Fatalf("initial Submit(%d) returned false", i)
+		}
+	}
+
+	select {
+	case <-allPulled:
+	case <-time.After(time.Second):
+		wp.Cancel()
+		t.Fatal("timed out waiting for all initial jobs to be pulled")
+	}
+
+	if err := wp.ScaleWorkers(survivorWorkers); err != nil {
+		wp.Cancel()
+		t.Fatalf("ScaleWorkers(%d): %v", survivorWorkers, err)
+	}
+
+	submitDone := make(chan error, 1)
+	go func() {
+		for i := initialWorkers; i < totalJobs; i++ {
+			if ok := wp.Submit(WriteJob{Rows: [][]any{{i}}, Seq: int64(i)}); !ok {
+				submitDone <- context.Canceled
+				return
+			}
+		}
+		submitDone <- nil
+	}()
+
+	close(releaseWrites)
+
+	select {
+	case err := <-submitDone:
+		if err != nil {
+			t.Fatalf("Submit returned false after scale-down: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		wp.Cancel()
+		t.Fatal("submitting remaining jobs deadlocked after scale-down")
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		wp.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		wp.Cancel()
+		t.Fatal("writer pool did not drain after scaled-down writes were released")
+	}
+
+	if got := atomic.LoadInt64(&written); got != totalJobs {
+		t.Fatalf("written jobs = %d, want %d", got, totalJobs)
+	}
+
+	processedMu.Lock()
+	defer processedMu.Unlock()
+	if len(processed) != totalJobs {
+		t.Fatalf("processed %d unique jobs, want %d", len(processed), totalJobs)
+	}
+	for i := 0; i < totalJobs; i++ {
+		if got := processed[i]; got != 1 {
+			t.Fatalf("job %d processed %d times, want exactly once", i, got)
+		}
+	}
+}
+
+// TestScaleDownThenUpDoesNotReuseDrainingWorkerIDs verifies that workers
+// cancelled during scale-down keep their writer IDs reserved until their
+// in-flight writes finish. Staging writers derive table names from writer IDs,
+// so a quick downscale/upscale must not create two active writes with the same
+// ID.
+func TestScaleDownThenUpDoesNotReuseDrainingWorkerIDs(t *testing.T) {
+	const initialWorkers = 4
+	const survivorWorkers = 1
+	const restoredWorkers = 4
+
+	allInitialPulled := make(chan struct{})
+	releaseInitial := make(chan struct{})
+	releaseNew := make(chan struct{})
+	newJobsDone := make(chan struct{})
+
+	var closeInitialPulled sync.Once
+	var closeNewJobsDone sync.Once
+	var initialPulled int32
+	var newDone int32
+
+	initialIDs := make(map[int]bool, initialWorkers)
+	newIDs := make(map[int]bool, restoredWorkers-survivorWorkers)
+	var idsMu sync.Mutex
+
+	wp := NewWriterPool(context.Background(), WriterPoolConfig{
+		NumWriters:    initialWorkers,
+		BufferSize:    1,
+		JobBufferSize: initialWorkers + 1,
+		WriteFunc: func(ctx context.Context, writerID int, rows [][]any) error {
+			seq := rows[0][0].(int)
+			if seq < initialWorkers {
+				idsMu.Lock()
+				initialIDs[writerID] = true
+				idsMu.Unlock()
+
+				if atomic.AddInt32(&initialPulled, 1) == initialWorkers {
+					closeInitialPulled.Do(func() { close(allInitialPulled) })
+				}
+
+				select {
+				case <-releaseInitial:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			} else {
+				idsMu.Lock()
+				newIDs[writerID] = true
+				idsMu.Unlock()
+
+				if atomic.AddInt32(&newDone, 1) == restoredWorkers-survivorWorkers {
+					closeNewJobsDone.Do(func() { close(newJobsDone) })
+				}
+
+				select {
+				case <-releaseNew:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
+		},
+	})
+	wp.Start()
+
+	for i := 0; i < initialWorkers; i++ {
+		if ok := wp.Submit(WriteJob{Rows: [][]any{{i}}, Seq: int64(i)}); !ok {
+			t.Fatalf("initial Submit(%d) returned false", i)
+		}
+	}
+
+	select {
+	case <-allInitialPulled:
+	case <-time.After(time.Second):
+		wp.Cancel()
+		t.Fatal("timed out waiting for initial jobs to be pulled")
+	}
+
+	if err := wp.ScaleWorkers(survivorWorkers); err != nil {
+		wp.Cancel()
+		t.Fatalf("ScaleWorkers(%d): %v", survivorWorkers, err)
+	}
+	if err := wp.ScaleWorkers(restoredWorkers); err != nil {
+		wp.Cancel()
+		t.Fatalf("ScaleWorkers(%d): %v", restoredWorkers, err)
+	}
+
+	for i := initialWorkers; i < initialWorkers+restoredWorkers-survivorWorkers; i++ {
+		if ok := wp.Submit(WriteJob{Rows: [][]any{{i}}, Seq: int64(i)}); !ok {
+			wp.Cancel()
+			t.Fatalf("new Submit(%d) returned false", i)
+		}
+	}
+
+	select {
+	case <-newJobsDone:
+	case <-time.After(time.Second):
+		wp.Cancel()
+		t.Fatal("timed out waiting for new jobs after scale-up")
+	}
+
+	idsMu.Lock()
+	if len(initialIDs) != initialWorkers {
+		idsMu.Unlock()
+		wp.Cancel()
+		t.Fatalf("initial writer IDs = %v, want %d unique IDs", initialIDs, initialWorkers)
+	}
+	if len(newIDs) != restoredWorkers-survivorWorkers {
+		idsMu.Unlock()
+		wp.Cancel()
+		t.Fatalf("new writer IDs = %v, want %d unique IDs", newIDs, restoredWorkers-survivorWorkers)
+	}
+	for writerID := range newIDs {
+		if initialIDs[writerID] {
+			idsMu.Unlock()
+			wp.Cancel()
+			t.Fatalf("writer ID %d was reused while an old worker with that ID was still draining", writerID)
+		}
+	}
+	idsMu.Unlock()
+
+	close(releaseNew)
+	close(releaseInitial)
+
+	waitDone := make(chan struct{})
+	go func() {
+		wp.Wait()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		wp.Cancel()
+		t.Fatal("writer pool did not drain after releasing writes")
+	}
+}
+
 // TestScaleDownMultipleWorkersSimultaneously verifies that scaling down multiple
 // workers at once doesn't lose any jobs.
 func TestScaleDownMultipleWorkersSimultaneously(t *testing.T) {
@@ -174,6 +425,49 @@ func TestScaleUpAndDown(t *testing.T) {
 	}
 }
 
+func TestNumWritersConcurrentScaleWorkersIsRaceFree(t *testing.T) {
+	wp := NewWriterPool(context.Background(), WriterPoolConfig{
+		NumWriters:    1,
+		BufferSize:    1,
+		JobBufferSize: 2,
+		WriteFunc: func(ctx context.Context, writerID int, rows [][]any) error {
+			return nil
+		},
+	})
+	wp.Start()
+
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = wp.NumWriters()
+				}
+			}
+		}()
+	}
+
+	for i := 0; i < 50; i++ {
+		target := 1 + i%4
+		if err := wp.ScaleWorkers(target); err != nil {
+			close(done)
+			readers.Wait()
+			wp.Cancel()
+			t.Fatalf("ScaleWorkers(%d): %v", target, err)
+		}
+	}
+
+	close(done)
+	readers.Wait()
+	wp.Wait()
+}
+
 func TestCalculateJobBufferSize(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -204,7 +498,7 @@ func TestCalculateJobBufferSize(t *testing.T) {
 				ReadAheadBuffers: 3,
 			},
 			// 2GB / (8000*2290) = ~117 total slots, minus 9 active = ~108
-			wantMin: 7,   // at least numWriters+1
+			wantMin: 7, // at least numWriters+1
 			wantMax: 150,
 		},
 		{

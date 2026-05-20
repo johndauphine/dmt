@@ -204,7 +204,7 @@ type recorder struct {
 	written bool
 }
 
-func newRecorder() *recorder { return &recorder{header: http.Header{}, Code: 200} }
+func newRecorder() *recorder            { return &recorder{header: http.Header{}, Code: 200} }
 func (r *recorder) Header() http.Header { return r.header }
 func (r *recorder) WriteHeader(code int) {
 	if r.written {

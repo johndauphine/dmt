@@ -9,10 +9,10 @@ import "testing"
 // malformed input.
 func TestParseMySQLVersion(t *testing.T) {
 	cases := []struct {
-		in         string
-		wantMajor  int
-		wantMinor  int
-		wantOK     bool
+		in        string
+		wantMajor int
+		wantMinor int
+		wantOK    bool
 	}{
 		{in: "8.0.35", wantMajor: 8, wantMinor: 0, wantOK: true},
 		{in: "5.7.43", wantMajor: 5, wantMinor: 7, wantOK: true},

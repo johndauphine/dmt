@@ -87,14 +87,14 @@ func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 
 	// Target database context
 	sb.WriteString("=== TARGET DATABASE ===\n")
-	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	fmt.Fprintf(&sb, "Type: %s\n", req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+		fmt.Fprintf(&sb, "Schema: %s\n", req.TargetSchema)
 	}
 	if req.TargetContext != nil {
-		sb.WriteString(fmt.Sprintf("Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength))
+		fmt.Fprintf(&sb, "Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength)
 		if req.TargetContext.IdentifierCase != "" {
-			sb.WriteString(fmt.Sprintf("Identifier Case: %s\n", req.TargetContext.IdentifierCase))
+			fmt.Fprintf(&sb, "Identifier Case: %s\n", req.TargetContext.IdentifierCase)
 		}
 	}
 	sb.WriteString("\n")
@@ -108,15 +108,15 @@ func (m *AITypeMapper) buildIndexDDLPrompt(req FinalizationDDLRequest) string {
 
 	// Index details
 	sb.WriteString("=== INDEX TO CREATE ===\n")
-	sb.WriteString(fmt.Sprintf("Table: %s\n", req.Table.Name))
-	sb.WriteString(fmt.Sprintf("Index Name: %s\n", req.Index.Name))
-	sb.WriteString(fmt.Sprintf("Columns: %s\n", strings.Join(req.Index.Columns, ", ")))
-	sb.WriteString(fmt.Sprintf("Is Unique: %v\n", req.Index.IsUnique))
+	fmt.Fprintf(&sb, "Table: %s\n", req.Table.Name)
+	fmt.Fprintf(&sb, "Index Name: %s\n", req.Index.Name)
+	fmt.Fprintf(&sb, "Columns: %s\n", strings.Join(req.Index.Columns, ", "))
+	fmt.Fprintf(&sb, "Is Unique: %v\n", req.Index.IsUnique)
 	if len(req.Index.IncludeCols) > 0 {
-		sb.WriteString(fmt.Sprintf("Include Columns: %s\n", strings.Join(req.Index.IncludeCols, ", ")))
+		fmt.Fprintf(&sb, "Include Columns: %s\n", strings.Join(req.Index.IncludeCols, ", "))
 	}
 	if req.Index.Filter != "" {
-		sb.WriteString(fmt.Sprintf("Filter (WHERE clause): %s\n", req.Index.Filter))
+		fmt.Fprintf(&sb, "Filter (WHERE clause): %s\n", req.Index.Filter)
 	}
 	sb.WriteString("\n")
 
@@ -149,14 +149,14 @@ func (m *AITypeMapper) buildForeignKeyDDLPrompt(req FinalizationDDLRequest) stri
 
 	// Target database context
 	sb.WriteString("=== TARGET DATABASE ===\n")
-	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	fmt.Fprintf(&sb, "Type: %s\n", req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+		fmt.Fprintf(&sb, "Schema: %s\n", req.TargetSchema)
 	}
 	if req.TargetContext != nil {
-		sb.WriteString(fmt.Sprintf("Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength))
+		fmt.Fprintf(&sb, "Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength)
 		if req.TargetContext.IdentifierCase != "" {
-			sb.WriteString(fmt.Sprintf("Identifier Case: %s\n", req.TargetContext.IdentifierCase))
+			fmt.Fprintf(&sb, "Identifier Case: %s\n", req.TargetContext.IdentifierCase)
 		}
 	}
 	sb.WriteString("\n")
@@ -170,20 +170,20 @@ func (m *AITypeMapper) buildForeignKeyDDLPrompt(req FinalizationDDLRequest) stri
 
 	// Foreign key details
 	sb.WriteString("=== FOREIGN KEY TO CREATE ===\n")
-	sb.WriteString(fmt.Sprintf("Table: %s\n", req.Table.Name))
-	sb.WriteString(fmt.Sprintf("FK Name: %s\n", req.ForeignKey.Name))
-	sb.WriteString(fmt.Sprintf("Columns: %s\n", strings.Join(req.ForeignKey.Columns, ", ")))
+	fmt.Fprintf(&sb, "Table: %s\n", req.Table.Name)
+	fmt.Fprintf(&sb, "FK Name: %s\n", req.ForeignKey.Name)
+	fmt.Fprintf(&sb, "Columns: %s\n", strings.Join(req.ForeignKey.Columns, ", "))
 	refTable := req.ForeignKey.RefTable
 	if req.ForeignKey.RefSchema != "" && req.ForeignKey.RefSchema != req.TargetSchema {
 		refTable = req.ForeignKey.RefSchema + "." + req.ForeignKey.RefTable
 	}
-	sb.WriteString(fmt.Sprintf("References Table: %s\n", refTable))
-	sb.WriteString(fmt.Sprintf("References Columns: %s\n", strings.Join(req.ForeignKey.RefColumns, ", ")))
+	fmt.Fprintf(&sb, "References Table: %s\n", refTable)
+	fmt.Fprintf(&sb, "References Columns: %s\n", strings.Join(req.ForeignKey.RefColumns, ", "))
 	if req.ForeignKey.OnDelete != "" {
-		sb.WriteString(fmt.Sprintf("ON DELETE: %s\n", req.ForeignKey.OnDelete))
+		fmt.Fprintf(&sb, "ON DELETE: %s\n", req.ForeignKey.OnDelete)
 	}
 	if req.ForeignKey.OnUpdate != "" {
-		sb.WriteString(fmt.Sprintf("ON UPDATE: %s\n", req.ForeignKey.OnUpdate))
+		fmt.Fprintf(&sb, "ON UPDATE: %s\n", req.ForeignKey.OnUpdate)
 	}
 	sb.WriteString("\n")
 
@@ -216,20 +216,20 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 	// Source database context (for translating expressions)
 	if req.SourceDBType != "" {
 		sb.WriteString("=== SOURCE DATABASE ===\n")
-		sb.WriteString(fmt.Sprintf("Type: %s\n", req.SourceDBType))
+		fmt.Fprintf(&sb, "Type: %s\n", req.SourceDBType)
 		sb.WriteString("\n")
 	}
 
 	// Target database context
 	sb.WriteString("=== TARGET DATABASE ===\n")
-	sb.WriteString(fmt.Sprintf("Type: %s\n", req.TargetDBType))
+	fmt.Fprintf(&sb, "Type: %s\n", req.TargetDBType)
 	if req.TargetSchema != "" {
-		sb.WriteString(fmt.Sprintf("Schema: %s\n", req.TargetSchema))
+		fmt.Fprintf(&sb, "Schema: %s\n", req.TargetSchema)
 	}
 	if req.TargetContext != nil {
-		sb.WriteString(fmt.Sprintf("Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength))
+		fmt.Fprintf(&sb, "Max Identifier Length: %d\n", req.TargetContext.MaxIdentifierLength)
 		if req.TargetContext.IdentifierCase != "" {
-			sb.WriteString(fmt.Sprintf("Identifier Case: %s\n", req.TargetContext.IdentifierCase))
+			fmt.Fprintf(&sb, "Identifier Case: %s\n", req.TargetContext.IdentifierCase)
 		}
 	}
 	sb.WriteString("\n")
@@ -243,9 +243,9 @@ func (m *AITypeMapper) buildCheckConstraintDDLPrompt(req FinalizationDDLRequest)
 
 	// Check constraint details
 	sb.WriteString("=== CHECK CONSTRAINT TO CREATE ===\n")
-	sb.WriteString(fmt.Sprintf("Table: %s\n", req.Table.Name))
-	sb.WriteString(fmt.Sprintf("Constraint Name: %s\n", req.CheckConstraint.Name))
-	sb.WriteString(fmt.Sprintf("Definition: %s\n", req.CheckConstraint.Definition))
+	fmt.Fprintf(&sb, "Table: %s\n", req.Table.Name)
+	fmt.Fprintf(&sb, "Constraint Name: %s\n", req.CheckConstraint.Name)
+	fmt.Fprintf(&sb, "Definition: %s\n", req.CheckConstraint.Definition)
 	sb.WriteString("\n")
 
 	// Output requirements

@@ -163,7 +163,7 @@ func TestGenerateAddForeignKey_RestrictPreservedOnPGAndMySQL(t *testing.T) {
 func TestGenerateAddForeignKey_CascadePreservedAcrossDialects(t *testing.T) {
 	table := TableInfo{Name: "messages"}
 	c := Constraint{
-		Name:    "fk", Type: ConstraintForeignKey, Columns: []string{"user_id"},
+		Name: "fk", Type: ConstraintForeignKey, Columns: []string{"user_id"},
 		ForeignKey: &ForeignKey{
 			RefTable: "users", RefColumns: []string{"id"},
 			DeleteRule: "CASCADE", UpdateRule: "SET NULL",

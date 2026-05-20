@@ -273,7 +273,7 @@ func mysqlBlobTierFor(maxBytes *int64) string {
 
 // parseMySQLEnumValues extracts the enum value list from a column_type
 // string of the form "enum('a','b','c')". Handles single-quote escaping
-// (MySQL doubles single quotes inside enum values: enum('it''s'))
+// (MySQL doubles single quotes inside enum values: enum('it”s'))
 // byte by byte to match UVG's parser.
 func parseMySQLEnumValues(columnType string) []string {
 	openIdx := strings.Index(columnType, "(")

@@ -70,7 +70,10 @@ type AITypeMapper struct {
 	cacheFile      string
 	cacheMu        sync.RWMutex
 	requestsMu     sync.Mutex // Serialize API requests to avoid rate limiting
-	inflight       sync.Map   // Track in-flight requests to avoid duplicate API calls
+	budgetMu       sync.Mutex
+	requestsUsed   int
+	maxRequests    int
+	inflight       sync.Map // Track in-flight requests to avoid duplicate API calls
 	timeoutSeconds int
 }
 
@@ -121,6 +124,7 @@ func NewAITypeMapper(providerName string, provider *secrets.Provider) (*AITypeMa
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
 		timeoutSeconds: timeoutSec,
+		maxRequests:    provider.MaxRequests,
 	}
 
 	// Load existing cache
@@ -186,7 +190,11 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 	req := &inflightRequest{done: make(chan struct{})}
 	if existing, loaded := m.inflight.LoadOrStore(cacheKey, req); loaded {
 		// Another goroutine is already fetching this type, wait for it
-		existingReq := existing.(*inflightRequest)
+		existingReq, ok := existing.(*inflightRequest)
+		if !ok {
+			m.inflight.Delete(cacheKey)
+			return "", fmt.Errorf("invalid AI in-flight request state for %s", cacheKey)
+		}
 		<-existingReq.done
 		if existingReq.err != nil {
 			return "", existingReq.err
@@ -215,9 +223,9 @@ func (m *AITypeMapper) MapTypeWithError(info TypeInfo) (string, error) {
 	// Call AI API
 	result, err := m.queryAI(info)
 	if err != nil {
-		req.err = err
-		return "", fmt.Errorf("AI type mapping failed for %s.%s -> %s: %w",
+		req.err = fmt.Errorf("AI type mapping failed for %s.%s -> %s: %w",
 			info.SourceDBType, info.DataType, info.TargetDBType, err)
+		return "", req.err
 	}
 
 	// Cache the result. Tagged with current model so `dmt cache clear
@@ -258,6 +266,12 @@ func (m *AITypeMapper) queryAI(info TypeInfo) (string, error) {
 	// Serialize API requests to avoid rate limiting
 	m.requestsMu.Lock()
 	defer m.requestsMu.Unlock()
+
+	if m.hasCallableProvider() {
+		if err := m.reserveAIRequest("type mapping"); err != nil {
+			return "", err
+		}
+	}
 
 	prompt := m.buildPrompt(info)
 
@@ -313,6 +327,12 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 		defer cancel()
 	}
 
+	if m.hasCallableProvider() {
+		if err := m.reserveAIRequest("prompt"); err != nil {
+			return "", err
+		}
+	}
+
 	var result string
 	var err error
 
@@ -338,6 +358,30 @@ func (m *AITypeMapper) CallAI(ctx context.Context, prompt string) (string, error
 	}
 
 	return result, err
+}
+
+func (m *AITypeMapper) hasCallableProvider() bool {
+	switch AIProvider(m.providerName) {
+	case ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOllama, ProviderLMStudio:
+		return true
+	default:
+		return m.provider != nil && m.provider.BaseURL != ""
+	}
+}
+
+func (m *AITypeMapper) reserveAIRequest(surface string) error {
+	if m.maxRequests <= 0 {
+		return nil
+	}
+
+	m.budgetMu.Lock()
+	defer m.budgetMu.Unlock()
+	if m.requestsUsed >= m.maxRequests {
+		return fmt.Errorf("AI %s request cap exhausted (max_requests=%d for provider %s); use deterministic mapping where available or raise the provider cap",
+			surface, m.maxRequests, m.providerName)
+	}
+	m.requestsUsed++
+	return nil
 }
 
 // ProviderName returns the name of the configured provider.

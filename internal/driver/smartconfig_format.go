@@ -10,28 +10,28 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	var sb strings.Builder
 
 	sb.WriteString("# Smart Configuration Suggestions\n")
-	sb.WriteString(fmt.Sprintf("# Database: %d tables, %s rows, ~%d bytes/row avg\n\n",
-		s.TotalTables, formatRowCount(s.TotalRows), s.AvgRowSizeBytes))
+	fmt.Fprintf(&sb, "# Database: %d tables, %s rows, ~%d bytes/row avg\n\n",
+		s.TotalTables, formatRowCount(s.TotalRows), s.AvgRowSizeBytes)
 
 	sb.WriteString("migration:\n")
 	sb.WriteString("  # Deterministic tuner (internal/tuning) â€” see #175\n")
 
-	sb.WriteString(fmt.Sprintf("  workers: %d\n", s.Workers))
-	sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", s.ChunkSizeRecommendation))
-	sb.WriteString(fmt.Sprintf("  read_ahead_buffers: %d\n", s.ReadAheadBuffers))
-	sb.WriteString(fmt.Sprintf("  write_ahead_writers: %d\n", s.WriteAheadWriters))
-	sb.WriteString(fmt.Sprintf("  parallel_readers: %d\n", s.ParallelReaders))
-	sb.WriteString(fmt.Sprintf("  max_partitions: %d\n", s.MaxPartitions))
-	sb.WriteString(fmt.Sprintf("  large_table_threshold: %d\n", s.LargeTableThreshold))
-	sb.WriteString(fmt.Sprintf("  max_source_connections: %d\n", s.MaxSourceConnections))
-	sb.WriteString(fmt.Sprintf("  max_target_connections: %d\n", s.MaxTargetConnections))
-	sb.WriteString(fmt.Sprintf("  upsert_merge_chunk_size: %d\n", s.UpsertMergeChunkSize))
-	sb.WriteString(fmt.Sprintf("  checkpoint_frequency: %d\n", s.CheckpointFrequency))
-	sb.WriteString(fmt.Sprintf("  max_retries: %d\n", s.MaxRetries))
-	sb.WriteString(fmt.Sprintf("  # Estimated memory: ~%dMB\n", s.EstimatedMemMB))
+	fmt.Fprintf(&sb, "  workers: %d\n", s.Workers)
+	fmt.Fprintf(&sb, "  chunk_size: %d\n", s.ChunkSizeRecommendation)
+	fmt.Fprintf(&sb, "  read_ahead_buffers: %d\n", s.ReadAheadBuffers)
+	fmt.Fprintf(&sb, "  write_ahead_writers: %d\n", s.WriteAheadWriters)
+	fmt.Fprintf(&sb, "  parallel_readers: %d\n", s.ParallelReaders)
+	fmt.Fprintf(&sb, "  max_partitions: %d\n", s.MaxPartitions)
+	fmt.Fprintf(&sb, "  large_table_threshold: %d\n", s.LargeTableThreshold)
+	fmt.Fprintf(&sb, "  max_source_connections: %d\n", s.MaxSourceConnections)
+	fmt.Fprintf(&sb, "  max_target_connections: %d\n", s.MaxTargetConnections)
+	fmt.Fprintf(&sb, "  upsert_merge_chunk_size: %d\n", s.UpsertMergeChunkSize)
+	fmt.Fprintf(&sb, "  checkpoint_frequency: %d\n", s.CheckpointFrequency)
+	fmt.Fprintf(&sb, "  max_retries: %d\n", s.MaxRetries)
+	fmt.Fprintf(&sb, "  # Estimated memory: ~%dMB\n", s.EstimatedMemMB)
 
 	if s.Reasoning != "" {
-		sb.WriteString(fmt.Sprintf("  # Tuning reasoning: %s\n", s.Reasoning))
+		fmt.Fprintf(&sb, "  # Tuning reasoning: %s\n", s.Reasoning)
 	}
 	sb.WriteString("\n")
 
@@ -49,7 +49,7 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 			}
 		}
 		for _, col := range columns {
-			sb.WriteString(fmt.Sprintf("    - %s\n", col))
+			fmt.Fprintf(&sb, "    - %s\n", col)
 		}
 		sb.WriteString("\n")
 	}
@@ -58,7 +58,7 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 		sb.WriteString("  # Tables to exclude (temp/log/archive patterns)\n")
 		sb.WriteString("  exclude_tables:\n")
 		for _, table := range s.ExcludeTables {
-			sb.WriteString(fmt.Sprintf("    - %s\n", table))
+			fmt.Fprintf(&sb, "    - %s\n", table)
 		}
 		sb.WriteString("\n")
 	}
@@ -73,7 +73,7 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	if len(s.Warnings) > 0 {
 		sb.WriteString("# Warnings:\n")
 		for _, w := range s.Warnings {
-			sb.WriteString(fmt.Sprintf("# - %s\n", w))
+			fmt.Fprintf(&sb, "# - %s\n", w)
 		}
 	}
 
@@ -87,18 +87,18 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 
 	sb.WriteString("\n")
 	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
-	sb.WriteString(fmt.Sprintf("# %s DATABASE TUNING (%s)\n", strings.ToUpper(tuning.Role), strings.ToUpper(tuning.DatabaseType)))
+	fmt.Fprintf(&sb, "# %s DATABASE TUNING (%s)\n", strings.ToUpper(tuning.Role), strings.ToUpper(tuning.DatabaseType))
 	sb.WriteString("#" + strings.Repeat("=", 78) + "\n")
-	sb.WriteString(fmt.Sprintf("# Tuning Potential: %s\n", strings.ToUpper(tuning.TuningPotential)))
-	sb.WriteString(fmt.Sprintf("# Impact: %s\n", tuning.EstimatedImpact))
+	fmt.Fprintf(&sb, "# Tuning Potential: %s\n", strings.ToUpper(tuning.TuningPotential))
+	fmt.Fprintf(&sb, "# Impact: %s\n", tuning.EstimatedImpact)
 	sb.WriteString("#" + strings.Repeat("-", 78) + "\n\n")
 
 	if len(tuning.Recommendations) == 0 {
 		if tuning.TuningPotential == "unknown" {
-			sb.WriteString(fmt.Sprintf("# âš  Unable to analyze %s database tuning\n", tuning.Role))
-			sb.WriteString(fmt.Sprintf("# Reason: %s\n\n", tuning.EstimatedImpact))
+			fmt.Fprintf(&sb, "# âš  Unable to analyze %s database tuning\n", tuning.Role)
+			fmt.Fprintf(&sb, "# Reason: %s\n\n", tuning.EstimatedImpact)
 		} else {
-			sb.WriteString(fmt.Sprintf("# âœ“ No tuning needed - %s database is already well-configured!\n\n", tuning.Role))
+			fmt.Fprintf(&sb, "# âœ“ No tuning needed - %s database is already well-configured!\n\n", tuning.Role)
 		}
 		return sb.String()
 	}
@@ -152,10 +152,10 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 func (s *SmartConfigSuggestions) formatRecommendation(num int, rec dbtuning.TuningRecommendation) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("#\n# %d. %s\n", num, rec.Parameter))
-	sb.WriteString(fmt.Sprintf("#    Current:     %v\n", rec.CurrentValue))
-	sb.WriteString(fmt.Sprintf("#    Recommended: %v\n", rec.RecommendedValue))
-	sb.WriteString(fmt.Sprintf("#    Impact:      %s\n", strings.ToUpper(rec.Impact)))
+	fmt.Fprintf(&sb, "#\n# %d. %s\n", num, rec.Parameter)
+	fmt.Fprintf(&sb, "#    Current:     %v\n", rec.CurrentValue)
+	fmt.Fprintf(&sb, "#    Recommended: %v\n", rec.RecommendedValue)
+	fmt.Fprintf(&sb, "#    Impact:      %s\n", strings.ToUpper(rec.Impact))
 	sb.WriteString("#\n")
 	sb.WriteString("#    Why: " + s.wrapText(rec.Reason, 75, "#         ") + "\n")
 

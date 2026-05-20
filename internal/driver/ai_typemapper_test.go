@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,7 @@ func testMapperWithTempCache(t *testing.T, providerName string, provider *secret
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
 		timeoutSeconds: 30,
+		maxRequests:    provider.MaxRequests,
 	}
 	return mapper
 }
@@ -1831,6 +1834,131 @@ func TestParseTableDDLResponseValidatesShape(t *testing.T) {
 				t.Fatalf("parseTableDDLResponse() error = %v, want contains %q", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestGenerateTableDDL_DeduplicatesInFlightRequests(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("unexpected request path %q", r.URL.Path)
+		}
+		atomic.AddInt32(&calls, 1)
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"CREATE TABLE public.orders (id INTEGER NOT NULL, name TEXT, PRIMARY KEY (id));"}}]}`)
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, string(ProviderLMStudio), &secrets.Provider{
+		BaseURL:     server.URL,
+		Model:       "local-model",
+		MaxTokens:   1000,
+		MaxRequests: 1,
+	})
+	mapper.client = server.Client()
+
+	req := TableDDLRequest{
+		SourceDBType: "postgres",
+		TargetDBType: "postgres",
+		TargetSchema: "public",
+		SourceTable: &Table{
+			Schema: "public",
+			Name:   "orders",
+			Columns: []Column{
+				{Name: "id", DataType: "integer", IsNullable: false},
+				{Name: "name", DataType: "text", IsNullable: true},
+			},
+			PrimaryKey: []string{"id"},
+		},
+	}
+
+	const goroutines = 8
+	start := make(chan struct{})
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			resp, err := mapper.GenerateTableDDL(context.Background(), req)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if resp.CreateTableDDL == "" {
+				errs <- fmt.Errorf("empty DDL response")
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("GenerateTableDDL() concurrent call failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("AI calls after concurrent requests = %d, want 1", got)
+	}
+
+	if _, err := mapper.GenerateTableDDL(context.Background(), req); err != nil {
+		t.Fatalf("GenerateTableDDL() cached call failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("AI calls after cached request = %d, want 1", got)
+	}
+}
+
+func TestAITypeMapperMaxRequestsCapsUncachedProviderCalls(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer server.Close()
+
+	mapper := testMapperWithTempCache(t, string(ProviderLMStudio), &secrets.Provider{
+		BaseURL:     server.URL,
+		Model:       "local-model",
+		MaxRequests: 1,
+	})
+	mapper.client = server.Client()
+
+	if _, err := mapper.CallAI(context.Background(), "first prompt"); err != nil {
+		t.Fatalf("first CallAI() error: %v", err)
+	}
+
+	_, err := mapper.CallAI(context.Background(), "second prompt")
+	if err == nil {
+		t.Fatal("second CallAI() error = nil, want max_requests exhaustion")
+	}
+	if !strings.Contains(err.Error(), "max_requests=1") {
+		t.Fatalf("second CallAI() error = %v, want max_requests cap", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+}
+
+func TestMapTypeWithErrorInvalidInflightStateReturnsError(t *testing.T) {
+	mapper := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+	info := TypeInfo{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		DataType:     "int",
+	}
+
+	mapper.inflight.Store(mapper.cacheKey(info), "not an inflight request")
+
+	_, err := mapper.MapTypeWithError(info)
+	if err == nil {
+		t.Fatal("MapTypeWithError() error = nil, want invalid in-flight state")
+	}
+	if !strings.Contains(err.Error(), "invalid AI in-flight request state") {
+		t.Fatalf("MapTypeWithError() error = %v, want invalid in-flight state", err)
 	}
 }
 

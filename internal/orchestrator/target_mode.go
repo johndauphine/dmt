@@ -120,26 +120,23 @@ func (s *dropRecreateStrategy) PrepareTables(ctx context.Context, tables []sourc
 	createWg.Wait()
 	close(createErrs)
 	if err := <-createErrs; err != nil {
-		return err
+		return fmt.Errorf("drop_recreate prepare failed after dropping existing target tables; fix the DDL or permission problem and rerun drop_recreate to rebuild affected tables: %w", err)
 	}
 
 	return nil
 }
 
 func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Table) error {
-	// Phase 1: Reset sequences (parallel - no dependencies between tables)
+	// Phase 1: Reset sequences. Keep this serialized: shared or reused sequence
+	// objects are unusual, but parallel setval/reseed calls can make the final
+	// value depend on scheduling instead of table order.
 	logging.Debug("  Resetting sequences...")
-	var seqWg sync.WaitGroup
 	for _, t := range tables {
-		seqWg.Add(1)
-		go func(table source.Table) {
-			defer seqWg.Done()
-			if err := s.targetPool.ResetSequence(ctx, s.targetSchema, &table); err != nil {
-				logging.Warn("Warning: resetting sequence for %s: %v", table.Name, err)
-			}
-		}(t)
+		table := t
+		if err := s.targetPool.ResetSequence(ctx, s.targetSchema, &table); err != nil {
+			logging.Warn("Warning: resetting sequence for %s: %v", table.Name, err)
+		}
 	}
-	seqWg.Wait()
 
 	// Phase 2: Create indexes (if enabled) - parallel per table
 	if s.createIndexes {
