@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
 - Added an MSSQL → Postgres schema-evolution integration test that proves
   `added_column: auto` alters the target and transfers the new column value
   during a follow-up upsert run (#306).
+- Added `migration.schema_evolution.added_column: discard_value` (with
+  `discard` alias) to keep transferring rows while omitting newly added source
+  columns from target DDL, writes, validation, and schema snapshots.
 - Added an MSSQL → Postgres daily-driver integration test that proves a
   `drop_recreate` baseline seeds date-column watermarks, one changed source
   row transfers during the next `upsert`, and an unchanged follow-up transfers

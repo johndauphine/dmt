@@ -107,9 +107,11 @@ type AITypeMappingConfig struct {
 type SchemaEvolutionPolicy string
 
 const (
-	SchemaEvolutionAuto SchemaEvolutionPolicy = "auto"
-	SchemaEvolutionLog  SchemaEvolutionPolicy = "log"
-	SchemaEvolutionFail SchemaEvolutionPolicy = "fail"
+	SchemaEvolutionAuto         SchemaEvolutionPolicy = "auto"
+	SchemaEvolutionLog          SchemaEvolutionPolicy = "log"
+	SchemaEvolutionFail         SchemaEvolutionPolicy = "fail"
+	SchemaEvolutionDiscard      SchemaEvolutionPolicy = "discard"
+	SchemaEvolutionDiscardValue SchemaEvolutionPolicy = "discard_value"
 )
 
 // SchemaEvolutionConfig controls opt-in target schema changes after source
@@ -348,6 +350,9 @@ func (m MigrationConfig) AddedColumnSchemaEvolutionPolicy() SchemaEvolutionPolic
 	}
 	if m.SchemaEvolution.AddedColumn == "" {
 		return SchemaEvolutionAuto
+	}
+	if m.SchemaEvolution.AddedColumn == SchemaEvolutionDiscard {
+		return SchemaEvolutionDiscardValue
 	}
 	return m.SchemaEvolution.AddedColumn
 }

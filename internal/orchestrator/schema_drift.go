@@ -71,6 +71,14 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
 	}
 	if o.config.Migration.TargetMode != "upsert" {
+		addedPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
+		if addedPolicy == config.SchemaEvolutionDiscardValue && len(addedColumnChanges(report)) > 0 {
+			return fmt.Sprintf(
+				"Schema evolution added_column=discard_value; %d added column(s) will be omitted from target DDL and transfer. target_mode=%s will not apply target ALTERs for other changes.",
+				len(addedColumnChanges(report)),
+				o.config.Migration.TargetMode,
+			)
+		}
 		return fmt.Sprintf("Schema evolution is configured, but target_mode=%s will not apply target ALTERs.",
 			o.config.Migration.TargetMode)
 	}
@@ -110,6 +118,8 @@ func schemaEvolutionFooterPart(kind string, count int, noun string, policy confi
 		return fmt.Sprintf("%s=log; %d %s will be reported only", kind, count, noun)
 	case config.SchemaEvolutionFail:
 		return fmt.Sprintf("%s=fail; %d %s will abort before transfer", kind, count, noun)
+	case config.SchemaEvolutionDiscard, config.SchemaEvolutionDiscardValue:
+		return fmt.Sprintf("%s=discard_value; %d %s will be omitted from transfer", kind, count, noun)
 	default:
 		return fmt.Sprintf("%s policy is invalid", kind)
 	}

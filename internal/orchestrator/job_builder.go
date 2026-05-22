@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
@@ -107,8 +108,9 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 		return nil
 	}
 
+	candidates := dateColumnCandidatesForTable(t, b.config.Migration.DateUpdatedColumns)
 	colName, colType, found := b.sourcePool.GetDateColumnInfo(
-		ctx, t.Schema, t.Name, b.config.Migration.DateUpdatedColumns)
+		ctx, t.Schema, t.Name, candidates)
 
 	if !found {
 		result.Summary.TablesNoDateColumn++
@@ -154,6 +156,29 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 	logging.Debug("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
 		t.Name, t.RowCount, colName)
 	return nil
+}
+
+func dateColumnCandidatesForTable(t *source.Table, candidates []string) []string {
+	if len(t.Columns) == 0 {
+		return candidates
+	}
+
+	filtered := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if tableColumnExists(t, candidate) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func tableColumnExists(t *source.Table, columnName string) bool {
+	for _, column := range t.Columns {
+		if strings.EqualFold(column.Name, columnName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *JobBuilder) lastSyncTimestamp(t *source.Table, applyDateFilter bool) *time.Time {

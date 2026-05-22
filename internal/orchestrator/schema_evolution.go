@@ -42,8 +42,8 @@ func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 
 	addedColumnPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
 	nullabilityPolicy := o.config.Migration.NullabilityChangeSchemaEvolutionPolicy()
-	return (addedColumnPolicy != config.SchemaEvolutionLog && len(addedColumnChanges(report)) > 0) ||
-		(nullabilityPolicy != config.SchemaEvolutionLog && len(nullabilityChanges(report)) > 0)
+	return (schemaEvolutionPolicyRequiresTargetStep(addedColumnPolicy) && len(addedColumnChanges(report)) > 0) ||
+		(schemaEvolutionPolicyRequiresTargetStep(nullabilityPolicy) && len(nullabilityChanges(report)) > 0)
 }
 
 func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
@@ -73,8 +73,14 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		return &SchemaEvolutionError{Message: err.Error()}
 	}
 	if len(addedLogOnly) > 0 {
-		logging.Warn("schema evolution: %d added column(s) detected; policy added_column=log leaves target unchanged",
-			len(addedLogOnly))
+		policy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
+		if policy == config.SchemaEvolutionDiscardValue {
+			logging.Warn("schema evolution: %d added column(s) detected; policy added_column=discard_value leaves target unchanged and omits values from transfer",
+				len(addedLogOnly))
+		} else {
+			logging.Warn("schema evolution: %d added column(s) detected; policy added_column=log leaves target unchanged",
+				len(addedLogOnly))
+		}
 	}
 	if len(nullabilityLogOnly) > 0 {
 		logging.Warn("schema evolution: %d nullability change(s) detected; policy nullability_change=log leaves target unchanged",
@@ -139,6 +145,38 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	return nil
 }
 
+func schemaEvolutionPolicyRequiresTargetStep(policy config.SchemaEvolutionPolicy) bool {
+	switch policy {
+	case config.SchemaEvolutionAuto, config.SchemaEvolutionFail:
+		return true
+	default:
+		return false
+	}
+}
+
+func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, tables []source.Table) ([]source.Table, error) {
+	if !report.HasChanges() ||
+		!o.config.Migration.SchemaEvolutionEnabled() ||
+		o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
+		return tables, nil
+	}
+
+	pruned, discarded, err := pruneDiscardedAddedColumns(report, tables)
+	if err != nil {
+		return nil, &SchemaEvolutionError{Message: err.Error()}
+	}
+	if discarded == 0 {
+		return pruned, nil
+	}
+
+	logging.Warn("schema evolution: discarding %d added column(s) from target DDL, transfer, validation, and snapshots because added_column=discard_value",
+		discarded)
+	o.auditEvent("schema_evolution_discarded", map[string]any{
+		"added_columns": discarded,
+	})
+	return pruned, nil
+}
+
 func planAddedColumnEvolution(
 	report drift.Report,
 	tables []source.Table,
@@ -150,7 +188,7 @@ func planAddedColumnEvolution(
 	}
 
 	switch policy {
-	case config.SchemaEvolutionLog:
+	case config.SchemaEvolutionLog, config.SchemaEvolutionDiscard, config.SchemaEvolutionDiscardValue:
 		return nil, added, nil
 	case config.SchemaEvolutionFail:
 		return nil, nil, fmt.Errorf("schema evolution policy added_column=fail; %d added column(s) detected",
@@ -185,6 +223,224 @@ func planAddedColumnEvolution(
 		})
 	}
 	return actions, nil, nil
+}
+
+func pruneDiscardedAddedColumns(report drift.Report, tables []source.Table) ([]source.Table, int, error) {
+	discardByTable := discardedAddedColumnsByTable(report)
+	if len(discardByTable) == 0 {
+		return tables, 0, nil
+	}
+
+	pruned := make([]source.Table, 0, len(tables))
+	discarded := 0
+	for _, table := range tables {
+		discardCols, ok := discardByTable[schemaEvolutionTableKey(table.Schema, table.Name)]
+		if !ok {
+			pruned = append(pruned, table)
+			continue
+		}
+
+		for _, pk := range table.PrimaryKey {
+			if stringSetContains(discardCols, pk) {
+				return nil, 0, fmt.Errorf(
+					"schema evolution cannot discard added primary-key column %s.%s",
+					table.Name, pk,
+				)
+			}
+		}
+
+		next := table
+		next.Columns = filterColumnsWithoutDiscarded(table.Columns, discardCols)
+		removed := len(table.Columns) - len(next.Columns)
+		if removed == 0 {
+			pruned = append(pruned, next)
+			continue
+		}
+
+		next.PopulatePKColumns()
+		next.Indexes = filterIndexesWithoutDiscarded(table.Indexes, discardCols)
+		next.ForeignKeys = filterForeignKeysWithoutDiscarded(table, table.ForeignKeys, discardByTable)
+		next.CheckConstraints = filterChecksWithoutDiscarded(table.CheckConstraints, discardCols)
+		pruned = append(pruned, next)
+		discarded += removed
+	}
+
+	return pruned, discarded, nil
+}
+
+func discardedAddedColumnsByTable(report drift.Report) map[string]map[string]struct{} {
+	byTable := make(map[string]map[string]struct{})
+	for _, change := range addedColumnChanges(report) {
+		key := schemaEvolutionTableKey(change.Schema, change.TableName)
+		if byTable[key] == nil {
+			byTable[key] = make(map[string]struct{})
+		}
+		byTable[key][change.ObjectName] = struct{}{}
+	}
+	return byTable
+}
+
+func filterColumnsWithoutDiscarded(columns []source.Column, discardCols map[string]struct{}) []source.Column {
+	out := make([]source.Column, 0, len(columns))
+	for _, column := range columns {
+		if stringSetContains(discardCols, column.Name) {
+			continue
+		}
+		out = append(out, column)
+	}
+	return out
+}
+
+func filterIndexesWithoutDiscarded(indexes []source.Index, discardCols map[string]struct{}) []source.Index {
+	out := make([]source.Index, 0, len(indexes))
+	for _, index := range indexes {
+		if anyNameInSet(index.Columns, discardCols) || anyNameInSet(index.IncludeCols, discardCols) {
+			continue
+		}
+		out = append(out, index)
+	}
+	return out
+}
+
+func filterForeignKeysWithoutDiscarded(
+	table source.Table,
+	foreignKeys []source.ForeignKey,
+	discardByTable map[string]map[string]struct{},
+) []source.ForeignKey {
+	out := make([]source.ForeignKey, 0, len(foreignKeys))
+	localDiscard := discardByTable[schemaEvolutionTableKey(table.Schema, table.Name)]
+	for _, fk := range foreignKeys {
+		if anyNameInSet(fk.Columns, localDiscard) {
+			continue
+		}
+
+		refSchema := fk.RefSchema
+		if refSchema == "" {
+			refSchema = table.Schema
+		}
+		refDiscard := discardByTable[schemaEvolutionTableKey(refSchema, fk.RefTable)]
+		if anyNameInSet(fk.RefColumns, refDiscard) {
+			continue
+		}
+
+		out = append(out, fk)
+	}
+	return out
+}
+
+func filterChecksWithoutDiscarded(checks []source.CheckConstraint, discardCols map[string]struct{}) []source.CheckConstraint {
+	out := make([]source.CheckConstraint, 0, len(checks))
+	for _, check := range checks {
+		if checkReferencesDiscardedColumn(check.Definition, discardCols) {
+			continue
+		}
+		out = append(out, check)
+	}
+	return out
+}
+
+func checkReferencesDiscardedColumn(definition string, discardCols map[string]struct{}) bool {
+	for column := range discardCols {
+		if definitionContainsIdentifier(definition, column) {
+			return true
+		}
+	}
+	return false
+}
+
+func definitionContainsIdentifier(definition, name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(definition); {
+		switch definition[i] {
+		case '[', '"', '`':
+			identifier, next := readDelimitedIdentifier(definition, i)
+			if next > i {
+				if strings.EqualFold(identifier, name) {
+					return true
+				}
+				i = next
+				continue
+			}
+		}
+
+		if !isIdentifierByte(definition[i]) {
+			i++
+			continue
+		}
+
+		start := i
+		for i < len(definition) && isIdentifierByte(definition[i]) {
+			i++
+		}
+		if strings.EqualFold(definition[start:i], name) {
+			return true
+		}
+	}
+	return false
+}
+
+func readDelimitedIdentifier(definition string, start int) (string, int) {
+	if start >= len(definition) {
+		return "", start
+	}
+
+	open := definition[start]
+	close := open
+	if open == '[' {
+		close = ']'
+	}
+	if open != '[' && open != '"' && open != '`' {
+		return "", start
+	}
+
+	for i := start + 1; i < len(definition); i++ {
+		if definition[i] == close {
+			return definition[start+1 : i], i + 1
+		}
+	}
+	return "", start
+}
+
+func isIdentifierByte(b byte) bool {
+	return b == '_' ||
+		b == '$' ||
+		b == '#' ||
+		(b >= '0' && b <= '9') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= 'a' && b <= 'z')
+}
+
+func anyNameInSet(names []string, set map[string]struct{}) bool {
+	if len(set) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if stringSetContains(set, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSetContains(set map[string]struct{}, name string) bool {
+	if len(set) == 0 {
+		return false
+	}
+	if _, ok := set[name]; ok {
+		return true
+	}
+	for existing := range set {
+		if strings.EqualFold(existing, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func schemaEvolutionTableKey(schema, table string) string {
+	return schema + "\x00" + table
 }
 
 func planNullabilityEvolution(
