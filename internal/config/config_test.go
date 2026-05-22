@@ -1981,7 +1981,14 @@ func TestValidateSchemaEvolutionAddedColumnPolicy(t *testing.T) {
 		}
 	}
 
-	for _, policy := range []SchemaEvolutionPolicy{"", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail} {
+	for _, policy := range []SchemaEvolutionPolicy{
+		"",
+		SchemaEvolutionAuto,
+		SchemaEvolutionLog,
+		SchemaEvolutionFail,
+		SchemaEvolutionDiscard,
+		SchemaEvolutionDiscardValue,
+	} {
 		t.Run(string(policy), func(t *testing.T) {
 			if err := base(policy).validate(); err != nil {
 				t.Fatalf("validate returned error: %v", err)
@@ -2050,6 +2057,11 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	}
 	if got := enabled.NullabilityChangeSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
 		t.Fatalf("enabled default nullability-change policy = %q, want %q", got, SchemaEvolutionAuto)
+	}
+
+	discardAlias := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{AddedColumn: SchemaEvolutionDiscard}}
+	if got := discardAlias.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionDiscardValue {
+		t.Fatalf("discard alias added-column policy = %q, want %q", got, SchemaEvolutionDiscardValue)
 	}
 }
 
