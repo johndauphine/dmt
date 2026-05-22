@@ -57,6 +57,9 @@ All notable changes to this project will be documented in this file.
 - Added `migration.schema_evolution.added_column: discard_value` (with
   `discard` alias) to keep transferring rows while omitting newly added source
   columns from target DDL, writes, validation, and schema snapshots.
+- Added explicit `migration.schema_evolution.type_change` policy support so
+  operators can opt into widened source type ALTERs while keeping narrowed and
+  lossy type drift guarded (#395).
 - Added an MSSQL → Postgres daily-driver integration test that proves a
   `drop_recreate` baseline seeds date-column watermarks, one changed source
   row transfers during the next `upsert`, and an unchanged follow-up transfers
