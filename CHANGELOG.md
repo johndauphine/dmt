@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-22
+
 ### Added
 
 - Added read-only source schema drift detection with persisted snapshots,

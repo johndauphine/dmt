@@ -546,7 +546,7 @@ If you're seeing this symptom, you're either on a pre-#255 build, or
 the state file was created by a pre-#255 binary and lacks the
 `sync_timestamps:` section.
 
-**Recover by**: Upgrade dmt past v[unreleased] (the version that
+**Recover by**: Upgrade dmt to v5.0.0 or later (the version that
 includes #255). After the upgrade, the first incremental run
 populates the timestamps; the second run is fast as designed.
 
@@ -566,7 +566,7 @@ which allowed silent plaintext fallback. Operators who thought they
 were on TLS could have been transmitting credentials and data in the
 clear.
 
-**Recover by**: Upgrade to dmt v[unreleased] or later. If you really
+**Recover by**: Upgrade to dmt v5.0.0 or later. If you really
 need downgradeable TLS (e.g., to a non-TLS local Docker test
 instance), set `ssl_mode: preferred` explicitly — that branch still
 maps to `tls=preferred`, but it's now an opt-in. For non-TLS local
