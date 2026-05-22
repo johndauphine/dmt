@@ -64,18 +64,24 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 }
 
 func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
-	if !allowSchemaEvolution || !o.config.Migration.SchemaEvolutionEnabled() {
+	if !o.config.Migration.SchemaEvolutionEnabled() {
 		return "No automatic schema alignment will be applied (read-only mode)."
 	}
 	if o.config.Migration.FailOnSchemaDrift {
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
 	}
+	if !allowSchemaEvolution {
+		if part := addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))); part != "" {
+			return fmt.Sprintf("Schema evolution %s. No target ALTERs will be applied in read-only mode.", part)
+		}
+		return "No automatic schema alignment will be applied (read-only mode)."
+	}
 	if o.config.Migration.TargetMode != "upsert" {
 		addedPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
 		if addedPolicy == config.SchemaEvolutionDiscardValue && len(addedColumnChanges(report)) > 0 {
 			return fmt.Sprintf(
-				"Schema evolution added_column=discard_value; %d added column(s) will be omitted from target DDL and transfer. target_mode=%s will not apply target ALTERs for other changes.",
-				len(addedColumnChanges(report)),
+				"Schema evolution %s. target_mode=%s will not apply target ALTERs for other changes.",
+				addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))),
 				o.config.Migration.TargetMode,
 			)
 		}
@@ -119,10 +125,18 @@ func schemaEvolutionFooterPart(kind string, count int, noun string, policy confi
 	case config.SchemaEvolutionFail:
 		return fmt.Sprintf("%s=fail; %d %s will abort before transfer", kind, count, noun)
 	case config.SchemaEvolutionDiscard, config.SchemaEvolutionDiscardValue:
-		return fmt.Sprintf("%s=discard_value; %d %s will be omitted from transfer", kind, count, noun)
+		return fmt.Sprintf("%s=discard_value; %d %s will be omitted from target DDL, transfer, validation, and schema snapshots",
+			kind, count, noun)
 	default:
 		return fmt.Sprintf("%s policy is invalid", kind)
 	}
+}
+
+func addedColumnDiscardValueFooterPart(count int) string {
+	if count == 0 {
+		return ""
+	}
+	return fmt.Sprintf("added_column=discard_value; %d added column(s) will be omitted from target DDL, transfer, validation, and schema snapshots", count)
 }
 
 func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Table) {

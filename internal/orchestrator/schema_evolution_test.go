@@ -568,6 +568,15 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			want:      "read-only mode",
 		},
 		{
+			name:   "resume discard policy describes effective pruning",
+			report: addedColumnReport,
+			allow:  false,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionDiscardValue,
+			}},
+			want: "omitted from target DDL, transfer, validation, and schema snapshots",
+		},
+		{
 			name:      "auto added columns may apply",
 			report:    addedColumnReport,
 			allow:     true,
