@@ -71,8 +71,10 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
 	}
 	if !allowSchemaEvolution {
-		if part := addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))); part != "" {
-			return fmt.Sprintf("Schema evolution %s. No target ALTERs will be applied in read-only mode.", part)
+		if o.config.Migration.AddedColumnSchemaEvolutionPolicy() == config.SchemaEvolutionDiscardValue {
+			if part := addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))); part != "" {
+				return fmt.Sprintf("Schema evolution %s. No target ALTERs will be applied in read-only mode.", part)
+			}
 		}
 		return "No automatic schema alignment will be applied (read-only mode)."
 	}

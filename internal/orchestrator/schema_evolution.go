@@ -244,7 +244,7 @@ func pruneDiscardedAddedColumns(report drift.Report, tables []source.Table) ([]s
 			if stringSetContains(discardCols, pk) {
 				return nil, 0, fmt.Errorf(
 					"schema evolution cannot discard added primary-key column %s.%s",
-					table.Name, pk,
+					table.FullName(), pk,
 				)
 			}
 		}

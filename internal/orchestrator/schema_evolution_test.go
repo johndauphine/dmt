@@ -235,6 +235,25 @@ func TestPruneDiscardedAddedColumnsRejectsPrimaryKeyColumn(t *testing.T) {
 	if !strings.Contains(err.Error(), "primary-key column") {
 		t.Fatalf("error = %q, want primary-key column", err.Error())
 	}
+	if !strings.Contains(err.Error(), "dbo.Users.external_id") {
+		t.Fatalf("error = %q, want fully qualified column name", err.Error())
+	}
+}
+
+func TestSchemaDriftReportFooterReadOnlyDoesNotReportDiscardForOtherPolicies(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
+	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+		TargetMode:      "upsert",
+		SchemaEvolution: &config.SchemaEvolutionConfig{},
+	}}}
+
+	got := o.schemaDriftReportFooter(report, false)
+	if !strings.Contains(got, "read-only mode") {
+		t.Fatalf("schemaDriftReportFooter() = %q, want read-only mode", got)
+	}
+	if strings.Contains(got, "discard_value") {
+		t.Fatalf("schemaDriftReportFooter() = %q, should not report discard_value for default auto policy", got)
+	}
 }
 
 func TestDefinitionContainsIdentifierMatchesWholeIdentifiers(t *testing.T) {
