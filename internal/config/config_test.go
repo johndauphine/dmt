@@ -2036,6 +2036,40 @@ func TestValidateSchemaEvolutionNullabilityChangePolicy(t *testing.T) {
 	}
 }
 
+func TestValidateSchemaEvolutionTypeChangePolicy(t *testing.T) {
+	base := func(policy SchemaEvolutionPolicy) *Config {
+		return &Config{
+			Source: SourceConfig{
+				Type: "postgres", Host: "src", Port: 5432, Database: "d",
+				User: "u", Password: "p",
+			},
+			Target: TargetConfig{
+				Type: "mssql", Host: "tgt", Port: 1433, Database: "d",
+				User: "u", Password: "p",
+			},
+			Migration: MigrationConfig{
+				TargetMode: "upsert",
+				SchemaEvolution: &SchemaEvolutionConfig{
+					TypeChange: policy,
+				},
+			},
+		}
+	}
+
+	for _, policy := range []SchemaEvolutionPolicy{"", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail} {
+		t.Run(string(policy), func(t *testing.T) {
+			if err := base(policy).validate(); err != nil {
+				t.Fatalf("validate returned error: %v", err)
+			}
+		})
+	}
+
+	cfg := base("oops")
+	if err := cfg.validate(); err == nil {
+		t.Fatal("validate returned nil error for invalid policy")
+	}
+}
+
 func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	disabled := MigrationConfig{}
 	if disabled.SchemaEvolutionEnabled() {
@@ -2047,6 +2081,9 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	if got := disabled.NullabilityChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
 		t.Fatalf("disabled nullability-change policy = %q, want %q", got, SchemaEvolutionLog)
 	}
+	if got := disabled.TypeChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("disabled type-change policy = %q, want %q", got, SchemaEvolutionLog)
+	}
 
 	enabled := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{}}
 	if !enabled.SchemaEvolutionEnabled() {
@@ -2057,6 +2094,14 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	}
 	if got := enabled.NullabilityChangeSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
 		t.Fatalf("enabled default nullability-change policy = %q, want %q", got, SchemaEvolutionAuto)
+	}
+	if got := enabled.TypeChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("enabled default type-change policy = %q, want %q", got, SchemaEvolutionLog)
+	}
+
+	typeAuto := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{TypeChange: SchemaEvolutionAuto}}
+	if got := typeAuto.TypeChangeSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
+		t.Fatalf("explicit type-change policy = %q, want %q", got, SchemaEvolutionAuto)
 	}
 
 	discardAlias := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{AddedColumn: SchemaEvolutionDiscard}}

@@ -140,6 +140,41 @@ func (w *Writer) buildDropColumnNotNullSQL(t *driver.Table, column *driver.Colum
 		mappedType), nil
 }
 
+// AlterColumnType changes a target column to the mapped current source type.
+func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	ddl, err := w.buildAlterColumnTypeSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Altering SQL Server column type with DDL: %s", ddl)
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) buildAlterColumnTypeSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	if t == nil {
+		return "", fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return "", fmt.Errorf("column is required")
+	}
+
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "mssql", *column)
+	if err != nil {
+		return "", err
+	}
+
+	nullability := "NOT NULL"
+	if column.IsNullable {
+		nullability = "NULL"
+	}
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s %s",
+		w.dialect.QualifyTable(targetSchema, t.Name),
+		w.dialect.QuoteIdentifier(column.Name),
+		mappedType,
+		nullability), nil
+}
+
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	_, err := w.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", w.dialect.QualifyTable(schema, table)))

@@ -218,6 +218,19 @@ func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column 
 		t.Name, column.Name)
 }
 
+// AlterColumnType returns a clear unsupported error. SQLite stores declared
+// type affinity in the table definition, so changing it safely needs a rebuild.
+func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return fmt.Errorf("column is required")
+	}
+	return fmt.Errorf("sqlite cannot alter type for %s.%s without rebuilding the table",
+		t.Name, column.Name)
+}
+
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	qualifiedTable := w.dialect.QualifyTable(schema, table)

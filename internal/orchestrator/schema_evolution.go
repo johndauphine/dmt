@@ -33,6 +33,12 @@ type nullabilityEvolution struct {
 	Column source.Column
 }
 
+type typeEvolution struct {
+	Table  source.Table
+	Column source.Column
+	Change drift.Change
+}
+
 func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 	if !report.HasChanges() ||
 		!o.config.Migration.SchemaEvolutionEnabled() ||
@@ -42,8 +48,10 @@ func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 
 	addedColumnPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
 	nullabilityPolicy := o.config.Migration.NullabilityChangeSchemaEvolutionPolicy()
+	typePolicy := o.config.Migration.TypeChangeSchemaEvolutionPolicy()
 	return (schemaEvolutionPolicyRequiresTargetStep(addedColumnPolicy) && len(addedColumnChanges(report)) > 0) ||
-		(schemaEvolutionPolicyRequiresTargetStep(nullabilityPolicy) && len(nullabilityChanges(report)) > 0)
+		(schemaEvolutionPolicyRequiresTargetStep(nullabilityPolicy) && len(nullabilityChanges(report)) > 0) ||
+		(schemaEvolutionPolicyRequiresTargetStep(typePolicy) && len(typeChanges(report)) > 0)
 }
 
 func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
@@ -72,6 +80,14 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	if err != nil {
 		return &SchemaEvolutionError{Message: err.Error()}
 	}
+	typeActions, typeLogOnly, err := planTypeEvolution(
+		report,
+		tables,
+		o.config.Migration.TypeChangeSchemaEvolutionPolicy(),
+	)
+	if err != nil {
+		return &SchemaEvolutionError{Message: err.Error()}
+	}
 	if len(addedLogOnly) > 0 {
 		policy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
 		if policy == config.SchemaEvolutionDiscardValue {
@@ -86,7 +102,11 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		logging.Warn("schema evolution: %d nullability change(s) detected; policy nullability_change=log leaves target unchanged",
 			len(nullabilityLogOnly))
 	}
-	if len(addedActions) == 0 && len(nullabilityActions) == 0 {
+	if len(typeLogOnly) > 0 {
+		logging.Warn("schema evolution: %d type change(s) detected; policy type_change=log leaves target unchanged",
+			len(typeLogOnly))
+	}
+	if len(addedActions) == 0 && len(nullabilityActions) == 0 && len(typeActions) == 0 {
 		return nil
 	}
 
@@ -138,9 +158,32 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		}
 	}
 
+	if len(typeActions) > 0 {
+		logging.Info("schema evolution: widening %d target column type(s)", len(typeActions))
+	}
+	for _, action := range typeActions {
+		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
+		if err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", action.Table.Name, err)}
+		}
+		if !exists {
+			return &SchemaEvolutionError{Message: fmt.Sprintf(
+				"schema evolution cannot alter type for %s.%s: target table does not exist",
+				action.Table.Name, action.Column.Name,
+			)}
+		}
+		if err := o.targetPool.AlterColumnType(ctx, &action.Table, &action.Column, o.config.Target.Schema); err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf(
+				"altering target column type %s.%s (%s -> %s): %v",
+				action.Table.Name, action.Column.Name, action.Change.Previous, action.Change.Current, err,
+			)}
+		}
+	}
+
 	o.auditEvent("schema_evolution_applied", map[string]any{
 		"added_columns":           len(addedActions),
 		"nullability_relaxations": len(nullabilityActions),
+		"type_widenings":          len(typeActions),
 	})
 	return nil
 }
@@ -508,6 +551,71 @@ func planNullabilityEvolution(
 	return actions, nil, nil
 }
 
+func planTypeEvolution(
+	report drift.Report,
+	tables []source.Table,
+	policy config.SchemaEvolutionPolicy,
+) ([]typeEvolution, []drift.Change, error) {
+	changes := typeChanges(report)
+	if len(changes) == 0 {
+		return nil, nil, nil
+	}
+
+	switch policy {
+	case config.SchemaEvolutionLog:
+		return nil, changes, nil
+	case config.SchemaEvolutionFail:
+		return nil, nil, fmt.Errorf("schema evolution policy type_change=fail; %d type change(s) detected",
+			len(changes))
+	case config.SchemaEvolutionAuto:
+		// Continue below.
+	default:
+		return nil, nil, fmt.Errorf("unknown schema evolution type_change policy %q", policy)
+	}
+
+	actions := make([]typeEvolution, 0, len(changes))
+	for _, change := range changes {
+		table, column, err := findSourceColumn(tables, change)
+		if err != nil {
+			return nil, nil, err
+		}
+		if change.Kind != drift.TypeWidened {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-apply %s for %s.%s (%s -> %s); set type_change=log to report only",
+				change.Kind, table.Name, column.Name, change.Previous, change.Current,
+			)
+		}
+		if hasColumnNullabilityDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-widen type for %s.%s while nullability drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if hasColumnDefaultDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-widen type for %s.%s while default drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if hasPrimaryKeyDrift(report, change) {
+			return nil, nil, fmt.Errorf(
+				"schema evolution cannot auto-widen type for %s.%s while primary-key drift is also present",
+				table.Name, column.Name,
+			)
+		}
+		if column.IsIdentity {
+			return nil, nil, fmt.Errorf("schema evolution cannot auto-widen identity column %s.%s",
+				table.Name, column.Name)
+		}
+		if tablePrimaryKeyContains(table, column.Name) {
+			return nil, nil, fmt.Errorf("schema evolution cannot auto-widen primary-key column %s.%s",
+				table.Name, column.Name)
+		}
+		actions = append(actions, typeEvolution{Table: table, Column: column, Change: change})
+	}
+	return actions, nil, nil
+}
+
 func addedColumnChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
@@ -528,6 +636,17 @@ func nullabilityChanges(report drift.Report) []drift.Change {
 	return changes
 }
 
+func typeChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		switch change.Kind {
+		case drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
 func hasColumnTypeDrift(report drift.Report, candidate drift.Change) bool {
 	for _, change := range report.Changes {
 		if change.Schema != candidate.Schema ||
@@ -537,6 +656,18 @@ func hasColumnTypeDrift(report drift.Report, candidate drift.Change) bool {
 		}
 		switch change.Kind {
 		case drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			return true
+		}
+	}
+	return false
+}
+
+func hasColumnNullabilityDrift(report drift.Report, candidate drift.Change) bool {
+	for _, change := range report.Changes {
+		if change.Kind == drift.NullabilityChange &&
+			change.Schema == candidate.Schema &&
+			change.TableName == candidate.TableName &&
+			change.ObjectName == candidate.ObjectName {
 			return true
 		}
 	}

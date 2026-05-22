@@ -139,6 +139,38 @@ func (w *Writer) buildDropColumnNotNullSQL(t *driver.Table, column *driver.Colum
 		w.dialect.QuoteIdentifier(sanitizedColumn)), nil
 }
 
+// AlterColumnType changes a target column to the mapped current source type.
+func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	ddl, err := w.buildAlterColumnTypeSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Altering PostgreSQL column type with DDL: %s", ddl)
+	_, err = w.pool.Exec(ctx, ddl)
+	return err
+}
+
+func (w *Writer) buildAlterColumnTypeSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	if t == nil {
+		return "", fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return "", fmt.Errorf("column is required")
+	}
+
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "postgres", *column)
+	if err != nil {
+		return "", err
+	}
+
+	sanitizedTable := sanitizePGTableName(t.Name)
+	sanitizedColumn := sanitizePGIdentifier(column.Name)
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s",
+		w.dialect.QualifyTable(targetSchema, sanitizedTable),
+		w.dialect.QuoteIdentifier(sanitizedColumn),
+		mappedType), nil
+}
+
 // DropTable drops a table.
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	sanitizedTable := sanitizePGTableName(table)
