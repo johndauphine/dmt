@@ -146,6 +146,43 @@ func (w *Writer) buildDropColumnNotNullSQL(t *driver.Table, column *driver.Colum
 		defaultClause), nil
 }
 
+// AlterColumnType changes a target column to the mapped current source type.
+func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	ddl, err := w.buildAlterColumnTypeSQL(t, column, targetSchema)
+	if err != nil {
+		return err
+	}
+	logging.Debug("Altering MySQL column type with DDL: %s", ddl)
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) buildAlterColumnTypeSQL(t *driver.Table, column *driver.Column, targetSchema string) (string, error) {
+	if t == nil {
+		return "", fmt.Errorf("table is required")
+	}
+	if column == nil {
+		return "", fmt.Errorf("column is required")
+	}
+
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, "mysql", *column)
+	if err != nil {
+		return "", err
+	}
+
+	nullability := "NOT NULL"
+	if column.IsNullable {
+		nullability = "NULL"
+	}
+	defaultClause := mysqlDefaultClause(w.sourceType, mappedType, column)
+	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s %s %s%s",
+		w.dialect.QualifyTable(targetSchema, t.Name),
+		w.dialect.QuoteIdentifier(column.Name),
+		mappedType,
+		nullability,
+		defaultClause), nil
+}
+
 func mysqlDefaultClause(sourceType string, mappedType string, column *driver.Column) string {
 	if column.DefaultValue == "" {
 		return ""

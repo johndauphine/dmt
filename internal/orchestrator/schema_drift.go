@@ -108,6 +108,9 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 	); part != "" {
 		parts = append(parts, part)
 	}
+	if part := typeChangeFooterPart(report, o.config.Migration.TypeChangeSchemaEvolutionPolicy()); part != "" {
+		parts = append(parts, part)
+	}
 	if len(parts) == 0 {
 		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
 	}
@@ -132,6 +135,35 @@ func schemaEvolutionFooterPart(kind string, count int, noun string, policy confi
 	default:
 		return fmt.Sprintf("%s policy is invalid", kind)
 	}
+}
+
+func typeChangeFooterPart(report drift.Report, policy config.SchemaEvolutionPolicy) string {
+	changes := typeChanges(report)
+	if len(changes) == 0 {
+		return ""
+	}
+
+	if policy != config.SchemaEvolutionAuto {
+		return schemaEvolutionFooterPart("type_change", len(changes), "type change(s)", policy)
+	}
+
+	widened := 0
+	unsafe := 0
+	for _, change := range changes {
+		if change.Kind == drift.TypeWidened {
+			widened++
+		} else {
+			unsafe++
+		}
+	}
+	if unsafe == 0 {
+		return fmt.Sprintf("type_change=auto; %d widened type change(s) may be applied before transfer", widened)
+	}
+	if widened == 0 {
+		return fmt.Sprintf("type_change=auto; %d narrowed/lossy type change(s) will abort before transfer", unsafe)
+	}
+	return fmt.Sprintf("type_change=auto; %d widened type change(s) may be applied before transfer; %d narrowed/lossy type change(s) will abort before transfer",
+		widened, unsafe)
 }
 
 func addedColumnDiscardValueFooterPart(count int) string {

@@ -113,6 +113,27 @@ func TestBuildDropColumnNotNullSQL(t *testing.T) {
 	}
 }
 
+func TestBuildAlterColumnTypeSQL(t *testing.T) {
+	w := &Writer{
+		dialect:    &Dialect{},
+		typeMapper: driver.NewDeterministicMapper(),
+		sourceType: "postgres",
+	}
+	got, err := w.buildAlterColumnTypeSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email Address", DataType: "varchar", MaxLength: 512},
+		"public",
+	)
+	if err != nil {
+		t.Fatalf("buildAlterColumnTypeSQL returned error: %v", err)
+	}
+
+	want := `ALTER TABLE "public"."users" ALTER COLUMN "email_address" TYPE VARCHAR(512)`
+	if got != want {
+		t.Fatalf("SQL = %q, want %q", got, want)
+	}
+}
+
 func TestEstimateRowBytes(t *testing.T) {
 	tests := []struct {
 		name string

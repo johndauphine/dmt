@@ -112,6 +112,13 @@ func (c *Config) validate() error {
 			return fmt.Errorf("migration.schema_evolution.nullability_change must be 'auto', 'log', or 'fail'; got %q",
 				c.Migration.SchemaEvolution.NullabilityChange)
 		}
+		switch c.Migration.SchemaEvolution.TypeChange {
+		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail:
+			// Valid. Empty means log-only; type evolution requires explicit opt-in.
+		default:
+			return fmt.Errorf("migration.schema_evolution.type_change must be 'auto', 'log', or 'fail'; got %q",
+				c.Migration.SchemaEvolution.TypeChange)
+		}
 	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml

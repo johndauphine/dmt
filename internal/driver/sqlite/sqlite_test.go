@@ -206,6 +206,22 @@ func TestWriter_DropColumnNotNullUnsupported(t *testing.T) {
 	}
 }
 
+func TestWriter_AlterColumnTypeUnsupported(t *testing.T) {
+	w := &Writer{}
+	err := w.AlterColumnType(
+		context.Background(),
+		&driver.Table{Name: "users"},
+		&driver.Column{Name: "email"},
+		"",
+	)
+	if err == nil {
+		t.Fatal("AlterColumnType returned nil error")
+	}
+	if !strings.Contains(err.Error(), "cannot alter type") {
+		t.Fatalf("error = %q, want unsupported message", err.Error())
+	}
+}
+
 func TestWriter_IdempotentOnDup(t *testing.T) {
 	path := memoryDBPath(t, "idempotent")
 	w := newTestWriter(t, path)

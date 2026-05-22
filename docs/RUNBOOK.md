@@ -407,7 +407,10 @@ The report groups changes by table and labels the category:
    target can be rebuilt and run normally.
 2. For `upsert` mode, add the corresponding target columns or run a
    controlled `drop_recreate` refresh before trusting the incremental
-   run.
+   run. For known-safe drift, consider `migration.schema_evolution`
+   policies such as `added_column: auto`, `added_column: discard_value`,
+   `nullability_change: auto`, or explicit `type_change: auto` for
+   widened source types.
 3. For dropped columns, narrowed types, lossy type changes, or primary
    key changes, pause promotion and get an explicit schema migration
    decision from the data owner.
