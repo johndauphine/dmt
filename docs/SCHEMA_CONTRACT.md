@@ -71,3 +71,75 @@ DLT's official [schema contract](https://dlthub.com/docs/general-usage/schema-co
 surface uses the same `tables`, `columns`, and `data_type` entities and the
 same `evolve`/`freeze`/`discard_row`/`discard_value` mode names. DMT adds
 `report` because operators already rely on report-only schema drift detection.
+
+## DLT Parity Matrix
+
+| DLT contract behavior | DMT schema_contract behavior | Intentional relational differences |
+|-----------------------|------------------------------|------------------------------------|
+| Omitted entity defaults to `evolve` when a contract is configured. | Same. `schema_contract: report` is also available as DMT shorthand for report-only drift handling. | `report` is DMT-only and does not exist in DLT. |
+| `tables: evolve` accepts newly detected tables. | Creates added target tables before `upsert` transfer when deterministic DDL is available; `drop_recreate` rebuilds from the current filtered source tables. | `upsert` requires a primary key for newly evolved tables. Dropped source tables are reported and retained on the target. |
+| `tables: freeze` blocks table changes. | Same; added or dropped source tables abort before transfer. | None beyond DMT's pre-transfer error wording and audit decisions. |
+| `tables: discard_row` skips rows from new tables. | Skips newly added source tables for the run and omits them from validation and success snapshots. | Dropped source tables are reported; target tables are retained. |
+| `tables: discard_value` is not meaningful for whole tables. | Rejected at config load time. | DMT has no safe relational value-only interpretation for a whole table. |
+| `columns: evolve` accepts newly detected columns. | Adds compatible source columns before `upsert` transfer; `drop_recreate` rebuilds target tables from the current source shape. | Added identity or primary-key columns are blocked in `upsert` because they change write identity. Dropped source columns are reported and retained on the target. |
+| `columns: freeze` blocks column changes. | Same for added and dropped source columns. | None beyond DMT's pre-transfer error wording and audit decisions. |
+| `columns: discard_row` skips rows affected by new columns. | Skips the affected table for the run because every row in a relational table carries the added column. | This is table-granular, not individual-row granular. |
+| `columns: discard_value` omits newly detected column values. | Omits added source columns from target DDL, transfer, validation, and success snapshots. | Primary-key, identity, and date-tracking columns cannot be discarded. |
+| `data_type: evolve` accepts compatible type changes. | Applies deterministic safe changes in `upsert`: nullability relaxation and widened source types. `drop_recreate` accepts current source types by rebuilding the table. | DMT does not create DLT-style variant columns on relational targets. Narrowing, lossy conversion, nullability tightening, and PK/default-coupled drift are blocked. |
+| `data_type: freeze` blocks type changes. | Same for source type and nullability drift. | None beyond DMT's pre-transfer error wording and audit decisions. |
+| `data_type: discard_row` skips rows affected by type drift. | Skips the affected table for the run. | This is table-granular, not individual-row granular. |
+| `data_type: discard_value` omits affected values. | Omits affected non-key, non-identity, non-date-tracking columns from transfer and validation while retaining previous snapshot metadata for those columns. | Target column definitions are left unchanged; the same drift remains visible until the operator chooses another policy. |
+
+## Copyable Examples
+
+Report drift without applying target changes:
+
+```yaml
+migration:
+  target_mode: upsert
+  schema_contract: report
+```
+
+Automatically evolve deterministic relational changes:
+
+```yaml
+migration:
+  target_mode: upsert
+  schema_contract:
+    tables: evolve
+    columns: evolve
+    data_type: evolve
+```
+
+Block drift before transfer:
+
+```yaml
+migration:
+  target_mode: upsert
+  schema_contract:
+    tables: freeze
+    columns: freeze
+    data_type: freeze
+```
+
+Keep migrating but omit new column values and safe non-key type-drift values:
+
+```yaml
+migration:
+  target_mode: upsert
+  schema_contract:
+    tables: report
+    columns: discard_value
+    data_type: discard_value
+```
+
+Keep migrating unaffected tables while skipping tables touched by drift:
+
+```yaml
+migration:
+  target_mode: upsert
+  schema_contract:
+    tables: discard_row
+    columns: discard_row
+    data_type: discard_row
+```

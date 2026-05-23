@@ -3,8 +3,9 @@
         load-fixture-so2010-minimal-mssql load-fixture-so2010-minimal-pg \
         load-fixture-so2010-minimal-mysql test-fixtures-load \
         integration-test integration-test-schema-evolution \
-        integration-test-daily-driver \
-        integration-test-sqlite integration-test-pair
+        integration-test-daily-driver integration-test-schema-contracts-mssql-pg \
+        integration-test-sqlite integration-test-schema-contracts-sqlite \
+        integration-test-pair
 
 # Build variables
 BINARY_NAME=dmt
@@ -251,6 +252,21 @@ integration-test: build
 integration-test-schema-evolution: build
 	./scripts/integration-test-schema-evolution.sh
 
+# integration-test-schema-contracts-mssql-pg proves DLT-style
+# migration.schema_contract evolution end-to-end against real MSSQL and
+# PostgreSQL containers: added columns, safe type widening, and nullability
+# relaxation.
+#
+#   make build && make test-dbs-up
+#   make integration-test-schema-contracts-mssql-pg
+#
+# Expects:
+#   - dmt binary built (./dmt) - make depends on `build`
+#   - CI: sqlcmd/psql on PATH and services on localhost:1433/5432
+#   - Local: running mssql-test/pg-test or mssql-bench/pg-bench containers
+integration-test-schema-contracts-mssql-pg: build
+	./scripts/integration-test-schema-contracts-mssql-pg.sh
+
 # integration-test-daily-driver proves the documented daily workflow (#304):
 # baseline drop_recreate seeds date-column watermarks, a follow-up upsert
 # transfers one changed row, and an unchanged follow-up transfers zero rows.
@@ -302,6 +318,18 @@ integration-test-pair: build
 #     macOS; install with `apt-get install sqlite3` on bare Linux)
 integration-test-sqlite: build
 	./scripts/integration-test-sqlite.sh
+
+# integration-test-schema-contracts-sqlite runs a fast SQLite-only matrix for
+# DLT-style migration.schema_contract behavior: table/column evolve,
+# column freeze/discard modes, and data_type freeze/discard_value.
+#
+#   make build && make integration-test-schema-contracts-sqlite
+#
+# Expects:
+#   - dmt binary built (./dmt) - make depends on `build`
+#   - sqlite3 CLI on PATH
+integration-test-schema-contracts-sqlite: build
+	./scripts/integration-test-schema-contracts-sqlite.sh
 
 # Pre-commit hooks
 setup-hooks:
