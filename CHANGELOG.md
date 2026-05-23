@@ -19,6 +19,9 @@ All notable changes to this project will be documented in this file.
   DDL after transfer, and `tables: discard_row` skips newly added source tables
   for the run (#405).
 - `tables: freeze` now blocks table add/drop drift before transfer (#405).
+- Added column-level `schema_contract` parity with `columns: discard_row`
+  support for skipping affected tables, identity guardrails for
+  `columns: discard_value`, and explicit dropped-source-column reporting (#406).
 
 ### Deprecated
 

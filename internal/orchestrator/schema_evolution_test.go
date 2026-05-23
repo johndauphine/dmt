@@ -813,6 +813,10 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 			TargetMode:     "upsert",
 			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
 		}, want: false},
+		{name: "schema contract discard row prunes without target step", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardRow},
+		}, want: false},
 		{name: "nullability enabled", migration: config.MigrationConfig{
 			TargetMode:      "upsert",
 			SchemaEvolution: &config.SchemaEvolutionConfig{},
@@ -1022,6 +1026,26 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			want: "columns=freeze",
 		},
 		{
+			name:   "schema contract column discard row names skipped table",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardRow},
+			},
+			want: "columns=discard_row",
+		},
+		{
+			name:   "schema contract dropped source column names retained target",
+			report: drift.Report{Changes: []drift.Change{{Kind: drift.DroppedColumn, TableName: "Users", ObjectName: "legacy_code"}}},
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractReport},
+			},
+			want: "target columns are retained",
+		},
+		{
 			name:   "schema contract data type report mode names report",
 			report: typeWidenedReport,
 			allow:  true,
@@ -1096,6 +1120,77 @@ func TestSchemaContractTablesDiscardRowSkipsAddedTables(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Name != "users" {
 		t.Fatalf("effective tables = %#v, want only users", got)
+	}
+}
+
+func TestSchemaContractColumnsDiscardRowSkipsTablesWithAddedColumns(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardRow},
+		}},
+		auditor: audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "orders", ObjectName: "new_status"},
+		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "orders", ObjectName: "new_note"},
+		{Kind: drift.DroppedColumn, Schema: "dbo", TableName: "users", ObjectName: "legacy_code"},
+	}}
+	tables := []source.Table{
+		{Schema: "dbo", Name: "users"},
+		{Schema: "dbo", Name: "orders"},
+	}
+
+	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "users" {
+		t.Fatalf("effective tables = %#v, want only users", got)
+	}
+}
+
+func TestFilterSchemaDriftReportForTablesRemovesSkippedTableChanges(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "orders", ObjectName: "new_status"},
+		{Kind: drift.TypeWidened, Schema: "dbo", TableName: "orders", ObjectName: "description"},
+		{Kind: drift.TypeWidened, Schema: "dbo", TableName: "users", ObjectName: "display_name"},
+	}}
+	tables := []source.Table{{Schema: "dbo", Name: "users"}}
+
+	got := filterSchemaDriftReportForTables(report, tables)
+	if len(got.Changes) != 1 {
+		t.Fatalf("filtered changes = %#v, want one change", got.Changes)
+	}
+	if got.Changes[0].TableName != "users" {
+		t.Fatalf("filtered change table = %q, want users", got.Changes[0].TableName)
+	}
+}
+
+func TestSchemaContractColumnsDiscardValueRejectsAddedIdentityColumns(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
+		}},
+		auditor: audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "orders", ObjectName: "line_id"},
+	}}
+	tables := []source.Table{{
+		Schema: "dbo",
+		Name:   "orders",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int"},
+			{Name: "line_id", DataType: "int", IsIdentity: true},
+		},
+	}}
+
+	_, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	if err == nil {
+		t.Fatal("effectiveTablesForSchemaEvolution() error = nil, want identity discard error")
+	}
+	if !strings.Contains(err.Error(), "identity column") {
+		t.Fatalf("error = %q, want identity column message", err)
 	}
 }
 
@@ -1271,6 +1366,31 @@ func TestSchemaContractTablesFreezeFailsOnDroppedTable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tables=freeze") {
 		t.Fatalf("error = %q, want tables=freeze violation", err)
+	}
+}
+
+func TestSchemaContractColumnsFreezeFailsOnDroppedColumn(t *testing.T) {
+	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+		SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractFreeze},
+	}}}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.DroppedColumn, TableName: "Users", ObjectName: "legacy_code"},
+	}}
+
+	err := o.enforceSchemaContractPolicy(report)
+	if err == nil {
+		t.Fatal("enforceSchemaContractPolicy() error = nil, want dropped-column freeze violation")
+	}
+	if !strings.Contains(err.Error(), "columns=freeze") {
+		t.Fatalf("error = %q, want columns=freeze violation", err)
+	}
+
+	footer := o.schemaDriftReportFooter(report, true)
+	if !strings.Contains(footer, "will abort before transfer") {
+		t.Fatalf("footer = %q, want abort wording", footer)
+	}
+	if strings.Contains(footer, "target columns are retained") {
+		t.Fatalf("footer = %q, should not describe report-only retention under freeze", footer)
 	}
 }
 
