@@ -265,6 +265,7 @@ func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable
 // will start fresh from GENESIS in that case — there's no prior chain
 // to continue.
 func (o *Orchestrator) openAuditor(runID string, resume bool) {
+	o.schemaContractDecisionRunID = runID
 	if o.config.Migration.NoAudit {
 		o.auditor = audit.Disabled()
 		return

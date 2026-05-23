@@ -39,11 +39,27 @@ cannot enforce today.
 | Entity | Supported modes | Notes |
 |--------|-----------------|-------|
 | `tables` | `evolve`, `freeze`, `discard_row`, `report` | `evolve` creates newly added target tables before `upsert` transfer and finalizes configured secondary DDL after transfer; `drop_recreate` already recreates filtered source tables. `freeze` fails on table add/drop drift. `discard_row` skips newly added source tables for the run. Dropped source tables are reported and retained on the target. |
-| `columns` | `evolve`, `freeze`, `discard_row`, `discard_value`, `report` | `discard_value` keeps migrating while ignoring newly added source columns. `discard_row` skips the affected table for the run. DMT does not drop target columns for dropped source columns; source writes and validation use the current source column list, so retained target columns are not written by DMT. |
-| `data_type` | `evolve`, `freeze`, `discard_row`, `discard_value`, `report` | Covers source type drift and nullability drift. `evolve` only applies changes DMT already classifies as safe: nullability relaxation and widened source types. Narrowed/lossy type changes still abort under `evolve`; DMT does not create DLT-style variant columns for relational targets. `discard_row` skips affected tables. `discard_value` omits affected non-key, non-identity, non-date-tracking columns and prunes dependent indexes, foreign keys, and checks from the effective plan. |
+| `columns` | `evolve`, `freeze`, `discard_row`, `discard_value`, `report` | `evolve` can add compatible source columns to existing targets in `upsert` mode; `drop_recreate` accepts the current source columns by rebuilding the target table. `discard_value` keeps migrating while ignoring newly added source columns. `discard_row` skips the affected table for the run. DMT does not drop target columns for dropped source columns; source writes and validation use the current source column list, so retained target columns are not written by DMT. |
+| `data_type` | `evolve`, `freeze`, `discard_row`, `discard_value`, `report` | Covers source type drift and nullability drift. In `upsert` mode, `evolve` only applies changes DMT already classifies as safe: nullability relaxation and widened source types. Narrowed/lossy type changes still abort under `upsert` `evolve`; DMT does not create DLT-style variant columns for relational targets. `drop_recreate` accepts source type/nullability drift by rebuilding the target table. `discard_row` skips affected tables. `discard_value` omits affected non-key, non-identity, non-date-tracking columns and prunes dependent indexes, foreign keys, and checks from the effective plan. |
 
 Omitted entities default to `evolve` when `schema_contract` is present. Omitting
 the entire `schema_contract` section keeps the baseline read-only drift report.
+
+## Reporting
+
+When schema drift is detected, DMT records structured schema contract decisions
+in the audit log and includes the latest decisions in JSON result/status output
+when the run audit log is available. Each decision includes the entity
+(`tables`, `columns`, or `data_type`), configured mode, drift kind,
+schema/table/object, previous/current evidence, action (`evolved`, `frozen`,
+`blocked`, `discarded_row`, `discarded_value`, or `reported`), and reason.
+Unsafe `data_type: evolve` changes use the `blocked`
+action because they are stopped by deterministic safety gates rather than by
+`freeze` mode. Freeze failures also include the exact blocked object and point
+operators toward `report`, `evolve`, or discard modes where supported.
+When `discard_row` skips a table, non-freeze decisions for other drift on that
+same table are reported without target changes so skipped-table drift does not
+abort the run before DMT can omit the affected table.
 
 ## Compatibility
 

@@ -140,6 +140,7 @@ func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult
 		return nil, err
 	}
 	result.DeleteReconciliation = buildDeleteReconciliationSummary(deleteRecords)
+	result.SchemaContractDecisions = o.schemaContractDecisionOutputForRun(run.ID)
 
 	return result, nil
 }
@@ -221,17 +222,18 @@ func (o *Orchestrator) GetStatusResult() (*StatusResult, error) {
 	}
 
 	return &StatusResult{
-		RunID:           run.ID,
-		Status:          run.Status,
-		Phase:           phase,
-		StartedAt:       run.StartedAt,
-		TablesTotal:     total,
-		TablesComplete:  success,
-		TablesRunning:   running,
-		TablesPending:   pending,
-		TablesFailed:    failed,
-		RowsTransferred: totalRowsDone,
-		ProgressPercent: progressPct,
-		AIFallbacks:     fallbacks,
+		RunID:                   run.ID,
+		Status:                  run.Status,
+		Phase:                   phase,
+		StartedAt:               run.StartedAt,
+		TablesTotal:             total,
+		TablesComplete:          success,
+		TablesRunning:           running,
+		TablesPending:           pending,
+		TablesFailed:            failed,
+		RowsTransferred:         totalRowsDone,
+		ProgressPercent:         progressPct,
+		AIFallbacks:             fallbacks,
+		SchemaContractDecisions: o.schemaContractDecisionOutputForRun(run.ID),
 	}, nil
 }

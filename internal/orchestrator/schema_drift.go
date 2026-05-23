@@ -26,6 +26,7 @@ func (e *SchemaDriftError) Error() string {
 func (e *SchemaDriftError) ExitCode() int { return exitcodes.TransferError }
 
 func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolution bool) (drift.Report, error) {
+	o.lastSchemaContractDecisions = nil
 	records, err := o.state.GetLatestSchemaSnapshots(o.schemaSnapshotNamespace())
 	if err != nil {
 		return drift.Report{}, fmt.Errorf("loading schema snapshots: %w", err)
@@ -53,21 +54,40 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 		return drift.Report{}, nil
 	}
 
-	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooter(report, allowSchemaEvolution)))
-	o.auditEvent("schema_drift_detected", map[string]any{
+	contractDecisions := o.schemaContractDecisions(report, tables, allowSchemaEvolution)
+	o.lastSchemaContractDecisions = append([]SchemaContractDecision(nil), contractDecisions...)
+	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooterWithDecisions(
+		report,
+		allowSchemaEvolution,
+		contractDecisions,
+	)))
+	auditFields := map[string]any{
 		"tables_affected": report.TablesAffected(),
 		"changes":         len(report.Changes),
-	})
+	}
+	if len(contractDecisions) > 0 {
+		auditFields["schema_contract_decision_count"] = len(contractDecisions)
+	}
+	o.auditEvent("schema_drift_detected", auditFields)
+	o.auditSchemaContractDecisions(contractDecisions)
 	if o.config.Migration.FailOnSchemaDrift {
 		return report, &SchemaDriftError{Report: report}
 	}
-	if err := o.enforceSchemaContractPolicy(report); err != nil {
+	if err := enforceSchemaContractDecisions(contractDecisions); err != nil {
 		return report, err
 	}
 	return report, nil
 }
 
 func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
+	return o.schemaDriftReportFooterWithDecisions(report, allowSchemaEvolution, nil)
+}
+
+func (o *Orchestrator) schemaDriftReportFooterWithDecisions(
+	report drift.Report,
+	allowSchemaEvolution bool,
+	decisions []schemaContractDecision,
+) string {
 	if !o.config.Migration.SchemaEvolutionEnabled() {
 		return "No automatic schema alignment will be applied (read-only mode)."
 	}
@@ -75,6 +95,9 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
 	}
 	if o.config.Migration.SchemaContractEnabled() {
+		if len(decisions) > 0 {
+			return schemaContractDecisionReportFooter(decisions, allowSchemaEvolution)
+		}
 		return o.schemaContractReportFooter(report, allowSchemaEvolution)
 	}
 	if !allowSchemaEvolution {
@@ -122,6 +145,135 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
 	}
 	return "Schema evolution " + strings.Join(parts, "; ") + "."
+}
+
+type schemaContractDecisionFooterKey struct {
+	entity string
+	mode   string
+	action string
+}
+
+func schemaContractDecisionReportFooter(decisions []schemaContractDecision, allowSchemaEvolution bool) string {
+	counts := make(map[schemaContractDecisionFooterKey]int, len(decisions))
+	for _, decision := range decisions {
+		key := schemaContractDecisionFooterKey{
+			entity: decision.Entity,
+			mode:   decision.Mode,
+			action: decision.Action,
+		}
+		counts[key]++
+	}
+
+	var parts []string
+	if schemaContractDecisionAbortCount(counts) > 0 {
+		for _, entity := range []string{
+			schemaContractEntityTables,
+			schemaContractEntityColumns,
+			schemaContractEntityDataType,
+		} {
+			for _, action := range []string{
+				schemaContractActionBlocked,
+				schemaContractActionFrozen,
+			} {
+				keys := matchingSchemaContractDecisionFooterKeys(counts, entity, action)
+				for _, key := range keys {
+					parts = append(parts, schemaContractDecisionFooterPart(key, counts[key]))
+				}
+			}
+		}
+		if remaining := len(decisions) - schemaContractDecisionAbortCount(counts); remaining > 0 {
+			parts = append(parts, fmt.Sprintf("%d other change(s) will not be applied because transfer will abort", remaining))
+		}
+		footer := "Schema contract " + strings.Join(parts, "; ") + "."
+		if !allowSchemaEvolution {
+			footer += " No target ALTERs will be applied in read-only mode."
+		}
+		return footer
+	}
+
+	for _, entity := range []string{
+		schemaContractEntityTables,
+		schemaContractEntityColumns,
+		schemaContractEntityDataType,
+	} {
+		for _, action := range []string{
+			schemaContractActionBlocked,
+			schemaContractActionFrozen,
+			schemaContractActionEvolved,
+			schemaContractActionDiscardedRow,
+			schemaContractActionDiscardedValue,
+			schemaContractActionReported,
+		} {
+			keys := matchingSchemaContractDecisionFooterKeys(counts, entity, action)
+			for _, key := range keys {
+				parts = append(parts, schemaContractDecisionFooterPart(key, counts[key]))
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return "Schema contract is enabled, but this report contains no currently supported contract actions."
+	}
+
+	footer := "Schema contract " + strings.Join(parts, "; ") + "."
+	if !allowSchemaEvolution {
+		footer += " No target ALTERs will be applied in read-only mode."
+	}
+	return footer
+}
+
+func schemaContractDecisionAbortCount(counts map[schemaContractDecisionFooterKey]int) int {
+	aborts := 0
+	for key, count := range counts {
+		if key.action == schemaContractActionBlocked || key.action == schemaContractActionFrozen {
+			aborts += count
+		}
+	}
+	return aborts
+}
+
+func matchingSchemaContractDecisionFooterKeys(
+	counts map[schemaContractDecisionFooterKey]int,
+	entity string,
+	action string,
+) []schemaContractDecisionFooterKey {
+	var keys []schemaContractDecisionFooterKey
+	for key := range counts {
+		if key.entity == entity && key.action == action {
+			keys = append(keys, key)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i].mode < keys[j].mode
+	})
+	return keys
+}
+
+func schemaContractDecisionFooterPart(key schemaContractDecisionFooterKey, count int) string {
+	mode := key.mode
+	if mode == "" {
+		mode = string(config.SchemaContractEvolve)
+	}
+
+	prefix := fmt.Sprintf("%s=%s; ", key.entity, mode)
+	switch key.action {
+	case schemaContractActionBlocked:
+		return prefix + fmt.Sprintf("%d blocked change(s) will abort before transfer", count)
+	case schemaContractActionFrozen:
+		return prefix + fmt.Sprintf("%d change(s) will abort before transfer", count)
+	case schemaContractActionEvolved:
+		return prefix + fmt.Sprintf("%d change(s) will follow target_mode behavior", count)
+	case schemaContractActionDiscardedRow:
+		return prefix + fmt.Sprintf("%d change(s) will skip affected table(s) for this run", count)
+	case schemaContractActionDiscardedValue:
+		if key.entity == schemaContractEntityDataType {
+			return prefix + fmt.Sprintf("%d change(s) will be omitted from transfer and validation; previous schema snapshot metadata will be retained", count)
+		}
+		return prefix + fmt.Sprintf("%d change(s) will be omitted from target DDL, transfer, validation, and schema snapshots", count)
+	case schemaContractActionReported:
+		return prefix + fmt.Sprintf("%d change(s) will be reported only", count)
+	default:
+		return prefix + fmt.Sprintf("%d change(s) have unrecognized schema contract action %q", count, key.action)
+	}
 }
 
 func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSchemaEvolution bool) string {
@@ -299,17 +451,30 @@ func schemaContractDataTypeFooterPart(report drift.Report, mode config.SchemaCon
 
 func dataTypeEvolveFooterPart(report drift.Report) string {
 	safeNullability := 0
-	unsafeNullability := 0
+	unsafe := 0
 	for _, change := range nullabilityChanges(report) {
-		if change.Previous == "NOT NULL" && change.Current == "NULL" {
+		if change.Previous == "NOT NULL" &&
+			change.Current == "NULL" &&
+			!hasColumnTypeDrift(report, change) &&
+			!hasColumnDefaultDrift(report, change) &&
+			!hasPrimaryKeyDrift(report, change) {
 			safeNullability++
 		} else {
-			unsafeNullability++
+			unsafe++
 		}
 	}
 
-	widened := len(typeWidenedChanges(report))
-	unsafeType := len(typeNarrowedOrLossyChanges(report))
+	widened := 0
+	for _, change := range typeChanges(report) {
+		if change.Kind == drift.TypeWidened &&
+			!hasColumnNullabilityDrift(report, change) &&
+			!hasColumnDefaultDrift(report, change) &&
+			!hasPrimaryKeyDrift(report, change) {
+			widened++
+		} else {
+			unsafe++
+		}
+	}
 	var parts []string
 	if safeNullability > 0 {
 		parts = append(parts, fmt.Sprintf("%d nullability relaxation(s) may be applied before transfer", safeNullability))
@@ -317,8 +482,8 @@ func dataTypeEvolveFooterPart(report drift.Report) string {
 	if widened > 0 {
 		parts = append(parts, fmt.Sprintf("%d widened type change(s) may be applied before transfer", widened))
 	}
-	if unsafeNullability+unsafeType > 0 {
-		parts = append(parts, fmt.Sprintf("%d unsafe data type/nullability change(s) will abort before transfer", unsafeNullability+unsafeType))
+	if unsafe > 0 {
+		parts = append(parts, fmt.Sprintf("%d unsafe data type/nullability change(s) will abort before transfer", unsafe))
 	}
 	if len(parts) == 0 {
 		return "data_type=evolve; data type/nullability changes will be reported only"

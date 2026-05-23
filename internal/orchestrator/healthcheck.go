@@ -112,14 +112,15 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	}
 
 	result := &DryRunResult{
-		SourceType:   o.config.Source.Type,
-		TargetType:   o.config.Target.Type,
-		SourceSchema: o.config.Source.Schema,
-		TargetSchema: o.config.Target.Schema,
-		Workers:      o.config.Migration.Workers,
-		ChunkSize:    o.config.Migration.ChunkSize,
-		TargetMode:   o.config.Migration.TargetMode,
-		TotalTables:  len(tables),
+		SourceType:              o.config.Source.Type,
+		TargetType:              o.config.Target.Type,
+		SourceSchema:            o.config.Source.Schema,
+		TargetSchema:            o.config.Target.Schema,
+		Workers:                 o.config.Migration.Workers,
+		ChunkSize:               o.config.Migration.ChunkSize,
+		TargetMode:              o.config.Migration.TargetMode,
+		TotalTables:             len(tables),
+		SchemaContractDecisions: cloneSchemaContractDecisions(o.lastSchemaContractDecisions),
 	}
 
 	// Calculate estimated memory

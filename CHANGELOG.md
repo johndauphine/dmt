@@ -26,6 +26,9 @@ All notable changes to this project will be documented in this file.
   affected tables, `data_type: discard_value` omits non-key, non-identity,
   non-date-tracking columns with data type drift, and unsafe
   `data_type: evolve` drift remains blocked with clearer reporting (#407).
+- Added structured schema contract decision records in drift audit payloads and
+  JSON result/status output, and made freeze violations identify the exact
+  entity, drift kind, table, column, and suggested next policy options (#408).
 
 ### Deprecated
 

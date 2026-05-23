@@ -55,28 +55,18 @@ func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 		(schemaEvolutionPolicyRequiresTargetStep(typePolicy) && len(typeChanges(report)) > 0)
 }
 
-func (o *Orchestrator) enforceSchemaContractPolicy(report drift.Report) error {
-	if !report.HasChanges() || !o.config.Migration.SchemaContractEnabled() {
-		return nil
-	}
-
+func enforceSchemaContractDecisions(decisions []schemaContractDecision) error {
 	var violations []string
-	if count := len(tableContractChanges(report)); count > 0 &&
-		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractFreeze {
-		violations = append(violations, fmt.Sprintf("tables=freeze blocked %d table change(s)", count))
-	}
-	if count := len(columnContractChanges(report)); count > 0 &&
-		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractFreeze {
-		violations = append(violations, fmt.Sprintf("columns=freeze blocked %d column change(s)", count))
-	}
-	if count := len(nullabilityChanges(report)) + len(typeChanges(report)); count > 0 &&
-		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractFreeze {
-		violations = append(violations, fmt.Sprintf("data_type=freeze blocked %d data type/nullability change(s)", count))
+	for _, decision := range decisions {
+		if decision.Action == schemaContractActionFrozen || decision.Action == schemaContractActionBlocked {
+			violations = append(violations, formatSchemaContractViolation(decision))
+		}
 	}
 	if len(violations) == 0 {
 		return nil
 	}
-	return &SchemaEvolutionError{Message: "schema contract violation: " + strings.Join(violations, "; ")}
+	return &SchemaEvolutionError{Message: "schema contract violation: " + strings.Join(violations, "; ") +
+		"; choose report to observe only, evolve for deterministic safe changes, or discard_row/discard_value where supported"}
 }
 
 func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
@@ -444,7 +434,7 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 		return pruned, nil
 	}
 
-	pruned, discarded, err := pruneDiscardedAddedColumns(report, pruned)
+	pruned, discarded, err := pruneDiscardedAddedColumns(report, pruned, o.config.Migration.DateUpdatedColumns)
 	if err != nil {
 		return nil, &SchemaEvolutionError{Message: err.Error()}
 	}
@@ -709,7 +699,7 @@ func planAddedColumnEvolution(
 	return actions, nil, nil
 }
 
-func pruneDiscardedAddedColumns(report drift.Report, tables []source.Table) ([]source.Table, int, error) {
+func pruneDiscardedAddedColumns(report drift.Report, tables []source.Table, dateUpdatedColumns []string) ([]source.Table, int, error) {
 	discardByTable := discardedAddedColumnsByTable(report)
 	if len(discardByTable) == 0 {
 		return tables, 0, nil
@@ -724,21 +714,8 @@ func pruneDiscardedAddedColumns(report drift.Report, tables []source.Table) ([]s
 			continue
 		}
 
-		for _, pk := range table.PrimaryKey {
-			if stringSetContains(discardCols, pk) {
-				return nil, 0, fmt.Errorf(
-					"schema evolution cannot discard added primary-key column %s.%s",
-					table.FullName(), pk,
-				)
-			}
-		}
-		for _, column := range table.Columns {
-			if stringSetContains(discardCols, column.Name) && column.IsIdentity {
-				return nil, 0, fmt.Errorf(
-					"schema evolution cannot discard added identity column %s.%s",
-					table.FullName(), column.Name,
-				)
-			}
+		if err := rejectDiscardedAddedRequiredColumns(table, discardCols, dateUpdatedColumns); err != nil {
+			return nil, 0, err
 		}
 
 		next := table
