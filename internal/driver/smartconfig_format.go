@@ -14,7 +14,7 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 		s.TotalTables, formatRowCount(s.TotalRows), s.AvgRowSizeBytes)
 
 	sb.WriteString("migration:\n")
-	sb.WriteString("  # Deterministic tuner (internal/tuning) â€” see #175\n")
+	sb.WriteString("  # Deterministic tuner (internal/tuning) -- see #175\n")
 
 	fmt.Fprintf(&sb, "  workers: %d\n", s.Workers)
 	fmt.Fprintf(&sb, "  chunk_size: %d\n", s.ChunkSizeRecommendation)
@@ -95,10 +95,10 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 
 	if len(tuning.Recommendations) == 0 {
 		if tuning.TuningPotential == "unknown" {
-			fmt.Fprintf(&sb, "# âš  Unable to analyze %s database tuning\n", tuning.Role)
+			fmt.Fprintf(&sb, "# WARNING: Unable to analyze %s database tuning\n", tuning.Role)
 			fmt.Fprintf(&sb, "# Reason: %s\n\n", tuning.EstimatedImpact)
 		} else {
-			fmt.Fprintf(&sb, "# âœ“ No tuning needed - %s database is already well-configured!\n\n", tuning.Role)
+			fmt.Fprintf(&sb, "# OK: No tuning needed - %s database is already well-configured!\n\n", tuning.Role)
 		}
 		return sb.String()
 	}
@@ -119,7 +119,7 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 	}
 
 	if len(priority1) > 0 {
-		sb.WriteString("# ðŸ”´ CRITICAL (Priority 1) - High Impact Changes\n")
+		sb.WriteString("# CRITICAL (Priority 1) - High Impact Changes\n")
 		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
 		for i, rec := range priority1 {
 			sb.WriteString(s.formatRecommendation(i+1, rec))
@@ -128,7 +128,7 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 	}
 
 	if len(priority2) > 0 {
-		sb.WriteString("# ðŸŸ¡ IMPORTANT (Priority 2) - Medium Impact Changes\n")
+		sb.WriteString("# IMPORTANT (Priority 2) - Medium Impact Changes\n")
 		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
 		for i, rec := range priority2 {
 			sb.WriteString(s.formatRecommendation(i+1, rec))
@@ -137,7 +137,7 @@ func (s *SmartConfigSuggestions) formatDatabaseTuning(tuning *dbtuning.DatabaseT
 	}
 
 	if len(priority3) > 0 {
-		sb.WriteString("# ðŸŸ¢ OPTIONAL (Priority 3) - Nice to Have\n")
+		sb.WriteString("# OPTIONAL (Priority 3) - Nice to Have\n")
 		sb.WriteString("#" + strings.Repeat("-", 78) + "\n")
 		for i, rec := range priority3 {
 			sb.WriteString(s.formatRecommendation(i+1, rec))
@@ -161,7 +161,7 @@ func (s *SmartConfigSuggestions) formatRecommendation(num int, rec dbtuning.Tuni
 
 	if rec.CanApplyRuntime && rec.SQLCommand != "" {
 		sb.WriteString("#\n")
-		sb.WriteString("#    âœ“ Can apply at runtime (no restart needed):\n")
+		sb.WriteString("#    OK: Can apply at runtime (no restart needed):\n")
 		sqlLines := strings.Split(rec.SQLCommand, ";")
 		for _, line := range sqlLines {
 			line = strings.TrimSpace(line)
@@ -171,7 +171,7 @@ func (s *SmartConfigSuggestions) formatRecommendation(num int, rec dbtuning.Tuni
 		}
 	} else if rec.RequiresRestart {
 		sb.WriteString("#\n")
-		sb.WriteString("#    âš  Requires database restart\n")
+		sb.WriteString("#    WARNING: Requires database restart\n")
 		if rec.ConfigFile != "" {
 			sb.WriteString("#    Add to config file:\n")
 			lines := strings.Split(rec.ConfigFile, "\n")
