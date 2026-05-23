@@ -95,7 +95,7 @@ migration:
   # schema_contract:
   #   tables: report             # evolve | freeze | discard_row | report
   #   columns: discard_value     # evolve | freeze | discard_row | discard_value | report
-  #   data_type: report          # evolve | freeze | report
+  #   data_type: report          # evolve | freeze | discard_row | discard_value | report
 
   # Deprecated schema evolution (#306). This legacy surface still works for
   # existing migrations, but new configs should use schema_contract instead.

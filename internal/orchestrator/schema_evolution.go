@@ -409,6 +409,37 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 		}
 	}
 
+	if o.config.Migration.SchemaContractEnabled() &&
+		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractDiscardRow {
+		var skippedTables, skippedColumns int
+		pruned, skippedTables, skippedColumns = pruneTablesWithDataTypeChanges(report, pruned)
+		if skippedTables > 0 {
+			logging.Warn("%s: skipping %d table(s) with %d data type/nullability-changed column(s) from transfer, validation, and schema snapshots because data_type=discard_row",
+				o.schemaChangeLogLabel(), skippedTables, skippedColumns)
+			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				"data_type_columns": skippedColumns,
+				"skipped_tables":    skippedTables,
+			})
+		}
+	}
+
+	if o.config.Migration.SchemaContractEnabled() &&
+		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractDiscardValue {
+		var discarded int
+		var err error
+		pruned, discarded, err = pruneDiscardedDataTypeColumns(report, pruned, o.config.Migration.DateUpdatedColumns)
+		if err != nil {
+			return nil, &SchemaEvolutionError{Message: err.Error()}
+		}
+		if discarded > 0 {
+			logging.Warn("%s: discarding %d data type/nullability-changed column(s) from transfer and validation because data_type=discard_value; previous schema snapshot metadata will be retained",
+				o.schemaChangeLogLabel(), discarded)
+			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				"data_type_columns": discarded,
+			})
+		}
+	}
+
 	if o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
 		return pruned, nil
 	}
@@ -466,6 +497,121 @@ func pruneTablesWithAddedColumns(report drift.Report, tables []source.Table) ([]
 		skippedColumns += len(columns)
 	}
 	return pruned, skippedTables, skippedColumns
+}
+
+func pruneTablesWithDataTypeChanges(report drift.Report, tables []source.Table) ([]source.Table, int, int) {
+	discardByTable := dataTypeChangesByTable(report)
+	if len(discardByTable) == 0 {
+		return tables, 0, 0
+	}
+
+	pruned := make([]source.Table, 0, len(tables))
+	skippedTables := 0
+	skippedColumns := 0
+	for _, table := range tables {
+		columns := discardByTable[schemaEvolutionTableKey(table.Schema, table.Name)]
+		if len(columns) == 0 {
+			pruned = append(pruned, table)
+			continue
+		}
+		skippedTables++
+		skippedColumns += len(columns)
+	}
+	return pruned, skippedTables, skippedColumns
+}
+
+func pruneDiscardedDataTypeColumns(report drift.Report, tables []source.Table, dateUpdatedColumns []string) ([]source.Table, int, error) {
+	discardByTable := dataTypeChangesByTable(report)
+	if len(discardByTable) == 0 {
+		return tables, 0, nil
+	}
+
+	pruned := make([]source.Table, 0, len(tables))
+	discarded := 0
+	for _, table := range tables {
+		discardCols := discardByTable[schemaEvolutionTableKey(table.Schema, table.Name)]
+		if len(discardCols) == 0 {
+			next := table
+			next.ForeignKeys = filterForeignKeysWithoutDiscarded(table, table.ForeignKeys, discardByTable)
+			pruned = append(pruned, next)
+			continue
+		}
+
+		if err := rejectDiscardedRequiredDataTypeColumns(table, discardCols, dateUpdatedColumns); err != nil {
+			return nil, 0, err
+		}
+
+		next := table
+		next.Columns = filterColumnsWithoutDiscarded(table.Columns, discardCols)
+		removed := len(table.Columns) - len(next.Columns)
+		if removed == 0 {
+			pruned = append(pruned, next)
+			continue
+		}
+
+		next.PopulatePKColumns()
+		next.Indexes = filterIndexesWithoutDiscarded(table.Indexes, discardCols)
+		next.ForeignKeys = filterForeignKeysWithoutDiscarded(table, table.ForeignKeys, discardByTable)
+		next.CheckConstraints = filterChecksWithoutDiscarded(table.CheckConstraints, discardCols)
+		pruned = append(pruned, next)
+		discarded += removed
+	}
+
+	return pruned, discarded, nil
+}
+
+func rejectDiscardedRequiredDataTypeColumns(table source.Table, discardCols map[string]struct{}, dateUpdatedColumns []string) error {
+	for _, pk := range table.PrimaryKey {
+		if stringSetContains(discardCols, pk) {
+			return fmt.Errorf(
+				"schema evolution cannot discard data type/nullability-changed primary-key column %s.%s",
+				table.FullName(), pk,
+			)
+		}
+	}
+	if stringSetContains(discardCols, table.DateColumn) {
+		return fmt.Errorf(
+			"schema evolution cannot discard data type/nullability-changed date tracking column %s.%s",
+			table.FullName(), table.DateColumn,
+		)
+	}
+	for _, candidate := range dateUpdatedColumns {
+		if stringSetContains(discardCols, candidate) && tableHasColumn(table, candidate) {
+			return fmt.Errorf(
+				"schema evolution cannot discard data type/nullability-changed date tracking column %s.%s",
+				table.FullName(), candidate,
+			)
+		}
+	}
+	for _, column := range table.Columns {
+		if stringSetContains(discardCols, column.Name) && column.IsIdentity {
+			return fmt.Errorf(
+				"schema evolution cannot discard data type/nullability-changed identity column %s.%s",
+				table.FullName(), column.Name,
+			)
+		}
+	}
+	return nil
+}
+
+func dataTypeChangesByTable(report drift.Report) map[string]map[string]struct{} {
+	byTable := make(map[string]map[string]struct{})
+	for _, change := range dataTypeContractChanges(report) {
+		key := schemaEvolutionTableKey(change.Schema, change.TableName)
+		if byTable[key] == nil {
+			byTable[key] = make(map[string]struct{})
+		}
+		byTable[key][change.ObjectName] = struct{}{}
+	}
+	return byTable
+}
+
+func dataTypeChangedColumnCount(report drift.Report) int {
+	count := 0
+	for _, columns := range dataTypeChangesByTable(report) {
+		count += len(columns)
+	}
+	return count
 }
 
 func findAddedSourceTables(report drift.Report, tables []source.Table) []source.Table {
@@ -970,6 +1116,17 @@ func columnContractChanges(report drift.Report) []drift.Change {
 	return changes
 }
 
+func dataTypeContractChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		switch change.Kind {
+		case drift.NullabilityChange, drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
 func tableContractChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
@@ -996,6 +1153,27 @@ func typeChanges(report drift.Report) []drift.Change {
 	for _, change := range report.Changes {
 		switch change.Kind {
 		case drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func typeWidenedChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		if change.Kind == drift.TypeWidened {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func typeNarrowedOrLossyChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		switch change.Kind {
+		case drift.TypeNarrowed, drift.TypeChangedLossy:
 			changes = append(changes, change)
 		}
 	}
@@ -1082,6 +1260,15 @@ func findSourceTable(tables []source.Table, change drift.Change) (source.Table, 
 func tablePrimaryKeyContains(table source.Table, columnName string) bool {
 	for _, pk := range table.PrimaryKey {
 		if strings.EqualFold(pk, columnName) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableHasColumn(table source.Table, columnName string) bool {
+	for _, column := range table.Columns {
+		if strings.EqualFold(column.Name, columnName) {
 			return true
 		}
 	}

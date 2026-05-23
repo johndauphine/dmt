@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -141,10 +142,8 @@ func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSche
 	); part != "" {
 		parts = append(parts, part)
 	}
-	if part := schemaContractFooterPart(
-		"data_type",
-		len(nullabilityChanges(report))+len(typeChanges(report)),
-		"data type/nullability change(s)",
+	if part := schemaContractDataTypeFooterPart(
+		report,
 		o.config.Migration.SchemaContractDataTypeMode(),
 		allowSchemaEvolution,
 	); part != "" {
@@ -270,6 +269,63 @@ func schemaContractColumnsFooterPart(added, dropped int, mode config.SchemaContr
 	return "columns=" + string(mode) + "; " + strings.Join(parts, "; ")
 }
 
+func schemaContractDataTypeFooterPart(report drift.Report, mode config.SchemaContractMode, allowSchemaEvolution bool) string {
+	changes := dataTypeContractChanges(report)
+	if len(changes) == 0 {
+		return ""
+	}
+
+	if mode == "" {
+		mode = config.SchemaContractEvolve
+	}
+	switch mode {
+	case config.SchemaContractEvolve:
+		if !allowSchemaEvolution {
+			return fmt.Sprintf("data_type=evolve; %d data type/nullability change(s) will be reported only in read-only mode", len(changes))
+		}
+		return dataTypeEvolveFooterPart(report)
+	case config.SchemaContractFreeze:
+		return fmt.Sprintf("data_type=freeze; %d data type/nullability change(s) will abort before transfer", len(changes))
+	case config.SchemaContractDiscardRow:
+		return fmt.Sprintf("data_type=discard_row; %d data type/nullability-changed column(s) found; affected table(s) will be skipped for this run", dataTypeChangedColumnCount(report))
+	case config.SchemaContractDiscardValue:
+		return fmt.Sprintf("data_type=discard_value; %d data type/nullability-changed column(s) will be omitted from transfer and validation; previous schema snapshot metadata will be retained", dataTypeChangedColumnCount(report))
+	case config.SchemaContractReport:
+		return fmt.Sprintf("data_type=report; %d data type/nullability change(s) will be reported only", len(changes))
+	default:
+		return "data_type policy is invalid"
+	}
+}
+
+func dataTypeEvolveFooterPart(report drift.Report) string {
+	safeNullability := 0
+	unsafeNullability := 0
+	for _, change := range nullabilityChanges(report) {
+		if change.Previous == "NOT NULL" && change.Current == "NULL" {
+			safeNullability++
+		} else {
+			unsafeNullability++
+		}
+	}
+
+	widened := len(typeWidenedChanges(report))
+	unsafeType := len(typeNarrowedOrLossyChanges(report))
+	var parts []string
+	if safeNullability > 0 {
+		parts = append(parts, fmt.Sprintf("%d nullability relaxation(s) may be applied before transfer", safeNullability))
+	}
+	if widened > 0 {
+		parts = append(parts, fmt.Sprintf("%d widened type change(s) may be applied before transfer", widened))
+	}
+	if unsafeNullability+unsafeType > 0 {
+		parts = append(parts, fmt.Sprintf("%d unsafe data type/nullability change(s) will abort before transfer", unsafeNullability+unsafeType))
+	}
+	if len(parts) == 0 {
+		return "data_type=evolve; data type/nullability changes will be reported only"
+	}
+	return "data_type=evolve; " + strings.Join(parts, "; ")
+}
+
 func schemaEvolutionFooterPart(kind string, count int, noun string, policy config.SchemaEvolutionPolicy) string {
 	if count == 0 {
 		return ""
@@ -326,8 +382,11 @@ func addedColumnDiscardValueFooterPart(count int) string {
 	return fmt.Sprintf("added_column=discard_value; %d added column(s) will be omitted from target DDL, transfer, validation, and schema snapshots", count)
 }
 
-func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Table) {
-	snapshots := drift.BuildTableSnapshots(tables)
+func (o *Orchestrator) captureSchemaSnapshotsForReport(runID string, report drift.Report, tables []source.Table) {
+	o.captureSchemaSnapshotSet(runID, o.schemaSnapshotPlan(report, tables))
+}
+
+func (o *Orchestrator) captureSchemaSnapshotSet(runID string, snapshots []drift.TableSnapshot) {
 	for _, snapshot := range snapshots {
 		schemaJSON, err := drift.MarshalTableSnapshot(snapshot)
 		if err != nil {
@@ -344,6 +403,173 @@ func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Tabl
 		}
 	}
 	logging.Debug("Captured %d source schema snapshot(s)", len(snapshots))
+}
+
+func (o *Orchestrator) schemaSnapshotPlan(report drift.Report, tables []source.Table) []drift.TableSnapshot {
+	snapshots := drift.BuildTableSnapshots(tables)
+	if !o.config.Migration.SchemaContractEnabled() ||
+		o.config.Migration.SchemaContractDataTypeMode() != config.SchemaContractDiscardValue ||
+		len(report.Previous) == 0 {
+		return snapshots
+	}
+
+	previousByTable := tableSnapshotsByKey(report.Previous)
+	discardByTable := dataTypeChangesByTable(report)
+	for i := range snapshots {
+		key := schemaEvolutionTableKey(snapshots[i].Schema, snapshots[i].Name)
+		discardCols := discardByTable[key]
+		previous, ok := previousByTable[key]
+		if !ok {
+			continue
+		}
+		restoreDiscardedDataTypeSnapshotMetadata(&snapshots[i], previous, discardCols, discardByTable)
+	}
+	return snapshots
+}
+
+func tableSnapshotsByKey(snapshots []drift.TableSnapshot) map[string]drift.TableSnapshot {
+	out := make(map[string]drift.TableSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		out[schemaEvolutionTableKey(snapshot.Schema, snapshot.Name)] = snapshot
+	}
+	return out
+}
+
+func restoreDiscardedDataTypeSnapshotMetadata(
+	current *drift.TableSnapshot,
+	previous drift.TableSnapshot,
+	discardCols map[string]struct{},
+	discardByTable map[string]map[string]struct{},
+) {
+	current.Columns = mergePreviousDiscardedColumns(current.Columns, previous.Columns, discardCols)
+	current.Indexes = mergePreviousDiscardedIndexes(current.Indexes, previous.Indexes, discardCols)
+	current.ForeignKeys = mergePreviousDiscardedForeignKeys(
+		current.Schema,
+		current.ForeignKeys,
+		previous.ForeignKeys,
+		discardCols,
+		discardByTable,
+	)
+	current.CheckConstraints = mergePreviousDiscardedChecks(current.CheckConstraints, previous.CheckConstraints, discardCols)
+}
+
+func mergePreviousDiscardedColumns(
+	current []drift.ColumnSnapshot,
+	previous []drift.ColumnSnapshot,
+	discardCols map[string]struct{},
+) []drift.ColumnSnapshot {
+	byName := make(map[string]drift.ColumnSnapshot, len(current)+len(previous))
+	for _, column := range current {
+		byName[column.Name] = column
+	}
+	for _, column := range previous {
+		if stringSetContains(discardCols, column.Name) {
+			byName[column.Name] = column
+		}
+	}
+
+	merged := make([]drift.ColumnSnapshot, 0, len(byName))
+	for _, column := range byName {
+		merged = append(merged, column)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		left, right := merged[i], merged[j]
+		if left.OrdinalPosition != right.OrdinalPosition {
+			return left.OrdinalPosition < right.OrdinalPosition
+		}
+		return left.Name < right.Name
+	})
+	return merged
+}
+
+func mergePreviousDiscardedIndexes(
+	current []drift.IndexSnapshot,
+	previous []drift.IndexSnapshot,
+	discardCols map[string]struct{},
+) []drift.IndexSnapshot {
+	byName := make(map[string]drift.IndexSnapshot, len(current)+len(previous))
+	for _, index := range current {
+		byName[index.Name] = index
+	}
+	for _, index := range previous {
+		if anyNameInSet(index.Columns, discardCols) || anyNameInSet(index.IncludeColumns, discardCols) {
+			byName[index.Name] = index
+		}
+	}
+
+	merged := make([]drift.IndexSnapshot, 0, len(byName))
+	for _, index := range byName {
+		merged = append(merged, index)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Name < merged[j].Name
+	})
+	return merged
+}
+
+func mergePreviousDiscardedForeignKeys(
+	tableSchema string,
+	current []drift.ForeignKeySnapshot,
+	previous []drift.ForeignKeySnapshot,
+	discardCols map[string]struct{},
+	discardByTable map[string]map[string]struct{},
+) []drift.ForeignKeySnapshot {
+	byName := make(map[string]drift.ForeignKeySnapshot, len(current)+len(previous))
+	for _, fk := range current {
+		byName[fk.Name] = fk
+	}
+	for _, fk := range previous {
+		if anyNameInSet(fk.Columns, discardCols) || foreignKeyReferencesDiscardedColumns(tableSchema, fk, discardByTable) {
+			byName[fk.Name] = fk
+		}
+	}
+
+	merged := make([]drift.ForeignKeySnapshot, 0, len(byName))
+	for _, fk := range byName {
+		merged = append(merged, fk)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Name < merged[j].Name
+	})
+	return merged
+}
+
+func foreignKeyReferencesDiscardedColumns(
+	tableSchema string,
+	fk drift.ForeignKeySnapshot,
+	discardByTable map[string]map[string]struct{},
+) bool {
+	refSchema := fk.RefSchema
+	if refSchema == "" {
+		refSchema = tableSchema
+	}
+	refDiscard := discardByTable[schemaEvolutionTableKey(refSchema, fk.RefTable)]
+	return anyNameInSet(fk.RefColumns, refDiscard)
+}
+
+func mergePreviousDiscardedChecks(
+	current []drift.CheckConstraintSnapshot,
+	previous []drift.CheckConstraintSnapshot,
+	discardCols map[string]struct{},
+) []drift.CheckConstraintSnapshot {
+	byName := make(map[string]drift.CheckConstraintSnapshot, len(current)+len(previous))
+	for _, check := range current {
+		byName[check.Name] = check
+	}
+	for _, check := range previous {
+		if checkReferencesDiscardedColumn(check.Definition, discardCols) {
+			byName[check.Name] = check
+		}
+	}
+
+	merged := make([]drift.CheckConstraintSnapshot, 0, len(byName))
+	for _, check := range byName {
+		merged = append(merged, check)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Name < merged[j].Name
+	})
+	return merged
 }
 
 func (o *Orchestrator) schemaSnapshotNamespace() string {
