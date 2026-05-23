@@ -97,6 +97,9 @@ func (c *Config) validate() error {
 	}
 
 	if c.Migration.SchemaEvolution != nil {
+		if c.Migration.SchemaContract != nil {
+			return fmt.Errorf("migration.schema_contract cannot be combined with deprecated migration.schema_evolution")
+		}
 		switch c.Migration.SchemaEvolution.AddedColumn {
 		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail,
 			SchemaEvolutionDiscard, SchemaEvolutionDiscardValue:
@@ -120,8 +123,39 @@ func (c *Config) validate() error {
 				c.Migration.SchemaEvolution.TypeChange)
 		}
 	}
+	if c.Migration.SchemaContract != nil {
+		if err := validateSchemaContractMode("migration.schema_contract.tables", c.Migration.SchemaContract.Tables,
+			SchemaContractEvolve, SchemaContractFreeze, SchemaContractReport); err != nil {
+			return err
+		}
+		if err := validateSchemaContractMode("migration.schema_contract.columns", c.Migration.SchemaContract.Columns,
+			SchemaContractEvolve, SchemaContractFreeze, SchemaContractDiscardValue, SchemaContractReport); err != nil {
+			return err
+		}
+		if err := validateSchemaContractMode("migration.schema_contract.data_type", c.Migration.SchemaContract.DataType,
+			SchemaContractEvolve, SchemaContractFreeze, SchemaContractReport); err != nil {
+			return err
+		}
+	}
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
 	return nil
+}
+
+func validateSchemaContractMode(path string, got SchemaContractMode, allowed ...SchemaContractMode) error {
+	if got == "" {
+		return nil
+	}
+	for _, mode := range allowed {
+		if got == mode {
+			return nil
+		}
+	}
+
+	values := make([]string, 0, len(allowed))
+	for _, mode := range allowed {
+		values = append(values, string(mode))
+	}
+	return fmt.Errorf("%s must be one of %s; got %q", path, strings.Join(values, ", "), got)
 }

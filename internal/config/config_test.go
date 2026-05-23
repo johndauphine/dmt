@@ -2261,6 +2261,129 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	}
 }
 
+func TestSchemaContractShorthandReportMode(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	var logs strings.Builder
+	logging.SetOutput(&logs)
+	logging.SetFormat("text")
+	t.Cleanup(func() {
+		logging.SetOutput(os.Stdout)
+		logging.SetFormat("text")
+	})
+
+	cfg, err := LoadBytes(minConfigYAML(`  target_mode: upsert
+  schema_contract: report
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes() error: %v", err)
+	}
+	if cfg.Migration.SchemaContract == nil {
+		t.Fatal("SchemaContract was nil")
+	}
+	if got := cfg.Migration.SchemaContractTablesMode(); got != SchemaContractReport {
+		t.Fatalf("tables mode = %q, want %q", got, SchemaContractReport)
+	}
+	if got := cfg.Migration.SchemaContractColumnsMode(); got != SchemaContractReport {
+		t.Fatalf("columns mode = %q, want %q", got, SchemaContractReport)
+	}
+	if got := cfg.Migration.SchemaContractDataTypeMode(); got != SchemaContractReport {
+		t.Fatalf("data_type mode = %q, want %q", got, SchemaContractReport)
+	}
+	if got := cfg.Migration.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("added-column policy = %q, want %q", got, SchemaEvolutionLog)
+	}
+	if got := cfg.Migration.NullabilityChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("nullability policy = %q, want %q", got, SchemaEvolutionLog)
+	}
+	if got := cfg.Migration.TypeChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("type policy = %q, want %q", got, SchemaEvolutionLog)
+	}
+	if strings.Contains(logs.String(), "migration.schema_evolution is deprecated") {
+		t.Fatalf("schema_contract should not emit schema_evolution deprecation warning:\n%s", logs.String())
+	}
+}
+
+func TestSchemaContractMappingDefaultsOmittedEntitiesToEvolve(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	cfg, err := LoadBytes(minConfigYAML(`  target_mode: upsert
+  schema_contract:
+    columns: discard_value
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes() error: %v", err)
+	}
+	if got := cfg.Migration.SchemaContractTablesMode(); got != SchemaContractEvolve {
+		t.Fatalf("tables mode = %q, want %q", got, SchemaContractEvolve)
+	}
+	if got := cfg.Migration.SchemaContractColumnsMode(); got != SchemaContractDiscardValue {
+		t.Fatalf("columns mode = %q, want %q", got, SchemaContractDiscardValue)
+	}
+	if got := cfg.Migration.SchemaContractDataTypeMode(); got != SchemaContractEvolve {
+		t.Fatalf("data_type mode = %q, want %q", got, SchemaContractEvolve)
+	}
+	if got := cfg.Migration.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionDiscardValue {
+		t.Fatalf("added-column policy = %q, want %q", got, SchemaEvolutionDiscardValue)
+	}
+	if got := cfg.Migration.NullabilityChangeSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
+		t.Fatalf("nullability policy = %q, want %q", got, SchemaEvolutionAuto)
+	}
+	if got := cfg.Migration.TypeChangeSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
+		t.Fatalf("type policy = %q, want %q", got, SchemaEvolutionAuto)
+	}
+}
+
+func TestValidateSchemaContractRejectsAmbiguousOrUnsupportedModes(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "cannot combine with legacy schema evolution",
+			yaml: `  schema_contract: report
+  schema_evolution:
+    added_column: log
+`,
+			want: "cannot be combined",
+		},
+		{
+			name: "invalid mode",
+			yaml: "  schema_contract: noisy\n",
+			want: "migration.schema_contract.tables must be one of",
+		},
+		{
+			name: "data type discard value unsupported",
+			yaml: `  schema_contract:
+    data_type: discard_value
+`,
+			want: "migration.schema_contract.data_type must be one of",
+		},
+		{
+			name: "discard row unsupported in first slice",
+			yaml: `  schema_contract:
+    columns: discard_row
+`,
+			want: "migration.schema_contract.columns must be one of",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadBytes(minConfigYAML(tt.yaml))
+			if err == nil {
+				t.Fatal("LoadBytes() error = nil, want validation error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadBytesWarnsForDeprecatedSchemaEvolution(t *testing.T) {
 	withEmptySecretsFile(t)
 

@@ -54,6 +54,30 @@ func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 		(schemaEvolutionPolicyRequiresTargetStep(typePolicy) && len(typeChanges(report)) > 0)
 }
 
+func (o *Orchestrator) enforceSchemaContractPolicy(report drift.Report) error {
+	if !report.HasChanges() || !o.config.Migration.SchemaContractEnabled() {
+		return nil
+	}
+
+	var violations []string
+	if count := len(tableAddedChanges(report)); count > 0 &&
+		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractFreeze {
+		violations = append(violations, fmt.Sprintf("tables=freeze blocked %d added table(s)", count))
+	}
+	if count := len(addedColumnChanges(report)); count > 0 &&
+		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractFreeze {
+		violations = append(violations, fmt.Sprintf("columns=freeze blocked %d added column(s)", count))
+	}
+	if count := len(nullabilityChanges(report)) + len(typeChanges(report)); count > 0 &&
+		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractFreeze {
+		violations = append(violations, fmt.Sprintf("data_type=freeze blocked %d data type/nullability change(s)", count))
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	return &SchemaEvolutionError{Message: "schema contract violation: " + strings.Join(violations, "; ")}
+}
+
 func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
 	if !report.HasChanges() || !o.config.Migration.SchemaEvolutionEnabled() {
 		return nil
@@ -180,7 +204,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		}
 	}
 
-	o.auditEvent("schema_evolution_applied", map[string]any{
+	o.auditEvent(o.schemaChangeAuditName("schema_evolution_applied"), map[string]any{
 		"added_columns":           len(addedActions),
 		"nullability_relaxations": len(nullabilityActions),
 		"type_widenings":          len(typeActions),
@@ -195,6 +219,13 @@ func schemaEvolutionPolicyRequiresTargetStep(policy config.SchemaEvolutionPolicy
 	default:
 		return false
 	}
+}
+
+func (o *Orchestrator) schemaChangeAuditName(base string) string {
+	if o.config.Migration.SchemaContractEnabled() {
+		return strings.Replace(base, "schema_evolution", "schema_contract", 1)
+	}
+	return base
 }
 
 func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, tables []source.Table) ([]source.Table, error) {
@@ -214,7 +245,7 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 
 	logging.Warn("schema evolution: discarding %d added column(s) from target DDL, transfer, validation, and snapshots because added_column=discard_value",
 		discarded)
-	o.auditEvent("schema_evolution_discarded", map[string]any{
+	o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 		"added_columns": discarded,
 	})
 	return pruned, nil
@@ -620,6 +651,16 @@ func addedColumnChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
 		if change.Kind == drift.AddedColumn {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func tableAddedChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		if change.Kind == drift.TableAdded {
 			changes = append(changes, change)
 		}
 	}

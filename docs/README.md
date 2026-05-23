@@ -10,7 +10,8 @@ Technical documentation, planning documents, and implementation notes for dmt.
 | [RESTARTABILITY.md](RESTARTABILITY.md) | Checkpoint and resume functionality documentation |
 | [PRIVILEGES.md](PRIVILEGES.md) | Per-driver minimum DB privileges (source / target / drop_recreate / upsert) — operator-facing GRANT recipes aligned with `dmt preflight` (see [PRIVILEGES.md](PRIVILEGES.md#what-dmt-preflight-actually-probes) for the subset preflight actually probes) |
 | [DRIVER_SHARED.md](DRIVER_SHARED.md) | Shared driver refactor boundary and PR sequence |
-| [SCHEMA_EVOLUTION.md](SCHEMA_EVOLUTION.md) | Schema drift auto-apply policy and current added-column scope |
+| [SCHEMA_CONTRACT.md](SCHEMA_CONTRACT.md) | DLT-style schema contract configuration, including DMT's report mode |
+| [SCHEMA_EVOLUTION.md](SCHEMA_EVOLUTION.md) | Deprecated legacy schema drift auto-apply policy |
 | [DAILY_DRIVER.md](DAILY_DRIVER.md) | Daily incremental upsert workflow and validation notes |
 | [DELETE_HANDLING.md](DELETE_HANDLING.md) | Design proposal for delete propagation in incremental upsert mode |
 | [ORCHESTRATOR_FLOW.md](ORCHESTRATOR_FLOW.md) | Map of the fresh run, resume, transfer runner, and target-mode orchestration files |

@@ -798,6 +798,18 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 				AddedColumn: config.SchemaEvolutionDiscardValue,
 			},
 		}, want: false},
+		{name: "schema contract report is report only", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractReport},
+		}, want: false},
+		{name: "schema contract freeze runs gate", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractFreeze},
+		}, want: true},
+		{name: "schema contract discard value prunes without target step", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
+		}, want: false},
 		{name: "nullability enabled", migration: config.MigrationConfig{
 			TargetMode:      "upsert",
 			SchemaEvolution: &config.SchemaEvolutionConfig{},
@@ -823,6 +835,14 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 			SchemaEvolution: &config.SchemaEvolutionConfig{
 				TypeChange: config.SchemaEvolutionFail,
 			},
+		}, want: true, report: typeReport},
+		{name: "schema contract data type report is report only", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractReport},
+		}, want: false, report: typeReport},
+		{name: "schema contract data type evolve runs gate", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
 		}, want: true, report: typeReport},
 		{name: "unsupported drift only", migration: config.MigrationConfig{
 			TargetMode:      "upsert",
@@ -967,6 +987,36 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			},
 			want: "fail_on_schema_drift",
 		},
+		{
+			name:   "schema contract report mode names report",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractReport},
+			},
+			want: "columns=report",
+		},
+		{
+			name:   "schema contract data type report mode names report",
+			report: typeWidenedReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractReport},
+			},
+			want: "data_type=report",
+		},
+		{
+			name:   "schema contract freeze mode names abort",
+			report: drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, TableName: "Orders"}}},
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractFreeze},
+			},
+			want: "tables=freeze",
+		},
 	}
 
 	for _, tt := range tests {
@@ -977,5 +1027,30 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 				t.Fatalf("schemaDriftReportFooter() = %q, want substring %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSchemaContractFreezeFailsBeforeTargetPreparation(t *testing.T) {
+	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+		SchemaContract: &config.SchemaContractConfig{
+			Tables:   config.SchemaContractFreeze,
+			Columns:  config.SchemaContractFreeze,
+			DataType: config.SchemaContractFreeze,
+		},
+	}}}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.TableAdded, TableName: "Orders"},
+		{Kind: drift.AddedColumn, TableName: "Users", ObjectName: "email"},
+		{Kind: drift.TypeWidened, TableName: "Users", ObjectName: "name"},
+	}}
+
+	err := o.enforceSchemaContractPolicy(report)
+	if err == nil {
+		t.Fatal("enforceSchemaContractPolicy() error = nil, want freeze violation")
+	}
+	for _, want := range []string{"tables=freeze", "columns=freeze", "data_type=freeze"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want substring %q", err, want)
+		}
 	}
 }

@@ -1,11 +1,10 @@
 # Schema Evolution
 
 > Deprecated: `migration.schema_evolution` is a legacy configuration surface.
-> It remains functional for existing migrations, but DMT will replace it with
-> DLT-style `migration.schema_contract` settings for tables, columns, and
-> data_type in a future release. New configs should avoid adding
-> `migration.schema_evolution`; track the replacement work in
-> [#403](https://github.com/johndauphine/dmt/issues/403).
+> It remains functional for existing migrations, but new configs should use
+> DLT-style `migration.schema_contract` settings instead. See
+> [SCHEMA_CONTRACT.md](SCHEMA_CONTRACT.md) for `tables`, `columns`,
+> `data_type`, and DMT's `report` mode.
 
 Schema evolution builds on source schema drift detection. Drift detection
 compares the current source schema to the last successful source snapshot; schema
