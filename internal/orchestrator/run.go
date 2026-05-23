@@ -237,6 +237,12 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("creating schema: %w", err)
 	}
 
+	if err := o.applySchemaContractTableEvolution(ctx, schemaDriftReport, tables); err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
+	}
+
 	// Prepare target tables using the appropriate strategy
 	if err := o.targetMode.PrepareTables(ctx, tables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
@@ -298,6 +304,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
+	o.finalizeSchemaContractTableEvolution(ctx, schemaDriftReport, successTables)
 
 	if err := o.reconcileDeletesIfDue(ctx, runID, successTables); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())

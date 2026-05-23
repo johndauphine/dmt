@@ -125,7 +125,7 @@ func (c *Config) validate() error {
 	}
 	if c.Migration.SchemaContract != nil {
 		if err := validateSchemaContractMode("migration.schema_contract.tables", c.Migration.SchemaContract.Tables,
-			SchemaContractEvolve, SchemaContractFreeze, SchemaContractReport); err != nil {
+			SchemaContractEvolve, SchemaContractFreeze, SchemaContractDiscardRow, SchemaContractReport); err != nil {
 			return err
 		}
 		if err := validateSchemaContractMode("migration.schema_contract.columns", c.Migration.SchemaContract.Columns,

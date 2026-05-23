@@ -93,7 +93,7 @@ migration:
   # tables, columns, and data_type. The DMT-specific report mode reports drift
   # without applying target schema changes.
   # schema_contract:
-  #   tables: report             # evolve | freeze | report
+  #   tables: report             # evolve | freeze | discard_row | report
   #   columns: discard_value     # evolve | freeze | discard_value | report
   #   data_type: report          # evolve | freeze | report
 

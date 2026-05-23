@@ -9,6 +9,7 @@ import (
 	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/source"
 )
 
@@ -60,9 +61,9 @@ func (o *Orchestrator) enforceSchemaContractPolicy(report drift.Report) error {
 	}
 
 	var violations []string
-	if count := len(tableAddedChanges(report)); count > 0 &&
+	if count := len(tableContractChanges(report)); count > 0 &&
 		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractFreeze {
-		violations = append(violations, fmt.Sprintf("tables=freeze blocked %d added table(s)", count))
+		violations = append(violations, fmt.Sprintf("tables=freeze blocked %d table change(s)", count))
 	}
 	if count := len(addedColumnChanges(report)); count > 0 &&
 		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractFreeze {
@@ -213,6 +214,140 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	return nil
 }
 
+func (o *Orchestrator) applySchemaContractTableEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
+	if !report.HasChanges() ||
+		!o.config.Migration.SchemaContractEnabled() ||
+		o.config.Migration.SchemaContractTablesMode() != config.SchemaContractEvolve ||
+		o.config.Migration.TargetMode != "upsert" {
+		return nil
+	}
+
+	addedTables := tableAddedChanges(report)
+	if len(addedTables) == 0 {
+		return nil
+	}
+
+	label := o.schemaChangeLogLabel()
+	logging.Info("%s: creating %d added target table(s) before upsert transfer", label, len(addedTables))
+	created := 0
+	for _, change := range addedTables {
+		table, err := findSourceTable(tables, change)
+		if err != nil {
+			return &SchemaEvolutionError{Message: err.Error()}
+		}
+		if !table.HasPK() {
+			return &SchemaEvolutionError{Message: fmt.Sprintf(
+				"schema contract cannot evolve added table %s: upsert mode requires a primary key",
+				table.FullName(),
+			)}
+		}
+
+		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, table.Name)
+		if err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", table.Name, err)}
+		}
+		if exists {
+			logging.Debug("%s: target table %s already exists; skipping create", label, table.Name)
+			continue
+		}
+
+		if err := o.targetPool.CreateTableWithOptions(ctx, &table, o.config.Target.Schema, pool.TableOptions{}); err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf("creating target table %s: %v", table.FullName(), err)}
+		}
+		if err := o.targetPool.CreatePrimaryKey(ctx, &table, o.config.Target.Schema); err != nil {
+			return &SchemaEvolutionError{Message: fmt.Sprintf("creating primary key for target table %s: %v", table.FullName(), err)}
+		}
+		created++
+	}
+
+	if created > 0 {
+		o.auditEvent("schema_contract_tables_applied", map[string]any{
+			"added_tables": created,
+		})
+	}
+	return nil
+}
+
+func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context, report drift.Report, tables []source.Table) {
+	if !report.HasChanges() ||
+		!o.config.Migration.SchemaContractEnabled() ||
+		o.config.Migration.SchemaContractTablesMode() != config.SchemaContractEvolve ||
+		o.config.Migration.TargetMode != "upsert" {
+		return
+	}
+
+	addedTables := findAddedSourceTables(report, tables)
+	if len(addedTables) == 0 {
+		return
+	}
+
+	label := o.schemaChangeLogLabel()
+	logging.Info("%s: finalizing %d evolved target table(s) after transfer", label, len(addedTables))
+
+	resets := 0
+	for _, table := range addedTables {
+		t := table
+		if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &t); err != nil {
+			logging.Warn("%s: resetting sequence for evolved table %s: %v", label, t.Name, err)
+			continue
+		}
+		resets++
+	}
+
+	indexes := 0
+	if o.config.Migration.CreateIndexesEnabled() {
+		for _, table := range addedTables {
+			for _, index := range table.Indexes {
+				t := table
+				idx := index
+				if err := o.targetPool.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
+					logging.Warn("%s: creating index %s on evolved table %s: %v", label, idx.Name, t.Name, err)
+					continue
+				}
+				indexes++
+			}
+		}
+	}
+
+	foreignKeys := 0
+	if o.config.Migration.CreateForeignKeysEnabled() {
+		for _, table := range addedTables {
+			for _, fk := range table.ForeignKeys {
+				t := table
+				foreignKey := fk
+				if err := o.targetPool.CreateForeignKey(ctx, &t, &foreignKey, o.config.Target.Schema); err != nil {
+					logging.Warn("%s: creating foreign key %s on evolved table %s: %v", label, foreignKey.Name, t.Name, err)
+					continue
+				}
+				foreignKeys++
+			}
+		}
+	}
+
+	checks := 0
+	if o.config.Migration.CreateCheckConstraints {
+		for _, table := range addedTables {
+			for _, check := range table.CheckConstraints {
+				t := table
+				chk := check
+				if err := o.targetPool.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
+					logging.Warn("%s: creating check constraint %s on evolved table %s: %v", label, chk.Name, t.Name, err)
+					continue
+				}
+				checks++
+			}
+		}
+	}
+
+	o.auditEvent("schema_contract_tables_finalized", map[string]any{
+		"tables":          len(addedTables),
+		"sequence_resets": resets,
+		"indexes":         indexes,
+		"foreign_keys":    foreignKeys,
+		"checks":          checks,
+	})
+}
+
 func schemaEvolutionPolicyRequiresTargetStep(policy config.SchemaEvolutionPolicy) bool {
 	switch policy {
 	case config.SchemaEvolutionAuto, config.SchemaEvolutionFail:
@@ -238,12 +373,29 @@ func (o *Orchestrator) schemaChangeLogLabel() string {
 
 func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, tables []source.Table) ([]source.Table, error) {
 	if !report.HasChanges() ||
-		!o.config.Migration.SchemaEvolutionEnabled() ||
-		o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
+		!o.config.Migration.SchemaEvolutionEnabled() {
 		return tables, nil
 	}
 
-	pruned, discarded, err := pruneDiscardedAddedColumns(report, tables)
+	pruned := tables
+	if o.config.Migration.SchemaContractEnabled() &&
+		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractDiscardRow {
+		var discardedTables int
+		pruned, discardedTables = pruneDiscardedAddedTables(report, pruned)
+		if discardedTables > 0 {
+			logging.Warn("%s: skipping %d added table(s) from transfer, validation, and schema snapshots because tables=discard_row",
+				o.schemaChangeLogLabel(), discardedTables)
+			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				"added_tables": discardedTables,
+			})
+		}
+	}
+
+	if o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
+		return pruned, nil
+	}
+
+	pruned, discarded, err := pruneDiscardedAddedColumns(report, pruned)
 	if err != nil {
 		return nil, &SchemaEvolutionError{Message: err.Error()}
 	}
@@ -257,6 +409,52 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 		"added_columns": discarded,
 	})
 	return pruned, nil
+}
+
+func pruneDiscardedAddedTables(report drift.Report, tables []source.Table) ([]source.Table, int) {
+	discardTables := addedTablesSet(report)
+	if len(discardTables) == 0 {
+		return tables, 0
+	}
+
+	pruned := make([]source.Table, 0, len(tables))
+	discarded := 0
+	for _, table := range tables {
+		if _, ok := discardTables[schemaEvolutionTableKey(table.Schema, table.Name)]; ok {
+			discarded++
+			continue
+		}
+		pruned = append(pruned, table)
+	}
+	return pruned, discarded
+}
+
+func findAddedSourceTables(report drift.Report, tables []source.Table) []source.Table {
+	added := addedTablesSet(report)
+	if len(added) == 0 {
+		return nil
+	}
+
+	out := make([]source.Table, 0, len(added))
+	for _, table := range tables {
+		if _, ok := added[schemaEvolutionTableKey(table.Schema, table.Name)]; ok {
+			out = append(out, table)
+		}
+	}
+	return out
+}
+
+func tableAddedInReport(report drift.Report, table source.Table) bool {
+	_, ok := addedTablesSet(report)[schemaEvolutionTableKey(table.Schema, table.Name)]
+	return ok
+}
+
+func addedTablesSet(report drift.Report) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, change := range tableAddedChanges(report) {
+		out[schemaEvolutionTableKey(change.Schema, change.TableName)] = struct{}{}
+	}
+	return out
 }
 
 func planAddedColumnEvolution(
@@ -675,6 +873,27 @@ func tableAddedChanges(report drift.Report) []drift.Change {
 	return changes
 }
 
+func tableDroppedChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		if change.Kind == drift.TableDropped {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func tableContractChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		switch change.Kind {
+		case drift.TableAdded, drift.TableDropped:
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
 func nullabilityChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
@@ -760,6 +979,16 @@ func findSourceColumn(tables []source.Table, change drift.Change) (source.Table,
 			table.Name, change.ObjectName)
 	}
 	return source.Table{}, source.Column{}, fmt.Errorf("schema evolution could not find source table %s.%s",
+		change.Schema, change.TableName)
+}
+
+func findSourceTable(tables []source.Table, change drift.Change) (source.Table, error) {
+	for _, table := range tables {
+		if table.Schema == change.Schema && table.Name == change.TableName {
+			return table, nil
+		}
+	}
+	return source.Table{}, fmt.Errorf("schema evolution could not find source table %s.%s",
 		change.Schema, change.TableName)
 }
 

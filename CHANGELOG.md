@@ -14,6 +14,11 @@ All notable changes to this project will be documented in this file.
 - Added DLT-style `migration.schema_contract` settings with `tables`,
   `columns`, and `data_type` entities, including DMT's `report` mode for
   report-only drift handling (#403).
+- Added table-level schema contract handling so `tables: evolve` creates newly
+  detected target tables before upsert transfer, finalizes configured secondary
+  DDL after transfer, and `tables: discard_row` skips newly added source tables
+  for the run (#405).
+- `tables: freeze` now blocks table add/drop drift before transfer (#405).
 
 ### Deprecated
 
