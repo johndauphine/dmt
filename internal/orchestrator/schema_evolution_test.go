@@ -998,6 +998,26 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			want: "columns=report",
 		},
 		{
+			name:   "schema contract resume discard still describes pruning",
+			report: addedColumnReport,
+			allow:  false,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
+			},
+			want: "omitted from target DDL",
+		},
+		{
+			name:   "schema contract resume freeze still describes abort",
+			report: addedColumnReport,
+			allow:  false,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractFreeze},
+			},
+			want: "columns=freeze",
+		},
+		{
 			name:   "schema contract data type report mode names report",
 			report: typeWidenedReport,
 			allow:  true,

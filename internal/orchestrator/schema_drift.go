@@ -124,16 +124,13 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 }
 
 func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSchemaEvolution bool) string {
-	if !allowSchemaEvolution {
-		return "Schema contract is configured, but no target ALTERs will be applied in read-only mode."
-	}
-
 	var parts []string
 	if part := schemaContractFooterPart(
 		"tables",
 		len(tableAddedChanges(report)),
 		"added table(s)",
 		o.config.Migration.SchemaContractTablesMode(),
+		allowSchemaEvolution,
 	); part != "" {
 		parts = append(parts, part)
 	}
@@ -142,6 +139,7 @@ func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSche
 		len(addedColumnChanges(report)),
 		"added column(s)",
 		o.config.Migration.SchemaContractColumnsMode(),
+		allowSchemaEvolution,
 	); part != "" {
 		parts = append(parts, part)
 	}
@@ -150,22 +148,30 @@ func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSche
 		len(nullabilityChanges(report))+len(typeChanges(report)),
 		"data type/nullability change(s)",
 		o.config.Migration.SchemaContractDataTypeMode(),
+		allowSchemaEvolution,
 	); part != "" {
 		parts = append(parts, part)
 	}
 	if len(parts) == 0 {
 		return "Schema contract is enabled, but this report contains no currently supported contract actions."
 	}
-	return "Schema contract " + strings.Join(parts, "; ") + "."
+	footer := "Schema contract " + strings.Join(parts, "; ") + "."
+	if !allowSchemaEvolution {
+		footer += " No target ALTERs will be applied in read-only mode."
+	}
+	return footer
 }
 
-func schemaContractFooterPart(entity string, count int, noun string, mode config.SchemaContractMode) string {
+func schemaContractFooterPart(entity string, count int, noun string, mode config.SchemaContractMode, allowSchemaEvolution bool) string {
 	if count == 0 {
 		return ""
 	}
 
 	switch mode {
 	case config.SchemaContractEvolve, "":
+		if !allowSchemaEvolution {
+			return fmt.Sprintf("%s=evolve; %d %s will be reported only in read-only mode", entity, count, noun)
+		}
 		return fmt.Sprintf("%s=evolve; %d %s will follow target_mode behavior", entity, count, noun)
 	case config.SchemaContractFreeze:
 		return fmt.Sprintf("%s=freeze; %d %s will abort before transfer", entity, count, noun)
