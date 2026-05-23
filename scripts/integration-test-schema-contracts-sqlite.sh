@@ -135,6 +135,23 @@ latest_snapshot_json() {
     state_sql "SELECT schema_json FROM schema_snapshots WHERE table_name = '$table' ORDER BY id DESC LIMIT 1;"
 }
 
+snapshot_count() {
+    local table="$1"
+    state_sql "SELECT COUNT(*) FROM schema_snapshots WHERE table_name = '$table';"
+}
+
+assert_snapshot_appended() {
+    local table="$1"
+    local before="$2"
+    assert_eq "snapshot $table appended" "$(snapshot_count "$table")" "$((before + 1))"
+}
+
+assert_snapshot_unchanged() {
+    local table="$1"
+    local before="$2"
+    assert_eq "snapshot $table unchanged" "$(snapshot_count "$table")" "$before"
+}
+
 assert_snapshot_contains() {
     local table="$1"
     local needle="$2"
@@ -183,6 +200,8 @@ SQL
 echo ""
 echo "=== Scenario: tables=evolve and columns=evolve ==="
 reset_case "tables-columns-evolve"
+before_users_snapshots="$(snapshot_count "users")"
+before_announcements_snapshots="$(snapshot_count "source_announcements")"
 sqlite3 "$SQLITE_CONTRACT_SOURCE_DB" <<'SQL'
 ALTER TABLE users ADD COLUMN nickname VARCHAR(40) NULL;
 UPDATE users SET nickname = 'countess' WHERE id = 1;
@@ -196,20 +215,25 @@ run_dmt "upsert" "evolve" "evolve" "report" "tables-columns-evolve: contract fol
 assert_target_sql "evolved table row count" "SELECT COUNT(*) FROM source_announcements;" "2"
 assert_target_sql "evolved column value transferred" "SELECT nickname FROM users WHERE id = 1;" "countess"
 assert_target_sql "evolved column exists on target" "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'nickname';" "1"
+assert_snapshot_appended "users" "$before_users_snapshots"
+assert_snapshot_appended "source_announcements" "$before_announcements_snapshots"
 assert_snapshot_contains "users" '"name":"nickname"'
 assert_snapshot_contains "source_announcements" '"name":"source_announcements"'
 
 echo ""
 echo "=== Scenario: columns=freeze ==="
 reset_case "columns-freeze"
+before_users_snapshots="$(snapshot_count "users")"
 sqlite3 "$SQLITE_CONTRACT_SOURCE_DB" "ALTER TABLE users ADD COLUMN frozen_note TEXT NULL;"
 run_dmt_expect_fail "upsert" "report" "freeze" "report" "columns-freeze: contract follow-up"
 assert_target_sql "frozen column not added" "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'frozen_note';" "0"
+assert_snapshot_unchanged "users" "$before_users_snapshots"
 assert_snapshot_omits "users" '"name":"frozen_note"'
 
 echo ""
 echo "=== Scenario: columns=discard_value ==="
 reset_case "columns-discard-value"
+before_users_snapshots="$(snapshot_count "users")"
 sqlite3 "$SQLITE_CONTRACT_SOURCE_DB" <<'SQL'
 ALTER TABLE users ADD COLUMN ignored_note TEXT NULL;
 UPDATE users SET name = 'Ada Lovelace', ignored_note = 'hidden' WHERE id = 1;
@@ -220,11 +244,14 @@ run_dmt "upsert" "report" "discard_value" "report" "columns-discard-value: contr
 assert_target_sql "discarded column absent" "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'ignored_note';" "0"
 assert_target_sql "non-discarded update transferred" "SELECT name FROM users WHERE id = 1;" "Ada Lovelace"
 assert_target_sql "new row transferred without discarded column" "SELECT COUNT(*) FROM users;" "3"
+assert_snapshot_appended "users" "$before_users_snapshots"
 assert_snapshot_omits "users" '"name":"ignored_note"'
 
 echo ""
 echo "=== Scenario: columns=discard_row ==="
 reset_case "columns-discard-row"
+before_users_snapshots="$(snapshot_count "users")"
+before_orders_snapshots="$(snapshot_count "orders")"
 sqlite3 "$SQLITE_CONTRACT_SOURCE_DB" <<'SQL'
 ALTER TABLE users ADD COLUMN row_contract_note TEXT NULL;
 UPDATE users SET name = 'Ada skipped', row_contract_note = 'skip this table' WHERE id = 1;
@@ -237,27 +264,33 @@ assert_target_sql "discard_row leaves users row count unchanged" "SELECT COUNT(*
 assert_target_sql "discard_row skips users update" "SELECT name FROM users WHERE id = 1;" "Ada"
 assert_target_sql "discard_row leaves target schema unchanged" "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'row_contract_note';" "0"
 assert_target_sql "unaffected table still transfers" "SELECT amount FROM orders WHERE id = 10;" "777"
+assert_snapshot_unchanged "users" "$before_users_snapshots"
+assert_snapshot_appended "orders" "$before_orders_snapshots"
 assert_snapshot_omits "users" '"name":"row_contract_note"'
 
 echo ""
 echo "=== Scenario: data_type=freeze ==="
 reset_case "data-type-freeze"
 baseline_age_target_type="$(target_column_type "users" "age")"
+before_users_snapshots="$(snapshot_count "users")"
 rebuild_users_with_age_type "TEXT"
 run_dmt_expect_fail "upsert" "report" "report" "freeze" "data-type-freeze: contract follow-up"
 assert_eq "frozen data type target unchanged" "$(target_column_type "users" "age")" "$baseline_age_target_type"
+assert_snapshot_unchanged "users" "$before_users_snapshots"
 assert_snapshot_contains "users" '"name":"age","data_type":"integer"'
 
 echo ""
 echo "=== Scenario: data_type=discard_value ==="
 reset_case "data-type-discard-value"
 baseline_age_target_type="$(target_column_type "users" "age")"
+before_users_snapshots="$(snapshot_count "users")"
 rebuild_users_with_age_type "BIGINT"
 sqlite3 "$SQLITE_CONTRACT_SOURCE_DB" "UPDATE users SET name = 'Ada type discard', age = 99 WHERE id = 1;"
 run_dmt "upsert" "report" "report" "discard_value" "data-type-discard-value: contract follow-up"
 assert_target_sql "data_type discard transfers unaffected column" "SELECT name FROM users WHERE id = 1;" "Ada type discard"
 assert_target_sql "data_type discard leaves omitted value unchanged" "SELECT age FROM users WHERE id = 1;" "34"
 assert_eq "data_type discard leaves target type unchanged" "$(target_column_type "users" "age")" "$baseline_age_target_type"
+assert_snapshot_appended "users" "$before_users_snapshots"
 assert_snapshot_contains "users" '"name":"age","data_type":"integer"'
 
 if [[ "$fail" -ne 0 ]]; then
