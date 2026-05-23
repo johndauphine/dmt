@@ -125,6 +125,33 @@ func TestBuildDropColumnNotNullSQL(t *testing.T) {
 	}
 }
 
+func TestBuildAlterColumnTypeSQL(t *testing.T) {
+	w := &Writer{
+		dialect:    &Dialect{},
+		typeMapper: driver.NewDeterministicMapper(),
+		sourceType: "postgres",
+	}
+	got, err := w.buildAlterColumnTypeSQL(
+		&driver.Table{Name: "Users"},
+		&driver.Column{Name: "Email", DataType: "varchar", MaxLength: 512, IsNullable: false},
+		"dbo",
+	)
+	if err != nil {
+		t.Fatalf("buildAlterColumnTypeSQL returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		"ALTER TABLE [dbo].[Users] ALTER COLUMN",
+		"[Email]",
+		"VARCHAR(512)",
+		"NOT NULL",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("SQL %q missing %q", got, want)
+		}
+	}
+}
+
 func TestFormatDateFilterTimestamp(t *testing.T) {
 	ts := time.Date(2024, 6, 15, 10, 30, 0, 123456700, time.FixedZone("CDT", -5*60*60))
 

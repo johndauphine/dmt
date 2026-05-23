@@ -68,6 +68,26 @@ func TestPlanAddedColumnEvolutionLogOnly(t *testing.T) {
 	}
 }
 
+func TestPlanAddedColumnEvolutionDiscardValue(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.AddedColumn,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "email",
+	}}}
+
+	actions, logOnly, err := planAddedColumnEvolution(report, nil, config.SchemaEvolutionDiscardValue)
+	if err != nil {
+		t.Fatalf("planAddedColumnEvolution returned error: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("actions = %+v, want empty", actions)
+	}
+	if len(logOnly) != 1 {
+		t.Fatalf("logOnly = %+v, want one change", logOnly)
+	}
+}
+
 func TestPlanAddedColumnEvolutionFailPolicy(t *testing.T) {
 	report := drift.Report{Changes: []drift.Change{{
 		Kind:       drift.AddedColumn,
@@ -131,6 +151,132 @@ func TestPlanAddedColumnEvolutionRejectsUnsafeColumns(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPruneDiscardedAddedColumnsRemovesColumnFromEffectiveSchema(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.AddedColumn,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "email",
+	}}}
+	table := source.Table{
+		Schema:     "dbo",
+		Name:       "Users",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false},
+			{Name: "name", DataType: "varchar", MaxLength: 100, IsNullable: true},
+			{Name: "email", DataType: "varchar", MaxLength: 255, IsNullable: true},
+		},
+		Indexes: []source.Index{
+			{Name: "idx_users_name", Columns: []string{"name"}},
+			{Name: "idx_users_email", Columns: []string{"email"}},
+		},
+		CheckConstraints: []source.CheckConstraint{
+			{Name: "chk_users_email", Definition: "email <> ''"},
+		},
+	}
+	table.PopulatePKColumns()
+
+	pruned, discarded, err := pruneDiscardedAddedColumns(report, []source.Table{table})
+	if err != nil {
+		t.Fatalf("pruneDiscardedAddedColumns returned error: %v", err)
+	}
+	if discarded != 1 {
+		t.Fatalf("discarded = %d, want 1", discarded)
+	}
+	if len(pruned) != 1 {
+		t.Fatalf("pruned table count = %d, want 1", len(pruned))
+	}
+	got := pruned[0]
+	if names := got.GetColumnNames(); strings.Join(names, ",") != "id,name" {
+		t.Fatalf("columns = %v, want [id name]", names)
+	}
+	if len(got.PKColumns) != 1 || got.PKColumns[0].Name != "id" {
+		t.Fatalf("PKColumns = %+v, want id metadata", got.PKColumns)
+	}
+	if len(got.Indexes) != 1 || got.Indexes[0].Name != "idx_users_name" {
+		t.Fatalf("Indexes = %+v, want only idx_users_name", got.Indexes)
+	}
+	if len(got.CheckConstraints) != 0 {
+		t.Fatalf("CheckConstraints = %+v, want discarded-column checks removed", got.CheckConstraints)
+	}
+	if len(table.Columns) != 3 {
+		t.Fatalf("original table mutated: columns = %+v", table.Columns)
+	}
+}
+
+func TestPruneDiscardedAddedColumnsRejectsPrimaryKeyColumn(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.AddedColumn,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "external_id",
+	}}}
+	table := source.Table{
+		Schema:     "dbo",
+		Name:       "Users",
+		PrimaryKey: []string{"id", "external_id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false},
+			{Name: "external_id", DataType: "int", IsNullable: false},
+		},
+	}
+	table.PopulatePKColumns()
+
+	_, _, err := pruneDiscardedAddedColumns(report, []source.Table{table})
+	if err == nil {
+		t.Fatal("pruneDiscardedAddedColumns returned nil error")
+	}
+	if !strings.Contains(err.Error(), "primary-key column") {
+		t.Fatalf("error = %q, want primary-key column", err.Error())
+	}
+	if !strings.Contains(err.Error(), "dbo.Users.external_id") {
+		t.Fatalf("error = %q, want fully qualified column name", err.Error())
+	}
+}
+
+func TestSchemaDriftReportFooterReadOnlyDoesNotReportDiscardForOtherPolicies(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
+	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+		TargetMode:      "upsert",
+		SchemaEvolution: &config.SchemaEvolutionConfig{},
+	}}}
+
+	got := o.schemaDriftReportFooter(report, false)
+	if !strings.Contains(got, "read-only mode") {
+		t.Fatalf("schemaDriftReportFooter() = %q, want read-only mode", got)
+	}
+	if strings.Contains(got, "discard_value") {
+		t.Fatalf("schemaDriftReportFooter() = %q, should not report discard_value for default auto policy", got)
+	}
+}
+
+func TestDefinitionContainsIdentifierMatchesWholeIdentifiers(t *testing.T) {
+	tests := []struct {
+		name       string
+		definition string
+		column     string
+		want       bool
+	}{
+		{name: "plain identifier", definition: "email <> ''", column: "email", want: true},
+		{name: "case insensitive", definition: "Email <> ''", column: "email", want: true},
+		{name: "bracket delimited", definition: "[Order Date] IS NOT NULL", column: "Order Date", want: true},
+		{name: "double quote delimited", definition: "\"Order Date\" IS NOT NULL", column: "Order Date", want: true},
+		{name: "substring is not match", definition: "customer_id > 0", column: "id", want: false},
+		{name: "suffix is not match", definition: "id2 > 0", column: "id", want: false},
+		{name: "prefix is not match", definition: "old_id > 0", column: "id", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := definitionContainsIdentifier(tt.definition, tt.column); got != tt.want {
+				t.Fatalf("definitionContainsIdentifier(%q, %q) = %v, want %v",
+					tt.definition, tt.column, got, tt.want)
 			}
 		})
 	}
@@ -348,6 +494,260 @@ func TestPlanNullabilityEvolutionRejectsPrimaryKeyDrift(t *testing.T) {
 	}
 }
 
+func TestPlanTypeEvolutionAutoWidensType(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.TypeWidened,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "display_name",
+		Previous:   "varchar(100)",
+		Current:    "varchar(255)",
+	}}}
+	tables := []source.Table{{
+		Schema:     "dbo",
+		Name:       "Users",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false},
+			{Name: "display_name", DataType: "varchar", MaxLength: 255, IsNullable: true},
+		},
+	}}
+
+	actions, logOnly, err := planTypeEvolution(report, tables, config.SchemaEvolutionAuto)
+	if err != nil {
+		t.Fatalf("planTypeEvolution returned error: %v", err)
+	}
+	if len(logOnly) != 0 {
+		t.Fatalf("logOnly = %+v, want empty", logOnly)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("actions = %+v, want one action", actions)
+	}
+	action := actions[0]
+	if action.Table.Name != "Users" || action.Column.Name != "display_name" {
+		t.Fatalf("action = %+v, want Users.display_name", action)
+	}
+	if action.Change.Kind != drift.TypeWidened {
+		t.Fatalf("change kind = %s, want %s", action.Change.Kind, drift.TypeWidened)
+	}
+}
+
+func TestPlanTypeEvolutionLogOnly(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.TypeWidened,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "display_name",
+		Previous:   "varchar(100)",
+		Current:    "varchar(255)",
+	}}}
+
+	actions, logOnly, err := planTypeEvolution(report, nil, config.SchemaEvolutionLog)
+	if err != nil {
+		t.Fatalf("planTypeEvolution returned error: %v", err)
+	}
+	if len(actions) != 0 {
+		t.Fatalf("actions = %+v, want empty", actions)
+	}
+	if len(logOnly) != 1 {
+		t.Fatalf("logOnly = %+v, want one change", logOnly)
+	}
+}
+
+func TestPlanTypeEvolutionFailPolicy(t *testing.T) {
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.TypeWidened,
+		Schema:     "dbo",
+		TableName:  "Users",
+		ObjectName: "display_name",
+		Previous:   "varchar(100)",
+		Current:    "varchar(255)",
+	}}}
+
+	_, _, err := planTypeEvolution(report, nil, config.SchemaEvolutionFail)
+	if err == nil {
+		t.Fatal("planTypeEvolution returned nil error")
+	}
+	if !strings.Contains(err.Error(), "type_change=fail") {
+		t.Fatalf("error = %q, want type_change=fail", err.Error())
+	}
+}
+
+func TestPlanTypeEvolutionRejectsUnsafeChanges(t *testing.T) {
+	tests := []struct {
+		name    string
+		change  drift.Change
+		table   source.Table
+		wantErr string
+	}{
+		{
+			name: "narrowed",
+			change: drift.Change{
+				Kind:       drift.TypeNarrowed,
+				Schema:     "dbo",
+				TableName:  "Users",
+				ObjectName: "display_name",
+				Previous:   "varchar(255)",
+				Current:    "varchar(100)",
+			},
+			table: source.Table{
+				Schema: "dbo",
+				Name:   "Users",
+				Columns: []source.Column{
+					{Name: "display_name", DataType: "varchar", MaxLength: 100, IsNullable: true},
+				},
+			},
+			wantErr: "cannot auto-apply type_narrowed",
+		},
+		{
+			name: "lossy",
+			change: drift.Change{
+				Kind:       drift.TypeChangedLossy,
+				Schema:     "dbo",
+				TableName:  "Users",
+				ObjectName: "score",
+				Previous:   "integer",
+				Current:    "varchar(50)",
+			},
+			table: source.Table{
+				Schema: "dbo",
+				Name:   "Users",
+				Columns: []source.Column{
+					{Name: "score", DataType: "varchar", MaxLength: 50, IsNullable: true},
+				},
+			},
+			wantErr: "cannot auto-apply type_changed_lossy",
+		},
+		{
+			name: "primary key",
+			change: drift.Change{
+				Kind:       drift.TypeWidened,
+				Schema:     "dbo",
+				TableName:  "Users",
+				ObjectName: "id",
+				Previous:   "int",
+				Current:    "bigint",
+			},
+			table: source.Table{
+				Schema:     "dbo",
+				Name:       "Users",
+				PrimaryKey: []string{"id"},
+				Columns: []source.Column{
+					{Name: "id", DataType: "bigint", IsNullable: false},
+				},
+			},
+			wantErr: "primary-key column",
+		},
+		{
+			name: "identity",
+			change: drift.Change{
+				Kind:       drift.TypeWidened,
+				Schema:     "dbo",
+				TableName:  "Users",
+				ObjectName: "external_id",
+				Previous:   "int",
+				Current:    "bigint",
+			},
+			table: source.Table{
+				Schema: "dbo",
+				Name:   "Users",
+				Columns: []source.Column{
+					{Name: "external_id", DataType: "bigint", IsIdentity: true, IsNullable: false},
+				},
+			},
+			wantErr: "identity column",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := drift.Report{Changes: []drift.Change{tt.change}}
+			_, _, err := planTypeEvolution(report, []source.Table{tt.table}, config.SchemaEvolutionAuto)
+			if err == nil {
+				t.Fatal("planTypeEvolution returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPlanTypeEvolutionRejectsCoupledColumnDrift(t *testing.T) {
+	tests := []struct {
+		name    string
+		extra   drift.Change
+		wantErr string
+	}{
+		{
+			name: "nullability",
+			extra: drift.Change{
+				Kind:       drift.NullabilityChange,
+				Schema:     "dbo",
+				TableName:  "Users",
+				ObjectName: "display_name",
+				Previous:   "NOT NULL",
+				Current:    "NULL",
+			},
+			wantErr: "nullability drift",
+		},
+		{
+			name: "default",
+			extra: drift.Change{
+				Kind:       drift.DefaultChange,
+				Schema:     "dbo",
+				TableName:  "Users",
+				ObjectName: "display_name",
+				Previous:   "'old'",
+				Current:    "'new'",
+			},
+			wantErr: "default drift",
+		},
+		{
+			name: "primary key drift",
+			extra: drift.Change{
+				Kind:      drift.PKChange,
+				Schema:    "dbo",
+				TableName: "Users",
+				Previous:  "display_name",
+				Current:   "id",
+			},
+			wantErr: "primary-key drift",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := drift.Report{Changes: []drift.Change{
+				{
+					Kind:       drift.TypeWidened,
+					Schema:     "dbo",
+					TableName:  "Users",
+					ObjectName: "display_name",
+					Previous:   "varchar(100)",
+					Current:    "varchar(255)",
+				},
+				tt.extra,
+			}}
+			tables := []source.Table{{
+				Schema: "dbo",
+				Name:   "Users",
+				Columns: []source.Column{
+					{Name: "display_name", DataType: "varchar", MaxLength: 255, IsNullable: true},
+				},
+			}}
+
+			_, _, err := planTypeEvolution(report, tables, config.SchemaEvolutionAuto)
+			if err == nil {
+				t.Fatal("planTypeEvolution returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
 	nullabilityReport := drift.Report{Changes: []drift.Change{{
@@ -356,6 +756,13 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 		ObjectName: "email",
 		Previous:   "NOT NULL",
 		Current:    "NULL",
+	}}}
+	typeReport := drift.Report{Changes: []drift.Change{{
+		Kind:       drift.TypeWidened,
+		TableName:  "Users",
+		ObjectName: "display_name",
+		Previous:   "varchar(100)",
+		Current:    "varchar(255)",
 	}}}
 
 	tests := []struct {
@@ -385,6 +792,12 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 				AddedColumn: config.SchemaEvolutionFail,
 			},
 		}, want: true},
+		{name: "discard policy prunes without target step", migration: config.MigrationConfig{
+			TargetMode: "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionDiscardValue,
+			},
+		}, want: false},
 		{name: "nullability enabled", migration: config.MigrationConfig{
 			TargetMode:      "upsert",
 			SchemaEvolution: &config.SchemaEvolutionConfig{},
@@ -395,6 +808,22 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 				NullabilityChange: config.SchemaEvolutionLog,
 			},
 		}, want: false, report: nullabilityReport},
+		{name: "type change omitted reports only", migration: config.MigrationConfig{
+			TargetMode:      "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{},
+		}, want: false, report: typeReport},
+		{name: "type change auto runs gate", migration: config.MigrationConfig{
+			TargetMode: "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{
+				TypeChange: config.SchemaEvolutionAuto,
+			},
+		}, want: true, report: typeReport},
+		{name: "type change fail runs gate", migration: config.MigrationConfig{
+			TargetMode: "upsert",
+			SchemaEvolution: &config.SchemaEvolutionConfig{
+				TypeChange: config.SchemaEvolutionFail,
+			},
+		}, want: true, report: typeReport},
 		{name: "unsupported drift only", migration: config.MigrationConfig{
 			TargetMode:      "upsert",
 			SchemaEvolution: &config.SchemaEvolutionConfig{},
@@ -418,6 +847,8 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *testing.T) {
 	addedColumnReport := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
 	nullabilityReport := drift.Report{Changes: []drift.Change{{Kind: drift.NullabilityChange, TableName: "Users"}}}
+	typeWidenedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TypeWidened, TableName: "Users", ObjectName: "name"}}}
+	typeNarrowedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TypeNarrowed, TableName: "Users", ObjectName: "name"}}}
 	unsupportedReport := drift.Report{Changes: []drift.Change{{Kind: drift.DroppedColumn, TableName: "Users"}}}
 
 	tests := []struct {
@@ -435,6 +866,15 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			want:      "read-only mode",
 		},
 		{
+			name:   "resume discard policy describes effective pruning",
+			report: addedColumnReport,
+			allow:  false,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionDiscardValue,
+			}},
+			want: "omitted from target DDL, transfer, validation, and schema snapshots",
+		},
+		{
 			name:      "auto added columns may apply",
 			report:    addedColumnReport,
 			allow:     true,
@@ -447,6 +887,31 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			allow:     true,
 			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
 			want:      "nullability_change=auto",
+		},
+		{
+			name:      "type changes default to report only",
+			report:    typeWidenedReport,
+			allow:     true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{}},
+			want:      "type_change=log",
+		},
+		{
+			name:   "auto widened type changes may apply",
+			report: typeWidenedReport,
+			allow:  true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				TypeChange: config.SchemaEvolutionAuto,
+			}},
+			want: "widened type change",
+		},
+		{
+			name:   "auto narrowed type changes abort",
+			report: typeNarrowedReport,
+			allow:  true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				TypeChange: config.SchemaEvolutionAuto,
+			}},
+			want: "will abort",
 		},
 		{
 			name:   "log policy reports only",
@@ -465,6 +930,24 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 				AddedColumn: config.SchemaEvolutionFail,
 			}},
 			want: "will abort",
+		},
+		{
+			name:   "discard policy names omitted transfer",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{TargetMode: "upsert", SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionDiscardValue,
+			}},
+			want: "discard_value",
+		},
+		{
+			name:   "discard policy works outside upsert",
+			report: addedColumnReport,
+			allow:  true,
+			migration: config.MigrationConfig{TargetMode: "drop_recreate", SchemaEvolution: &config.SchemaEvolutionConfig{
+				AddedColumn: config.SchemaEvolutionDiscardValue,
+			}},
+			want: "omitted from target DDL",
 		},
 		{
 			name:      "unsupported drift only",

@@ -14,6 +14,13 @@ All notable changes to this project will be documented in this file.
 - Fixed PR review text artifacts by rendering SmartConfig YAML comments with
   ASCII status labels and documenting MySQL enum escaped quotes with the
   correct doubled single-quote form (#393).
+- Hardened architecture follow-up paths after the review epic: force-resume
+  now rejects incompatible config drift, ROW_NUMBER resume/runtime tuning
+  have targeted regression coverage, drop-recreate recovery/finalization paths
+  are clearer and safer, and AI fallback calls support `max_requests` with
+  table-DDL in-flight deduplication (#388, #389, #390, #391, #392).
+
+## [5.1.0] - 2026-05-22
 
 ### Added
 
@@ -60,6 +67,12 @@ All notable changes to this project will be documented in this file.
 - Added an MSSQL → Postgres schema-evolution integration test that proves
   `added_column: auto` alters the target and transfers the new column value
   during a follow-up upsert run (#306).
+- Added `migration.schema_evolution.added_column: discard_value` (with
+  `discard` alias) to keep transferring rows while omitting newly added source
+  columns from target DDL, writes, validation, and schema snapshots.
+- Added explicit `migration.schema_evolution.type_change` policy support so
+  operators can opt into widened source type ALTERs while keeping narrowed and
+  lossy type drift guarded (#395).
 - Added an MSSQL → Postgres daily-driver integration test that proves a
   `drop_recreate` baseline seeds date-column watermarks, one changed source
   row transfers during the next `upsert`, and an unchanged follow-up transfers
@@ -149,11 +162,6 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- Hardened architecture follow-up paths after the review epic: force-resume
-  now rejects incompatible config drift, ROW_NUMBER resume/runtime tuning
-  have targeted regression coverage, drop-recreate recovery/finalization paths
-  are clearer and safer, and AI fallback calls support `max_requests` with
-  table-DDL in-flight deduplication (#388, #389, #390, #391, #392).
 - Run summaries and superseded-run detection now use newest-inserted ordering
   when multiple runs share the same SQLite timestamp second, avoiding stale
   completion output and same-second resume ambiguity (#308).

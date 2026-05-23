@@ -128,9 +128,11 @@ type AITypeMappingConfig struct {
 type SchemaEvolutionPolicy string
 
 const (
-	SchemaEvolutionAuto SchemaEvolutionPolicy = "auto"
-	SchemaEvolutionLog  SchemaEvolutionPolicy = "log"
-	SchemaEvolutionFail SchemaEvolutionPolicy = "fail"
+	SchemaEvolutionAuto         SchemaEvolutionPolicy = "auto"
+	SchemaEvolutionLog          SchemaEvolutionPolicy = "log"
+	SchemaEvolutionFail         SchemaEvolutionPolicy = "fail"
+	SchemaEvolutionDiscard      SchemaEvolutionPolicy = "discard"
+	SchemaEvolutionDiscardValue SchemaEvolutionPolicy = "discard_value"
 )
 
 // SchemaEvolutionConfig controls opt-in target schema changes after source
@@ -142,6 +144,9 @@ type SchemaEvolutionConfig struct {
 	// NullabilityChange controls source nullability drift. Auto only relaxes
 	// target columns from NOT NULL to NULL; tightening remains a hard error.
 	NullabilityChange SchemaEvolutionPolicy `yaml:"nullability_change,omitempty" json:"nullability_change,omitempty"`
+	// TypeChange controls source data type drift. Omitted values stay log-only
+	// so widening target ALTERs require an explicit opt-in.
+	TypeChange SchemaEvolutionPolicy `yaml:"type_change,omitempty" json:"type_change,omitempty"`
 }
 
 // NotifyConfig controls migration completion notifications. Nil fields default
@@ -370,6 +375,9 @@ func (m MigrationConfig) AddedColumnSchemaEvolutionPolicy() SchemaEvolutionPolic
 	if m.SchemaEvolution.AddedColumn == "" {
 		return SchemaEvolutionAuto
 	}
+	if m.SchemaEvolution.AddedColumn == SchemaEvolutionDiscard {
+		return SchemaEvolutionDiscardValue
+	}
 	return m.SchemaEvolution.AddedColumn
 }
 
@@ -384,6 +392,16 @@ func (m MigrationConfig) NullabilityChangeSchemaEvolutionPolicy() SchemaEvolutio
 		return SchemaEvolutionAuto
 	}
 	return m.SchemaEvolution.NullabilityChange
+}
+
+// TypeChangeSchemaEvolutionPolicy returns the effective type-change policy.
+// Type evolution can rewrite target storage, so it stays log-only unless the
+// operator explicitly opts into migration.schema_evolution.type_change.
+func (m MigrationConfig) TypeChangeSchemaEvolutionPolicy() SchemaEvolutionPolicy {
+	if m.SchemaEvolution == nil || m.SchemaEvolution.TypeChange == "" {
+		return SchemaEvolutionLog
+	}
+	return m.SchemaEvolution.TypeChange
 }
 
 // NotifyOnSuccess reports whether successful completion notifications should

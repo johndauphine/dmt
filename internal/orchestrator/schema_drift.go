@@ -64,13 +64,29 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 }
 
 func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
-	if !allowSchemaEvolution || !o.config.Migration.SchemaEvolutionEnabled() {
+	if !o.config.Migration.SchemaEvolutionEnabled() {
 		return "No automatic schema alignment will be applied (read-only mode)."
 	}
 	if o.config.Migration.FailOnSchemaDrift {
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
 	}
+	if !allowSchemaEvolution {
+		if o.config.Migration.AddedColumnSchemaEvolutionPolicy() == config.SchemaEvolutionDiscardValue {
+			if part := addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))); part != "" {
+				return fmt.Sprintf("Schema evolution %s. No target ALTERs will be applied in read-only mode.", part)
+			}
+		}
+		return "No automatic schema alignment will be applied (read-only mode)."
+	}
 	if o.config.Migration.TargetMode != "upsert" {
+		addedPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
+		if addedPolicy == config.SchemaEvolutionDiscardValue && len(addedColumnChanges(report)) > 0 {
+			return fmt.Sprintf(
+				"Schema evolution %s. target_mode=%s will not apply target ALTERs for other changes.",
+				addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))),
+				o.config.Migration.TargetMode,
+			)
+		}
 		return fmt.Sprintf("Schema evolution is configured, but target_mode=%s will not apply target ALTERs.",
 			o.config.Migration.TargetMode)
 	}
@@ -92,6 +108,9 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 	); part != "" {
 		parts = append(parts, part)
 	}
+	if part := typeChangeFooterPart(report, o.config.Migration.TypeChangeSchemaEvolutionPolicy()); part != "" {
+		parts = append(parts, part)
+	}
 	if len(parts) == 0 {
 		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
 	}
@@ -110,9 +129,48 @@ func schemaEvolutionFooterPart(kind string, count int, noun string, policy confi
 		return fmt.Sprintf("%s=log; %d %s will be reported only", kind, count, noun)
 	case config.SchemaEvolutionFail:
 		return fmt.Sprintf("%s=fail; %d %s will abort before transfer", kind, count, noun)
+	case config.SchemaEvolutionDiscard, config.SchemaEvolutionDiscardValue:
+		return fmt.Sprintf("%s=discard_value; %d %s will be omitted from target DDL, transfer, validation, and schema snapshots",
+			kind, count, noun)
 	default:
 		return fmt.Sprintf("%s policy is invalid", kind)
 	}
+}
+
+func typeChangeFooterPart(report drift.Report, policy config.SchemaEvolutionPolicy) string {
+	changes := typeChanges(report)
+	if len(changes) == 0 {
+		return ""
+	}
+
+	if policy != config.SchemaEvolutionAuto {
+		return schemaEvolutionFooterPart("type_change", len(changes), "type change(s)", policy)
+	}
+
+	widened := 0
+	unsafe := 0
+	for _, change := range changes {
+		if change.Kind == drift.TypeWidened {
+			widened++
+		} else {
+			unsafe++
+		}
+	}
+	if unsafe == 0 {
+		return fmt.Sprintf("type_change=auto; %d widened type change(s) may be applied before transfer", widened)
+	}
+	if widened == 0 {
+		return fmt.Sprintf("type_change=auto; %d narrowed/lossy type change(s) will abort before transfer", unsafe)
+	}
+	return fmt.Sprintf("type_change=auto; %d widened type change(s) may be applied before transfer; %d narrowed/lossy type change(s) will abort before transfer",
+		widened, unsafe)
+}
+
+func addedColumnDiscardValueFooterPart(count int) string {
+	if count == 0 {
+		return ""
+	}
+	return fmt.Sprintf("added_column=discard_value; %d added column(s) will be omitted from target DDL, transfer, validation, and schema snapshots", count)
 }
 
 func (o *Orchestrator) captureSchemaSnapshots(runID string, tables []source.Table) {

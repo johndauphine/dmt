@@ -25,6 +25,9 @@ type Writer interface {
 	// DropColumnNotNull relaxes an existing target column from NOT NULL to
 	// NULL using source column metadata for dialects that require a full type.
 	DropColumnNotNull(ctx context.Context, t *Table, column *Column, targetSchema string) error
+	// AlterColumnType changes an existing target column to the mapped current
+	// source type. Callers are responsible for limiting this to safe changes.
+	AlterColumnType(ctx context.Context, t *Table, column *Column, targetSchema string) error
 	DropTable(ctx context.Context, schema, table string) error
 	TruncateTable(ctx context.Context, schema, table string) error
 	TableExists(ctx context.Context, schema, table string) (bool, error)

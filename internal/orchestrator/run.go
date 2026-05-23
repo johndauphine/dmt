@@ -177,6 +177,12 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return err
 	}
+	tables, err = o.effectiveTablesForSchemaEvolution(schemaDriftReport, tables)
+	if err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
+	}
 
 	o.tables = tables
 	o.progress.SetTablesTotal(len(tables))

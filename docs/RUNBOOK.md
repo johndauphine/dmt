@@ -410,7 +410,10 @@ The report groups changes by table and labels the category:
    target can be rebuilt and run normally.
 2. For `upsert` mode, add the corresponding target columns or run a
    controlled `drop_recreate` refresh before trusting the incremental
-   run.
+   run. For known-safe drift, consider `migration.schema_evolution`
+   policies such as `added_column: auto`, `added_column: discard_value`,
+   `nullability_change: auto`, or explicit `type_change: auto` for
+   widened source types.
 3. For dropped columns, narrowed types, lossy type changes, or primary
    key changes, pause promotion and get an explicit schema migration
    decision from the data owner.
@@ -558,7 +561,7 @@ If you're seeing this symptom, you're either on a pre-#255 build, or
 the state file was created by a pre-#255 binary and lacks the
 `sync_timestamps:` section.
 
-**Recover by**: Upgrade dmt past v[unreleased] (the version that
+**Recover by**: Upgrade dmt to v5.0.0 or later (the version that
 includes #255). After the upgrade, the first incremental run
 populates the timestamps; the second run is fast as designed.
 
@@ -578,7 +581,7 @@ which allowed silent plaintext fallback. Operators who thought they
 were on TLS could have been transmitting credentials and data in the
 clear.
 
-**Recover by**: Upgrade to dmt v[unreleased] or later. If you really
+**Recover by**: Upgrade to dmt v5.0.0 or later. If you really
 need downgradeable TLS (e.g., to a non-TLS local Docker test
 instance), set `ssl_mode: preferred` explicitly — that branch still
 maps to `tls=preferred`, but it's now an opt-in. For non-TLS local

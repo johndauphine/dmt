@@ -91,10 +91,12 @@ migration:
   # Schema evolution (#306). Omit this section to keep schema drift
   # reporting read-only. In upsert mode, adding this section opts into
   # compatible target ALTERs before transfer. Today this supports added
-  # columns and safe nullability relaxation (NOT NULL -> NULL).
+  # columns, safe nullability relaxation (NOT NULL -> NULL), and opt-in
+  # type widening.
   # schema_evolution:
-  #   added_column: auto          # auto | log | fail (section default: auto)
+  #   added_column: auto          # auto | log | fail | discard_value | discard (section default: auto)
   #   nullability_change: auto    # auto | log | fail; auto only relaxes to NULL
+  #   type_change: log            # auto | log | fail; auto only applies widened source types (default: log)
 
   # Validation options
   sample_validation: false      # Enable sample data validation after row count check

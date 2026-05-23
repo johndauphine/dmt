@@ -98,10 +98,11 @@ func (c *Config) validate() error {
 
 	if c.Migration.SchemaEvolution != nil {
 		switch c.Migration.SchemaEvolution.AddedColumn {
-		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail:
+		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail,
+			SchemaEvolutionDiscard, SchemaEvolutionDiscardValue:
 			// Valid. Empty means the section-level default: auto.
 		default:
-			return fmt.Errorf("migration.schema_evolution.added_column must be 'auto', 'log', or 'fail'; got %q",
+			return fmt.Errorf("migration.schema_evolution.added_column must be 'auto', 'log', 'fail', 'discard_value', or 'discard'; got %q",
 				c.Migration.SchemaEvolution.AddedColumn)
 		}
 		switch c.Migration.SchemaEvolution.NullabilityChange {
@@ -110,6 +111,13 @@ func (c *Config) validate() error {
 		default:
 			return fmt.Errorf("migration.schema_evolution.nullability_change must be 'auto', 'log', or 'fail'; got %q",
 				c.Migration.SchemaEvolution.NullabilityChange)
+		}
+		switch c.Migration.SchemaEvolution.TypeChange {
+		case "", SchemaEvolutionAuto, SchemaEvolutionLog, SchemaEvolutionFail:
+			// Valid. Empty means log-only; type evolution requires explicit opt-in.
+		default:
+			return fmt.Errorf("migration.schema_evolution.type_change must be 'auto', 'log', or 'fail'; got %q",
+				c.Migration.SchemaEvolution.TypeChange)
 		}
 	}
 
