@@ -2212,6 +2212,9 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	if disabled.SchemaEvolutionEnabled() {
 		t.Fatal("SchemaEvolutionEnabled() = true, want false")
 	}
+	if got := disabled.SchemaEvolutionDeprecationWarning(); got != "" {
+		t.Fatalf("disabled deprecation warning = %q, want empty", got)
+	}
 	if got := disabled.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
 		t.Fatalf("disabled added-column policy = %q, want %q", got, SchemaEvolutionLog)
 	}
@@ -2225,6 +2228,17 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	enabled := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{}}
 	if !enabled.SchemaEvolutionEnabled() {
 		t.Fatal("SchemaEvolutionEnabled() = false, want true")
+	}
+	warning := enabled.SchemaEvolutionDeprecationWarning()
+	for _, want := range []string{
+		"migration.schema_evolution is deprecated",
+		"migration.schema_contract",
+		"Existing schema_evolution behavior still runs for now",
+		"#403",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("deprecation warning missing %q in %q", want, warning)
+		}
 	}
 	if got := enabled.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionAuto {
 		t.Fatalf("enabled default added-column policy = %q, want %q", got, SchemaEvolutionAuto)
@@ -2244,6 +2258,30 @@ func TestSchemaEvolutionPolicyDefaults(t *testing.T) {
 	discardAlias := MigrationConfig{SchemaEvolution: &SchemaEvolutionConfig{AddedColumn: SchemaEvolutionDiscard}}
 	if got := discardAlias.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionDiscardValue {
 		t.Fatalf("discard alias added-column policy = %q, want %q", got, SchemaEvolutionDiscardValue)
+	}
+}
+
+func TestLoadBytesWarnsForDeprecatedSchemaEvolution(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	var logs strings.Builder
+	logging.SetOutput(&logs)
+	oldLevel := logging.GetLevel()
+	logging.SetLevel(logging.LevelInfo)
+	t.Cleanup(func() {
+		logging.SetOutput(os.Stdout)
+		logging.SetLevel(oldLevel)
+	})
+
+	_, err := LoadBytes(minConfigYAML(`  target_mode: upsert
+  schema_evolution:
+    added_column: auto
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes() error: %v", err)
+	}
+	if got := logs.String(); !strings.Contains(got, "migration.schema_evolution is deprecated") {
+		t.Fatalf("expected schema evolution deprecation warning, got:\n%s", got)
 	}
 }
 

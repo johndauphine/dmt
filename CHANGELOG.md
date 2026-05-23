@@ -9,6 +9,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Deprecated
+
+- `migration.schema_evolution` now emits a runtime deprecation warning because
+  it will be replaced by DLT-style `migration.schema_contract` settings for
+  tables, columns, and data_type (#403).
+
 ### Fixed
 
 - Fixed PR review text artifacts by rendering SmartConfig YAML comments with

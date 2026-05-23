@@ -149,6 +149,12 @@ type SchemaEvolutionConfig struct {
 	TypeChange SchemaEvolutionPolicy `yaml:"type_change,omitempty" json:"type_change,omitempty"`
 }
 
+const schemaEvolutionDeprecationWarning = `migration.schema_evolution is deprecated; ` +
+	`it will be replaced by DLT-style migration.schema_contract settings for ` +
+	`tables, columns, and data_type in a future release. Existing ` +
+	`schema_evolution behavior still runs for now, but new configs should not ` +
+	`add this legacy section. See issue #403.`
+
 // NotifyConfig controls migration completion notifications. Nil fields default
 // to true so existing Slack behavior is preserved when a webhook is configured.
 type NotifyConfig struct {
@@ -363,6 +369,15 @@ func (m MigrationConfig) CreateForeignKeysEnabled() bool {
 // schema evolution by adding migration.schema_evolution to the config.
 func (m MigrationConfig) SchemaEvolutionEnabled() bool {
 	return m.SchemaEvolution != nil
+}
+
+// SchemaEvolutionDeprecationWarning returns the user-facing warning for
+// configs that still opt into the legacy schema evolution section.
+func (m MigrationConfig) SchemaEvolutionDeprecationWarning() string {
+	if m.SchemaEvolution == nil {
+		return ""
+	}
+	return schemaEvolutionDeprecationWarning
 }
 
 // AddedColumnSchemaEvolutionPolicy returns the effective added-column policy.
