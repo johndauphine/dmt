@@ -24,7 +24,11 @@ func (c *Config) applyDefaults() error {
 	// drained.
 	c.normalizeRuntimeTuningFields()
 	if warning := c.Migration.SchemaEvolutionDeprecationWarning(); warning != "" {
-		logging.Warn("%s", warning)
+		logging.WarnEvent(warning,
+			"config_key", "migration.schema_evolution",
+			"replacement", "migration.schema_contract",
+			"issue", "#403",
+		)
 	}
 
 	// Capture original values before auto-tuning

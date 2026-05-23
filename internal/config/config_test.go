@@ -2266,10 +2266,12 @@ func TestLoadBytesWarnsForDeprecatedSchemaEvolution(t *testing.T) {
 
 	var logs strings.Builder
 	logging.SetOutput(&logs)
+	logging.SetFormat("text")
 	oldLevel := logging.GetLevel()
 	logging.SetLevel(logging.LevelInfo)
 	t.Cleanup(func() {
 		logging.SetOutput(os.Stdout)
+		logging.SetFormat("text")
 		logging.SetLevel(oldLevel)
 	})
 
@@ -2282,6 +2284,8 @@ func TestLoadBytesWarnsForDeprecatedSchemaEvolution(t *testing.T) {
 	}
 	if got := logs.String(); !strings.Contains(got, "migration.schema_evolution is deprecated") {
 		t.Fatalf("expected schema evolution deprecation warning, got:\n%s", got)
+	} else if !strings.Contains(got, "config_key=migration.schema_evolution") {
+		t.Fatalf("expected structured config key on warning, got:\n%s", got)
 	}
 }
 
