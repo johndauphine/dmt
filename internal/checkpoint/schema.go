@@ -12,6 +12,7 @@ func (s *State) migrate() error {
 		id TEXT PRIMARY KEY,
 		started_at TEXT NOT NULL,
 		completed_at TEXT,
+		last_heartbeat TEXT,
 		status TEXT NOT NULL DEFAULT 'running',
 		phase TEXT NOT NULL DEFAULT 'initializing',
 		source_schema TEXT NOT NULL,
@@ -202,6 +203,7 @@ func (s *State) ensureRunColumns() error {
 	needsError := true
 	needsPhase := true
 	needsConfigHash := true
+	needsLastHeartbeat := true
 	for _, col := range columns {
 		switch col {
 		case "profile_name":
@@ -214,6 +216,8 @@ func (s *State) ensureRunColumns() error {
 			needsPhase = false
 		case "config_hash":
 			needsConfigHash = false
+		case "last_heartbeat":
+			needsLastHeartbeat = false
 		}
 	}
 
@@ -239,6 +243,11 @@ func (s *State) ensureRunColumns() error {
 	}
 	if needsConfigHash {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN config_hash TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsLastHeartbeat {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN last_heartbeat TEXT`); err != nil {
 			return err
 		}
 	}

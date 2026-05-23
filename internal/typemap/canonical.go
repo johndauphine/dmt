@@ -68,7 +68,7 @@ type CanonicalType struct {
 	// VARBINARY/BINARY columns is byte-defined). nil = "no length
 	// specified," which means LONGTEXT/LONGBLOB on MySQL targets after
 	// the #196 fix.
-	Length *int
+	Length    *int
 	Precision *int // Decimal — nil = "default precision"
 	Scale     *int // Decimal — nil = "default scale"
 	WithTZ    bool // Time, Timestamp

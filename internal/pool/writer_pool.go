@@ -168,9 +168,10 @@ type WriterPool struct {
 	cancel   context.CancelFunc
 
 	// Dynamic worker management
-	workersMu sync.RWMutex
-	workers   []*workerState // Track individual worker states for scaling
-	started   bool           // Whether Start() has been called
+	workersMu    sync.RWMutex
+	workers      []*workerState // Track individual worker states for scaling
+	nextWorkerID int            // Monotonic ID source; IDs may outlive worker slice entries while draining
+	started      bool           // Whether Start() has been called
 }
 
 // WriterPoolConfig holds the configuration for creating a writer pool.
@@ -231,7 +232,8 @@ func (wp *WriterPool) Start() {
 	}
 
 	for i := 0; i < wp.numWriters; i++ {
-		writerID := i
+		writerID := wp.nextWorkerID
+		wp.nextWorkerID++
 		wp.writerWg.Add(1)
 
 		// Create worker state with individual context
@@ -278,26 +280,16 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 		}
 
 		if wp.ackChan != nil {
-			// Non-blocking send with context check to prevent deadlock.
-			// If ackChan is full, we skip the ack rather than blocking the writer.
-			// This is safe because checkpoint coordination handles out-of-order and
-			// missing acks gracefully - the checkpoint just won't advance past this point.
-			select {
-			case wp.ackChan <- WriteAck{
+			ack := WriteAck{
 				ReaderID: job.ReaderID,
 				Seq:      job.Seq,
 				LastPK:   job.LastPK,
 				RowNum:   job.RowNum,
-			}:
-				// Ack sent successfully
+			}
+			select {
+			case wp.ackChan <- ack:
 			case <-wp.ctx.Done():
-				// Context cancelled, exit worker
 				return
-			default:
-				// Channel full, skip this ack (checkpoint won't advance past this point).
-				// This should be rare with the large buffer, but prevents deadlock.
-				// Log at debug level to help diagnose checkpoint issues if they occur.
-				logging.Debug("Ack channel full, skipping ack for reader %d seq %d (checkpoint may not advance)", job.ReaderID, job.Seq)
 			}
 		}
 
@@ -412,6 +404,8 @@ func (wp *WriterPool) Cancel() {
 
 // NumWriters returns the configured number of workers.
 func (wp *WriterPool) NumWriters() int {
+	wp.workersMu.RLock()
+	defer wp.workersMu.RUnlock()
 	return wp.numWriters
 }
 
@@ -439,16 +433,18 @@ func (wp *WriterPool) ScaleWorkers(newCount int) error {
 	if newCount > currentCount {
 		// Add new workers
 		for i := currentCount; i < newCount; i++ {
+			writerID := wp.nextWorkerID
+			wp.nextWorkerID++
 			workerCtx, cancel := context.WithCancel(wp.ctx)
 			ws := &workerState{
-				id:     i,
+				id:     writerID,
 				active: true,
 				cancel: cancel,
 			}
 			wp.workers = append(wp.workers, ws)
 
 			wp.writerWg.Add(1)
-			go wp.workerWithContext(i, workerCtx)
+			go wp.workerWithContext(writerID, workerCtx)
 		}
 	} else {
 		// Remove workers: mark them as inactive and cancel their contexts

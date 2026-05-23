@@ -9,6 +9,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed PR review text artifacts by rendering SmartConfig YAML comments with
+  ASCII status labels and documenting MySQL enum escaped quotes with the
+  correct doubled single-quote form (#393).
+- Hardened architecture follow-up paths after the review epic: force-resume
+  now rejects incompatible config drift, ROW_NUMBER resume/runtime tuning
+  have targeted regression coverage, drop-recreate recovery/finalization paths
+  are clearer and safer, and AI fallback calls support `max_requests` with
+  table-DDL in-flight deduplication (#388, #389, #390, #391, #392).
+
 ## [5.1.0] - 2026-05-22
 
 ### Added

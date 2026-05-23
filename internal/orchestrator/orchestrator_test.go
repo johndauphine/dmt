@@ -589,6 +589,108 @@ func TestExpectedResumeRowsUsesPartitionProgress(t *testing.T) {
 	}
 }
 
+func TestRecordSuccessfulTuningResult(t *testing.T) {
+	state := &tuningResultState{}
+	o := &Orchestrator{state: state, lastChunkRetryCount: 3}
+
+	o.recordSuccessfulTuningResult(1000, 2*time.Second)
+
+	if state.calls != 1 {
+		t.Fatalf("UpdateAITuningResult calls = %d, want 1", state.calls)
+	}
+	if state.throughput != 500 {
+		t.Errorf("throughput = %f, want 500", state.throughput)
+	}
+	if state.durationSecs != 2 {
+		t.Errorf("durationSecs = %f, want 2", state.durationSecs)
+	}
+	if state.chunkRetryCount != 3 {
+		t.Errorf("chunkRetryCount = %d, want 3", state.chunkRetryCount)
+	}
+}
+
+func TestRecordSuccessfulTuningResultSkipsInvalidDuration(t *testing.T) {
+	state := &tuningResultState{}
+	o := &Orchestrator{state: state}
+
+	o.recordSuccessfulTuningResult(1000, 0)
+	o.recordSuccessfulTuningResult(1000, -time.Second)
+
+	if state.calls != 0 {
+		t.Fatalf("UpdateAITuningResult calls = %d, want 0", state.calls)
+	}
+}
+
+func TestValidateResumeHeartbeat(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		run       *checkpoint.Run
+		force     bool
+		wantError string
+	}{
+		{
+			name: "fresh heartbeat",
+			run: &checkpoint.Run{
+				ID:            "fresh-run",
+				StartedAt:     now.Add(-10 * time.Minute),
+				LastHeartbeat: now.Add(-30 * time.Second),
+			},
+		},
+		{
+			name: "stale heartbeat",
+			run: &checkpoint.Run{
+				ID:            "stale-run",
+				StartedAt:     now.Add(-2 * time.Hour),
+				LastHeartbeat: now.Add(-20 * time.Minute),
+			},
+			wantError: "stale-run",
+		},
+		{
+			name: "force allows stale heartbeat",
+			run: &checkpoint.Run{
+				ID:            "force-run",
+				StartedAt:     now.Add(-2 * time.Hour),
+				LastHeartbeat: now.Add(-20 * time.Minute),
+			},
+			force: true,
+		},
+		{
+			name: "legacy run falls back to started_at",
+			run: &checkpoint.Run{
+				ID:        "legacy-run",
+				StartedAt: now.Add(-20 * time.Minute),
+			},
+			wantError: "legacy-run",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &Orchestrator{opts: Options{
+				ForceResume:     tt.force,
+				RunHeartbeatTTL: time.Minute,
+			}}
+			err := o.validateResumeHeartbeat(tt.run, now)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateResumeHeartbeat() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateResumeHeartbeat() error = nil, want %q", tt.wantError)
+			}
+			for _, want := range []string{tt.wantError, "--force-resume", "last heartbeat"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("validateResumeHeartbeat() error = %q, want substring %q", err.Error(), want)
+				}
+			}
+		})
+	}
+}
+
 type resumeProgressClearState struct {
 	checkpoint.StateBackend
 	clearErr            error
@@ -620,6 +722,22 @@ func (s *resumeProgressSummaryState) GetPartitionTransferProgressSummary(
 ) (checkpoint.PartitionProgressSummary, error) {
 	s.calls++
 	return s.summary, s.err
+}
+
+type tuningResultState struct {
+	checkpoint.StateBackend
+	calls           int
+	throughput      float64
+	durationSecs    float64
+	chunkRetryCount int
+}
+
+func (s *tuningResultState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
+	s.calls++
+	s.throughput = throughput
+	s.durationSecs = durationSecs
+	s.chunkRetryCount = chunkRetryCount
+	return nil
 }
 
 // TestComputeConfigHash_AllowPartialInvariant guards against the

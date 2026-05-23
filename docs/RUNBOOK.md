@@ -117,8 +117,11 @@ second: connection ping (both sides), supported DB version (PG 12+,
 MSSQL 2016+, MySQL 5.7+ / MariaDB 10.3+), encoding/collation,
 connection-pool headroom (`max_connections - current_connections ≥
 workers + 5`), per-driver privilege probes, and the backup-acknowledgment
-guard (#228). It also doubles as `dmt health-check` — the alias is
-preserved so existing Airflow / k8s liveness probes work unchanged.
+guard (#228). For MSSQL targets, it also warns when the target schema
+already has enabled nonclustered indexes because dmt's current MSSQL
+writer contract is parallel BCP without TABLOCK by default. It also
+doubles as `dmt health-check` — the alias is preserved so existing
+Airflow / k8s liveness probes work unchanged.
 
 If `dmt preflight` reports an error, fix it before launching `dmt run`.
 The whole point of preflight is to fail fast in 500ms instead of slow
@@ -479,26 +482,38 @@ across those changes can silently corrupt the target.
 
 **Exit code / log signature**: Exit code **6 (`StateError`)**. Logs:
 `incomplete run is obsolete: a successful run completed after it
-(<run-id> finished <ts>)`. Or `run not found` if state is missing.
+(<run-id> finished <ts>)`, `incomplete run <id> has a stale heartbeat`,
+or `run not found` if state is missing.
 
 **What it means**: The state DB still has a running-status row from a
 prior crashed migration, but a subsequent migration completed
-successfully. dmt won't resume the obsolete one because resuming would
-move stale data into a target that's already current.
+successfully, or the incomplete run has not refreshed its heartbeat
+within the resume safety window. dmt won't resume an obsolete run
+because resuming would move stale data into a target that's already
+current. dmt also won't automatically attach to a stale heartbeat
+because the original process may still be alive and slow.
 
 **Recover by**: If you really want to resume the older run (you
 shouldn't — you have a more-recent success), use the SQLite CLI to
 inspect state:
 
 ```bash
-sqlite3 ~/.dmt/migrate.db "SELECT id, started_at, status FROM runs ORDER BY started_at DESC LIMIT 10"
+sqlite3 ~/.dmt/migrate.db "SELECT id, started_at, last_heartbeat, status FROM runs ORDER BY started_at DESC LIMIT 10"
 ```
 
-Then either start a fresh `dmt run`, or — only if you really mean it
-— manually update the old run's status and resume with
-`--force-resume`. The cleaner path is to start fresh.
+For a stale heartbeat, first verify no migration process is still
+running on the host or in the scheduler. Only after that verification,
+resume with `--force-resume`. For an obsolete run, either start a fresh
+`dmt run`, or — only if you really mean it — manually update the old
+run's status and resume with `--force-resume`. The cleaner path is to
+start fresh.
 
 **Verify the fix**: `dmt run` (not `resume`) starts a new run.
+
+While a run is active, both SQLite and YAML file-state backends persist
+`last_heartbeat`. Fresh runs and resumed runs refresh it every ~30s.
+By default, `dmt resume` treats a running-status row older than ~15m as
+stale unless `--force-resume` is supplied.
 
 ### Resume blocked: torn state file (file backend)
 

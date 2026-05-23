@@ -13,6 +13,9 @@ Technical documentation, planning documents, and implementation notes for dmt.
 | [SCHEMA_EVOLUTION.md](SCHEMA_EVOLUTION.md) | Schema drift auto-apply policy and current added-column scope |
 | [DAILY_DRIVER.md](DAILY_DRIVER.md) | Daily incremental upsert workflow and validation notes |
 | [DELETE_HANDLING.md](DELETE_HANDLING.md) | Design proposal for delete propagation in incremental upsert mode |
+| [ORCHESTRATOR_FLOW.md](ORCHESTRATOR_FLOW.md) | Map of the fresh run, resume, transfer runner, and target-mode orchestration files |
+| [ARCHITECTURE_HARDENING_EPIC.md](ARCHITECTURE_HARDENING_EPIC.md) | Proposed epic to harden correctness, state, AI, and operational contracts after the 2026-05-19 architecture review |
+| [ARCHITECTURE_REVIEW_2026-05-19.md](ARCHITECTURE_REVIEW_2026-05-19.md) | Claude architecture review findings and prioritized leads |
 | [AI_REFACTOR_HANDOFF.md](AI_REFACTOR_HANDOFF.md) | Execution handoff for AI-led architecture simplification and code reduction |
 | [UPSERT_PERF_PLAN.md](UPSERT_PERF_PLAN.md) | Upsert performance improvement plan |
 

@@ -249,9 +249,9 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 
 	var sb strings.Builder
 	// Use dialect's QuoteIdentifier for proper escaping
-	sb.WriteString(fmt.Sprintf("CREATE TABLE %s.%s (\n",
+	fmt.Fprintf(&sb, "CREATE TABLE %s.%s (\n",
 		w.dialect.QuoteIdentifier(schema),
-		w.dialect.QuoteIdentifier(table)))
+		w.dialect.QuoteIdentifier(table))
 
 	first := true
 	for rows.Next() {
@@ -269,7 +269,7 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 		}
 		first = false
 
-		sb.WriteString(fmt.Sprintf("    %s ", w.dialect.QuoteIdentifier(colName)))
+		fmt.Fprintf(&sb, "    %s ", w.dialect.QuoteIdentifier(colName))
 
 		// Build type with precision
 		typeStr := dataType
@@ -292,7 +292,7 @@ func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
 			sb.WriteString(" NOT NULL")
 		}
 		if colDefault.Valid && colDefault.String != "" {
-			sb.WriteString(fmt.Sprintf(" DEFAULT %s", colDefault.String))
+			fmt.Fprintf(&sb, " DEFAULT %s", colDefault.String)
 		}
 	}
 

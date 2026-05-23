@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -102,6 +103,36 @@ func TestDeleteKeys(t *testing.T) {
 	}
 	if remaining != 2 {
 		t.Fatalf("remaining rows = %d, want 2", remaining)
+	}
+}
+
+func TestDeleteKeysHonorsCanceledContext(t *testing.T) {
+	db := openKeyTestDB(t)
+	execKeyTestSQL(t, db, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1);
+	`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	deleted, err := DeleteKeys(
+		ctx,
+		db,
+		&drvsqlite.Dialect{},
+		"", "items",
+		[]string{"id"},
+		[][]any{{int64(1)}},
+		1,
+	)
+	if err == nil {
+		t.Fatal("DeleteKeys() error = nil, want canceled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeleteKeys() error = %v, want context.Canceled", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted = %d, want 0 after canceled context", deleted)
 	}
 }
 

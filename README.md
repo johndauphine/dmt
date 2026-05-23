@@ -135,7 +135,7 @@ ai:
    - Connection pool utilization (active, idle, wait counts per pool)
    - Queue depth, active workers, error count
 
-2. **Resource-Aware Prompting**: The AI receives live system state:
+2. **Resource-Aware Controller**: The rule engine receives live system state:
    - CPU cores, available/used RAM, max database connections
    - Connection pool saturation (active/idle/waits for source and target)
    - Data profile: total tables, total rows, avg row size, estimated pipeline memory
@@ -143,7 +143,7 @@ ai:
    - Current parameter values and adjustment history
    - Effectiveness of previous adjustments
 
-3. **AI Decision Making**: Analyzes trends and recommends adjustments:
+3. **Rule-Based Decisions**: Analyzes trends and recommends adjustments:
    - **Scale up**: Increase workers or chunk_size if resources available
    - **Scale down**: Reduce workers to minimize lock contention
    - **Reduce chunk**: Decrease batch size if memory pressure detected
@@ -154,7 +154,6 @@ ai:
    - **Effectiveness tracking** — measures throughput change after each adjustment
    - **Consecutive-negative breaker** — pauses tuning after 3 adjustments that hurt performance
    - **Completion skip** — no adjustments when transfer is >90% complete
-   - **API circuit breaker** — disables after 3 consecutive API/parse failures
    - Updates applied at chunk boundaries, never mid-transfer
 
 ### Performance
@@ -164,11 +163,11 @@ Tested on Stack Overflow 2013 dataset (106.5M rows, MSSQL to PostgreSQL):
 ```
 Configuration                     Transfer    Overall    Throughput
 ──────────────────────────────────────────────────────────────────────
-AI startup + runtime tuning       2m 33s      3m 08s     697K rows/sec
+Smartconfig + runtime tuning      2m 33s      3m 08s     697K rows/sec
 Runtime tuning only               5m 14s      5m 50s     339K rows/sec
 ```
 
-AI startup tuning analyzes source schema and system resources to set optimal initial parameters. Runtime tuning monitors live metrics (throughput, CPU, memory, pool utilization, transfer time breakdown) and adjusts parameters mid-migration. Haiku and Sonnet produce identical tuning results — Haiku recommended for lower cost.
+Smartconfig analyzes source schema, system resources, driver profiles, and completed-run history to set initial parameters. Runtime tuning monitors live metrics (throughput, CPU, memory, pool utilization, transfer time breakdown) and adjusts parameters mid-migration through the rule-based controller.
 
 ### Configuration
 
@@ -365,15 +364,15 @@ migration:
 - **Exclude tables**: Tables that should probably be excluded (temp, log, archive, etc.)
 - **Chunk size**: Optimal chunk size based on average row sizes
 
-### AI Error Diagnosis
+### Error Diagnosis
 
-When a table transfer fails, AI automatically analyzes the error and provides actionable suggestions for resolution.
+When a table transfer fails, DMT uses its deterministic diagnosis catalog to provide actionable suggestions. Unmatched errors are counted in observability as catalog-growth candidates; they are not sent to an AI provider.
 
 **Example output:**
 ```
 Table Orders failed: pq: invalid input syntax for type integer: "abc"
 
-  AI Diagnosis:
+  Diagnosis:
     Cause: Data type mismatch - column contains non-numeric values being inserted into integer column
     Suggestions:
       - Check source data for non-numeric values in numeric columns
@@ -383,13 +382,13 @@ Table Orders failed: pq: invalid input syntax for type integer: "abc"
 ```
 
 **Features:**
-- **Automatic**: Runs automatically when AI is configured and a transfer fails
-- **Context-aware**: Includes table schema, column types, and source/target DB info in analysis
-- **Cached**: Same errors are diagnosed once to minimize API calls
+- **Automatic**: Runs automatically when a transfer fails
+- **Context-aware**: Uses table schema, column types, and source/target DB info when available
+- **Local**: No error text is sent to an AI provider
 - **Categorized**: Errors classified as type_mismatch, constraint, permission, connection, or data_quality
 
 **Common diagnoses:**
-| Error Type | AI Diagnosis |
+| Error Type | Diagnosis |
 |------------|--------------|
 | Type mismatch | Identifies incompatible column types and suggests mappings |
 | NULL constraint | Detects NULL values in NOT NULL columns |
@@ -628,11 +627,11 @@ sensor = PythonSensor(
 ## Performance
 
 - **222K-697K rows/sec** depending on direction and row width
-- **MSSQL → PG**: 697K rows/sec with AI startup + runtime tuning (106.5M rows in 2m33s)
+- **MSSQL → PG**: 697K rows/sec with smartconfig + runtime tuning (106.5M rows in 2m33s)
 - **PG → MSSQL**: 645K rows/sec (PG streaming + TDS bulk copy)
 - **PG → PG**: 563K rows/sec (COPY protocol both ends)
 - **MSSQL → MSSQL**: 222K rows/sec (TDS both ends)
-- **Auto-tuning** based on CPU cores, available RAM, and AI-driven adjustments
+- **Auto-tuning** based on CPU cores, available RAM, completed-run history, and rule-based runtime adjustments
 - **Single binary** - no runtime dependencies, no CGO
 
 ## Supported Databases
@@ -1392,10 +1391,10 @@ For types not in the built-in mappings (custom domains, user-defined types, etc.
 
 | Configuration | Transfer | Overall | Throughput |
 |---------------|----------|---------|------------|
-| **AI startup + runtime tuning** | 2m 33s | 3m 08s | **697K rows/sec** |
+| **Smartconfig + runtime tuning** | 2m 33s | 3m 08s | **697K rows/sec** |
 | **Runtime tuning only** | 5m 14s | 5m 50s | 339K rows/sec |
 
-AI startup tuning analyzes source schema and system resources to set optimal initial parameters, delivering a 2x speedup over runtime-only tuning.
+Smartconfig analyzes source schema, system resources, driver profiles, and completed-run history to set initial parameters, delivering a 2x speedup over runtime-only tuning.
 
 Performance varies based on network latency, table width, data types, and available CPU/memory.
 

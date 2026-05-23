@@ -125,8 +125,8 @@ func streamRowNumber(ctx context.Context, batches chan<- driver.Batch, cfg Strea
 		}
 
 		queryStart := time.Now()
-		query := cfg.Dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, cfg.TableHint, nil)
-		args := cfg.Dialect.BuildRowNumberArgs(currentRow, batchSize, nil)
+		query := cfg.Dialect.BuildRowNumberQuery(cols, orderBy, opts.Table.Schema, opts.Table.Name, cfg.TableHint, opts.DateFilter)
+		args := cfg.Dialect.BuildRowNumberArgs(currentRow, batchSize, opts.DateFilter)
 
 		rows, err := cfg.DB.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)

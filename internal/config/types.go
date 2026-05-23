@@ -2,10 +2,23 @@ package config
 
 import "github.com/johndauphine/dmt/internal/dbconfig"
 
-// Type aliases for database configuration types.
-// These are defined in dbconfig package to break circular imports with driver package.
+// Type aliases for the shared connection-spec types. Keeping the concrete
+// structs in dbconfig lets config loading and driver construction depend on
+// the same narrow database connection contract.
 type SourceConfig = dbconfig.SourceConfig
 type TargetConfig = dbconfig.TargetConfig
+
+// ConfigValueProvenance names the layer that supplied a tunable value.
+type ConfigValueProvenance string
+
+const (
+	ProvenanceUserConfig     ConfigValueProvenance = "config"
+	ProvenanceSecretsDefault ConfigValueProvenance = "secrets default"
+	ProvenanceDriverDefault  ConfigValueProvenance = "driver default"
+	ProvenanceAutoDefault    ConfigValueProvenance = "auto default"
+	ProvenanceSmartConfig    ConfigValueProvenance = "smartconfig"
+	ProvenanceRuntimeControl ConfigValueProvenance = "runtime controller"
+)
 
 // AutoConfig tracks which values were auto-configured and why
 type AutoConfig struct {
@@ -13,6 +26,14 @@ type AutoConfig struct {
 	AvailableMemoryMB    int64
 	EffectiveMaxMemoryMB int64 // After applying user limit and 70% cap
 	CPUCores             int
+
+	// Raw user-supplied values captured after YAML/template expansion and
+	// before secrets, driver defaults, smartconfig, or runtime tuning apply.
+	RawUserSource          SourceConfig
+	RawUserTarget          TargetConfig
+	RawUserMigration       MigrationConfig
+	RawUserConfigCaptured  bool
+	TunableValueProvenance map[string]ConfigValueProvenance
 
 	// Original values (before auto-tuning)
 	OriginalWorkers              int

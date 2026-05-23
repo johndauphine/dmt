@@ -81,6 +81,7 @@ type Provider struct {
 	Model          string `yaml:"model,omitempty"`           // Optional, uses smart defaults
 	ContextWindow  int    `yaml:"context_window,omitempty"`  // Optional, context window size in tokens (for Ollama/local providers)
 	MaxTokens      int    `yaml:"max_tokens,omitempty"`      // Optional, max output tokens (default: 16000 for local, 4000 for cloud)
+	MaxRequests    int    `yaml:"max_requests,omitempty"`    // Optional, max uncached AI provider calls per dmt process/run
 	TimeoutSeconds int    `yaml:"timeout_seconds,omitempty"` // Optional, API timeout in seconds (default: 30 for cloud, 120 for local)
 }
 

@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,22 +75,20 @@ func EnsureSecretsDir() (string, error) {
 func loadFromFile() (*Config, error) {
 	path := GetSecretsPath()
 
+	// Check file permissions before reading - reject if too permissive.
+	if err := ValidateFilePermissions(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, &SecretsNotFoundError{Path: path}
+		}
+		return nil, err
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, &SecretsNotFoundError{Path: path}
 		}
 		return nil, fmt.Errorf("reading secrets file: %w", err)
-	}
-
-	// Check file permissions - reject if too permissive (security requirement)
-	info, err := os.Stat(path)
-	if err == nil {
-		mode := info.Mode().Perm()
-		if mode&0077 != 0 {
-			return nil, fmt.Errorf("secrets file %s has insecure permissions (%04o). "+
-				"Other users can read your API keys. Run: chmod 600 %s", path, mode, path)
-		}
 	}
 
 	var config Config

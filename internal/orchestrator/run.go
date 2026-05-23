@@ -12,7 +12,6 @@ import (
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
-	"github.com/johndauphine/dmt/internal/source"
 )
 
 // Run executes a new migration.
@@ -137,6 +136,8 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
 	}
+	stopHeartbeat := o.startRunHeartbeat(ctx, runID)
+	defer stopHeartbeat()
 
 	// Preflight (phase 0): verify the environment satisfies the assumptions
 	// downstream phases make — privileges, version floor, encoding, connection
@@ -286,12 +287,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	for _, f := range tableFailures {
 		failedTableNames[f.TableName] = true
 	}
-	var successTables []source.Table
-	for _, t := range tables {
-		if !failedTableNames[t.Name] {
-			successTables = append(successTables, t)
-		}
-	}
+	successTables := finalizableTables(tables, failedTableNames)
 
 	// Finalize (only for successful tables)
 	o.setPhase("finalizing")
@@ -361,18 +357,10 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 			"tables":     len(tables),
 			"rows_total": totalRows,
 		})
-	}
-
-	// Record transfer-only throughput in AI tuning history for future learning
-	// transferDuration captured right after transferAll returns (excludes schema
-	// extraction, DDL creation, finalization, and validation)
-	transferDurationSecs := transferDuration.Seconds()
-	var transferThroughput float64
-	if transferDurationSecs > 0 {
-		transferThroughput = float64(totalRows) / transferDurationSecs
-	}
-	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount); err != nil {
-		logging.Debug("Failed to update AI tuning result: %v", err)
+		// Record transfer-only throughput in tuning history only for full
+		// success. Partial runs can have misleading early throughput and should
+		// not steer future smartconfig recommendations.
+		o.recordSuccessfulTuningResult(totalRows, transferDuration)
 	}
 
 	// Log identifier changes for PostgreSQL targets

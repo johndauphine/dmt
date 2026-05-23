@@ -72,7 +72,7 @@ The Prometheus endpoint binds at the address given by `--metrics-addr`. It only 
 | `dmt_writer_queue_depth` | gauge | `run_id` | Current depth of the writer pool's input queue |
 | `dmt_writers_active` | gauge | `run_id` | Active writer goroutines |
 | `dmt_runtime_tuning_adjustments_total` | counter | `rule_name`, `direction` | Runtime parameter adjustments |
-| `dmt_ai_fallback_total` | counter | `surface` | AI fallbacks fired (cross-ref #176) |
+| `dmt_ai_fallback_total` | counter | `surface` | AI fallback/catalog-growth events by surface (`typemap`, `ddl`, `errordiag`) |
 | `dmt_migration_info` | gauge (always 1) | `run_id`, `source_db`, `target_db` | Info-style identity tuple. Set on RunStarted, deleted on RunComplete. Join other run-scoped metrics by `run_id` to pivot dashboards on driver pair. |
 
 ### Cardinality note

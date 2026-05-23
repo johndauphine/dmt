@@ -72,18 +72,18 @@ func (m *AITypeMapper) buildPrompt(info TypeInfo) string {
 	var sb strings.Builder
 	sb.WriteString("You are a database type mapping expert.\n\n")
 	sb.WriteString("Based on DDL metadata only (no sample data), ")
-	sb.WriteString(fmt.Sprintf("map this %s type to %s:\n", info.SourceDBType, info.TargetDBType))
-	sb.WriteString(fmt.Sprintf("- Type: %s\n", info.DataType))
+	fmt.Fprintf(&sb, "map this %s type to %s:\n", info.SourceDBType, info.TargetDBType)
+	fmt.Fprintf(&sb, "- Type: %s\n", info.DataType)
 	if info.MaxLength > 0 {
-		sb.WriteString(fmt.Sprintf("- Max length: %d\n", info.MaxLength))
+		fmt.Fprintf(&sb, "- Max length: %d\n", info.MaxLength)
 	} else if info.MaxLength == -1 {
 		sb.WriteString("- Max length: MAX\n")
 	}
 	if info.Precision > 0 {
-		sb.WriteString(fmt.Sprintf("- Precision: %d\n", info.Precision))
+		fmt.Fprintf(&sb, "- Precision: %d\n", info.Precision)
 	}
 	if info.Scale > 0 {
-		sb.WriteString(fmt.Sprintf("- Scale: %d\n", info.Scale))
+		fmt.Fprintf(&sb, "- Scale: %d\n", info.Scale)
 	}
 
 	// Sample values are no longer collected (privacy improvement)

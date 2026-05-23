@@ -23,7 +23,7 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 
 	// Check cache first
 	m.cacheMu.RLock()
-	if cached, ok := m.cache.Get(cacheKey); ok {
+	if cached, ok := m.cache.GetAI(cacheKey, m.providerName, m.Model()); ok {
 		m.cacheMu.RUnlock()
 		return cached, nil
 	}
@@ -51,7 +51,7 @@ func (m *AITypeMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDD
 
 	// Cache the result with AI provenance (#177).
 	m.cacheMu.Lock()
-	m.cache.SetAI(cacheKey, ddl, m.Model())
+	m.cache.SetAIWithMetadata(cacheKey, ddl, m.providerName, m.Model())
 	m.cacheMu.Unlock()
 
 	// Persist cache

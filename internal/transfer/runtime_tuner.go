@@ -60,16 +60,16 @@ type WriteErrorAdjuster interface {
 type RuntimeTuner interface {
 	Snapshot() RuntimeSnapshot
 	Update(RuntimeUpdate) error
-	TableChunkSize(tableName string) (int, bool)  // Returns per-table chunk size override if set
-	SetTableChunkSize(tableName string, size int)  // Sets per-table chunk size override
-	TableBatchSize(tableName string) (int, bool)   // Returns per-table batch size override if set
-	SetTableBatchSize(tableName string, size int)   // Sets per-table batch size override
-	ReportActiveJobs(delta int)                               // Atomically adjust active job count (+1 on start, -1 on end)
-	ReportQueueDepth(delta int)                               // Atomically adjust aggregate queue depth (use deltas per job)
-	ReportError()                                             // Atomically increment terminal error count (job exhausted all retries)
-	ReportChunkRetry()                                        // Atomically increment chunk retry count (transient failure about to be retried)
+	TableChunkSize(tableName string) (int, bool)             // Returns per-table chunk size override if set
+	SetTableChunkSize(tableName string, size int)            // Sets per-table chunk size override
+	TableBatchSize(tableName string) (int, bool)             // Returns per-table batch size override if set
+	SetTableBatchSize(tableName string, size int)            // Sets per-table batch size override
+	ReportActiveJobs(delta int)                              // Atomically adjust active job count (+1 on start, -1 on end)
+	ReportQueueDepth(delta int)                              // Atomically adjust aggregate queue depth (use deltas per job)
+	ReportError()                                            // Atomically increment terminal error count (job exhausted all retries)
+	ReportChunkRetry()                                       // Atomically increment chunk retry count (transient failure about to be retried)
 	ReportTransferTime(queryNs, scanNs, writeNs, rows int64) // Atomically add cumulative transfer time breakdown
-	Metrics() RuntimeMetrics                                  // Read current operational metrics
+	Metrics() RuntimeMetrics                                 // Read current operational metrics
 }
 
 // runtimeTuner is the concrete implementation of RuntimeTuner.

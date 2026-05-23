@@ -116,11 +116,11 @@ func TestStripMSSQLParens_DoesNotOverStrip(t *testing.T) {
 	tests := []struct {
 		input, want string
 	}{
-		{"((1)+(2))", "(1)+(2)"},                  // outer wraps, but inner pair doesn't span — strip once only
-		{"((1)+(2)+(3))", "(1)+(2)+(3)"},          // same shape, three terms
-		{"(a)+(b)", "(a)+(b)"},                    // no outer wrapping — leave alone
-		{"((((0))))", "0"},                        // multiple safe layers — strip all
-		{"('a)b')", "'a)b'"},                      // ')' inside quoted literal must not confuse depth tracking
+		{"((1)+(2))", "(1)+(2)"},         // outer wraps, but inner pair doesn't span — strip once only
+		{"((1)+(2)+(3))", "(1)+(2)+(3)"}, // same shape, three terms
+		{"(a)+(b)", "(a)+(b)"},           // no outer wrapping — leave alone
+		{"((((0))))", "0"},               // multiple safe layers — strip all
+		{"('a)b')", "'a)b'"},             // ')' inside quoted literal must not confuse depth tracking
 	}
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {

@@ -14,12 +14,12 @@ import (
 // the audit file stays writable for the next `dmt resume`.
 func TestClassifyRunOutcome(t *testing.T) {
 	cases := []struct {
-		name      string
-		runErr    error
-		rec       any
-		wantStat  string
-		wantErr   string
-		wantRes   bool
+		name     string
+		runErr   error
+		rec      any
+		wantStat string
+		wantErr  string
+		wantRes  bool
 	}{
 		{
 			name:     "success",

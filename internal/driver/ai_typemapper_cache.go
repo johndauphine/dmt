@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,10 +44,12 @@ const cacheFileFormatVersion = 2
 // etc.). Source / Model / CachedAt are best-effort and may be empty on
 // legacy entries migrated from the pre-#177 flat-map format.
 type CacheEntry struct {
-	Result   string      `json:"result"`
-	Source   CacheSource `json:"source,omitempty"`
-	Model    string      `json:"model,omitempty"`
-	CachedAt time.Time   `json:"cached_at,omitempty"`
+	Result     string      `json:"result"`
+	Source     CacheSource `json:"source,omitempty"`
+	Provider   string      `json:"provider,omitempty"`
+	Model      string      `json:"model,omitempty"`
+	SchemaHash string      `json:"schema_hash,omitempty"`
+	CachedAt   time.Time   `json:"cached_at,omitempty"`
 }
 
 // TypeMappingCache stores type mappings keyed by stable cache keys
@@ -83,6 +86,25 @@ func (c *TypeMappingCache) Get(key string) (string, bool) {
 	return e.Result, true
 }
 
+// GetAI retrieves an AI cache entry only when provider/model metadata are
+// compatible with the current mapper. Legacy entries without metadata remain
+// readable, but newly written entries do not cross provider/model boundaries.
+func (c *TypeMappingCache) GetAI(key, provider, model string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, ok := c.mappings[key]
+	if !ok || e.Source == SourceDeterministic {
+		return "", false
+	}
+	if e.Provider != "" && e.Provider != provider {
+		return "", false
+	}
+	if e.Model != "" && e.Model != model {
+		return "", false
+	}
+	return e.Result, true
+}
+
 // Set stores a mapping without provenance metadata. Kept for backward
 // compatibility with tests and pre-#177 callers; production AI write
 // sites use SetAI so `dmt cache clear --ai-only` can find them.
@@ -96,13 +118,21 @@ func (c *TypeMappingCache) Set(key, value string) {
 // Used by the AITypeMapper's column- and table-level write paths so the
 // cache CLI's --ai-only filter can find them on model upgrade.
 func (c *TypeMappingCache) SetAI(key, value, model string) {
+	c.SetAIWithMetadata(key, value, "", model)
+}
+
+// SetAIWithMetadata stores a mapping tagged with AI provider/model provenance
+// and a stable hash of the input signature encoded in the cache key.
+func (c *TypeMappingCache) SetAIWithMetadata(key, value, provider, model string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.mappings[key] = CacheEntry{
-		Result:   value,
-		Source:   SourceAI,
-		Model:    model,
-		CachedAt: time.Now().UTC(),
+		Result:     value,
+		Source:     SourceAI,
+		Provider:   provider,
+		Model:      model,
+		SchemaHash: cacheKeyHash(key),
+		CachedAt:   time.Now().UTC(),
 	}
 }
 
@@ -179,6 +209,7 @@ func (c *TypeMappingCache) ClearAI() int {
 // falls back to the legacy flat-map format below.
 type cacheFilePayload struct {
 	Version  int                   `json:"version"`
+	Checksum string                `json:"checksum,omitempty"`
 	Mappings map[string]CacheEntry `json:"mappings"`
 }
 
@@ -197,6 +228,15 @@ func (m *AITypeMapper) loadCache() error {
 	// below triggers the legacy migration path.
 	var payload cacheFilePayload
 	if err := json.Unmarshal(data, &payload); err == nil && payload.Mappings != nil {
+		if payload.Checksum != "" {
+			checksum, err := cachePayloadChecksum(payload.Version, payload.Mappings)
+			if err != nil {
+				return fmt.Errorf("checksumming cache file: %w", err)
+			}
+			if checksum != payload.Checksum {
+				return fmt.Errorf("cache integrity check failed: checksum mismatch")
+			}
+		}
 		m.cache.LoadEntries(payload.Mappings)
 		logging.Debug("Loaded %d type mappings from cache (format v%d)", len(payload.Mappings), payload.Version)
 		return nil
@@ -226,6 +266,11 @@ func (m *AITypeMapper) saveCache() error {
 		Version:  cacheFileFormatVersion,
 		Mappings: m.cache.AllEntries(),
 	}
+	checksum, err := cachePayloadChecksum(payload.Version, payload.Mappings)
+	if err != nil {
+		return fmt.Errorf("checksumming cache: %w", err)
+	}
+	payload.Checksum = checksum
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling cache: %w", err)
@@ -274,6 +319,15 @@ func ClearAICacheEntries(cacheFile string) (int, error) {
 	cache := NewTypeMappingCache()
 	var payload cacheFilePayload
 	if err := json.Unmarshal(data, &payload); err == nil && payload.Mappings != nil {
+		if payload.Checksum != "" {
+			checksum, err := cachePayloadChecksum(payload.Version, payload.Mappings)
+			if err != nil {
+				return 0, fmt.Errorf("checksumming cache file: %w", err)
+			}
+			if checksum != payload.Checksum {
+				return 0, fmt.Errorf("cache integrity check failed: checksum mismatch")
+			}
+		}
 		cache.LoadEntries(payload.Mappings)
 	} else {
 		var legacy map[string]string
@@ -297,6 +351,11 @@ func ClearAICacheEntries(cacheFile string) (int, error) {
 	}
 
 	out := cacheFilePayload{Version: cacheFileFormatVersion, Mappings: remaining}
+	checksum, err := cachePayloadChecksum(out.Version, out.Mappings)
+	if err != nil {
+		return cleared, fmt.Errorf("checksumming cache: %w", err)
+	}
+	out.Checksum = checksum
 	rewritten, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return cleared, fmt.Errorf("marshaling cache: %w", err)
@@ -305,6 +364,26 @@ func ClearAICacheEntries(cacheFile string) (int, error) {
 		return cleared, fmt.Errorf("writing cache file: %w", err)
 	}
 	return cleared, nil
+}
+
+func cacheKeyHash(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func cachePayloadChecksum(version int, mappings map[string]CacheEntry) (string, error) {
+	raw, err := json.Marshal(struct {
+		Version  int                   `json:"version"`
+		Mappings map[string]CacheEntry `json:"mappings"`
+	}{
+		Version:  version,
+		Mappings: mappings,
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%x", sum[:]), nil
 }
 
 // DefaultCacheFilePath is the canonical on-disk location for the type

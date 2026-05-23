@@ -11,10 +11,11 @@ import (
 
 // Anthropic API types
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	Temperature float64            `json:"temperature"`
+	System      string             `json:"system,omitempty"`
+	Messages    []anthropicMessage `json:"messages"`
 }
 
 type anthropicMessage struct {
@@ -56,9 +57,10 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 	}
 
 	reqBody := anthropicRequest{
-		Model:     model,
-		MaxTokens: maxTokens,
-		System:    systemPrompt,
+		Model:       model,
+		MaxTokens:   maxTokens,
+		Temperature: 0,
+		System:      systemPrompt,
 		Messages: []anthropicMessage{
 			{Role: "user", Content: prompt},
 		},

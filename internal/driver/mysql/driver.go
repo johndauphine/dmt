@@ -31,8 +31,8 @@ func (d *Driver) Aliases() []string {
 // Defaults returns the default configuration values for MySQL.
 func (d *Driver) Defaults() driver.DriverDefaults {
 	return driver.DriverDefaults{
-		Port:                  3306,
-		Schema:                "", // MySQL uses database name, not schema
+		Port:   3306,
+		Schema: "", // MySQL uses database name, not schema
 		// "require" maps to tls=true (require + verify) in the
 		// dialect; operators who knowingly want downgradeable TLS
 		// must explicitly set ssl_mode: preferred. (#252)

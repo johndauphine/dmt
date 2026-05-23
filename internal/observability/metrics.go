@@ -75,7 +75,7 @@ type Registry struct {
 	rowsTotal       *prometheus.CounterVec
 	bytesTotal      *prometheus.CounterVec
 	errorsTotal     *prometheus.CounterVec
-	retriesTotal   *prometheus.CounterVec
+	retriesTotal    *prometheus.CounterVec
 	chunkDuration   *prometheus.HistogramVec
 	phaseDuration   *prometheus.HistogramVec
 	queueDepth      *prometheus.GaugeVec
@@ -372,15 +372,15 @@ func Global() Metrics {
 // (which requires concrete-type uniformity across stores).
 type metricsHolder struct{ m Metrics }
 
-func (noopMetrics) IncRows(string, string, int64)                  {}
-func (noopMetrics) IncBytes(string, string, int64)                 {}
-func (noopMetrics) IncErrors(string, string, string)               {}
-func (noopMetrics) IncRetries(string)                              {}
-func (noopMetrics) IncTuningAdjustment(string, string)             {}
-func (noopMetrics) IncAIFallback(string)                           {}
-func (noopMetrics) ObserveChunkDuration(string, float64)           {}
-func (noopMetrics) ObservePhaseDuration(string, float64)           {}
-func (noopMetrics) SetWriterQueueDepth(int)                        {}
-func (noopMetrics) SetWritersActive(int)                           {}
-func (noopMetrics) RunStarted(string, string, string)              {}
-func (noopMetrics) RunComplete(string)                             {}
+func (noopMetrics) IncRows(string, string, int64)        {}
+func (noopMetrics) IncBytes(string, string, int64)       {}
+func (noopMetrics) IncErrors(string, string, string)     {}
+func (noopMetrics) IncRetries(string)                    {}
+func (noopMetrics) IncTuningAdjustment(string, string)   {}
+func (noopMetrics) IncAIFallback(string)                 {}
+func (noopMetrics) ObserveChunkDuration(string, float64) {}
+func (noopMetrics) ObservePhaseDuration(string, float64) {}
+func (noopMetrics) SetWriterQueueDepth(int)              {}
+func (noopMetrics) SetWritersActive(int)                 {}
+func (noopMetrics) RunStarted(string, string, string)    {}
+func (noopMetrics) RunComplete(string)                   {}

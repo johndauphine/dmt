@@ -9,37 +9,37 @@ import (
 
 func (m *AITypeMapper) writeContextDetails(sb *strings.Builder, ctx *DatabaseContext, label string) {
 	if ctx.Version != "" {
-		sb.WriteString(fmt.Sprintf("Version: %s\n", ctx.Version))
+		fmt.Fprintf(sb, "Version: %s\n", ctx.Version)
 	}
 	if ctx.DatabaseName != "" {
-		sb.WriteString(fmt.Sprintf("Database: %s\n", ctx.DatabaseName))
+		fmt.Fprintf(sb, "Database: %s\n", ctx.DatabaseName)
 	}
 
 	// Character encoding section
 	sb.WriteString("Character Encoding:\n")
 	if ctx.Charset != "" {
-		sb.WriteString(fmt.Sprintf("  Charset: %s\n", ctx.Charset))
+		fmt.Fprintf(sb, "  Charset: %s\n", ctx.Charset)
 	}
 	if ctx.NationalCharset != "" {
-		sb.WriteString(fmt.Sprintf("  National Charset: %s\n", ctx.NationalCharset))
+		fmt.Fprintf(sb, "  National Charset: %s\n", ctx.NationalCharset)
 	}
 	if ctx.Encoding != "" {
-		sb.WriteString(fmt.Sprintf("  Encoding: %s\n", ctx.Encoding))
+		fmt.Fprintf(sb, "  Encoding: %s\n", ctx.Encoding)
 	}
 	if ctx.CodePage > 0 {
-		sb.WriteString(fmt.Sprintf("  Code Page: %d\n", ctx.CodePage))
+		fmt.Fprintf(sb, "  Code Page: %d\n", ctx.CodePage)
 	}
 	if ctx.Collation != "" {
-		sb.WriteString(fmt.Sprintf("  Collation: %s\n", ctx.Collation))
+		fmt.Fprintf(sb, "  Collation: %s\n", ctx.Collation)
 	}
 	if ctx.BytesPerChar > 0 {
-		sb.WriteString(fmt.Sprintf("  Max Bytes Per Char: %d\n", ctx.BytesPerChar))
+		fmt.Fprintf(sb, "  Max Bytes Per Char: %d\n", ctx.BytesPerChar)
 	}
 
 	// Case sensitivity section
 	sb.WriteString("Case Sensitivity:\n")
 	if ctx.IdentifierCase != "" {
-		sb.WriteString(fmt.Sprintf("  Identifier Case: %s\n", ctx.IdentifierCase))
+		fmt.Fprintf(sb, "  Identifier Case: %s\n", ctx.IdentifierCase)
 	}
 	if ctx.CaseSensitiveIdentifiers {
 		sb.WriteString("  Identifiers: case-sensitive\n")
@@ -55,27 +55,27 @@ func (m *AITypeMapper) writeContextDetails(sb *strings.Builder, ctx *DatabaseCon
 	// Limits section
 	sb.WriteString("Limits:\n")
 	if ctx.MaxIdentifierLength > 0 {
-		sb.WriteString(fmt.Sprintf("  Max Identifier Length: %d\n", ctx.MaxIdentifierLength))
+		fmt.Fprintf(sb, "  Max Identifier Length: %d\n", ctx.MaxIdentifierLength)
 	}
 	if ctx.MaxVarcharLength > 0 {
-		sb.WriteString(fmt.Sprintf("  Max VARCHAR Length: %d\n", ctx.MaxVarcharLength))
+		fmt.Fprintf(sb, "  Max VARCHAR Length: %d\n", ctx.MaxVarcharLength)
 	}
 	if ctx.MaxNVarcharLength > 0 {
-		sb.WriteString(fmt.Sprintf("  Max NVARCHAR Length: %d characters\n", ctx.MaxNVarcharLength))
+		fmt.Fprintf(sb, "  Max NVARCHAR Length: %d characters\n", ctx.MaxNVarcharLength)
 	}
 	if ctx.VarcharSemantics != "" {
-		sb.WriteString(fmt.Sprintf("  VARCHAR Semantics: %s (lengths are in %ss)\n", ctx.VarcharSemantics, ctx.VarcharSemantics))
+		fmt.Fprintf(sb, "  VARCHAR Semantics: %s (lengths are in %ss)\n", ctx.VarcharSemantics, ctx.VarcharSemantics)
 	}
 
 	// Features section
 	if ctx.StorageEngine != "" {
-		sb.WriteString(fmt.Sprintf("Storage Engine: %s\n", ctx.StorageEngine))
+		fmt.Fprintf(sb, "Storage Engine: %s\n", ctx.StorageEngine)
 	}
 	if len(ctx.Features) > 0 {
-		sb.WriteString(fmt.Sprintf("Features: %s\n", strings.Join(ctx.Features, ", ")))
+		fmt.Fprintf(sb, "Features: %s\n", strings.Join(ctx.Features, ", "))
 	}
 	if ctx.Notes != "" {
-		sb.WriteString(fmt.Sprintf("Notes: %s\n", ctx.Notes))
+		fmt.Fprintf(sb, "Notes: %s\n", ctx.Notes)
 	}
 }
 
@@ -136,11 +136,11 @@ func (m *AITypeMapper) writeVarcharGuidance(sb *strings.Builder, ctx *DatabaseCo
 
 	switch ctx.VarcharSemantics {
 	case "char":
-		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in CHARACTERS\n", capitalizeFirst(role)))
+		fmt.Fprintf(sb, "- %s VARCHAR lengths are in CHARACTERS\n", capitalizeFirst(role))
 	case "byte":
-		sb.WriteString(fmt.Sprintf("- %s VARCHAR lengths are in BYTES\n", capitalizeFirst(role)))
+		fmt.Fprintf(sb, "- %s VARCHAR lengths are in BYTES\n", capitalizeFirst(role))
 		if ctx.BytesPerChar > 1 {
-			sb.WriteString(fmt.Sprintf("- Each character may take up to %d bytes\n", ctx.BytesPerChar))
+			fmt.Fprintf(sb, "- Each character may take up to %d bytes\n", ctx.BytesPerChar)
 		}
 	}
 }
@@ -148,13 +148,13 @@ func (m *AITypeMapper) writeVarcharGuidance(sb *strings.Builder, ctx *DatabaseCo
 // writeEncodingGuidance writes character encoding guidance based on context.
 func (m *AITypeMapper) writeEncodingGuidance(sb *strings.Builder, ctx *DatabaseContext, role string) {
 	if ctx.Charset != "" {
-		sb.WriteString(fmt.Sprintf("- Character set: %s\n", ctx.Charset))
+		fmt.Fprintf(sb, "- Character set: %s\n", ctx.Charset)
 	}
 	if ctx.BytesPerChar > 0 {
-		sb.WriteString(fmt.Sprintf("- Max bytes per character: %d\n", ctx.BytesPerChar))
+		fmt.Fprintf(sb, "- Max bytes per character: %d\n", ctx.BytesPerChar)
 	}
 	if ctx.Encoding != "" && ctx.Encoding != ctx.Charset {
-		sb.WriteString(fmt.Sprintf("- Encoding: %s\n", ctx.Encoding))
+		fmt.Fprintf(sb, "- Encoding: %s\n", ctx.Encoding)
 	}
 }
 
@@ -191,10 +191,10 @@ func (m *AITypeMapper) writeIdentifierGuidance(sb *strings.Builder, ctx *Databas
 // writeLimitsGuidance writes database limits guidance based on context.
 func (m *AITypeMapper) writeLimitsGuidance(sb *strings.Builder, ctx *DatabaseContext) {
 	if ctx.MaxIdentifierLength > 0 {
-		sb.WriteString(fmt.Sprintf("- Maximum identifier length: %d characters\n", ctx.MaxIdentifierLength))
+		fmt.Fprintf(sb, "- Maximum identifier length: %d characters\n", ctx.MaxIdentifierLength)
 	}
 	if ctx.MaxVarcharLength > 0 {
-		sb.WriteString(fmt.Sprintf("- Maximum VARCHAR length: %d\n", ctx.MaxVarcharLength))
+		fmt.Fprintf(sb, "- Maximum VARCHAR length: %d\n", ctx.MaxVarcharLength)
 		if ctx.VarcharSemantics == "byte" {
 			sb.WriteString("- Use CLOB/TEXT equivalent for content exceeding max VARCHAR\n")
 		}
@@ -215,7 +215,7 @@ func (m *AITypeMapper) writeConversionGuidance(sb *strings.Builder, srcCtx, tgtC
 	} else if srcCtx.VarcharSemantics == "byte" && tgtCtx.VarcharSemantics == "char" {
 		sb.WriteString("- Source uses BYTE lengths, target uses CHARACTER lengths\n")
 		if srcCtx.BytesPerChar > 1 {
-			sb.WriteString(fmt.Sprintf("- Source VARCHAR(n) with %d bytes/char = approximately n/%d characters\n", srcCtx.BytesPerChar, srcCtx.BytesPerChar))
+			fmt.Fprintf(sb, "- Source VARCHAR(n) with %d bytes/char = approximately n/%d characters\n", srcCtx.BytesPerChar, srcCtx.BytesPerChar)
 		}
 	} else if srcCtx.VarcharSemantics == "char" && tgtCtx.VarcharSemantics == "char" {
 		sb.WriteString("- Both source and target use CHARACTER lengths - preserve lengths directly\n")
@@ -284,7 +284,7 @@ func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDB
 		tableName = t.Schema + "." + t.Name
 	}
 
-	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", tableName))
+	fmt.Fprintf(&sb, "CREATE TABLE %s (\n", tableName)
 
 	for i, col := range t.Columns {
 		sb.WriteString("    ")
@@ -331,7 +331,7 @@ func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDB
 		if targetDBType != "" {
 			tgt := targetIdentifier(col.Name, targetDBType)
 			if tgt != col.Name {
-				sb.WriteString(fmt.Sprintf("  -- target column: %s", tgt))
+				fmt.Fprintf(&sb, "  -- target column: %s", tgt)
 			}
 		}
 
@@ -340,7 +340,7 @@ func (m *AITypeMapper) buildSourceDDLWithTarget(t *Table, sourceDBType, targetDB
 
 	// Primary key
 	if len(t.PrimaryKey) > 0 {
-		sb.WriteString(fmt.Sprintf("    ,PRIMARY KEY (%s)\n", strings.Join(t.PrimaryKey, ", ")))
+		fmt.Fprintf(&sb, "    ,PRIMARY KEY (%s)\n", strings.Join(t.PrimaryKey, ", "))
 	}
 
 	sb.WriteString(");")

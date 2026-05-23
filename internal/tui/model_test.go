@@ -77,10 +77,10 @@ func TestExploreCommandParsing(t *testing.T) {
 
 func TestTinyTerminalDoesNotPanic(t *testing.T) {
 	for _, size := range []struct{ w, h int }{
-		{80, 5},  // h < footerHeight(7)
-		{80, 1},  // pathological min
-		{1, 1},   // both at minimum
-		{80, 7},  // h == footerHeight (exact-zero viewport before clamp)
+		{80, 5}, // h < footerHeight(7)
+		{80, 1}, // pathological min
+		{1, 1},  // both at minimum
+		{80, 7}, // h == footerHeight (exact-zero viewport before clamp)
 	} {
 		t.Run("", func(t *testing.T) {
 			defer func() {

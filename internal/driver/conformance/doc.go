@@ -12,7 +12,8 @@
 // Optional behavior is expressed by expectation fields on DriverCase. Engines
 // opt in only to behavior that is meaningful for that dialect, such as ignoring
 // schemas during table qualification, including schema qualification, or
-// exposing AI prompt augmentation. The harness intentionally does not assert
-// schema introspection details; those remain engine-specific and often require
-// live databases.
+// exposing AI prompt augmentation. Dialects can also opt into exact pagination
+// SQL/argument ordering assertions for keyset and ROW_NUMBER reads with date
+// filters. The harness intentionally does not assert schema introspection
+// details; those remain engine-specific and often require live databases.
 package conformance

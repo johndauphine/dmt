@@ -32,8 +32,9 @@ func LoadWithOptions(path string, opts LoadOptions) (*Config, error) {
 // Also supports legacy ${VAR} syntax for backward compatibility.
 // This runs before YAML parsing to allow templates in any field.
 //
-// Security note: File paths are not restricted - users should only use trusted paths
-// like /run/secrets/ for Docker secrets. Avoid user-controlled paths.
+// Security note: File paths are not restricted, but referenced files must use
+// owner-only permissions. Use trusted private secret paths and avoid
+// user-controlled paths.
 func expandYAMLTemplates(yamlStr string) (string, error) {
 	// Pattern to match ${file:path}, ${env:VAR}, or ${VAR} in YAML
 	// - file: allows any path characters (user responsibility to use safe paths)

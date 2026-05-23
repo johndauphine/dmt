@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DMT is a high-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL. Written in Go, it achieves 222K-717K rows/sec throughput through bulk copy protocols, parallel I/O pipelines, and AI-driven parameter tuning.
+DMT is a high-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL. Written in Go, it achieves 222K-717K rows/sec throughput through bulk copy protocols, parallel I/O pipelines, deterministic smartconfig, and rule-based runtime tuning.
 
 ## Build and Test Commands
 
@@ -65,7 +65,7 @@ Each driver implements:
 
 Driver aliases: `mssql` (sqlserver, sql-server), `postgres` (postgresql, pg), `mysql` (mariadb, maria), `sqlite` (sqlite3, sqlitedb).
 
-MSSQL sets `ScaleWritersWithCores: false` (TABLOCK serializes bulk inserts); PostgreSQL/MySQL set `true`; SQLite sets `false` and pins to a single writer (file-based, single-writer constraint).
+MSSQL sets `ScaleWritersWithCores: true`: the target writer uses parallel BCP without TABLOCK by default. PostgreSQL/MySQL also set `true`; SQLite sets `false` and pins to a single writer (file-based, single-writer constraint). MSSQL `drop_recreate` builds non-PK indexes after transfer; for upsert or other loads into existing indexed tables, reduce `migration.write_ahead_writers` or rebuild secondary indexes around the migration if contention appears.
 
 SQLite is intended primarily for testing dmt end-to-end without external database servers — fixtures live in `.db` files and round-trip through the same pipeline. Cross-engine type mapping is supported: sqlite→{mssql,postgres,mysql} and {mssql,postgres,mysql}→sqlite both go through the deterministic typemap. `GetPartitionBoundaries` always returns a single partition for SQLite (no parallelism benefit from splitting). FK and CHECK constraints can only be declared inline at CREATE TABLE time on SQLite, so `CreateForeignKey` / `CreateCheckConstraint` log a warning and skip; users who need FK enforcement should run sqlite as source rather than target.
 
@@ -100,14 +100,14 @@ The orchestrator (`orchestrator/orchestrator.go`) sequences 9 phases:
 
 **Resume flow**: Verifies config hash (SHA256 of sanitized config), skips completed tables, loads chunk-level progress, cleans up partial data (keyset only).
 
-### AI Integration
+### AI And Tuning Integration
 
-All AI features share `AITypeMapper.CallAI()` with provider abstraction (Claude, OpenAI, Gemini, Ollama, LMStudio):
+AI fallback features share `AITypeMapper.CallAI()` with provider abstraction (Claude, OpenAI, Gemini, Ollama, LMStudio):
 
-1. **Type Mapper** (`driver/ai_typemapper.go`) — Cross-database type inference. Local cache at `~/.dmt/type-cache.json`. In-flight dedup via `sync.Map`. Exponential backoff (1s base, 10s max, 3 retries).
-2. **Smart Config** (`driver/ai_smartconfig.go`) — Queries source stats + system resources (gopsutil), recommends config. `config.ApplyAISuggestions()` only overrides params the user didn't explicitly set (tracked via `AutoConfig.Original*` fields). The smartconfig prompt encodes a "RULE 1" retry-rate override that downgrades `write_ahead_writers` when the historical retry rate at the candidate value exceeds zero. **Compliance with this specific override** (not overall tuning quality) **was retested after fixing two infrastructure bugs** (PR #135 — `init-secrets` template double-prefixed `/v1`, so LM Studio requests landed on the incorrect `/v1/v1/...` endpoint; PR #136 — LM Studio returns errors as HTTP 200 with a string-shaped JSON body, e.g. `{"error": "Unexpected endpoint or method. (POST /v1/v1/chat/completions)"}`, and dmt's struct-only parser failed on that shape, surfacing as a generic "AI tuning unavailable" warning that masked the real cause). Pre-fix, every local-model test was a false negative because the AI call never reached the model. Post-fix results: `claude-haiku-4-5-20251001` (10/10), `google/gemma-4-e4b` (4/4), and `openai/gpt-oss-20b` (9/10 — converges after a single early-history outlier where it cherry-picked a peak `waw=2` run) all follow the rule. **OpenAI cloud `gpt-5.5` is the lone genuine non-follower** (0/8 across two prompt iterations) — that path doesn't go through the URL bug, so its pre-fix results were already real. Other locals (`google/gemma-4-26b-a4b`, `google/gemma-4-31b`, `qwen/qwen3.6-27b`) were not retested after the bug fixes; their pre-fix "anchored on baseline" results were also false negatives. (Anthropic Sonnet not tested; the README's "Haiku and Sonnet produce identical tuning results" claim is about overall tuning quality and is unrelated to this specific override.) **For parameter tuning, recommended model remains `claude-haiku-4-5-20251001`** for sub-second AI-call latency and consistent rule-following; local providers also work but add 30-90s of AI-call latency per migration on the 24K-token smartconfig prompt. See PRs #133 (the rule itself), #135/#136 (the infrastructure bugs that masked compliance), and #132 (the underlying Docker VM transport finding).
-3. **Runtime Monitor** (`monitor/ai_monitor.go` + `ai_adjuster.go`) — 30s ticker collecting throughput, CPU%, memory%, queue depth, error count, transfer time breakdown. Circuit breakers: API failure (3 fails → 5min pause), effectiveness (3 negative effects → 10min pause). 90s cooldown between adjustments. Skips when >90% done.
-4. **Error Diagnosis** (`driver/ai_errordiag.go`) — Singleton, initialized on first error. Caches diagnoses by SHA256 of error message. Called from `orchestrator/target_mode.go` for DDL failures.
+1. **AI fallback type/DDL mapper** (`driver/ai_typemapper*.go`) — Handles Raw vendor types and unsupported DDL surfaces after the deterministic mapper declines. Local cache at `~/.dmt/type-cache.json` records source/provider/model/schema-hash metadata plus a checksum. In-flight dedup uses `sync.Map`; provider HTTP uses exponential backoff and honors `Retry-After`.
+2. **Smart Config** (`driver/ai_smartconfig.go`, `internal/tuning/`) — Deterministic tuner based on source stats, system resources, driver profiles, and completed-run history. `config.ApplyAISuggestions()` pins per-config and secrets-default values; generated defaults remain overrideable and debug output reports provenance.
+3. **Runtime Controller** (`monitor/`) — Rule-based controller that adjusts runtime parameters through `RuntimeTuner`; it does not call an LLM or mutate `*config.Config` during transfer.
+4. **Error Diagnosis** (`driver/diagnosis*.go`) — Deterministic catalog. Unmatched errors are counted as `errordiag` fallback-observability events for catalog growth, not sent to an AI provider.
 
 ### Config System
 
@@ -133,7 +133,7 @@ All AI features share `AITypeMapper.CallAI()` with provider abstraction (Claude,
 - **Circular Import Prevention**: `dbconfig` package holds SourceConfig/TargetConfig used by both `config` and `driver`
 - **Producer-Consumer Pipeline**: Multiple reader goroutines → buffered chunkChan → WriterPool → ackChan → checkpoint coordinator
 - **Strategy Pattern**: `TargetModeStrategy` interface for drop-recreate vs upsert
-- **Circuit Breaker**: AI adjuster has two breakers (API failures + effectiveness) with auto-reset
+- **Runtime Controller**: rule-based adjustments flow through `RuntimeTuner`; config is treated as the pre-transfer baseline
 - **Dynamic Tuning**: `RuntimeTuner` + `chunkSizeFn` closure allow mid-migration parameter changes
 - **Identifier Sanitization**: `target.SanitizePGIdentifier()` converts SQL Server identifiers to valid PostgreSQL names
 

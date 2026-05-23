@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -185,6 +186,52 @@ func TestGetPKColumn(t *testing.T) {
 	}
 }
 
+func TestValidateIdentifierLengthLimitIsGlobalNotDialectSpecific(t *testing.T) {
+	const genericMax = 128
+
+	if err := ValidateIdentifier(strings.Repeat("a", genericMax)); err != nil {
+		t.Fatalf("ValidateIdentifier should accept the generic %d-character limit: %v", genericMax, err)
+	}
+	if err := ValidateIdentifier(strings.Repeat("a", genericMax+1)); err == nil {
+		t.Fatalf("ValidateIdentifier should reject identifiers longer than the generic %d-character limit", genericMax)
+	}
+
+	// These are target-dialect limits used elsewhere as DatabaseContext
+	// guidance. There is no dialect-specific validation hook today, so this
+	// test documents which limits are executable here and which are not.
+	tests := []struct {
+		dialect        string
+		targetLimit    int
+		enforcedByHook bool
+	}{
+		{dialect: "mssql", targetLimit: 128, enforcedByHook: true},
+		{dialect: "mysql", targetLimit: 64},
+		{dialect: "postgres", targetLimit: 63},
+		{dialect: "sqlite", targetLimit: 0}, // no documented SQLite identifier limit
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.dialect, func(t *testing.T) {
+			if tt.enforcedByHook {
+				if tt.targetLimit != genericMax {
+					t.Fatalf("%s target limit = %d, but ValidateIdentifier only enforces %d",
+						tt.dialect, tt.targetLimit, genericMax)
+				}
+				return
+			}
+			if tt.targetLimit > 0 {
+				nameBeyondTargetLimit := strings.Repeat("a", tt.targetLimit+1)
+				if len(nameBeyondTargetLimit) <= genericMax {
+					if err := ValidateIdentifier(nameBeyondTargetLimit); err != nil {
+						t.Fatalf("ValidateIdentifier unexpectedly enforced %s's %d-character target limit: %v",
+							tt.dialect, tt.targetLimit, err)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestGoHeapBytesPerRow(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -193,13 +240,13 @@ func TestGoHeapBytesPerRow(t *testing.T) {
 		wantMax int64
 	}{
 		{
-			name: "empty table",
+			name:    "empty table",
 			columns: nil,
 			wantMin: 0,
 			wantMax: 0,
 		},
 		{
-			name: "single int column",
+			name:    "single int column",
 			columns: []Column{{Name: "id", DataType: "int"}},
 			// slice header (24) + 1 iface slot (16) + int64 value (8) = 48
 			wantMin: 40,
@@ -223,7 +270,7 @@ func TestGoHeapBytesPerRow(t *testing.T) {
 			name: "SO2013 Posts-like table (wide rows with text)",
 			columns: []Column{
 				{Name: "Id", DataType: "int"},
-				{Name: "Body", DataType: "nvarchar", MaxLength: -1},       // MAX → 4096 (same as TEXT/NTEXT)
+				{Name: "Body", DataType: "nvarchar", MaxLength: -1}, // MAX → 4096 (same as TEXT/NTEXT)
 				{Name: "Title", DataType: "nvarchar", MaxLength: 250},
 				{Name: "Tags", DataType: "nvarchar", MaxLength: 250},
 				{Name: "OwnerUserId", DataType: "int"},

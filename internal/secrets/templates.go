@@ -59,14 +59,17 @@ const aiSection = `ai:
     anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
       model: "claude-haiku-4-5-20251001"  # optional
+      # max_requests: 100  # optional, max uncached AI calls per dmt process/run
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/
       model: "gpt-4o"  # optional
+      # max_requests: 100  # optional, max uncached AI calls per dmt process/run
 
     gemini:
       api_key: ""  # Get from https://makersuite.google.com/
       model: "gemini-2.0-flash"  # optional
+      # max_requests: 100  # optional, max uncached AI calls per dmt process/run
 
     # Local providers (no API key needed)
     ollama:
@@ -74,6 +77,7 @@ const aiSection = `ai:
       model: "llama3"
       # context_window: 8192  # optional, defaults to 8192 (conservative)
       # max_tokens: 16000     # optional, max output tokens (default: 16000 for local, 4000 for cloud)
+      # max_requests: 100     # optional, max uncached AI calls per dmt process/run
       # Common context_window values:
       # - llama3:8b, llama3.2: 8192
       # - llama3:70b, llama3.1: 131072 (128K)
@@ -85,6 +89,7 @@ const aiSection = `ai:
       model: "local-model"
       # context_window: 8192  # optional, configure based on your model
       # max_tokens: 16000     # optional, increase for reasoning models (e.g., Qwen3, GPT-OSS)
+      # max_requests: 100     # optional, max uncached AI calls per dmt process/run
 `
 
 func generateTemplate(withAI bool) string {

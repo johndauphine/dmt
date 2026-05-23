@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const sqliteRunTimeLayout = "2006-01-02 15:04:05"
+
 // CreateRun creates a new migration run
 func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
 	configJSON, _ := json.Marshal(config)
@@ -18,8 +20,8 @@ func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, pro
 	configHash := hex.EncodeToString(hash[:8])
 
 	_, err := s.db.Exec(`
-		INSERT INTO runs (id, started_at, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
-		VALUES (?, datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
+		INSERT INTO runs (id, started_at, last_heartbeat, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
+		VALUES (?, datetime('now'), datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
 	`, id, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
 	return err
 }
@@ -56,16 +58,23 @@ func (s *State) CompleteRun(id string, status string, errorMsg string) error {
 	return err
 }
 
+// UpdateRunHeartbeat records that a running process still owns a run.
+func (s *State) UpdateRunHeartbeat(runID string, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE runs SET last_heartbeat = ? WHERE id = ?`,
+		at.UTC().Format(sqliteRunTimeLayout), runID)
+	return err
+}
+
 // GetLastIncompleteRun returns the most recent incomplete run
 func (s *State) GetLastIncompleteRun() (*Run, error) {
 	var r Run
 	var startedAtStr string
-	var profileName, configPath, phase, configHash sql.NullString
+	var profileName, configPath, phase, configHash, lastHeartbeat, configStr sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash
+		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash, last_heartbeat, config
 		FROM runs WHERE status = 'running'
 		ORDER BY started_at DESC, rowid DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash)
+	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat, &configStr)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -73,7 +82,13 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 		return nil, err
 	}
 	// Parse SQLite datetime string
-	r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+	r.StartedAt, _ = time.Parse(sqliteRunTimeLayout, startedAtStr)
+	r.LastHeartbeat = r.StartedAt
+	if lastHeartbeat.Valid && lastHeartbeat.String != "" {
+		if t, err := time.Parse(sqliteRunTimeLayout, lastHeartbeat.String); err == nil {
+			r.LastHeartbeat = t
+		}
+	}
 	if profileName.Valid {
 		r.ProfileName = profileName.String
 	}
@@ -85,6 +100,9 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 	}
 	if configHash.Valid {
 		r.ConfigHash = configHash.String
+	}
+	if configStr.Valid {
+		r.Config = configStr.String
 	}
 	return &r, nil
 }
@@ -130,7 +148,7 @@ func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
 // GetAllRuns returns all runs for history
 func (s *State) GetAllRuns() ([]Run, error) {
 	rows, err := s.db.Query(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, started_at, completed_at, last_heartbeat, status, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 20
 	`)
 	if err != nil {
@@ -143,15 +161,22 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var r Run
 		var startedAtStr string
 		var completedAtStr sql.NullString
+		var lastHeartbeat sql.NullString
 		var configStr sql.NullString
 		var profileName, configPath, errorMsg sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
-		r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+		r.StartedAt, _ = time.Parse(sqliteRunTimeLayout, startedAtStr)
+		r.LastHeartbeat = r.StartedAt
 		if completedAtStr.Valid {
-			t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
+			t, _ := time.Parse(sqliteRunTimeLayout, completedAtStr.String)
 			r.CompletedAt = &t
+		}
+		if lastHeartbeat.Valid && lastHeartbeat.String != "" {
+			if t, err := time.Parse(sqliteRunTimeLayout, lastHeartbeat.String); err == nil {
+				r.LastHeartbeat = t
+			}
 		}
 		if configStr.Valid {
 			r.Config = configStr.String
@@ -175,13 +200,14 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	var r Run
 	var startedAtStr string
 	var completedAtStr sql.NullString
+	var lastHeartbeat sql.NullString
 	var configStr sql.NullString
 
 	var profileName, configPath, errorMsg sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, completed_at, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, started_at, completed_at, last_heartbeat, status, source_schema, target_schema, config, profile_name, config_path, error
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
+	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -190,10 +216,16 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 		return nil, err
 	}
 
-	r.StartedAt, _ = time.Parse("2006-01-02 15:04:05", startedAtStr)
+	r.StartedAt, _ = time.Parse(sqliteRunTimeLayout, startedAtStr)
+	r.LastHeartbeat = r.StartedAt
 	if completedAtStr.Valid {
-		t, _ := time.Parse("2006-01-02 15:04:05", completedAtStr.String)
+		t, _ := time.Parse(sqliteRunTimeLayout, completedAtStr.String)
 		r.CompletedAt = &t
+	}
+	if lastHeartbeat.Valid && lastHeartbeat.String != "" {
+		if t, err := time.Parse(sqliteRunTimeLayout, lastHeartbeat.String); err == nil {
+			r.LastHeartbeat = t
+		}
 	}
 	if configStr.Valid {
 		r.Config = configStr.String

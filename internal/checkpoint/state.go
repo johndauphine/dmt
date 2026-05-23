@@ -17,6 +17,26 @@ type State struct {
 	db *sql.DB
 }
 
+// Capabilities reports the SQLite backend's supported behavior.
+func (s *State) Capabilities() BackendCapabilities {
+	return BackendCapabilities{
+		RunLifecycle:         true,
+		TaskLifecycle:        true,
+		TransferProgress:     true,
+		PartitionProgress:    true,
+		SyncTimestamps:       true,
+		DeleteReconciliation: true,
+		SchemaSnapshots:      true,
+		FallbackEvents:       true,
+
+		RunHistory:          true,
+		RunConfigSnapshots:  true,
+		Profiles:            true,
+		AIAdjustmentHistory: true,
+		AITuningHistory:     true,
+	}
+}
+
 // Task represents a migration task
 type Task struct {
 	ID           int64
@@ -33,14 +53,15 @@ type Task struct {
 
 // Run represents a migration run
 type Run struct {
-	ID           string
-	StartedAt    time.Time
-	CompletedAt  *time.Time
-	Status       string
-	Phase        string // Current phase: initializing, transferring, finalizing, validating, complete
-	SourceSchema string
-	TargetSchema string
-	Config       string
+	ID            string
+	StartedAt     time.Time
+	CompletedAt   *time.Time
+	LastHeartbeat time.Time
+	Status        string
+	Phase         string // Current phase: initializing, transferring, finalizing, validating, complete
+	SourceSchema  string
+	TargetSchema  string
+	Config        string
 	// ConfigHash is the hash of the migration config, used for change detection on resume.
 	// Both SQLite and file-based backends persist this field for config validation.
 	ConfigHash  string

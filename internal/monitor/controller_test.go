@@ -834,9 +834,9 @@ func TestThroughputStable_Detection(t *testing.T) {
 		throughputs []float64
 		want        bool
 	}{
-		{"stable_5pct", []float64{500_000, 510_000, 495_000}, true},        // (515-495)/501 ≈ 4%
-		{"unstable_60pct", []float64{100_000, 500_000, 800_000}, false},    // huge spread
-		{"unstable_15pct", []float64{500_000, 600_000, 460_000}, false},    // (600-460)/520 ≈ 27%
+		{"stable_5pct", []float64{500_000, 510_000, 495_000}, true},     // (515-495)/501 ≈ 4%
+		{"unstable_60pct", []float64{100_000, 500_000, 800_000}, false}, // huge spread
+		{"unstable_15pct", []float64{500_000, 600_000, 460_000}, false}, // (600-460)/520 ≈ 27%
 		{"stable_at_zero_returns_false", []float64{0, 0, 0}, false},
 		{"too_few_samples", []float64{500_000, 510_000}, false},
 	}
@@ -885,7 +885,7 @@ func TestGrowChunk(t *testing.T) {
 		{"basic_grow", 1000, 1.10, 0, 1100},
 		{"capped", 1000, 1.10, 1050, 1050},
 		{"small_value_rounds_up_min_plus_one", 10, 1.10, 0, 11}, // 10×1.10 = 11 exactly with rounding
-		{"min_increment_guard_at_cur_1", 1, 1.10, 0, 2},          // (1×1.10)+0.5 = 1.6, int = 1; guard kicks → 2
+		{"min_increment_guard_at_cur_1", 1, 1.10, 0, 2},         // (1×1.10)+0.5 = 1.6, int = 1; guard kicks → 2
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -924,16 +924,16 @@ func (failingTuner) Snapshot() transfer.RuntimeSnapshot { return transfer.Runtim
 func (failingTuner) Update(transfer.RuntimeUpdate) error {
 	return errFailingTuner
 }
-func (failingTuner) TableChunkSize(string) (int, bool)       { return 0, false }
-func (failingTuner) SetTableChunkSize(string, int)           {}
-func (failingTuner) TableBatchSize(string) (int, bool)       { return 0, false }
-func (failingTuner) SetTableBatchSize(string, int)           {}
-func (failingTuner) ReportActiveJobs(int)                    {}
-func (failingTuner) ReportQueueDepth(int)                    {}
-func (failingTuner) ReportError()                            {}
-func (failingTuner) ReportChunkRetry()                       {}
+func (failingTuner) TableChunkSize(string) (int, bool)             { return 0, false }
+func (failingTuner) SetTableChunkSize(string, int)                 {}
+func (failingTuner) TableBatchSize(string) (int, bool)             { return 0, false }
+func (failingTuner) SetTableBatchSize(string, int)                 {}
+func (failingTuner) ReportActiveJobs(int)                          {}
+func (failingTuner) ReportQueueDepth(int)                          {}
+func (failingTuner) ReportError()                                  {}
+func (failingTuner) ReportChunkRetry()                             {}
 func (failingTuner) ReportTransferTime(int64, int64, int64, int64) {}
-func (failingTuner) Metrics() transfer.RuntimeMetrics        { return transfer.RuntimeMetrics{} }
+func (failingTuner) Metrics() transfer.RuntimeMetrics              { return transfer.RuntimeMetrics{} }
 
 var errFailingTuner = errSentinel("tuner failed")
 

@@ -28,6 +28,7 @@ func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []d
 		},
 		checkPoolHeadroomMSSQL,
 		checkPrivilegesMSSQL,
+		checkParallelBCPIndexRiskMSSQL,
 		checkBackupAcknowledgmentMSSQL,
 	)
 }
@@ -229,6 +230,72 @@ func mssqlCheckDBPerm(ctx context.Context, db *sql.DB, perm, intent string, side
 		}}
 	}
 	return nil
+}
+
+// checkParallelBCPIndexRiskMSSQL warns when the target schema already has
+// enabled nonclustered indexes. dmt's MSSQL target writer currently favors
+// parallel BCP without TABLOCK; that is the right default for fresh
+// drop_recreate loads where secondary indexes are built after transfer, but
+// it can amplify logging and lock contention when loading into existing
+// indexed tables. PreFlightRequest does not currently expose the final
+// write_ahead_writers value, so this advisory assumes the MSSQL parallel
+// default and points at write_ahead_writers=1 as the operator mitigation.
+func checkParallelBCPIndexRiskMSSQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+	if req.Side != driver.PreFlightSideTarget {
+		return nil
+	}
+
+	schema := strings.TrimSpace(req.Schema)
+	if schema == "" {
+		schema = "dbo"
+	}
+
+	var indexCount, tableCount int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COUNT(DISTINCT t.object_id)
+		FROM sys.indexes i
+		JOIN sys.tables t ON t.object_id = i.object_id
+		JOIN sys.schemas s ON s.schema_id = t.schema_id
+		WHERE s.name = @p1
+		  AND t.is_ms_shipped = 0
+		  AND UPPER(i.type_desc) LIKE 'NONCLUSTERED%'
+		  AND i.is_primary_key = 0
+		  AND i.is_disabled = 0
+		  AND i.is_hypothetical = 0`, sql.Named("p1", schema)).Scan(&indexCount, &tableCount)
+	if err != nil {
+		return []driver.PreFlightFinding{{
+			Severity: driver.SeverityInfo,
+			Check:    "bulk.parallel_bcp_indexes",
+			Side:     req.Side,
+			Message:  fmt.Sprintf("could not inspect nonclustered indexes in target schema [%s] for MSSQL parallel BCP risk: %v", schema, err),
+			Remedy:   "grant metadata visibility on target tables if you want this advisory check to be precise",
+		}}
+	}
+	if indexCount == 0 {
+		return nil
+	}
+
+	return []driver.PreFlightFinding{{
+		Severity: driver.SeverityWarn,
+		Check:    "bulk.parallel_bcp_indexes",
+		Side:     req.Side,
+		Message: fmt.Sprintf(
+			"target schema [%s] has %d enabled nonclustered %s across %d %s; MSSQL loads use parallel BCP without TABLOCK by default, which can increase logging and lock contention when preserving indexed target tables",
+			schema,
+			indexCount,
+			plural(indexCount, "index", "indexes"),
+			tableCount,
+			plural(tableCount, "table", "tables"),
+		),
+		Remedy: "for upsert or other loads into existing tables, consider dropping/rebuilding secondary indexes around the migration or set migration.write_ahead_writers: 1; in drop_recreate, dmt creates non-PK indexes after transfer",
+	}}
+}
+
+func plural(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
 }
 
 // lookupDBPrincipal returns the quoted database user name suitable for
