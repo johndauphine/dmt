@@ -245,7 +245,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		}
 
 		o.state.CompleteRun(run.ID, "success", "")
-		o.captureSchemaSnapshots(run.ID, tables)
+		o.captureSchemaSnapshotsForReport(run.ID, schemaDriftReport, tables)
 		logging.Info("Resume complete!")
 		return nil
 	}
@@ -446,7 +446,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	} else {
 		// Full success
 		o.state.CompleteRun(run.ID, "success", "")
-		o.captureSchemaSnapshots(run.ID, tables)
+		o.captureSchemaSnapshotsForReport(run.ID, schemaDriftReport, tables)
 		o.notifyCompletion(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tablesToTransfer), totalRows, duration.Round(time.Second), throughput)

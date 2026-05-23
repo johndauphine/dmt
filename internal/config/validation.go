@@ -133,7 +133,7 @@ func (c *Config) validate() error {
 			return err
 		}
 		if err := validateSchemaContractMode("migration.schema_contract.data_type", c.Migration.SchemaContract.DataType,
-			SchemaContractEvolve, SchemaContractFreeze, SchemaContractReport); err != nil {
+			SchemaContractEvolve, SchemaContractFreeze, SchemaContractDiscardRow, SchemaContractDiscardValue, SchemaContractReport); err != nil {
 			return err
 		}
 	}

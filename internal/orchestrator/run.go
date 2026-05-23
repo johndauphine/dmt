@@ -357,7 +357,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	} else {
 		// Full success
 		o.state.CompleteRun(runID, "success", "")
-		o.captureSchemaSnapshots(runID, tables)
+		o.captureSchemaSnapshotsForReport(runID, schemaDriftReport, tables)
 		o.notifyCompletion(runID, startTime, duration, len(tables), totalRows, throughput)
 		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",
 			len(tables), totalRows, duration.Round(time.Second), throughput)

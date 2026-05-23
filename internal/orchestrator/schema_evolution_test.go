@@ -847,6 +847,14 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 			TargetMode:     "upsert",
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractReport},
 		}, want: false, report: typeReport},
+		{name: "schema contract data type discard row prunes without target step", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardRow},
+		}, want: false, report: typeReport},
+		{name: "schema contract data type discard value prunes without target step", migration: config.MigrationConfig{
+			TargetMode:     "upsert",
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
+		}, want: false, report: typeReport},
 		{name: "schema contract data type evolve runs gate", migration: config.MigrationConfig{
 			TargetMode:     "upsert",
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
@@ -874,6 +882,12 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *testing.T) {
 	addedColumnReport := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
 	nullabilityReport := drift.Report{Changes: []drift.Change{{Kind: drift.NullabilityChange, TableName: "Users"}}}
+	safeNullabilityReport := drift.Report{Changes: []drift.Change{{
+		Kind:      drift.NullabilityChange,
+		TableName: "Users",
+		Previous:  "NOT NULL",
+		Current:   "NULL",
+	}}}
 	typeWidenedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TypeWidened, TableName: "Users", ObjectName: "name"}}}
 	typeNarrowedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TypeNarrowed, TableName: "Users", ObjectName: "name"}}}
 	tableDroppedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TableDropped, TableName: "Legacy"}}}
@@ -1056,6 +1070,46 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			want: "data_type=report",
 		},
 		{
+			name:   "schema contract data type discard row names skipped table",
+			report: typeWidenedReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardRow},
+			},
+			want: "data_type=discard_row",
+		},
+		{
+			name:   "schema contract data type discard value names omitted column",
+			report: typeWidenedReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
+			},
+			want: "data_type=discard_value",
+		},
+		{
+			name:   "schema contract data type evolve unsafe names abort",
+			report: typeNarrowedReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
+			},
+			want: "will abort",
+		},
+		{
+			name:   "schema contract data type evolve safe nullability names relaxation",
+			report: safeNullabilityReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
+			},
+			want: "nullability relaxation",
+		},
+		{
 			name:   "schema contract freeze mode names abort",
 			report: drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, TableName: "Orders"}}},
 			allow:  true,
@@ -1191,6 +1245,360 @@ func TestSchemaContractColumnsDiscardValueRejectsAddedIdentityColumns(t *testing
 	}
 	if !strings.Contains(err.Error(), "identity column") {
 		t.Fatalf("error = %q, want identity column message", err)
+	}
+}
+
+func TestSchemaContractDataTypeDiscardRowSkipsTablesWithDataTypeChanges(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardRow},
+		}},
+		auditor: audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.TypeWidened, Schema: "dbo", TableName: "orders", ObjectName: "description"},
+		{Kind: drift.NullabilityChange, Schema: "dbo", TableName: "orders", ObjectName: "note"},
+		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "users", ObjectName: "email"},
+	}}
+	tables := []source.Table{
+		{Schema: "dbo", Name: "users"},
+		{Schema: "dbo", Name: "orders"},
+	}
+
+	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "users" {
+		t.Fatalf("effective tables = %#v, want only users", got)
+	}
+}
+
+func TestSchemaContractDataTypeDiscardRowSnapshotPlanOmitsSkippedTables(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardRow},
+		}},
+		auditor: audit.Disabled(),
+	}
+	previous := source.Table{
+		Schema: "dbo",
+		Name:   "orders",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", OrdinalPos: 1},
+			{Name: "description", DataType: "varchar", MaxLength: 255, OrdinalPos: 2},
+		},
+	}
+	current := previous
+	current.Columns = []source.Column{
+		{Name: "id", DataType: "int", OrdinalPos: 1},
+		{Name: "description", DataType: "varchar", MaxLength: 100, OrdinalPos: 2},
+	}
+	users := source.Table{
+		Schema: "dbo",
+		Name:   "users",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", OrdinalPos: 1},
+		},
+	}
+	report := drift.Compare(
+		[]drift.TableSnapshot{drift.BuildTableSnapshot(previous), drift.BuildTableSnapshot(users)},
+		[]drift.TableSnapshot{drift.BuildTableSnapshot(current), drift.BuildTableSnapshot(users)},
+	)
+
+	effective, err := o.effectiveTablesForSchemaEvolution(report, []source.Table{current, users})
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	snapshots := o.schemaSnapshotPlan(report, effective)
+	if len(snapshots) != 1 || snapshots[0].Name != "users" {
+		t.Fatalf("snapshots = %#v, want only non-skipped users table", snapshots)
+	}
+}
+
+func TestSchemaContractDataTypeDiscardValuePrunesAffectedColumns(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
+		}},
+		auditor: audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.TypeNarrowed, Schema: "dbo", TableName: "orders", ObjectName: "description"},
+		{Kind: drift.TypeWidened, Schema: "dbo", TableName: "orders", ObjectName: "note"},
+	}}
+	tables := []source.Table{{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int"},
+			{Name: "description", DataType: "varchar", MaxLength: 100},
+			{Name: "note", DataType: "varchar", MaxLength: 500},
+			{Name: "amount", DataType: "decimal"},
+		},
+		Indexes: []source.Index{
+			{Name: "ix_orders_description", Columns: []string{"description"}},
+			{Name: "ix_orders_note", Columns: []string{"note"}},
+			{Name: "ix_orders_amount", Columns: []string{"amount"}},
+		},
+		CheckConstraints: []source.CheckConstraint{
+			{Name: "chk_orders_description", Definition: "description <> ''"},
+			{Name: "chk_orders_note", Definition: "note <> ''"},
+			{Name: "chk_orders_amount", Definition: "amount >= 0"},
+		},
+	}}
+
+	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(effective tables) = %d, want 1", len(got))
+	}
+	if len(got[0].Columns) != 2 {
+		t.Fatalf("columns = %#v, want description and note pruned", got[0].Columns)
+	}
+	for _, column := range got[0].Columns {
+		if column.Name == "description" || column.Name == "note" {
+			t.Fatalf("discarded data type column was not pruned: %#v", got[0].Columns)
+		}
+	}
+	if len(got[0].Indexes) != 1 || got[0].Indexes[0].Name != "ix_orders_amount" {
+		t.Fatalf("indexes = %#v, want only ix_orders_amount", got[0].Indexes)
+	}
+	if len(got[0].CheckConstraints) != 1 || got[0].CheckConstraints[0].Name != "chk_orders_amount" {
+		t.Fatalf("checks = %#v, want only chk_orders_amount", got[0].CheckConstraints)
+	}
+}
+
+func TestSchemaContractDataTypeDiscardValueAllowsOnlyRequiredColumnsToRemain(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
+		}},
+		auditor: audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.TypeChangedLossy, Schema: "dbo", TableName: "orders", ObjectName: "description"},
+		{Kind: drift.NullabilityChange, Schema: "dbo", TableName: "orders", ObjectName: "note"},
+	}}
+	tables := []source.Table{{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int"},
+			{Name: "description", DataType: "varchar", MaxLength: 100},
+			{Name: "note", DataType: "varchar", MaxLength: 500},
+		},
+	}}
+
+	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Columns) != 1 || got[0].Columns[0].Name != "id" {
+		t.Fatalf("columns = %#v, want only required id column", got)
+	}
+	if len(got[0].PrimaryKey) != 1 || got[0].PrimaryKey[0] != "id" {
+		t.Fatalf("primary key = %#v, want id retained", got[0].PrimaryKey)
+	}
+}
+
+func TestSchemaContractDataTypeDiscardValueSnapshotPlanRetainsPreviousDiscardedMetadata(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
+		}},
+		auditor: audit.Disabled(),
+	}
+	previous := source.Table{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", OrdinalPos: 1},
+			{Name: "description", DataType: "varchar", MaxLength: 255, OrdinalPos: 2},
+			{Name: "amount", DataType: "decimal", OrdinalPos: 3},
+		},
+		Indexes: []source.Index{
+			{Name: "ix_orders_description", Columns: []string{"description"}},
+			{Name: "ix_orders_amount", Columns: []string{"amount"}},
+		},
+		CheckConstraints: []source.CheckConstraint{
+			{Name: "chk_orders_description", Definition: "description <> ''"},
+			{Name: "chk_orders_amount", Definition: "amount >= 0"},
+		},
+	}
+	current := previous
+	current.Columns = []source.Column{
+		{Name: "id", DataType: "int", OrdinalPos: 1},
+		{Name: "description", DataType: "varchar", MaxLength: 100, OrdinalPos: 2},
+		{Name: "amount", DataType: "decimal", OrdinalPos: 3},
+	}
+	items := source.Table{
+		Schema: "dbo",
+		Name:   "order_items",
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", OrdinalPos: 1},
+			{Name: "order_description", DataType: "varchar", MaxLength: 255, OrdinalPos: 2},
+		},
+		ForeignKeys: []source.ForeignKey{{
+			Name:       "fk_items_orders_description",
+			Columns:    []string{"order_description"},
+			RefTable:   "orders",
+			RefColumns: []string{"description"},
+		}},
+	}
+
+	report := drift.Compare(
+		[]drift.TableSnapshot{drift.BuildTableSnapshot(previous), drift.BuildTableSnapshot(items)},
+		[]drift.TableSnapshot{drift.BuildTableSnapshot(current), drift.BuildTableSnapshot(items)},
+	)
+	effective, err := o.effectiveTablesForSchemaEvolution(report, []source.Table{current, items})
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	var effectiveItems *source.Table
+	for i := range effective {
+		if effective[i].Name == "order_items" {
+			effectiveItems = &effective[i]
+			break
+		}
+	}
+	if effectiveItems == nil {
+		t.Fatalf("effective tables = %#v, want order_items retained", effective)
+	}
+	if len(effectiveItems.ForeignKeys) != 0 {
+		t.Fatalf("effective order_items foreign keys = %#v, want FK referencing discarded column pruned", effectiveItems.ForeignKeys)
+	}
+	snapshots := o.schemaSnapshotPlan(report, effective)
+	if len(snapshots) != 2 {
+		t.Fatalf("snapshot count = %d, want 2", len(snapshots))
+	}
+
+	ordersSnapshot := snapshots[1]
+	itemsSnapshot := snapshots[0]
+	if ordersSnapshot.Name != "orders" {
+		ordersSnapshot, itemsSnapshot = itemsSnapshot, ordersSnapshot
+	}
+	var description *drift.ColumnSnapshot
+	for i := range ordersSnapshot.Columns {
+		if ordersSnapshot.Columns[i].Name == "description" {
+			description = &ordersSnapshot.Columns[i]
+			break
+		}
+	}
+	if description == nil {
+		t.Fatalf("snapshot columns = %#v, want previous description metadata retained", ordersSnapshot.Columns)
+	}
+	if description.MaxLength != 255 {
+		t.Fatalf("description max length = %d, want previous 255", description.MaxLength)
+	}
+	if len(ordersSnapshot.Indexes) != 2 {
+		t.Fatalf("snapshot indexes = %#v, want previous discarded-column index retained", ordersSnapshot.Indexes)
+	}
+	if len(ordersSnapshot.CheckConstraints) != 2 {
+		t.Fatalf("snapshot checks = %#v, want previous discarded-column check retained", ordersSnapshot.CheckConstraints)
+	}
+	if len(itemsSnapshot.ForeignKeys) != 1 {
+		t.Fatalf("item snapshot foreign keys = %#v, want referenced discarded-column FK retained", itemsSnapshot.ForeignKeys)
+	}
+
+	nextReport := drift.Compare(snapshots, []drift.TableSnapshot{drift.BuildTableSnapshot(current), drift.BuildTableSnapshot(items)})
+	if len(addedColumnChanges(nextReport)) != 0 {
+		t.Fatalf("next report added columns = %#v, want discarded data type column to remain a type change", addedColumnChanges(nextReport))
+	}
+	if got := len(typeNarrowedOrLossyChanges(nextReport)); got != 1 {
+		t.Fatalf("next report narrowed/lossy changes = %d, want 1", got)
+	}
+	for _, change := range nextReport.Changes {
+		if change.Kind == drift.FKAdded {
+			t.Fatalf("next report includes FKAdded = %#v, want referenced FK retained in snapshot", change)
+		}
+	}
+}
+
+func TestSchemaContractDataTypeDiscardValueRejectsPrimaryKeyAndIdentityColumns(t *testing.T) {
+	tests := []struct {
+		name    string
+		table   source.Table
+		wantErr string
+	}{
+		{
+			name: "primary key",
+			table: source.Table{
+				Schema:     "dbo",
+				Name:       "orders",
+				PrimaryKey: []string{"id"},
+				Columns: []source.Column{
+					{Name: "id", DataType: "int"},
+				},
+			},
+			wantErr: "primary-key column",
+		},
+		{
+			name: "identity",
+			table: source.Table{
+				Schema: "dbo",
+				Name:   "orders",
+				Columns: []source.Column{
+					{Name: "id", DataType: "int", IsIdentity: true},
+				},
+			},
+			wantErr: "identity column",
+		},
+		{
+			name: "resolved date tracking column",
+			table: source.Table{
+				Schema:     "dbo",
+				Name:       "orders",
+				DateColumn: "updated_at",
+				Columns: []source.Column{
+					{Name: "updated_at", DataType: "datetime2"},
+				},
+			},
+			wantErr: "date tracking column",
+		},
+		{
+			name: "configured date tracking candidate",
+			table: source.Table{
+				Schema: "dbo",
+				Name:   "orders",
+				Columns: []source.Column{
+					{Name: "updated_at", DataType: "datetime2"},
+				},
+			},
+			wantErr: "date tracking column",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := &Orchestrator{
+				config: &config.Config{Migration: config.MigrationConfig{
+					DateUpdatedColumns: []string{"updated_at"},
+					SchemaContract:     &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
+				}},
+				auditor: audit.Disabled(),
+			}
+			columnName := "id"
+			if tt.wantErr == "date tracking column" {
+				columnName = "updated_at"
+			}
+			report := drift.Report{Changes: []drift.Change{
+				{Kind: drift.TypeChangedLossy, Schema: "dbo", TableName: "orders", ObjectName: columnName},
+			}}
+
+			_, err := o.effectiveTablesForSchemaEvolution(report, []source.Table{tt.table})
+			if err == nil {
+				t.Fatal("effectiveTablesForSchemaEvolution() error = nil, want discard guardrail error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

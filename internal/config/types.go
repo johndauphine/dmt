@@ -503,6 +503,8 @@ func schemaContractDataTypePolicy(mode SchemaContractMode) SchemaEvolutionPolicy
 	switch mode {
 	case SchemaContractFreeze:
 		return SchemaEvolutionFail
+	case SchemaContractDiscardRow, SchemaContractDiscardValue:
+		return SchemaEvolutionLog
 	case SchemaContractReport:
 		return SchemaEvolutionLog
 	case "", SchemaContractEvolve:

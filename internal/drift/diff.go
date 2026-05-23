@@ -38,14 +38,17 @@ type Change struct {
 }
 
 type Report struct {
-	Changes []Change `json:"changes"`
+	Changes  []Change        `json:"changes"`
+	Previous []TableSnapshot `json:"-"`
 }
 
 func Compare(previous, current []TableSnapshot) Report {
 	prevByTable := snapshotsByTable(previous)
 	currByTable := snapshotsByTable(current)
 
-	var report Report
+	report := Report{
+		Previous: append([]TableSnapshot(nil), previous...),
+	}
 	for _, key := range sortedKeys(prevByTable) {
 		if _, ok := currByTable[key]; !ok {
 			table := prevByTable[key]

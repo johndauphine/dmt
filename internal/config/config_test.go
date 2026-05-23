@@ -2334,14 +2334,14 @@ func TestSchemaContractMappingDefaultsOmittedEntitiesToEvolve(t *testing.T) {
 	}
 }
 
-func TestSchemaContractDiscardRowModes(t *testing.T) {
+func TestSchemaContractDiscardModes(t *testing.T) {
 	withEmptySecretsFile(t)
 
 	cfg, err := LoadBytes(minConfigYAML(`  target_mode: upsert
   schema_contract:
     tables: discard_row
     columns: discard_row
-    data_type: report
+    data_type: discard_value
 `))
 	if err != nil {
 		t.Fatalf("LoadBytes() error: %v", err)
@@ -2355,8 +2355,14 @@ func TestSchemaContractDiscardRowModes(t *testing.T) {
 	if got := cfg.Migration.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
 		t.Fatalf("added-column policy = %q, want %q", got, SchemaEvolutionLog)
 	}
-	if got := cfg.Migration.SchemaContractDataTypeMode(); got != SchemaContractReport {
-		t.Fatalf("data_type mode = %q, want %q", got, SchemaContractReport)
+	if got := cfg.Migration.SchemaContractDataTypeMode(); got != SchemaContractDiscardValue {
+		t.Fatalf("data_type mode = %q, want %q", got, SchemaContractDiscardValue)
+	}
+	if got := cfg.Migration.NullabilityChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("nullability policy = %q, want %q", got, SchemaEvolutionLog)
+	}
+	if got := cfg.Migration.TypeChangeSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("type policy = %q, want %q", got, SchemaEvolutionLog)
 	}
 }
 
@@ -2387,20 +2393,6 @@ func TestValidateSchemaContractRejectsAmbiguousOrUnsupportedModes(t *testing.T) 
     tables: discard_value
 `,
 			want: "migration.schema_contract.tables must be one of",
-		},
-		{
-			name: "data type discard value unsupported",
-			yaml: `  schema_contract:
-    data_type: discard_value
-`,
-			want: "migration.schema_contract.data_type must be one of",
-		},
-		{
-			name: "data type discard row unsupported",
-			yaml: `  schema_contract:
-    data_type: discard_row
-`,
-			want: "migration.schema_contract.data_type must be one of",
 		},
 	}
 
