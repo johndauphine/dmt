@@ -23,6 +23,13 @@ func (c *Config) applyDefaults() error {
 	// intent regardless of which name the YAML used; AIAdjust* are
 	// drained.
 	c.normalizeRuntimeTuningFields()
+	if warning := c.Migration.SchemaEvolutionDeprecationWarning(); warning != "" {
+		logging.WarnEvent(warning,
+			"config_key", "migration.schema_evolution",
+			"replacement", "migration.schema_contract",
+			"issue", "#403",
+		)
+	}
 
 	// Capture original values before auto-tuning
 	c.autoConfig.OriginalWorkers = c.Migration.Workers

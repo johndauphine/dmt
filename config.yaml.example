@@ -88,11 +88,10 @@ migration:
   # report before transfer. Set true to abort when any drift is detected.
   fail_on_schema_drift: false
 
-  # Schema evolution (#306). Omit this section to keep schema drift
-  # reporting read-only. In upsert mode, adding this section opts into
-  # compatible target ALTERs before transfer. Today this supports added
-  # columns, safe nullability relaxation (NOT NULL -> NULL), and opt-in
-  # type widening.
+  # Deprecated schema evolution (#306). Omit this section to keep schema
+  # drift reporting read-only. This legacy surface still works for existing
+  # migrations, but DMT will replace it with DLT-style schema_contract
+  # settings in a future release (#403). New configs should avoid adding it.
   # schema_evolution:
   #   added_column: auto          # auto | log | fail | discard_value | discard (section default: auto)
   #   nullability_change: auto    # auto | log | fail; auto only relaxes to NULL
