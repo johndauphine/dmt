@@ -293,6 +293,9 @@ func (p *keysetRuntimeTargetPool) AddColumn(context.Context, *driver.Table, *dri
 func (p *keysetRuntimeTargetPool) DropColumnNotNull(context.Context, *driver.Table, *driver.Column, string) error {
 	return nil
 }
+func (p *keysetRuntimeTargetPool) AlterColumnType(context.Context, *driver.Table, *driver.Column, string) error {
+	return nil
+}
 func (p *keysetRuntimeTargetPool) DropTable(context.Context, string, string) error { return nil }
 func (p *keysetRuntimeTargetPool) TruncateTable(context.Context, string, string) error {
 	return nil
