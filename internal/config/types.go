@@ -486,6 +486,8 @@ func schemaContractColumnsPolicy(mode SchemaContractMode) SchemaEvolutionPolicy 
 	switch mode {
 	case SchemaContractFreeze:
 		return SchemaEvolutionFail
+	case SchemaContractDiscardRow:
+		return SchemaEvolutionLog
 	case SchemaContractDiscardValue:
 		return SchemaEvolutionDiscardValue
 	case SchemaContractReport:

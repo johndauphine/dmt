@@ -133,10 +133,9 @@ func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSche
 	); part != "" {
 		parts = append(parts, part)
 	}
-	if part := schemaContractFooterPart(
-		"columns",
+	if part := schemaContractColumnsFooterPart(
 		len(addedColumnChanges(report)),
-		"added column(s)",
+		len(droppedColumnChanges(report)),
 		o.config.Migration.SchemaContractColumnsMode(),
 		allowSchemaEvolution,
 	); part != "" {
@@ -219,6 +218,56 @@ func schemaContractTablesFooterPart(added, dropped int, mode config.SchemaContra
 	default:
 		return "tables policy is invalid"
 	}
+}
+
+func schemaContractColumnsFooterPart(added, dropped int, mode config.SchemaContractMode, allowSchemaEvolution bool) string {
+	if added == 0 && dropped == 0 {
+		return ""
+	}
+
+	var parts []string
+	switch mode {
+	case config.SchemaContractEvolve, "":
+		if allowSchemaEvolution {
+			if added > 0 {
+				parts = append(parts, fmt.Sprintf("%d added column(s) may be added before transfer", added))
+			}
+		} else if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added column(s) will be reported only in read-only mode", added))
+		}
+	case config.SchemaContractFreeze:
+		if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added column(s) will abort before transfer", added))
+		}
+		if dropped > 0 {
+			parts = append(parts, fmt.Sprintf("%d dropped source column(s) will abort before transfer", dropped))
+		}
+	case config.SchemaContractDiscardRow:
+		if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added column(s) will skip affected table(s) for this run", added))
+		}
+	case config.SchemaContractDiscardValue:
+		if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added column(s) will be omitted from target DDL, transfer, validation, and schema snapshots", added))
+		}
+	case config.SchemaContractReport:
+		if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added column(s) will be reported only", added))
+		}
+	default:
+		return "columns policy is invalid"
+	}
+
+	if dropped > 0 && mode != config.SchemaContractFreeze {
+		parts = append(parts, fmt.Sprintf("%d dropped source column(s) will be reported; target columns are retained and omitted from writes/validation", dropped))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	if mode == "" {
+		mode = config.SchemaContractEvolve
+	}
+	return "columns=" + string(mode) + "; " + strings.Join(parts, "; ")
 }
 
 func schemaEvolutionFooterPart(kind string, count int, noun string, policy config.SchemaEvolutionPolicy) string {

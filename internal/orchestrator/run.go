@@ -250,10 +250,11 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 
-	if o.shouldApplySchemaEvolution(schemaDriftReport) {
+	transferSchemaDriftReport := filterSchemaDriftReportForTables(schemaDriftReport, tables)
+	if o.shouldApplySchemaEvolution(transferSchemaDriftReport) {
 		o.setPhase("schema_evolution")
 		o.state.UpdatePhase(runID, "schema_evolution")
-		if err := o.applySchemaEvolution(ctx, schemaDriftReport, tables); err != nil {
+		if err := o.applySchemaEvolution(ctx, transferSchemaDriftReport, tables); err != nil {
 			o.state.CompleteRun(runID, "failed", err.Error())
 			o.notifyFailure(runID, err, time.Since(startTime))
 			return err

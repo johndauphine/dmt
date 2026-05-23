@@ -2334,13 +2334,13 @@ func TestSchemaContractMappingDefaultsOmittedEntitiesToEvolve(t *testing.T) {
 	}
 }
 
-func TestSchemaContractTablesDiscardRowMode(t *testing.T) {
+func TestSchemaContractDiscardRowModes(t *testing.T) {
 	withEmptySecretsFile(t)
 
 	cfg, err := LoadBytes(minConfigYAML(`  target_mode: upsert
   schema_contract:
     tables: discard_row
-    columns: discard_value
+    columns: discard_row
     data_type: report
 `))
 	if err != nil {
@@ -2349,8 +2349,11 @@ func TestSchemaContractTablesDiscardRowMode(t *testing.T) {
 	if got := cfg.Migration.SchemaContractTablesMode(); got != SchemaContractDiscardRow {
 		t.Fatalf("tables mode = %q, want %q", got, SchemaContractDiscardRow)
 	}
-	if got := cfg.Migration.SchemaContractColumnsMode(); got != SchemaContractDiscardValue {
-		t.Fatalf("columns mode = %q, want %q", got, SchemaContractDiscardValue)
+	if got := cfg.Migration.SchemaContractColumnsMode(); got != SchemaContractDiscardRow {
+		t.Fatalf("columns mode = %q, want %q", got, SchemaContractDiscardRow)
+	}
+	if got := cfg.Migration.AddedColumnSchemaEvolutionPolicy(); got != SchemaEvolutionLog {
+		t.Fatalf("added-column policy = %q, want %q", got, SchemaEvolutionLog)
 	}
 	if got := cfg.Migration.SchemaContractDataTypeMode(); got != SchemaContractReport {
 		t.Fatalf("data_type mode = %q, want %q", got, SchemaContractReport)
@@ -2393,11 +2396,11 @@ func TestValidateSchemaContractRejectsAmbiguousOrUnsupportedModes(t *testing.T) 
 			want: "migration.schema_contract.data_type must be one of",
 		},
 		{
-			name: "discard row unsupported in first slice",
+			name: "data type discard row unsupported",
 			yaml: `  schema_contract:
-    columns: discard_row
+    data_type: discard_row
 `,
-			want: "migration.schema_contract.columns must be one of",
+			want: "migration.schema_contract.data_type must be one of",
 		},
 	}
 

@@ -65,9 +65,9 @@ func (o *Orchestrator) enforceSchemaContractPolicy(report drift.Report) error {
 		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractFreeze {
 		violations = append(violations, fmt.Sprintf("tables=freeze blocked %d table change(s)", count))
 	}
-	if count := len(addedColumnChanges(report)); count > 0 &&
+	if count := len(columnContractChanges(report)); count > 0 &&
 		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractFreeze {
-		violations = append(violations, fmt.Sprintf("columns=freeze blocked %d added column(s)", count))
+		violations = append(violations, fmt.Sprintf("columns=freeze blocked %d column change(s)", count))
 	}
 	if count := len(nullabilityChanges(report)) + len(typeChanges(report)); count > 0 &&
 		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractFreeze {
@@ -116,7 +116,11 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	label := o.schemaChangeLogLabel()
 	if len(addedLogOnly) > 0 {
 		policy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
-		if policy == config.SchemaEvolutionDiscardValue {
+		if o.config.Migration.SchemaContractEnabled() &&
+			o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractDiscardRow {
+			logging.Warn("%s: %d added column(s) detected; columns=discard_row skips affected table(s) and leaves target columns unchanged",
+				label, len(addedLogOnly))
+		} else if policy == config.SchemaEvolutionDiscardValue {
 			logging.Warn("%s: %d added column(s) detected; policy added_column=discard_value leaves target unchanged and omits values from transfer",
 				label, len(addedLogOnly))
 		} else {
@@ -391,6 +395,20 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 		}
 	}
 
+	if o.config.Migration.SchemaContractEnabled() &&
+		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractDiscardRow {
+		var skippedTables, skippedColumns int
+		pruned, skippedTables, skippedColumns = pruneTablesWithAddedColumns(report, pruned)
+		if skippedTables > 0 {
+			logging.Warn("%s: skipping %d table(s) with %d added column(s) from transfer, validation, and schema snapshots because columns=discard_row",
+				o.schemaChangeLogLabel(), skippedTables, skippedColumns)
+			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				"added_columns":  skippedColumns,
+				"skipped_tables": skippedTables,
+			})
+		}
+	}
+
 	if o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
 		return pruned, nil
 	}
@@ -429,6 +447,27 @@ func pruneDiscardedAddedTables(report drift.Report, tables []source.Table) ([]so
 	return pruned, discarded
 }
 
+func pruneTablesWithAddedColumns(report drift.Report, tables []source.Table) ([]source.Table, int, int) {
+	addedColumns := discardedAddedColumnsByTable(report)
+	if len(addedColumns) == 0 {
+		return tables, 0, 0
+	}
+
+	pruned := make([]source.Table, 0, len(tables))
+	skippedTables := 0
+	skippedColumns := 0
+	for _, table := range tables {
+		columns := addedColumns[schemaEvolutionTableKey(table.Schema, table.Name)]
+		if len(columns) == 0 {
+			pruned = append(pruned, table)
+			continue
+		}
+		skippedTables++
+		skippedColumns += len(columns)
+	}
+	return pruned, skippedTables, skippedColumns
+}
+
 func findAddedSourceTables(report drift.Report, tables []source.Table) []source.Table {
 	added := addedTablesSet(report)
 	if len(added) == 0 {
@@ -447,6 +486,25 @@ func findAddedSourceTables(report drift.Report, tables []source.Table) []source.
 func tableAddedInReport(report drift.Report, table source.Table) bool {
 	_, ok := addedTablesSet(report)[schemaEvolutionTableKey(table.Schema, table.Name)]
 	return ok
+}
+
+func filterSchemaDriftReportForTables(report drift.Report, tables []source.Table) drift.Report {
+	if !report.HasChanges() || len(tables) == 0 {
+		return drift.Report{}
+	}
+
+	tableSet := make(map[string]struct{}, len(tables))
+	for _, table := range tables {
+		tableSet[schemaEvolutionTableKey(table.Schema, table.Name)] = struct{}{}
+	}
+
+	filtered := drift.Report{Changes: make([]drift.Change, 0, len(report.Changes))}
+	for _, change := range report.Changes {
+		if _, ok := tableSet[schemaEvolutionTableKey(change.Schema, change.TableName)]; ok {
+			filtered.Changes = append(filtered.Changes, change)
+		}
+	}
+	return filtered
 }
 
 func addedTablesSet(report drift.Report) map[string]struct{} {
@@ -525,6 +583,14 @@ func pruneDiscardedAddedColumns(report drift.Report, tables []source.Table) ([]s
 				return nil, 0, fmt.Errorf(
 					"schema evolution cannot discard added primary-key column %s.%s",
 					table.FullName(), pk,
+				)
+			}
+		}
+		for _, column := range table.Columns {
+			if stringSetContains(discardCols, column.Name) && column.IsIdentity {
+				return nil, 0, fmt.Errorf(
+					"schema evolution cannot discard added identity column %s.%s",
+					table.FullName(), column.Name,
 				)
 			}
 		}
@@ -877,6 +943,27 @@ func tableDroppedChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
 		if change.Kind == drift.TableDropped {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func droppedColumnChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		if change.Kind == drift.DroppedColumn {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func columnContractChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		switch change.Kind {
+		case drift.AddedColumn, drift.DroppedColumn:
 			changes = append(changes, change)
 		}
 	}
