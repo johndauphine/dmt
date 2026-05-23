@@ -150,10 +150,31 @@ type SchemaEvolutionConfig struct {
 }
 
 const schemaEvolutionDeprecationWarning = `migration.schema_evolution is deprecated; ` +
-	`it will be replaced by DLT-style migration.schema_contract settings for ` +
-	`tables, columns, and data_type in a future release. Existing ` +
-	`schema_evolution behavior still runs for now, but new configs should not ` +
-	`add this legacy section. See issue #403.`
+	`use DLT-style migration.schema_contract settings for tables, columns, ` +
+	`and data_type instead. Existing schema_evolution behavior still runs for ` +
+	`now, but new configs should not add this legacy section. See issue #403.`
+
+// SchemaContractMode controls how DMT responds when detected schema drift
+// violates a schema contract entity. `report` is DMT-specific and preserves
+// the legacy report-only behavior without applying target schema changes.
+type SchemaContractMode string
+
+const (
+	SchemaContractEvolve       SchemaContractMode = "evolve"
+	SchemaContractFreeze       SchemaContractMode = "freeze"
+	SchemaContractDiscardRow   SchemaContractMode = "discard_row"
+	SchemaContractDiscardValue SchemaContractMode = "discard_value"
+	SchemaContractReport       SchemaContractMode = "report"
+)
+
+// SchemaContractConfig is DMT's DLT-style schema contract surface. A scalar
+// YAML value such as `schema_contract: report` expands to all three entities.
+// Omitted entities default to evolve when the section is present.
+type SchemaContractConfig struct {
+	Tables   SchemaContractMode `yaml:"tables,omitempty" json:"tables,omitempty"`
+	Columns  SchemaContractMode `yaml:"columns,omitempty" json:"columns,omitempty"`
+	DataType SchemaContractMode `yaml:"data_type,omitempty" json:"data_type,omitempty"`
+}
 
 // NotifyConfig controls migration completion notifications. Nil fields default
 // to true so existing Slack behavior is preserved when a webhook is configured.
@@ -185,9 +206,12 @@ type MigrationConfig struct {
 	FailOnSchemaDrift bool `yaml:"fail_on_schema_drift" json:"-"`
 	// SchemaEvolution applies compatible source drift to the target before
 	// transfer. Omit the section to keep drift reporting read-only.
-	SchemaEvolution  *SchemaEvolutionConfig `yaml:"schema_evolution,omitempty" json:"schema_evolution,omitempty"`
-	SampleValidation bool                   `yaml:"sample_validation"` // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
-	SampleSize       int                    `yaml:"sample_size"`       // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
+	SchemaEvolution *SchemaEvolutionConfig `yaml:"schema_evolution,omitempty" json:"schema_evolution,omitempty"`
+	// SchemaContract is the DLT-style replacement for schema_evolution. It
+	// supports tables/columns/data_type entities plus DMT's report mode.
+	SchemaContract   *SchemaContractConfig `yaml:"schema_contract,omitempty" json:"schema_contract,omitempty"`
+	SampleValidation bool                  `yaml:"sample_validation"` // (legacy) Enable PK-existence sample validation; superseded by validation.mode (#226)
+	SampleSize       int                   `yaml:"sample_size"`       // (legacy) Number of rows to sample for validation; superseded by validation.sample_rows (#226)
 	// Notify controls non-data-plane completion alerts. It is omitted from
 	// the resume config hash because changing alert policy should not make a
 	// resumable migration look incompatible with its original run config.
@@ -365,10 +389,16 @@ func (m MigrationConfig) CreateForeignKeysEnabled() bool {
 	return boolPtrDefault(m.CreateForeignKeys, true)
 }
 
-// SchemaEvolutionEnabled returns true when the operator opted into target-side
-// schema evolution by adding migration.schema_evolution to the config.
+// SchemaContractEnabled returns true when the operator configured the
+// DLT-style schema contract surface.
+func (m MigrationConfig) SchemaContractEnabled() bool {
+	return m.SchemaContract != nil
+}
+
+// SchemaEvolutionEnabled returns true when the operator opted into either the
+// legacy schema evolution surface or the schema contract replacement.
 func (m MigrationConfig) SchemaEvolutionEnabled() bool {
-	return m.SchemaEvolution != nil
+	return m.SchemaEvolution != nil || m.SchemaContract != nil
 }
 
 // SchemaEvolutionDeprecationWarning returns the user-facing warning for
@@ -380,10 +410,37 @@ func (m MigrationConfig) SchemaEvolutionDeprecationWarning() string {
 	return schemaEvolutionDeprecationWarning
 }
 
+// SchemaContractTablesMode returns the effective tables contract mode.
+func (m MigrationConfig) SchemaContractTablesMode() SchemaContractMode {
+	if m.SchemaContract == nil || m.SchemaContract.Tables == "" {
+		return SchemaContractEvolve
+	}
+	return m.SchemaContract.Tables
+}
+
+// SchemaContractColumnsMode returns the effective columns contract mode.
+func (m MigrationConfig) SchemaContractColumnsMode() SchemaContractMode {
+	if m.SchemaContract == nil || m.SchemaContract.Columns == "" {
+		return SchemaContractEvolve
+	}
+	return m.SchemaContract.Columns
+}
+
+// SchemaContractDataTypeMode returns the effective data_type contract mode.
+func (m MigrationConfig) SchemaContractDataTypeMode() SchemaContractMode {
+	if m.SchemaContract == nil || m.SchemaContract.DataType == "" {
+		return SchemaContractEvolve
+	}
+	return m.SchemaContract.DataType
+}
+
 // AddedColumnSchemaEvolutionPolicy returns the effective added-column policy.
 // The absent section preserves read-only drift reporting. Once the section is
 // present, omitted added_column defaults to auto.
 func (m MigrationConfig) AddedColumnSchemaEvolutionPolicy() SchemaEvolutionPolicy {
+	if m.SchemaContract != nil {
+		return schemaContractColumnsPolicy(m.SchemaContractColumnsMode())
+	}
 	if m.SchemaEvolution == nil {
 		return SchemaEvolutionLog
 	}
@@ -400,6 +457,9 @@ func (m MigrationConfig) AddedColumnSchemaEvolutionPolicy() SchemaEvolutionPolic
 // policy. The absent section preserves read-only drift reporting. Once the
 // section is present, omitted nullability_change defaults to auto.
 func (m MigrationConfig) NullabilityChangeSchemaEvolutionPolicy() SchemaEvolutionPolicy {
+	if m.SchemaContract != nil {
+		return schemaContractDataTypePolicy(m.SchemaContractDataTypeMode())
+	}
 	if m.SchemaEvolution == nil {
 		return SchemaEvolutionLog
 	}
@@ -413,10 +473,41 @@ func (m MigrationConfig) NullabilityChangeSchemaEvolutionPolicy() SchemaEvolutio
 // Type evolution can rewrite target storage, so it stays log-only unless the
 // operator explicitly opts into migration.schema_evolution.type_change.
 func (m MigrationConfig) TypeChangeSchemaEvolutionPolicy() SchemaEvolutionPolicy {
+	if m.SchemaContract != nil {
+		return schemaContractDataTypePolicy(m.SchemaContractDataTypeMode())
+	}
 	if m.SchemaEvolution == nil || m.SchemaEvolution.TypeChange == "" {
 		return SchemaEvolutionLog
 	}
 	return m.SchemaEvolution.TypeChange
+}
+
+func schemaContractColumnsPolicy(mode SchemaContractMode) SchemaEvolutionPolicy {
+	switch mode {
+	case SchemaContractFreeze:
+		return SchemaEvolutionFail
+	case SchemaContractDiscardValue:
+		return SchemaEvolutionDiscardValue
+	case SchemaContractReport:
+		return SchemaEvolutionLog
+	case "", SchemaContractEvolve:
+		return SchemaEvolutionAuto
+	default:
+		return SchemaEvolutionFail
+	}
+}
+
+func schemaContractDataTypePolicy(mode SchemaContractMode) SchemaEvolutionPolicy {
+	switch mode {
+	case SchemaContractFreeze:
+		return SchemaEvolutionFail
+	case SchemaContractReport:
+		return SchemaEvolutionLog
+	case "", SchemaContractEvolve:
+		return SchemaEvolutionAuto
+	default:
+		return SchemaEvolutionFail
+	}
 }
 
 // NotifyOnSuccess reports whether successful completion notifications should

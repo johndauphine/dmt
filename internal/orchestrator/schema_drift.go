@@ -60,6 +60,9 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 	if o.config.Migration.FailOnSchemaDrift {
 		return report, &SchemaDriftError{Report: report}
 	}
+	if err := o.enforceSchemaContractPolicy(report); err != nil {
+		return report, err
+	}
 	return report, nil
 }
 
@@ -69,6 +72,9 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 	}
 	if o.config.Migration.FailOnSchemaDrift {
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
+	}
+	if o.config.Migration.SchemaContractEnabled() {
+		return o.schemaContractReportFooter(report, allowSchemaEvolution)
 	}
 	if !allowSchemaEvolution {
 		if o.config.Migration.AddedColumnSchemaEvolutionPolicy() == config.SchemaEvolutionDiscardValue {
@@ -115,6 +121,68 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 		return "Schema evolution is enabled, but this report contains no currently supported auto-apply changes."
 	}
 	return "Schema evolution " + strings.Join(parts, "; ") + "."
+}
+
+func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSchemaEvolution bool) string {
+	var parts []string
+	if part := schemaContractFooterPart(
+		"tables",
+		len(tableAddedChanges(report)),
+		"added table(s)",
+		o.config.Migration.SchemaContractTablesMode(),
+		allowSchemaEvolution,
+	); part != "" {
+		parts = append(parts, part)
+	}
+	if part := schemaContractFooterPart(
+		"columns",
+		len(addedColumnChanges(report)),
+		"added column(s)",
+		o.config.Migration.SchemaContractColumnsMode(),
+		allowSchemaEvolution,
+	); part != "" {
+		parts = append(parts, part)
+	}
+	if part := schemaContractFooterPart(
+		"data_type",
+		len(nullabilityChanges(report))+len(typeChanges(report)),
+		"data type/nullability change(s)",
+		o.config.Migration.SchemaContractDataTypeMode(),
+		allowSchemaEvolution,
+	); part != "" {
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return "Schema contract is enabled, but this report contains no currently supported contract actions."
+	}
+	footer := "Schema contract " + strings.Join(parts, "; ") + "."
+	if !allowSchemaEvolution {
+		footer += " No target ALTERs will be applied in read-only mode."
+	}
+	return footer
+}
+
+func schemaContractFooterPart(entity string, count int, noun string, mode config.SchemaContractMode, allowSchemaEvolution bool) string {
+	if count == 0 {
+		return ""
+	}
+
+	switch mode {
+	case config.SchemaContractEvolve, "":
+		if !allowSchemaEvolution {
+			return fmt.Sprintf("%s=evolve; %d %s will be reported only in read-only mode", entity, count, noun)
+		}
+		return fmt.Sprintf("%s=evolve; %d %s will follow target_mode behavior", entity, count, noun)
+	case config.SchemaContractFreeze:
+		return fmt.Sprintf("%s=freeze; %d %s will abort before transfer", entity, count, noun)
+	case config.SchemaContractDiscardValue:
+		return fmt.Sprintf("%s=discard_value; %d %s will be omitted from target DDL, transfer, validation, and schema snapshots",
+			entity, count, noun)
+	case config.SchemaContractReport:
+		return fmt.Sprintf("%s=report; %d %s will be reported only", entity, count, noun)
+	default:
+		return fmt.Sprintf("%s policy is invalid", entity)
+	}
 }
 
 func schemaEvolutionFooterPart(kind string, count int, noun string, policy config.SchemaEvolutionPolicy) string {

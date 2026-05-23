@@ -54,6 +54,30 @@ func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
 		(schemaEvolutionPolicyRequiresTargetStep(typePolicy) && len(typeChanges(report)) > 0)
 }
 
+func (o *Orchestrator) enforceSchemaContractPolicy(report drift.Report) error {
+	if !report.HasChanges() || !o.config.Migration.SchemaContractEnabled() {
+		return nil
+	}
+
+	var violations []string
+	if count := len(tableAddedChanges(report)); count > 0 &&
+		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractFreeze {
+		violations = append(violations, fmt.Sprintf("tables=freeze blocked %d added table(s)", count))
+	}
+	if count := len(addedColumnChanges(report)); count > 0 &&
+		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractFreeze {
+		violations = append(violations, fmt.Sprintf("columns=freeze blocked %d added column(s)", count))
+	}
+	if count := len(nullabilityChanges(report)) + len(typeChanges(report)); count > 0 &&
+		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractFreeze {
+		violations = append(violations, fmt.Sprintf("data_type=freeze blocked %d data type/nullability change(s)", count))
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	return &SchemaEvolutionError{Message: "schema contract violation: " + strings.Join(violations, "; ")}
+}
+
 func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
 	if !report.HasChanges() || !o.config.Migration.SchemaEvolutionEnabled() {
 		return nil
@@ -88,30 +112,31 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	if err != nil {
 		return &SchemaEvolutionError{Message: err.Error()}
 	}
+	label := o.schemaChangeLogLabel()
 	if len(addedLogOnly) > 0 {
 		policy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
 		if policy == config.SchemaEvolutionDiscardValue {
-			logging.Warn("schema evolution: %d added column(s) detected; policy added_column=discard_value leaves target unchanged and omits values from transfer",
-				len(addedLogOnly))
+			logging.Warn("%s: %d added column(s) detected; policy added_column=discard_value leaves target unchanged and omits values from transfer",
+				label, len(addedLogOnly))
 		} else {
-			logging.Warn("schema evolution: %d added column(s) detected; policy added_column=log leaves target unchanged",
-				len(addedLogOnly))
+			logging.Warn("%s: %d added column(s) detected; policy added_column=log leaves target unchanged",
+				label, len(addedLogOnly))
 		}
 	}
 	if len(nullabilityLogOnly) > 0 {
-		logging.Warn("schema evolution: %d nullability change(s) detected; policy nullability_change=log leaves target unchanged",
-			len(nullabilityLogOnly))
+		logging.Warn("%s: %d nullability change(s) detected; policy nullability_change=log leaves target unchanged",
+			label, len(nullabilityLogOnly))
 	}
 	if len(typeLogOnly) > 0 {
-		logging.Warn("schema evolution: %d type change(s) detected; policy type_change=log leaves target unchanged",
-			len(typeLogOnly))
+		logging.Warn("%s: %d type change(s) detected; policy type_change=log leaves target unchanged",
+			label, len(typeLogOnly))
 	}
 	if len(addedActions) == 0 && len(nullabilityActions) == 0 && len(typeActions) == 0 {
 		return nil
 	}
 
 	if len(addedActions) > 0 {
-		logging.Info("schema evolution: adding %d nullable column(s) to target", len(addedActions))
+		logging.Info("%s: adding %d nullable column(s) to target", label, len(addedActions))
 	}
 	for _, action := range addedActions {
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
@@ -125,8 +150,8 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 			)}
 		}
 		if !action.SourceNullable {
-			logging.Warn("schema evolution: source column %s.%s is NOT NULL; adding target column as NULL to preserve existing rows",
-				action.Table.Name, action.Column.Name)
+			logging.Warn("%s: source column %s.%s is NOT NULL; adding target column as NULL to preserve existing rows",
+				label, action.Table.Name, action.Column.Name)
 		}
 		if err := o.targetPool.AddColumn(ctx, &action.Table, &action.Column, o.config.Target.Schema); err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf(
@@ -137,7 +162,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	}
 
 	if len(nullabilityActions) > 0 {
-		logging.Info("schema evolution: relaxing %d target column(s) from NOT NULL to NULL", len(nullabilityActions))
+		logging.Info("%s: relaxing %d target column(s) from NOT NULL to NULL", label, len(nullabilityActions))
 	}
 	for _, action := range nullabilityActions {
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
@@ -159,7 +184,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	}
 
 	if len(typeActions) > 0 {
-		logging.Info("schema evolution: widening %d target column type(s)", len(typeActions))
+		logging.Info("%s: widening %d target column type(s)", label, len(typeActions))
 	}
 	for _, action := range typeActions {
 		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
@@ -180,7 +205,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		}
 	}
 
-	o.auditEvent("schema_evolution_applied", map[string]any{
+	o.auditEvent(o.schemaChangeAuditName("schema_evolution_applied"), map[string]any{
 		"added_columns":           len(addedActions),
 		"nullability_relaxations": len(nullabilityActions),
 		"type_widenings":          len(typeActions),
@@ -195,6 +220,20 @@ func schemaEvolutionPolicyRequiresTargetStep(policy config.SchemaEvolutionPolicy
 	default:
 		return false
 	}
+}
+
+func (o *Orchestrator) schemaChangeAuditName(base string) string {
+	if o.config.Migration.SchemaContractEnabled() {
+		return strings.Replace(base, "schema_evolution", "schema_contract", 1)
+	}
+	return base
+}
+
+func (o *Orchestrator) schemaChangeLogLabel() string {
+	if o.config.Migration.SchemaContractEnabled() {
+		return "schema contract"
+	}
+	return "schema evolution"
 }
 
 func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, tables []source.Table) ([]source.Table, error) {
@@ -212,9 +251,9 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 		return pruned, nil
 	}
 
-	logging.Warn("schema evolution: discarding %d added column(s) from target DDL, transfer, validation, and snapshots because added_column=discard_value",
-		discarded)
-	o.auditEvent("schema_evolution_discarded", map[string]any{
+	logging.Warn("%s: discarding %d added column(s) from target DDL, transfer, validation, and snapshots because added_column=discard_value",
+		o.schemaChangeLogLabel(), discarded)
+	o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 		"added_columns": discarded,
 	})
 	return pruned, nil
@@ -620,6 +659,16 @@ func addedColumnChanges(report drift.Report) []drift.Change {
 	var changes []drift.Change
 	for _, change := range report.Changes {
 		if change.Kind == drift.AddedColumn {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func tableAddedChanges(report drift.Report) []drift.Change {
+	var changes []drift.Change
+	for _, change := range report.Changes {
+		if change.Kind == drift.TableAdded {
 			changes = append(changes, change)
 		}
 	}

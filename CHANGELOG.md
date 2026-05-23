@@ -9,10 +9,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added DLT-style `migration.schema_contract` settings with `tables`,
+  `columns`, and `data_type` entities, including DMT's `report` mode for
+  report-only drift handling (#403).
+
 ### Deprecated
 
 - `migration.schema_evolution` now emits a runtime deprecation warning because
-  it will be replaced by DLT-style `migration.schema_contract` settings for
+  it is being replaced by DLT-style `migration.schema_contract` settings for
   tables, columns, and data_type (#403).
 
 ### Fixed

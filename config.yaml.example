@@ -88,10 +88,17 @@ migration:
   # report before transfer. Set true to abort when any drift is detected.
   fail_on_schema_drift: false
 
-  # Deprecated schema evolution (#306). Omit this section to keep schema
-  # drift reporting read-only. This legacy surface still works for existing
-  # migrations, but DMT will replace it with DLT-style schema_contract
-  # settings in a future release (#403). New configs should avoid adding it.
+  # Schema contract (#403). Omit this section to keep schema drift reporting
+  # read-only. Shorthand such as `schema_contract: report` applies one mode to
+  # tables, columns, and data_type. The DMT-specific report mode reports drift
+  # without applying target schema changes.
+  # schema_contract:
+  #   tables: report             # evolve | freeze | report
+  #   columns: discard_value     # evolve | freeze | discard_value | report
+  #   data_type: report          # evolve | freeze | report
+
+  # Deprecated schema evolution (#306). This legacy surface still works for
+  # existing migrations, but new configs should use schema_contract instead.
   # schema_evolution:
   #   added_column: auto          # auto | log | fail | discard_value | discard (section default: auto)
   #   nullability_change: auto    # auto | log | fail; auto only relaxes to NULL
