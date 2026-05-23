@@ -1,9 +1,12 @@
 package orchestrator
 
 import (
+	"context"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/johndauphine/dmt/internal/audit"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/source"
@@ -869,6 +872,7 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 	nullabilityReport := drift.Report{Changes: []drift.Change{{Kind: drift.NullabilityChange, TableName: "Users"}}}
 	typeWidenedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TypeWidened, TableName: "Users", ObjectName: "name"}}}
 	typeNarrowedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TypeNarrowed, TableName: "Users", ObjectName: "name"}}}
+	tableDroppedReport := drift.Report{Changes: []drift.Change{{Kind: drift.TableDropped, TableName: "Legacy"}}}
 	unsupportedReport := drift.Report{Changes: []drift.Change{{Kind: drift.DroppedColumn, TableName: "Users"}}}
 
 	tests := []struct {
@@ -1037,6 +1041,26 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 			},
 			want: "tables=freeze",
 		},
+		{
+			name:   "schema contract table discard row names skip",
+			report: drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, TableName: "Orders"}}},
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractDiscardRow},
+			},
+			want: "tables=discard_row",
+		},
+		{
+			name:   "schema contract table dropped is report only",
+			report: tableDroppedReport,
+			allow:  true,
+			migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
+			},
+			want: "target tables are retained",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1047,6 +1071,164 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 				t.Fatalf("schemaDriftReportFooter() = %q, want substring %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSchemaContractTablesDiscardRowSkipsAddedTables(t *testing.T) {
+	o := &Orchestrator{
+		config: &config.Config{Migration: config.MigrationConfig{
+			SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractDiscardRow},
+		}},
+		auditor: audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"},
+		{Kind: drift.TableDropped, Schema: "dbo", TableName: "legacy"},
+	}}
+	tables := []source.Table{
+		{Schema: "dbo", Name: "users"},
+		{Schema: "dbo", Name: "orders"},
+	}
+
+	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	if err != nil {
+		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "users" {
+		t.Fatalf("effective tables = %#v, want only users", got)
+	}
+}
+
+func TestSchemaContractTableEvolveCreatesAddedTablesBeforeUpsert(t *testing.T) {
+	targetPool := &targetModeTestPool{existing: map[string]bool{"users": true}}
+	o := &Orchestrator{
+		config: &config.Config{
+			Target: config.TargetConfig{Schema: "public"},
+			Migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
+			},
+		},
+		targetPool: targetPool,
+		auditor:    audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
+	tables := []source.Table{{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "int", IsNullable: false},
+			{Name: "name", DataType: "varchar", MaxLength: 255, IsNullable: true},
+		},
+	}}
+
+	if err := o.applySchemaContractTableEvolution(context.Background(), report, tables); err != nil {
+		t.Fatalf("applySchemaContractTableEvolution() error: %v", err)
+	}
+	if got, want := targetPool.createdTables(), []string{"orders"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("created tables = %v, want %v", got, want)
+	}
+	if got, want := targetPool.primaryKeyTables(), []string{"orders"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("primary key tables = %v, want %v", got, want)
+	}
+}
+
+func TestSchemaContractTableEvolveSkipsExistingTargetTables(t *testing.T) {
+	targetPool := &targetModeTestPool{existing: map[string]bool{"orders": true}}
+	o := &Orchestrator{
+		config: &config.Config{
+			Target: config.TargetConfig{Schema: "public"},
+			Migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
+			},
+		},
+		targetPool: targetPool,
+		auditor:    audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
+	tables := []source.Table{{Schema: "dbo", Name: "orders", PrimaryKey: []string{"id"}}}
+
+	if err := o.applySchemaContractTableEvolution(context.Background(), report, tables); err != nil {
+		t.Fatalf("applySchemaContractTableEvolution() error: %v", err)
+	}
+	if got := targetPool.createdTables(); len(got) != 0 {
+		t.Fatalf("created tables = %v, want none", got)
+	}
+	if got := targetPool.primaryKeyTables(); len(got) != 0 {
+		t.Fatalf("primary key tables = %v, want none", got)
+	}
+}
+
+func TestSchemaContractTableEvolveRequiresPrimaryKeyForUpsert(t *testing.T) {
+	targetPool := &targetModeTestPool{}
+	o := &Orchestrator{
+		config: &config.Config{
+			Target: config.TargetConfig{Schema: "public"},
+			Migration: config.MigrationConfig{
+				TargetMode:     "upsert",
+				SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
+			},
+		},
+		targetPool: targetPool,
+		auditor:    audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
+	tables := []source.Table{{Schema: "dbo", Name: "orders"}}
+
+	err := o.applySchemaContractTableEvolution(context.Background(), report, tables)
+	if err == nil {
+		t.Fatal("applySchemaContractTableEvolution() error = nil, want primary-key error")
+	}
+	if !strings.Contains(err.Error(), "requires a primary key") {
+		t.Fatalf("error = %q, want primary-key message", err)
+	}
+}
+
+func TestFinalizeSchemaContractTableEvolutionCreatesPostTransferDDL(t *testing.T) {
+	targetPool := &targetModeTestPool{}
+	o := &Orchestrator{
+		config: &config.Config{
+			Target: config.TargetConfig{Schema: "public"},
+			Migration: config.MigrationConfig{
+				TargetMode:             "upsert",
+				SchemaContract:         &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
+				CreateCheckConstraints: true,
+			},
+		},
+		targetPool: targetPool,
+		auditor:    audit.Disabled(),
+	}
+	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
+	tables := []source.Table{{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		Indexes: []source.Index{
+			{Name: "ix_orders_name", Columns: []string{"name"}},
+		},
+		ForeignKeys: []source.ForeignKey{
+			{Name: "fk_orders_customer", Columns: []string{"customer_id"}, RefTable: "customers", RefColumns: []string{"id"}},
+		},
+		CheckConstraints: []source.CheckConstraint{
+			{Name: "chk_orders_amount", Definition: "amount >= 0"},
+		},
+	}}
+
+	o.finalizeSchemaContractTableEvolution(context.Background(), report, tables)
+
+	if got, want := targetPool.resetTables(), []string{"orders"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reset tables = %v, want %v", got, want)
+	}
+	if got, want := targetPool.createdIndexes(), []string{"orders.ix_orders_name"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("created indexes = %v, want %v", got, want)
+	}
+	if got, want := targetPool.createdForeignKeys(), []string{"orders.fk_orders_customer"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("created foreign keys = %v, want %v", got, want)
+	}
+	if got, want := targetPool.createdChecks(), []string{"orders.chk_orders_amount"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("created checks = %v, want %v", got, want)
 	}
 }
 
@@ -1072,5 +1254,78 @@ func TestSchemaContractFreezeFailsBeforeTargetPreparation(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err, want)
 		}
+	}
+}
+
+func TestSchemaContractTablesFreezeFailsOnDroppedTable(t *testing.T) {
+	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractFreeze},
+	}}}
+	report := drift.Report{Changes: []drift.Change{
+		{Kind: drift.TableDropped, TableName: "Legacy"},
+	}}
+
+	err := o.enforceSchemaContractPolicy(report)
+	if err == nil {
+		t.Fatal("enforceSchemaContractPolicy() error = nil, want dropped-table freeze violation")
+	}
+	if !strings.Contains(err.Error(), "tables=freeze") {
+		t.Fatalf("error = %q, want tables=freeze violation", err)
+	}
+}
+
+func TestValidateResumeMissingTargetTableRequiresPrimaryKeyForUpsert(t *testing.T) {
+	err := validateResumeMissingTargetTable(
+		source.Table{Schema: "dbo", Name: "events"},
+		config.MigrationConfig{TargetMode: "upsert"},
+		drift.Report{},
+	)
+	if err == nil {
+		t.Fatal("validateResumeMissingTargetTable() error = nil, want primary-key error")
+	}
+	if !strings.Contains(err.Error(), "source table has no primary key") {
+		t.Fatalf("error = %q, want primary-key message", err)
+	}
+
+	if err := validateResumeMissingTargetTable(
+		source.Table{Schema: "dbo", Name: "events"},
+		config.MigrationConfig{TargetMode: "drop_recreate"},
+		drift.Report{},
+	); err != nil {
+		t.Fatalf("drop_recreate missing target table validation error: %v", err)
+	}
+	if err := validateResumeMissingTargetTable(
+		source.Table{Schema: "dbo", Name: "events", PrimaryKey: []string{"id"}},
+		config.MigrationConfig{TargetMode: "upsert"},
+		drift.Report{},
+	); err != nil {
+		t.Fatalf("upsert table with primary key validation error: %v", err)
+	}
+}
+
+func TestValidateResumeMissingTargetTableHonorsSchemaContractReport(t *testing.T) {
+	table := source.Table{Schema: "dbo", Name: "events", PrimaryKey: []string{"id"}}
+	report := drift.Report{Changes: []drift.Change{{
+		Kind:      drift.TableAdded,
+		Schema:    "dbo",
+		TableName: "events",
+	}}}
+
+	err := validateResumeMissingTargetTable(table, config.MigrationConfig{
+		TargetMode:     "upsert",
+		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractReport},
+	}, report)
+	if err == nil {
+		t.Fatal("validateResumeMissingTargetTable() error = nil, want tables=report error")
+	}
+	if !strings.Contains(err.Error(), "tables=report") {
+		t.Fatalf("error = %q, want tables=report message", err)
+	}
+
+	if err := validateResumeMissingTargetTable(table, config.MigrationConfig{
+		TargetMode:     "upsert",
+		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
+	}, report); err != nil {
+		t.Fatalf("tables=evolve validation error: %v", err)
 	}
 }

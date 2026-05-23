@@ -125,10 +125,9 @@ func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaE
 
 func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSchemaEvolution bool) string {
 	var parts []string
-	if part := schemaContractFooterPart(
-		"tables",
+	if part := schemaContractTablesFooterPart(
 		len(tableAddedChanges(report)),
-		"added table(s)",
+		len(tableDroppedChanges(report)),
 		o.config.Migration.SchemaContractTablesMode(),
 		allowSchemaEvolution,
 	); part != "" {
@@ -182,6 +181,43 @@ func schemaContractFooterPart(entity string, count int, noun string, mode config
 		return fmt.Sprintf("%s=report; %d %s will be reported only", entity, count, noun)
 	default:
 		return fmt.Sprintf("%s policy is invalid", entity)
+	}
+}
+
+func schemaContractTablesFooterPart(added, dropped int, mode config.SchemaContractMode, allowSchemaEvolution bool) string {
+	if added == 0 && dropped == 0 {
+		return ""
+	}
+
+	total := added + dropped
+	var parts []string
+	switch mode {
+	case config.SchemaContractEvolve, "":
+		if allowSchemaEvolution {
+			if added > 0 {
+				parts = append(parts, fmt.Sprintf("%d added table(s) may be created before transfer", added))
+			}
+		} else if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added table(s) will be reported only in read-only mode", added))
+		}
+		if dropped > 0 {
+			parts = append(parts, fmt.Sprintf("%d dropped table(s) will be reported; target tables are retained", dropped))
+		}
+		return "tables=evolve; " + strings.Join(parts, "; ")
+	case config.SchemaContractFreeze:
+		return fmt.Sprintf("tables=freeze; %d table change(s) will abort before transfer", total)
+	case config.SchemaContractDiscardRow:
+		if added > 0 {
+			parts = append(parts, fmt.Sprintf("%d added table(s) will be skipped for this run", added))
+		}
+		if dropped > 0 {
+			parts = append(parts, fmt.Sprintf("%d dropped table(s) will be reported; target tables are retained", dropped))
+		}
+		return "tables=discard_row; " + strings.Join(parts, "; ")
+	case config.SchemaContractReport:
+		return fmt.Sprintf("tables=report; %d table change(s) will be reported only", total)
+	default:
+		return "tables policy is invalid"
 	}
 }
 

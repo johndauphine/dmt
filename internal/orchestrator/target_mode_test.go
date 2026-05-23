@@ -117,10 +117,14 @@ type targetModeTestPool struct {
 
 	mu         sync.Mutex
 	createErrs map[string]error
+	existing   map[string]bool
 	dropped    []string
 	created    []string
 	primaryKey []string
 	resets     []string
+	indexes    []string
+	fks        []string
+	checks     []string
 }
 
 func (p *targetModeTestPool) DropTable(ctx context.Context, _, table string) error {
@@ -140,7 +144,23 @@ func (p *targetModeTestPool) CreateTableWithOptions(ctx context.Context, table *
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.created = append(p.created, table.Name)
-	return p.createErrs[table.Name]
+	if err := p.createErrs[table.Name]; err != nil {
+		return err
+	}
+	if p.existing == nil {
+		p.existing = make(map[string]bool)
+	}
+	p.existing[table.Name] = true
+	return nil
+}
+
+func (p *targetModeTestPool) TableExists(ctx context.Context, _, table string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.existing[table], nil
 }
 
 func (p *targetModeTestPool) CreatePrimaryKey(ctx context.Context, table *driver.Table, _ string) error {
@@ -160,6 +180,36 @@ func (p *targetModeTestPool) ResetSequence(ctx context.Context, _ string, table 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.resets = append(p.resets, table.Name)
+	return nil
+}
+
+func (p *targetModeTestPool) CreateIndex(ctx context.Context, table *driver.Table, index *driver.Index, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.indexes = append(p.indexes, table.Name+"."+index.Name)
+	return nil
+}
+
+func (p *targetModeTestPool) CreateForeignKey(ctx context.Context, table *driver.Table, fk *driver.ForeignKey, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fks = append(p.fks, table.Name+"."+fk.Name)
+	return nil
+}
+
+func (p *targetModeTestPool) CreateCheckConstraint(ctx context.Context, table *driver.Table, check *driver.CheckConstraint, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.checks = append(p.checks, table.Name+"."+check.Name)
 	return nil
 }
 
@@ -185,4 +235,22 @@ func (p *targetModeTestPool) resetTables() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.resets...)
+}
+
+func (p *targetModeTestPool) createdIndexes() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.indexes...)
+}
+
+func (p *targetModeTestPool) createdForeignKeys() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.fks...)
+}
+
+func (p *targetModeTestPool) createdChecks() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.checks...)
 }

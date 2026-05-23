@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/source"
@@ -225,6 +227,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 			o.notifyFailure(run.ID, err, time.Since(startTime))
 			return fmt.Errorf("finalizing: %w", err)
 		}
+		o.finalizeSchemaContractTableEvolution(ctx, schemaDriftReport, tables)
 
 		if err := o.reconcileDeletesIfDue(ctx, run.ID, tables); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -262,6 +265,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 			return fmt.Errorf("checking table %s: %w", t.Name, err)
 		}
 		if !exists {
+			if err := validateResumeMissingTargetTable(t, o.config.Migration, schemaDriftReport); err != nil {
+				o.state.CompleteRun(run.ID, "failed", err.Error())
+				return err
+			}
 			// Table doesn't exist - clear any stale progress before creating it.
 			// If cleanup fails, leaving the target missing is safer than creating
 			// an empty target beside stale partition checkpoints (#266).
@@ -380,6 +387,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		o.notifyFailure(run.ID, err, time.Since(startTime))
 		return fmt.Errorf("finalizing: %w", err)
 	}
+	o.finalizeSchemaContractTableEvolution(ctx, schemaDriftReport, successTables)
 
 	if err := o.reconcileDeletesIfDue(ctx, run.ID, successTables); err != nil {
 		o.state.CompleteRun(run.ID, "failed", err.Error())
@@ -457,4 +465,23 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		return &PartialMigrationError{Failed: tableFailures}
 	}
 	return nil
+}
+
+func validateResumeMissingTargetTable(table source.Table, migration config.MigrationConfig, report drift.Report) error {
+	if migration.TargetMode == "upsert" && !table.HasPK() {
+		return fmt.Errorf(
+			"upsert resume cannot create missing target table %s: source table has no primary key",
+			table.FullName(),
+		)
+	}
+	if !migration.SchemaContractEnabled() ||
+		migration.SchemaContractTablesMode() == config.SchemaContractEvolve ||
+		!tableAddedInReport(report, table) {
+		return nil
+	}
+	return fmt.Errorf(
+		"schema contract tables=%s will not create added table %s during resume",
+		migration.SchemaContractTablesMode(),
+		table.FullName(),
+	)
 }

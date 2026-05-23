@@ -2334,6 +2334,29 @@ func TestSchemaContractMappingDefaultsOmittedEntitiesToEvolve(t *testing.T) {
 	}
 }
 
+func TestSchemaContractTablesDiscardRowMode(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	cfg, err := LoadBytes(minConfigYAML(`  target_mode: upsert
+  schema_contract:
+    tables: discard_row
+    columns: discard_value
+    data_type: report
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes() error: %v", err)
+	}
+	if got := cfg.Migration.SchemaContractTablesMode(); got != SchemaContractDiscardRow {
+		t.Fatalf("tables mode = %q, want %q", got, SchemaContractDiscardRow)
+	}
+	if got := cfg.Migration.SchemaContractColumnsMode(); got != SchemaContractDiscardValue {
+		t.Fatalf("columns mode = %q, want %q", got, SchemaContractDiscardValue)
+	}
+	if got := cfg.Migration.SchemaContractDataTypeMode(); got != SchemaContractReport {
+		t.Fatalf("data_type mode = %q, want %q", got, SchemaContractReport)
+	}
+}
+
 func TestValidateSchemaContractRejectsAmbiguousOrUnsupportedModes(t *testing.T) {
 	withEmptySecretsFile(t)
 
@@ -2353,6 +2376,13 @@ func TestValidateSchemaContractRejectsAmbiguousOrUnsupportedModes(t *testing.T) 
 		{
 			name: "invalid mode",
 			yaml: "  schema_contract: noisy\n",
+			want: "migration.schema_contract.tables must be one of",
+		},
+		{
+			name: "table discard value unsupported",
+			yaml: `  schema_contract:
+    tables: discard_value
+`,
 			want: "migration.schema_contract.tables must be one of",
 		},
 		{
