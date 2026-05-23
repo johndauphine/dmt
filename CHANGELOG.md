@@ -29,6 +29,9 @@ All notable changes to this project will be documented in this file.
 - Added structured schema contract decision records in drift audit payloads and
   JSON result/status output, and made freeze violations identify the exact
   entity, drift kind, table, column, and suggested next policy options (#408).
+- Added schema contract parity integration coverage for SQLite and
+  MSSQL-to-Postgres migrations, including end-to-end checks for evolved,
+  frozen, discarded-row, and discarded-value contract outcomes (#409).
 
 ### Deprecated
 

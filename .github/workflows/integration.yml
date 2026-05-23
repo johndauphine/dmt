@@ -139,6 +139,12 @@ jobs:
           INTEGRATION_TEST_LOG: /tmp/dmt-ci-schema-evolution.log
         run: make integration-test-schema-evolution
 
+      - name: Run schema contract evolution integration
+        env:
+          DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-schema-contract-mssql-pg-state
+          INTEGRATION_TEST_SCHEMA_CONTRACT_LOG: /tmp/dmt-ci-schema-contract-mssql-pg.log
+        run: make integration-test-schema-contracts-mssql-pg
+
       - name: Run daily-driver upsert integration
         env:
           DMT_STATE_DIR: ${{ github.workspace }}/.dmt-ci-daily-driver-state
@@ -153,9 +159,11 @@ jobs:
           path: |
             /tmp/dmt-ci.log
             /tmp/dmt-ci-schema-evolution.log
+            /tmp/dmt-ci-schema-contract-mssql-pg.log
             /tmp/dmt-ci-daily-driver.log
             ${{ env.DMT_STATE_DIR }}
             ${{ github.workspace }}/.dmt-ci-schema-evolution-state
+            ${{ github.workspace }}/.dmt-ci-schema-contract-mssql-pg-state
             ${{ github.workspace }}/.dmt-ci-daily-driver-state
           if-no-files-found: ignore
 
@@ -192,6 +200,12 @@ jobs:
       - name: Run dmt sqlite → sqlite migration
         run: make integration-test-sqlite
 
+      - name: Run schema contract sqlite matrix
+        env:
+          SQLITE_SCHEMA_CONTRACT_WORK_DIR: ${{ github.workspace }}/.dmt-ci-schema-contract-sqlite-work
+          INTEGRATION_TEST_SCHEMA_CONTRACT_SQLITE_LOG: /tmp/dmt-ci-schema-contract-sqlite.log
+        run: make integration-test-schema-contracts-sqlite
+
       - name: Upload dmt logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -199,6 +213,8 @@ jobs:
           name: dmt-sqlite-logs-${{ github.run_id }}
           path: |
             /tmp/dmt-ci-sqlite.log
+            /tmp/dmt-ci-schema-contract-sqlite.log
             ${{ env.DMT_STATE_DIR }}
             ${{ env.SQLITE_WORK_DIR }}
+            ${{ github.workspace }}/.dmt-ci-schema-contract-sqlite-work
           if-no-files-found: ignore
