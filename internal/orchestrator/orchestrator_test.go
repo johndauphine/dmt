@@ -216,6 +216,41 @@ func TestMigrationResultJSON(t *testing.T) {
 			t.Error("expected 'error' field to be omitted when empty")
 		}
 	})
+
+	t.Run("marshal schema contract decisions", func(t *testing.T) {
+		result := MigrationResult{
+			RunID:  "schema-run",
+			Status: "failed",
+			SchemaContractDecisions: []SchemaContractDecision{{
+				Entity:   schemaContractEntityDataType,
+				Mode:     string(config.SchemaContractEvolve),
+				Drift:    string(drift.TypeNarrowed),
+				Schema:   "dbo",
+				Table:    "Users",
+				Object:   "name",
+				Previous: "varchar(255)",
+				Current:  "varchar(50)",
+				Action:   schemaContractActionBlocked,
+				Reason:   "data_type=evolve blocks unsafe narrowed, lossy, or tightening changes before transfer",
+			}},
+		}
+
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("json.Marshal() error: %v", err)
+		}
+
+		var parsed MigrationResult
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("json.Unmarshal() error: %v", err)
+		}
+		if len(parsed.SchemaContractDecisions) != 1 {
+			t.Fatalf("decision count = %d, want 1", len(parsed.SchemaContractDecisions))
+		}
+		if parsed.SchemaContractDecisions[0].Action != schemaContractActionBlocked {
+			t.Fatalf("decision = %#v, want blocked action", parsed.SchemaContractDecisions[0])
+		}
+	})
 }
 
 func TestIsRetryableError(t *testing.T) {
@@ -275,6 +310,39 @@ func TestStatusResultJSON(t *testing.T) {
 		}
 		if parsed.ProgressPercent != 55.5 {
 			t.Errorf("ProgressPercent = %f, want %f", parsed.ProgressPercent, 55.5)
+		}
+	})
+
+	t.Run("marshal schema contract decisions", func(t *testing.T) {
+		result := StatusResult{
+			RunID:  "status-run-123",
+			Status: "running",
+			SchemaContractDecisions: []SchemaContractDecision{{
+				Entity: schemaContractEntityColumns,
+				Mode:   string(config.SchemaContractDiscardRow),
+				Drift:  string(drift.AddedColumn),
+				Schema: "dbo",
+				Table:  "Users",
+				Object: "email",
+				Action: schemaContractActionDiscardedRow,
+				Reason: "columns=discard_row skips tables with newly added source columns",
+			}},
+		}
+
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("json.Marshal() error: %v", err)
+		}
+
+		var parsed StatusResult
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("json.Unmarshal() error: %v", err)
+		}
+		if len(parsed.SchemaContractDecisions) != 1 {
+			t.Fatalf("decision count = %d, want 1", len(parsed.SchemaContractDecisions))
+		}
+		if parsed.SchemaContractDecisions[0].Action != schemaContractActionDiscardedRow {
+			t.Fatalf("decision = %#v, want discarded_row action", parsed.SchemaContractDecisions[0])
 		}
 	})
 }

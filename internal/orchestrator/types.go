@@ -119,6 +119,9 @@ type Orchestrator struct {
 	// is set so call sites stay unconditional. Initialized in Run/Resume
 	// once the run_id is known.
 	auditor *audit.Logger
+
+	schemaContractDecisionRunID string
+	lastSchemaContractDecisions []SchemaContractDecision
 }
 
 // Options configures the orchestrator.
@@ -146,6 +149,10 @@ type Options struct {
 	// When true, target pool is not created and analyze operations only work.
 	SourceOnly bool
 }
+
+// SchemaContractDecision describes how one schema drift change was handled by
+// the DLT-style schema contract policy.
+type SchemaContractDecision = schemaContractDecision
 
 // computeConfigHash returns a short hex hash of the sanitized config.
 func computeConfigHash(cfg *config.Config) string {
@@ -185,20 +192,21 @@ func isRetryableError(err error) bool {
 
 // MigrationResult contains the outcome of a migration run.
 type MigrationResult struct {
-	RunID                string                       `json:"run_id"`
-	Status               string                       `json:"status"`
-	StartedAt            time.Time                    `json:"started_at"`
-	CompletedAt          time.Time                    `json:"completed_at"`
-	DurationSeconds      float64                      `json:"duration_seconds"`
-	TablesTotal          int                          `json:"tables_total"`
-	TablesSuccess        int                          `json:"tables_success"`
-	TablesFailed         int                          `json:"tables_failed"`
-	RowsTransferred      int64                        `json:"rows_transferred"`
-	RowsPerSecond        int64                        `json:"rows_per_second"`
-	FailedTables         []string                     `json:"failed_tables"`
-	TableStats           []TableResult                `json:"table_stats"`
-	DeleteReconciliation *DeleteReconciliationSummary `json:"delete_reconciliation,omitempty"`
-	Error                string                       `json:"error,omitempty"`
+	RunID                   string                       `json:"run_id"`
+	Status                  string                       `json:"status"`
+	StartedAt               time.Time                    `json:"started_at"`
+	CompletedAt             time.Time                    `json:"completed_at"`
+	DurationSeconds         float64                      `json:"duration_seconds"`
+	TablesTotal             int                          `json:"tables_total"`
+	TablesSuccess           int                          `json:"tables_success"`
+	TablesFailed            int                          `json:"tables_failed"`
+	RowsTransferred         int64                        `json:"rows_transferred"`
+	RowsPerSecond           int64                        `json:"rows_per_second"`
+	FailedTables            []string                     `json:"failed_tables"`
+	TableStats              []TableResult                `json:"table_stats"`
+	DeleteReconciliation    *DeleteReconciliationSummary `json:"delete_reconciliation,omitempty"`
+	SchemaContractDecisions []SchemaContractDecision     `json:"schema_contract_decisions,omitempty"`
+	Error                   string                       `json:"error,omitempty"`
 }
 
 // TableResult contains the outcome for a single table.
@@ -247,7 +255,8 @@ type StatusResult struct {
 	// (SQLite or YAML/FileState), so a separate-process `dmt status`
 	// poll sees the running migration's counts. Rows persist until
 	// CleanupOldRuns purges them with the rest of the run-scoped state.
-	AIFallbacks map[string]int64 `json:"ai_fallbacks,omitempty"`
+	AIFallbacks             map[string]int64         `json:"ai_fallbacks,omitempty"`
+	SchemaContractDecisions []SchemaContractDecision `json:"schema_contract_decisions,omitempty"`
 }
 
 // HealthCheckResult contains connection health information and preflight
@@ -290,6 +299,7 @@ type DryRunResult struct {
 	ChunkSize                int                          `json:"chunk_size"`
 	TargetMode               string                       `json:"target_mode"`
 	DeleteReconciliation     *DeleteReconciliationPreview `json:"delete_reconciliation,omitempty"`
+	SchemaContractDecisions  []SchemaContractDecision     `json:"schema_contract_decisions,omitempty"`
 }
 
 // DeleteReconciliationPreview describes whether the opt-in #351 delete
