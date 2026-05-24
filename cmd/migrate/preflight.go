@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/aicopilot"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/orchestrator"
@@ -40,6 +42,11 @@ func healthCheck(c *cli.Context) error {
 	result, err := orch.HealthCheck(ctx)
 	if err != nil {
 		return err
+	}
+	if c.Bool("ai-review") {
+		reviewCtx, reviewCancel := context.WithTimeout(ctx, 90*time.Second)
+		defer reviewCancel()
+		result.AIPreflightReview = orch.ReviewPreflightWithAI(reviewCtx, result)
 	}
 
 	// Output JSON or human-readable based on --output-json flag
@@ -97,12 +104,64 @@ func healthCheck(c *cli.Context) error {
 		}
 	}
 
+	printAIPreflightReview(result.AIPreflightReview)
+
 	fmt.Printf("\n  Overall: %s\n", boolToHealthy(result.Healthy))
 
 	if !result.Healthy {
 		return preflightExitError(result)
 	}
 	return nil
+}
+
+func printAIPreflightReview(review *aicopilot.PreflightReview) {
+	if review == nil {
+		return
+	}
+	fmt.Println("\n  AI readiness review:")
+	fmt.Printf("    Status: %s", review.Status)
+	if review.Readiness != "" {
+		fmt.Printf(" (readiness: %s)", strings.ToUpper(review.Readiness))
+	}
+	fmt.Println()
+	if review.Provider != "" {
+		fmt.Printf("    Provider: %s", review.Provider)
+		if review.Model != "" {
+			fmt.Printf(" / %s", review.Model)
+		}
+		fmt.Println()
+	}
+	if review.Summary != "" {
+		fmt.Printf("    Summary: %s\n", review.Summary)
+	}
+	if review.Error != "" {
+		fmt.Printf("    Error: %s\n", review.Error)
+	}
+	if len(review.DeterministicBlockers) > 0 {
+		fmt.Println("    Deterministic blockers:")
+		for _, blocker := range review.DeterministicBlockers {
+			fmt.Printf("      - %s\n", blocker)
+		}
+	}
+	if len(review.Findings) > 0 {
+		fmt.Println("    AI advisory findings:")
+		for _, f := range review.Findings {
+			affected := f.Affected
+			if affected == "" {
+				affected = f.Category
+			}
+			fmt.Printf("      - [%s] %s: %s\n", f.Severity, affected, f.Rationale)
+			if f.NextAction != "" {
+				fmt.Printf("        next: %s\n", f.NextAction)
+			}
+		}
+	}
+	if len(review.Notes) > 0 {
+		fmt.Println("    Notes:")
+		for _, note := range review.Notes {
+			fmt.Printf("      - %s\n", note)
+		}
+	}
 }
 
 // preflightExitError classifies a failed preflight result into an exit code:
