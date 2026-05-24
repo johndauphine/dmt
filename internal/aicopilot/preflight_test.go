@@ -56,7 +56,9 @@ func TestBuildPreflightPayloadRedactsConnectionValues(t *testing.T) {
 	}
 	payload := BuildPreflightPayload(cfg, HealthSummary{
 		SourceConnected: true,
+		SourceError:     "dial postgres://source_user:source-secret@source.internal:5432/source_prod failed",
 		TargetConnected: true,
+		TargetError:     "login failed for sqlserver://target_user:target-secret@target.internal:1433?database=target_prod",
 		Healthy:         true,
 	}, []driver.PreFlightFinding{{
 		Severity: driver.SeverityError,
@@ -88,6 +90,9 @@ func TestBuildPreflightPayloadRedactsConnectionValues(t *testing.T) {
 	}
 	if !strings.Contains(text, "[REDACTED]") {
 		t.Fatalf("payload should scrub secret-looking finding text: %s", text)
+	}
+	if !strings.Contains(payload.Health.SourceError, "omitted") || !strings.Contains(payload.Health.TargetError, "omitted") {
+		t.Fatalf("health connection errors should be omitted from AI payload: %+v", payload.Health)
 	}
 	if len(payload.DeterministicBlockers) != 1 {
 		t.Fatalf("DeterministicBlockers len = %d, want 1", len(payload.DeterministicBlockers))
@@ -181,6 +186,14 @@ func TestGeneratePreflightReviewRejectsInvalidJSON(t *testing.T) {
 	_, err := GeneratePreflightReview(context.Background(), client, PreflightPayload{})
 	if err == nil {
 		t.Fatal("GeneratePreflightReview() error = nil, want parse error")
+	}
+}
+
+func TestGeneratePreflightReviewRejectsTypedNilClient(t *testing.T) {
+	var client *fakeClient
+	_, err := GeneratePreflightReview(context.Background(), client, PreflightPayload{})
+	if err == nil || !strings.Contains(err.Error(), "AI provider is not configured") {
+		t.Fatalf("GeneratePreflightReview() error = %v, want not configured", err)
 	}
 }
 

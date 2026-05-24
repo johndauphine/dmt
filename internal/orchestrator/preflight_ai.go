@@ -22,7 +22,7 @@ func (o *Orchestrator) ReviewPreflightWithAI(ctx context.Context, result *Health
 	payload.RecentRuns = o.recentRunsForAIReview()
 
 	mapper := o.aiReviewClient()
-	if mapper == nil {
+	if aicopilot.IsNilTextClient(mapper) {
 		return aicopilot.UnavailablePreflightReview("no AI provider configured in secrets", payload)
 	}
 
@@ -48,7 +48,11 @@ func (o *Orchestrator) aiReviewClient() aicopilot.TextClient {
 	if o != nil && o.opts.AIReviewClientFactory != nil {
 		return o.opts.AIReviewClientFactory()
 	}
-	return driver.GetAIMapper()
+	mapper := driver.GetAIMapper()
+	if mapper == nil {
+		return nil
+	}
+	return mapper
 }
 
 func healthSummaryForAI(result *HealthCheckResult) aicopilot.HealthSummary {

@@ -3,12 +3,13 @@ package aicopilot
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
 func GeneratePreflightReview(ctx context.Context, client TextClient, payload PreflightPayload) (*PreflightReview, error) {
-	if client == nil {
+	if IsNilTextClient(client) {
 		return nil, fmt.Errorf("AI provider is not configured")
 	}
 	prompt, err := BuildPreflightPrompt(payload)
@@ -47,6 +48,21 @@ func UnavailablePreflightReview(reason string, payload PreflightPayload) *Prefli
 		Readiness:             deterministicReadiness(payload),
 		Summary:               "AI review unavailable: " + logging.Scrub(reason) + ". Deterministic preflight results are unchanged.",
 		DeterministicBlockers: append([]string(nil), payload.DeterministicBlockers...),
+	}
+}
+
+// IsNilTextClient reports whether client is nil, including typed-nil values
+// stored in the TextClient interface.
+func IsNilTextClient(client TextClient) bool {
+	if client == nil {
+		return true
+	}
+	v := reflect.ValueOf(client)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
 	}
 }
 
