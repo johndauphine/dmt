@@ -36,7 +36,12 @@ func healthCheck(c *cli.Context) error {
 	}
 	defer orch.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	commandCtx := c.Context
+	if commandCtx == nil {
+		commandCtx = context.Background()
+	}
+
+	ctx, cancel := context.WithTimeout(commandCtx, 30*time.Second)
 	defer cancel()
 
 	result, err := orch.HealthCheck(ctx)
@@ -44,7 +49,7 @@ func healthCheck(c *cli.Context) error {
 		return err
 	}
 	if c.Bool("ai-review") {
-		reviewCtx, reviewCancel := context.WithTimeout(ctx, 90*time.Second)
+		reviewCtx, reviewCancel := context.WithTimeout(commandCtx, 90*time.Second)
 		defer reviewCancel()
 		result.AIPreflightReview = orch.ReviewPreflightWithAI(reviewCtx, result)
 	}

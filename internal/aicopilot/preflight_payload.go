@@ -20,6 +20,7 @@ func BuildPreflightPayload(cfg *config.Config, health HealthSummary, findings []
 			OmittedFields: []string{
 				"source.host", "source.port", "source.user", "source.password", "source.database",
 				"target.host", "target.port", "target.user", "target.password", "target.database",
+				"health.source_error", "health.target_error",
 				"ai.api_key", "slack.webhook_url",
 			},
 			ScrubbedText: true,
@@ -144,8 +145,12 @@ func validationSummary(v config.ValidationConfig) ValidationSummary {
 }
 
 func scrubHealth(h HealthSummary) HealthSummary {
-	h.SourceError = logging.Scrub(h.SourceError)
-	h.TargetError = logging.Scrub(h.TargetError)
+	if strings.TrimSpace(h.SourceError) != "" {
+		h.SourceError = "source connection error details omitted from AI payload"
+	}
+	if strings.TrimSpace(h.TargetError) != "" {
+		h.TargetError = "target connection error details omitted from AI payload"
+	}
 	return h
 }
 

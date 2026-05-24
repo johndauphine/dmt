@@ -75,6 +75,32 @@ func TestReviewPreflightWithAIUnavailableFallback(t *testing.T) {
 	}
 }
 
+func TestReviewPreflightWithAITypedNilClientFallback(t *testing.T) {
+	orch := &Orchestrator{
+		config: &config.Config{},
+		opts: Options{AIReviewClientFactory: func() aicopilot.TextClient {
+			var client *fakeAIReviewClient
+			return client
+		}},
+	}
+
+	review := orch.ReviewPreflightWithAI(context.Background(), &HealthCheckResult{
+		SourceConnected: true,
+		TargetConnected: true,
+		Healthy:         true,
+	})
+
+	if review == nil {
+		t.Fatal("ReviewPreflightWithAI() returned nil")
+	}
+	if review.Status != aicopilot.ReviewStatusUnavailable || review.Enabled {
+		t.Fatalf("status/enabled = %q/%v", review.Status, review.Enabled)
+	}
+	if review.Readiness != aicopilot.ReadinessReady {
+		t.Fatalf("readiness = %q, want ready", review.Readiness)
+	}
+}
+
 func TestReviewPreflightWithAIDoesNotDowngradeDeterministicBlockers(t *testing.T) {
 	orch := &Orchestrator{
 		config: &config.Config{},
