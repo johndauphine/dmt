@@ -21,19 +21,34 @@ func (o *Orchestrator) ReviewPreflightWithAI(ctx context.Context, result *Health
 	payload := aicopilot.BuildPreflightPayload(o.config, healthSummaryForAI(result), findings)
 	payload.RecentRuns = o.recentRunsForAIReview()
 
-	mapper := driver.GetAIMapper()
+	mapper := o.aiReviewClient()
 	if mapper == nil {
 		return aicopilot.UnavailablePreflightReview("no AI provider configured in secrets", payload)
 	}
 
 	review, err := aicopilot.GeneratePreflightReview(ctx, mapper, payload)
 	if err != nil {
-		logging.Warn("AI preflight review failed: %v", err)
+		logging.WarnEvent("AI preflight review failed",
+			"provider", mapper.ProviderName(),
+			"model", mapper.Model(),
+			"error", logging.Scrub(err.Error()),
+		)
 		return aicopilot.ErrorPreflightReview(mapper.ProviderName(), mapper.Model(), err, payload)
 	}
-	logging.Info("AI preflight review completed: readiness=%s advisory_findings=%d provider=%s model=%s",
-		review.Readiness, len(review.Findings), review.Provider, review.Model)
+	logging.InfoEvent("AI preflight review completed",
+		"provider", review.Provider,
+		"model", review.Model,
+		"readiness", review.Readiness,
+		"advisory_findings", len(review.Findings),
+	)
 	return review
+}
+
+func (o *Orchestrator) aiReviewClient() aicopilot.TextClient {
+	if o != nil && o.opts.AIReviewClientFactory != nil {
+		return o.opts.AIReviewClientFactory()
+	}
+	return driver.GetAIMapper()
 }
 
 func healthSummaryForAI(result *HealthCheckResult) aicopilot.HealthSummary {
@@ -61,7 +76,11 @@ func (o *Orchestrator) recentRunsForAIReview() []aicopilot.RunHistorySummary {
 	}
 	records, err := o.state.GetAITuningHistory(3, driver.Canonicalize(o.config.Source.Type), driver.Canonicalize(o.config.Target.Type))
 	if err != nil {
-		logging.Debug("AI preflight review: recent run history unavailable: %v", err)
+		logging.DebugEvent("AI preflight review recent run history unavailable",
+			"source_db", driver.Canonicalize(o.config.Source.Type),
+			"target_db", driver.Canonicalize(o.config.Target.Type),
+			"error", logging.Scrub(err.Error()),
+		)
 		return nil
 	}
 	out := make([]aicopilot.RunHistorySummary, 0, len(records))

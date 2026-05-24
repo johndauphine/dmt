@@ -149,6 +149,12 @@ type Options struct {
 	// SourceOnly creates orchestrator with only source pool (for analyze command).
 	// When true, target pool is not created and analyze operations only work.
 	SourceOnly bool
+
+	// AIReviewClientFactory overrides the default AI provider lookup for
+	// the preflight advisory path. Production leaves this nil; tests
+	// inject a fake factory so success/error/unavailable behavior is
+	// covered without touching global secrets or provider singletons.
+	AIReviewClientFactory func() aicopilot.TextClient
 }
 
 // SchemaContractDecision describes how one schema drift change was handled by

@@ -44,7 +44,7 @@ func healthCheck(c *cli.Context) error {
 		return err
 	}
 	if c.Bool("ai-review") {
-		reviewCtx, reviewCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		reviewCtx, reviewCancel := context.WithTimeout(ctx, 90*time.Second)
 		defer reviewCancel()
 		result.AIPreflightReview = orch.ReviewPreflightWithAI(reviewCtx, result)
 	}

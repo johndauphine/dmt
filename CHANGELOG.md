@@ -32,6 +32,9 @@ All notable changes to this project will be documented in this file.
 - Added schema contract parity integration coverage for SQLite and
   MSSQL-to-Postgres migrations, including end-to-end checks for evolved,
   frozen, discarded-row, and discarded-value contract outcomes (#409).
+- Added opt-in AI preflight readiness reviews for `dmt preflight`, including
+  redacted structured prompts, deterministic fallback behavior, and JSON/human
+  output support (#417).
 
 ### Deprecated
 
