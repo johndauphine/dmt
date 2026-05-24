@@ -112,6 +112,20 @@ This is what closes the loop:
 dmt preflight --config production.yaml
 ```
 
+If an AI provider is configured in `~/.secrets/dmt-config.yaml`, you can
+add an advisory readiness summary without starting a transfer:
+
+```bash
+dmt preflight --config production.yaml --ai-review
+```
+
+The AI review receives a redacted, structured payload: driver pair,
+schemas, migration policy knobs, connection/preflight status, and recent
+same-direction run summaries. It does not receive hosts, ports, database
+names, users, passwords, API keys, or Slack webhooks. Treat the AI section
+as prioritization and explanation only; deterministic preflight blockers
+remain the source of truth.
+
 `dmt preflight` runs the full pre-flight battery in roughly half a
 second: connection ping (both sides), supported DB version (PG 12+,
 MSSQL 2016+, MySQL 5.7+ / MariaDB 10.3+), encoding/collation,
@@ -706,7 +720,7 @@ for an SRE:
 |---|---|---|
 | `dmt run` | Starts a new migration. Runs preflight → schema extract → DDL → transfer → validation in one shot. | First-time migration, or after a clean rollback. |
 | `dmt resume` | Continues an interrupted migration from the last checkpoint. Honors config-hash check; use `--force-resume` to override. | After a crash, kill, OOM, or pod eviction. Almost always preferable to a fresh `run` because completed tables are skipped. |
-| `dmt preflight` (alias `health-check`) | Runs only the preflight battery (connectivity, version, encoding, privileges, pool headroom, backup ack). Does NOT touch data. | Before launching a production `run`. As a liveness probe in Airflow / k8s. After a config change to verify the new settings still work. |
+| `dmt preflight` (alias `health-check`) | Runs only the preflight battery (connectivity, version, encoding, privileges, pool headroom, backup ack). `--ai-review` adds an advisory redacted readiness summary when AI is configured. Does NOT touch data. | Before launching a production `run`. As a liveness probe in Airflow / k8s. After a config change to verify the new settings still work. |
 | `dmt status` | Prints current/last run status. With `--json` emits a structured result suitable for Airflow sensors. | Polling from automation. Quick "is it done yet" check during a long migration. |
 | `dmt history` | Lists past runs from the SQLite state DB. `--run <id>` drills into one run. | Post-mortem. "What was different about Tuesday's run?" |
 | `dmt validate` | Re-runs validation against an already-completed migration. Mode is read from `migration.validation.mode` in the YAML config (`count_only`, `null_parity`, or `sample`) — there's no `--mode` flag; edit the config (or point `--config` at a sibling file) to pick a deeper pass than the default that ran with `dmt run`. | After a migration completes, before promoting. Whenever you suspect drift. |

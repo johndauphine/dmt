@@ -275,6 +275,10 @@ func main() {
 						Name:  "skip-preflight",
 						Usage: "Comma-separated list of preflight checks to skip, or 'all' to disable preflight",
 					},
+					&cli.BoolFlag{
+						Name:  "ai-review",
+						Usage: "Ask the configured AI provider for an advisory readiness review after deterministic preflight (#398)",
+					},
 				},
 			},
 			{

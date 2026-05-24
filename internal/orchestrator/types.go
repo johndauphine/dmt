@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/aicopilot"
 	"github.com/johndauphine/dmt/internal/audit"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
@@ -266,19 +267,20 @@ type StatusResult struct {
 // cleanly; Healthy is true only when connections succeed AND no
 // SeverityError findings remain.
 type HealthCheckResult struct {
-	Timestamp         string                    `json:"timestamp"`
-	SourceConnected   bool                      `json:"source_connected"`
-	SourceLatencyMs   int64                     `json:"source_latency_ms"`
-	SourceDBType      string                    `json:"source_db_type"`
-	SourceTableCount  int                       `json:"source_table_count,omitempty"`
-	SourceError       string                    `json:"source_error,omitempty"`
-	TargetConnected   bool                      `json:"target_connected"`
-	TargetLatencyMs   int64                     `json:"target_latency_ms"`
-	TargetDBType      string                    `json:"target_db_type"`
-	TargetError       string                    `json:"target_error,omitempty"`
-	Healthy           bool                      `json:"healthy"`
-	PreFlightFindings []driver.PreFlightFinding `json:"preflight_findings,omitempty"`
-	PreFlightAborted  bool                      `json:"preflight_aborted,omitempty"`
+	Timestamp         string                     `json:"timestamp"`
+	SourceConnected   bool                       `json:"source_connected"`
+	SourceLatencyMs   int64                      `json:"source_latency_ms"`
+	SourceDBType      string                     `json:"source_db_type"`
+	SourceTableCount  int                        `json:"source_table_count,omitempty"`
+	SourceError       string                     `json:"source_error,omitempty"`
+	TargetConnected   bool                       `json:"target_connected"`
+	TargetLatencyMs   int64                      `json:"target_latency_ms"`
+	TargetDBType      string                     `json:"target_db_type"`
+	TargetError       string                     `json:"target_error,omitempty"`
+	Healthy           bool                       `json:"healthy"`
+	PreFlightFindings []driver.PreFlightFinding  `json:"preflight_findings,omitempty"`
+	PreFlightAborted  bool                       `json:"preflight_aborted,omitempty"`
+	AIPreflightReview *aicopilot.PreflightReview `json:"ai_preflight_review,omitempty"`
 }
 
 // DryRunResult contains the migration plan preview.
