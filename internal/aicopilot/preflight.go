@@ -231,9 +231,7 @@ func GeneratePreflightReview(ctx context.Context, client TextClient, payload Pre
 	review.Model = client.Model()
 	review.PromptVersion = PreflightPromptVersion
 	review.DeterministicBlockers = append([]string(nil), payload.DeterministicBlockers...)
-	if review.Readiness == "" || review.Readiness == ReadinessUnknown {
-		review.Readiness = deterministicReadiness(payload)
-	}
+	review.Readiness = applyDeterministicReadinessFloor(review.Readiness, deterministicReadiness(payload))
 	if review.Summary == "" {
 		review.Summary = deterministicSummary(payload)
 	}
@@ -444,6 +442,28 @@ func deterministicSummary(payload PreflightPayload) string {
 		return "Deterministic preflight did not find blockers."
 	default:
 		return "Readiness is unknown from the available deterministic preflight data."
+	}
+}
+
+func applyDeterministicReadinessFloor(aiReadiness, deterministic string) string {
+	aiReadiness = normalizeReadiness(aiReadiness)
+	deterministic = normalizeReadiness(deterministic)
+	if readinessRank(deterministic) > readinessRank(aiReadiness) {
+		return deterministic
+	}
+	return aiReadiness
+}
+
+func readinessRank(v string) int {
+	switch normalizeReadiness(v) {
+	case ReadinessBlocked:
+		return 3
+	case ReadinessAttention:
+		return 2
+	case ReadinessReady:
+		return 1
+	default:
+		return 0
 	}
 }
 

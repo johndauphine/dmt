@@ -139,6 +139,43 @@ func TestGeneratePreflightReviewParsesStructuredResponse(t *testing.T) {
 	}
 }
 
+func TestGeneratePreflightReviewCannotDowngradeDeterministicReadiness(t *testing.T) {
+	t.Run("blocker beats AI ready", func(t *testing.T) {
+		payload := PreflightPayload{
+			Health:                HealthSummary{SourceConnected: true, TargetConnected: true, Healthy: false},
+			DeterministicBlockers: []string{"target/backup.ack: backup confirmation required"},
+		}
+		client := &fakeClient{response: `{"readiness":"ready","summary":"Looks fine.","findings":[]}`}
+
+		review, err := GeneratePreflightReview(context.Background(), client, payload)
+		if err != nil {
+			t.Fatalf("GeneratePreflightReview() error = %v", err)
+		}
+		if review.Readiness != ReadinessBlocked {
+			t.Fatalf("readiness = %q, want blocked", review.Readiness)
+		}
+	})
+
+	t.Run("warning beats AI ready", func(t *testing.T) {
+		payload := PreflightPayload{
+			Health: HealthSummary{SourceConnected: true, TargetConnected: true, Healthy: true},
+			PreflightFindings: []PreflightFinding{{
+				Severity: string(driver.SeverityWarn),
+				Check:    "pool.headroom",
+			}},
+		}
+		client := &fakeClient{response: `{"readiness":"ready","summary":"Looks fine.","findings":[]}`}
+
+		review, err := GeneratePreflightReview(context.Background(), client, payload)
+		if err != nil {
+			t.Fatalf("GeneratePreflightReview() error = %v", err)
+		}
+		if review.Readiness != ReadinessAttention {
+			t.Fatalf("readiness = %q, want attention", review.Readiness)
+		}
+	})
+}
+
 func TestGeneratePreflightReviewRejectsInvalidJSON(t *testing.T) {
 	client := &fakeClient{response: "not json"}
 	_, err := GeneratePreflightReview(context.Background(), client, PreflightPayload{})
