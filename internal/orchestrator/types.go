@@ -155,6 +155,11 @@ type Options struct {
 	// inject a fake factory so success/error/unavailable behavior is
 	// covered without touching global secrets or provider singletons.
 	AIReviewClientFactory func() aicopilot.TextClient
+
+	// EnableAISchemaAdvisor asks DryRun to include an advisory AI schema
+	// drift/evolution review. Deterministic schema policy remains
+	// authoritative and controls whether the run can proceed.
+	EnableAISchemaAdvisor bool
 }
 
 // SchemaContractDecision describes how one schema drift change was handled by
@@ -301,13 +306,14 @@ type DryRunResult struct {
 	EstimatedMemMB int64         `json:"estimated_memory_mb"`
 	// EstimatedDurationSeconds is populated when recent same-direction
 	// throughput history is available.
-	EstimatedDurationSeconds float64                      `json:"estimated_duration_seconds,omitempty"`
-	EstimatedRowsPerSecond   int64                        `json:"estimated_rows_per_second,omitempty"`
-	Workers                  int                          `json:"workers"`
-	ChunkSize                int                          `json:"chunk_size"`
-	TargetMode               string                       `json:"target_mode"`
-	DeleteReconciliation     *DeleteReconciliationPreview `json:"delete_reconciliation,omitempty"`
-	SchemaContractDecisions  []SchemaContractDecision     `json:"schema_contract_decisions,omitempty"`
+	EstimatedDurationSeconds float64                        `json:"estimated_duration_seconds,omitempty"`
+	EstimatedRowsPerSecond   int64                          `json:"estimated_rows_per_second,omitempty"`
+	Workers                  int                            `json:"workers"`
+	ChunkSize                int                            `json:"chunk_size"`
+	TargetMode               string                         `json:"target_mode"`
+	DeleteReconciliation     *DeleteReconciliationPreview   `json:"delete_reconciliation,omitempty"`
+	SchemaContractDecisions  []SchemaContractDecision       `json:"schema_contract_decisions,omitempty"`
+	AISchemaAdvisor          *aicopilot.SchemaAdvisorReview `json:"ai_schema_advisor,omitempty"`
 }
 
 // DeleteReconciliationPreview describes whether the opt-in #351 delete

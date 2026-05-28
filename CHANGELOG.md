@@ -35,6 +35,11 @@ All notable changes to this project will be documented in this file.
 - Added opt-in AI preflight readiness reviews for `dmt preflight`, including
   redacted structured prompts, deterministic fallback behavior, and JSON/human
   output support (#417).
+- Added `dmt run --dry-run --ai-schema-advisor` for advisory schema drift and
+  schema evolution guidance that preserves deterministic policy gates (#399).
+- Added foundation payloads/parsers/fallbacks for upcoming AI failure triage,
+  config/runbook review, and performance explanation copilot flows (#400,
+  #401, #402).
 
 ### Deprecated
 
