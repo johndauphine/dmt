@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/aicopilot"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 )
 
@@ -34,6 +35,7 @@ func printDryRunResult(r *orchestrator.DryRunResult) {
 			eta, orchestrator.FormatCount(r.EstimatedRowsPerSecond))
 	}
 	printDeleteReconciliationPreview(r.DeleteReconciliation)
+	printAISchemaAdvisor(r.AISchemaAdvisor)
 }
 
 func printDeleteReconciliationPreview(p *orchestrator.DeleteReconciliationPreview) {
@@ -79,5 +81,52 @@ func printDeleteReconciliationPreview(p *orchestrator.DeleteReconciliationPrevie
 			}
 			fmt.Println(line)
 		}
+	}
+}
+
+func printAISchemaAdvisor(review *aicopilot.SchemaAdvisorReview) {
+	if review == nil {
+		return
+	}
+	fmt.Println()
+	fmt.Println("AI Schema Advisor:")
+	fmt.Printf("  Status: %s\n", review.Status)
+	if review.Provider != "" {
+		fmt.Printf("  Provider: %s", review.Provider)
+		if review.Model != "" {
+			fmt.Printf(" / %s", review.Model)
+		}
+		fmt.Println()
+	}
+	if review.Summary != "" {
+		fmt.Printf("  Summary: %s\n", review.Summary)
+	}
+	if len(review.DeterministicBlockers) > 0 {
+		fmt.Println("  Deterministic blockers:")
+		for _, blocker := range review.DeterministicBlockers {
+			fmt.Printf("    - %s\n", blocker)
+		}
+	}
+	if len(review.Recommendations) > 0 {
+		fmt.Println("  Recommendations:")
+		for _, rec := range review.Recommendations {
+			affected := rec.Table
+			if rec.Schema != "" {
+				affected = rec.Schema + "." + affected
+			}
+			if rec.Column != "" {
+				affected += "." + rec.Column
+			}
+			fmt.Printf("    [%s] %s: %s\n", strings.ToUpper(rec.Risk), affected, rec.SuggestedAction)
+			if rec.Reason != "" {
+				fmt.Printf("      reason: %s\n", rec.Reason)
+			}
+			if rec.DeterministicGate.Action != "" {
+				fmt.Printf("      gate: %s (%s)\n", rec.DeterministicGate.Action, rec.DeterministicGate.Reason)
+			}
+		}
+	}
+	if review.Error != "" {
+		fmt.Printf("  Error: %s\n", review.Error)
 	}
 }

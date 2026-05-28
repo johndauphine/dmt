@@ -418,6 +418,18 @@ The report groups changes by table and labels the category:
 `index_dropped`, `fk_added`, `fk_dropped`, `check_added`, and
 `check_dropped`.
 
+If an AI provider is configured, dry-run can add advisory schema guidance:
+
+```bash
+dmt run --config production.yaml --dry-run --ai-schema-advisor
+```
+
+The schema advisor receives a redacted drift payload and deterministic
+policy gates. It can explain risk and suggest a policy/runbook direction,
+but it cannot override `schema_contract`, `schema_evolution`, or
+`fail_on_schema_drift`; those deterministic checks still decide what can
+run or change.
+
 **Recover by**:
 
 1. For additive, safe changes in `drop_recreate` mode, confirm the
@@ -718,7 +730,7 @@ for an SRE:
 
 | Command | What it does | When to use it |
 |---|---|---|
-| `dmt run` | Starts a new migration. Runs preflight → schema extract → DDL → transfer → validation in one shot. | First-time migration, or after a clean rollback. |
+| `dmt run` | Starts a new migration. Runs preflight → schema extract → DDL → transfer → validation in one shot. With `--dry-run --ai-schema-advisor`, adds advisory redacted schema drift guidance when AI is configured. | First-time migration, or after a clean rollback. |
 | `dmt resume` | Continues an interrupted migration from the last checkpoint. Honors config-hash check; use `--force-resume` to override. | After a crash, kill, OOM, or pod eviction. Almost always preferable to a fresh `run` because completed tables are skipped. |
 | `dmt preflight` (alias `health-check`) | Runs only the preflight battery (connectivity, version, encoding, privileges, pool headroom, backup ack). `--ai-review` adds an advisory redacted readiness summary when AI is configured. Does NOT touch data. | Before launching a production `run`. As a liveness probe in Airflow / k8s. After a config change to verify the new settings still work. |
 | `dmt status` | Prints current/last run status. With `--json` emits a structured result suitable for Airflow sensors. | Polling from automation. Quick "is it done yet" check during a long migration. |

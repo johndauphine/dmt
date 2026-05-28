@@ -52,8 +52,9 @@ func runMigration(c *cli.Context) error {
 
 	// Build orchestrator options
 	opts := orchestrator.Options{
-		StateFile: c.String("state-file"),
-		RunID:     c.String("run-id"),
+		StateFile:             c.String("state-file"),
+		RunID:                 c.String("run-id"),
+		EnableAISchemaAdvisor: c.Bool("ai-schema-advisor"),
 	}
 
 	// Create orchestrator

@@ -107,7 +107,8 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 
 	// Apply table filters
 	tables = o.filterTables(tables)
-	if _, err := o.reportSchemaDrift(tables, false); err != nil {
+	schemaReport, err := o.reportSchemaDrift(tables, false)
+	if err != nil {
 		return nil, err
 	}
 
@@ -121,6 +122,11 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 		TargetMode:              o.config.Migration.TargetMode,
 		TotalTables:             len(tables),
 		SchemaContractDecisions: cloneSchemaContractDecisions(o.lastSchemaContractDecisions),
+	}
+	if o.opts.EnableAISchemaAdvisor && schemaReport.HasChanges() {
+		reviewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		result.AISchemaAdvisor = o.ReviewSchemaDriftWithAI(reviewCtx, schemaReport, tables, false)
 	}
 
 	// Calculate estimated memory
