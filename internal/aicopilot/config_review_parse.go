@@ -111,7 +111,7 @@ func configReviewPathAllowed(path string, payload *ConfigReviewPayload) bool {
 	if path == "" {
 		return false
 	}
-	allowedPaths := []string{
+	exactPaths := []string{
 		"source.type", "source.schema", "source.ssl_mode", "source.encrypt", "source.packet_size",
 		"target.type", "target.schema", "target.ssl_mode", "target.encrypt", "target.packet_size",
 		"migration.target_mode", "migration.workers", "migration.chunk_size", "migration.read_ahead_buffers",
@@ -123,12 +123,24 @@ func configReviewPathAllowed(path string, payload *ConfigReviewPayload) bool {
 		"migration.deletes", "migration.validation",
 	}
 	if payload != nil && len(payload.Safety.AllowedPatchPaths) > 0 {
-		allowedPaths = payload.Safety.AllowedPatchPaths
+		exactPaths = payload.Safety.AllowedPatchPaths
 	}
-	for _, allowed := range allowedPaths {
-		if path == allowed || strings.HasPrefix(path, allowed+".") {
+	for _, allowed := range exactPaths {
+		if path == allowed || configReviewExpandablePath(allowed) && strings.HasPrefix(path, allowed+".") {
 			return true
 		}
 	}
 	return false
+}
+
+func configReviewExpandablePath(path string) bool {
+	switch path {
+	case "migration.schema_contract",
+		"migration.schema_evolution",
+		"migration.deletes",
+		"migration.validation":
+		return true
+	default:
+		return false
+	}
 }

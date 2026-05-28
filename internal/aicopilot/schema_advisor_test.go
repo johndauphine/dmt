@@ -75,6 +75,57 @@ func TestBuildSchemaAdvisorPayloadRedactsConnectionValuesAndGates(t *testing.T) 
 	}
 }
 
+func TestBuildSchemaAdvisorPayloadOmitsRawDriftLiterals(t *testing.T) {
+	payload := BuildSchemaAdvisorPayload(&config.Config{}, drift.Report{Changes: []drift.Change{
+		{
+			Kind:       drift.DefaultChange,
+			Schema:     "dbo",
+			TableName:  "Users",
+			ObjectName: "TenantCode",
+			Previous:   "DEFAULT 'customer-secret-a'",
+			Current:    "DEFAULT 'customer-secret-b'",
+		},
+		{
+			Kind:       drift.IndexAdded,
+			Schema:     "dbo",
+			TableName:  "Orders",
+			ObjectName: "idx_orders_tenant",
+			Current:    "tenant_id where tenant_id = 'tenant-secret'",
+		},
+		{
+			Kind:       drift.CheckAdded,
+			Schema:     "dbo",
+			TableName:  "Invoices",
+			ObjectName: "ck_invoice_region",
+			Current:    "region_code in ('private-region')",
+		},
+	}}, nil, true)
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, secret := range []string{
+		"customer-secret-a",
+		"customer-secret-b",
+		"tenant-secret",
+		"private-region",
+	} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("payload leaked drift literal %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, "schema_drift.previous") || !strings.Contains(text, "schema_drift.current") {
+		t.Fatalf("payload should document omitted drift literal fields: %s", text)
+	}
+	for _, change := range payload.Changes {
+		if change.Previous != "" || change.Current != "" {
+			t.Fatalf("raw previous/current should be omitted from AI payload: %+v", change)
+		}
+	}
+}
+
 func TestGenerateSchemaAdvisorReviewPreservesDeterministicGate(t *testing.T) {
 	payload := SchemaAdvisorPayload{
 		PromptVersion: SchemaAdvisorPromptVersion,

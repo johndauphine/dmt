@@ -88,6 +88,41 @@ func TestGenerateConfigReviewParsesAndSanitizesStructuredResponse(t *testing.T) 
 	assertConfigReviewNoSensitiveValues(t, client.prompt)
 }
 
+func TestGenerateConfigReviewRejectsNestedPathUnderScalarAllowlistEntry(t *testing.T) {
+	cfg := configReviewTestConfig()
+	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})
+	client := &fakeClient{response: `{
+  "summary": "Unsafe nested scalar path.",
+  "patch_recommendations": [
+    {
+      "operation": "set",
+      "path": "source.schema.password",
+      "value": "not-a-real-field",
+      "rationale": "unsafe nested path under a scalar allowlist entry",
+      "requires_confirmation": false
+    }
+  ]
+}`}
+
+	review, err := GenerateConfigReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateConfigReview() error = %v", err)
+	}
+	if len(review.PatchRecommendations) != 1 {
+		t.Fatalf("patch recommendations len = %d, want 1", len(review.PatchRecommendations))
+	}
+	patch := review.PatchRecommendations[0]
+	if patch.Path != "source.schema.password" {
+		t.Fatalf("path = %q, want original unsafe path for auditability", patch.Path)
+	}
+	if patch.Value != "[REDACTED]" || !patch.RequiresConfirmation {
+		t.Fatalf("unsafe nested scalar path should be redacted and confirmation-gated: %+v", patch)
+	}
+	if !strings.Contains(patch.Rationale, "outside the safe config review allowlist") {
+		t.Fatalf("rationale = %q, want allowlist redaction reason", patch.Rationale)
+	}
+}
+
 func TestGenerateConfigReviewRefusesUnsafeOperatorRequestWithoutCallingAI(t *testing.T) {
 	cfg := configReviewTestConfig()
 	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{
