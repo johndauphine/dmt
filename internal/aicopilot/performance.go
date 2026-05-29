@@ -38,11 +38,12 @@ func GeneratePerformanceExplanation(ctx context.Context, client TextClient, payl
 }
 
 func UnavailablePerformanceExplanation(reason string, payload PerformancePayload) *PerformanceExplanation {
+	reason = sanitizePerformanceDisplayText(logging.Scrub(reason))
 	return &PerformanceExplanation{
 		Enabled:       false,
 		Status:        ReviewStatusUnavailable,
 		PromptVersion: PerformancePromptVersion,
-		Summary:       "AI performance explanation unavailable: " + logging.Scrub(reason) + ". Deterministic tuning choices are unchanged.",
+		Summary:       "AI performance explanation unavailable: " + reason + ". Deterministic tuning choices are unchanged.",
 		Notes:         deterministicPerformanceNotes(payload),
 	}
 }
@@ -50,7 +51,7 @@ func UnavailablePerformanceExplanation(reason string, payload PerformancePayload
 func ErrorPerformanceExplanation(provider, model string, err error, payload PerformancePayload) *PerformanceExplanation {
 	errMsg := ""
 	if err != nil {
-		errMsg = logging.Scrub(err.Error())
+		errMsg = sanitizePerformanceDisplayText(logging.Scrub(err.Error()))
 	}
 	return &PerformanceExplanation{
 		Enabled:       true,
@@ -66,10 +67,10 @@ func ErrorPerformanceExplanation(provider, model string, err error, payload Perf
 
 func deterministicPerformanceSummary(payload PerformancePayload) string {
 	if payload.DeterministicReasoning != "" {
-		return limitText(logging.Scrub(payload.DeterministicReasoning), 800)
+		return limitText(sanitizePerformanceDisplayText(logging.Scrub(payload.DeterministicReasoning)), 800)
 	}
 	if payload.DeterministicTier != "" {
-		return "Deterministic tuning selected the " + logging.Scrub(payload.DeterministicTier) + " tier."
+		return "Deterministic tuning selected the " + sanitizePerformanceDisplayText(logging.Scrub(payload.DeterministicTier)) + " tier."
 	}
 	return "Deterministic tuning choices are available in the payload."
 }
@@ -77,10 +78,10 @@ func deterministicPerformanceSummary(payload PerformancePayload) string {
 func deterministicPerformanceNotes(payload PerformancePayload) []string {
 	notes := []string{}
 	if payload.DeterministicTier != "" {
-		notes = append(notes, "tier: "+logging.Scrub(payload.DeterministicTier))
+		notes = append(notes, "tier: "+sanitizePerformanceDisplayText(logging.Scrub(payload.DeterministicTier)))
 	}
 	if payload.DeterministicReasoning != "" {
-		notes = append(notes, "reasoning: "+limitText(logging.Scrub(payload.DeterministicReasoning), 400))
+		notes = append(notes, "reasoning: "+limitText(sanitizePerformanceDisplayText(logging.Scrub(payload.DeterministicReasoning)), 400))
 	}
 	return notes
 }

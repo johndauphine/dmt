@@ -82,6 +82,56 @@ func TestController_MemoryPressure_ShrinksChunkSize(t *testing.T) {
 	}
 }
 
+func TestControllerApplyPersistsRuntimeAdjustment(t *testing.T) {
+	var records []AdjustmentRecord
+	c, col, tuner := newTestController(t, ControllerOptions{
+		RunID:                   "run-1",
+		InitialAdjustmentNumber: 3,
+		AdjustmentRecorder: func(runID string, record AdjustmentRecord) error {
+			if runID != "run-1" {
+				t.Fatalf("runID = %q, want run-1", runID)
+			}
+			records = append(records, record)
+			return nil
+		},
+	})
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(now))
+	pushSnapshots(col, snap(95.0, 30, 0, 0, 500_000, 50000, 2))
+	decision := &Decision{
+		Knob:          "chunk_size",
+		PreviousValue: 50000,
+		NewValue:      37500,
+		Reasoning:     "memory pressure",
+	}
+
+	if err := c.apply(decision); err != nil {
+		t.Fatalf("apply() error = %v", err)
+	}
+	if got := tuner.Snapshot().ChunkSize; got != 37500 {
+		t.Fatalf("chunk_size = %d, want 37500", got)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records len = %d, want 1", len(records))
+	}
+	record := records[0]
+	if record.AdjustmentNumber != 4 || !record.Timestamp.Equal(now) || record.Action != "chunk_size" {
+		t.Fatalf("record metadata = %+v", record)
+	}
+	if record.Adjustments["chunk_size"] != 37500 {
+		t.Fatalf("record adjustments = %+v", record.Adjustments)
+	}
+	if record.ThroughputBefore != 500_000 || record.CPUBefore != 30 || record.MemoryBefore != 95 {
+		t.Fatalf("record metrics = %+v", record)
+	}
+	if record.ThroughputAfter != 0 || record.CPUAfter != 0 || record.MemoryAfter != 0 || record.EffectPercent != 0 {
+		t.Fatalf("record should not claim post-adjustment metrics from a pre-change sample: %+v", record)
+	}
+	if record.Confidence != "deterministic" || record.Reasoning != "memory pressure" {
+		t.Fatalf("record reason/confidence = %+v", record)
+	}
+}
+
 // TestController_MemoryPressure_FlooredAtMinChunkSize — Copilot review
 // on PR #194. Without a floor, sustained memory pressure could
 // shrink chunk_size all the way to 1, where per-row overhead
