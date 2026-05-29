@@ -131,12 +131,56 @@ type tableValidationResult struct {
 	exactTimedOut bool
 }
 
+// ValidationRunResult is the structured deterministic validation outcome used
+// by the opt-in AI triage path. It contains facts only; AI hypotheses are
+// added later by internal/aicopilot.
+type ValidationRunResult struct {
+	Mode      string
+	Rows      []ValidationRowCountResult
+	Deep      validation.Result
+	Failed    bool
+	Error     string
+	StartedAt time.Time
+	EndedAt   time.Time
+}
+
+// ValidationRowCountResult describes one table's count validation outcome.
+type ValidationRowCountResult struct {
+	TableName     string
+	SourceCount   int64
+	TargetCount   int64
+	Difference    int64
+	CountsKnown   bool
+	UsedEstimate  bool
+	ExactTimedOut bool
+	TimedOut      bool
+	Error         string
+	Failed        bool
+}
+
 // Validate checks row counts between source and target in parallel.
 func (o *Orchestrator) Validate(ctx context.Context) error {
+	_, err := o.ValidateDetailed(ctx)
+	return err
+}
+
+// ValidateDetailed checks row counts and configured deep-validation passes,
+// returning the structured deterministic facts even when validation fails.
+func (o *Orchestrator) ValidateDetailed(ctx context.Context) (*ValidationRunResult, error) {
+	result := &ValidationRunResult{
+		Mode:      validationModeForResult(o.config.Migration.Validation.Mode),
+		StartedAt: time.Now(),
+	}
+	defer func() {
+		result.EndedAt = time.Now()
+	}()
+
 	if o.tables == nil {
 		tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 		if err != nil {
-			return err
+			result.Failed = true
+			result.Error = err.Error()
+			return result, err
 		}
 		o.tables = tables
 	}
@@ -187,23 +231,32 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 	// Report results
 	var failed bool
 	for _, r := range allResults {
-		if policy.evaluate(r) {
+		rowFailed := policy.evaluate(r)
+		result.Rows = append(result.Rows, validationRowCountResult(r, rowFailed))
+		if rowFailed {
 			failed = true
 		}
 	}
 
 	if failed {
-		return fmt.Errorf("validation failed")
+		err := fmt.Errorf("validation failed")
+		result.Failed = true
+		result.Error = err.Error()
+		return result, err
 	}
 
 	// After row-count validation, run the deeper validation passes
 	// configured by Migration.Validation.Mode (#226). Empty mode
 	// or "count_only" → no additional passes; pre-#226 behavior.
-	if err := o.runDeepValidation(ctx); err != nil {
-		return err
+	deep, err := o.runDeepValidationResult(ctx)
+	result.Deep = deep
+	if err != nil {
+		result.Failed = true
+		result.Error = err.Error()
+		return result, err
 	}
 
-	return nil
+	return result, nil
 }
 
 // runDeepValidation runs the configured #226 passes (null_parity,
@@ -214,15 +267,20 @@ func (o *Orchestrator) Validate(ctx context.Context) error {
 // the PR discussion); we reject it here with a clear pointer
 // rather than silently degrading to a weaker check.
 func (o *Orchestrator) runDeepValidation(ctx context.Context) error {
+	_, err := o.runDeepValidationResult(ctx)
+	return err
+}
+
+func (o *Orchestrator) runDeepValidationResult(ctx context.Context) (validation.Result, error) {
 	mode := validation.Mode(o.config.Migration.Validation.Mode)
 	if mode == "" || mode == validation.ModeCountOnly {
-		return nil
+		return validation.Result{}, nil
 	}
 	if mode == validation.ModeFull {
-		return fmt.Errorf("validation.mode: full is reserved for the in-DB row-hashing follow-up to #226. Use 'sample' for value-level checks on a row sample, or 'null_parity' for NULL-count parity")
+		return validation.Result{}, fmt.Errorf("validation.mode: full is reserved for the in-DB row-hashing follow-up to #226. Use 'sample' for value-level checks on a row sample, or 'null_parity' for NULL-count parity")
 	}
 	if mode != validation.ModeNullParity && mode != validation.ModeSample {
-		return fmt.Errorf("validation.mode %q is not recognized; valid values are count_only, null_parity, sample", mode)
+		return validation.Result{}, fmt.Errorf("validation.mode %q is not recognized; valid values are count_only, null_parity, sample", mode)
 	}
 
 	cfg := validation.Config{
@@ -236,7 +294,7 @@ func (o *Orchestrator) runDeepValidation(ctx context.Context) error {
 	if s := o.config.Migration.Validation.Timeout; s != "" {
 		d, err := time.ParseDuration(s)
 		if err != nil {
-			return fmt.Errorf("validation.timeout %q: %w (use Go-format duration like \"30s\", \"5m\", \"1h\")", s, err)
+			return validation.Result{}, fmt.Errorf("validation.timeout %q: %w (use Go-format duration like \"30s\", \"5m\", \"1h\")", s, err)
 		}
 		cfg.Timeout = d
 	}
@@ -276,12 +334,38 @@ func (o *Orchestrator) runDeepValidation(ctx context.Context) error {
 	}
 
 	if result.HasFailure() && cfg.FailOnMismatchOrDefault() {
-		return fmt.Errorf("deep validation (%s) failed", mode)
+		return result, fmt.Errorf("deep validation (%s) failed", mode)
 	}
 	if result.HasFailure() {
 		logging.Warn("Deep validation failures detected; continuing because validation.fail_on_mismatch is false")
 	}
-	return nil
+	return result, nil
+}
+
+func validationRowCountResult(r tableValidationResult, failed bool) ValidationRowCountResult {
+	out := ValidationRowCountResult{
+		TableName:     r.tableName,
+		SourceCount:   r.sourceCount,
+		TargetCount:   r.targetCount,
+		Difference:    r.sourceCount - r.targetCount,
+		CountsKnown:   r.err == nil && !r.timedOut,
+		UsedEstimate:  r.usedEstimate,
+		ExactTimedOut: r.exactTimedOut,
+		TimedOut:      r.timedOut,
+		Failed:        failed,
+	}
+	if r.err != nil {
+		out.Error = r.err.Error()
+	}
+	return out
+}
+
+func validationModeForResult(mode string) string {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return string(validation.ModeCountOnly)
+	}
+	return mode
 }
 
 // targetIdentifierTransform returns the per-driver identifier
