@@ -68,37 +68,11 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating target pool: %w", err)
 	}
 
-	// Create state manager based on options
-	var state checkpoint.StateBackend
-	if opts.StateFile != "" {
-		// Use file-based state (for Airflow/headless)
-		state, err = checkpoint.NewFileState(opts.StateFile)
-		if err != nil {
-			sourcePool.Close()
-			targetPool.Close()
-			return nil, fmt.Errorf("creating file state manager: %w", err)
-		}
-	} else {
-		// Use SQLite state (default for desktop)
-		sqliteState, err := checkpoint.New(cfg.Migration.DataDir)
-		if err != nil {
-			sourcePool.Close()
-			targetPool.Close()
-			return nil, fmt.Errorf("creating state manager: %w", err)
-		}
-
-		// Cleanup old runs based on retention policy
-		retentionDays := cfg.Migration.HistoryRetentionDays
-		if retentionDays <= 0 {
-			retentionDays = 30 // Default
-		}
-		if deleted, cleanupErr := sqliteState.CleanupOldRuns(retentionDays); cleanupErr != nil {
-			logging.Warn("History cleanup failed: %v", cleanupErr)
-		} else if deleted > 0 {
-			logging.Info("Cleaned up %d old migration runs (retention: %d days)", deleted, retentionDays)
-		}
-
-		state = sqliteState
+	state, err := newStateBackend(cfg, opts, true)
+	if err != nil {
+		sourcePool.Close()
+		targetPool.Close()
+		return nil, err
 	}
 
 	// Create notifier from the effective config. Config defaults already
@@ -138,6 +112,56 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		opts:       opts,
 		targetMode: targetModeStrategy,
 	}, nil
+}
+
+// NewDiagnosticsWithOptions creates an orchestrator that can inspect checkpoint
+// state without opening source or target database pools.
+func NewDiagnosticsWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
+	state, err := newStateBackend(cfg, opts, false)
+	if err != nil {
+		return nil, err
+	}
+
+	observability.SetGlobal(observability.Noop())
+
+	return &Orchestrator{
+		config:   cfg,
+		state:    state,
+		progress: progress.New(),
+		metrics:  observability.Noop(),
+		auditor:  audit.Disabled(),
+		opts:     opts,
+	}, nil
+}
+
+func newStateBackend(cfg *config.Config, opts Options, cleanupHistory bool) (checkpoint.StateBackend, error) {
+	if opts.StateFile != "" {
+		state, err := checkpoint.NewFileState(opts.StateFile)
+		if err != nil {
+			return nil, fmt.Errorf("creating file state manager: %w", err)
+		}
+		return state, nil
+	}
+
+	sqliteState, err := checkpoint.New(cfg.Migration.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("creating state manager: %w", err)
+	}
+	if !cleanupHistory {
+		return sqliteState, nil
+	}
+
+	retentionDays := cfg.Migration.HistoryRetentionDays
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	if deleted, cleanupErr := sqliteState.CleanupOldRuns(retentionDays); cleanupErr != nil {
+		logging.Warn("History cleanup failed: %v", cleanupErr)
+	} else if deleted > 0 {
+		logging.Info("Cleaned up %d old migration runs (retention: %d days)", deleted, retentionDays)
+	}
+
+	return sqliteState, nil
 }
 
 // Close releases all resources
