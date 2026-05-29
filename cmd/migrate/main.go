@@ -198,6 +198,45 @@ func main() {
 				Name:   "validate",
 				Usage:  "Validate row counts between source and target",
 				Action: validateMigration,
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "ai-triage",
+						Usage: "On validation failure, ask the configured AI provider for advisory triage while keeping deterministic facts authoritative (#400)",
+					},
+					&cli.DurationFlag{
+						Name:  "timeout",
+						Value: 90 * time.Second,
+						Usage: "Maximum time to wait for AI validation triage",
+					},
+					&cli.BoolFlag{
+						Name:  "json",
+						Usage: "With --ai-triage, output the triage review as JSON",
+					},
+				},
+			},
+			{
+				Name:   "diagnose",
+				Usage:  "Build deterministic failure facts for the current or selected run, with opt-in AI advisory triage",
+				Action: diagnoseMigration,
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "run",
+						Usage: "Diagnose a specific run ID instead of the current/last run",
+					},
+					&cli.BoolFlag{
+						Name:  "ai-triage",
+						Usage: "Ask the configured AI provider for advisory triage while keeping deterministic facts authoritative (#400)",
+					},
+					&cli.DurationFlag{
+						Name:  "timeout",
+						Value: 90 * time.Second,
+						Usage: "Maximum time to wait for AI triage",
+					},
+					&cli.BoolFlag{
+						Name:  "json",
+						Usage: "Output the triage review as JSON",
+					},
+				},
 			},
 			{
 				Name:  "history",
