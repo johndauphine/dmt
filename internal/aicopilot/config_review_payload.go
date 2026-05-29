@@ -10,16 +10,22 @@ import (
 
 func BuildConfigReviewPayload(cfg *config.Config, opts ConfigReviewOptions) ConfigReviewPayload {
 	sensitiveValues := collectConfigReviewSensitiveValues(cfg)
+	targetMode := ""
+	if cfg != nil {
+		targetMode = cfg.Migration.TargetMode
+	}
 	payload := ConfigReviewPayload{
 		PromptVersion:   ConfigReviewPromptVersion,
 		Task:            "Review an existing DMT configuration and return safe patch-style recommendations plus a concise operator runbook.",
 		OperatorRequest: configReviewSafeText(opts.OperatorRequest, &ConfigReviewPayload{sensitiveValues: sensitiveValues}, 400),
 		Config:          buildConfigSummary(cfg),
+		Commands:        buildConfigReviewCommands(opts),
 		Safety: ConfigReviewSafetyContext{
 			AllowedPatchPaths: []string{
 				"migration.target_mode",
 				"migration.workers",
 				"migration.chunk_size",
+				"migration.upsert_merge_chunk_size",
 				"migration.read_ahead_buffers",
 				"migration.write_ahead_writers",
 				"migration.parallel_readers",
@@ -38,6 +44,12 @@ func BuildConfigReviewPayload(cfg *config.Config, opts ConfigReviewOptions) Conf
 				"migration.schema_evolution",
 				"migration.deletes",
 				"migration.validation",
+				"migration.checkpoint_frequency",
+				"migration.max_retries",
+				"migration.history_retention_days",
+				"migration.notify",
+				"migration.runtime_tuning",
+				"migration.runtime_tuning_interval",
 				"source.type",
 				"source.schema",
 				"source.ssl_mode",
@@ -55,6 +67,7 @@ func BuildConfigReviewPayload(cfg *config.Config, opts ConfigReviewOptions) Conf
 				"connection strings", "DSNs", "API keys", "Slack webhook URLs", "Kerberos keytab paths",
 			},
 			RequiresReviewOnly: true,
+			TargetMode:         targetMode,
 		},
 		Redaction: RedactionSummary{
 			OmittedFields: []string{
@@ -70,6 +83,51 @@ func BuildConfigReviewPayload(cfg *config.Config, opts ConfigReviewOptions) Conf
 	}
 	payload.Safety.RefusalReason = configReviewRefusalReason(payload.OperatorRequest)
 	return payload
+}
+
+func buildConfigReviewCommands(opts ConfigReviewOptions) ConfigReviewCommands {
+	base := "dmt"
+	switch {
+	case strings.TrimSpace(opts.ProfileName) != "":
+		base += " --profile " + shellQuoteForReview(opts.ProfileName)
+	case strings.TrimSpace(opts.ConfigPath) != "":
+		base += " --config " + shellQuoteForReview(opts.ConfigPath)
+	default:
+		base += " --config config.yaml"
+	}
+	if strings.TrimSpace(opts.StateFile) != "" {
+		base += " --state-file " + shellQuoteForReview(opts.StateFile)
+	}
+	return ConfigReviewCommands{
+		Preflight: base + " preflight --ai-review",
+		Run:       base + " run",
+		Validate:  base + " validate",
+		Resume:    base + " resume",
+	}
+}
+
+func shellQuoteForReview(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return !isShellSafeReviewRune(r)
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func isShellSafeReviewRune(r rune) bool {
+	switch r {
+	case '/', '.', '_', '-', ':':
+		return true
+	default:
+		return r >= '0' && r <= '9' ||
+			r >= 'A' && r <= 'Z' ||
+			r >= 'a' && r <= 'z'
+	}
 }
 
 func collectConfigReviewSensitiveValues(cfg *config.Config) []string {

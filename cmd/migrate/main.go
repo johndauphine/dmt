@@ -297,6 +297,45 @@ func main() {
 				},
 			},
 			{
+				Name:  "ai",
+				Usage: "AI-assisted advisory workflows",
+				Subcommands: []*cli.Command{
+					{
+						Name:    "config-review",
+						Aliases: []string{"runbook"},
+						Usage:   "Review config and generate safe patch recommendations plus a migration runbook (#401)",
+						Action:  aiConfigReview,
+						Flags: []cli.Flag{
+							&cli.StringFlag{
+								Name:  "request",
+								Usage: "Optional operator goal or constraint for the advisory review",
+							},
+							&cli.DurationFlag{
+								Name:  "timeout",
+								Value: 90 * time.Second,
+								Usage: "Maximum time to wait for AI config review",
+							},
+							&cli.StringFlag{
+								Name:  "state-file",
+								Usage: "Use YAML state file when generating exact runbook commands",
+							},
+							&cli.BoolFlag{
+								Name:  "json",
+								Usage: "Output the review as JSON",
+							},
+							&cli.BoolFlag{
+								Name:  "output-json",
+								Usage: "Output the review as JSON (same as --json)",
+							},
+							&cli.StringFlag{
+								Name:  "output-file",
+								Usage: "Write JSON review to file",
+							},
+						},
+					},
+				},
+			},
+			{
 				Name:   "init",
 				Usage:  "Create a new configuration file interactively",
 				Action: initConfig,

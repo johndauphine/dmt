@@ -498,6 +498,83 @@ func TestStatusCommandJSONFlag(t *testing.T) {
 	}
 }
 
+func TestAIConfigReviewCommandLocalOutputFlags(t *testing.T) {
+	app := &cli.App{
+		Commands: []*cli.Command{
+			{
+				Name: "ai",
+				Subcommands: []*cli.Command{
+					{
+						Name: "config-review",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "state-file"},
+							&cli.BoolFlag{Name: "output-json"},
+							&cli.StringFlag{Name: "output-file"},
+						},
+						Action: func(c *cli.Context) error {
+							if got := aiConfigReviewString(c, "state-file"); got != "state.yaml" {
+								t.Errorf("state-file = %q, want state.yaml", got)
+							}
+							if !aiConfigReviewBool(c, "output-json") {
+								t.Error("expected output-json to be true")
+							}
+							if got := aiConfigReviewOutputFile(c); got != "review.json" {
+								t.Errorf("output-file = %q, want review.json", got)
+							}
+							return nil
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := app.Run([]string{"app", "ai", "config-review", "--state-file", "state.yaml", "--output-json", "--output-file", "review.json"}); err != nil {
+		t.Fatalf("app.Run() error: %v", err)
+	}
+}
+
+func TestAIConfigReviewCommandUsesGlobalOutputFlags(t *testing.T) {
+	app := &cli.App{
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "state-file"},
+			&cli.BoolFlag{Name: "output-json"},
+			&cli.StringFlag{Name: "output-file"},
+		},
+		Commands: []*cli.Command{
+			{
+				Name: "ai",
+				Subcommands: []*cli.Command{
+					{
+						Name: "config-review",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "state-file"},
+							&cli.BoolFlag{Name: "output-json"},
+							&cli.StringFlag{Name: "output-file"},
+						},
+						Action: func(c *cli.Context) error {
+							if got := aiConfigReviewString(c, "state-file"); got != "global-state.yaml" {
+								t.Errorf("state-file = %q, want global-state.yaml", got)
+							}
+							if !aiConfigReviewJSONRequested(c) {
+								t.Error("expected global output-json to be honored")
+							}
+							if got := aiConfigReviewOutputFile(c); got != "global-review.json" {
+								t.Errorf("output-file = %q, want global-review.json", got)
+							}
+							return nil
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := app.Run([]string{"app", "--state-file", "global-state.yaml", "--output-json", "--output-file", "global-review.json", "ai", "config-review"}); err != nil {
+		t.Fatalf("app.Run() error: %v", err)
+	}
+}
+
 func TestProfileSubcommands(t *testing.T) {
 	tests := []struct {
 		name     string
