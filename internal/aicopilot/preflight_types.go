@@ -63,6 +63,25 @@ type ValidationSummary struct {
 	MaxParallel    int     `json:"max_parallel,omitempty"`
 }
 
+type CheckpointSummary struct {
+	FrequencyChunks      int `json:"frequency_chunks"`
+	MaxRetries           int `json:"max_retries"`
+	HistoryRetentionDays int `json:"history_retention_days"`
+}
+
+type NotificationSummary struct {
+	SlackConfigured bool `json:"slack_configured"`
+	SlackEnabled    bool `json:"slack_enabled"`
+	OnSuccess       bool `json:"on_success"`
+	OnFailure       bool `json:"on_failure"`
+}
+
+type SecretsPlacementSummary struct {
+	SecretsFile      string   `json:"secrets_file"`
+	KeepOutOfConfig  []string `json:"keep_out_of_config"`
+	ConfigMayContain []string `json:"config_may_contain"`
+}
+
 type MigrationSummary struct {
 	TargetMode             string                 `json:"target_mode"`
 	Workers                int                    `json:"workers"`
@@ -85,12 +104,15 @@ type MigrationSummary struct {
 	SchemaEvolution        SchemaEvolutionSummary `json:"schema_evolution"`
 	Deletes                DeleteSummary          `json:"deletes"`
 	Validation             ValidationSummary      `json:"validation"`
+	Checkpoint             CheckpointSummary      `json:"checkpoint"`
+	Notifications          NotificationSummary    `json:"notifications"`
 }
 
 type ConfigSummary struct {
-	Source    EndpointSummary  `json:"source"`
-	Target    EndpointSummary  `json:"target"`
-	Migration MigrationSummary `json:"migration"`
+	Source           EndpointSummary         `json:"source"`
+	Target           EndpointSummary         `json:"target"`
+	Migration        MigrationSummary        `json:"migration"`
+	SecretsPlacement SecretsPlacementSummary `json:"secrets_placement"`
 }
 
 type HealthSummary struct {

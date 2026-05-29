@@ -6,6 +6,9 @@ const ReviewStatusRefused = "refused"
 
 type ConfigReviewOptions struct {
 	OperatorRequest string
+	ConfigPath      string
+	ProfileName     string
+	StateFile       string
 }
 
 type ConfigReviewSafetyContext struct {
@@ -13,6 +16,7 @@ type ConfigReviewSafetyContext struct {
 	DisallowedContent  []string `json:"disallowed_content"`
 	RefusalReason      string   `json:"refusal_reason,omitempty"`
 	RequiresReviewOnly bool     `json:"requires_review_only"`
+	TargetMode         string   `json:"target_mode,omitempty"`
 }
 
 type ConfigReviewPayload struct {
@@ -20,20 +24,29 @@ type ConfigReviewPayload struct {
 	Task            string                    `json:"task"`
 	OperatorRequest string                    `json:"operator_request,omitempty"`
 	Config          ConfigSummary             `json:"config"`
+	Commands        ConfigReviewCommands      `json:"commands"`
 	Safety          ConfigReviewSafetyContext `json:"safety"`
 	Redaction       RedactionSummary          `json:"redaction"`
 
 	sensitiveValues []string
 }
 
+type ConfigReviewCommands struct {
+	Preflight string `json:"preflight"`
+	Run       string `json:"run"`
+	Validate  string `json:"validate"`
+	Resume    string `json:"resume"`
+}
+
 type ConfigPatchRecommendation struct {
-	Operation            string `json:"operation"`
-	Path                 string `json:"path"`
-	Value                any    `json:"value,omitempty"`
-	Rationale            string `json:"rationale"`
-	Risk                 string `json:"risk,omitempty"`
-	WhenToApply          string `json:"when_to_apply,omitempty"`
-	RequiresConfirmation bool   `json:"requires_confirmation"`
+	Operation            string   `json:"operation"`
+	Path                 string   `json:"path"`
+	Value                any      `json:"value,omitempty"`
+	Rationale            string   `json:"rationale"`
+	Risk                 string   `json:"risk,omitempty"`
+	WhenToApply          string   `json:"when_to_apply,omitempty"`
+	RequiresConfirmation bool     `json:"requires_confirmation"`
+	ValidationErrors     []string `json:"validation_errors,omitempty"`
 }
 
 type ConfigRunbook struct {
