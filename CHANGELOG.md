@@ -40,6 +40,9 @@ All notable changes to this project will be documented in this file.
 - Added `dmt analyze --ai-explain` performance explanations for deterministic
   smartconfig choices with redacted payloads and terminal-safe AI advisory
   output (#402).
+- Added `dmt diagnose` and `dmt validate --ai-triage` advisory failure triage
+  flows with redacted AI prompts, constrained suggested commands, and
+  deterministic fallbacks (#400).
 - Added foundation payloads/parsers/fallbacks for upcoming AI failure triage,
   config/runbook review, and performance explanation copilot flows (#400,
   #401, #402).
