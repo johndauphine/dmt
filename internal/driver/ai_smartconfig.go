@@ -194,12 +194,20 @@ type TuningHistoryProvider interface {
 // AIAdjustmentRecord represents a historical AI adjustment from runtime
 // migration. Used by the runtime monitor (separate from smartconfig).
 type AIAdjustmentRecord struct {
+	RunID            string         `json:"run_id,omitempty"`
+	AdjustmentNumber int            `json:"adjustment_number,omitempty"`
+	Timestamp        *time.Time     `json:"timestamp,omitempty"`
 	Action           string         `json:"action"`
 	Adjustments      map[string]int `json:"adjustments"`
 	ThroughputBefore float64        `json:"throughput_before"`
 	ThroughputAfter  float64        `json:"throughput_after"`
 	EffectPercent    float64        `json:"effect_percent"`
+	CPUBefore        float64        `json:"cpu_before,omitempty"`
+	CPUAfter         float64        `json:"cpu_after,omitempty"`
+	MemoryBefore     float64        `json:"memory_before,omitempty"`
+	MemoryAfter      float64        `json:"memory_after,omitempty"`
 	Reasoning        string         `json:"reasoning"`
+	Confidence       string         `json:"confidence,omitempty"`
 }
 
 // AITuningRecord is one row in the SQL ai_tuning_history table. Schema is

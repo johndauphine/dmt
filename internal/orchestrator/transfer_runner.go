@@ -122,6 +122,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		CheckpointFrequency:  r.config.Migration.CheckpointFrequency,
 		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
 	})
+	runtimeAdjustments := newRuntimeAdjustmentRecorder(r.state, runID)
 
 	// Setup runtime parameter adjustment via the rule-based controller
 	// (#172). Replaced the AI-driven monitor in PR 172b. The controller
@@ -154,6 +155,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 			// constructed below catches chunk-too-big errors by
 			// halving on write error, which is the fast-feedback
 			// safety net; MaxChunkSize is the proactive cap.
+			RunID:                runID,
+			NextAdjustmentNumber: runtimeAdjustments.nextNumber,
+			AdjustmentRecorder:   runtimeAdjustments.record,
 		}
 		if hardCap := r.config.Migration.TargetHardChunkLimit; hardCap > 0 {
 			controllerOpts.MaxChunkSize = hardCap
@@ -202,7 +206,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	}
 
 	// Execute jobs with worker pool
-	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, runtimeMonitor, tuner)
+	failures, err := r.executeJobs(ctx, runID, jobs, buildResult, statsMap, runtimeMonitor, tuner, runtimeAdjustments)
 	if err != nil {
 		return nil, err
 	}

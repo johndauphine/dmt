@@ -56,20 +56,60 @@ type RuntimeAdjustmentSummary struct {
 	ThroughputBefore float64        `json:"throughput_before,omitempty"`
 	ThroughputAfter  float64        `json:"throughput_after,omitempty"`
 	EffectPercent    float64        `json:"effect_percent,omitempty"`
+	CPUBefore        float64        `json:"cpu_before,omitempty"`
+	CPUAfter         float64        `json:"cpu_after,omitempty"`
+	MemoryBefore     float64        `json:"memory_before,omitempty"`
+	MemoryAfter      float64        `json:"memory_after,omitempty"`
 	Reasoning        string         `json:"reasoning,omitempty"`
+	Confidence       string         `json:"confidence,omitempty"`
+}
+
+type PerformanceObservedMetrics struct {
+	MaxSourceConnections   int     `json:"max_source_connections,omitempty"`
+	MaxTargetConnections   int     `json:"max_target_connections,omitempty"`
+	RecentSuccessfulRuns   int     `json:"recent_successful_runs,omitempty"`
+	RunsWithRetries        int     `json:"runs_with_retries,omitempty"`
+	TotalChunkRetries      int     `json:"total_chunk_retries,omitempty"`
+	ChunkRetryRate         float64 `json:"chunk_retry_rate,omitempty"`
+	AverageThroughputRows  float64 `json:"average_throughput_rows_per_second,omitempty"`
+	BestThroughputRows     float64 `json:"best_throughput_rows_per_second,omitempty"`
+	RuntimeAdjustmentCount int     `json:"runtime_adjustment_count,omitempty"`
+}
+
+type PerformanceDBTuningRecommendation struct {
+	Parameter        string `json:"parameter,omitempty"`
+	CurrentValue     string `json:"current_value,omitempty"`
+	RecommendedValue string `json:"recommended_value,omitempty"`
+	Impact           string `json:"impact,omitempty"`
+	Priority         int    `json:"priority,omitempty"`
+	CanApplyRuntime  bool   `json:"can_apply_runtime"`
+	RequiresRestart  bool   `json:"requires_restart"`
+	Reason           string `json:"reason,omitempty"`
+}
+
+type PerformanceDBTuningSummary struct {
+	Role             string                              `json:"role,omitempty"`
+	DatabaseType     string                              `json:"database_type,omitempty"`
+	TuningPotential  string                              `json:"tuning_potential,omitempty"`
+	EstimatedImpact  string                              `json:"estimated_impact,omitempty"`
+	Recommendations  []PerformanceDBTuningRecommendation `json:"recommendations,omitempty"`
+	RecommendationCt int                                 `json:"recommendation_count,omitempty"`
 }
 
 type PerformancePayload struct {
-	PromptVersion          string                     `json:"prompt_version"`
-	Task                   string                     `json:"task"`
-	Workload               PerformanceWorkloadSummary `json:"workload"`
-	DeterministicTier      string                     `json:"deterministic_tier,omitempty"`
-	DeterministicReasoning string                     `json:"deterministic_reasoning,omitempty"`
-	DeterministicKnobs     PerformanceKnobs           `json:"deterministic_knobs"`
-	RecentRuns             []PerformanceHistoryRun    `json:"recent_runs,omitempty"`
-	RuntimeAdjustments     []RuntimeAdjustmentSummary `json:"runtime_adjustments,omitempty"`
-	AllowedKnobs           []string                   `json:"allowed_knobs"`
-	Redaction              RedactionSummary           `json:"redaction"`
+	PromptVersion          string                       `json:"prompt_version"`
+	Task                   string                       `json:"task"`
+	Workload               PerformanceWorkloadSummary   `json:"workload"`
+	DeterministicTier      string                       `json:"deterministic_tier,omitempty"`
+	DeterministicReasoning string                       `json:"deterministic_reasoning,omitempty"`
+	DeterministicKnobs     PerformanceKnobs             `json:"deterministic_knobs"`
+	RecentRuns             []PerformanceHistoryRun      `json:"recent_runs,omitempty"`
+	RuntimeAdjustments     []RuntimeAdjustmentSummary   `json:"runtime_adjustments,omitempty"`
+	DatabaseTuning         []PerformanceDBTuningSummary `json:"database_tuning,omitempty"`
+	ObservedMetrics        PerformanceObservedMetrics   `json:"observed_metrics,omitempty"`
+	AllowedKnobs           []string                     `json:"allowed_knobs"`
+	AllowedFindingTargets  []string                     `json:"allowed_finding_targets"`
+	Redaction              RedactionSummary             `json:"redaction"`
 }
 
 type PerformanceFinding struct {

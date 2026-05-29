@@ -37,6 +37,9 @@ All notable changes to this project will be documented in this file.
   output support (#417).
 - Added `dmt run --dry-run --ai-schema-advisor` for advisory schema drift and
   schema evolution guidance that preserves deterministic policy gates (#399).
+- Added `dmt analyze --ai-explain` performance explanations for deterministic
+  smartconfig choices with redacted payloads and terminal-safe AI advisory
+  output (#402).
 - Added foundation payloads/parsers/fallbacks for upcoming AI failure triage,
   config/runbook review, and performance explanation copilot flows (#400,
   #401, #402).

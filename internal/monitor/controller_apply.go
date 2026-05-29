@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
 
@@ -13,6 +14,7 @@ import (
 // cooldown for 90s, suppressing retries even though no change took
 // effect (Copilot review on PR #194).
 func (c *Controller) apply(d *Decision) error {
+	before := c.latestSnapshot()
 	update := transfer.RuntimeUpdate{}
 	switch d.Knob {
 	case "chunk_size":
@@ -56,7 +58,44 @@ func (c *Controller) apply(d *Decision) error {
 			c.lastWAWAddThroughputSet = false
 		}
 	}
+	c.recordAdjustment(d, before)
 	return nil
+}
+
+func (c *Controller) latestSnapshot() PerformanceSnapshot {
+	recent := c.collector.GetRecentMetrics(1)
+	if len(recent) == 0 {
+		return PerformanceSnapshot{}
+	}
+	return recent[len(recent)-1]
+}
+
+func (c *Controller) recordAdjustment(d *Decision, before PerformanceSnapshot) {
+	if c.adjustmentRecorder == nil || c.runID == "" || d == nil {
+		return
+	}
+	record := AdjustmentRecord{
+		AdjustmentNumber: c.nextAdjustmentNumberValue(),
+		Timestamp:        c.nowFn(),
+		Action:           d.Knob,
+		Adjustments:      map[string]int{d.Knob: d.NewValue},
+		ThroughputBefore: before.Throughput,
+		CPUBefore:        before.CPUPercent,
+		MemoryBefore:     before.MemoryPercent,
+		Reasoning:        d.Reasoning,
+		Confidence:       "deterministic",
+	}
+	if err := c.adjustmentRecorder(c.runID, record); err != nil {
+		logging.Warn("rule controller: failed to persist runtime adjustment: %v", err)
+	}
+}
+
+func (c *Controller) nextAdjustmentNumberValue() int {
+	if c.nextAdjustmentNumber != nil {
+		return c.nextAdjustmentNumber()
+	}
+	c.adjustmentNumber++
+	return c.adjustmentNumber
 }
 
 // knobReady returns true when the named knob is past its cooldown

@@ -1,9 +1,12 @@
 package aicopilot
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -50,13 +53,17 @@ func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.Smar
 			OmittedFields: []string{
 				"source.host", "source.port", "source.user", "source.password", "source.database", "source.schema",
 				"target.host", "target.port", "target.user", "target.password", "target.database", "target.schema",
-				"ai.api_key", "slack.webhook_url",
+				"runtime_adjustments.reasoning", "ai.api_key", "slack.webhook_url",
+				"recent_runs.reasoning",
 			},
 			ScrubbedText: true,
 		},
 	}
 	payload.RecentRuns = buildPerformanceHistoryRuns(recent, 5)
 	payload.RuntimeAdjustments = buildRuntimeAdjustmentSummaries(adjustments, 5)
+	payload.DatabaseTuning = buildDBTuningSummaries(suggestions, 5)
+	payload.ObservedMetrics = buildObservedPerformanceMetrics(suggestions, recent, payload.RuntimeAdjustments)
+	payload.AllowedFindingTargets = allowedPerformanceFindingTargets(payload.DatabaseTuning)
 	return payload
 }
 
@@ -100,7 +107,6 @@ func buildPerformanceHistoryRuns(recent []driver.AITuningRecord, limit int) []Pe
 			FinalThroughput:      r.FinalThroughput,
 			FinalDurationSeconds: r.FinalDurationSecs,
 			ChunkRetryCount:      r.ChunkRetryCount,
-			Reasoning:            logging.Scrub(r.AIReasoning),
 		})
 	}
 	return out
@@ -114,17 +120,53 @@ func buildRuntimeAdjustmentSummaries(adjustments []driver.AIAdjustmentRecord, li
 		limit = len(adjustments)
 	}
 	out := make([]RuntimeAdjustmentSummary, 0, limit)
-	for _, a := range adjustments[:limit] {
+	for _, a := range adjustments {
+		if !isDeterministicRuntimeAdjustment(a.Confidence) {
+			continue
+		}
 		out = append(out, RuntimeAdjustmentSummary{
-			Action:           logging.Scrub(a.Action),
+			Action:           runtimeAdjustmentActionForPayload(a),
 			Adjustments:      filterRuntimeAdjustments(a.Adjustments),
 			ThroughputBefore: a.ThroughputBefore,
 			ThroughputAfter:  a.ThroughputAfter,
 			EffectPercent:    a.EffectPercent,
-			Reasoning:        logging.Scrub(a.Reasoning),
+			CPUBefore:        a.CPUBefore,
+			CPUAfter:         a.CPUAfter,
+			MemoryBefore:     a.MemoryBefore,
+			MemoryAfter:      a.MemoryAfter,
+			Confidence:       normalizeRuntimeAdjustmentConfidence(a.Confidence),
 		})
+		if len(out) == limit {
+			break
+		}
 	}
 	return out
+}
+
+func runtimeAdjustmentActionForPayload(a driver.AIAdjustmentRecord) string {
+	allowed := allowedPerformanceKnobSet()
+	if allowed[a.Action] {
+		return a.Action
+	}
+	for knob := range a.Adjustments {
+		if allowed[knob] {
+			return knob
+		}
+	}
+	return ""
+}
+
+func normalizeRuntimeAdjustmentConfidence(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "deterministic":
+		return strings.ToLower(strings.TrimSpace(v))
+	default:
+		return ""
+	}
+}
+
+func isDeterministicRuntimeAdjustment(confidence string) bool {
+	return normalizeRuntimeAdjustmentConfidence(confidence) == "deterministic"
 }
 
 func filterRuntimeAdjustments(in map[string]int) map[string]int {
@@ -144,6 +186,90 @@ func filterRuntimeAdjustments(in map[string]int) map[string]int {
 	return out
 }
 
+func buildDBTuningSummaries(suggestions driver.SmartConfigSuggestions, limit int) []PerformanceDBTuningSummary {
+	out := make([]PerformanceDBTuningSummary, 0, 2)
+	appendTuning := func(tuning *dbtuning.DatabaseTuning) {
+		if tuning == nil {
+			return
+		}
+		summary := PerformanceDBTuningSummary{
+			Role:             logging.Scrub(tuning.Role),
+			DatabaseType:     logging.Scrub(tuning.DatabaseType),
+			TuningPotential:  logging.Scrub(tuning.TuningPotential),
+			EstimatedImpact:  limitText(logging.Scrub(tuning.EstimatedImpact), 300),
+			RecommendationCt: len(tuning.Recommendations),
+		}
+		recs := tuning.Recommendations
+		if limit > 0 && len(recs) > limit {
+			recs = recs[:limit]
+		}
+		for _, rec := range recs {
+			summary.Recommendations = append(summary.Recommendations, PerformanceDBTuningRecommendation{
+				Parameter:        limitText(logging.Scrub(rec.Parameter), 120),
+				CurrentValue:     scrubTuningValue(rec.CurrentValue),
+				RecommendedValue: scrubTuningValue(rec.RecommendedValue),
+				Impact:           limitText(logging.Scrub(rec.Impact), 80),
+				Priority:         rec.Priority,
+				CanApplyRuntime:  rec.CanApplyRuntime,
+				RequiresRestart:  rec.RequiresRestart,
+				Reason:           limitText(logging.Scrub(rec.Reason), 400),
+			})
+		}
+		out = append(out, summary)
+	}
+	appendTuning(suggestions.SourceTuning)
+	appendTuning(suggestions.TargetTuning)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func scrubTuningValue(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch v.(type) {
+	case string,
+		bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return limitText(logging.Scrub(fmt.Sprint(v)), 200)
+	default:
+		return logging.RedactedToken
+	}
+}
+
+func buildObservedPerformanceMetrics(suggestions driver.SmartConfigSuggestions, recent []driver.AITuningRecord, adjustments []RuntimeAdjustmentSummary) PerformanceObservedMetrics {
+	metrics := PerformanceObservedMetrics{
+		MaxSourceConnections:   suggestions.MaxSourceConnections,
+		MaxTargetConnections:   suggestions.MaxTargetConnections,
+		RuntimeAdjustmentCount: len(adjustments),
+	}
+	var throughputSum float64
+	for _, r := range recent {
+		if r.FinalThroughput > 0 {
+			metrics.RecentSuccessfulRuns++
+			throughputSum += r.FinalThroughput
+			if r.FinalThroughput > metrics.BestThroughputRows {
+				metrics.BestThroughputRows = r.FinalThroughput
+			}
+		}
+		if r.ChunkRetryCount > 0 {
+			metrics.RunsWithRetries++
+			metrics.TotalChunkRetries += r.ChunkRetryCount
+		}
+	}
+	if metrics.RecentSuccessfulRuns > 0 {
+		metrics.AverageThroughputRows = throughputSum / float64(metrics.RecentSuccessfulRuns)
+	}
+	if len(recent) > 0 {
+		metrics.ChunkRetryRate = float64(metrics.RunsWithRetries) / float64(len(recent))
+	}
+	return metrics
+}
+
 func allowedPerformanceKnobs() []string {
 	knobs := []string{
 		"workers",
@@ -161,6 +287,29 @@ func allowedPerformanceKnobs() []string {
 	}
 	sort.Strings(knobs)
 	return knobs
+}
+
+func allowedPerformanceFindingTargets(databaseTuning []PerformanceDBTuningSummary) []string {
+	targets := append([]string{}, allowedPerformanceKnobs()...)
+	for _, tuning := range databaseTuning {
+		for _, rec := range tuning.Recommendations {
+			parameter := strings.ToLower(strings.TrimSpace(rec.Parameter))
+			if parameter != "" {
+				targets = append(targets, "db_tuning."+parameter)
+			}
+		}
+	}
+	sort.Strings(targets)
+	out := targets[:0]
+	seen := map[string]bool{}
+	for _, target := range targets {
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		out = append(out, target)
+	}
+	return out
 }
 
 func allowedPerformanceKnobSet() map[string]bool {

@@ -93,6 +93,11 @@ type Controller struct {
 	// options-style setter so cooldown logic can be exercised
 	// deterministically without sleeping.
 	nowFn func() time.Time
+
+	runID                string
+	adjustmentRecorder   AdjustmentRecorder
+	adjustmentNumber     int
+	nextAdjustmentNumber func() int
 }
 
 // ControllerOptions wraps the optional knobs the rule controller
@@ -116,6 +121,36 @@ type ControllerOptions struct {
 	// workloads rarely hit the cap, low enough that runaway
 	// queue-depth-growth doesn't push WAW into the contention zone.
 	MaxWAW int
+
+	// RunID and AdjustmentRecorder persist successful runtime decisions
+	// so later analysis can explain why knobs changed during the run.
+	RunID                   string
+	InitialAdjustmentNumber int
+	NextAdjustmentNumber    func() int
+	AdjustmentRecorder      AdjustmentRecorder
+}
+
+// AdjustmentRecorder persists a successful runtime controller decision.
+// The controller treats recorder failures as telemetry failures: the
+// runtime adjustment has already succeeded and is not rolled back.
+type AdjustmentRecorder func(runID string, record AdjustmentRecord) error
+
+// AdjustmentRecord is the monitor package's persistence-neutral shape for
+// a runtime controller decision.
+type AdjustmentRecord struct {
+	AdjustmentNumber int
+	Timestamp        time.Time
+	Action           string
+	Adjustments      map[string]int
+	ThroughputBefore float64
+	ThroughputAfter  float64
+	EffectPercent    float64
+	CPUBefore        float64
+	CPUAfter         float64
+	MemoryBefore     float64
+	MemoryAfter      float64
+	Reasoning        string
+	Confidence       string
 }
 
 // defaultMaxWAW is the cap the controller uses when ControllerOptions
@@ -220,6 +255,11 @@ func NewController(tuner transfer.RuntimeTuner, collector *MetricsCollector, int
 		minChunkSize: opts.MinChunkSize,
 		maxWAW:       opts.MaxWAW,
 		nowFn:        time.Now,
+
+		runID:                opts.RunID,
+		adjustmentNumber:     opts.InitialAdjustmentNumber,
+		nextAdjustmentNumber: opts.NextAdjustmentNumber,
+		adjustmentRecorder:   opts.AdjustmentRecorder,
 	}
 }
 

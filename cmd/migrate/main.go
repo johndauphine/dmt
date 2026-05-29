@@ -294,6 +294,10 @@ func main() {
 						Name:  "apply",
 						Usage: "Apply AI-tuned parameters to the analyzed config file",
 					},
+					&cli.BoolFlag{
+						Name:  "ai-explain",
+						Usage: "Ask the configured AI provider to explain deterministic smartconfig and runtime tuning evidence (#402)",
+					},
 				},
 			},
 			{

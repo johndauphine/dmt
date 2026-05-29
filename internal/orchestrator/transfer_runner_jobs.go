@@ -15,7 +15,7 @@ import (
 // For partitioned tables, first partitions are processed before remaining partitions
 // to prevent race conditions in partition cleanup logic during idempotent retries.
 // Note: Table truncation is handled upfront by preTruncateIfNeeded, not by partitions.
-func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) ([]TableFailure, error) {
+func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) ([]TableFailure, error) {
 	// Separate jobs into two phases:
 	// - Phase 1: Non-partitioned jobs + first partitions (no dependencies)
 	// - Phase 2: Remaining partitions (wait for first partitions to establish cleanup boundaries)
@@ -41,7 +41,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 	// Phase 1: Process non-partitioned jobs and first partitions
 	// These can run in parallel since they're for different tables or establish cleanup boundaries
 	if len(firstPhaseJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner); err != nil {
+		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments); err != nil {
 			close(errCh)
 			return nil, err
 		}
@@ -49,7 +49,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 
 	// Phase 2: Process remaining partitions (after first partitions complete)
 	if len(remainingJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner); err != nil {
+		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments); err != nil {
 			close(errCh)
 			return nil, err
 		}
@@ -62,7 +62,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 }
 
 // executeJobBatch runs a batch of jobs with the worker pool.
-func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) error {
+func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) error {
 	sem := make(chan struct{}, r.config.Migration.Workers)
 	var wg sync.WaitGroup
 	var ctxErr error
@@ -81,7 +81,7 @@ loop:
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, runtimeMonitor, tuner)
+			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments)
 		}(job)
 	}
 
@@ -93,7 +93,7 @@ loop:
 }
 
 // executeJob runs a single job with retry logic.
-func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner) {
+func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) {
 	// Report active job metrics for runtime monitoring (the rule-based
 	// controller's queue-growth and throughput-stable rules read these
 	// via the MetricsCollector + tuner.Metrics()).
@@ -141,7 +141,10 @@ retryLoop:
 		// MSSQL 2100-parameter cap, max_allowed_packet); returns 0
 		// (no adjustment) for other errors so transient failures fall
 		// through to the normal retry logic.
-		writeErrAdjuster := monitor.NewRuleWriteErrorAdjuster()
+		var writeErrAdjuster transfer.WriteErrorAdjuster = monitor.NewRuleWriteErrorAdjuster()
+		if runtimeAdjustments != nil {
+			writeErrAdjuster = recordingWriteErrorAdjuster{base: writeErrAdjuster, recorder: runtimeAdjustments}
+		}
 		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner, writeErrAdjuster)
 		if err == nil {
 			break

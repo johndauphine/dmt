@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"time"
+
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -20,13 +22,26 @@ func (a *stateHistoryAdapter) GetAIAdjustments(limit int) ([]driver.AIAdjustment
 	// Convert checkpoint records to driver records
 	result := make([]driver.AIAdjustmentRecord, len(records))
 	for i, r := range records {
+		var timestamp *time.Time
+		if !r.Timestamp.IsZero() {
+			ts := r.Timestamp
+			timestamp = &ts
+		}
 		result[i] = driver.AIAdjustmentRecord{
+			RunID:            r.RunID,
+			AdjustmentNumber: r.AdjustmentNumber,
+			Timestamp:        timestamp,
 			Action:           r.Action,
 			Adjustments:      r.Adjustments,
 			ThroughputBefore: r.ThroughputBefore,
 			ThroughputAfter:  r.ThroughputAfter,
 			EffectPercent:    r.EffectPercent,
+			CPUBefore:        r.CPUBefore,
+			CPUAfter:         r.CPUAfter,
+			MemoryBefore:     r.MemoryBefore,
+			MemoryAfter:      r.MemoryAfter,
 			Reasoning:        r.Reasoning,
+			Confidence:       r.Confidence,
 		}
 	}
 	return result, nil
