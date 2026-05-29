@@ -3,6 +3,7 @@ package aicopilot
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/johndauphine/dmt/internal/logging"
 )
@@ -25,13 +26,17 @@ func GenerateConfigReview(ctx context.Context, client TextClient, payload Config
 	if err != nil {
 		return nil, err
 	}
-	review, err := ParseConfigReview(raw)
+	review, err := parseConfigReview(raw)
 	if err != nil {
 		return nil, err
 	}
 	normalizeConfigReview(review, &payload)
-	if review.RefusalReason != "" {
-		review.Status = ReviewStatusRefused
+	if review.RefusalReason != "" || strings.EqualFold(strings.TrimSpace(review.Status), ReviewStatusRefused) {
+		reason := review.RefusalReason
+		if reason == "" {
+			reason = "AI provider refused the config review request"
+		}
+		review = RefusedConfigReview(reason, payload)
 	} else {
 		review.Status = ReviewStatusOK
 	}
@@ -55,7 +60,7 @@ func UnavailableConfigReview(reason string, payload ConfigReviewPayload) *Config
 func ErrorConfigReview(provider, model string, err error, payload ConfigReviewPayload) *ConfigReview {
 	errMsg := ""
 	if err != nil {
-		errMsg = logging.Scrub(err.Error())
+		errMsg = configReviewSafeText(err.Error(), &payload, 800)
 	}
 	review := deterministicConfigReviewFallback("AI config review failed; using deterministic safety guidance.", payload)
 	review.Enabled = true
@@ -67,10 +72,11 @@ func ErrorConfigReview(provider, model string, err error, payload ConfigReviewPa
 }
 
 func RefusedConfigReview(reason string, payload ConfigReviewPayload) *ConfigReview {
+	reason = configReviewSafeGuidanceText(reason, &payload, 400)
 	review := deterministicConfigReviewFallback("AI config review refused: "+logging.Scrub(reason)+".", payload)
 	review.Enabled = true
 	review.Status = ReviewStatusRefused
-	review.RefusalReason = configReviewSafeText(reason, &payload, 400)
+	review.RefusalReason = reason
 	review.PatchRecommendations = nil
 	return review
 }
@@ -88,7 +94,7 @@ func deterministicConfigReviewFallback(summary string, payload ConfigReviewPaylo
 				"Confirm target backups before using drop_recreate or other destructive workflows.",
 			},
 			Run: []string{
-				"Start with a bounded worker and chunk-size profile appropriate for the database pool limits.",
+				"Start with a bounded worker/chunk-size profile appropriate for the database pool limits.",
 				"Monitor throughput, retries, and validation failures during the run.",
 			},
 			Validation: []string{

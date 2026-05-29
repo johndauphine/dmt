@@ -37,6 +37,8 @@ All notable changes to this project will be documented in this file.
   output support (#417).
 - Added `dmt run --dry-run --ai-schema-advisor` for advisory schema drift and
   schema evolution guidance that preserves deterministic policy gates (#399).
+- Added `dmt ai config-review` to produce redacted config patch guidance and
+  operator runbooks with unsafe AI recommendations suppressed (#401).
 - Added `dmt diagnose` and `dmt validate --ai-triage` advisory failure triage
   flows with redacted AI prompts, constrained suggested commands, and
   deterministic fallbacks (#400).

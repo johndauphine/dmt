@@ -71,6 +71,27 @@ func buildConfigSummary(cfg *config.Config) ConfigSummary {
 			SchemaEvolution:        schemaEvolutionSummary(cfg.Migration),
 			Deletes:                deleteSummary(cfg.Migration),
 			Validation:             validationSummary(cfg.Migration.Validation),
+			Checkpoint: CheckpointSummary{
+				FrequencyChunks:      cfg.Migration.CheckpointFrequency,
+				MaxRetries:           cfg.Migration.MaxRetries,
+				HistoryRetentionDays: cfg.Migration.HistoryRetentionDays,
+			},
+			Notifications: notificationSummary(cfg),
+		},
+		SecretsPlacement: SecretsPlacementSummary{
+			SecretsFile: "~/.secrets/dmt-config.yaml",
+			KeepOutOfConfig: []string{
+				"source.password",
+				"target.password",
+				"ai.api_key",
+				"slack.webhook_url",
+			},
+			ConfigMayContain: []string{
+				"migration.notify.on_success",
+				"migration.notify.on_failure",
+				"profile.name",
+				"profile.description",
+			},
 		},
 	}
 }
@@ -141,6 +162,18 @@ func validationSummary(v config.ValidationConfig) ValidationSummary {
 		FailOnMismatch: failOnMismatch,
 		Timeout:        v.Timeout,
 		MaxParallel:    v.MaxParallel,
+	}
+}
+
+func notificationSummary(cfg *config.Config) NotificationSummary {
+	if cfg == nil {
+		return NotificationSummary{}
+	}
+	return NotificationSummary{
+		SlackConfigured: cfg.Slack != nil && cfg.Slack.WebhookURL != "",
+		SlackEnabled:    cfg.Slack != nil && cfg.Slack.Enabled && cfg.Slack.WebhookURL != "",
+		OnSuccess:       cfg.Migration.NotifyOnSuccess(),
+		OnFailure:       cfg.Migration.NotifyOnFailure(),
 	}
 }
 
