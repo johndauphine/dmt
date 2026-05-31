@@ -162,11 +162,22 @@ func isSparseValidationMismatchPayload(payload TriagePayload) bool {
 	}
 	facts := payload.ValidationMismatch
 	return facts.HasRowCountFacts &&
-		len(facts.Differences) == 0 &&
+		hasOnlyRowCountValidationDifferences(facts.Differences) &&
 		len(facts.SchemaDrift) == 0 &&
 		facts.Error == "" &&
 		!facts.TimedOut &&
 		!facts.ExactTimedOut
+}
+
+func hasOnlyRowCountValidationDifferences(differences []ValidationDifferenceFact) bool {
+	for _, diff := range differences {
+		if strings.EqualFold(strings.TrimSpace(diff.Pass), "row_count") &&
+			normalizeValidationCategory(diff.Category) != ValidationCategoryValidationRuntime {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func findingHasExplicitDeterministicEvidence(payload TriagePayload, finding TriageFinding) bool {
@@ -205,8 +216,8 @@ func findingHasExplicitDeterministicEvidence(payload TriagePayload, finding Tria
 }
 
 func containsUnsupportedSparseValidationClaim(value string) bool {
-	lower := strings.ToLower(value)
-	return containsAny(lower, []string{
+	normalized := strings.NewReplacer("-", " ", "_", " ").Replace(strings.ToLower(value))
+	return containsAny(normalized, []string{
 		"checkpoint false success",
 		"false success",
 		"writer bottleneck",

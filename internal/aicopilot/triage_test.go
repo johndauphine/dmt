@@ -758,17 +758,24 @@ func TestGenerateTriageReviewCautionsSparseValidationMismatchClaims(t *testing.T
 		TargetCount:      99,
 		Difference:       1,
 		HasRowCountFacts: true,
+		Differences: []ValidationDifferenceFact{{
+			Category: ValidationCategoryWatermarkIssue,
+			Table:    "public.orders",
+			Pass:     "row_count",
+			Severity: "error",
+			Detail:   "source_count=100 target_count=99 difference=1",
+		}},
 	})
 	client := &fakeClient{response: `{
   "impact": "attention",
-  "summary": "A target row was manually deleted.",
+  "summary": "A target row has a manual-delete root cause.",
   "findings": [{
     "severity": "warn",
     "category": "validation",
     "affected": "public.orders",
     "deterministic_facts": ["source_count=100 target_count=99"],
-    "likely_cause": "A checkpoint false success caused a manually deleted target row and a durability gap.",
-    "hypotheses": [{"confidence":"high","rationale":"The writer bottleneck and schema evolution prove checkpoint false success."}],
+    "likely_cause": "A checkpoint false success caused a manual-delete target row and a durability gap.",
+    "hypotheses": [{"confidence":"high","rationale":"The writer bottleneck and schema evolution prove manual-delete checkpoint false success."}],
     "manual_inspection": "Compare read-only validation output.",
     "next_action": "Inspect deterministic facts before recovery."
   }]
@@ -780,7 +787,7 @@ func TestGenerateTriageReviewCautionsSparseValidationMismatchClaims(t *testing.T
 	}
 	finding := review.Findings[0]
 	combined := strings.ToLower(review.Summary + " " + finding.LikelyCause + " " + finding.Hypotheses[0].Rationale)
-	for _, unsupported := range []string{"checkpoint false success", "writer bottleneck", "durability", "schema evolution", "manually deleted"} {
+	for _, unsupported := range []string{"checkpoint false success", "writer bottleneck", "durability", "schema evolution", "manual-delete"} {
 		if strings.Contains(combined, unsupported) {
 			t.Fatalf("unsupported sparse validation claim survived %q: %+v summary=%q", unsupported, finding, review.Summary)
 		}
