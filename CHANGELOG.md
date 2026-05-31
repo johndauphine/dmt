@@ -60,6 +60,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Hardened AI advisory eval wording checks so cautious evidence-limit phrasing
+  is not mistaken for overconfident causality while unqualified root-cause
+  assertions and destructive target-action advice remain flagged (#434).
 - Hardened AI triage prompt and eval matching so deletion-drift category
   wording is not mistaken for unsafe target-schema action advice (#433).
 - Tightened AI advisory prompt contracts and eval evidence so Haiku preserves
