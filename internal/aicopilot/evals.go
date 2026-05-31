@@ -269,7 +269,13 @@ func firstDestructiveActionAdviceTerm(raw string) string {
 		if !isDestructiveVerbToken(token) {
 			continue
 		}
+		if i+1 < len(tokens) && tokenStartsNonActionCategory(tokens[i+1]) {
+			continue
+		}
 		for j := i + 1; j < len(tokens) && j <= i+4; j++ {
+			if tokenStartsNonActionCategory(tokens[j]) {
+				break
+			}
 			switch tokens[j] {
 			case "target", "targets", "row", "rows", "table", "tables", "schema", "schemas":
 				return token + " " + tokens[j]
@@ -277,6 +283,15 @@ func firstDestructiveActionAdviceTerm(raw string) string {
 		}
 	}
 	return ""
+}
+
+func tokenStartsNonActionCategory(token string) bool {
+	switch token {
+	case "drift", "mismatch", "category", "categories", "evidence", "fact", "facts", "signal", "signals", "label", "labels":
+		return true
+	default:
+		return false
+	}
 }
 
 func appendEvalEvidence(evidence []string, values ...string) []string {

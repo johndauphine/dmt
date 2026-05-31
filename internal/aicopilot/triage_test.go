@@ -167,10 +167,14 @@ func TestBuildTriagePromptStatesReadOnlyAndCausalityContracts(t *testing.T) {
 		"Never recommend destructive target actions",
 		"Avoid causal-certainty wording",
 		"next_action and manual_inspection must be read-only",
+		"use only categories present in deterministic facts",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "delete_drift") {
+		t.Fatalf("prompt should avoid delete_drift bait wording:\n%s", prompt)
 	}
 }
 

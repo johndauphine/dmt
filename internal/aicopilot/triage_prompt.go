@@ -23,7 +23,7 @@ func BuildTriagePrompt(payload TriagePayload) (string, error) {
 	b.WriteString("next_action and manual_inspection must be read-only inspection or validation steps, not recovery, rerun, resume, cleanup, or target-change steps.\n")
 	b.WriteString("Avoid causal-certainty wording: do not use root cause, proves, definitely, certainly, must be caused by, is caused by, or the cause is. Use possible, may, or could.\n")
 	b.WriteString("High confidence requires explicit deterministic evidence in the payload. Sparse validation count mismatches are insufficient evidence for checkpoint, writer, durability, schema evolution, trigger, or manual-delete root-cause claims.\n")
-	b.WriteString("For validation mismatches, use these categories when supported by evidence: delete_drift, type_coercion, timezone_date_handling, watermark_issue, target_trigger_default_behavior.\n")
+	b.WriteString("For validation mismatches, use only categories present in deterministic facts or difference categories; otherwise prefer neutral labels such as null_mismatch, row_count_mismatch, type_coercion, timezone_date_handling, watermark_issue, or target_trigger_default_behavior.\n")
 	b.WriteString("Return likely causes as hypotheses with confidence. Include affected tables, suggested read-only commands/config changes, and when to stop and inspect manually.\n")
 	b.WriteString("Return ONLY valid JSON with this shape:\n")
 	b.WriteString(`{"impact":"blocked|attention|informational|unknown","summary":"one sentence","findings":[{"severity":"error|warn|info","category":"short","affected":"table/phase/check","affected_tables":["table"],"deterministic_facts":["fact ids or short fact text"],"likely_cause":"short advisory cause","hypotheses":[{"confidence":"high|medium|low","rationale":"why this might explain the facts"}],"suggested_commands":["read-only or DMT command"],"suggested_config_changes":["config path=value"],"manual_inspection":"when to stop and inspect manually","next_action":"operator action"}],"notes":["optional short notes"]}` + "\n")
@@ -36,7 +36,7 @@ func BuildTriagePrompt(payload TriagePayload) (string, error) {
 	b.WriteString("- Do not use causal-certainty wording in any generated string.\n")
 	b.WriteString("- Each finding must include deterministic_facts from the payload and hypotheses must use low or medium confidence unless explicit deterministic evidence supports high.\n")
 	b.WriteString("- Forbidden output tokens in JSON values: drop, dropped, dropping, delete, deleted, deleting, truncate, recreate, remove, reload, wipe, root cause, caused by, proves, definitely, certainly. Use neutral wording such as row-count mismatch, target-changing action, or read-only evidence instead.\n")
-	b.WriteString("- Do not introduce delete_drift unless the payload includes an exact deterministic fact or difference category for validation.delete_drift.\n")
+	b.WriteString("- Do not introduce absence/deletion-drift categories unless the payload includes an exact deterministic fact or difference category for that issue.\n")
 	b.WriteString("- For null-parity or row-count mismatches, use neutral phrases such as null-count mismatch, row-count mismatch, and read-only validation evidence.\n")
 	return b.String(), nil
 }
