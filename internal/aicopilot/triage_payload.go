@@ -172,13 +172,23 @@ func scrubValidationMismatchFacts(facts ValidationMismatchFacts) ValidationMisma
 }
 
 func scrubTriageText(s string, max int) string {
+	return scrubTriageTextWithOptions(s, max, true)
+}
+
+func scrubTriageAdvisoryDisplayText(s string, max int) string {
+	return scrubTriageTextWithOptions(s, max, false)
+}
+
+func scrubTriageTextWithOptions(s string, max int, redactQuotedValues bool) string {
 	s = strings.TrimSpace(redactSQLLike(s))
 	s = emailPattern.ReplaceAllString(s, "[REDACTED]")
 	s = pkValuePattern.ReplaceAllString(s, "PK [REDACTED]")
 	s = detailKeyPattern.ReplaceAllString(s, "DETAIL: Key [REDACTED]")
 	s = detailFailingRowPattern.ReplaceAllString(s, "DETAIL: Failing row contains [REDACTED]")
 	s = duplicateKeyValuePattern.ReplaceAllString(s, "duplicate key value is [REDACTED]")
-	s = quotedValuePattern.ReplaceAllString(s, "\"[REDACTED]\"")
+	if redactQuotedValues {
+		s = quotedValuePattern.ReplaceAllString(s, "\"[REDACTED]\"")
+	}
 	return limitText(logging.Scrub(s), max)
 }
 
