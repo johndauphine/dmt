@@ -376,6 +376,34 @@ func main() {
 							},
 						},
 					},
+					{
+						Name:   "evals",
+						Usage:  "Run fixed live model-quality evals for AI advisory prompts (#427)",
+						Action: aiAdvisoryEvals,
+						Flags: []cli.Flag{
+							&cli.BoolFlag{
+								Name:  "live",
+								Usage: "Actually call the configured AI provider from secrets; required for provider/model evals",
+							},
+							&cli.BoolFlag{
+								Name:  "list",
+								Usage: "List advisory eval scenario IDs without calling a provider",
+							},
+							&cli.StringSliceFlag{
+								Name:  "scenario",
+								Usage: "Run only the named scenario ID; repeat for multiple scenarios",
+							},
+							&cli.DurationFlag{
+								Name:  "timeout",
+								Value: 2 * time.Minute,
+								Usage: "Maximum total time for the advisory eval run",
+							},
+							&cli.StringFlag{
+								Name:  "output-file",
+								Usage: "Write JSON eval report to file instead of stdout",
+							},
+						},
+					},
 				},
 			},
 			{

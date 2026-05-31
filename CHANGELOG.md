@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added repeatable AI advisory eval scenarios and an explicit `dmt ai evals`
+  live-provider command for comparing prompt/model quality without making
+  normal tests call external providers (#427).
 - Added DLT-style `migration.schema_contract` settings with `tables`,
   `columns`, and `data_type` entities, including DMT's `report` mode for
   report-only drift handling (#403).

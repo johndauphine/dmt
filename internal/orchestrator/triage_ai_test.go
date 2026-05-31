@@ -13,6 +13,7 @@ import (
 
 func TestReviewValidationWithAIUnavailableFallback(t *testing.T) {
 	orch := &Orchestrator{
+		opts: Options{AIReviewClientFactory: func() aicopilot.TextClient { return nil }},
 		config: &config.Config{
 			Migration: config.MigrationConfig{
 				TargetMode: "drop_recreate",
@@ -58,6 +59,7 @@ func TestReviewValidationWithAIUnavailableFallback(t *testing.T) {
 
 func TestReviewValidationWithAIDeepValidationOnlyDoesNotInventCountFacts(t *testing.T) {
 	orch := &Orchestrator{
+		opts:   Options{AIReviewClientFactory: func() aicopilot.TextClient { return nil }},
 		config: &config.Config{},
 	}
 	result := &ValidationRunResult{
@@ -96,7 +98,7 @@ func TestReviewValidationWithAIDeepValidationOnlyDoesNotInventCountFacts(t *test
 }
 
 func TestReviewValidationWithAIRowCountRuntimeFailureDoesNotInventCountFacts(t *testing.T) {
-	orch := &Orchestrator{config: &config.Config{}}
+	orch := &Orchestrator{opts: Options{AIReviewClientFactory: func() aicopilot.TextClient { return nil }}, config: &config.Config{}}
 	result := &ValidationRunResult{
 		Mode:   "count_only",
 		Failed: true,
@@ -214,7 +216,7 @@ func TestTriageRunRejectsExplicitSuccessfulRun(t *testing.T) {
 }
 
 func TestDeepValidationTriageOmitsSampleRowDigestValues(t *testing.T) {
-	orch := &Orchestrator{config: &config.Config{}}
+	orch := &Orchestrator{opts: Options{AIReviewClientFactory: func() aicopilot.TextClient { return nil }}, config: &config.Config{}}
 	result := &ValidationRunResult{
 		Mode:   "sample",
 		Failed: true,
