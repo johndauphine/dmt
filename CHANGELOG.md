@@ -60,6 +60,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Tightened AI advisory prompt contracts and eval evidence so Haiku preserves
+  deterministic gates, avoids unsafe command/action wording, and cites
+  deterministic support across config review, schema advisor, triage, and
+  performance guidance (#432).
 - Fixed AI advisory scrubbers so short connection identifiers no longer redact
   substrings inside normal words while real secrets remain protected (#423).
 - Calibrated AI triage output so sparse validation mismatches avoid
