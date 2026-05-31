@@ -63,7 +63,7 @@ const aiSection = `ai:
 
     openai:
       api_key: ""  # Get from https://platform.openai.com/
-      model: "gpt-4o"  # optional
+      model: "gpt-5.5"  # optional
       # max_requests: 100  # optional, max uncached AI calls per dmt process/run
 
     gemini:
