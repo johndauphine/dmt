@@ -18,11 +18,11 @@ func BuildTriagePrompt(payload TriagePayload) (string, error) {
 	b.WriteString("deterministic_facts are authoritative. Keep them separate from hypotheses and never contradict them.\n")
 	b.WriteString("Your output is advisory only. DMT policy gates and deterministic checks decide what can run or change.\n")
 	b.WriteString("Never recommend destructive target actions. Do not use words such as drop, delete, truncate, recreate, remove target, reload target, wipe, force resume, skip validation, or bypass validation.\n")
-	b.WriteString("Do not write negative destructive advice like do not drop or do not delete; say keep target unchanged and inspect read-only evidence instead.\n")
+	b.WriteString("Do not write negative destructive advice; say keep target unchanged and inspect read-only evidence instead.\n")
 	b.WriteString("suggested_commands may contain only read-only DMT commands: dmt validate, dmt status, dmt diagnose, or dmt analyze. Never suggest dmt run, dmt resume, --confirm-backup, shell operators, SQL, or mutation commands.\n")
 	b.WriteString("next_action and manual_inspection must be read-only inspection or validation steps, not recovery, rerun, resume, cleanup, or target-change steps.\n")
-	b.WriteString("Avoid causal-certainty wording: do not use root cause, proves, definitely, certainly, must be caused by, is caused by, or the cause is. Use possible, may, or could.\n")
-	b.WriteString("High confidence requires explicit deterministic evidence in the payload. Sparse validation count mismatches are insufficient evidence for checkpoint, writer, durability, schema evolution, trigger, or manual-delete root-cause claims.\n")
+	b.WriteString("Avoid causal-certainty wording: do not use the exact phrase root cause, even in negated sentences; do not use proves, definitely, certainly, must be caused by, is caused by, or the cause is. Use possible explanation, hypothesis, may, or could.\n")
+	b.WriteString("High confidence requires explicit deterministic evidence in the payload. Sparse validation count mismatches are insufficient evidence for checkpoint, writer, durability, schema evolution, trigger, or operator target-change claims.\n")
 	b.WriteString("For validation mismatches, use only categories present in deterministic facts or difference categories; otherwise prefer neutral labels such as null_mismatch, row_count_mismatch, type_coercion, timezone_date_handling, watermark_issue, or target_trigger_default_behavior.\n")
 	b.WriteString("Return likely causes as hypotheses with confidence. Include affected tables, suggested read-only commands/config changes, and when to stop and inspect manually.\n")
 	b.WriteString("Return ONLY valid JSON with this shape:\n")
@@ -36,7 +36,7 @@ func BuildTriagePrompt(payload TriagePayload) (string, error) {
 	b.WriteString("- Do not use causal-certainty wording in any generated string.\n")
 	b.WriteString("- Each finding must include deterministic_facts from the payload and hypotheses must use low or medium confidence unless explicit deterministic evidence supports high.\n")
 	b.WriteString("- Forbidden output tokens in JSON values: drop, dropped, dropping, delete, deleted, deleting, truncate, recreate, remove, reload, wipe, root cause, caused by, proves, definitely, certainly. Use neutral wording such as row-count mismatch, target-changing action, or read-only evidence instead.\n")
-	b.WriteString("- Do not introduce absence/deletion-drift categories unless the payload includes an exact deterministic fact or difference category for that issue.\n")
+	b.WriteString("- Do not introduce missing-row or target-change categories unless the payload includes an exact deterministic fact or difference category for that issue.\n")
 	b.WriteString("- For null-parity or row-count mismatches, use neutral phrases such as null-count mismatch, row-count mismatch, and read-only validation evidence.\n")
 	return b.String(), nil
 }

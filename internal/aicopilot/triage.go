@@ -95,7 +95,7 @@ func calibrateTriageReviewEvidence(payload TriagePayload, review *TriageReview) 
 	}
 	sparseValidation := isSparseValidationMismatchPayload(payload)
 	if sparseValidation && containsUnsupportedSparseValidationClaim(review.Summary) {
-		review.Summary = "Sparse validation mismatch facts are available; deterministic evidence does not identify a root cause."
+		review.Summary = "Sparse validation mismatch facts are available; deterministic evidence is insufficient to identify a specific explanation."
 	}
 	for i := range review.Findings {
 		finding := &review.Findings[i]
@@ -122,7 +122,7 @@ func calibrateTriageReviewEvidence(payload TriagePayload, review *TriageReview) 
 			if h.Confidence == "high" && !explicitEvidence {
 				h.Confidence = "medium"
 				if h.Rationale == "" || containsUnsupportedHighConfidenceClaim(h.Rationale) {
-					h.Rationale = "Deterministic facts support investigation, but they do not prove a root cause."
+					h.Rationale = "Deterministic facts support investigation, but they do not establish a definitive explanation."
 				}
 			}
 		}
@@ -278,16 +278,16 @@ func deterministicNextActionFallback(payload TriagePayload) string {
 
 func sparseValidationLikelyCauseFallback(payload TriagePayload) string {
 	if payload.ValidationMismatch != nil && payload.ValidationMismatch.Table != "" {
-		return "Row counts differ for " + payload.ValidationMismatch.Table + ", but deterministic facts do not identify the root cause."
+		return "Row counts differ for " + payload.ValidationMismatch.Table + ", but deterministic facts are insufficient to identify a specific explanation."
 	}
-	return "Row counts differ, but deterministic facts do not identify the root cause."
+	return "Row counts differ, but deterministic facts are insufficient to identify a specific explanation."
 }
 
 func sparseValidationHypothesisFallback(payload TriagePayload) string {
 	if payload.ValidationMismatch != nil && payload.ValidationMismatch.Table != "" {
-		return "Only sparse validation mismatch facts are available for " + payload.ValidationMismatch.Table + "; treat root-cause hypotheses as insufficient evidence."
+		return "Only sparse validation mismatch facts are available for " + payload.ValidationMismatch.Table + "; treat cause hypotheses as insufficient evidence."
 	}
-	return "Only sparse validation mismatch facts are available; treat root-cause hypotheses as insufficient evidence."
+	return "Only sparse validation mismatch facts are available; treat cause hypotheses as insufficient evidence."
 }
 
 func sparseValidationNextActionFallback(payload TriagePayload) string {

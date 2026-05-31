@@ -32,7 +32,7 @@ func BuildConfigReviewPrompt(payload ConfigReviewPayload) (string, error) {
 	b.WriteString("Do not include shell commands or DMT command lines in your JSON. The deterministic post-processor will insert exact commands from the original command context.\n")
 	b.WriteString("Do not use destructive words or strings such as drop_recreate, drop, delete, truncate, recreate, remove target, reload target, or wipe in generated prose; say configured target mode instead of repeating a destructive mode value.\n")
 	b.WriteString("Do not write negative destructive advice like do not drop; say avoid target DDL or data-changing actions instead.\n")
-	b.WriteString("Avoid causal-certainty wording in all output: do not use root cause, proves, definitely, certainly, must be caused by, is caused by, or the cause is.\n")
+	b.WriteString("Avoid causal-certainty wording in all output: do not use the exact phrase root cause, even in negated sentences; do not use proves, definitely, certainly, must be caused by, is caused by, or the cause is.\n")
 	b.WriteString("The runbook must include command intent labels, explicit prerequisites, expected validation, rollback notes, and concise risk callouts.\n")
 	b.WriteString("Return ONLY valid JSON with this shape:\n")
 	b.WriteString(`{"summary":"one sentence","patch_recommendations":[{"operation":"set|add|remove","path":"migration.validation.mode","value":"sample","rationale":"why","risk":"short risk","when_to_apply":"condition","requires_confirmation":true}],"runbook":{"title":"short","summary":"short","before_run":["steps without command text"],"run":["steps without command text"],"validation":["steps without command text"],"rollback":["steps without command text"]},"notes":["optional"],"refusal_reason":"optional"}` + "\n")
