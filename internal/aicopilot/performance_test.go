@@ -472,6 +472,36 @@ func TestParsePerformanceExplanationDropsCrossKnobNextAction(t *testing.T) {
 	}
 }
 
+func TestParsePerformanceExplanationDropsInvalidConfigAdvice(t *testing.T) {
+	payload := PerformancePayload{
+		DeterministicReasoning: "baseline selected workers=4",
+		DeterministicKnobs:     PerformanceKnobs{Workers: 4},
+		AllowedKnobs:           []string{"workers"},
+	}
+	explanation, err := ParsePerformanceExplanation(`{
+ "summary": "Set migration.validation.mode=row_hash before retrying.",
+  "findings": [
+    {"knob":"workers","rationale":"workers is deterministic at 4.","evidence":["workers=4"],"next_action":"Set schema_evolution.added_column=add."}
+  ],
+  "notes": ["Use migration.validation.mode=sample if you want sample validation."]
+}`, payload)
+	if err != nil {
+		t.Fatalf("ParsePerformanceExplanation() error = %v", err)
+	}
+	if strings.Contains(explanation.Summary, "row_hash") || strings.Contains(explanation.Summary, "migration.validation.mode") {
+		t.Fatalf("invalid config summary survived: %q", explanation.Summary)
+	}
+	if len(explanation.Findings) != 1 {
+		t.Fatalf("safe finding should remain: %+v", explanation.Findings)
+	}
+	if explanation.Findings[0].NextAction != "" {
+		t.Fatalf("invalid config next_action should be dropped: %+v", explanation.Findings[0])
+	}
+	if len(explanation.Notes) != 1 || !strings.Contains(explanation.Notes[0], "migration.validation.mode=sample") {
+		t.Fatalf("valid config note should remain: %+v", explanation.Notes)
+	}
+}
+
 func TestParsePerformanceExplanationAllowsDBTuningTargets(t *testing.T) {
 	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{
 		SourceTuning: &dbtuning.DatabaseTuning{

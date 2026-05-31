@@ -269,6 +269,37 @@ func TestParseTriageReviewPreservesQuotedIdentifiersInAdvisoryText(t *testing.T)
 	}
 }
 
+func TestParseTriageReviewSuppressesInvalidSuggestedConfigChanges(t *testing.T) {
+	review, err := ParseTriageReview(`{
+  "impact": "attention",
+  "summary": "Invalid config suggestions were returned.",
+  "findings": [{
+    "severity": "warn",
+    "category": "validation",
+    "affected": "public.orders",
+    "suggested_config_changes": [
+      "migration.validation.mode=row_hash",
+      "schema_evolution.added_column=add",
+      "migration.validation.mode=sample"
+    ]
+  }]
+}`)
+	if err != nil {
+		t.Fatalf("ParseTriageReview() error = %v", err)
+	}
+	changes := strings.Join(review.Findings[0].SuggestedConfigChanges, "\n")
+	if strings.Contains(changes, "\nmigration.validation.mode=row_hash") ||
+		strings.Contains(changes, "\nschema_evolution.added_column=add") {
+		t.Fatalf("invalid config suggestions survived as actionable entries: %+v", review.Findings[0].SuggestedConfigChanges)
+	}
+	if got := strings.Count(changes, "Invalid config suggestion suppressed"); got != 2 {
+		t.Fatalf("invalid config suggestions should be explicitly suppressed twice, got %d in %+v", got, review.Findings[0].SuggestedConfigChanges)
+	}
+	if !strings.Contains(changes, "migration.validation.mode=sample") {
+		t.Fatalf("valid config suggestion should remain: %+v", review.Findings[0].SuggestedConfigChanges)
+	}
+}
+
 func TestParseTriageReviewSuppressesDestructiveSuggestedCommand(t *testing.T) {
 	review, err := ParseTriageReview(`{
   "impact": "attention",

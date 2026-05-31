@@ -113,6 +113,9 @@ func sanitizePerformanceGeneralText(s string, max int, allowedNumbers map[string
 	if mentionsPerformanceKnobWithUnsupportedNumber(s, payload, false) {
 		return ""
 	}
+	if invalidConfigAssignmentInText(s, aiConfigChangeContext{}) != "" {
+		return ""
+	}
 	params := dbTuningParametersMentioned(s, payload)
 	if len(params) == 0 && mentionsDBTuningExactValue(s, payload) {
 		return ""
@@ -141,6 +144,9 @@ func sanitizePerformanceFindingText(s string, max int, allowedNumbers map[string
 		return ""
 	}
 	if mentionsPerformanceKnobWithUnsupportedNumber(s, payload, includeRuntimeMetrics) {
+		return ""
+	}
+	if invalidConfigAssignmentInText(s, aiConfigChangeContext{}) != "" {
 		return ""
 	}
 	return s

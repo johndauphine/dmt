@@ -51,9 +51,13 @@ func normalizeConfigReview(review *ConfigReview, payload *ConfigReviewPayload) {
 		p.WhenToApply = configReviewSafeGuidanceText(p.WhenToApply, payload, 300)
 		p.ValidationErrors = sanitizeConfigReviewGuidanceStrings(p.ValidationErrors, payload, 5, 160)
 		pathAllowed := configReviewPathAllowed(p.Path, payload)
+		schemaErrors := validateAIConfigChange(p.Path, p.Value, configReviewChangeContext(payload))
 		sensitivePath := isSensitiveConfigReviewPath(p.Path) || rawValueSensitive || valueContainsSensitiveConfigReviewKey(p.Value)
 		if !patchOperationAllowed(originalOperation) {
 			p.ValidationErrors = appendConfigPatchValidationError(p.ValidationErrors, "operation normalized to set because only set, add, and remove are allowed")
+		}
+		for _, schemaError := range schemaErrors {
+			p.ValidationErrors = appendConfigPatchValidationError(p.ValidationErrors, schemaError)
 		}
 		if sensitivePath {
 			p.ValidationErrors = appendConfigPatchValidationError(p.ValidationErrors, "path targets sensitive connection or secret material")
@@ -96,6 +100,9 @@ func normalizeConfigReview(review *ConfigReview, payload *ConfigReviewPayload) {
 				p.Risk = limitText(p.Risk+" Requires verified target backup before applying.", 300)
 			}
 		}
+		if len(schemaErrors) > 0 {
+			p.RequiresConfirmation = true
+		}
 		p.ValidationErrors = prioritizeConfigPatchValidationErrors(p.ValidationErrors)
 		if len(p.ValidationErrors) > 5 {
 			p.ValidationErrors = p.ValidationErrors[:5]
@@ -112,6 +119,14 @@ func normalizeConfigReview(review *ConfigReview, payload *ConfigReviewPayload) {
 		ensureConfigReviewRunbook(review, payload)
 		review.Notes = removeUnsafeConfigReviewRunbookSteps(removeConfigReviewCommandSteps(review.Notes))
 	}
+}
+
+func configReviewChangeContext(payload *ConfigReviewPayload) aiConfigChangeContext {
+	var ctx aiConfigChangeContext
+	if payload != nil {
+		ctx.TargetMode = payload.Safety.TargetMode
+	}
+	return ctx
 }
 
 func normalizePatchOperation(v string) string {
@@ -482,10 +497,12 @@ func appendConfigPatchValidationError(values []string, msg string) []string {
 func prioritizeConfigPatchValidationErrors(values []string) []string {
 	critical := map[string]bool{
 		"operation normalized to set because only set, add, and remove are allowed": true,
-		"path contains unsafe guidance or command text":                             true,
-		"path targets sensitive connection or secret material":                      true,
-		"path is outside the safe config review allowlist":                          true,
-		"value contains unsafe guidance or command text":                            true,
+		configChangeUnknownPathError:                           true,
+		configChangeInvalidValueError:                          true,
+		"path contains unsafe guidance or command text":        true,
+		"path targets sensitive connection or secret material": true,
+		"path is outside the safe config review allowlist":     true,
+		"value contains unsafe guidance or command text":       true,
 	}
 	out := make([]string, 0, len(values))
 	seen := map[string]bool{}
@@ -497,12 +514,12 @@ func prioritizeConfigPatchValidationErrors(values []string) []string {
 		out = append(out, v)
 	}
 	for _, v := range values {
-		if critical[v] {
+		if critical[v] || strings.HasPrefix(v, configChangeUnknownPathError) || strings.HasPrefix(v, configChangeInvalidValueError) {
 			appendIf(v)
 		}
 	}
 	for _, v := range values {
-		if !critical[v] {
+		if !critical[v] && !strings.HasPrefix(v, configChangeUnknownPathError) && !strings.HasPrefix(v, configChangeInvalidValueError) {
 			appendIf(v)
 		}
 	}
