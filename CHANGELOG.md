@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-05-31
+
 ### Added
 
 - Added repeatable AI advisory eval scenarios and an explicit `dmt ai evals`
