@@ -62,6 +62,9 @@ All notable changes to this project will be documented in this file.
 - Calibrated AI triage output so sparse validation mismatches avoid
   unsupported high-confidence root-cause claims and repeated unsafe-command
   suppression text is deduplicated (#425, #426).
+- Validated AI advisory config suggestions against the real DMT config surface
+  so unsupported paths and enum values are suppressed or marked invalid across
+  config review, schema advisor, triage, and performance guidance (#424).
 - Fixed AI preflight review follow-ups so absent providers return the intended
   unavailable result, connection error details are omitted from AI-bound
   payloads, and the advisory review gets its own command-scoped timeout (#417).

@@ -25,6 +25,10 @@ func ParseSchemaAdvisorReview(raw string) (*SchemaAdvisorReview, error) {
 		r.Column = limitText(logging.Scrub(strings.TrimSpace(r.Column)), 160)
 		r.Reason = limitText(logging.Scrub(strings.TrimSpace(r.Reason)), 700)
 		r.SuggestedPolicy = limitText(logging.Scrub(strings.TrimSpace(r.SuggestedPolicy)), 160)
+		if reason := invalidConfigAssignmentInText(r.SuggestedPolicy, aiConfigChangeContext{}); reason != "" {
+			r.SuggestedPolicy = "manual_review_required"
+			r.SuggestedAction = appendGateReason(r.SuggestedAction, reason)
+		}
 		r.SuggestedAction = safeSchemaAdvisorAction(r.SuggestedAction)
 		r.Source = "ai_advisory"
 		if len(r.ManualGuidance) > 5 {

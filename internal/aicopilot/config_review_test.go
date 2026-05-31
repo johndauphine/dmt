@@ -397,6 +397,95 @@ func TestGenerateConfigReviewValidatesPatchRecommendations(t *testing.T) {
 	}
 }
 
+func TestAIConfigChangeValidationRejectsUnknownPathsAndInvalidValues(t *testing.T) {
+	invalid := map[string]any{
+		"migration.checkpoint.frequency_chunks":   5,
+		"migration.deletes.mode":                  "log",
+		"migration.validation.mode":               "row_hash",
+		"migration.validation":                    map[string]any{"mode": "row_sample"},
+		"migration.schema_contract.columns":       "add",
+		"migration.schema_evolution.added_column": "add",
+	}
+	for path, value := range invalid {
+		errs := validateAIConfigChange(path, value, aiConfigChangeContext{TargetMode: "upsert"})
+		if len(errs) == 0 {
+			t.Fatalf("validateAIConfigChange(%q, %#v) returned no errors", path, value)
+		}
+	}
+
+	valid := map[string]any{
+		"migration.checkpoint_frequency":          5,
+		"migration.deletes.mode":                  "reconcile",
+		"migration.validation.mode":               "sample",
+		"migration.schema_contract.columns":       "discard_value",
+		"migration.schema_evolution.added_column": "discard",
+		"migration.schema_evolution.type_change":  "log",
+		"migration.schema_contract.data_type":     "freeze",
+		"migration.deletes.reconcile.batch_size":  100,
+		"migration.deletes.reconcile.interval":    "24h",
+	}
+	for path, value := range valid {
+		errs := validateAIConfigChange(path, value, aiConfigChangeContext{TargetMode: "upsert"})
+		if len(errs) != 0 {
+			t.Fatalf("validateAIConfigChange(%q, %#v) errors = %+v", path, value, errs)
+		}
+	}
+
+	known := strings.Join(knownAIConfigChangePathsForTest(), "\n")
+	for _, want := range []string{"migration.checkpoint_frequency", "migration.validation.mode", "migration.schema_contract.columns"} {
+		if !strings.Contains(known, want) {
+			t.Fatalf("known config paths missing %q from:\n%s", want, known)
+		}
+	}
+	if strings.Contains(known, "migration.checkpoint.frequency_chunks") {
+		t.Fatalf("known config paths should not contain synthetic summary path:\n%s", known)
+	}
+
+	for _, text := range []string{
+		"Set migration.validation.mode=row_hash before retrying.",
+		"schema_evolution.added_column=add",
+		"columns=add",
+		"migration.validation.mode: row_sample",
+	} {
+		if reason := invalidConfigAssignmentInText(text, aiConfigChangeContext{TargetMode: "upsert"}); reason == "" {
+			t.Fatalf("invalidConfigAssignmentInText(%q) returned empty reason", text)
+		}
+	}
+}
+
+func TestGenerateConfigReviewFlagsSchemaInvalidRecommendations(t *testing.T) {
+	cfg := configReviewTestConfig()
+	cfg.Migration.TargetMode = "upsert"
+	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})
+	client := &fakeClient{response: `{
+  "summary": "Invalid config patch suggestions.",
+  "patch_recommendations": [
+    {"operation": "set", "path": "migration.checkpoint.frequency_chunks", "value": 5},
+    {"operation": "set", "path": "migration.deletes.mode", "value": "log"},
+    {"operation": "set", "path": "migration.validation.mode", "value": "row_hash"},
+    {"operation": "set", "path": "migration.schema_contract.columns", "value": "add"},
+    {"operation": "set", "path": "migration.schema_evolution.added_column", "value": "add"}
+  ]
+}`}
+
+	review, err := GenerateConfigReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateConfigReview() error = %v", err)
+	}
+	if len(review.PatchRecommendations) != 5 {
+		t.Fatalf("patch recommendations len = %d, want 5", len(review.PatchRecommendations))
+	}
+	for _, patch := range review.PatchRecommendations {
+		errs := strings.Join(patch.ValidationErrors, "\n")
+		if !strings.Contains(errs, configChangeUnknownPathError) && !strings.Contains(errs, configChangeInvalidValueError) {
+			t.Fatalf("patch should carry schema/value validation errors: %+v", patch)
+		}
+		if !patch.RequiresConfirmation {
+			t.Fatalf("invalid patch should require confirmation: %+v", patch)
+		}
+	}
+}
+
 func TestGenerateConfigReviewPreservesRemoveAndRequiresConfirmation(t *testing.T) {
 	cfg := configReviewTestConfig()
 	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})

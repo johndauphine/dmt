@@ -57,7 +57,7 @@ func ParseTriageReview(raw string) (*TriageReview, error) {
 			f.SuggestedCommands = f.SuggestedCommands[:5]
 		}
 		for j := range f.SuggestedConfigChanges {
-			f.SuggestedConfigChanges[j] = sanitizeTriageNextAction(f.SuggestedConfigChanges[j])
+			f.SuggestedConfigChanges[j] = sanitizeTriageSuggestedConfigChange(f.SuggestedConfigChanges[j])
 		}
 		f.SuggestedConfigChanges = compactTriageTextList(f.SuggestedConfigChanges, 5)
 		if len(f.SuggestedConfigChanges) > 5 {
@@ -199,6 +199,15 @@ func compactTriageTextList(values []string, max int) []string {
 		}
 	}
 	return out
+}
+
+func sanitizeTriageSuggestedConfigChange(change string) string {
+	raw := change
+	change = sanitizeTriageNextAction(change)
+	if reason := invalidConfigAssignmentInText(raw, aiConfigChangeContext{}); reason != "" {
+		return "Invalid config suggestion suppressed. " + reason
+	}
+	return change
 }
 
 func containsDestructiveRecommendation(s string) bool {
