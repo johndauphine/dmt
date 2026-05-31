@@ -35,6 +35,7 @@ func testMapperWithTempCache(t *testing.T, providerName string, provider *secret
 	mapper := &AITypeMapper{
 		providerName:   providerName,
 		provider:       provider,
+		client:         &http.Client{Timeout: 30 * time.Second},
 		cache:          NewTypeMappingCache(),
 		cacheFile:      cacheFile,
 		timeoutSeconds: 30,
@@ -91,7 +92,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		expectedModel string
 	}{
 		{"anthropic", "claude-haiku-4-5-20251001"},
-		{"openai", "gpt-4o"},
+		{"openai", "gpt-5.5"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},
 		{"lmstudio", "local-model"},
@@ -353,6 +354,92 @@ func TestAnthropicRequestIncludesDeterministicDefaults(t *testing.T) {
 	temperature, ok := got["temperature"].(float64)
 	if !ok {
 		t.Fatalf("expected temperature in request JSON, got %s", raw)
+	}
+	if temperature != 0 {
+		t.Fatalf("temperature = %v, want 0", temperature)
+	}
+}
+
+func TestOpenAIRequestOmitsTemperatureForGPT5Models(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-api-key" {
+			t.Errorf("Authorization header = %q, want bearer test key", r.Header.Get("Authorization"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"bytea"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := testProvider("test-api-key")
+	provider.Model = "gpt-5.5"
+	mapper := testMapperWithTempCache(t, "openai", provider)
+
+	if _, err := mapper.queryOpenAIAPIWithTokens(context.Background(), "map varbinary to postgres", server.URL, 100); err != nil {
+		t.Fatalf("queryOpenAIAPIWithTokens: %v", err)
+	}
+	if got["model"] != "gpt-5.5" {
+		t.Fatalf("model = %v, want gpt-5.5", got["model"])
+	}
+	if _, ok := got["temperature"]; ok {
+		t.Fatalf("temperature should be omitted for GPT-5-family OpenAI models, got request %#v", got)
+	}
+}
+
+func TestOpenAIRequestIncludesTemperatureForLegacyModels(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"bytea"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := testProvider("test-api-key")
+	provider.Model = "gpt-4o"
+	mapper := testMapperWithTempCache(t, "openai", provider)
+
+	if _, err := mapper.queryOpenAIAPIWithTokens(context.Background(), "map varbinary to postgres", server.URL, 100); err != nil {
+		t.Fatalf("queryOpenAIAPIWithTokens: %v", err)
+	}
+	temperature, ok := got["temperature"].(float64)
+	if !ok {
+		t.Fatalf("expected temperature in request JSON, got %#v", got)
+	}
+	if temperature != 0 {
+		t.Fatalf("temperature = %v, want 0", temperature)
+	}
+}
+
+func TestOpenAICompatRequestKeepsDeterministicTemperature(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("Authorization header = %q, want empty for local provider", auth)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"bytea"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := testProvider("")
+	provider.Model = "gpt-5.5"
+	mapper := testMapperWithTempCache(t, "ollama", provider)
+
+	if _, err := mapper.queryOpenAICompatAPIWithTokens(context.Background(), "map varbinary to postgres", server.URL, 100); err != nil {
+		t.Fatalf("queryOpenAICompatAPIWithTokens: %v", err)
+	}
+	temperature, ok := got["temperature"].(float64)
+	if !ok {
+		t.Fatalf("expected temperature in OpenAI-compatible request JSON, got %#v", got)
 	}
 	if temperature != 0 {
 		t.Fatalf("temperature = %v, want 0", temperature)

@@ -60,6 +60,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Updated OpenAI defaults to `gpt-5.5` and omitted unsupported temperature
+  overrides for GPT-5-family OpenAI requests so live AI advisory evals can use
+  the latest OpenAI model (#435).
 - Hardened AI advisory eval wording checks so cautious evidence-limit phrasing
   is not mistaken for overconfident causality while unqualified root-cause
   assertions and destructive target-action advice remain flagged (#434).

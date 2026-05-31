@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // OpenAI API types
@@ -14,7 +15,7 @@ type openAIRequest struct {
 	Messages            []openAIMessage        `json:"messages"`
 	MaxCompletionTokens int                    `json:"max_completion_tokens,omitempty"`
 	MaxTokens           int                    `json:"max_tokens,omitempty"`
-	Temperature         float64                `json:"temperature"`
+	Temperature         *float64               `json:"temperature,omitempty"`
 	Options             map[string]interface{} `json:"options,omitempty"` // Provider-specific options (e.g., Ollama's num_ctx for context window size)
 }
 
@@ -38,6 +39,23 @@ type openAIResponse struct {
 	// turning a meaningful provider error message into "cannot unmarshal string
 	// into Go struct field openAIResponse.error".
 	Error json.RawMessage `json:"error,omitempty"`
+}
+
+func openAITemperatureForModel(model string) *float64 {
+	if openAIModelRequiresDefaultTemperature(model) {
+		return nil
+	}
+	return deterministicTemperature()
+}
+
+func openAIModelRequiresDefaultTemperature(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(normalized, "gpt-5")
+}
+
+func deterministicTemperature() *float64 {
+	temperature := 0.0
+	return &temperature
 }
 
 // ErrorMessage extracts a human-readable error message from openAIResponse.Error,
@@ -94,7 +112,7 @@ func (m *AITypeMapper) queryOpenAIAPIWithTokens(ctx context.Context, prompt stri
 			{Role: "user", Content: prompt},
 		},
 		MaxCompletionTokens: maxTokens,
-		Temperature:         0,
+		Temperature:         openAITemperatureForModel(model),
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -174,7 +192,7 @@ func (m *AITypeMapper) queryOpenAICompatAPIWithTokens(ctx context.Context, promp
 			{Role: "user", Content: prompt},
 		},
 		MaxCompletionTokens: maxTokens,
-		Temperature:         0,
+		Temperature:         deterministicTemperature(),
 	}
 
 	// For local providers (Ollama/LMStudio), use max_tokens (older OpenAI-compatible API)
