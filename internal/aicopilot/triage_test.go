@@ -152,6 +152,28 @@ func TestGenerateTriageReviewSeparatesFactsFromHypotheses(t *testing.T) {
 	}
 }
 
+func TestBuildTriagePromptStatesReadOnlyAndCausalityContracts(t *testing.T) {
+	payload := BuildValidationMismatchTriagePayload(nil, ValidationMismatchFacts{
+		Mode:             "sample",
+		Table:            "public.orders",
+		HasRowCountFacts: true,
+	})
+	prompt, err := BuildTriagePrompt(payload)
+	if err != nil {
+		t.Fatalf("BuildTriagePrompt() error = %v", err)
+	}
+	for _, want := range []string{
+		"Never suggest dmt run",
+		"Never recommend destructive target actions",
+		"Avoid causal-certainty wording",
+		"next_action and manual_inspection must be read-only",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildValidationMismatchTriagePayloadRedactsAndGroupsDifferences(t *testing.T) {
 	payload := BuildValidationMismatchTriagePayload(nil, ValidationMismatchFacts{
 		Mode:        "sample",

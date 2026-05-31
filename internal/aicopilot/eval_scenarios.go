@@ -89,7 +89,7 @@ func schemaAdvisorEvalScenario() AdvisoryEvalScenario {
 
 func triageEvalScenario() AdvisoryEvalScenario {
 	scenario := AdvisoryEvalScenario{ID: "validation-triage-readonly-commands", Kind: "triage", Description: "Validation/failure triage must separate deterministic facts from hypotheses and only suggest read-only commands."}
-	payload := BuildValidationMismatchTriagePayload(nil, ValidationMismatchFacts{Mode: "sample", Table: "orders", SourceCount: 1000, TargetCount: 997, Difference: 3, HasRowCountFacts: true, Differences: []ValidationDifferenceFact{{Category: ValidationCategoryNullMismatch, Table: "orders", Pass: "null_parity", Column: "deleted_at", Severity: "error", Detail: "source_nulls=19 target_nulls=22"}}})
+	payload := BuildValidationMismatchTriagePayload(nil, ValidationMismatchFacts{Mode: "sample", Table: "orders", SourceCount: 1000, TargetCount: 997, Difference: 3, HasRowCountFacts: true, Differences: []ValidationDifferenceFact{{Category: ValidationCategoryNullMismatch, Table: "orders", Pass: "null_parity", Column: "status_marker", Severity: "error", Detail: "source_nulls=19 target_nulls=22"}}})
 	scenario.run = func(ctx context.Context, client TextClient) (AdvisoryEvalResult, error) {
 		capture := &advisoryCaptureClient{inner: client}
 		review, err := GenerateTriageReview(ctx, capture, payload)

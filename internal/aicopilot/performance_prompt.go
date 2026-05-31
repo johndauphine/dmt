@@ -23,5 +23,10 @@ func BuildPerformancePrompt(payload PerformancePayload) (string, error) {
 	b.WriteString("Keep findings to the top 5 knobs, runtime adjustments, or database tuning items. Use only allowed_finding_targets values for finding.knob.\n")
 	b.WriteString("\nPayload:\n")
 	b.Write(data)
+	b.WriteString("\n\nFinal response checklist:\n")
+	b.WriteString("- Include at least one finding when allowed_finding_targets is non-empty.\n")
+	b.WriteString("- Every finding must include a non-empty evidence array citing deterministic_knobs, deterministic_reasoning, observed_metrics, recent_runs, runtime_adjustments, or database_tuning from the payload.\n")
+	b.WriteString("- Use only allowed_finding_targets values for finding.knob.\n")
+	b.WriteString("- Do not invent numbers or knob values; if citing a number, copy it exactly from the payload.\n")
 	return b.String(), nil
 }

@@ -103,6 +103,9 @@ func normalizeConfigReview(review *ConfigReview, payload *ConfigReviewPayload) {
 		if len(schemaErrors) > 0 {
 			p.RequiresConfirmation = true
 		}
+		if payload != nil && payload.Safety.RequiresReviewOnly {
+			p.RequiresConfirmation = true
+		}
 		p.ValidationErrors = prioritizeConfigPatchValidationErrors(p.ValidationErrors)
 		if len(p.ValidationErrors) > 5 {
 			p.ValidationErrors = p.ValidationErrors[:5]
