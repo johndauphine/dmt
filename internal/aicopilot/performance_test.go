@@ -247,6 +247,26 @@ func TestGeneratePerformanceExplanationParsesStructuredResponse(t *testing.T) {
 	}
 }
 
+func TestBuildPerformancePromptRequiresEvidenceFindings(t *testing.T) {
+	prompt, err := BuildPerformancePrompt(PerformancePayload{
+		DeterministicReasoning: "Memory estimate supports medium concurrency.",
+		DeterministicKnobs:     PerformanceKnobs{Workers: 8},
+		AllowedFindingTargets:  []string{"workers"},
+	})
+	if err != nil {
+		t.Fatalf("BuildPerformancePrompt() error = %v", err)
+	}
+	for _, want := range []string{
+		"Include at least one finding",
+		"Every finding must include a non-empty evidence array",
+		"Use only allowed_finding_targets values",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestParsePerformanceExplanationDropsInventedKnobsAndNumbers(t *testing.T) {
 	payload := PerformancePayload{
 		PromptVersion:          PerformancePromptVersion,

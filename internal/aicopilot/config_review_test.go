@@ -36,6 +36,45 @@ func TestBuildConfigReviewPayloadRedactsConnectionValues(t *testing.T) {
 	}
 }
 
+func TestBuildConfigReviewPromptStatesEvalSafetyContracts(t *testing.T) {
+	prompt, err := BuildConfigReviewPrompt(ConfigReviewPayload{
+		Safety: ConfigReviewSafetyContext{
+			AllowedPatchPaths:  []string{"migration.validation.mode"},
+			RequiresReviewOnly: true,
+			TargetMode:         "drop_recreate",
+		},
+		Commands: ConfigReviewCommands{
+			Run: "dmt run --config config.yaml --confirm-backup",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildConfigReviewPrompt() error = %v", err)
+	}
+	for _, want := range []string{
+		"requires_confirmation=true",
+		"only use count_only, null_parity, or sample",
+		"Do not include shell commands or DMT command lines",
+		"say configured target mode instead of repeating a destructive mode value",
+		"prefer only these neutral patches",
+		"Adds deterministic validation evidence before operator review.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, `"requires_confirmation":false`) {
+		t.Fatalf("prompt should not model unsafe confirmation default:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "dmt run --config config.yaml --confirm-backup") || strings.Contains(prompt, `"commands"`) {
+		t.Fatalf("prompt should not expose exact command lines to the model:\n%s", prompt)
+	}
+	for _, unsafePayloadText := range []string{`"target_mode": "drop_recreate"`, `"deletes"`} {
+		if strings.Contains(prompt, unsafePayloadText) {
+			t.Fatalf("prompt should mask high-risk payload text %q:\n%s", unsafePayloadText, prompt)
+		}
+	}
+}
+
 func TestBuildConfigReviewPayloadRedactsBeforeTruncatingOperatorRequest(t *testing.T) {
 	cfg := configReviewTestConfig()
 	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{
@@ -394,6 +433,28 @@ func TestGenerateConfigReviewValidatesPatchRecommendations(t *testing.T) {
 	}
 	if strings.Contains(runbookText, "dmt --config config.yaml") {
 		t.Fatalf("runbook should not retain default commands when exact command context is available, got: %s", runbookText)
+	}
+}
+
+func TestGenerateConfigReviewForcesConfirmationForReviewOnlyPayload(t *testing.T) {
+	payload := BuildConfigReviewPayload(configReviewTestConfig(), ConfigReviewOptions{})
+	payload.Safety.RequiresReviewOnly = true
+	client := &fakeClient{response: `{
+  "summary": "Review-only patch.",
+  "patch_recommendations": [
+    {"operation": "set", "path": "migration.validation.mode", "value": "sample", "requires_confirmation": false}
+  ]
+}`}
+
+	review, err := GenerateConfigReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateConfigReview() error = %v", err)
+	}
+	if len(review.PatchRecommendations) != 1 {
+		t.Fatalf("patch recommendations len = %d, want 1", len(review.PatchRecommendations))
+	}
+	if !review.PatchRecommendations[0].RequiresConfirmation {
+		t.Fatalf("review-only patch should require confirmation: %+v", review.PatchRecommendations[0])
 	}
 }
 

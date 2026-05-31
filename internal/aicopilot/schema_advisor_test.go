@@ -185,6 +185,37 @@ func TestGenerateSchemaAdvisorReviewPreservesDeterministicGate(t *testing.T) {
 	}
 }
 
+func TestBuildSchemaAdvisorPromptRequiresModelSuppliedGates(t *testing.T) {
+	prompt, err := BuildSchemaAdvisorPrompt(SchemaAdvisorPayload{
+		Changes: []SchemaDriftAdvisoryChange{{
+			DriftKind: "column_type_changed",
+			Table:     "orders",
+			Column:    "amount",
+			DeterministicGate: SchemaAdvisorPolicyGate{
+				Allowed: false,
+				Action:  "block",
+				Policy:  "schema_contract.data_type=freeze",
+				Reason:  "data type drift is frozen by deterministic policy",
+			},
+		}},
+		DeterministicBlockers: []string{"data type drift is frozen by deterministic policy"},
+	})
+	if err != nil {
+		t.Fatalf("BuildSchemaAdvisorPrompt() error = %v", err)
+	}
+	for _, want := range []string{
+		"Copy payload.deterministic_blockers",
+		"copy that change's deterministic_gate object",
+		`"deterministic_blockers"`,
+		`"deterministic_gate"`,
+		"Avoid causal-certainty wording",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestGenerateSchemaAdvisorReviewSanitizesDestructiveAction(t *testing.T) {
 	client := &fakeClient{response: `{
   "summary": "Clean up target.",
