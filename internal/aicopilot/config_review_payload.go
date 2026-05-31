@@ -130,51 +130,52 @@ func isShellSafeReviewRune(r rune) bool {
 	}
 }
 
-func collectConfigReviewSensitiveValues(cfg *config.Config) []string {
+func collectConfigReviewSensitiveValues(cfg *config.Config) []configReviewSensitiveValue {
 	if cfg == nil {
 		return nil
 	}
-	var values []string
-	add := func(v any) {
+	var values []configReviewSensitiveValue
+	add := func(v any, strict bool) {
 		s := strings.TrimSpace(fmt.Sprint(v))
 		if s != "" && s != "0" && s != "<nil>" {
-			values = append(values, s)
+			values = append(values, configReviewSensitiveValue{Value: s, Strict: strict})
 		}
 	}
-	add(cfg.Source.Host)
-	add(cfg.Source.Port)
-	add(cfg.Source.Database)
-	add(cfg.Source.User)
-	add(cfg.Source.Password)
-	add(cfg.Source.Krb5Conf)
-	add(cfg.Source.Keytab)
-	add(cfg.Source.Realm)
-	add(cfg.Source.SPN)
-	add(cfg.Target.Host)
-	add(cfg.Target.Port)
-	add(cfg.Target.Database)
-	add(cfg.Target.User)
-	add(cfg.Target.Password)
-	add(cfg.Target.Krb5Conf)
-	add(cfg.Target.Keytab)
-	add(cfg.Target.Realm)
-	add(cfg.Target.SPN)
+	add(cfg.Source.Host, false)
+	add(cfg.Source.Port, false)
+	add(cfg.Source.Database, false)
+	add(cfg.Source.User, false)
+	add(cfg.Source.Password, true)
+	add(cfg.Source.Krb5Conf, false)
+	add(cfg.Source.Keytab, false)
+	add(cfg.Source.Realm, false)
+	add(cfg.Source.SPN, false)
+	add(cfg.Target.Host, false)
+	add(cfg.Target.Port, false)
+	add(cfg.Target.Database, false)
+	add(cfg.Target.User, false)
+	add(cfg.Target.Password, true)
+	add(cfg.Target.Krb5Conf, false)
+	add(cfg.Target.Keytab, false)
+	add(cfg.Target.Realm, false)
+	add(cfg.Target.SPN, false)
 	if cfg.AI != nil {
-		add(cfg.AI.APIKey)
+		add(cfg.AI.APIKey, true)
 	}
 	if cfg.Slack != nil {
-		add(cfg.Slack.WebhookURL)
+		add(cfg.Slack.WebhookURL, true)
 	}
 	sort.SliceStable(values, func(i, j int) bool {
-		return len(values[i]) > len(values[j])
+		return len(values[i].Value) > len(values[j].Value)
 	})
 	out := values[:0]
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, v := range values {
-		if seen[v] {
+		if idx, ok := seen[v.Value]; ok {
+			out[idx].Strict = out[idx].Strict || v.Strict
 			continue
 		}
-		seen[v] = true
+		seen[v.Value] = len(out)
 		out = append(out, v)
 	}
 	return out

@@ -133,6 +133,84 @@ func TestGenerateConfigReviewRedactsResponseBeforeTruncatingWithPayloadContext(t
 	}
 }
 
+func TestConfigReviewSafeTextDoesNotOverRedactShortIdentityValues(t *testing.T) {
+	payload := &ConfigReviewPayload{sensitiveValues: []configReviewSensitiveValue{
+		{Value: "sa"},
+		{Value: "pg"},
+		{Value: "users"},
+		{Value: "1433"},
+		{Value: "target.internal"},
+	}}
+
+	got := configReviewSafeText("safe sample disabled users table uses target.internal, not target.internalx.", payload, 1000)
+	for _, want := range []string{"safe", "sample", "disabled", "users table", "target.internalx"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("configReviewSafeText() = %q, want to preserve %q", got, want)
+		}
+	}
+	for _, leak := range []string{"target.internal,"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("configReviewSafeText() leaked %q: %q", leak, got)
+		}
+	}
+	for _, mangled := range []string{"[REDACTED]fe", "[REDACTED]mple", "di[REDACTED]bled", "[REDACTED]ers"} {
+		if strings.Contains(got, mangled) {
+			t.Fatalf("configReviewSafeText() over-redacted %q: %q", mangled, got)
+		}
+	}
+}
+
+func TestConfigReviewSafeTextRedactsShortStrictSecretsAtBoundaries(t *testing.T) {
+	payload := &ConfigReviewPayload{sensitiveValues: []configReviewSensitiveValue{
+		{Value: "sa", Strict: true},
+	}}
+
+	got := configReviewSafeText("safe sample uses sa as a credential.", payload, 1000)
+	if !strings.Contains(got, "safe") || !strings.Contains(got, "sample") {
+		t.Fatalf("configReviewSafeText() over-redacted normal words: %q", got)
+	}
+	if strings.Contains(got, "uses sa ") || !strings.Contains(got, "uses [REDACTED] ") {
+		t.Fatalf("configReviewSafeText() did not redact standalone short secret: %q", got)
+	}
+}
+
+func TestGenerateConfigReviewDoesNotOverRedactShortConnectionValues(t *testing.T) {
+	cfg := configReviewTestConfig()
+	cfg.Source.User = "sa"
+	cfg.Target.User = "pg"
+	cfg.Source.Database = "users"
+	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})
+	client := &fakeClient{response: `{
+  "summary": "Keep safe sample checks enabled for users table validation.",
+  "patch_recommendations": [],
+  "runbook": {
+    "summary": "The disabled path should remain readable.",
+    "validation": ["Use sample validation for users rows when safe."]
+  },
+  "notes": ["safe sample disabled users"]
+}`}
+
+	review, err := GenerateConfigReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateConfigReview() error = %v", err)
+	}
+	data, err := json.Marshal(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"safe", "sample", "disabled", "users"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("review text should preserve %q, got: %s", want, text)
+		}
+	}
+	for _, mangled := range []string{"[REDACTED]fe", "[REDACTED]mple", "di[REDACTED]bled", "[REDACTED]ers"} {
+		if strings.Contains(text, mangled) {
+			t.Fatalf("review text over-redacted %q: %s", mangled, text)
+		}
+	}
+}
+
 func TestGenerateConfigReviewSuppressesUnsafeGuidanceText(t *testing.T) {
 	cfg := configReviewTestConfig()
 	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})

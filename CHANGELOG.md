@@ -57,6 +57,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Fixed AI advisory scrubbers so short connection identifiers no longer redact
+  substrings inside normal words while real secrets remain protected (#423).
 - Fixed AI preflight review follow-ups so absent providers return the intended
   unavailable result, connection error details are omitted from AI-bound
   payloads, and the advisory review gets its own command-scoped timeout (#417).

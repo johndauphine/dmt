@@ -97,7 +97,7 @@ func normalizeConfidence(v string) string {
 
 func sanitizeTriageNextAction(action string) string {
 	raw := action
-	action = scrubTriageText(action, 600)
+	action = scrubTriageAdvisoryDisplayText(action, 600)
 	if containsUnsafeDMTCommand(raw) {
 		return "Unsafe advisory text suppressed. Use read-only DMT commands and documented recovery procedures."
 	}
@@ -109,7 +109,7 @@ func sanitizeTriageNextAction(action string) string {
 
 func sanitizeTriageAdvisoryText(text string, max int) string {
 	raw := text
-	text = scrubTriageText(text, max)
+	text = scrubTriageAdvisoryDisplayText(text, max)
 	if text == "" {
 		return text
 	}
@@ -124,7 +124,7 @@ func sanitizeTriageAdvisoryText(text string, max int) string {
 
 func sanitizeTriageHeadingText(text string, max int) string {
 	raw := text
-	text = scrubTriageText(text, max)
+	text = scrubTriageAdvisoryDisplayText(text, max)
 	if text == "" {
 		return text
 	}
@@ -159,7 +159,7 @@ func isSafeTriageValidationReference(s string) bool {
 
 func sanitizeTriageSuggestedCommand(command string) string {
 	raw := command
-	command = scrubTriageText(command, 600)
+	command = scrubTriageAdvisoryDisplayText(command, 600)
 	if command == "" || isReadOnlySuggestedCommand(raw) {
 		return command
 	}

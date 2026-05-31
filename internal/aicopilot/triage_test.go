@@ -236,6 +236,39 @@ func TestParseTriageReviewStructuredActions(t *testing.T) {
 	}
 }
 
+func TestParseTriageReviewPreservesQuotedIdentifiersInAdvisoryText(t *testing.T) {
+	review, err := ParseTriageReview(`{
+  "impact": "attention",
+  "summary": "Validate the \"users\" table before retrying.",
+  "findings": [{
+    "severity": "warn",
+    "category": "validation",
+    "affected": "\"users\"",
+    "affected_tables": ["public.\"users\""],
+    "deterministic_facts": ["validation.sample_mismatch on \"users\""],
+    "manual_inspection": "Compare read-only validation output for 'users'.",
+    "next_action": "Inspect \"users\" rows using read-only validation evidence."
+  }],
+  "notes": ["Quoted table name \"users\" should remain readable."]
+}`)
+	if err != nil {
+		t.Fatalf("ParseTriageReview() error = %v", err)
+	}
+	data, err := json.Marshal(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("quoted identifiers in advisory text should remain readable: %s", text)
+	}
+	for _, want := range []string{`\"users\"`, "public.\\\"users\\\"", "'users'"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("review text should preserve %q, got: %s", want, text)
+		}
+	}
+}
+
 func TestParseTriageReviewSuppressesDestructiveSuggestedCommand(t *testing.T) {
 	review, err := ParseTriageReview(`{
   "impact": "attention",

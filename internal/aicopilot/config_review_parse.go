@@ -299,7 +299,8 @@ func configReviewPrimitiveMatchesSensitiveValue(v any, payload *ConfigReviewPayl
 		return false
 	}
 	text := fmt.Sprint(v)
-	for _, value := range payload.sensitiveValues {
+	for _, sensitive := range payload.sensitiveValues {
+		value := sensitive.Value
 		if value == "" {
 			continue
 		}
@@ -313,18 +314,76 @@ func configReviewPrimitiveMatchesSensitiveValue(v any, payload *ConfigReviewPayl
 func configReviewSafeText(s string, payload *ConfigReviewPayload, max int) string {
 	s = logging.Scrub(strings.TrimSpace(s))
 	if payload != nil {
-		values := append([]string(nil), payload.sensitiveValues...)
+		values := append([]configReviewSensitiveValue(nil), payload.sensitiveValues...)
 		sort.SliceStable(values, func(i, j int) bool {
-			return len(values[i]) > len(values[j])
+			return len(values[i].Value) > len(values[j].Value)
 		})
-		for _, value := range values {
-			if value == "" {
+		for _, sensitive := range values {
+			if sensitive.Value == "" {
 				continue
 			}
-			s = strings.ReplaceAll(s, value, logging.RedactedToken)
+			s = redactConfigReviewSensitiveValue(s, sensitive)
 		}
 	}
 	return limitText(s, max)
+}
+
+func redactConfigReviewSensitiveValue(s string, sensitive configReviewSensitiveValue) string {
+	value := strings.TrimSpace(sensitive.Value)
+	if value == "" {
+		return s
+	}
+	if sensitive.Strict && len(value) >= 6 {
+		return strings.ReplaceAll(s, value, logging.RedactedToken)
+	}
+	if !sensitive.Strict && len(value) < 6 {
+		return s
+	}
+	return replaceConfigReviewBoundedValue(s, value)
+}
+
+func replaceConfigReviewBoundedValue(s, value string) string {
+	if value == "" || !strings.Contains(s, value) {
+		return s
+	}
+	var b strings.Builder
+	searchStart := 0
+	changed := false
+	for {
+		idx := strings.Index(s[searchStart:], value)
+		if idx < 0 {
+			break
+		}
+		idx += searchStart
+		end := idx + len(value)
+		if configReviewValueAtBoundary(s, idx, end) {
+			b.WriteString(s[searchStart:idx])
+			b.WriteString(logging.RedactedToken)
+			searchStart = end
+			changed = true
+			continue
+		}
+		b.WriteString(s[searchStart : idx+1])
+		searchStart = idx + 1
+	}
+	if !changed {
+		return s
+	}
+	b.WriteString(s[searchStart:])
+	return b.String()
+}
+
+func configReviewValueAtBoundary(s string, start, end int) bool {
+	prevOK := start == 0 || !isConfigReviewIdentifierByte(s[start-1])
+	nextOK := end >= len(s) || !isConfigReviewIdentifierByte(s[end])
+	return prevOK && nextOK
+}
+
+func isConfigReviewIdentifierByte(b byte) bool {
+	return b >= '0' && b <= '9' ||
+		b >= 'A' && b <= 'Z' ||
+		b >= 'a' && b <= 'z' ||
+		b == '_'
 }
 
 func configReviewSafeGuidanceText(s string, payload *ConfigReviewPayload, max int) string {

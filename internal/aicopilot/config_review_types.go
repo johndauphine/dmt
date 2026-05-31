@@ -19,6 +19,11 @@ type ConfigReviewSafetyContext struct {
 	TargetMode         string   `json:"target_mode,omitempty"`
 }
 
+type configReviewSensitiveValue struct {
+	Value  string
+	Strict bool
+}
+
 type ConfigReviewPayload struct {
 	PromptVersion   string                    `json:"prompt_version"`
 	Task            string                    `json:"task"`
@@ -28,7 +33,7 @@ type ConfigReviewPayload struct {
 	Safety          ConfigReviewSafetyContext `json:"safety"`
 	Redaction       RedactionSummary          `json:"redaction"`
 
-	sensitiveValues []string
+	sensitiveValues []configReviewSensitiveValue
 }
 
 type ConfigReviewCommands struct {
