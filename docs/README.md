@@ -7,6 +7,7 @@ Technical documentation, planning documents, and implementation notes for dmt.
 | Document | Description |
 |----------|-------------|
 | [BENCHMARKS.md](BENCHMARKS.md) | Performance benchmarks comparing Go and Rust implementations |
+| [AI_EVALS.md](AI_EVALS.md) | Repeatable live-provider evals for AI advisory prompt quality |
 | [RESTARTABILITY.md](RESTARTABILITY.md) | Checkpoint and resume functionality documentation |
 | [PRIVILEGES.md](PRIVILEGES.md) | Per-driver minimum DB privileges (source / target / drop_recreate / upsert) — operator-facing GRANT recipes aligned with `dmt preflight` (see [PRIVILEGES.md](PRIVILEGES.md#what-dmt-preflight-actually-probes) for the subset preflight actually probes) |
 | [DRIVER_SHARED.md](DRIVER_SHARED.md) | Shared driver refactor boundary and PR sequence |
