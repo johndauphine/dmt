@@ -90,6 +90,16 @@ func TestUnsafeAdvisoryEvidenceIgnoresSafeIdentifierAndConfigWords(t *testing.T)
 	}
 }
 
+func TestUnsafeAdvisoryEvidenceIgnoresDriftCategoryWording(t *testing.T) {
+	raw := `{"summary":"The deterministic evidence shows null-count mismatch, not delete drift or schema drift.","findings":[{"category":"null_mismatch","next_action":"Inspect read-only validation evidence."}]}`
+	if containsUnsafeAdvisory(raw) {
+		t.Fatalf("containsUnsafeAdvisory() flagged drift category wording: %s", raw)
+	}
+	if evidence := unsafeAdvisoryEvidence(raw); len(evidence) != 0 {
+		t.Fatalf("unsafeAdvisoryEvidence() = %+v, want none", evidence)
+	}
+}
+
 func TestRunAdvisoryEvalsFlagsMissingModelSuppliedEvidence(t *testing.T) {
 	cases := []struct {
 		name       string

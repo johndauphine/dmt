@@ -60,6 +60,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Hardened AI triage prompt and eval matching so deletion-drift category
+  wording is not mistaken for unsafe target-schema action advice (#433).
 - Tightened AI advisory prompt contracts and eval evidence so Haiku preserves
   deterministic gates, avoids unsafe command/action wording, and cites
   deterministic support across config review, schema advisor, triage, and
