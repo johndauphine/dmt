@@ -9,6 +9,13 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
+const (
+	triageUnsafeAdvisorySuppressed = "Unsafe advisory text suppressed. Use read-only DMT commands and documented recovery procedures."
+	triageUnsafeHeadingSuppressed  = "Unsafe advisory heading suppressed"
+	triageCommandSuppressed        = "Destructive command suppressed. Use read-only DMT commands such as dmt diagnose, dmt status, dmt validate, or dmt analyze."
+	triageDestructiveSuppressed    = "Destructive recommendation suppressed. Verify backups, gather operator confirmation, and use documented DMT recovery procedures before any target data change."
+)
+
 func ParseTriageReview(raw string) (*TriageReview, error) {
 	body := extractJSONObject(strings.TrimSpace(raw))
 	var review TriageReview
@@ -33,6 +40,7 @@ func ParseTriageReview(raw string) (*TriageReview, error) {
 		for j := range f.DeterministicFacts {
 			f.DeterministicFacts[j] = sanitizeTriageAdvisoryText(f.DeterministicFacts[j], 220)
 		}
+		f.DeterministicFacts = compactTriageTextList(f.DeterministicFacts, 10)
 		f.LikelyCause = sanitizeTriageAdvisoryText(f.LikelyCause, 300)
 		for j := range f.Hypotheses {
 			f.Hypotheses[j].Confidence = normalizeConfidence(f.Hypotheses[j].Confidence)
@@ -44,12 +52,14 @@ func ParseTriageReview(raw string) (*TriageReview, error) {
 		for j := range f.SuggestedCommands {
 			f.SuggestedCommands[j] = sanitizeTriageSuggestedCommand(f.SuggestedCommands[j])
 		}
+		f.SuggestedCommands = compactTriageTextList(f.SuggestedCommands, 5)
 		if len(f.SuggestedCommands) > 5 {
 			f.SuggestedCommands = f.SuggestedCommands[:5]
 		}
 		for j := range f.SuggestedConfigChanges {
 			f.SuggestedConfigChanges[j] = sanitizeTriageNextAction(f.SuggestedConfigChanges[j])
 		}
+		f.SuggestedConfigChanges = compactTriageTextList(f.SuggestedConfigChanges, 5)
 		if len(f.SuggestedConfigChanges) > 5 {
 			f.SuggestedConfigChanges = f.SuggestedConfigChanges[:5]
 		}
@@ -60,6 +70,7 @@ func ParseTriageReview(raw string) (*TriageReview, error) {
 	for i := range review.Notes {
 		review.Notes[i] = sanitizeTriageAdvisoryText(review.Notes[i], 400)
 	}
+	review.Notes = compactTriageTextList(review.Notes, 10)
 	if len(review.Findings) > 5 {
 		review.Findings = review.Findings[:5]
 	}
@@ -99,12 +110,12 @@ func sanitizeTriageNextAction(action string) string {
 	raw := action
 	action = scrubTriageAdvisoryDisplayText(action, 600)
 	if containsUnsafeDMTCommand(raw) {
-		return "Unsafe advisory text suppressed. Use read-only DMT commands and documented recovery procedures."
+		return triageUnsafeAdvisorySuppressed
 	}
 	if !containsDestructiveRecommendation(raw) || includesBackupAndConfirmation(raw) {
 		return action
 	}
-	return "Destructive recommendation suppressed. Verify backups, gather operator confirmation, and use documented DMT recovery procedures before any target data change."
+	return triageDestructiveSuppressed
 }
 
 func sanitizeTriageAdvisoryText(text string, max int) string {
@@ -117,7 +128,7 @@ func sanitizeTriageAdvisoryText(text string, max int) string {
 		return text
 	}
 	if containsDestructiveRecommendation(raw) || containsUnsafeDMTCommand(raw) {
-		return "Unsafe advisory text suppressed. Use read-only DMT commands and documented recovery procedures."
+		return triageUnsafeAdvisorySuppressed
 	}
 	return text
 }
@@ -132,7 +143,7 @@ func sanitizeTriageHeadingText(text string, max int) string {
 		return text
 	}
 	if containsDestructiveRecommendation(raw) || containsUnsafeDMTCommand(raw) {
-		return "Unsafe advisory heading suppressed"
+		return triageUnsafeHeadingSuppressed
 	}
 	return text
 }
@@ -163,7 +174,31 @@ func sanitizeTriageSuggestedCommand(command string) string {
 	if command == "" || isReadOnlySuggestedCommand(raw) {
 		return command
 	}
-	return "Destructive command suppressed. Use read-only DMT commands such as dmt diagnose, dmt status, dmt validate, or dmt analyze."
+	return triageCommandSuppressed
+}
+
+func compactTriageTextList(values []string, max int) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, value)
+		if max > 0 && len(out) >= max {
+			break
+		}
+	}
+	return out
 }
 
 func containsDestructiveRecommendation(s string) bool {

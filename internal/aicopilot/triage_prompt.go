@@ -18,6 +18,7 @@ func BuildTriagePrompt(payload TriagePayload) (string, error) {
 	b.WriteString("deterministic_facts are authoritative. Keep them separate from hypotheses and never contradict them.\n")
 	b.WriteString("Your output is advisory only. DMT policy gates and deterministic checks decide what can run or change.\n")
 	b.WriteString("Never recommend destructive target actions unless next_action explicitly includes backup verification and operator confirmation.\n")
+	b.WriteString("High confidence requires explicit deterministic evidence in the payload. Sparse validation count mismatches are insufficient evidence for checkpoint, writer, durability, schema evolution, trigger, or manual-delete root-cause claims.\n")
 	b.WriteString("For validation mismatches, use these categories when supported by evidence: delete_drift, type_coercion, timezone_date_handling, watermark_issue, target_trigger_default_behavior.\n")
 	b.WriteString("Return likely causes as hypotheses with confidence. Include affected tables, suggested read-only commands/config changes, and when to stop and inspect manually.\n")
 	b.WriteString("Return ONLY valid JSON with this shape:\n")

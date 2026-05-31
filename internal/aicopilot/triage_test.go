@@ -750,6 +750,128 @@ func TestParseTriageReviewSuppressesUnsafeSummaryCauseAndHypothesis(t *testing.T
 	}
 }
 
+func TestGenerateTriageReviewCautionsSparseValidationMismatchClaims(t *testing.T) {
+	payload := BuildValidationMismatchTriagePayload(nil, ValidationMismatchFacts{
+		Mode:             "count_only",
+		Table:            "public.orders",
+		SourceCount:      100,
+		TargetCount:      99,
+		Difference:       1,
+		HasRowCountFacts: true,
+		Differences: []ValidationDifferenceFact{{
+			Category: ValidationCategoryWatermarkIssue,
+			Table:    "public.orders",
+			Pass:     "row_count",
+			Severity: "error",
+			Detail:   "source_count=100 target_count=99 difference=1",
+		}},
+	})
+	client := &fakeClient{response: `{
+  "impact": "attention",
+  "summary": "A target row has a manual-delete root cause.",
+  "findings": [{
+    "severity": "warn",
+    "category": "validation",
+    "affected": "public.orders",
+    "deterministic_facts": ["source_count=100 target_count=99"],
+    "likely_cause": "A checkpoint false success caused a manual-delete target row and a durability gap.",
+    "hypotheses": [{"confidence":"high","rationale":"The writer bottleneck and schema evolution prove manual-delete checkpoint false success."}],
+    "manual_inspection": "Compare read-only validation output.",
+    "next_action": "Inspect deterministic facts before recovery."
+  }]
+}`}
+
+	review, err := GenerateTriageReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateTriageReview() error = %v", err)
+	}
+	finding := review.Findings[0]
+	combined := strings.ToLower(review.Summary + " " + finding.LikelyCause + " " + finding.Hypotheses[0].Rationale)
+	for _, unsupported := range []string{"checkpoint false success", "writer bottleneck", "durability", "schema evolution", "manual-delete"} {
+		if strings.Contains(combined, unsupported) {
+			t.Fatalf("unsupported sparse validation claim survived %q: %+v summary=%q", unsupported, finding, review.Summary)
+		}
+	}
+	if finding.Hypotheses[0].Confidence != "low" {
+		t.Fatalf("sparse validation confidence = %q, want low", finding.Hypotheses[0].Confidence)
+	}
+	if !strings.Contains(strings.ToLower(finding.Hypotheses[0].Rationale), "insufficient evidence") {
+		t.Fatalf("sparse rationale should frame insufficient evidence: %+v", finding.Hypotheses[0])
+	}
+}
+
+func TestGenerateTriageReviewUsesDeterministicFallbacksForUnsafeStructuredFields(t *testing.T) {
+	payload := BuildValidationMismatchTriagePayload(nil, ValidationMismatchFacts{
+		Mode:             "count_only",
+		Table:            "public.orders",
+		SourceCount:      10,
+		TargetCount:      9,
+		Difference:       1,
+		HasRowCountFacts: true,
+	})
+	client := &fakeClient{response: `{
+  "impact": "attention",
+  "summary": "Unsafe prose was supplied.",
+  "findings": [{
+    "severity": "warn",
+    "category": "validation",
+    "affected": "public.orders",
+    "likely_cause": "drop target tables manually",
+    "manual_inspection": "Run dmt analyze --apply.",
+    "next_action": "Run dmt run --confirm-backup."
+  }]
+}`}
+
+	review, err := GenerateTriageReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateTriageReview() error = %v", err)
+	}
+	finding := review.Findings[0]
+	text := strings.ToLower(finding.LikelyCause + " " + finding.ManualInspection + " " + finding.NextAction)
+	if strings.Contains(text, "unsafe advisory text suppressed") || strings.Contains(text, "drop target") || strings.Contains(text, "--apply") || strings.Contains(text, "--confirm-backup") {
+		t.Fatalf("unsafe boilerplate or command survived in structured fields: %+v", finding)
+	}
+	if !strings.Contains(text, "deterministic") || !strings.Contains(text, "read-only") {
+		t.Fatalf("structured fields should use deterministic read-only fallbacks: %+v", finding)
+	}
+}
+
+func TestParseTriageReviewDeduplicatesRepeatedUnsafeCommands(t *testing.T) {
+	review, err := ParseTriageReview(`{
+  "impact": "attention",
+  "summary": "Repeated unsafe commands were suggested.",
+  "findings": [{
+    "severity": "warn",
+    "category": "target",
+    "affected": "dbo.orders",
+    "suggested_commands": [
+      "dmt run --confirm-backup",
+      "dmt run --confirm-backup",
+      "dmt resume --force-resume",
+      "drop table dbo.orders"
+    ],
+    "suggested_config_changes": [
+      "migration.target_mode=drop_recreate",
+      "migration.target_mode=drop_recreate"
+    ]
+  }],
+  "notes": ["Run dmt run --confirm-backup.", "Run dmt run --confirm-backup.", "drop target tables manually"]
+}`)
+	if err != nil {
+		t.Fatalf("ParseTriageReview() error = %v", err)
+	}
+	finding := review.Findings[0]
+	if len(finding.SuggestedCommands) != 1 {
+		t.Fatalf("suggested command suppressions should collapse to one, got %+v", finding.SuggestedCommands)
+	}
+	if len(finding.SuggestedConfigChanges) != 1 {
+		t.Fatalf("config change suppressions should collapse to one, got %+v", finding.SuggestedConfigChanges)
+	}
+	if len(review.Notes) != 1 {
+		t.Fatalf("unsafe note suppressions should collapse to one, got %+v", review.Notes)
+	}
+}
+
 func TestParseTriageReviewRejectsInvalidJSON(t *testing.T) {
 	if _, err := ParseTriageReview("not json"); err == nil {
 		t.Fatal("ParseTriageReview() error = nil, want parse error")
