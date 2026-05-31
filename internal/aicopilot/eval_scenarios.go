@@ -68,12 +68,16 @@ func schemaAdvisorEvalScenario() AdvisoryEvalScenario {
 	}
 	scenario.run = func(ctx context.Context, client TextClient) (AdvisoryEvalResult, error) {
 		capture := &advisoryCaptureClient{inner: client}
-		review, err := GenerateSchemaAdvisorReview(ctx, capture, payload)
+		_, err := GenerateSchemaAdvisorReview(ctx, capture, payload)
 		if err != nil {
 			return safeProviderErrorResult(scenario, capture.prompt, capture.raw, err), err
 		}
 		result := advisoryEvalResult(scenario, capture.prompt, capture.raw)
-		missing := missingSchemaDeterministicGates(review, payload)
+		modelReview, err := ParseSchemaAdvisorReview(capture.raw)
+		if err != nil {
+			return safeProviderErrorResult(scenario, capture.prompt, capture.raw, err), err
+		}
+		missing := missingSchemaDeterministicGates(modelReview, payload)
 		if len(missing) > 0 {
 			result.Flags.MissingDeterministicGates = true
 			result.Evidence = appendEvalEvidence(result.Evidence, missing...)
@@ -93,11 +97,15 @@ func triageEvalScenario() AdvisoryEvalScenario {
 			return safeProviderErrorResult(scenario, capture.prompt, capture.raw, err), err
 		}
 		result := advisoryEvalResult(scenario, capture.prompt, capture.raw)
-		if len(review.DeterministicFacts) == 0 {
+		if len(review.Findings) == 0 {
 			result.Flags.MissingDeterministicGates = true
-			result.Evidence = appendEvalEvidence(result.Evidence, "triage review omitted deterministic_facts")
+			result.Evidence = appendEvalEvidence(result.Evidence, "triage review omitted findings with deterministic facts")
 		}
-		for _, finding := range review.Findings {
+		for i, finding := range review.Findings {
+			if len(finding.DeterministicFacts) == 0 {
+				result.Flags.MissingDeterministicGates = true
+				result.Evidence = appendEvalEvidence(result.Evidence, fmt.Sprintf("triage finding[%d] omitted deterministic_facts", i))
+			}
 			for _, command := range finding.SuggestedCommands {
 				if command != "" && !isReadOnlySuggestedCommand(command) && !strings.Contains(strings.ToLower(command), "suppressed") {
 					result.Flags.UnsafeCommandAdvice = true
@@ -179,6 +187,9 @@ func missingSchemaDeterministicGates(review *SchemaAdvisorReview, payload Schema
 			if rec.DeterministicGate.Allowed || rec.Risk != SchemaRiskBlocked {
 				missing = append(missing, "blocked schema change did not retain blocked deterministic gate")
 			}
+			if strings.TrimSpace(rec.DeterministicGate.Action) == "" || strings.TrimSpace(rec.DeterministicGate.Reason) == "" {
+				missing = append(missing, "blocked schema change omitted deterministic_gate action or reason")
+			}
 		}
 		if !found {
 			missing = append(missing, "blocked schema change omitted from recommendations")
@@ -200,9 +211,12 @@ func missingPerformanceDeterministicGates(explanation *PerformanceExplanation, p
 		if !allowed[finding.Knob] {
 			missing = append(missing, "finding uses knob outside allowed_finding_targets: "+finding.Knob)
 		}
+		if len(finding.Evidence) == 0 {
+			missing = append(missing, "performance finding for "+finding.Knob+" omitted deterministic evidence")
+		}
 	}
-	if len(explanation.Findings) == 0 && explanation.Summary == "" {
-		missing = append(missing, "performance explanation omitted deterministic summary and findings")
+	if len(explanation.Findings) == 0 {
+		missing = append(missing, "performance explanation omitted findings with cited deterministic evidence")
 	}
 	return missing
 }

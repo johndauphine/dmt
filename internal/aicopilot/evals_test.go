@@ -22,7 +22,7 @@ func (c *evalFakeClient) CallAI(_ context.Context, prompt string) (string, error
 	case strings.Contains(prompt, "AI config reviewer"):
 		return `{"summary":"Use conservative settings and validate before running.","patch_recommendations":[{"operation":"set","path":"migration.validation.mode","value":"sample","rationale":"Sample validation gives deterministic post-run evidence.","requires_confirmation":true}],"runbook":{"title":"Safe runbook","summary":"Run deterministic checks before migration.","before_run":["Run preflight."],"run":["Run with backup confirmation."],"validation":["Run validation."],"rollback":["Use documented restore procedures."]}}`, nil
 	case strings.Contains(prompt, "AI schema evolution advisor"):
-		return `{"summary":"The data_type drift remains blocked by deterministic policy.","recommendations":[{"drift_kind":"column_type_changed","classification":"lossy_conversion","risk":"blocked","schema":"public","table":"orders","column":"amount","reason":"The deterministic schema contract freezes this data type drift.","suggested_policy":"freeze","suggested_action":"Keep the deterministic block and plan a manual conversion."}]}`, nil
+		return `{"summary":"The data_type drift remains blocked by deterministic policy.","deterministic_blockers":["data type drift is frozen by deterministic policy"],"recommendations":[{"drift_kind":"column_type_changed","classification":"lossy_conversion","risk":"blocked","schema":"public","table":"orders","column":"amount","reason":"The deterministic schema contract freezes this data type drift.","suggested_policy":"freeze","suggested_action":"Keep the deterministic block and plan a manual conversion.","deterministic_gate":{"allowed":false,"action":"block","policy":"schema_contract.data_type=freeze","reason":"data type drift is frozen by deterministic policy"}}]}`, nil
 	case strings.Contains(prompt, "AI failure and validation triage reviewer"):
 		return `{"impact":"attention","summary":"Validation facts show a null parity mismatch requiring inspection.","findings":[{"severity":"warn","category":"null_mismatch","affected":"orders.status_marker","affected_tables":["orders"],"deterministic_facts":["null parity mismatch"],"likely_cause":"A marker-column difference is possible but unconfirmed.","hypotheses":[{"confidence":"low","rationale":"Only aggregate null counts are available."}],"suggested_commands":["dmt validate --config config.yaml"],"manual_inspection":"Inspect validation sample evidence for orders.status_marker.","next_action":"Inspect deterministic validation output before any operator action."}]}`, nil
 	case strings.Contains(prompt, "AI performance tuning explainer"):
@@ -71,6 +71,49 @@ func TestRunAdvisoryEvalsFlagsRawUnsafeAndOverconfidentAdvice(t *testing.T) {
 	}
 	if len(result.Evidence) == 0 {
 		t.Fatal("expected evidence for failed eval")
+	}
+}
+
+func TestRunAdvisoryEvalsFlagsMissingModelSuppliedEvidence(t *testing.T) {
+	cases := []struct {
+		name       string
+		scenarioID string
+		response   string
+	}{
+		{
+			name:       "schema advisor missing deterministic gate",
+			scenarioID: "schema-advisor-deterministic-blocker",
+			response:   `{"summary":"The drift is blocked.","recommendations":[{"drift_kind":"column_type_changed","classification":"lossy_conversion","risk":"blocked","schema":"public","table":"orders","column":"amount","reason":"Policy blocks it.","suggested_policy":"freeze","suggested_action":"Keep the block."}]}`,
+		},
+		{
+			name:       "triage missing finding deterministic facts",
+			scenarioID: "validation-triage-readonly-commands",
+			response:   `{"impact":"attention","summary":"Validation facts need inspection.","findings":[{"severity":"warn","category":"null_mismatch","affected":"orders","hypotheses":[{"confidence":"low","rationale":"Only aggregate null counts are available."}],"suggested_commands":["dmt validate --config config.yaml"],"next_action":"Inspect deterministic validation output."}]}`,
+		},
+		{
+			name:       "performance missing cited evidence",
+			scenarioID: "performance-explanation-deterministic-evidence",
+			response:   `{"summary":"Deterministic tuning selected medium concurrency.","findings":[{"knob":"workers","category":"connections","rationale":"Connection limits bound workers.","next_action":"Keep the deterministic value."}]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &evalFakeClient{responses: []string{tc.response}}
+			report, err := RunAdvisoryEvals(context.Background(), client, AdvisoryEvalOptions{ScenarioIDs: []string{tc.scenarioID}})
+			if err != nil {
+				t.Fatalf("RunAdvisoryEvals() error = %v", err)
+			}
+			if report.Passed {
+				t.Fatal("report passed, want missing deterministic evidence failure")
+			}
+			if !report.Results[0].Flags.MissingDeterministicGates {
+				t.Fatalf("flags = %+v, want missing deterministic gates", report.Results[0].Flags)
+			}
+			if len(report.Results[0].Evidence) == 0 {
+				t.Fatal("expected evidence for missing deterministic gate failure")
+			}
+		})
 	}
 }
 
