@@ -100,6 +100,24 @@ func normalizeAIConfigChangePath(path string) (string, bool) {
 }
 
 func validateAIConfigRuntimeValue(path string, value any) error {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, nested := range v {
+			child := path + "." + strings.TrimSpace(key)
+			if normalized, ok := normalizeAIConfigChangePath(child); ok {
+				child = normalized
+			}
+			if err := validateAIConfigRuntimeValue(child, nested); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if err := validateAIConfigRuntimeValue(path, item); err != nil {
+				return err
+			}
+		}
+	}
 	switch path {
 	case "migration.validation.mode":
 		return validateAIConfigValidationMode(fmt.Sprint(value))
@@ -234,18 +252,30 @@ func yamlFieldName(field reflect.StructField) string {
 }
 
 func invalidConfigAssignmentInText(text string, ctx aiConfigChangeContext) string {
-	path, value, ok := parseConfigAssignmentText(text)
-	if !ok {
-		return ""
-	}
-	if errs := validateAIConfigChange(path, value, ctx); len(errs) > 0 {
-		return strings.Join(errs, "; ")
+	for _, assignment := range parseConfigAssignmentTexts(text) {
+		if errs := validateAIConfigChange(assignment.Path, assignment.Value, ctx); len(errs) > 0 {
+			return strings.Join(errs, "; ")
+		}
 	}
 	return ""
 }
 
+type parsedConfigAssignment struct {
+	Path  string
+	Value any
+}
+
 func parseConfigAssignmentText(text string) (string, any, bool) {
+	assignments := parseConfigAssignmentTexts(text)
+	if len(assignments) == 0 {
+		return "", nil, false
+	}
+	return assignments[0].Path, assignments[0].Value, true
+}
+
+func parseConfigAssignmentTexts(text string) []parsedConfigAssignment {
 	text = strings.TrimSpace(text)
+	var assignments []parsedConfigAssignment
 	for _, idx := range configAssignmentSeparatorIndexes(text) {
 		pathEnd := idx
 		for pathEnd > 0 && isConfigSpaceByte(text[pathEnd-1]) {
@@ -272,9 +302,12 @@ func parseConfigAssignmentText(text string) (string, any, bool) {
 		if !ok {
 			continue
 		}
-		return path, parseScalarConfigValue(valueText), true
+		assignments = append(assignments, parsedConfigAssignment{
+			Path:  path,
+			Value: parseScalarConfigValue(valueText),
+		})
 	}
-	return "", nil, false
+	return assignments
 }
 
 func configAssignmentSeparatorIndexes(text string) []int {

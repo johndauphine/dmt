@@ -242,6 +242,38 @@ func TestParseSchemaAdvisorReviewRejectsInvalidConfigPolicyAssignment(t *testing
 	}
 }
 
+func TestParseSchemaAdvisorReviewRejectsInvalidConfigActionAssignment(t *testing.T) {
+	review, err := ParseSchemaAdvisorReview(`{
+  "summary": "Invalid action.",
+  "recommendations": [{
+    "drift_kind": "added_column",
+    "classification": "additive",
+    "risk": "low",
+    "table": "customers",
+    "column": "nickname",
+    "reason": "AI proposed a non-existent DMT policy value.",
+    "suggested_policy": "manual",
+    "suggested_action": "Apply migration.validation.mode=sample, then migration.schema_contract.columns=add."
+  }]
+}`)
+	if err != nil {
+		t.Fatalf("ParseSchemaAdvisorReview() error = %v", err)
+	}
+	if len(review.Recommendations) != 1 {
+		t.Fatalf("recommendations len = %d, want 1", len(review.Recommendations))
+	}
+	rec := review.Recommendations[0]
+	if rec.SuggestedPolicy != "manual_review_required" {
+		t.Fatalf("suggested policy = %q, want manual_review_required", rec.SuggestedPolicy)
+	}
+	if strings.Contains(rec.SuggestedAction, "schema_contract.columns=add") {
+		t.Fatalf("invalid action assignment should not survive, got %q", rec.SuggestedAction)
+	}
+	if !strings.Contains(rec.SuggestedAction, configChangeInvalidValueError) {
+		t.Fatalf("suggested action should explain invalid config action, got %q", rec.SuggestedAction)
+	}
+}
+
 func TestUnavailableSchemaAdvisorReviewUsesDeterministicFallback(t *testing.T) {
 	payload := BuildSchemaAdvisorPayload(&config.Config{
 		Migration: config.MigrationConfig{

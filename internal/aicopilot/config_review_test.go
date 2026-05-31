@@ -400,6 +400,7 @@ func TestGenerateConfigReviewValidatesPatchRecommendations(t *testing.T) {
 func TestAIConfigChangeValidationRejectsUnknownPathsAndInvalidValues(t *testing.T) {
 	invalid := map[string]any{
 		"migration.checkpoint.frequency_chunks":   5,
+		"migration":                               map[string]any{"validation": map[string]any{"mode": "row_hash"}},
 		"migration.deletes.mode":                  "log",
 		"migration.validation.mode":               "row_hash",
 		"migration.validation":                    map[string]any{"mode": "row_sample"},
@@ -446,6 +447,7 @@ func TestAIConfigChangeValidationRejectsUnknownPathsAndInvalidValues(t *testing.
 		"schema_evolution.added_column=add",
 		"columns=add",
 		"migration.validation.mode: row_sample",
+		"migration.validation.mode=sample; migration.deletes.mode=log",
 	} {
 		if reason := invalidConfigAssignmentInText(text, aiConfigChangeContext{TargetMode: "upsert"}); reason == "" {
 			t.Fatalf("invalidConfigAssignmentInText(%q) returned empty reason", text)
