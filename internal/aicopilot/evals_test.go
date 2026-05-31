@@ -106,6 +106,7 @@ func TestOverconfidentCausalityFlagsRootCauseAssertion(t *testing.T) {
 		`{"summary":"Root cause: target drift.","findings":[{"likely_cause":"The mismatch is possible."}]}`,
 		`{"reason":"Root cause: target drift."}`,
 		`{"next_action":"Root cause: target drift."}`,
+		`{"next_action":"Avoid delay.","summary":"Root cause: target drift."}`,
 	}
 	for _, raw := range cases {
 		if !containsOverconfidentCausality(raw) {

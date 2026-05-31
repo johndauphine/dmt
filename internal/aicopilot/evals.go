@@ -394,7 +394,8 @@ func rootCauseAssertionEvidence(lower string) []string {
 func rootCausePhraseCautioned(tokens []string, rootIndex int) bool {
 	if rootIndex > 0 {
 		switch tokens[rootIndex-1] {
-		case "not", "no", "without", "possible", "potential", "hypothesized", "hypothetical":
+		case "not", "no", "without", "possible", "potential", "hypothesized", "hypothetical",
+			"avoid", "avoids", "avoiding", "forbid", "forbidden":
 			return true
 		}
 	}
@@ -410,8 +411,6 @@ func rootCausePhraseCautioned(tokens []string, rootIndex int) bool {
 			hasNegation = true
 		case "identify", "establish", "prove", "determine", "confirm":
 			hasEvidenceLimit = true
-		case "avoid", "avoids", "avoiding", "forbid", "forbidden":
-			return true
 		}
 	}
 	if hasNegation && hasEvidenceLimit {
