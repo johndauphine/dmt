@@ -1213,6 +1213,66 @@ The first-attach number on the Core Ultra 7 358H ties M5 Pro on transfer through
 - Bumping `MSSQL_MEMORY_LIMIT_MB` to 12288 on SO2013 caused WSL to swap (only 24GB total, MSSQL+PG+dmt+OS exceeded budget). Throughput dropped ~30%. Practical ceiling: 8GB MSSQL cap on a 24GB WSL.
 - After accumulated swap activity (cumulative `pswpout` > 23GB), SO2013 throughput regressed ~33% vs cold-start state even after container restarts. A `wsl --shutdown` is required for a true clean reset; container restarts alone don't reclaim the WSL kernel's degraded page-cache state.
 
+## ASUS Windows Native DBs -- SO2010 Runtime Tuning A/B
+
+### Environment
+
+- **Host**: ASUS Windows laptop, performance power mode enabled for the final comparison
+- **Source**: SQL Server 2022 Developer installed directly on Windows
+- **Target**: PostgreSQL 17 installed directly on Windows
+- **Dataset**: StackOverflow2010 full Brent Ozar fixture, 19,310,703 rows transferred
+- **dmt**: `v5.2.0`, Windows binary, run directly from Windows
+- **Mode**: `drop_recreate`, startup auto-tuning enabled, no fixed transfer parameters passed
+- **Runtime controller A/B**: `runtime_tuning: true` vs `runtime_tuning: false`
+- **Date**: June 2026
+
+Database-level tuning was applied before the comparison:
+
+- SQL Server: `max server memory = 6144 MB`, `MAXDOP = 4`, `cost threshold for parallelism = 50`, 8 tempdb files
+- PostgreSQL: `shared_buffers = 2GB`, `work_mem = 32MB`, `maintenance_work_mem = 1GB`, `effective_cache_size = 8GB`, `wal_buffers = 64MB`, `max_wal_size = 8GB`, `checkpoint_timeout = 30min`, `synchronous_commit = off`
+
+### Runtime tuning enabled vs disabled
+
+Both series let the startup tuner choose parameters. The runtime-disabled series only turned off mid-run controller adjustments; it did not pin `workers`, `chunk_size`, `parallel_readers`, or writer counts.
+
+| Series | n | Runtime adjustments | Transfer mean | Transfer median | Transfer CV | Overall mean | Overall median | Overall CV |
+|--------|--:|--------------------:|--------------:|----------------:|------------:|-------------:|---------------:|-----------:|
+| Runtime tuning enabled, all runs | 10 | 10 | 537,193 rows/s | 520,786 rows/s | 13.50% | 394,953 rows/s | 394,260 rows/s | 10.84% |
+| Runtime tuning disabled, all runs | 10 | 0 | 362,154 rows/s | 315,359 rows/s | 28.75% | 236,679 rows/s | 212,230 rows/s | 28.58% |
+| Runtime tuning enabled, runs 3-10 | 8 | 8 | 517,236 rows/s | 512,582 rows/s | 12.44% | 381,176 rows/s | 371,910 rows/s | 8.88% |
+| Runtime tuning disabled, runs 3-10 | 8 | 0 | 313,788 rows/s | 306,460 rows/s | 6.30% | 209,849 rows/s | 208,770 rows/s | 5.38% |
+| Runtime tuning enabled, runs 3-10 regression-tier only | 6 | 6 | 491,596 rows/s | 492,551 rows/s | 5.78% | 368,038 rows/s | 357,605 rows/s | 6.88% |
+
+### Runtime-disabled run detail
+
+The no-runtime series converged on the same startup shape for every run: `workers=14`, `chunk_size=24557`, `write_ahead_writers=1`, `parallel_readers=2`, `read_ahead_buffers=4`. No rows were inserted into `ai_adjustments` during the series.
+
+| Run | Tuning tier | Transfer | Overall | Wall time |
+|----:|-------------|---------:|--------:|----------:|
+| 1 | regression | 580,716 rows/s | 419,797 rows/s | 45.996s |
+| 2 | regression | 530,520 rows/s | 268,204 rows/s | 72.070s |
+| 3 | regression | 310,535 rows/s | 201,153 rows/s | 96.923s |
+| 4 | regression | 302,386 rows/s | 219,439 rows/s | 88.992s |
+| 5 | regression | 296,742 rows/s | 201,153 rows/s | 97.368s |
+| 6 | regression | 296,844 rows/s | 195,057 rows/s | 99.956s |
+| 7 | regression | 344,532 rows/s | 207,641 rows/s | 93.141s |
+| 8 | regression | 341,550 rows/s | 229,889 rows/s | 84.073s |
+| 9 | regression | 320,183 rows/s | 209,898 rows/s | 93.484s |
+| 10 | regression | 297,530 rows/s | 214,563 rows/s | 90.811s |
+
+### Findings
+
+1. **Runtime tuning improved performance substantially.** Against the full 10-run samples, runtime tuning raised transfer throughput from 362K to 537K rows/s (+48%) and overall throughput from 237K to 395K rows/s (+67%). On the settled runs 3-10, the lift was larger: transfer +65%, overall +82%.
+2. **Runtime tuning did not make the environment quieter.** Whole-series CV was lower with runtime tuning enabled than disabled, but that was mostly because the disabled series had two high opening outliers. After dropping those opening runs, no-runtime CV tightened to 6.30% transfer / 5.38% overall, while runtime-enabled runs 3-10 remained at 12.44% transfer / 8.88% overall.
+3. **The quieter no-runtime band was much slower.** Runtime-disabled runs 3-10 averaged only 314K transfer / 210K overall. Runtime-enabled regression-tier runs in the same performance-mode regime averaged 492K transfer / 368K overall with similar CV.
+4. **The startup regression tuner had converged.** It repeatedly selected `WAW=1`, `chunk_size=24557`, `PR=2`, `RAB=4`, `workers=14`. The remaining spread is therefore not startup parameter churn.
+5. **Mid-run adjustments were load-bearing.** The runtime-enabled series recorded 10 adjustments, mostly increasing `write_ahead_writers` from 1 to 2 and occasionally shrinking chunks under memory pressure. Disabling the controller removed those adjustments completely, but also removed the mechanism that rescued throughput on this host.
+6. **Native Windows is faster than the earlier Docker/WSL2 laptop setup, but still noisy.** Native DBs remove Docker Desktop and WSL2 as bottlenecks, yet the laptop still shows warmup/regime effects and run-to-run variance. Repeated samples and outlier filtering remain necessary for convergence claims.
+
+### Takeaway
+
+Keep runtime tuning enabled for native Windows SO2010 runs. It materially improves throughput, and the observed noise is better handled by repeated runs, regression-tier filtering, and warmup/outlier handling than by disabling the runtime controller.
+
 ## M5 Pro 48GB — Host Memory Pressure Finding (SO2010 + SO2013, MSSQL→PG)
 
 ### Test Environment
