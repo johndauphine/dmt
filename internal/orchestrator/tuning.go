@@ -2,11 +2,10 @@ package orchestrator
 
 import (
 	"context"
-	"strings"
-	"time"
-
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
+	"strings"
+	"time"
 )
 
 // applyAITuning runs the deterministic tuner (internal/tuning) to set
@@ -171,4 +170,19 @@ func sanitizeForLog(s string) string {
 		flat = strings.ReplaceAll(flat, "  ", " ")
 	}
 	return strings.TrimSpace(flat)
+}
+
+func (o *Orchestrator) recordSuccessfulTuningResult(totalRows int64, transferDuration time.Duration) {
+	if o.state == nil {
+		return
+	}
+	transferDurationSecs := transferDuration.Seconds()
+	if transferDurationSecs <= 0 {
+		return
+	}
+
+	transferThroughput := float64(totalRows) / transferDurationSecs
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount); err != nil {
+		logging.Debug("Failed to update AI tuning result: %v", err)
+	}
 }
