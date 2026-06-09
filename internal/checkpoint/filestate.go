@@ -2,13 +2,13 @@ package checkpoint
 
 import (
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // FileState implements StateBackend using a single YAML file.
@@ -268,4 +268,232 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		}
 	}
 	return nil
+}
+
+func (fs *FileState) Close() error {
+	return nil
+}
+
+// Path returns the state file path.
+func (fs *FileState) Path() string {
+	return fs.path
+}
+
+// Ensure FileState implements StateBackend
+var _ StateBackend = (*FileState)(nil)
+
+func (fs *FileState) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if fs.state == nil || fs.state.SyncTimestamps == nil {
+		return nil, nil
+	}
+	tables, ok := fs.state.SyncTimestamps[sourceSchema]
+	if !ok {
+		return nil, nil
+	}
+	targets, ok := tables[tableName]
+	if !ok {
+		return nil, nil
+	}
+	ts, ok := targets[targetSchema]
+	if !ok {
+		return nil, nil
+	}
+	return &ts, nil
+}
+
+// UpdateSyncTimestamp persists the sync timestamp for the given
+// (sourceSchema, tableName, targetSchema) triple. Uses the
+// crash-safe atomic-write path established in #254, so a
+// SIGKILL/eviction partway through the save can't tear the file.
+func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.state == nil {
+		fs.state = &fileStateData{Tables: make(map[string]tableState)}
+	}
+	if fs.state.SyncTimestamps == nil {
+		fs.state.SyncTimestamps = make(map[string]map[string]map[string]time.Time)
+	}
+	if fs.state.SyncTimestamps[sourceSchema] == nil {
+		fs.state.SyncTimestamps[sourceSchema] = make(map[string]map[string]time.Time)
+	}
+	if fs.state.SyncTimestamps[sourceSchema][tableName] == nil {
+		fs.state.SyncTimestamps[sourceSchema][tableName] = make(map[string]time.Time)
+	}
+	fs.state.SyncTimestamps[sourceSchema][tableName][targetSchema] = ts
+	return fs.save()
+}
+
+func (fs *FileState) SaveAIAdjustment(runID string, record AIAdjustmentRecord) error {
+	return nil
+}
+
+// GetAIAdjustments returns empty slice for file state (doesn't persist AI history).
+func (fs *FileState) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
+	return nil, nil
+}
+
+// GetAIAdjustmentsByAction returns empty slice for file state.
+func (fs *FileState) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error) {
+	return nil, nil
+}
+
+// SaveAITuning is a no-op for file state (doesn't persist tuning history).
+func (fs *FileState) SaveAITuning(record AITuningRecord) error {
+	return nil
+}
+
+// UpdateAITuningResult is a no-op for file state.
+func (fs *FileState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
+	return nil
+}
+
+// GetAITuningHistory returns empty slice for file state (doesn't persist tuning history).
+func (fs *FileState) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
+	return nil, nil
+}
+
+// GetAITuningAggregatesByWaw returns nil for file state - no history persisted.
+// len(nil) == 0 so the smartconfig format helper correctly skips the section.
+func (fs *FileState) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
+	return nil, nil
+}
+
+// GetAITuningAggregatesByChunkSize returns nil for file state - no history persisted.
+func (fs *FileState) GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error) {
+	return nil, nil
+}
+
+// SaveFallbackEvent persists an AI fallback occurrence (#176) so a
+// separate "dmt status" poll can read counts even though the running
+// migration's in-memory counters are inaccessible. UPSERTs into the
+// nested run_id -> surface -> fingerprint map. Fingerprint may be ""
+// (call sites with no fingerprint still accumulate under one record
+// for the surface).
+//
+// The file backend is the Airflow path; cross-process visibility is
+// the whole reason this method exists rather than being a no-op like
+
+func (fs *FileState) SaveSchemaSnapshot(runID, sourceSchema, tableName, schemaJSON string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	if fs.state == nil {
+		fs.state = &fileStateData{Tables: make(map[string]tableState)}
+	}
+	if fs.state.SchemaSnapshots == nil {
+		fs.state.SchemaSnapshots = make(map[string]map[string]schemaSnapshotState)
+	}
+	if fs.state.SchemaSnapshots[sourceSchema] == nil {
+		fs.state.SchemaSnapshots[sourceSchema] = make(map[string]schemaSnapshotState)
+	}
+	fs.state.SchemaSnapshots[sourceSchema][tableName] = schemaSnapshotState{
+		RunID:      runID,
+		CapturedAt: time.Now().UTC(),
+		SchemaJSON: schemaJSON,
+	}
+	return fs.save()
+}
+
+func (fs *FileState) GetLatestSchemaSnapshots(sourceSchema string) ([]SchemaSnapshotRecord, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	if fs.state == nil || fs.state.SchemaSnapshots == nil {
+		return nil, nil
+	}
+	tables := fs.state.SchemaSnapshots[sourceSchema]
+	if len(tables) == 0 {
+		return nil, nil
+	}
+
+	names := make([]string, 0, len(tables))
+	for tableName := range tables {
+		names = append(names, tableName)
+	}
+	sort.Strings(names)
+
+	records := make([]SchemaSnapshotRecord, 0, len(names))
+	for _, tableName := range names {
+		snapshot := tables[tableName]
+		records = append(records, SchemaSnapshotRecord{
+			RunID:        snapshot.RunID,
+			SourceSchema: sourceSchema,
+			TableName:    tableName,
+			CapturedAt:   snapshot.CapturedAt,
+			SchemaJSON:   snapshot.SchemaJSON,
+		})
+	}
+	return records, nil
+}
+
+func (fs *FileState) SaveFallbackEvent(runID, surface, fingerprint string) error {
+	if runID == "" || surface == "" {
+		return nil
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.state.FallbackEvents == nil {
+		fs.state.FallbackEvents = map[string]map[string]map[string]fallbackEventState{}
+	}
+	bySurface, ok := fs.state.FallbackEvents[runID]
+	if !ok {
+		bySurface = map[string]map[string]fallbackEventState{}
+		fs.state.FallbackEvents[runID] = bySurface
+	}
+	byFP, ok := bySurface[surface]
+	if !ok {
+		byFP = map[string]fallbackEventState{}
+		bySurface[surface] = byFP
+	}
+	now := time.Now().UTC()
+	rec, ok := byFP[fingerprint]
+	if !ok {
+		rec = fallbackEventState{FirstSeen: now}
+	}
+	rec.Count++
+	rec.LastSeen = now
+	byFP[fingerprint] = rec
+	return fs.save()
+}
+
+// GetFallbackEventsByRun returns the persisted fallback events for a
+// run, sorted by (surface, fingerprint) for deterministic status
+// rendering. Empty slice (not nil) when nothing has been recorded.
+func (fs *FileState) GetFallbackEventsByRun(runID string) ([]FallbackEventRecord, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	out := make([]FallbackEventRecord, 0)
+	bySurface, ok := fs.state.FallbackEvents[runID]
+	if !ok {
+		return out, nil
+	}
+	surfaces := make([]string, 0, len(bySurface))
+	for s := range bySurface {
+		surfaces = append(surfaces, s)
+	}
+	sort.Strings(surfaces)
+	for _, surface := range surfaces {
+		byFP := bySurface[surface]
+		fps := make([]string, 0, len(byFP))
+		for fp := range byFP {
+			fps = append(fps, fp)
+		}
+		sort.Strings(fps)
+		for _, fp := range fps {
+			rec := byFP[fp]
+			out = append(out, FallbackEventRecord{
+				RunID:       runID,
+				Surface:     surface,
+				Fingerprint: fp,
+				Count:       rec.Count,
+				FirstSeen:   rec.FirstSeen,
+				LastSeen:    rec.LastSeen,
+			})
+		}
+	}
+	return out, nil
 }

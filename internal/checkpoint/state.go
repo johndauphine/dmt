@@ -5,11 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	_ "modernc.org/sqlite"
 	"os"
 	"path/filepath"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // State manages migration state in SQLite
@@ -140,4 +139,153 @@ func New(dataDir string) (*State, error) {
 // Close closes the database connection
 func (s *State) Close() error {
 	return s.db.Close()
+}
+
+// GetLastSyncTimestamp returns the last successful sync timestamp for a table.
+// Returns nil if no previous sync exists (first sync should do full load).
+func (s *State) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	var tsStr sql.NullString
+	err := s.db.QueryRow(`
+		SELECT last_sync_timestamp FROM table_sync_timestamps
+		WHERE source_schema = ? AND table_name = ? AND target_schema = ?
+	`, sourceSchema, tableName, targetSchema).Scan(&tsStr)
+
+	if err == sql.ErrNoRows || !tsStr.Valid {
+		return nil, nil // No previous sync
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	ts, err := time.Parse(time.RFC3339Nano, tsStr.String)
+	if err != nil {
+		return nil, nil // Invalid timestamp format, treat as no sync
+	}
+	return &ts, nil
+}
+
+// UpdateSyncTimestamp records the source-side high watermark for a table after
+// a successful sync. Incremental reads use a strict "date > watermark" filter,
+// so callers should only persist a watermark whose source rows have been
+// covered by the completed run.
+func (s *State) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error {
+	_, err := s.db.Exec(`
+		INSERT INTO table_sync_timestamps (source_schema, table_name, target_schema, last_sync_timestamp, updated_at)
+		VALUES (?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(source_schema, table_name, target_schema) DO UPDATE SET
+			last_sync_timestamp = excluded.last_sync_timestamp,
+			updated_at = excluded.updated_at
+	`, sourceSchema, tableName, targetSchema, ts.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// SaveSchemaSnapshot records the source schema shape for one table after a
+// successful migration run. Snapshots are append-only; GetLatestSchemaSnapshots
+// chooses the newest row for each table so history cleanup does not erase the
+// baseline for the next run.
+func (s *State) SaveSchemaSnapshot(runID, sourceSchema, tableName, schemaJSON string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO schema_snapshots (source_schema, table_name, run_id, captured_at, schema_json)
+		VALUES (?, ?, ?, ?, ?)
+	`, sourceSchema, tableName, runID, time.Now().UTC().Format(time.RFC3339Nano), schemaJSON)
+	return err
+}
+
+// GetLatestSchemaSnapshots returns the newest saved snapshot per table for a
+// source schema, ordered by table name for deterministic callers and tests.
+func (s *State) GetLatestSchemaSnapshots(sourceSchema string) ([]SchemaSnapshotRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT ss.run_id, ss.source_schema, ss.table_name, ss.captured_at, ss.schema_json
+		FROM schema_snapshots ss
+		JOIN (
+			SELECT table_name, MAX(id) AS id
+			FROM schema_snapshots
+			WHERE source_schema = ?
+			GROUP BY table_name
+		) latest ON latest.id = ss.id
+		ORDER BY ss.table_name
+	`, sourceSchema)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []SchemaSnapshotRecord
+	for rows.Next() {
+		var record SchemaSnapshotRecord
+		var capturedAt string
+		if err := rows.Scan(
+			&record.RunID,
+			&record.SourceSchema,
+			&record.TableName,
+			&capturedAt,
+			&record.SchemaJSON,
+		); err != nil {
+			return nil, err
+		}
+		ts, err := time.Parse(time.RFC3339Nano, capturedAt)
+		if err != nil {
+			return nil, err
+		}
+		record.CapturedAt = ts
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+// SaveFallbackEvent records one AI fallback event for a run (#176).
+// Bumps the count for (run_id, surface, fingerprint) under UPSERT
+// semantics; first_seen is preserved across calls, last_seen advances.
+// Surface is one of observability.Surface* values; fingerprint may be
+// empty for call sites that don't carry one (the row still aggregates
+// the count under the surface).
+//
+// Called from the observability package's FallbackSink registration
+// (orchestrator wires this in Run/Resume). Cheap by design — one
+// UPSERT per fallback; a pathological migration's distinct-fingerprint
+// count is bounded by the source schema's vocabulary, not the row
+// count, so this stays well under the IO budget of the migration
+// itself.
+func (s *State) SaveFallbackEvent(runID, surface, fingerprint string) error {
+	if runID == "" || surface == "" {
+		return nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`
+		INSERT INTO fallback_events (run_id, surface, fingerprint, count, first_seen, last_seen)
+		VALUES (?, ?, ?, 1, ?, ?)
+		ON CONFLICT(run_id, surface, fingerprint) DO UPDATE SET
+			count = count + 1,
+			last_seen = excluded.last_seen
+	`, runID, surface, fingerprint, now, now)
+	return err
+}
+
+// GetFallbackEventsByRun returns every fallback row for a run in
+// surface-then-fingerprint order so the status renderer's per-surface
+// totals are deterministic. Returns an empty slice (never nil) when
+// the run has no events so callers don't need a nil guard.
+func (s *State) GetFallbackEventsByRun(runID string) ([]FallbackEventRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT run_id, surface, fingerprint, count, first_seen, last_seen
+		FROM fallback_events
+		WHERE run_id = ?
+		ORDER BY surface ASC, fingerprint ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]FallbackEventRecord, 0)
+	for rows.Next() {
+		var rec FallbackEventRecord
+		var firstStr, lastStr string
+		if err := rows.Scan(&rec.RunID, &rec.Surface, &rec.Fingerprint, &rec.Count, &firstStr, &lastStr); err != nil {
+			return nil, err
+		}
+		rec.FirstSeen, _ = time.Parse(time.RFC3339Nano, firstStr)
+		rec.LastSeen, _ = time.Parse(time.RFC3339Nano, lastStr)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
