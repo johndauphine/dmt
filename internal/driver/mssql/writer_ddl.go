@@ -200,11 +200,6 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 	return err == nil, err
 }
 
-// SetTableLogged is a no-op for SQL Server.
-func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error {
-	return nil
-}
-
 // CreatePrimaryKey is a no-op because PK is created with the table.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
 	return nil

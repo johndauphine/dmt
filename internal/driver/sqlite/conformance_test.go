@@ -78,3 +78,13 @@ func sqlitePaginationCase() *conformance.PaginationCase {
 		RowNumberArgs: []any{ts, int64(50), int64(75)},
 	}
 }
+
+// TestWriterCapabilities pins the #460 capability matrix: SQLite cannot
+// ADD CONSTRAINT after CREATE TABLE, so it deliberately does not
+// implement driver.ConstraintWriter — finalization skips FK/CHECK with
+// one audited message instead of per-constraint stub warnings.
+func TestWriterCapabilities(t *testing.T) {
+	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
+		ConstraintWriter: false,
+	})
+}

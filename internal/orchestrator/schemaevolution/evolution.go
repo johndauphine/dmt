@@ -3,6 +3,7 @@ package schemaevolution
 import (
 	"context"
 	"fmt"
+	"github.com/johndauphine/dmt/internal/driver"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -303,13 +304,43 @@ func (e *Engine) FinalizeContractTableEvolution(ctx context.Context, report drif
 		}
 	}
 
+	// Capability check (#460): same degradation contract as the
+	// target-mode finalization phases. Warn only when constraint work
+	// was actually requested AND exists on the evolved tables — an
+	// added table with no FKs/CHECKs skips nothing (codex review).
+	cw, hasConstraintWriter := e.targetPool.(driver.ConstraintWriter)
+	if !hasConstraintWriter {
+		skipped := 0
+		if e.cfg.Migration.CreateForeignKeysEnabled() {
+			for _, table := range addedTables {
+				skipped += len(table.ForeignKeys)
+			}
+		}
+		if e.cfg.Migration.CreateCheckConstraints {
+			for _, table := range addedTables {
+				skipped += len(table.CheckConstraints)
+			}
+		}
+		if skipped > 0 {
+			logging.Warn("%s: skipping %d FK/CHECK constraint(s) on evolved tables: target engine %s does not support post-transfer constraint creation", label, skipped, e.targetPool.DBType())
+			// Audited via the engine's sink, NOT observability.RecordFallback —
+			// that surface set is reserved for AI fallbacks and would print
+			// this as one in status output (codex review).
+			e.auditEvent("constraint_capability_skip", map[string]any{
+				"target_db_type": e.targetPool.DBType(),
+				"skipped":        skipped,
+				"context":        "schema_evolution",
+			})
+		}
+	}
+
 	foreignKeys := 0
-	if e.cfg.Migration.CreateForeignKeysEnabled() {
+	if e.cfg.Migration.CreateForeignKeysEnabled() && hasConstraintWriter {
 		for _, table := range addedTables {
 			for _, fk := range table.ForeignKeys {
 				t := table
 				foreignKey := fk
-				if err := e.targetPool.CreateForeignKey(ctx, &t, &foreignKey, e.cfg.Target.Schema); err != nil {
+				if err := cw.CreateForeignKey(ctx, &t, &foreignKey, e.cfg.Target.Schema); err != nil {
 					logging.Warn("%s: creating foreign key %s on evolved table %s: %v", label, foreignKey.Name, t.Name, err)
 					continue
 				}
@@ -319,12 +350,12 @@ func (e *Engine) FinalizeContractTableEvolution(ctx context.Context, report drif
 	}
 
 	checks := 0
-	if e.cfg.Migration.CreateCheckConstraints {
+	if e.cfg.Migration.CreateCheckConstraints && hasConstraintWriter {
 		for _, table := range addedTables {
 			for _, check := range table.CheckConstraints {
 				t := table
 				chk := check
-				if err := e.targetPool.CreateCheckConstraint(ctx, &t, &chk, e.cfg.Target.Schema); err != nil {
+				if err := cw.CreateCheckConstraint(ctx, &t, &chk, e.cfg.Target.Schema); err != nil {
 					logging.Warn("%s: creating check constraint %s on evolved table %s: %v", label, chk.Name, t.Name, err)
 					continue
 				}
