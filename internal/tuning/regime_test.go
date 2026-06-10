@@ -549,7 +549,7 @@ func TestFilterByExactIdentity_PreIdentityRowsRejected(t *testing.T) {
 }
 
 // TestTune_ExactIdentityCohort_FiresRegression — integration test for
-// the Tier 1 dispatch. When the history holds ≥minRowsForRegression
+// the Tier 1 dispatch. When the history holds enough rows for the regression (#452 floor)
 // rows from the exact same identity, the tuner should fire regression
 // on those alone (not the broader regime-comparable set).
 func TestTune_ExactIdentityCohort_FiresRegression(t *testing.T) {
@@ -601,7 +601,7 @@ func TestTune_ExactIdentityCohort_FiresRegression(t *testing.T) {
 }
 
 // TestTune_ExactIdentityCohortTooThin_FallsThroughToTier2 — when the
-// exact-identity cohort has fewer than minRowsForRegression rows, the
+// exact-identity cohort has too few rows for the regression floor (#452), the
 // dispatch falls through to the Tier 2 regime filter. The rest of the
 // rows (regime-comparable but not identity-matching) take over.
 func TestTune_ExactIdentityCohortTooThin_FallsThroughToTier2(t *testing.T) {

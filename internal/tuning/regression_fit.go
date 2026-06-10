@@ -20,12 +20,30 @@ import (
 // (notably tests written before #224) keep training rather than
 // silently collapsing to a constant-zero y.
 func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
-	if len(rows) < minRowsForRegression {
-		return nil, errInsufficientRowsForRegression
-	}
-
 	pairs := distinctPairs(rows)
 	modes := distinctModes(rows)
+	// Single-level categoricals are dropped from the design matrix (#452):
+	// a one-level one-hot is an all-ones column — a duplicate intercept
+	// that adds a feature (raising the row floor below) without carrying
+	// information. In production this always fires: Records() fetches
+	// per-pair and modes aren't persisted yet, so the model is the 8
+	// numeric columns.
+	if len(pairs) < 2 {
+		pairs = nil
+	}
+	if len(modes) < 2 {
+		modes = nil
+	}
+	nFeat := 8 + len(pairs) + len(modes)
+
+	// dof-based row floor (#452): refuse to solve unless the residual
+	// degrees of freedom clear minRegressionDOF for the model actually
+	// being built. The error carries the arithmetic so the Reasoning
+	// fall-through line tells the user how far away the next tier is.
+	if required := nFeat + minRegressionDOF; len(rows) < required {
+		return nil, fmt.Errorf("%w: %d rows < %d required (%d features + %d dof)",
+			errInsufficientRowsForRegression, len(rows), required, nFeat, minRegressionDOF)
+	}
 
 	// First pass: numeric feature stats for standardization.
 	var wawSum, csSum, logAvgSum, prSum, rabSum float64
@@ -68,9 +86,8 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	//   [5] logAvg_z
 	//   [6] pr_z                                 (#219)
 	//   [7] rab_z                                (#219)
-	//   [8 .. 8+|pairs|-1]    one-hot per pair
-	//   [8+|pairs| .. ]       one-hot per mode
-	nFeat := 8 + len(pairs) + len(modes)
+	//   [8 .. 8+|pairs|-1]    one-hot per pair (≥2 levels only, see above)
+	//   [8+|pairs| .. ]       one-hot per mode (≥2 levels only, see above)
 	X := mat.NewDense(len(rows), nFeat, nil)
 	y := mat.NewVecDense(len(rows), nil)
 

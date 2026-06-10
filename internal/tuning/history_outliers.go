@@ -68,7 +68,7 @@ type outlierFilterResult struct {
 
 // filterOutliersForRegression dispatches between the residual-based
 // outlier filter (#225) and the marginal-median filter based on row
-// count. Above 2×minRowsForRegression the residual filter runs — its
+// count. At or above residualFilterMinRows the residual filter runs — its
 // feature-aware t-statistic catches near-threshold noisy points that
 // the marginal floor misses (the original 0.5×median rule survived
 // run-8-style host throttling at 575K vs a 1.06M prediction). Below

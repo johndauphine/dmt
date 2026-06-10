@@ -39,7 +39,13 @@ import (
 // at just two values each ({2,4} and {4,8}), so a quadratic term would be
 // perfectly collinear with the linear one. Categorical features are
 // one-hot encoded with NO baseline-dropped category — the intercept
-// absorbs the baseline which the ridge solve handles.
+// absorbs the baseline which the ridge solve handles. Categoricals with
+// a single level are dropped from the design matrix entirely (#452): a
+// one-level one-hot is an all-ones duplicate of the intercept, adding a
+// feature (and raising the row floor) without information. In production
+// this always fires — Records() fetches history per (source, target)
+// pair, and target_mode isn't persisted yet — so the real model is the
+// 8 numeric columns.
 //
 // The model is trained on rows the caller filters (regime + outliers +
 // RULE 1) so the regression sees only "comparable" past runs. PR2 wires
@@ -56,13 +62,30 @@ import (
 // (predict-then-argmax over a small grid; the intercept dominates and
 // the result is ≈ the global mean, which is sensible).
 
-// minRowsForRegression is the floor below which fitRegression refuses
-// to solve. p features need at least p+1 observations in principle; in
-// practice we want enough data that coefficients aren't pure noise. After
-// #219 added pr_z + rab_z the largest model has ~7 numeric + 9 pairs +
-// 2 modes = 18 features; 30 rows still gives a dof of ≥12, enough for
-// the t-critical lookup to stay in well-tabled territory.
-const minRowsForRegression = 30
+// minRegressionDOF is the residual degrees-of-freedom floor enforced by
+// fitRegression: it refuses to solve unless n ≥ nFeat + minRegressionDOF
+// for the design matrix it actually builds (#452). Four residual dof is
+// the working minimum for the fit-quality machinery — σ̂² stays defined
+// and tCritical(4)=2.78 keeps prediction intervals honest (wide) rather
+// than unavailable. Below that, coefficients are pure noise.
+const minRegressionDOF = 4
+
+// minRowsToAttemptRegression is the dispatch gate: the tier dispatchers
+// (applyHistorySelection, Tune's Tier 1) try the regression at this many
+// filtered rows; fitRegression enforces the exact dof-based floor for
+// the model it builds and a refusal falls through to smoothed bins.
+//
+// Sized to the model that actually occurs in production (#452): the
+// single-level categorical drop (see package comment) leaves 8 numeric
+// columns, so 8 + minRegressionDOF = 12. The previous floor of 30 was
+// sized for a hypothetical ~18-feature cross-pair model that the
+// per-pair history fetch makes impossible — it kept the regression tier
+// idle through runs 12-29, exactly the window where a recurring
+// migration should be converging. Multi-level cohorts (constructed
+// directly in tests) need more rows; the dof floor scales with their
+// feature count and the dispatch gate just means those fits are
+// attempted and cleanly refused.
+const minRowsToAttemptRegression = 12
 
 // halfOptimumFraction and fullOptimumFraction set the chunk-byte grid
 // the argmax search walks (per the issue spec for #179 — "CS_BYTES ∈
@@ -81,8 +104,9 @@ const (
 const ridgeLambda = 1e-6
 
 // errInsufficientRowsForRegression is returned by fitRegression when the
-// caller passed fewer than minRowsForRegression rows. The caller should
-// fall back to the smoothed-bins tier on this error.
+// caller passed fewer rows than the dof floor for the model it would
+// build (nFeat + minRegressionDOF). The caller should fall back to the
+// smoothed-bins tier on this error.
 var errInsufficientRowsForRegression = errors.New("regression: insufficient rows to fit model")
 
 // regressionModel holds a fitted quadratic model and the metadata
