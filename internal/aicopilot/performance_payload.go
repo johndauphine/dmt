@@ -11,7 +11,7 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
-func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.SmartConfigSuggestions, recent []checkpoint.AITuningRecord, adjustments []checkpoint.AIAdjustmentRecord) PerformancePayload {
+func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.SmartConfigSuggestions, recent []checkpoint.TuningRecord, adjustments []checkpoint.RuntimeAdjustmentRecord) PerformancePayload {
 	payload := PerformancePayload{
 		PromptVersion: PerformancePromptVersion,
 		Task:          "Explain deterministic DMT smartconfig and runtime tuning choices. Deterministic knobs and values are authoritative; AI may rank evidence but must not invent knobs or values.",
@@ -68,7 +68,7 @@ func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.Smar
 	return payload
 }
 
-func buildPerformanceHistoryRuns(recent []checkpoint.AITuningRecord, limit int) []PerformanceHistoryRun {
+func buildPerformanceHistoryRuns(recent []checkpoint.TuningRecord, limit int) []PerformanceHistoryRun {
 	if limit <= 0 || len(recent) == 0 {
 		return nil
 	}
@@ -113,7 +113,7 @@ func buildPerformanceHistoryRuns(recent []checkpoint.AITuningRecord, limit int) 
 	return out
 }
 
-func buildRuntimeAdjustmentSummaries(adjustments []checkpoint.AIAdjustmentRecord, limit int) []RuntimeAdjustmentSummary {
+func buildRuntimeAdjustmentSummaries(adjustments []checkpoint.RuntimeAdjustmentRecord, limit int) []RuntimeAdjustmentSummary {
 	if limit <= 0 || len(adjustments) == 0 {
 		return nil
 	}
@@ -144,7 +144,7 @@ func buildRuntimeAdjustmentSummaries(adjustments []checkpoint.AIAdjustmentRecord
 	return out
 }
 
-func runtimeAdjustmentActionForPayload(a checkpoint.AIAdjustmentRecord) string {
+func runtimeAdjustmentActionForPayload(a checkpoint.RuntimeAdjustmentRecord) string {
 	allowed := allowedPerformanceKnobSet()
 	if allowed[a.Action] {
 		return a.Action
@@ -242,7 +242,7 @@ func scrubTuningValue(v interface{}) string {
 	}
 }
 
-func buildObservedPerformanceMetrics(suggestions driver.SmartConfigSuggestions, recent []checkpoint.AITuningRecord, adjustments []RuntimeAdjustmentSummary) PerformanceObservedMetrics {
+func buildObservedPerformanceMetrics(suggestions driver.SmartConfigSuggestions, recent []checkpoint.TuningRecord, adjustments []RuntimeAdjustmentSummary) PerformanceObservedMetrics {
 	metrics := PerformanceObservedMetrics{
 		MaxSourceConnections:   suggestions.MaxSourceConnections,
 		MaxTargetConnections:   suggestions.MaxTargetConnections,

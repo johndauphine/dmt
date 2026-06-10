@@ -28,11 +28,11 @@ func (s *State) Capabilities() BackendCapabilities {
 		SchemaSnapshots:      true,
 		FallbackEvents:       true,
 
-		RunHistory:          true,
-		RunConfigSnapshots:  true,
-		Profiles:            true,
-		AIAdjustmentHistory: true,
-		AITuningHistory:     true,
+		RunHistory:               true,
+		RunConfigSnapshots:       true,
+		Profiles:                 true,
+		RuntimeAdjustmentHistory: true,
+		TuningHistory:            true,
 	}
 }
 

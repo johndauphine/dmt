@@ -116,7 +116,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 
 	// Always create the runtime tuner so chunk-retry / error / queue-depth
 	// metrics flow into RunResult and downstream into ai_tuning_history. The
-	// AI monitor (which makes runtime adjustments) only attaches if
+	// runtime controller (which makes runtime adjustments) only attaches if
 	// AIAdjust is enabled and an AI mapper is configured, but the tuner's
 	// metrics are useful for the smartconfig history feedback loop even
 	// without runtime adjustment enabled.
@@ -150,7 +150,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	if adjustEnabled {
 		collector := monitor.NewMetricsCollector(tuner, adjustInterval)
 
-		// Carry the probe-derived hard cap from applyAITuning into the
+		// Carry the probe-derived hard cap from applyTuning into the
 		// controller so growth and shrink rules can't push chunk_size
 		// past the target's protocol limit mid-migration (#166).
 		// Without this, MySQL targets with a default 4MB @@max_allowed_packet
@@ -269,7 +269,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	}
 
 	// Stash chunk retry count so the orchestrator can persist it with the run's
-	// final tuning result. Read by the UpdateAITuningResult call sites in Run/Resume.
+	// final tuning result. Read by the UpdateTuningResult call sites in Run/Resume.
 	o.lastChunkRetryCount = result.ChunkRetryCount
 	o.lastRunAdjusted = result.RuntimeAdjusted
 
@@ -451,7 +451,7 @@ retryLoop:
 		ts.stats.ScanTime += stats.ScanTime
 		ts.stats.WriteTime += stats.WriteTime
 		ts.stats.Rows += stats.Rows
-		// Report transfer time breakdown for AI monitoring
+		// Report transfer time breakdown for runtime controllering
 		if tuner != nil {
 			tuner.ReportTransferTime(
 				stats.QueryTime.Nanoseconds(),

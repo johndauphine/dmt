@@ -1,5 +1,5 @@
 // Rule-based runtime parameter controller — the deterministic
-// replacement for AIAdjuster (#172 of the AI-optional epic #167).
+// replacement for Adjuster (#172 of the AI-optional epic #167).
 //
 // Architecture: a fixed set of rules evaluated on each tick of the
 // MetricsCollector, with per-knob cooldowns to prevent oscillation.

@@ -179,7 +179,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	logging.Debug("Found %d tables", len(tables))
 
 	// Apply AI-recommended parameters (if AI is available)
-	o.applyAITuning(ctx)
+	o.applyTuning(ctx)
 
 	// Refine memory settings based on actual row sizes from database stats
 	tableRowSizes := make([]config.TableRowSize, len(tables))

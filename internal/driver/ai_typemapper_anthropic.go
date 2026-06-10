@@ -38,7 +38,7 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 	model := m.provider.GetEffectiveModel(m.providerName)
 
 	// Detect if this is a type mapping query (short, simple) vs a complex query.
-	// DDL generation prompts need raw SQL output, while AI monitor/smart config
+	// DDL generation prompts need raw SQL output, while runtime controller/smart config
 	// prompts need structured JSON output. Use prompt content to distinguish.
 	maxTokens := 1024
 	systemPrompt := ""

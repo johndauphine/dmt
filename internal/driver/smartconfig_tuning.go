@@ -153,7 +153,7 @@ func (s *SmartConfigAnalyzer) toTuningHistory() tuning.HistoryProvider {
 }
 
 // tuningHistoryAdapter converts the analyzer's TuningHistoryProvider into
-// the tuning package's HistoryProvider â€” fetches AITuningRecord rows and
+// the tuning package's HistoryProvider â€” fetches TuningRecord rows and
 // translates each into a tuning.HistoryRecord.
 type tuningHistoryAdapter struct {
 	base TuningHistoryProvider
@@ -162,7 +162,7 @@ type tuningHistoryAdapter struct {
 // Records returns all history rows for the (source, target) pair. limit=0
 // = no bound; the tuner does its own filtering downstream.
 func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tuning.HistoryRecord, error) {
-	rows, err := a.base.GetAITuningHistory(0, sourceDBType, targetDBType)
+	rows, err := a.base.GetTuningHistory(0, sourceDBType, targetDBType)
 	if err != nil {
 		return nil, err
 	}

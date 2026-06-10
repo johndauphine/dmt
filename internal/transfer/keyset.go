@@ -28,7 +28,7 @@ func executeKeysetPagination(
 	resumeRanges []resumeRange,
 	targetTableName string,
 	tuner RuntimeTuner,
-	aiAdjuster WriteErrorAdjuster,
+	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -303,7 +303,7 @@ func executeKeysetPagination(
 		Prog:                   prog,
 		EnableAck:              job.Saver != nil && job.TaskID > 0,
 		Tuner:                  tuner,
-		AIAdjuster:             aiAdjuster,
+		Adjuster:               writeErrorAdjuster,
 		TableName:              job.Table.Name,
 		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
 	})

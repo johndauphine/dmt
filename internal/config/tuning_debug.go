@@ -14,10 +14,10 @@ type ParamChange struct {
 	NewValue int64
 }
 
-// ApplyAISuggestions overrides formula-computed defaults with AI recommendations.
+// ApplyTunerSuggestions overrides formula-computed defaults with AI recommendations.
 // Only parameters the user didn't explicitly set (Original* == 0) are overridden.
 // Returns a list of parameters that were changed.
-func (c *Config) ApplyAISuggestions(s *driver.SmartConfigSuggestions) []ParamChange {
+func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []ParamChange {
 	ac := c.autoConfig
 	var changes []ParamChange
 

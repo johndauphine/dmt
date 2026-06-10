@@ -42,7 +42,7 @@ func TestReplayValidation_AgainstAITuningHistory(t *testing.T) {
 	}
 	defer state.Close()
 
-	// Find every (source, target) pair present in history. GetAITuningHistory
+	// Find every (source, target) pair present in history. GetTuningHistory
 	// with limit=0 returns all rows; we group locally.
 	all, err := allHistoryPairs(state)
 	if err != nil {
@@ -74,8 +74,8 @@ type historyKey struct {
 // driver names (aliases) or future drivers added without updating this
 // list would be silently missed; harmless for the diagnostic-only purpose
 // of this test.
-func allHistoryPairs(state *checkpoint.State) (map[historyKey][]checkpoint.AITuningRecord, error) {
-	pairs := map[historyKey][]checkpoint.AITuningRecord{}
+func allHistoryPairs(state *checkpoint.State) (map[historyKey][]checkpoint.TuningRecord, error) {
+	pairs := map[historyKey][]checkpoint.TuningRecord{}
 	candidates := []historyKey{
 		{"mssql", "postgres"}, {"postgres", "mssql"},
 		{"mssql", "mysql"}, {"mysql", "mssql"},
@@ -83,7 +83,7 @@ func allHistoryPairs(state *checkpoint.State) (map[historyKey][]checkpoint.AITun
 		{"mssql", "mssql"}, {"postgres", "postgres"}, {"mysql", "mysql"},
 	}
 	for _, k := range candidates {
-		rows, err := state.GetAITuningHistory(0, k.source, k.target)
+		rows, err := state.GetTuningHistory(0, k.source, k.target)
 		if err != nil {
 			return nil, err
 		}
@@ -124,8 +124,8 @@ type disagreement struct {
 // replayPair walks the rows for one (source, target) pair in chronological
 // order, replaying each through tuning.Tune with history-as-of-the-row's-
 // timestamp.
-func replayPair(rows []checkpoint.AITuningRecord) replayResult {
-	// State's GetAITuningHistory orders by Timestamp DESC; we want ASC for
+func replayPair(rows []checkpoint.TuningRecord) replayResult {
+	// State's GetTuningHistory orders by Timestamp DESC; we want ASC for
 	// chronological replay so each row sees the prior history.
 	sort.Slice(rows, func(i, j int) bool {
 		return rows[i].Timestamp.Before(rows[j].Timestamp)
@@ -197,7 +197,7 @@ func (h *historySliceProvider) Records(_, _ string) ([]tuning.HistoryRecord, err
 	return h.rows, nil
 }
 
-func convertHistoryRows(rows []checkpoint.AITuningRecord) []tuning.HistoryRecord {
+func convertHistoryRows(rows []checkpoint.TuningRecord) []tuning.HistoryRecord {
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{

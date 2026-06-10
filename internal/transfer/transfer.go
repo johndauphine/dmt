@@ -23,12 +23,12 @@ func Execute(
 	job Job,
 	prog *progress.Tracker,
 	tuner RuntimeTuner,
-	aiAdjuster ...WriteErrorAdjuster,
+	writeErrorAdjuster ...WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	// Extract optional AI adjuster
 	var adjuster WriteErrorAdjuster
-	if len(aiAdjuster) > 0 {
-		adjuster = aiAdjuster[0]
+	if len(writeErrorAdjuster) > 0 {
+		adjuster = writeErrorAdjuster[0]
 	}
 
 	// Track table start/end for accurate progress display

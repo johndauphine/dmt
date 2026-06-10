@@ -126,7 +126,7 @@ func appendOutlierReasoning(out *Output, r outlierFilterResult) {
 
 // filterOutliers drops two kinds of unhelpful rows:
 //   - Incomplete: FinalThroughput == 0 (NULL coerced to zero by the
-//     checkpoint backend before UpdateAITuningResult fires for the
+//     checkpoint backend before UpdateTuningResult fires for the
 //     row's run). The smoothed-bins aggregator skips these too; the
 //     regression in fitRegression would otherwise train on them as
 //     legitimate 0 rows/s observations, biasing the fit toward zero

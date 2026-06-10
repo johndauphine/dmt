@@ -174,21 +174,21 @@ type AutoTuneOutput struct {
 // the AI prompt used were dropped; the new tuner reads raw records and
 // does its own aggregation in-package.
 type TuningHistoryProvider interface {
-	// GetAIAdjustments returns recent runtime AI adjustments. Used by
+	// GetRuntimeAdjustments returns recent runtime adjustments. Used by
 	// the runtime monitor (separate AI surface; not retired in PR1).
-	GetAIAdjustments(limit int) ([]checkpoint.AIAdjustmentRecord, error)
+	GetRuntimeAdjustments(limit int) ([]checkpoint.RuntimeAdjustmentRecord, error)
 
-	// GetAITuningHistory returns recent tuning recommendations filtered by
+	// GetTuningHistory returns recent tuning recommendations filtered by
 	// migration direction, ordered by Timestamp DESC. limit > 0 bounds the
 	// slice; the bridge passes 0 for unbounded.
-	GetAITuningHistory(limit int, sourceType, targetType string) ([]checkpoint.AITuningRecord, error)
+	GetTuningHistory(limit int, sourceType, targetType string) ([]checkpoint.TuningRecord, error)
 
-	// SaveAITuning saves a tuning recommendation for future reference.
-	SaveAITuning(record checkpoint.AITuningRecord) error
+	// SaveTuningRecord saves a tuning recommendation for future reference.
+	SaveTuningRecord(record checkpoint.TuningRecord) error
 
-	// UpdateAITuningResult updates the most recent tuning record with final
+	// UpdateTuningResult updates the most recent tuning record with final
 	// throughput and chunk retry count from the completed run.
-	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
+	UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal

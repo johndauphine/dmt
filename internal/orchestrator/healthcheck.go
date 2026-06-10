@@ -198,7 +198,7 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 }
 
 func (o *Orchestrator) estimateDryRunRowsPerSecond() int64 {
-	history, err := o.state.GetAITuningHistory(5, o.sourcePool.DBType(), o.targetPool.DBType())
+	history, err := o.state.GetTuningHistory(5, o.sourcePool.DBType(), o.targetPool.DBType())
 	if err != nil {
 		logging.Debug("dry-run: failed to load throughput history: %v", err)
 		return 0
@@ -295,24 +295,24 @@ type stateHistoryAdapter struct {
 	state checkpoint.StateBackend
 }
 
-// GetAIAdjustments returns recent runtime AI adjustments from migrations.
-func (a *stateHistoryAdapter) GetAIAdjustments(limit int) ([]checkpoint.AIAdjustmentRecord, error) {
-	return a.state.GetAIAdjustments(limit)
+// GetRuntimeAdjustments returns recent runtime adjustments from migrations.
+func (a *stateHistoryAdapter) GetRuntimeAdjustments(limit int) ([]checkpoint.RuntimeAdjustmentRecord, error) {
+	return a.state.GetRuntimeAdjustments(limit)
 }
 
-// GetAITuningHistory returns recent tuning recommendations from analyze.
-func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetType string) ([]checkpoint.AITuningRecord, error) {
-	return a.state.GetAITuningHistory(limit, sourceType, targetType)
+// GetTuningHistory returns recent tuning recommendations from analyze.
+func (a *stateHistoryAdapter) GetTuningHistory(limit int, sourceType, targetType string) ([]checkpoint.TuningRecord, error) {
+	return a.state.GetTuningHistory(limit, sourceType, targetType)
 }
 
-// SaveAITuning saves a tuning recommendation for future reference.
-func (a *stateHistoryAdapter) SaveAITuning(record checkpoint.AITuningRecord) error {
-	return a.state.SaveAITuning(record)
+// SaveTuningRecord saves a tuning recommendation for future reference.
+func (a *stateHistoryAdapter) SaveTuningRecord(record checkpoint.TuningRecord) error {
+	return a.state.SaveTuningRecord(record)
 }
 
-// UpdateAITuningResult updates the most recent tuning record with final migration throughput.
-func (a *stateHistoryAdapter) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
-	return a.state.UpdateAITuningResult(throughput, durationSecs, chunkRetryCount, adjustedAtRuntime)
+// UpdateTuningResult updates the most recent tuning record with final migration throughput.
+func (a *stateHistoryAdapter) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+	return a.state.UpdateTuningResult(throughput, durationSecs, chunkRetryCount, adjustedAtRuntime)
 }
 
 // AnalyzeConfig analyzes the source database and emits tuning

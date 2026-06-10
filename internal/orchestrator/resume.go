@@ -182,7 +182,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	logging.Debug("Found %d tables in source", len(tables))
 
 	// Apply AI-recommended parameters (if AI is available)
-	o.applyAITuning(ctx)
+	o.applyTuning(ctx)
 
 	// Persist the post-tuning config so `dmt history --run <id>` reflects what actually ran.
 	if err := o.state.UpdateRunConfig(run.ID, o.config.Sanitized()); err != nil {

@@ -8,13 +8,13 @@ import (
 	"time"
 )
 
-// applyAITuning runs the deterministic tuner (internal/tuning) to set
+// applyTuning runs the deterministic tuner (internal/tuning) to set
 // migration parameters before transfer begins. Only overrides
 // formula-computed values (where Original* == 0), never user-specified
 // values. Function name kept for now; rename pending in a follow-up
 // cleanup (#175 PR1 minimized public-API churn). Falls back to baseline
 // on any failure (logged at Debug/Warn level).
-func (o *Orchestrator) applyAITuning(ctx context.Context) {
+func (o *Orchestrator) applyTuning(ctx context.Context) {
 	logging.Debug("Running parameter tuning...")
 
 	// One line of parameter ownership (#461), deferred so it fires on
@@ -97,7 +97,7 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 
 	// Capture effective DB tuning at run start (#144). Used for both:
 	//   (a) smartconfig prompt regime classification (per trajectory row)
-	//   (b) persisting on the saved AITuningRecord so future runs can
+	//   (b) persisting on the saved TuningRecord so future runs can
 	//       classify against THIS run.
 	// Best-effort: failures yield zero-valued fields, which the render path
 	// and classifier treat as "unknown".
@@ -126,7 +126,7 @@ func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	}
 
 	// Apply suggestions only where user didn't specify values
-	changes := o.config.ApplyAISuggestions(suggestions)
+	changes := o.config.ApplyTunerSuggestions(suggestions)
 	if len(changes) > 0 {
 		logging.Info("Tuning applied %d parameter(s):", len(changes))
 		for _, c := range changes {
@@ -191,7 +191,7 @@ func (o *Orchestrator) recordSuccessfulTuningResult(totalRows int64, transferDur
 	}
 
 	transferThroughput := float64(totalRows) / transferDurationSecs
-	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount, o.lastRunAdjusted); err != nil {
+	if err := o.state.UpdateTuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount, o.lastRunAdjusted); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 }

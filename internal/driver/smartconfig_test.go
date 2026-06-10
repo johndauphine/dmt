@@ -17,24 +17,24 @@ import (
 // tuner reads raw rows and aggregates in-package). Just enough to verify
 // SaveTuningWithActualParams persists the post-override params.
 type mockHistoryProvider struct {
-	saved   *checkpoint.AITuningRecord
-	history []checkpoint.AITuningRecord
+	saved   *checkpoint.TuningRecord
+	history []checkpoint.TuningRecord
 }
 
-func (m *mockHistoryProvider) GetAIAdjustments(int) ([]checkpoint.AIAdjustmentRecord, error) {
+func (m *mockHistoryProvider) GetRuntimeAdjustments(int) ([]checkpoint.RuntimeAdjustmentRecord, error) {
 	return nil, nil
 }
 
-func (m *mockHistoryProvider) GetAITuningHistory(_ int, _, _ string) ([]checkpoint.AITuningRecord, error) {
+func (m *mockHistoryProvider) GetTuningHistory(_ int, _, _ string) ([]checkpoint.TuningRecord, error) {
 	return m.history, nil
 }
 
-func (m *mockHistoryProvider) SaveAITuning(record checkpoint.AITuningRecord) error {
+func (m *mockHistoryProvider) SaveTuningRecord(record checkpoint.TuningRecord) error {
 	m.saved = &record
 	return nil
 }
 
-func (m *mockHistoryProvider) UpdateAITuningResult(float64, float64, int, bool) error {
+func (m *mockHistoryProvider) UpdateTuningResult(float64, float64, int, bool) error {
 	return nil
 }
 
@@ -88,13 +88,13 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 	if mock.saved.SourceDBType != "mssql" || mock.saved.TargetDBType != "postgres" {
 		t.Errorf("DB types wrong: source=%q target=%q", mock.saved.SourceDBType, mock.saved.TargetDBType)
 	}
-	// PR1: WasAIUsed always false now; AIReasoning carries the deterministic
+	// PR1: WasAIUsed always false now; Reasoning carries the deterministic
 	// tuner's reasoning string.
 	if mock.saved.WasAIUsed {
 		t.Error("WasAIUsed should be false post-PR #175")
 	}
-	if mock.saved.AIReasoning != "test reasoning" {
-		t.Errorf("AIReasoning: got %q, want %q", mock.saved.AIReasoning, "test reasoning")
+	if mock.saved.Reasoning != "test reasoning" {
+		t.Errorf("Reasoning: got %q, want %q", mock.saved.Reasoning, "test reasoning")
 	}
 
 	// Issue #160: persisted EstimatedMemoryMB must reflect post-override
@@ -534,14 +534,14 @@ func TestThroughputBytesForHistory_GuardsBadValues(t *testing.T) {
 
 // TestTuningHistoryAdapter_MapsAllSharedFields is the #455 guard against
 // the adapter failure mode that hit #219: a field present on both
-// checkpoint.AITuningRecord and tuning.HistoryRecord silently dropped by
+// checkpoint.TuningRecord and tuning.HistoryRecord silently dropped by
 // the hand-written mapping in tuningHistoryAdapter.Records. The test sets
 // a distinctive non-zero value on every checkpoint field via reflection,
 // runs the adapter, and requires every same-name same-type field on the
 // tuning side to carry that exact value. Adding a shared field without
 // mapping it fails here instead of silently starving the tuner.
 func TestTuningHistoryAdapter_MapsAllSharedFields(t *testing.T) {
-	src := checkpoint.AITuningRecord{}
+	src := checkpoint.TuningRecord{}
 	rv := reflect.ValueOf(&src).Elem()
 	for i := 0; i < rv.NumField(); i++ {
 		f := rv.Field(i)
@@ -557,13 +557,13 @@ func TestTuningHistoryAdapter_MapsAllSharedFields(t *testing.T) {
 		case f.Type() == reflect.TypeOf(time.Time{}):
 			f.Set(reflect.ValueOf(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)))
 		default:
-			t.Fatalf("checkpoint.AITuningRecord field %s has unhandled kind %s — extend this test's value generator",
+			t.Fatalf("checkpoint.TuningRecord field %s has unhandled kind %s — extend this test's value generator",
 				rv.Type().Field(i).Name, f.Kind())
 		}
 	}
 
 	adapter := &tuningHistoryAdapter{base: &mockHistoryProvider{
-		history: []checkpoint.AITuningRecord{src},
+		history: []checkpoint.TuningRecord{src},
 	}}
 	rows, err := adapter.Records(src.SourceDBType, src.TargetDBType)
 	if err != nil {

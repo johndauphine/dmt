@@ -21,7 +21,7 @@ type runtimeAdjustmentRecorder struct {
 
 func newRuntimeAdjustmentRecorder(state checkpoint.StateBackend, runID string) *runtimeAdjustmentRecorder {
 	r := &runtimeAdjustmentRecorder{state: state, runID: runID}
-	records, err := state.GetAIAdjustments(0)
+	records, err := state.GetRuntimeAdjustments(0)
 	if err != nil {
 		logging.Warn("failed to load runtime adjustment history for %s: %v", runID, err)
 		return r
@@ -63,7 +63,7 @@ func (r *runtimeAdjustmentRecorder) record(_ string, record monitor.AdjustmentRe
 	if record.AdjustmentNumber <= 0 {
 		record.AdjustmentNumber = r.nextNumber()
 	}
-	return r.state.SaveAIAdjustment(r.runID, checkpoint.AIAdjustmentRecord{
+	return r.state.SaveRuntimeAdjustment(r.runID, checkpoint.RuntimeAdjustmentRecord{
 		AdjustmentNumber: record.AdjustmentNumber,
 		Timestamp:        record.Timestamp,
 		Action:           record.Action,
