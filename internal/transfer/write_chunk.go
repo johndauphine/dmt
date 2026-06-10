@@ -1,38 +1,9 @@
 package transfer
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
-	"fmt"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/johndauphine/dmt/internal/pool"
 )
-
-func writeChunk(ctx context.Context, pgPool *pgxpool.Pool, schema, table string, cols []string, rows [][]any) error {
-	conn, err := pgPool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-
-	// Disable statement timeout for this operation
-	_, err = conn.Exec(ctx, "SET statement_timeout = 0")
-	if err != nil {
-		return fmt.Errorf("setting statement timeout: %w", err)
-	}
-
-	// Use COPY for bulk insert
-	_, err = conn.Conn().CopyFrom(
-		ctx,
-		pgx.Identifier{schema, table},
-		cols,
-		pgx.CopyFromRows(rows),
-	)
-
-	return err
-}
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool
 func writeChunkGeneric(ctx context.Context, tgtPool pool.TargetPool, schema, table string, cols, colTypes []string, rows [][]any, batchSize int, orderCols ...string) error {
@@ -88,23 +59,4 @@ func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, sc
 		WriterID:    writerID,
 		PartitionID: partitionID,
 	})
-}
-
-// ValidateBinaryData ensures binary data is properly formatted
-func ValidateBinaryData(data []byte) []byte {
-	if data == nil || len(data) == 0 {
-		return nil
-	}
-	return data
-}
-
-// FormatBytea formats binary data for PostgreSQL bytea column
-func FormatBytea(data []byte) string {
-	if data == nil || len(data) == 0 {
-		return ""
-	}
-	var buf bytes.Buffer
-	buf.WriteString("\\x")
-	buf.WriteString(hex.EncodeToString(data))
-	return buf.String()
 }

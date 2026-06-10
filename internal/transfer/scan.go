@@ -14,6 +14,20 @@ func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 	var result [][]any
 	var lastPK any
 
+	// Column types are fixed for the chunk, so conversion is resolved once
+	// per scan instead of a per-value string switch (#466) — at pipeline
+	// throughput that switch ran millions of times per second, and most
+	// columns fall through it unchanged. convIdx holds only the columns
+	// that actually need conversion so pass-through tables skip the loop
+	// entirely.
+	convs := buildValueConverters(colTypes)
+	convIdx := make([]int, 0, len(convs))
+	for i, c := range convs {
+		if c != nil {
+			convIdx = append(convIdx, i)
+		}
+	}
+
 	// Reuse pointers slice to avoid allocation per row
 	ptrs := make([]any, numCols)
 
@@ -27,9 +41,8 @@ func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 			return nil, nil, err
 		}
 
-		// Process values for PostgreSQL compatibility
-		for i, val := range row {
-			row[i] = processValue(val, colTypes[i])
+		for _, i := range convIdx {
+			row[i] = convs[i](row[i])
 		}
 
 		result = append(result, row)
@@ -43,65 +56,85 @@ func scanRows(rows *sql.Rows, cols, colTypes []string) ([][]any, any, error) {
 	return result, lastPK, rows.Err()
 }
 
-// processValue handles type conversions for PostgreSQL compatibility
-func processValue(val any, colType string) any {
-	if val == nil {
-		return nil
+// buildValueConverters resolves each column's type to a conversion func.
+// A nil entry means the column's values pass through unchanged — the
+// common case. The conversions themselves are unchanged from the old
+// per-value processValue switch; only the dispatch moved.
+func buildValueConverters(colTypes []string) []func(any) any {
+	convs := make([]func(any) any, len(colTypes))
+	for i, ct := range colTypes {
+		convs[i] = converterForType(ct)
 	}
+	return convs
+}
 
+// converterForType handles type conversions for PostgreSQL compatibility.
+func converterForType(colType string) func(any) any {
 	switch colType {
 	case "binary", "varbinary", "image":
-		// Convert binary data to hex format for bytea
-		switch v := val.(type) {
-		case []byte:
-			if len(v) == 0 {
-				return nil
-			}
-			return v // pgx handles []byte directly
-		}
+		return convertBinaryValue
 	case "uniqueidentifier":
-		// Handle UUID conversion
-		switch v := val.(type) {
-		case []byte:
-			if len(v) == 16 {
-				// SQL Server GUID to PostgreSQL UUID
-				return formatUUID(v)
-			}
-			return string(v)
-		case string:
-			return v
-		}
+		return convertUniqueIdentifierValue
 	case "bit":
-		// Convert bit to boolean
-		switch v := val.(type) {
-		case bool:
-			return v
-		case int64:
-			return v != 0
-		case int:
-			return v != 0
-		}
-	case "datetime", "datetime2", "smalldatetime":
-		// Ensure proper timestamp format
-		switch v := val.(type) {
-		case time.Time:
-			// Handle SQL Server minimum datetime (1753-01-01)
-			if v.Year() < 1 {
-				return nil
-			}
-			return v
-		}
-	case "datetimeoffset":
-		// Handle datetimeoffset with timezone
-		switch v := val.(type) {
-		case time.Time:
-			if v.Year() < 1 {
-				return nil
-			}
-			return v
-		}
+		return convertBitValue
+	case "datetime", "datetime2", "smalldatetime", "datetimeoffset":
+		return convertDateTimeValue
+	default:
+		return nil
 	}
+}
 
+// convertBinaryValue converts binary data for bytea targets.
+func convertBinaryValue(val any) any {
+	switch v := val.(type) {
+	case []byte:
+		if len(v) == 0 {
+			return nil
+		}
+		return v // pgx handles []byte directly
+	}
+	return val
+}
+
+// convertUniqueIdentifierValue handles SQL Server GUID conversion.
+func convertUniqueIdentifierValue(val any) any {
+	switch v := val.(type) {
+	case []byte:
+		if len(v) == 16 {
+			// SQL Server GUID to PostgreSQL UUID
+			return formatUUID(v)
+		}
+		return string(v)
+	case string:
+		return v
+	}
+	return val
+}
+
+// convertBitValue converts bit to boolean.
+func convertBitValue(val any) any {
+	switch v := val.(type) {
+	case bool:
+		return v
+	case int64:
+		return v != 0
+	case int:
+		return v != 0
+	}
+	return val
+}
+
+// convertDateTimeValue ensures proper timestamp format, mapping SQL Server's
+// pre-year-1 sentinel datetimes to NULL.
+func convertDateTimeValue(val any) any {
+	switch v := val.(type) {
+	case time.Time:
+		// Handle SQL Server minimum datetime (1753-01-01)
+		if v.Year() < 1 {
+			return nil
+		}
+		return v
+	}
 	return val
 }
 
