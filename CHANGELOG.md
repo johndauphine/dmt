@@ -11,6 +11,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Set the Go runtime soft memory limit (GOMEMLIMIT) from the effective
+  memory budget so GC paces against it natively; the transfer memory guard
+  becomes the backstop and now uses a single process-wide heap sampler
+  instead of per-chunk `ReadMemStats` calls, firing `FreeOSMemory` once per
+  pressure episode instead of every 500ms (#462). An operator-supplied
+  GOMEMLIMIT environment variable is honored untouched.
+
+### Fixed
+
 - Fixed tuning-history feedback contamination: runs where the runtime
   controller (or structural write-error adjuster) changed parameters
   mid-migration are now flagged `adjusted_at_runtime` in `ai_tuning_history`,

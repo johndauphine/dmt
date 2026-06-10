@@ -1,6 +1,35 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"runtime/debug"
+
+	"github.com/johndauphine/dmt/internal/logging"
+)
+
+// ApplyRuntimeMemoryLimit sets the Go runtime's soft memory limit
+// (GOMEMLIMIT) from the effective budget so the GC paces itself against
+// the same number the pipeline buffers are sized from (#462). Without
+// this, the only memory enforcement is the transfer memory guard, which
+// fires at 80% with no pacing before it; with it, the guard becomes the
+// backstop for the case GC cannot solve (live data exceeding budget).
+//
+// A user-supplied GOMEMLIMIT environment variable wins — the runtime
+// already honors it at startup and overriding an explicit operator
+// choice here would be rude.
+func (c *Config) ApplyRuntimeMemoryLimit() {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		logging.Debug("GOMEMLIMIT set in environment — leaving runtime memory limit untouched")
+		return
+	}
+	mb := c.autoConfig.EffectiveMaxMemoryMB
+	if mb <= 0 {
+		return
+	}
+	debug.SetMemoryLimit(mb << 20)
+	logging.Debug("Runtime memory limit (GOMEMLIMIT) set to %d MB from effective budget", mb)
+}
 
 // TableRowSize holds row size info for a table
 type TableRowSize struct {
@@ -11,7 +40,9 @@ type TableRowSize struct {
 
 // RefineSettingsForRowSizes reports actual table row sizes for informational purposes.
 // Previously this function would reduce chunk_size/workers based on memory estimates,
-// but this caused performance regressions. The Go GC soft limit handles memory pressure.
+// but this caused performance regressions. Memory pressure is handled by the Go GC
+// soft limit — set from the effective budget by ApplyRuntimeMemoryLimit (#462) —
+// with the transfer pipeline's memory guard as the backstop.
 // Returns false (no adjustments made) and a description of row sizes.
 func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool, changes string) {
 	if len(tables) == 0 {
