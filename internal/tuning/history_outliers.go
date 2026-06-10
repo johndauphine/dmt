@@ -138,6 +138,26 @@ func appendOutlierReasoning(out *Output, r outlierFilterResult) {
 // Retained as the < residualFilterMinRows safety net for
 // filterOutliersForRegression — see that function's comment for the
 // dispatch rationale.
+// dropRuntimeAdjusted strips rows whose run was changed mid-flight by the
+// runtime controller or write-error adjuster (#451). Such rows attribute a
+// blended multi-config throughput to the single recorded parameter set —
+// and the bias is systematic, not noise: the controller intervenes exactly
+// when the configured values underperform, so the blend flatters bad
+// configs. They are removed before ANY cohort is built (regime, drift,
+// outliers, exploration bucket count, selection) — unlike the outlier
+// filter, there is no selector for which these rows are valid evidence.
+func dropRuntimeAdjusted(rows []HistoryRecord) (kept []HistoryRecord, dropped int) {
+	kept = make([]HistoryRecord, 0, len(rows))
+	for _, r := range rows {
+		if r.AdjustedAtRuntime {
+			dropped++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept, dropped
+}
+
 func filterOutliers(rows []HistoryRecord) []HistoryRecord {
 	// First pass: drop incomplete rows so neither pipeline tier sees
 	// them. Median below is computed on completed runs only.

@@ -188,7 +188,7 @@ type TuningHistoryProvider interface {
 
 	// UpdateAITuningResult updates the most recent tuning record with final
 	// throughput and chunk retry count from the completed run.
-	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
+	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 }
 
 // AIAdjustmentRecord represents a historical AI adjustment from runtime
@@ -237,6 +237,10 @@ type AITuningRecord struct {
 	FinalThroughput      float64   `json:"final_throughput,omitempty"`
 	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"`
 	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`
+	// AdjustedAtRuntime mirrors checkpoint.AITuningRecord (#451): true when
+	// the runtime controller changed parameters mid-run, so the row's
+	// throughput can't be attributed to its recorded parameters.
+	AdjustedAtRuntime bool `json:"adjusted_at_runtime,omitempty"`
 
 	// Effective DB tuning captured at run start (#144). Mirrors the
 	// fields in checkpoint.AITuningRecord.

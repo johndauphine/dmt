@@ -87,6 +87,11 @@ type Orchestrator struct {
 	// retry pressure into ai_tuning_history.
 	lastChunkRetryCount int
 
+	// Set by transferAll alongside lastChunkRetryCount; true when any
+	// runtime adjustment was applied during the run (#451). Persisted to
+	// ai_tuning_history so the tuner can exclude the row from training.
+	lastRunAdjusted bool
+
 	// metrics is the observability surface for #229. Always non-nil —
 	// observability.Noop() satisfies the interface when metrics are
 	// disabled, so call sites can invoke methods unconditionally without

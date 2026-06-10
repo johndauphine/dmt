@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Fixed tuning-history feedback contamination: runs where the runtime
+  controller (or structural write-error adjuster) changed parameters
+  mid-migration are now flagged `adjusted_at_runtime` in `ai_tuning_history`,
+  and the deterministic tuner excludes them from all training cohorts —
+  regression, smoothed bins, drift detection, and the exploration bucket
+  count — with the exclusion reported in the tuning reasoning (#451).
 - Fixed the deterministic tuner's regression tier rarely engaging: the row
   floor is now degrees-of-freedom-based (12 rows for the production cohort
   shape instead of 30), single-level categorical columns are dropped from

@@ -182,7 +182,7 @@ func (o *Orchestrator) recordSuccessfulTuningResult(totalRows int64, transferDur
 	}
 
 	transferThroughput := float64(totalRows) / transferDurationSecs
-	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount); err != nil {
+	if err := o.state.UpdateAITuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount, o.lastRunAdjusted); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 }

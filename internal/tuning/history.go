@@ -85,6 +85,16 @@ func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryP
 		return
 	}
 
+	// #451: same hygiene as Tune — runtime-adjusted rows precede every
+	// cohort, so this wrapper can't train on them either.
+	rows, adjustedDropped := dropRuntimeAdjusted(rows)
+	if adjustedDropped > 0 {
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"history hygiene: %d runtime-adjusted run(s) excluded from tuning cohorts (#451)",
+			adjustedDropped,
+		)
+	}
+
 	rows = filterByRegime(rows, in, currentTuning)
 	if len(rows) == 0 {
 		return

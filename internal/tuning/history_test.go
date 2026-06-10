@@ -1438,3 +1438,92 @@ func TestApplyHistorySelection_RegressionEngagesMidWindow(t *testing.T) {
 		t.Errorf("WAW = %d, want 4 (regression should detect the quadratic peak)", out.WriteAheadWriters)
 	}
 }
+
+// TestApplyHistory_RuntimeAdjustedRowsExcluded locks in the #451 fix: rows
+// flagged AdjustedAtRuntime must not reach any selection tier. The fixture
+// poisons the history with adjusted runs showing spectacular throughput at
+// WAW=4 — exactly the flattering blend a mid-run controller rescue
+// produces. Pre-fix, the 14 total rows cleared the regression gate and the
+// argmax chased the poisoned WAW=4 cells; post-fix only the 6 clean WAW=2
+// rows remain, the smoothed-bins tier runs, and WAW stays 2.
+func TestApplyHistory_RuntimeAdjustedRowsExcluded(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+
+	rows := []HistoryRecord{}
+	for i := 0; i < 6; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 800_000,
+			CPUCores:        16, MemoryGB: 48,
+		})
+	}
+	for i := 0; i < 8; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 4, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 2_000_000,
+			CPUCores:        16, MemoryGB: 48,
+			AdjustedAtRuntime: true,
+		})
+	}
+
+	applyHistory(&out, in, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	if out.WriteAheadWriters != 2 {
+		t.Errorf("WAW = %d, want 2 (adjusted WAW=4 rows must not train any tier); reasoning: %s",
+			out.WriteAheadWriters, out.Reasoning)
+	}
+	if out.Tier != TierSmoothedBins {
+		t.Errorf("Tier = %q, want %q (6 clean rows -> bins, not regression over 14)", out.Tier, TierSmoothedBins)
+	}
+	if !strings.Contains(out.Reasoning, "runtime-adjusted") {
+		t.Errorf("Reasoning missing runtime-adjusted hygiene note; got %q", out.Reasoning)
+	}
+}
+
+// TestTune_AllRowsRuntimeAdjusted_TreatedAsColdStart verifies the bucket
+// count also excludes adjusted rows (#451): when every history row is
+// adjusted, the bucket is effectively cold and Tune should re-enter the
+// planned exploration grid to gather clean measurements — not train on
+// the poisoned set, and not sit at bare baseline when a working history
+// backend is available to learn through.
+func TestTune_AllRowsRuntimeAdjusted_TreatedAsColdStart(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	rows := make([]HistoryRecord, 8)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 4, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 2_000_000,
+			CPUCores:        16, MemoryGB: 48,
+			AdjustedAtRuntime: true,
+		}
+	}
+
+	out := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
+
+	if out.Tier != TierExploration {
+		t.Errorf("Tier = %q, want %q (all-adjusted history = cold-start bucket)", out.Tier, TierExploration)
+	}
+	if !strings.Contains(out.Reasoning, "runtime-adjusted") {
+		t.Errorf("Reasoning missing runtime-adjusted hygiene note; got %q", out.Reasoning)
+	}
+}

@@ -800,7 +800,7 @@ type tuningResultState struct {
 	chunkRetryCount int
 }
 
-func (s *tuningResultState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
+func (s *tuningResultState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	s.calls++
 	s.throughput = throughput
 	s.durationSecs = durationSecs

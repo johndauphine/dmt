@@ -346,7 +346,7 @@ func (fs *FileState) SaveAITuning(record AITuningRecord) error {
 }
 
 // UpdateAITuningResult is a no-op for file state.
-func (fs *FileState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
+func (fs *FileState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	return nil
 }
 

@@ -118,7 +118,10 @@ type StateBackend interface {
 	// GetAITuningAggregatesByChunkSize returns per-chunk_size aggregates over the
 	// FULL ai_tuning_history. Same rationale as GetAITuningAggregatesByWaw.
 	GetAITuningAggregatesByChunkSize(sourceType, targetType string) ([]ChunkSizeAggregateRecord, error)
-	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error
+	// adjustedAtRuntime flags the row as runtime-adjusted (#451): the
+	// run's throughput blends multiple configs, so the deterministic
+	// tuner excludes the row from its training cohorts.
+	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 
 	// AI fallback events (#176). UPSERT semantics: each call bumps the
 	// count for (run_id, surface, fingerprint). The file backend is the
@@ -235,6 +238,11 @@ type AITuningRecord struct {
 	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
 	FinalDurationSecs float64 `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
 	ChunkRetryCount   int     `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
+	// AdjustedAtRuntime is true when the runtime controller (or write-error
+	// adjuster) changed parameters mid-run (#451). The run's throughput is a
+	// blend across configs, so the tuner must not attribute it to the
+	// recorded parameters. False for pre-migration rows.
+	AdjustedAtRuntime bool `json:"adjusted_at_runtime,omitempty"`
 
 	// Effective DB tuning captured at run start. Used by the smartconfig
 	// trajectory rendering to compare history against the current run's

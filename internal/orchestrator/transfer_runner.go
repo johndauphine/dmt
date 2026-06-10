@@ -56,6 +56,9 @@ type RunResult struct {
 	TableStats      map[string]*transfer.TransferStats
 	TableFailures   []TableFailure
 	ChunkRetryCount int // Cumulative count of transient chunk retries across the run
+	// RuntimeAdjusted is true when the runtime controller or write-error
+	// adjuster applied any parameter change during the run (#451).
+	RuntimeAdjusted bool
 }
 
 // tableStats tracks stats for a single table (internal).
@@ -233,6 +236,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	if tuner != nil {
 		result.ChunkRetryCount = tuner.Metrics().ChunkRetryCount
 	}
+	result.RuntimeAdjusted = runtimeAdjustments.applied()
 
 	return result, nil
 }
@@ -267,6 +271,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []s
 	// Stash chunk retry count so the orchestrator can persist it with the run's
 	// final tuning result. Read by the UpdateAITuningResult call sites in Run/Resume.
 	o.lastChunkRetryCount = result.ChunkRetryCount
+	o.lastRunAdjusted = result.RuntimeAdjusted
 
 	return result.TableFailures, nil
 }

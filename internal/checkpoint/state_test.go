@@ -139,7 +139,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	}
 
 	// Update with throughput result
-	if err := state.UpdateAITuningResult(450000, 240.5, 0); err != nil {
+	if err := state.UpdateAITuningResult(450000, 240.5, 0, false); err != nil {
 		t.Fatalf("UpdateAITuningResult() error: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	if err := state.SaveAITuning(record2); err != nil {
 		t.Fatalf("SaveAITuning(record2) error: %v", err)
 	}
-	if err := state.UpdateAITuningResult(300000, 350.0, 2); err != nil {
+	if err := state.UpdateAITuningResult(300000, 350.0, 2, false); err != nil {
 		t.Fatalf("UpdateAITuningResult(record2) error: %v", err)
 	}
 
@@ -248,7 +248,7 @@ func TestGetAITuningAggregatesByWaw(t *testing.T) {
 			t.Fatalf("SaveAITuning %d: %v", i, err)
 		}
 		if f.throughput > 0 {
-			if err := state.UpdateAITuningResult(f.throughput, f.durationSecs, f.retries); err != nil {
+			if err := state.UpdateAITuningResult(f.throughput, f.durationSecs, f.retries, false); err != nil {
 				t.Fatalf("UpdateAITuningResult %d: %v", i, err)
 			}
 		}
@@ -319,7 +319,7 @@ func TestGetAITuningAggregatesByChunkSize(t *testing.T) {
 		if err := state.SaveAITuning(rec); err != nil {
 			t.Fatalf("SaveAITuning %d: %v", i, err)
 		}
-		if err := state.UpdateAITuningResult(s.throughput, 20, 0); err != nil {
+		if err := state.UpdateAITuningResult(s.throughput, 20, 0, false); err != nil {
 			t.Fatalf("UpdateAITuningResult %d: %v", i, err)
 		}
 	}
@@ -1106,5 +1106,57 @@ func TestAITuningRegimeColumnsNullForOldRecords(t *testing.T) {
 	}
 	if got.TargetSyncCommit != "" {
 		t.Errorf("TargetSyncCommit should be empty, got %q", got.TargetSyncCommit)
+	}
+}
+
+// TestUpdateAITuningResult_AdjustedAtRuntimeFlag verifies the #451 flag
+// round-trips: a run the controller adjusted mid-flight persists
+// adjusted_at_runtime=1 and reads back true, while an unadjusted run
+// (and by extension pre-migration NULL rows) reads back false.
+func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	mkRecord := func(offset time.Duration) AITuningRecord {
+		return AITuningRecord{
+			Timestamp:    time.Now().Add(offset),
+			SourceDBType: "mssql",
+			TargetDBType: "postgres",
+			TotalTables:  5,
+			TotalRows:    1_000_000,
+			Workers:      6,
+			ChunkSize:    50_000,
+		}
+	}
+
+	if err := state.SaveAITuning(mkRecord(0)); err != nil {
+		t.Fatalf("SaveAITuning(clean): %v", err)
+	}
+	if err := state.UpdateAITuningResult(500_000, 100, 0, false); err != nil {
+		t.Fatalf("UpdateAITuningResult(clean): %v", err)
+	}
+	if err := state.SaveAITuning(mkRecord(time.Second)); err != nil {
+		t.Fatalf("SaveAITuning(adjusted): %v", err)
+	}
+	if err := state.UpdateAITuningResult(400_000, 120, 1, true); err != nil {
+		t.Fatalf("UpdateAITuningResult(adjusted): %v", err)
+	}
+
+	history, err := state.GetAITuningHistory(0, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetAITuningHistory: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(history))
+	}
+	// Ordered by timestamp DESC: adjusted run first.
+	if !history[0].AdjustedAtRuntime {
+		t.Error("adjusted run should read back AdjustedAtRuntime=true")
+	}
+	if history[1].AdjustedAtRuntime {
+		t.Error("clean run should read back AdjustedAtRuntime=false")
 	}
 }

@@ -191,15 +191,23 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 //
 // chunkRetryCount is the cumulative count of transient chunk retries observed
 // during the run (RuntimeMetrics.ChunkRetryCount); 0 for a clean run.
-func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
+//
+// adjustedAtRuntime marks the row as runtime-adjusted (#451): the run's
+// observed throughput blends multiple configs, so the deterministic tuner
+// excludes the row from regression / smoothed-bins / drift cohorts.
+func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+	adjusted := 0
+	if adjustedAtRuntime {
+		adjusted = 1
+	}
 	_, err := s.db.Exec(`
 		UPDATE ai_tuning_history
-		SET final_throughput = ?, final_duration_seconds = ?, chunk_retry_count = ?
+		SET final_throughput = ?, final_duration_seconds = ?, chunk_retry_count = ?, adjusted_at_runtime = ?
 		WHERE id = (
 			SELECT MAX(id) FROM ai_tuning_history
 			WHERE final_throughput IS NULL
 		)
-	`, throughput, durationSecs, chunkRetryCount)
+	`, throughput, durationSecs, chunkRetryCount, adjusted)
 	return err
 }
 
@@ -219,7 +227,8 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		       target_fsync, target_full_page_writes, target_max_wal_size_mb,
 		       target_wal_level, source_max_server_memory_mb,
 		       source_host, source_port, source_database, source_schema,
-		       target_host, target_port, target_database, target_schema
+		       target_host, target_port, target_database, target_schema,
+		       adjusted_at_runtime
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
 		ORDER BY timestamp DESC`, limit, sourceType, targetType)
@@ -245,6 +254,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		// #215 workload identity; nullable for older rows.
 		var sourceHost, sourceDatabase, sourceSchema, targetHost, targetDatabase, targetSchema sql.NullString
 		var sourcePort, targetPort sql.NullInt64
+		var adjustedAtRuntime sql.NullInt64
 
 		if err := rows.Scan(
 			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
@@ -260,6 +270,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 			&targetWALLevel, &sourceMaxServerMemoryMB,
 			&sourceHost, &sourcePort, &sourceDatabase, &sourceSchema,
 			&targetHost, &targetPort, &targetDatabase, &targetSchema,
+			&adjustedAtRuntime,
 		); err != nil {
 			return nil, err
 		}
@@ -291,6 +302,9 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 		if chunkRetryCount.Valid {
 			r.ChunkRetryCount = int(chunkRetryCount.Int64)
 		}
+		// #451: NULL (pre-migration row) reads as false — those runs
+		// mostly predate runtime tuning and stay eligible for training.
+		r.AdjustedAtRuntime = adjustedAtRuntime.Valid && adjustedAtRuntime.Int64 != 0
 		if platform.Valid {
 			r.Platform = platform.String
 		}

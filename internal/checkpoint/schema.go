@@ -322,6 +322,13 @@ func (s *State) ensureTuningResultColumns() error {
 		{"target_port", "ALTER TABLE ai_tuning_history ADD COLUMN target_port INTEGER"},
 		{"target_database", "ALTER TABLE ai_tuning_history ADD COLUMN target_database TEXT"},
 		{"target_schema", "ALTER TABLE ai_tuning_history ADD COLUMN target_schema TEXT"},
+		// #451: set when the runtime controller (or the structural
+		// write-error adjuster) changed parameters mid-run. Such rows
+		// attribute blended throughput to the configured params, so the
+		// deterministic tuner excludes them from its training cohorts.
+		// DEFAULT 0 keeps pre-migration rows eligible (their runs
+		// predate the flag and mostly predate runtime tuning).
+		{"adjusted_at_runtime", "ALTER TABLE ai_tuning_history ADD COLUMN adjusted_at_runtime INTEGER DEFAULT 0"},
 	}
 	for _, m := range migrations {
 		if have[m.col] {
