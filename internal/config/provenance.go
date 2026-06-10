@@ -1,5 +1,10 @@
 package config
 
+import (
+	"fmt"
+	"strings"
+)
+
 const (
 	provenanceMigrationWorkers              = "migration.workers"
 	provenanceMigrationChunkSize            = "migration.chunk_size"
@@ -150,4 +155,62 @@ func (c *Config) fillDefaultTunableProvenance() {
 	markInt(provenanceMigrationMaxRetries, c.Migration.MaxRetries, ProvenanceAutoDefault)
 	markInt(provenanceSourceChunkSize, c.Source.ChunkSize, ProvenanceAutoDefault)
 	markInt(provenanceTargetChunkSize, c.Target.ChunkSize, ProvenanceAutoDefault)
+}
+
+// TuningProvenanceSummary renders one line of who-owns-what for the
+// tunable parameters (#461): values pinned by the user or secrets
+// defaults (which the tuner will never override) versus values the
+// deterministic tuner derived. Logged at run start so pin-rot is
+// visible — a pinned knob silently disables tuning for that parameter.
+func (c *Config) TuningProvenanceSummary() string {
+	type tunable struct {
+		name  string
+		value int64
+	}
+	tunables := []tunable{
+		{provenanceMigrationWorkers, int64(c.Migration.Workers)},
+		{provenanceMigrationChunkSize, int64(c.Migration.ChunkSize)},
+		{provenanceMigrationWriteAheadWriters, int64(c.Migration.WriteAheadWriters)},
+		{provenanceMigrationParallelReaders, int64(c.Migration.ParallelReaders)},
+		{provenanceMigrationReadAheadBuffers, int64(c.Migration.ReadAheadBuffers)},
+		{provenanceMigrationMaxPartitions, int64(c.Migration.MaxPartitions)},
+		{provenanceMigrationMaxSourceConns, int64(c.Migration.MaxSourceConnections)},
+		{provenanceMigrationMaxTargetConns, int64(c.Migration.MaxTargetConnections)},
+		{provenanceMigrationLargeTableThreshold, c.Migration.LargeTableThreshold},
+	}
+
+	var pinned, derived, defaults []string
+	// max_memory_mb has no provenance entry (it's a cap, not a tuned
+	// value) but a set cap clamps every derived recommendation — surface
+	// it as pinned so the line explains why the tuner chose smaller
+	// values (codex review on #461).
+	if c.Migration.MaxMemoryMB > 0 {
+		pinned = append(pinned, fmt.Sprintf("max_memory_mb=%d", c.Migration.MaxMemoryMB))
+	}
+	for _, t := range tunables {
+		entry := fmt.Sprintf("%s=%d", strings.TrimPrefix(t.name, "migration."), t.value)
+		switch c.tunableProvenance(t.name) {
+		case ProvenanceUserConfig, ProvenanceSecretsDefault:
+			pinned = append(pinned, entry)
+		case ProvenanceSmartConfig, ProvenanceRuntimeControl:
+			derived = append(derived, entry)
+		default:
+			defaults = append(defaults, entry)
+		}
+	}
+
+	var parts []string
+	if len(pinned) > 0 {
+		parts = append(parts, "pinned (tuner will not adjust): "+strings.Join(pinned, ", "))
+	}
+	if len(derived) > 0 {
+		parts = append(parts, "tuner-derived: "+strings.Join(derived, ", "))
+	}
+	if len(defaults) > 0 {
+		parts = append(parts, "defaults: "+strings.Join(defaults, ", "))
+	}
+	if len(parts) == 0 {
+		return "no tunable parameters resolved"
+	}
+	return strings.Join(parts, " | ")
 }
