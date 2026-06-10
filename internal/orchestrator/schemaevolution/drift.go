@@ -1,4 +1,4 @@
-package orchestrator
+package schemaevolution
 
 import (
 	"context"
@@ -26,9 +26,9 @@ func (e *SchemaDriftError) Error() string {
 
 func (e *SchemaDriftError) ExitCode() int { return exitcodes.TransferError }
 
-func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolution bool) (drift.Report, error) {
-	o.lastSchemaContractDecisions = nil
-	records, err := o.state.GetLatestSchemaSnapshots(o.schemaSnapshotNamespace())
+func (e *Engine) ReportDrift(tables []source.Table, allowSchemaEvolution bool) (drift.Report, error) {
+	e.lastContractDecisions = nil
+	records, err := e.state.GetLatestSchemaSnapshots(e.SnapshotNamespace())
 	if err != nil {
 		return drift.Report{}, fmt.Errorf("loading schema snapshots: %w", err)
 	}
@@ -44,7 +44,7 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 			return drift.Report{}, fmt.Errorf("decoding schema snapshot for %s.%s: %w",
 				record.SourceSchema, record.TableName, err)
 		}
-		if o.tableInCurrentFilterScope(snapshot.Name) {
+		if e.tableInCurrentFilterScope(snapshot.Name) {
 			previous = append(previous, snapshot)
 		}
 	}
@@ -55,9 +55,9 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 		return drift.Report{}, nil
 	}
 
-	contractDecisions := o.schemaContractDecisions(report, tables, allowSchemaEvolution)
-	o.lastSchemaContractDecisions = append([]SchemaContractDecision(nil), contractDecisions...)
-	logging.Warn("%s", report.FormatWithFooter(o.schemaDriftReportFooterWithDecisions(
+	contractDecisions := e.schemaContractDecisions(report, tables, allowSchemaEvolution)
+	e.lastContractDecisions = append([]SchemaContractDecision(nil), contractDecisions...)
+	logging.Warn("%s", report.FormatWithFooter(e.schemaDriftReportFooterWithDecisions(
 		report,
 		allowSchemaEvolution,
 		contractDecisions,
@@ -69,9 +69,9 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 	if len(contractDecisions) > 0 {
 		auditFields["schema_contract_decision_count"] = len(contractDecisions)
 	}
-	o.auditEvent("schema_drift_detected", auditFields)
-	o.auditSchemaContractDecisions(contractDecisions)
-	if o.config.Migration.FailOnSchemaDrift {
+	e.auditEvent("schema_drift_detected", auditFields)
+	e.auditSchemaContractDecisions(contractDecisions)
+	if e.cfg.Migration.FailOnSchemaDrift {
 		return report, &SchemaDriftError{Report: report}
 	}
 	if err := enforceSchemaContractDecisions(contractDecisions); err != nil {
@@ -80,46 +80,46 @@ func (o *Orchestrator) reportSchemaDrift(tables []source.Table, allowSchemaEvolu
 	return report, nil
 }
 
-func (o *Orchestrator) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
-	return o.schemaDriftReportFooterWithDecisions(report, allowSchemaEvolution, nil)
+func (e *Engine) schemaDriftReportFooter(report drift.Report, allowSchemaEvolution bool) string {
+	return e.schemaDriftReportFooterWithDecisions(report, allowSchemaEvolution, nil)
 }
 
-func (o *Orchestrator) schemaDriftReportFooterWithDecisions(
+func (e *Engine) schemaDriftReportFooterWithDecisions(
 	report drift.Report,
 	allowSchemaEvolution bool,
-	decisions []schemaContractDecision,
+	decisions []SchemaContractDecision,
 ) string {
-	if !o.config.Migration.SchemaEvolutionEnabled() {
+	if !e.cfg.Migration.SchemaEvolutionEnabled() {
 		return "No automatic schema alignment will be applied (read-only mode)."
 	}
-	if o.config.Migration.FailOnSchemaDrift {
+	if e.cfg.Migration.FailOnSchemaDrift {
 		return "migration.fail_on_schema_drift is true; transfer will abort before schema evolution."
 	}
-	if o.config.Migration.SchemaContractEnabled() {
+	if e.cfg.Migration.SchemaContractEnabled() {
 		if len(decisions) > 0 {
 			return schemaContractDecisionReportFooter(decisions, allowSchemaEvolution)
 		}
-		return o.schemaContractReportFooter(report, allowSchemaEvolution)
+		return e.schemaContractReportFooter(report, allowSchemaEvolution)
 	}
 	if !allowSchemaEvolution {
-		if o.config.Migration.AddedColumnSchemaEvolutionPolicy() == config.SchemaEvolutionDiscardValue {
+		if e.cfg.Migration.AddedColumnSchemaEvolutionPolicy() == config.SchemaEvolutionDiscardValue {
 			if part := addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))); part != "" {
 				return fmt.Sprintf("Schema evolution %s. No target ALTERs will be applied in read-only mode.", part)
 			}
 		}
 		return "No automatic schema alignment will be applied (read-only mode)."
 	}
-	if o.config.Migration.TargetMode != "upsert" {
-		addedPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
+	if e.cfg.Migration.TargetMode != "upsert" {
+		addedPolicy := e.cfg.Migration.AddedColumnSchemaEvolutionPolicy()
 		if addedPolicy == config.SchemaEvolutionDiscardValue && len(addedColumnChanges(report)) > 0 {
 			return fmt.Sprintf(
 				"Schema evolution %s. target_mode=%s will not apply target ALTERs for other changes.",
 				addedColumnDiscardValueFooterPart(len(addedColumnChanges(report))),
-				o.config.Migration.TargetMode,
+				e.cfg.Migration.TargetMode,
 			)
 		}
 		return fmt.Sprintf("Schema evolution is configured, but target_mode=%s will not apply target ALTERs.",
-			o.config.Migration.TargetMode)
+			e.cfg.Migration.TargetMode)
 	}
 
 	var parts []string
@@ -127,7 +127,7 @@ func (o *Orchestrator) schemaDriftReportFooterWithDecisions(
 		"added_column",
 		len(addedColumnChanges(report)),
 		"added column(s)",
-		o.config.Migration.AddedColumnSchemaEvolutionPolicy(),
+		e.cfg.Migration.AddedColumnSchemaEvolutionPolicy(),
 	); part != "" {
 		parts = append(parts, part)
 	}
@@ -135,11 +135,11 @@ func (o *Orchestrator) schemaDriftReportFooterWithDecisions(
 		"nullability_change",
 		len(nullabilityChanges(report)),
 		"nullability change(s)",
-		o.config.Migration.NullabilityChangeSchemaEvolutionPolicy(),
+		e.cfg.Migration.NullabilityChangeSchemaEvolutionPolicy(),
 	); part != "" {
 		parts = append(parts, part)
 	}
-	if part := typeChangeFooterPart(report, o.config.Migration.TypeChangeSchemaEvolutionPolicy()); part != "" {
+	if part := typeChangeFooterPart(report, e.cfg.Migration.TypeChangeSchemaEvolutionPolicy()); part != "" {
 		parts = append(parts, part)
 	}
 	if len(parts) == 0 {
@@ -154,7 +154,7 @@ type schemaContractDecisionFooterKey struct {
 	action string
 }
 
-func schemaContractDecisionReportFooter(decisions []schemaContractDecision, allowSchemaEvolution bool) string {
+func schemaContractDecisionReportFooter(decisions []SchemaContractDecision, allowSchemaEvolution bool) string {
 	counts := make(map[schemaContractDecisionFooterKey]int, len(decisions))
 	for _, decision := range decisions {
 		key := schemaContractDecisionFooterKey{
@@ -168,13 +168,13 @@ func schemaContractDecisionReportFooter(decisions []schemaContractDecision, allo
 	var parts []string
 	if schemaContractDecisionAbortCount(counts) > 0 {
 		for _, entity := range []string{
-			schemaContractEntityTables,
-			schemaContractEntityColumns,
-			schemaContractEntityDataType,
+			SchemaContractEntityTables,
+			SchemaContractEntityColumns,
+			SchemaContractEntityDataType,
 		} {
 			for _, action := range []string{
-				schemaContractActionBlocked,
-				schemaContractActionFrozen,
+				SchemaContractActionBlocked,
+				SchemaContractActionFrozen,
 			} {
 				keys := matchingSchemaContractDecisionFooterKeys(counts, entity, action)
 				for _, key := range keys {
@@ -193,17 +193,17 @@ func schemaContractDecisionReportFooter(decisions []schemaContractDecision, allo
 	}
 
 	for _, entity := range []string{
-		schemaContractEntityTables,
-		schemaContractEntityColumns,
-		schemaContractEntityDataType,
+		SchemaContractEntityTables,
+		SchemaContractEntityColumns,
+		SchemaContractEntityDataType,
 	} {
 		for _, action := range []string{
-			schemaContractActionBlocked,
-			schemaContractActionFrozen,
-			schemaContractActionEvolved,
-			schemaContractActionDiscardedRow,
-			schemaContractActionDiscardedValue,
-			schemaContractActionReported,
+			SchemaContractActionBlocked,
+			SchemaContractActionFrozen,
+			SchemaContractActionEvolved,
+			SchemaContractActionDiscardedRow,
+			SchemaContractActionDiscardedValue,
+			SchemaContractActionReported,
 		} {
 			keys := matchingSchemaContractDecisionFooterKeys(counts, entity, action)
 			for _, key := range keys {
@@ -225,7 +225,7 @@ func schemaContractDecisionReportFooter(decisions []schemaContractDecision, allo
 func schemaContractDecisionAbortCount(counts map[schemaContractDecisionFooterKey]int) int {
 	aborts := 0
 	for key, count := range counts {
-		if key.action == schemaContractActionBlocked || key.action == schemaContractActionFrozen {
+		if key.action == SchemaContractActionBlocked || key.action == SchemaContractActionFrozen {
 			aborts += count
 		}
 	}
@@ -257,32 +257,32 @@ func schemaContractDecisionFooterPart(key schemaContractDecisionFooterKey, count
 
 	prefix := fmt.Sprintf("%s=%s; ", key.entity, mode)
 	switch key.action {
-	case schemaContractActionBlocked:
+	case SchemaContractActionBlocked:
 		return prefix + fmt.Sprintf("%d blocked change(s) will abort before transfer", count)
-	case schemaContractActionFrozen:
+	case SchemaContractActionFrozen:
 		return prefix + fmt.Sprintf("%d change(s) will abort before transfer", count)
-	case schemaContractActionEvolved:
+	case SchemaContractActionEvolved:
 		return prefix + fmt.Sprintf("%d change(s) will follow target_mode behavior", count)
-	case schemaContractActionDiscardedRow:
+	case SchemaContractActionDiscardedRow:
 		return prefix + fmt.Sprintf("%d change(s) will skip affected table(s) for this run", count)
-	case schemaContractActionDiscardedValue:
-		if key.entity == schemaContractEntityDataType {
+	case SchemaContractActionDiscardedValue:
+		if key.entity == SchemaContractEntityDataType {
 			return prefix + fmt.Sprintf("%d change(s) will be omitted from transfer and validation; previous schema snapshot metadata will be retained", count)
 		}
 		return prefix + fmt.Sprintf("%d change(s) will be omitted from target DDL, transfer, validation, and schema snapshots", count)
-	case schemaContractActionReported:
+	case SchemaContractActionReported:
 		return prefix + fmt.Sprintf("%d change(s) will be reported only", count)
 	default:
 		return prefix + fmt.Sprintf("%d change(s) have unrecognized schema contract action %q", count, key.action)
 	}
 }
 
-func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSchemaEvolution bool) string {
+func (e *Engine) schemaContractReportFooter(report drift.Report, allowSchemaEvolution bool) string {
 	var parts []string
 	if part := schemaContractTablesFooterPart(
 		len(tableAddedChanges(report)),
 		len(tableDroppedChanges(report)),
-		o.config.Migration.SchemaContractTablesMode(),
+		e.cfg.Migration.SchemaContractTablesMode(),
 		allowSchemaEvolution,
 	); part != "" {
 		parts = append(parts, part)
@@ -290,14 +290,14 @@ func (o *Orchestrator) schemaContractReportFooter(report drift.Report, allowSche
 	if part := schemaContractColumnsFooterPart(
 		len(addedColumnChanges(report)),
 		len(droppedColumnChanges(report)),
-		o.config.Migration.SchemaContractColumnsMode(),
+		e.cfg.Migration.SchemaContractColumnsMode(),
 		allowSchemaEvolution,
 	); part != "" {
 		parts = append(parts, part)
 	}
 	if part := schemaContractDataTypeFooterPart(
 		report,
-		o.config.Migration.SchemaContractDataTypeMode(),
+		e.cfg.Migration.SchemaContractDataTypeMode(),
 		allowSchemaEvolution,
 	); part != "" {
 		parts = append(parts, part)
@@ -548,20 +548,20 @@ func addedColumnDiscardValueFooterPart(count int) string {
 	return fmt.Sprintf("added_column=discard_value; %d added column(s) will be omitted from target DDL, transfer, validation, and schema snapshots", count)
 }
 
-func (o *Orchestrator) captureSchemaSnapshotsForReport(runID string, report drift.Report, tables []source.Table) {
-	o.captureSchemaSnapshotSet(runID, o.schemaSnapshotPlan(report, tables))
+func (e *Engine) CaptureSnapshotsForReport(runID string, report drift.Report, tables []source.Table) {
+	e.captureSchemaSnapshotSet(runID, e.schemaSnapshotPlan(report, tables))
 }
 
-func (o *Orchestrator) captureSchemaSnapshotSet(runID string, snapshots []drift.TableSnapshot) {
+func (e *Engine) captureSchemaSnapshotSet(runID string, snapshots []drift.TableSnapshot) {
 	for _, snapshot := range snapshots {
 		schemaJSON, err := drift.MarshalTableSnapshot(snapshot)
 		if err != nil {
 			logging.Warn("failed to encode schema snapshot for %s.%s: %v", snapshot.Schema, snapshot.Name, err)
 			continue
 		}
-		if err := o.state.SaveSchemaSnapshot(
+		if err := e.state.SaveSchemaSnapshot(
 			runID,
-			o.schemaSnapshotNamespace(),
+			e.SnapshotNamespace(),
 			snapshot.Name,
 			schemaJSON,
 		); err != nil {
@@ -571,10 +571,10 @@ func (o *Orchestrator) captureSchemaSnapshotSet(runID string, snapshots []drift.
 	logging.Debug("Captured %d source schema snapshot(s)", len(snapshots))
 }
 
-func (o *Orchestrator) schemaSnapshotPlan(report drift.Report, tables []source.Table) []drift.TableSnapshot {
+func (e *Engine) schemaSnapshotPlan(report drift.Report, tables []source.Table) []drift.TableSnapshot {
 	snapshots := drift.BuildTableSnapshots(tables)
-	if !o.config.Migration.SchemaContractEnabled() ||
-		o.config.Migration.SchemaContractDataTypeMode() != config.SchemaContractDiscardValue ||
+	if !e.cfg.Migration.SchemaContractEnabled() ||
+		e.cfg.Migration.SchemaContractDataTypeMode() != config.SchemaContractDiscardValue ||
 		len(report.Previous) == 0 {
 		return snapshots
 	}
@@ -738,17 +738,17 @@ func mergePreviousDiscardedChecks(
 	return merged
 }
 
-func (o *Orchestrator) schemaSnapshotNamespace() string {
+func (e *Engine) SnapshotNamespace() string {
 	return strings.Join([]string{
-		o.config.Source.Type,
-		o.config.Source.Database,
-		o.config.Source.Schema,
+		e.cfg.Source.Type,
+		e.cfg.Source.Database,
+		e.cfg.Source.Schema,
 	}, "|")
 }
 
-func (o *Orchestrator) tableInCurrentFilterScope(tableName string) bool {
-	include := o.config.Migration.IncludeTables
-	exclude := o.config.Migration.ExcludeTables
+func (e *Engine) tableInCurrentFilterScope(tableName string) bool {
+	include := e.cfg.Migration.IncludeTables
+	exclude := e.cfg.Migration.ExcludeTables
 	lowerName := strings.ToLower(tableName)
 
 	if len(include) > 0 {
@@ -772,17 +772,17 @@ func (o *Orchestrator) tableInCurrentFilterScope(tableName string) bool {
 	return true
 }
 
-// ReviewSchemaDriftWithAI asks the configured AI provider for an advisory
+// ReviewDriftWithAI asks the configured AI provider for an advisory
 // explanation of schema drift and policy-gated next actions. Failures never
 // change deterministic schema evolution or schema contract decisions.
-func (o *Orchestrator) ReviewSchemaDriftWithAI(
+func (e *Engine) ReviewDriftWithAI(
 	ctx context.Context,
 	report drift.Report,
 	tables []source.Table,
 	allowSchemaEvolution bool,
 ) *aicopilot.SchemaAdvisorReview {
-	payload := aicopilot.BuildSchemaAdvisorPayload(o.config, report, tables, allowSchemaEvolution)
-	mapper := o.aiReviewClient()
+	payload := aicopilot.BuildSchemaAdvisorPayload(e.cfg, report, tables, allowSchemaEvolution)
+	mapper := e.aiClient()
 	if aicopilot.IsNilTextClient(mapper) {
 		return aicopilot.UnavailableSchemaAdvisorReview("no AI provider configured in secrets", payload)
 	}

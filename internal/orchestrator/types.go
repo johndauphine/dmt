@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
 	"strings"
 	"time"
 
@@ -126,8 +127,9 @@ type Orchestrator struct {
 	// once the run_id is known.
 	auditor *audit.Logger
 
-	schemaContractDecisionRunID string
-	lastSchemaContractDecisions []SchemaContractDecision
+	// schemaEvo is the schema drift/contracts/evolution engine (#456),
+	// constructed lazily by schemaEvolution() and persistent for the run.
+	schemaEvo *schemaevolution.Engine
 }
 
 // Options configures the orchestrator.
@@ -168,8 +170,9 @@ type Options struct {
 }
 
 // SchemaContractDecision describes how one schema drift change was handled by
-// the DLT-style schema contract policy.
-type SchemaContractDecision = schemaContractDecision
+// the DLT-style schema contract policy. Defined in the schemaevolution
+// sub-package (#456); aliased so orchestrator result types keep their shape.
+type SchemaContractDecision = schemaevolution.SchemaContractDecision
 
 // computeConfigHash returns a short hex hash of the sanitized config.
 func computeConfigHash(cfg *config.Config) string {

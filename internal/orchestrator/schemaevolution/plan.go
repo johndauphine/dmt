@@ -1,4 +1,4 @@
-package orchestrator
+package schemaevolution
 
 import (
 	"fmt"
@@ -178,12 +178,12 @@ func findAddedSourceTables(report drift.Report, tables []source.Table) []source.
 	return out
 }
 
-func tableAddedInReport(report drift.Report, table source.Table) bool {
+func TableAddedInReport(report drift.Report, table source.Table) bool {
 	_, ok := addedTablesSet(report)[schemaEvolutionTableKey(table.Schema, table.Name)]
 	return ok
 }
 
-func filterSchemaDriftReportForTables(report drift.Report, tables []source.Table) drift.Report {
+func FilterDriftReportForTables(report drift.Report, tables []source.Table) drift.Report {
 	if !report.HasChanges() || len(tables) == 0 {
 		return drift.Report{}
 	}

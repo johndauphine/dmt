@@ -128,7 +128,7 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 		ChunkSize:               o.config.Migration.ChunkSize,
 		TargetMode:              o.config.Migration.TargetMode,
 		TotalTables:             len(tables),
-		SchemaContractDecisions: cloneSchemaContractDecisions(o.lastSchemaContractDecisions),
+		SchemaContractDecisions: o.schemaEvolution().LastContractDecisions(),
 	}
 	if o.opts.EnableAISchemaAdvisor && schemaReport.HasChanges() {
 		reviewCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
