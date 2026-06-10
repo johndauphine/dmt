@@ -1,8 +1,13 @@
 package driver
 
 import (
+	"fmt"
 	"math"
+	"reflect"
 	"testing"
+	"time"
+
+	"github.com/johndauphine/dmt/internal/checkpoint"
 
 	"github.com/johndauphine/dmt/internal/tuning"
 )
@@ -12,19 +17,19 @@ import (
 // tuner reads raw rows and aggregates in-package). Just enough to verify
 // SaveTuningWithActualParams persists the post-override params.
 type mockHistoryProvider struct {
-	saved   *AITuningRecord
-	history []AITuningRecord
+	saved   *checkpoint.AITuningRecord
+	history []checkpoint.AITuningRecord
 }
 
-func (m *mockHistoryProvider) GetAIAdjustments(int) ([]AIAdjustmentRecord, error) {
+func (m *mockHistoryProvider) GetAIAdjustments(int) ([]checkpoint.AIAdjustmentRecord, error) {
 	return nil, nil
 }
 
-func (m *mockHistoryProvider) GetAITuningHistory(_ int, _, _ string) ([]AITuningRecord, error) {
+func (m *mockHistoryProvider) GetAITuningHistory(_ int, _, _ string) ([]checkpoint.AITuningRecord, error) {
 	return m.history, nil
 }
 
-func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
+func (m *mockHistoryProvider) SaveAITuning(record checkpoint.AITuningRecord) error {
 	m.saved = &record
 	return nil
 }
@@ -524,5 +529,69 @@ func TestThroughputBytesForHistory_GuardsBadValues(t *testing.T) {
 				t.Errorf("got %d, want positive int64", got)
 			}
 		})
+	}
+}
+
+// TestTuningHistoryAdapter_MapsAllSharedFields is the #455 guard against
+// the adapter failure mode that hit #219: a field present on both
+// checkpoint.AITuningRecord and tuning.HistoryRecord silently dropped by
+// the hand-written mapping in tuningHistoryAdapter.Records. The test sets
+// a distinctive non-zero value on every checkpoint field via reflection,
+// runs the adapter, and requires every same-name same-type field on the
+// tuning side to carry that exact value. Adding a shared field without
+// mapping it fails here instead of silently starving the tuner.
+func TestTuningHistoryAdapter_MapsAllSharedFields(t *testing.T) {
+	src := checkpoint.AITuningRecord{}
+	rv := reflect.ValueOf(&src).Elem()
+	for i := 0; i < rv.NumField(); i++ {
+		f := rv.Field(i)
+		switch {
+		case f.Kind() == reflect.String:
+			f.SetString(fmt.Sprintf("v%d", i))
+		case f.Kind() == reflect.Int || f.Kind() == reflect.Int64:
+			f.SetInt(int64(i + 1))
+		case f.Kind() == reflect.Float64:
+			f.SetFloat(float64(i) + 0.5)
+		case f.Kind() == reflect.Bool:
+			f.SetBool(true)
+		case f.Type() == reflect.TypeOf(time.Time{}):
+			f.Set(reflect.ValueOf(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)))
+		default:
+			t.Fatalf("checkpoint.AITuningRecord field %s has unhandled kind %s — extend this test's value generator",
+				rv.Type().Field(i).Name, f.Kind())
+		}
+	}
+
+	adapter := &tuningHistoryAdapter{base: &mockHistoryProvider{
+		history: []checkpoint.AITuningRecord{src},
+	}}
+	rows, err := adapter.Records(src.SourceDBType, src.TargetDBType)
+	if err != nil {
+		t.Fatalf("Records: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+
+	out := reflect.ValueOf(rows[0])
+	srcType := rv.Type()
+	checked := 0
+	for i := 0; i < out.NumField(); i++ {
+		of := out.Type().Field(i)
+		sf, shared := srcType.FieldByName(of.Name)
+		if !shared || sf.Type != of.Type {
+			continue // renamed/derived fields (AvgRowBytes, FinalThroughputBytes) are mapped deliberately, not verbatim
+		}
+		got := out.Field(i).Interface()
+		want := rv.FieldByName(of.Name).Interface()
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("shared field %s not copied by tuningHistoryAdapter: got %v, want %v (did a new field miss the mapping?)",
+				of.Name, got, want)
+		}
+		checked++
+	}
+	// Sanity: the test is vacuous if the shared-field set ever collapses.
+	if checked < 15 {
+		t.Fatalf("only %d shared fields checked — expected the record shapes to overlap heavily; did a rename break the guard?", checked)
 	}
 }

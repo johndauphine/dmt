@@ -2,6 +2,7 @@ package aicopilot
 
 import (
 	"fmt"
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"sort"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
-func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.SmartConfigSuggestions, recent []driver.AITuningRecord, adjustments []driver.AIAdjustmentRecord) PerformancePayload {
+func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.SmartConfigSuggestions, recent []checkpoint.AITuningRecord, adjustments []checkpoint.AIAdjustmentRecord) PerformancePayload {
 	payload := PerformancePayload{
 		PromptVersion: PerformancePromptVersion,
 		Task:          "Explain deterministic DMT smartconfig and runtime tuning choices. Deterministic knobs and values are authoritative; AI may rank evidence but must not invent knobs or values.",
@@ -67,7 +68,7 @@ func BuildPerformancePayload(input driver.AutoTuneInput, suggestions driver.Smar
 	return payload
 }
 
-func buildPerformanceHistoryRuns(recent []driver.AITuningRecord, limit int) []PerformanceHistoryRun {
+func buildPerformanceHistoryRuns(recent []checkpoint.AITuningRecord, limit int) []PerformanceHistoryRun {
 	if limit <= 0 || len(recent) == 0 {
 		return nil
 	}
@@ -101,8 +102,8 @@ func buildPerformanceHistoryRuns(recent []driver.AITuningRecord, limit int) []Pe
 				ParallelReaders:      r.ParallelReaders,
 				MaxPartitions:        r.MaxPartitions,
 				LargeTableThreshold:  r.LargeTableThreshold,
-				MaxSourceConnections: r.MaxSourceConnections,
-				MaxTargetConnections: r.MaxTargetConnections,
+				MaxSourceConnections: r.MaxSourceConns,
+				MaxTargetConnections: r.MaxTargetConns,
 			},
 			FinalThroughput:      r.FinalThroughput,
 			FinalDurationSeconds: r.FinalDurationSecs,
@@ -112,7 +113,7 @@ func buildPerformanceHistoryRuns(recent []driver.AITuningRecord, limit int) []Pe
 	return out
 }
 
-func buildRuntimeAdjustmentSummaries(adjustments []driver.AIAdjustmentRecord, limit int) []RuntimeAdjustmentSummary {
+func buildRuntimeAdjustmentSummaries(adjustments []checkpoint.AIAdjustmentRecord, limit int) []RuntimeAdjustmentSummary {
 	if limit <= 0 || len(adjustments) == 0 {
 		return nil
 	}
@@ -143,7 +144,7 @@ func buildRuntimeAdjustmentSummaries(adjustments []driver.AIAdjustmentRecord, li
 	return out
 }
 
-func runtimeAdjustmentActionForPayload(a driver.AIAdjustmentRecord) string {
+func runtimeAdjustmentActionForPayload(a checkpoint.AIAdjustmentRecord) string {
 	allowed := allowedPerformanceKnobSet()
 	if allowed[a.Action] {
 		return a.Action
@@ -241,7 +242,7 @@ func scrubTuningValue(v interface{}) string {
 	}
 }
 
-func buildObservedPerformanceMetrics(suggestions driver.SmartConfigSuggestions, recent []driver.AITuningRecord, adjustments []RuntimeAdjustmentSummary) PerformanceObservedMetrics {
+func buildObservedPerformanceMetrics(suggestions driver.SmartConfigSuggestions, recent []checkpoint.AITuningRecord, adjustments []RuntimeAdjustmentSummary) PerformanceObservedMetrics {
 	metrics := PerformanceObservedMetrics{
 		MaxSourceConnections:   suggestions.MaxSourceConnections,
 		MaxTargetConnections:   suggestions.MaxTargetConnections,

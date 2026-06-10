@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 		Tier:                    "regression",
 		Reasoning:               "regression-selected WAW=2 from token=abc123",
 	}
-	payload := BuildPerformancePayload(input, suggestions, []driver.AITuningRecord{{
+	payload := BuildPerformancePayload(input, suggestions, []checkpoint.AITuningRecord{{
 		Timestamp:       time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
 		SourceDBType:    "postgres",
 		TargetDBType:    "mssql",
@@ -57,7 +58,7 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 		AIReasoning:     "history row used password=secret",
 		FinalThroughput: 2500,
 		ChunkRetryCount: 2,
-	}}, []driver.AIAdjustmentRecord{{
+	}}, []checkpoint.AIAdjustmentRecord{{
 		Action:       "increase",
 		Adjustments:  map[string]int{"workers": 6, "invented_knob": 99},
 		CPUBefore:    70,
@@ -108,7 +109,7 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 }
 
 func TestBuildPerformancePayloadOmitsUnsafeRuntimeAdjustmentAction(t *testing.T) {
-	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []driver.AIAdjustmentRecord{{
+	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.AIAdjustmentRecord{{
 		Action:      "public.orders",
 		Adjustments: map[string]int{"workers": 4},
 		Reasoning:   "table-specific legacy action",
@@ -126,7 +127,7 @@ func TestBuildPerformancePayloadOmitsUnsafeRuntimeAdjustmentAction(t *testing.T)
 }
 
 func TestBuildPerformancePayloadOmitsNonDeterministicRuntimeAdjustments(t *testing.T) {
-	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []driver.AIAdjustmentRecord{{
+	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.AIAdjustmentRecord{{
 		Action:      "workers",
 		Adjustments: map[string]int{"workers": 99},
 		Confidence:  "high",

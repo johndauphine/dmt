@@ -26,8 +26,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"strings"
-	"time"
 
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -176,94 +176,19 @@ type AutoTuneOutput struct {
 type TuningHistoryProvider interface {
 	// GetAIAdjustments returns recent runtime AI adjustments. Used by
 	// the runtime monitor (separate AI surface; not retired in PR1).
-	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
+	GetAIAdjustments(limit int) ([]checkpoint.AIAdjustmentRecord, error)
 
 	// GetAITuningHistory returns recent tuning recommendations filtered by
 	// migration direction, ordered by Timestamp DESC. limit > 0 bounds the
 	// slice; the bridge passes 0 for unbounded.
-	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
+	GetAITuningHistory(limit int, sourceType, targetType string) ([]checkpoint.AITuningRecord, error)
 
 	// SaveAITuning saves a tuning recommendation for future reference.
-	SaveAITuning(record AITuningRecord) error
+	SaveAITuning(record checkpoint.AITuningRecord) error
 
 	// UpdateAITuningResult updates the most recent tuning record with final
 	// throughput and chunk retry count from the completed run.
 	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
-}
-
-// AIAdjustmentRecord represents a historical AI adjustment from runtime
-// migration. Used by the runtime monitor (separate from smartconfig).
-type AIAdjustmentRecord struct {
-	RunID            string         `json:"run_id,omitempty"`
-	AdjustmentNumber int            `json:"adjustment_number,omitempty"`
-	Timestamp        *time.Time     `json:"timestamp,omitempty"`
-	Action           string         `json:"action"`
-	Adjustments      map[string]int `json:"adjustments"`
-	ThroughputBefore float64        `json:"throughput_before"`
-	ThroughputAfter  float64        `json:"throughput_after"`
-	EffectPercent    float64        `json:"effect_percent"`
-	CPUBefore        float64        `json:"cpu_before,omitempty"`
-	CPUAfter         float64        `json:"cpu_after,omitempty"`
-	MemoryBefore     float64        `json:"memory_before,omitempty"`
-	MemoryAfter      float64        `json:"memory_after,omitempty"`
-	Reasoning        string         `json:"reasoning"`
-	Confidence       string         `json:"confidence,omitempty"`
-}
-
-// AITuningRecord is one row in the SQL ai_tuning_history table. Schema is
-// unchanged from the AI era; the WasAIUsed column now always records false
-// and AIReasoning carries the deterministic tuner's reasoning string.
-type AITuningRecord struct {
-	Timestamp            time.Time `json:"timestamp"`
-	SourceDBType         string    `json:"source_db_type"`
-	TargetDBType         string    `json:"target_db_type"`
-	TotalTables          int       `json:"total_tables"`
-	TotalRows            int64     `json:"total_rows"`
-	AvgRowSizeBytes      int64     `json:"avg_row_size_bytes"`
-	CPUCores             int       `json:"cpu_cores"`
-	MemoryGB             int       `json:"memory_gb"`
-	Workers              int       `json:"workers"`
-	ChunkSize            int       `json:"chunk_size"`
-	ReadAheadBuffers     int       `json:"read_ahead_buffers"`
-	WriteAheadWriters    int       `json:"write_ahead_writers"`
-	ParallelReaders      int       `json:"parallel_readers"`
-	MaxPartitions        int       `json:"max_partitions"`
-	LargeTableThreshold  int64     `json:"large_table_threshold"`
-	MaxSourceConnections int       `json:"max_source_connections"`
-	MaxTargetConnections int       `json:"max_target_connections"`
-	EstimatedMemoryMB    int64     `json:"estimated_memory_mb"`
-	AIReasoning          string    `json:"ai_reasoning"`
-	WasAIUsed            bool      `json:"was_ai_used"`
-	FinalThroughput      float64   `json:"final_throughput,omitempty"`
-	FinalDurationSecs    float64   `json:"final_duration_seconds,omitempty"`
-	ChunkRetryCount      int       `json:"chunk_retry_count,omitempty"`
-	// AdjustedAtRuntime mirrors checkpoint.AITuningRecord (#451): true when
-	// the runtime controller changed parameters mid-run, so the row's
-	// throughput can't be attributed to its recorded parameters.
-	AdjustedAtRuntime bool `json:"adjusted_at_runtime,omitempty"`
-
-	// Effective DB tuning captured at run start (#144). Mirrors the
-	// fields in checkpoint.AITuningRecord.
-	Platform                string `json:"platform,omitempty"`
-	TargetSharedBuffersMB   int64  `json:"target_shared_buffers_mb,omitempty"`
-	TargetSyncCommit        string `json:"target_synchronous_commit,omitempty"`
-	TargetFsync             string `json:"target_fsync,omitempty"`
-	TargetFullPageWrites    string `json:"target_full_page_writes,omitempty"`
-	TargetMaxWALSizeMB      int64  `json:"target_max_wal_size_mb,omitempty"`
-	TargetWALLevel          string `json:"target_wal_level,omitempty"`
-	SourceMaxServerMemoryMB int64  `json:"source_max_server_memory_mb,omitempty"`
-
-	// Workload identity (#215). Mirrors the matching fields on
-	// checkpoint.AITuningRecord â€” the orchestrator's stateHistoryAdapter
-	// copies between the two struct shapes.
-	SourceHost     string `json:"source_host,omitempty"`
-	SourcePort     int    `json:"source_port,omitempty"`
-	SourceDatabase string `json:"source_database,omitempty"`
-	SourceSchema   string `json:"source_schema,omitempty"`
-	TargetHost     string `json:"target_host,omitempty"`
-	TargetPort     int    `json:"target_port,omitempty"`
-	TargetDatabase string `json:"target_database,omitempty"`
-	TargetSchema   string `json:"target_schema,omitempty"`
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal
