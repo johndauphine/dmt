@@ -184,6 +184,9 @@ func (s *State) migrate() error {
 	if err := s.ensureProfileColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureTransferProgressColumns(); err != nil {
+		return err
+	}
 	if err := s.ensureTuningResultColumns(); err != nil {
 		return err
 	}
@@ -277,6 +280,27 @@ func (s *State) ensureProfileColumns() error {
 	return nil
 }
 
+// ensureTransferProgressColumns adds columns introduced after the base
+// transfer_progress schema. #464: range_state holds the keyset
+// coordinator's per-range watermarks as JSON; NULL on pre-migration rows
+// and ROW_NUMBER tasks, which resume with the legacy single watermark.
+func (s *State) ensureTransferProgressColumns() error {
+	columns, err := s.tableColumns("transfer_progress")
+	if err != nil {
+		return err
+	}
+	have := make(map[string]bool, len(columns))
+	for _, col := range columns {
+		have[col] = true
+	}
+	if !have["range_state"] {
+		if _, err := s.db.Exec("ALTER TABLE transfer_progress ADD COLUMN range_state TEXT"); err != nil {
+			return fmt.Errorf("migrating transfer_progress.range_state: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *State) ensureTuningResultColumns() error {
 	columns, err := s.tableColumns("ai_tuning_history")
 	if err != nil {
@@ -355,6 +379,7 @@ func (s *State) ensureTuningResultColumns() error {
 // validTableNames is a whitelist of allowed table names for schema queries.
 // This prevents SQL injection via the table parameter in tableColumns().
 var validTableNames = map[string]bool{
+	"transfer_progress":            true,
 	"runs":                         true,
 	"tasks":                        true,
 	"profiles":                     true,

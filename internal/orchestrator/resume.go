@@ -292,7 +292,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 			}
 		} else {
 			// Table exists - check if we have saved chunk progress
-			lastPK, rowsDone, err := progressSaver.GetProgress(taskID)
+			lastPK, rowsDone, _, err := progressSaver.GetProgress(taskID)
 			if err != nil {
 				o.state.CompleteRun(run.ID, "failed", err.Error())
 				return fmt.Errorf("getting progress for %s: %w", t.Name, err)

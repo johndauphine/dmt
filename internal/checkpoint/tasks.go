@@ -92,26 +92,29 @@ func (s *State) AllTasksComplete(runID, taskType string) (bool, error) {
 }
 
 // SaveTransferProgress saves chunk-level progress for resume
-func (s *State) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error {
+func (s *State) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
 	lastPKJSON, _ := json.Marshal(lastPK)
 	_, err := s.db.Exec(`
-		INSERT INTO transfer_progress (task_id, table_name, partition_id, last_pk, rows_done, rows_total, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+		INSERT INTO transfer_progress (task_id, table_name, partition_id, last_pk, rows_done, rows_total, range_state, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), datetime('now'))
 		ON CONFLICT(task_id) DO UPDATE SET
 			last_pk = excluded.last_pk,
 			rows_done = excluded.rows_done,
+			range_state = excluded.range_state,
 			updated_at = excluded.updated_at
-	`, taskID, tableName, partitionID, string(lastPKJSON), rowsDone, rowsTotal)
+	`, taskID, tableName, partitionID, string(lastPKJSON), rowsDone, rowsTotal, rangeState)
 	return err
 }
 
 // GetTransferProgress returns progress for a task
 func (s *State) GetTransferProgress(taskID int64) (*TransferProgress, error) {
 	var p TransferProgress
+	var rangeState sql.NullString
 	err := s.db.QueryRow(`
-		SELECT task_id, table_name, partition_id, last_pk, rows_done, rows_total
+		SELECT task_id, table_name, partition_id, last_pk, rows_done, rows_total, range_state
 		FROM transfer_progress WHERE task_id = ?
-	`, taskID).Scan(&p.TaskID, &p.TableName, &p.PartitionID, &p.LastPK, &p.RowsDone, &p.RowsTotal)
+	`, taskID).Scan(&p.TaskID, &p.TableName, &p.PartitionID, &p.LastPK, &p.RowsDone, &p.RowsTotal, &rangeState)
+	p.RangeState = rangeState.String
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -330,24 +333,24 @@ func NewProgressSaver(s StateBackend) *ProgressSaver {
 }
 
 // SaveProgress saves chunk-level progress for resume
-func (p *ProgressSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error {
-	return p.state.SaveTransferProgress(taskID, tableName, partitionID, lastPK, rowsDone, rowsTotal)
+func (p *ProgressSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
+	return p.state.SaveTransferProgress(taskID, tableName, partitionID, lastPK, rowsDone, rowsTotal, rangeState)
 }
 
 // GetProgress retrieves saved progress for a task
-func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, err error) {
+func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, rangeState string, err error) {
 	prog, err := p.state.GetTransferProgress(taskID)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, "", err
 	}
 	if prog == nil {
-		return nil, 0, nil
+		return nil, 0, "", nil
 	}
 	// Unmarshal lastPK from JSON (stored as string in TransferProgress)
 	if prog.LastPK != "" {
 		if jsonErr := json.Unmarshal([]byte(prog.LastPK), &lastPK); jsonErr != nil {
-			return nil, prog.RowsDone, nil // Ignore unmarshal errors, just return rowsDone
+			return nil, prog.RowsDone, prog.RangeState, nil // Ignore unmarshal errors, just return rowsDone
 		}
 	}
-	return lastPK, prog.RowsDone, nil
+	return lastPK, prog.RowsDone, prog.RangeState, nil
 }

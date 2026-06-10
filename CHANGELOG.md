@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keyset transfers now checkpoint every parallel reader range's watermark
+  (`transfer_progress.range_state`); resume continues each range from its
+  own position instead of restarting all readers at the single safe
+  minimum and deleting the faster readers' completed work. Pre-existing
+  checkpoints resume with the legacy single-watermark behavior (#464).
+
+### Fixed
+
 - Set the Go runtime soft memory limit (GOMEMLIMIT) from the effective
   memory budget so GC paces against it natively; the transfer memory guard
   becomes the backstop and now uses a single process-wide heap sampler

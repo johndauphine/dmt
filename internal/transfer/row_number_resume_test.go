@@ -73,7 +73,7 @@ func TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleProgress(t *
 		t.Fatalf("CreateTask p2: %v", err)
 	}
 	p1ID := 1
-	if err := state.SaveTransferProgress(p1TaskID, table.Name, &p1ID, int64(2), 2, 3); err != nil {
+	if err := state.SaveTransferProgress(p1TaskID, table.Name, &p1ID, int64(2), 2, 3, ""); err != nil {
 		t.Fatalf("SaveTransferProgress p1: %v", err)
 	}
 

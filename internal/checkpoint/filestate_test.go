@@ -59,7 +59,7 @@ func TestFileState_CreateAndResumeRun(t *testing.T) {
 	}
 
 	// Save progress
-	err = fs.SaveTransferProgress(taskID, "Users", nil, 12345, 50000, 100000)
+	err = fs.SaveTransferProgress(taskID, "Users", nil, 12345, 50000, 100000, "")
 	if err != nil {
 		t.Fatalf("SaveTransferProgress: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestFileState_ClearTransferProgress(t *testing.T) {
 	}
 
 	// Save progress
-	err = fs.SaveTransferProgress(taskID, "Users", nil, 12345, 50000, 100000)
+	err = fs.SaveTransferProgress(taskID, "Users", nil, 12345, 50000, 100000, "")
 	if err != nil {
 		t.Fatalf("SaveTransferProgress: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestFileState_ClearPartitionTransferProgress(t *testing.T) {
 		}
 		votesPartIDs = append(votesPartIDs, taskID)
 		pid := i
-		if err := fs.SaveTransferProgress(taskID, "votes", &pid, int64(1000*i), 1000, 5000); err != nil {
+		if err := fs.SaveTransferProgress(taskID, "votes", &pid, int64(1000*i), 1000, 5000, ""); err != nil {
 			t.Fatalf("SaveTransferProgress votes p%d: %v", i, err)
 		}
 	}
@@ -215,7 +215,7 @@ func TestFileState_ClearPartitionTransferProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask(votes table): %v", err)
 	}
-	if err := fs.SaveTransferProgress(votesTableID, "votes", nil, int64(42), 42, 5000); err != nil {
+	if err := fs.SaveTransferProgress(votesTableID, "votes", nil, int64(42), 42, 5000, ""); err != nil {
 		t.Fatalf("SaveTransferProgress votes table: %v", err)
 	}
 
@@ -229,7 +229,7 @@ func TestFileState_ClearPartitionTransferProgress(t *testing.T) {
 		}
 		postsPartIDs = append(postsPartIDs, taskID)
 		pid := i
-		if err := fs.SaveTransferProgress(taskID, "posts", &pid, int64(2000*i), 2000, 10000); err != nil {
+		if err := fs.SaveTransferProgress(taskID, "posts", &pid, int64(2000*i), 2000, 10000, ""); err != nil {
 			t.Fatalf("SaveTransferProgress posts p%d: %v", i, err)
 		}
 	}
@@ -284,7 +284,7 @@ func TestFileState_GetPartitionTransferProgressSummary(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateTask(%s): %v", key, err)
 		}
-		if err := fs.SaveTransferProgress(taskID, "votes", &pid, int64(pid*1000), rowsDone, 1000); err != nil {
+		if err := fs.SaveTransferProgress(taskID, "votes", &pid, int64(pid*1000), rowsDone, 1000, ""); err != nil {
 			t.Fatalf("SaveTransferProgress(%s): %v", key, err)
 		}
 	}
@@ -293,7 +293,7 @@ func TestFileState_GetPartitionTransferProgressSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTask(votes table): %v", err)
 	}
-	if err := fs.SaveTransferProgress(tableTaskID, "votes", nil, int64(999), 999, 1000); err != nil {
+	if err := fs.SaveTransferProgress(tableTaskID, "votes", nil, int64(999), 999, 1000, ""); err != nil {
 		t.Fatalf("SaveTransferProgress(votes table): %v", err)
 	}
 
@@ -302,7 +302,7 @@ func TestFileState_GetPartitionTransferProgressSummary(t *testing.T) {
 		t.Fatalf("CreateTask(votes empty partition): %v", err)
 	}
 	pid := 4
-	if err := fs.SaveTransferProgress(emptyProgressID, "votes", &pid, nil, 999, 1000); err != nil {
+	if err := fs.SaveTransferProgress(emptyProgressID, "votes", &pid, nil, 999, 1000, ""); err != nil {
 		t.Fatalf("SaveTransferProgress(votes empty partition): %v", err)
 	}
 
@@ -311,7 +311,7 @@ func TestFileState_GetPartitionTransferProgressSummary(t *testing.T) {
 		t.Fatalf("CreateTask(posts): %v", err)
 	}
 	pid = 1
-	if err := fs.SaveTransferProgress(otherTaskID, "posts", &pid, int64(500), 500, 1000); err != nil {
+	if err := fs.SaveTransferProgress(otherTaskID, "posts", &pid, int64(500), 500, 1000, ""); err != nil {
 		t.Fatalf("SaveTransferProgress(posts): %v", err)
 	}
 

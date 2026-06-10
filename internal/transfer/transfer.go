@@ -38,14 +38,23 @@ func Execute(
 	// Check for saved progress (chunk-level resume)
 	var resumeLastPK any
 	var resumeRowsDone int64
+	var resumeRanges []resumeRange
 	if job.Saver != nil && job.TaskID > 0 {
+		var rangeState string
 		var err error
-		resumeLastPK, resumeRowsDone, err = job.Saver.GetProgress(job.TaskID)
+		resumeLastPK, resumeRowsDone, rangeState, err = job.Saver.GetProgress(job.TaskID)
 		if err != nil {
 			logging.Warn("Failed to load checkpoint for %s: %v", job.Table.Name, err)
 		}
 		if resumeLastPK != nil {
 			logging.Debug("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
+		}
+		// Per-range watermarks (#464): only meaningful on the keyset
+		// path; legacy rows (and ROW_NUMBER tasks) have none.
+		if job.Table.SupportsKeysetPagination() {
+			if resumeRanges = decodeKeysetRangeState(rangeState); len(resumeRanges) > 0 {
+				logging.Debug("Resuming %s with %d per-range watermarks", job.Table.Name, len(resumeRanges))
+			}
 		}
 	}
 
@@ -67,14 +76,28 @@ func Execute(
 				}
 			}
 		} else if job.Table.SupportsKeysetPagination() {
-			// Chunk-level resume: delete any rows beyond the saved lastPK
-			// This handles partial data written after the last saved checkpoint
-			var maxPK any
-			if job.Partition != nil {
-				maxPK = job.Partition.MaxPK
-			}
-			if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK, maxPK); err != nil {
-				logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+			// Chunk-level resume: delete any rows written after the last
+			// saved checkpoint. With per-range watermarks (#464) the
+			// delete is scoped per incomplete range — ranges a previous
+			// segment completed are left untouched instead of being
+			// deleted and re-transferred.
+			if len(resumeRanges) > 0 {
+				for _, rr := range resumeRanges {
+					if rr.complete || rr.lastPK == nil {
+						continue
+					}
+					if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], rr.lastPK, rr.maxPK); err != nil {
+						logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+					}
+				}
+			} else {
+				var maxPK any
+				if job.Partition != nil {
+					maxPK = job.Partition.MaxPK
+				}
+				if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK, maxPK); err != nil {
+					logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+				}
 			}
 		}
 	}
@@ -109,7 +132,7 @@ func Execute(
 
 	// Choose pagination strategy
 	if job.Table.SupportsKeysetPagination() {
-		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)
+		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, resumeRanges, targetTableName, tuner, adjuster)
 	}
 
 	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK

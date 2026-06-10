@@ -25,6 +25,7 @@ func executeKeysetPagination(
 	prog *progress.Tracker,
 	resumeLastPK any,
 	resumeRowsDone int64,
+	resumeRanges []resumeRange,
 	targetTableName string,
 	tuner RuntimeTuner,
 	aiAdjuster WriteErrorAdjuster,
@@ -75,8 +76,11 @@ func executeKeysetPagination(
 		}
 	}
 
-	// Use resume point if available
-	if resumeLastPK != nil {
+	// Use resume point if available. When per-range watermarks were
+	// persisted (#464), they carry the resume points instead — the single
+	// watermark is only the cross-range safe minimum and would restart
+	// faster readers' completed work.
+	if resumeLastPK != nil && len(resumeRanges) == 0 {
 		minPKVal = resumeLastPK
 	}
 
@@ -121,8 +125,16 @@ func executeKeysetPagination(
 	readerCtx, cancelReaders := context.WithCancel(ctx)
 	defer cancelReaders()
 
-	// Split PK range for parallel readers
-	pkRanges := splitPKRange(minPKVal, maxPKVal, numReaders)
+	// Split PK range for parallel readers — unless a previous segment
+	// persisted per-range watermarks (#464), in which case those ranges
+	// (and their completion flags) are restored verbatim.
+	var pkRanges []pkRange
+	var rangeCompleted []bool
+	if len(resumeRanges) > 0 {
+		pkRanges, rangeCompleted = restoredPKRanges(resumeRanges, minPKVal)
+	} else {
+		pkRanges = splitPKRange(minPKVal, maxPKVal, numReaders)
+	}
 
 	// Memory guardrail: pause readers when heap exceeds 80% of memory limit.
 	// This prevents memory ballooning when actual row sizes exceed static estimates
@@ -134,9 +146,14 @@ func executeKeysetPagination(
 	}
 	memGuard := newMemoryGuard(guardMemMB)
 
-	// Start parallel reader goroutines
+	// Start parallel reader goroutines. Ranges a previous run segment
+	// completed keep their slot (the coordinator indexes states by
+	// readerID) but spawn no reader (#464).
 	var readerWg sync.WaitGroup
 	for readerID, pkr := range pkRanges {
+		if rangeCompleted != nil && rangeCompleted[readerID] {
+			continue
+		}
 		readerWg.Add(1)
 		go func(readerID int, rangeMinPK, rangeMaxPK any) {
 			defer readerWg.Done()
@@ -292,7 +309,7 @@ func executeKeysetPagination(
 	})
 
 	// Setup checkpoint coordinator with dynamic checkpoint frequency
-	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, resumeRowsDone, wp.TotalWrittenPtr(), checkpointFreqFn)
+	checkpointCoord := newKeysetCheckpointCoordinator(job, pkRanges, rangeCompleted, resumeRowsDone, wp.TotalWrittenPtr(), checkpointFreqFn)
 	if checkpointCoord != nil {
 		wp.startAckProcessor(checkpointCoord.onAck)
 	}
@@ -452,7 +469,7 @@ chunkLoop:
 		if checkpointCoord != nil {
 			finalLastPK = checkpointCoord.finalCheckpoint(lastPK)
 		}
-		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount); err != nil {
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount, checkpointCoord.rangeState()); err != nil {
 			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}

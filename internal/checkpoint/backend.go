@@ -65,7 +65,9 @@ type StateBackend interface {
 	GetTasksWithProgress(runID string) ([]TaskWithProgress, error)
 
 	// Progress tracking (for chunk-level resume)
-	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
+	// rangeState is the keyset per-range watermark JSON (#464); "" for
+	// ROW_NUMBER tasks and stores as NULL.
+	SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error
 	GetTransferProgress(taskID int64) (*TransferProgress, error)
 	// GetPartitionTransferProgressSummary aggregates saved partition progress
 	// for one table.

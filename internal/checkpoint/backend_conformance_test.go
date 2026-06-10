@@ -275,7 +275,7 @@ func TestStateBackendConformanceTransferProgress(t *testing.T) {
 				t.Fatalf("CreateTask() error: %v", err)
 			}
 
-			if err := backend.SaveTransferProgress(taskID, "Users", nil, "pk-10", 10, 100); err != nil {
+			if err := backend.SaveTransferProgress(taskID, "Users", nil, "pk-10", 10, 100, `[{"last":"pk-10"}]`); err != nil {
 				t.Fatalf("SaveTransferProgress() error: %v", err)
 			}
 			progress, err := backend.GetTransferProgress(taskID)
@@ -289,12 +289,16 @@ func TestStateBackendConformanceTransferProgress(t *testing.T) {
 				t.Fatalf("progress = %+v, want Users/\"pk-10\"/10/100", progress)
 			}
 
-			lastPK, rowsDone, err := NewProgressSaver(backend).GetProgress(taskID)
+			lastPK, rowsDone, rangeState, err := NewProgressSaver(backend).GetProgress(taskID)
 			if err != nil {
 				t.Fatalf("ProgressSaver.GetProgress() error: %v", err)
 			}
 			if lastPK != "pk-10" || rowsDone != 10 {
 				t.Fatalf("ProgressSaver.GetProgress() = (%#v, %d), want (pk-10, 10)", lastPK, rowsDone)
+			}
+			// #464: the per-range watermark JSON must round-trip on both backends.
+			if rangeState != `[{"last":"pk-10"}]` {
+				t.Fatalf("ProgressSaver.GetProgress() rangeState = %q, want the saved JSON", rangeState)
 			}
 
 			task := findTaskWithProgress(t, backend, runID, taskKey)
@@ -331,7 +335,7 @@ func TestStateBackendConformancePartitionProgress(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CreateTask(table) error: %v", err)
 			}
-			if err := backend.SaveTransferProgress(tableID, "Users", nil, 15, 15, 300); err != nil {
+			if err := backend.SaveTransferProgress(tableID, "Users", nil, 15, 15, 300, ""); err != nil {
 				t.Fatalf("SaveTransferProgress(table) error: %v", err)
 			}
 
@@ -348,7 +352,7 @@ func TestStateBackendConformancePartitionProgress(t *testing.T) {
 				if rowsDone == 0 {
 					lastPK = nil
 				}
-				if err := backend.SaveTransferProgress(taskID, "Users", &partition, lastPK, rowsDone, 300); err != nil {
+				if err := backend.SaveTransferProgress(taskID, "Users", &partition, lastPK, rowsDone, 300, ""); err != nil {
 					t.Fatalf("SaveTransferProgress(partition %d) error: %v", partition, err)
 				}
 			}
