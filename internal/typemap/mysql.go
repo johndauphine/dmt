@@ -273,8 +273,14 @@ func mysqlBlobTierFor(maxBytes *int64) string {
 
 // parseMySQLEnumValues extracts the enum value list from a column_type
 // string of the form "enum('a','b','c')". Handles single-quote escaping
-// (MySQL doubles single quotes inside enum values: enum('it''s'))
-// byte by byte to match UVG's parser.
+// byte by byte to match UVG's parser — MySQL doubles a single quote
+// inside an enum value:
+//
+//	enum('it''s')
+//
+// The example lives in a code block because Go 1.26 gofmt applies
+// TeX-style quote substitution to doc-comment prose, silently turning
+// a doubled straight quote into a typographic one.
 func parseMySQLEnumValues(columnType string) []string {
 	openIdx := strings.Index(columnType, "(")
 	closeIdx := strings.LastIndex(columnType, ")")
