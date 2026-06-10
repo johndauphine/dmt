@@ -174,18 +174,10 @@ func approxDDL(sqlType, warning string) DdlType {
 // ToCanonical normalizes a source column to a CanonicalType using the
 // source dialect's mapper.
 func ToCanonical(col ColumnInfo, dialect string) CanonicalType {
-	switch dialect {
-	case DialectPostgres:
-		return postgresToCanonical(col)
-	case DialectMSSQL:
-		return mssqlToCanonical(col)
-	case DialectMySQL:
-		return mysqlToCanonical(col)
-	case DialectSQLite:
-		return sqliteToCanonical(col)
-	default:
-		return CanonicalType{Kind: KindRaw, TypeName: col.UDTName}
+	if m, ok := lookupMapper(dialect); ok {
+		return m.ToCanonical(col)
 	}
+	return CanonicalType{Kind: KindRaw, TypeName: col.UDTName}
 }
 
 // FromCanonical emits a canonical type as a DDL fragment for the target
@@ -197,21 +189,13 @@ func ToCanonical(col ColumnInfo, dialect string) CanonicalType {
 // with a warning so callers don't silently produce an empty SQLType
 // (Copilot review on PR #185).
 func FromCanonical(ct CanonicalType, dialect string) DdlType {
-	switch dialect {
-	case DialectPostgres:
-		return postgresFromCanonical(ct)
-	case DialectMSSQL:
-		return mssqlFromCanonical(ct)
-	case DialectMySQL:
-		return mysqlFromCanonical(ct)
-	case DialectSQLite:
-		return sqliteFromCanonical(ct)
-	default:
-		if ct.TypeName != "" {
-			return exactDDL(ct.TypeName)
-		}
-		return approxDDL("TEXT", fmt.Sprintf("unknown target dialect %q; defaulting to TEXT for kind %d", dialect, ct.Kind))
+	if m, ok := lookupMapper(dialect); ok {
+		return m.FromCanonical(ct)
 	}
+	if ct.TypeName != "" {
+		return exactDDL(ct.TypeName)
+	}
+	return approxDDL("TEXT", fmt.Sprintf("unknown target dialect %q; defaulting to TEXT for kind %d", dialect, ct.Kind))
 }
 
 // MapDDLType is the convenience composition: source column → canonical →
