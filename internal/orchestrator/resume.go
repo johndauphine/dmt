@@ -10,6 +10,7 @@ import (
 	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
+	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
 	"github.com/johndauphine/dmt/internal/source"
 	"reflect"
 	"time"
@@ -477,7 +478,7 @@ func validateResumeMissingTargetTable(table source.Table, migration config.Migra
 	}
 	if !migration.SchemaContractEnabled() ||
 		migration.SchemaContractTablesMode() == config.SchemaContractEvolve ||
-		!tableAddedInReport(report, table) {
+		!schemaevolution.TableAddedInReport(report, table) {
 		return nil
 	}
 	return fmt.Errorf(

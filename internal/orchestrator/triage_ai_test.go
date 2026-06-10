@@ -266,17 +266,16 @@ func TestValidationMismatchFactsUsesCurrentRunForSchemaDrift(t *testing.T) {
 	}
 
 	orch := &Orchestrator{
-		config:                      &config.Config{},
-		state:                       state,
-		schemaContractDecisionRunID: "run-1",
-		lastSchemaContractDecisions: []SchemaContractDecision{{
-			Entity: "tables",
-			Table:  "public.orders",
-			Drift:  "added_table",
-			Action: "report",
-			Reason: "schema contract reported added table",
-		}},
+		config: &config.Config{},
+		state:  state,
 	}
+	orch.schemaEvolution().RestoreDecisions("run-1", []SchemaContractDecision{{
+		Entity: "tables",
+		Table:  "public.orders",
+		Drift:  "added_table",
+		Action: "report",
+		Reason: "schema contract reported added table",
+	}})
 	facts := orch.validationMismatchFacts(&ValidationRunResult{
 		Mode:   "count_only",
 		Failed: true,

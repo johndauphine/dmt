@@ -1,4 +1,4 @@
-package orchestrator
+package schemaevolution
 
 import (
 	"context"
@@ -40,25 +40,25 @@ type typeEvolution struct {
 	Change drift.Change
 }
 
-func (o *Orchestrator) shouldApplySchemaEvolution(report drift.Report) bool {
+func (e *Engine) ShouldApplyEvolution(report drift.Report) bool {
 	if !report.HasChanges() ||
-		!o.config.Migration.SchemaEvolutionEnabled() ||
-		o.config.Migration.TargetMode != "upsert" {
+		!e.cfg.Migration.SchemaEvolutionEnabled() ||
+		e.cfg.Migration.TargetMode != "upsert" {
 		return false
 	}
 
-	addedColumnPolicy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
-	nullabilityPolicy := o.config.Migration.NullabilityChangeSchemaEvolutionPolicy()
-	typePolicy := o.config.Migration.TypeChangeSchemaEvolutionPolicy()
+	addedColumnPolicy := e.cfg.Migration.AddedColumnSchemaEvolutionPolicy()
+	nullabilityPolicy := e.cfg.Migration.NullabilityChangeSchemaEvolutionPolicy()
+	typePolicy := e.cfg.Migration.TypeChangeSchemaEvolutionPolicy()
 	return (schemaEvolutionPolicyRequiresTargetStep(addedColumnPolicy) && len(addedColumnChanges(report)) > 0) ||
 		(schemaEvolutionPolicyRequiresTargetStep(nullabilityPolicy) && len(nullabilityChanges(report)) > 0) ||
 		(schemaEvolutionPolicyRequiresTargetStep(typePolicy) && len(typeChanges(report)) > 0)
 }
 
-func enforceSchemaContractDecisions(decisions []schemaContractDecision) error {
+func enforceSchemaContractDecisions(decisions []SchemaContractDecision) error {
 	var violations []string
 	for _, decision := range decisions {
-		if decision.Action == schemaContractActionFrozen || decision.Action == schemaContractActionBlocked {
+		if decision.Action == SchemaContractActionFrozen || decision.Action == SchemaContractActionBlocked {
 			violations = append(violations, formatSchemaContractViolation(decision))
 		}
 	}
@@ -69,20 +69,20 @@ func enforceSchemaContractDecisions(decisions []schemaContractDecision) error {
 		"; choose report to observe only, evolve for deterministic safe changes, or discard_row/discard_value where supported"}
 }
 
-func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
-	if !report.HasChanges() || !o.config.Migration.SchemaEvolutionEnabled() {
+func (e *Engine) ApplyEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
+	if !report.HasChanges() || !e.cfg.Migration.SchemaEvolutionEnabled() {
 		return nil
 	}
-	if o.config.Migration.TargetMode != "upsert" {
+	if e.cfg.Migration.TargetMode != "upsert" {
 		logging.Debug("schema evolution configured but target_mode=%s recreates tables; skipping target ALTERs",
-			o.config.Migration.TargetMode)
+			e.cfg.Migration.TargetMode)
 		return nil
 	}
 
 	addedActions, addedLogOnly, err := planAddedColumnEvolution(
 		report,
 		tables,
-		o.config.Migration.AddedColumnSchemaEvolutionPolicy(),
+		e.cfg.Migration.AddedColumnSchemaEvolutionPolicy(),
 	)
 	if err != nil {
 		return &SchemaEvolutionError{Message: err.Error()}
@@ -90,7 +90,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	nullabilityActions, nullabilityLogOnly, err := planNullabilityEvolution(
 		report,
 		tables,
-		o.config.Migration.NullabilityChangeSchemaEvolutionPolicy(),
+		e.cfg.Migration.NullabilityChangeSchemaEvolutionPolicy(),
 	)
 	if err != nil {
 		return &SchemaEvolutionError{Message: err.Error()}
@@ -98,16 +98,16 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	typeActions, typeLogOnly, err := planTypeEvolution(
 		report,
 		tables,
-		o.config.Migration.TypeChangeSchemaEvolutionPolicy(),
+		e.cfg.Migration.TypeChangeSchemaEvolutionPolicy(),
 	)
 	if err != nil {
 		return &SchemaEvolutionError{Message: err.Error()}
 	}
-	label := o.schemaChangeLogLabel()
+	label := e.schemaChangeLogLabel()
 	if len(addedLogOnly) > 0 {
-		policy := o.config.Migration.AddedColumnSchemaEvolutionPolicy()
-		if o.config.Migration.SchemaContractEnabled() &&
-			o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractDiscardRow {
+		policy := e.cfg.Migration.AddedColumnSchemaEvolutionPolicy()
+		if e.cfg.Migration.SchemaContractEnabled() &&
+			e.cfg.Migration.SchemaContractColumnsMode() == config.SchemaContractDiscardRow {
 			logging.Warn("%s: %d added column(s) detected; columns=discard_row skips affected table(s) and leaves target columns unchanged",
 				label, len(addedLogOnly))
 		} else if policy == config.SchemaEvolutionDiscardValue {
@@ -134,7 +134,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		logging.Info("%s: adding %d nullable column(s) to target", label, len(addedActions))
 	}
 	for _, action := range addedActions {
-		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
+		exists, err := e.targetPool.TableExists(ctx, e.cfg.Target.Schema, action.Table.Name)
 		if err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", action.Table.Name, err)}
 		}
@@ -148,7 +148,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 			logging.Warn("%s: source column %s.%s is NOT NULL; adding target column as NULL to preserve existing rows",
 				label, action.Table.Name, action.Column.Name)
 		}
-		if err := o.targetPool.AddColumn(ctx, &action.Table, &action.Column, o.config.Target.Schema); err != nil {
+		if err := e.targetPool.AddColumn(ctx, &action.Table, &action.Column, e.cfg.Target.Schema); err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf(
 				"adding target column %s.%s: %v",
 				action.Table.Name, action.Column.Name, err,
@@ -160,7 +160,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		logging.Info("%s: relaxing %d target column(s) from NOT NULL to NULL", label, len(nullabilityActions))
 	}
 	for _, action := range nullabilityActions {
-		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
+		exists, err := e.targetPool.TableExists(ctx, e.cfg.Target.Schema, action.Table.Name)
 		if err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", action.Table.Name, err)}
 		}
@@ -170,7 +170,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 				action.Table.Name, action.Column.Name,
 			)}
 		}
-		if err := o.targetPool.DropColumnNotNull(ctx, &action.Table, &action.Column, o.config.Target.Schema); err != nil {
+		if err := e.targetPool.DropColumnNotNull(ctx, &action.Table, &action.Column, e.cfg.Target.Schema); err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf(
 				"relaxing target column nullability %s.%s: %v",
 				action.Table.Name, action.Column.Name, err,
@@ -182,7 +182,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		logging.Info("%s: widening %d target column type(s)", label, len(typeActions))
 	}
 	for _, action := range typeActions {
-		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, action.Table.Name)
+		exists, err := e.targetPool.TableExists(ctx, e.cfg.Target.Schema, action.Table.Name)
 		if err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", action.Table.Name, err)}
 		}
@@ -192,7 +192,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 				action.Table.Name, action.Column.Name,
 			)}
 		}
-		if err := o.targetPool.AlterColumnType(ctx, &action.Table, &action.Column, o.config.Target.Schema); err != nil {
+		if err := e.targetPool.AlterColumnType(ctx, &action.Table, &action.Column, e.cfg.Target.Schema); err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf(
 				"altering target column type %s.%s (%s -> %s): %v",
 				action.Table.Name, action.Column.Name, action.Change.Previous, action.Change.Current, err,
@@ -200,7 +200,7 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 		}
 	}
 
-	o.auditEvent(o.schemaChangeAuditName("schema_evolution_applied"), map[string]any{
+	e.auditEvent(e.schemaChangeAuditName("schema_evolution_applied"), map[string]any{
 		"added_columns":           len(addedActions),
 		"nullability_relaxations": len(nullabilityActions),
 		"type_widenings":          len(typeActions),
@@ -208,11 +208,11 @@ func (o *Orchestrator) applySchemaEvolution(ctx context.Context, report drift.Re
 	return nil
 }
 
-func (o *Orchestrator) applySchemaContractTableEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
+func (e *Engine) ApplyContractTableEvolution(ctx context.Context, report drift.Report, tables []source.Table) error {
 	if !report.HasChanges() ||
-		!o.config.Migration.SchemaContractEnabled() ||
-		o.config.Migration.SchemaContractTablesMode() != config.SchemaContractEvolve ||
-		o.config.Migration.TargetMode != "upsert" {
+		!e.cfg.Migration.SchemaContractEnabled() ||
+		e.cfg.Migration.SchemaContractTablesMode() != config.SchemaContractEvolve ||
+		e.cfg.Migration.TargetMode != "upsert" {
 		return nil
 	}
 
@@ -221,7 +221,7 @@ func (o *Orchestrator) applySchemaContractTableEvolution(ctx context.Context, re
 		return nil
 	}
 
-	label := o.schemaChangeLogLabel()
+	label := e.schemaChangeLogLabel()
 	logging.Info("%s: creating %d added target table(s) before upsert transfer", label, len(addedTables))
 	created := 0
 	for _, change := range addedTables {
@@ -236,7 +236,7 @@ func (o *Orchestrator) applySchemaContractTableEvolution(ctx context.Context, re
 			)}
 		}
 
-		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, table.Name)
+		exists, err := e.targetPool.TableExists(ctx, e.cfg.Target.Schema, table.Name)
 		if err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("checking target table %s: %v", table.Name, err)}
 		}
@@ -245,28 +245,28 @@ func (o *Orchestrator) applySchemaContractTableEvolution(ctx context.Context, re
 			continue
 		}
 
-		if err := o.targetPool.CreateTableWithOptions(ctx, &table, o.config.Target.Schema, pool.TableOptions{}); err != nil {
+		if err := e.targetPool.CreateTableWithOptions(ctx, &table, e.cfg.Target.Schema, pool.TableOptions{}); err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("creating target table %s: %v", table.FullName(), err)}
 		}
-		if err := o.targetPool.CreatePrimaryKey(ctx, &table, o.config.Target.Schema); err != nil {
+		if err := e.targetPool.CreatePrimaryKey(ctx, &table, e.cfg.Target.Schema); err != nil {
 			return &SchemaEvolutionError{Message: fmt.Sprintf("creating primary key for target table %s: %v", table.FullName(), err)}
 		}
 		created++
 	}
 
 	if created > 0 {
-		o.auditEvent("schema_contract_tables_applied", map[string]any{
+		e.auditEvent("schema_contract_tables_applied", map[string]any{
 			"added_tables": created,
 		})
 	}
 	return nil
 }
 
-func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context, report drift.Report, tables []source.Table) {
+func (e *Engine) FinalizeContractTableEvolution(ctx context.Context, report drift.Report, tables []source.Table) {
 	if !report.HasChanges() ||
-		!o.config.Migration.SchemaContractEnabled() ||
-		o.config.Migration.SchemaContractTablesMode() != config.SchemaContractEvolve ||
-		o.config.Migration.TargetMode != "upsert" {
+		!e.cfg.Migration.SchemaContractEnabled() ||
+		e.cfg.Migration.SchemaContractTablesMode() != config.SchemaContractEvolve ||
+		e.cfg.Migration.TargetMode != "upsert" {
 		return
 	}
 
@@ -275,13 +275,13 @@ func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context,
 		return
 	}
 
-	label := o.schemaChangeLogLabel()
+	label := e.schemaChangeLogLabel()
 	logging.Info("%s: finalizing %d evolved target table(s) after transfer", label, len(addedTables))
 
 	resets := 0
 	for _, table := range addedTables {
 		t := table
-		if err := o.targetPool.ResetSequence(ctx, o.config.Target.Schema, &t); err != nil {
+		if err := e.targetPool.ResetSequence(ctx, e.cfg.Target.Schema, &t); err != nil {
 			logging.Warn("%s: resetting sequence for evolved table %s: %v", label, t.Name, err)
 			continue
 		}
@@ -289,12 +289,12 @@ func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context,
 	}
 
 	indexes := 0
-	if o.config.Migration.CreateIndexesEnabled() {
+	if e.cfg.Migration.CreateIndexesEnabled() {
 		for _, table := range addedTables {
 			for _, index := range table.Indexes {
 				t := table
 				idx := index
-				if err := o.targetPool.CreateIndex(ctx, &t, &idx, o.config.Target.Schema); err != nil {
+				if err := e.targetPool.CreateIndex(ctx, &t, &idx, e.cfg.Target.Schema); err != nil {
 					logging.Warn("%s: creating index %s on evolved table %s: %v", label, idx.Name, t.Name, err)
 					continue
 				}
@@ -304,12 +304,12 @@ func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context,
 	}
 
 	foreignKeys := 0
-	if o.config.Migration.CreateForeignKeysEnabled() {
+	if e.cfg.Migration.CreateForeignKeysEnabled() {
 		for _, table := range addedTables {
 			for _, fk := range table.ForeignKeys {
 				t := table
 				foreignKey := fk
-				if err := o.targetPool.CreateForeignKey(ctx, &t, &foreignKey, o.config.Target.Schema); err != nil {
+				if err := e.targetPool.CreateForeignKey(ctx, &t, &foreignKey, e.cfg.Target.Schema); err != nil {
 					logging.Warn("%s: creating foreign key %s on evolved table %s: %v", label, foreignKey.Name, t.Name, err)
 					continue
 				}
@@ -319,12 +319,12 @@ func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context,
 	}
 
 	checks := 0
-	if o.config.Migration.CreateCheckConstraints {
+	if e.cfg.Migration.CreateCheckConstraints {
 		for _, table := range addedTables {
 			for _, check := range table.CheckConstraints {
 				t := table
 				chk := check
-				if err := o.targetPool.CreateCheckConstraint(ctx, &t, &chk, o.config.Target.Schema); err != nil {
+				if err := e.targetPool.CreateCheckConstraint(ctx, &t, &chk, e.cfg.Target.Schema); err != nil {
 					logging.Warn("%s: creating check constraint %s on evolved table %s: %v", label, chk.Name, t.Name, err)
 					continue
 				}
@@ -333,7 +333,7 @@ func (o *Orchestrator) finalizeSchemaContractTableEvolution(ctx context.Context,
 		}
 	}
 
-	o.auditEvent("schema_contract_tables_finalized", map[string]any{
+	e.auditEvent("schema_contract_tables_finalized", map[string]any{
 		"tables":          len(addedTables),
 		"sequence_resets": resets,
 		"indexes":         indexes,
@@ -351,90 +351,90 @@ func schemaEvolutionPolicyRequiresTargetStep(policy config.SchemaEvolutionPolicy
 	}
 }
 
-func (o *Orchestrator) schemaChangeAuditName(base string) string {
-	if o.config.Migration.SchemaContractEnabled() {
+func (e *Engine) schemaChangeAuditName(base string) string {
+	if e.cfg.Migration.SchemaContractEnabled() {
 		return strings.Replace(base, "schema_evolution", "schema_contract", 1)
 	}
 	return base
 }
 
-func (o *Orchestrator) schemaChangeLogLabel() string {
-	if o.config.Migration.SchemaContractEnabled() {
+func (e *Engine) schemaChangeLogLabel() string {
+	if e.cfg.Migration.SchemaContractEnabled() {
 		return "schema contract"
 	}
 	return "schema evolution"
 }
 
-func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, tables []source.Table) ([]source.Table, error) {
+func (e *Engine) EffectiveTables(report drift.Report, tables []source.Table) ([]source.Table, error) {
 	if !report.HasChanges() ||
-		!o.config.Migration.SchemaEvolutionEnabled() {
+		!e.cfg.Migration.SchemaEvolutionEnabled() {
 		return tables, nil
 	}
 
 	pruned := tables
-	if o.config.Migration.SchemaContractEnabled() &&
-		o.config.Migration.SchemaContractTablesMode() == config.SchemaContractDiscardRow {
+	if e.cfg.Migration.SchemaContractEnabled() &&
+		e.cfg.Migration.SchemaContractTablesMode() == config.SchemaContractDiscardRow {
 		var discardedTables int
 		pruned, discardedTables = pruneDiscardedAddedTables(report, pruned)
 		if discardedTables > 0 {
 			logging.Warn("%s: skipping %d added table(s) from transfer, validation, and schema snapshots because tables=discard_row",
-				o.schemaChangeLogLabel(), discardedTables)
-			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				e.schemaChangeLogLabel(), discardedTables)
+			e.auditEvent(e.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 				"added_tables": discardedTables,
 			})
 		}
 	}
 
-	if o.config.Migration.SchemaContractEnabled() &&
-		o.config.Migration.SchemaContractColumnsMode() == config.SchemaContractDiscardRow {
+	if e.cfg.Migration.SchemaContractEnabled() &&
+		e.cfg.Migration.SchemaContractColumnsMode() == config.SchemaContractDiscardRow {
 		var skippedTables, skippedColumns int
 		pruned, skippedTables, skippedColumns = pruneTablesWithAddedColumns(report, pruned)
 		if skippedTables > 0 {
 			logging.Warn("%s: skipping %d table(s) with %d added column(s) from transfer, validation, and schema snapshots because columns=discard_row",
-				o.schemaChangeLogLabel(), skippedTables, skippedColumns)
-			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				e.schemaChangeLogLabel(), skippedTables, skippedColumns)
+			e.auditEvent(e.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 				"added_columns":  skippedColumns,
 				"skipped_tables": skippedTables,
 			})
 		}
 	}
 
-	if o.config.Migration.SchemaContractEnabled() &&
-		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractDiscardRow {
+	if e.cfg.Migration.SchemaContractEnabled() &&
+		e.cfg.Migration.SchemaContractDataTypeMode() == config.SchemaContractDiscardRow {
 		var skippedTables, skippedColumns int
 		pruned, skippedTables, skippedColumns = pruneTablesWithDataTypeChanges(report, pruned)
 		if skippedTables > 0 {
 			logging.Warn("%s: skipping %d table(s) with %d data type/nullability-changed column(s) from transfer, validation, and schema snapshots because data_type=discard_row",
-				o.schemaChangeLogLabel(), skippedTables, skippedColumns)
-			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				e.schemaChangeLogLabel(), skippedTables, skippedColumns)
+			e.auditEvent(e.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 				"data_type_columns": skippedColumns,
 				"skipped_tables":    skippedTables,
 			})
 		}
 	}
 
-	if o.config.Migration.SchemaContractEnabled() &&
-		o.config.Migration.SchemaContractDataTypeMode() == config.SchemaContractDiscardValue {
+	if e.cfg.Migration.SchemaContractEnabled() &&
+		e.cfg.Migration.SchemaContractDataTypeMode() == config.SchemaContractDiscardValue {
 		var discarded int
 		var err error
-		pruned, discarded, err = pruneDiscardedDataTypeColumns(report, pruned, o.config.Migration.DateUpdatedColumns)
+		pruned, discarded, err = pruneDiscardedDataTypeColumns(report, pruned, e.cfg.Migration.DateUpdatedColumns)
 		if err != nil {
 			return nil, &SchemaEvolutionError{Message: err.Error()}
 		}
 		if discarded > 0 {
 			logging.Warn("%s: discarding %d data type/nullability-changed column(s) from transfer and validation because data_type=discard_value; previous schema snapshot metadata will be retained",
-				o.schemaChangeLogLabel(), discarded)
-			o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+				e.schemaChangeLogLabel(), discarded)
+			e.auditEvent(e.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 				"data_type_columns": discarded,
 			})
 		}
 	}
 
-	if o.config.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
+	if e.cfg.Migration.AddedColumnSchemaEvolutionPolicy() != config.SchemaEvolutionDiscardValue {
 		return pruned, nil
 	}
 
-	pruned, discarded, err := pruneDiscardedAddedColumns(report, pruned, o.config.Migration.DateUpdatedColumns)
+	pruned, discarded, err := pruneDiscardedAddedColumns(report, pruned, e.cfg.Migration.DateUpdatedColumns)
 	if err != nil {
 		return nil, &SchemaEvolutionError{Message: err.Error()}
 	}
@@ -443,8 +443,8 @@ func (o *Orchestrator) effectiveTablesForSchemaEvolution(report drift.Report, ta
 	}
 
 	logging.Warn("%s: discarding %d added column(s) from target DDL, transfer, validation, and snapshots because added_column=discard_value",
-		o.schemaChangeLogLabel(), discarded)
-	o.auditEvent(o.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
+		e.schemaChangeLogLabel(), discarded)
+	e.auditEvent(e.schemaChangeAuditName("schema_evolution_discarded"), map[string]any{
 		"added_columns": discarded,
 	})
 	return pruned, nil

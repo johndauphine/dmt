@@ -9,6 +9,7 @@ import (
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
+	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
 	"runtime/debug"
 	"time"
 )
@@ -249,7 +250,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 
-	transferSchemaDriftReport := filterSchemaDriftReportForTables(schemaDriftReport, tables)
+	transferSchemaDriftReport := schemaevolution.FilterDriftReportForTables(schemaDriftReport, tables)
 	if o.shouldApplySchemaEvolution(transferSchemaDriftReport) {
 		o.setPhase("schema_evolution")
 		o.state.UpdatePhase(runID, "schema_evolution")

@@ -1,4 +1,4 @@
-package orchestrator
+package schemaevolution
 
 import (
 	"bufio"
@@ -13,19 +13,19 @@ import (
 )
 
 const (
-	schemaContractEntityTables   = "tables"
-	schemaContractEntityColumns  = "columns"
-	schemaContractEntityDataType = "data_type"
+	SchemaContractEntityTables   = "tables"
+	SchemaContractEntityColumns  = "columns"
+	SchemaContractEntityDataType = "data_type"
 
-	schemaContractActionEvolved        = "evolved"
-	schemaContractActionFrozen         = "frozen"
-	schemaContractActionDiscardedRow   = "discarded_row"
-	schemaContractActionDiscardedValue = "discarded_value"
-	schemaContractActionReported       = "reported"
-	schemaContractActionBlocked        = "blocked"
+	SchemaContractActionEvolved        = "evolved"
+	SchemaContractActionFrozen         = "frozen"
+	SchemaContractActionDiscardedRow   = "discarded_row"
+	SchemaContractActionDiscardedValue = "discarded_value"
+	SchemaContractActionReported       = "reported"
+	SchemaContractActionBlocked        = "blocked"
 )
 
-type schemaContractDecision struct {
+type SchemaContractDecision struct {
 	Entity   string `json:"entity"`
 	Mode     string `json:"mode"`
 	Drift    string `json:"drift_kind"`
@@ -38,24 +38,24 @@ type schemaContractDecision struct {
 	Reason   string `json:"reason"`
 }
 
-func (o *Orchestrator) schemaContractDecisions(
+func (e *Engine) schemaContractDecisions(
 	report drift.Report,
 	tables []source.Table,
 	allowSchemaEvolution bool,
-) []schemaContractDecision {
-	if o.config == nil || !o.config.Migration.SchemaContractEnabled() || !report.HasChanges() {
+) []SchemaContractDecision {
+	if e.cfg == nil || !e.cfg.Migration.SchemaContractEnabled() || !report.HasChanges() {
 		return nil
 	}
 
-	decisions := make([]schemaContractDecision, 0, len(report.Changes))
+	decisions := make([]SchemaContractDecision, 0, len(report.Changes))
 	for _, change := range report.Changes {
 		entity := schemaContractEntity(change)
 		if entity == "" {
 			continue
 		}
-		mode := o.schemaContractModeForEntity(entity)
-		action, reason := o.schemaContractActionAndReason(change, report, entity, mode, tables, allowSchemaEvolution)
-		decisions = append(decisions, schemaContractDecision{
+		mode := e.schemaContractModeForEntity(entity)
+		action, reason := e.schemaContractActionAndReason(change, report, entity, mode, tables, allowSchemaEvolution)
+		decisions = append(decisions, SchemaContractDecision{
 			Entity:   entity,
 			Mode:     string(mode),
 			Drift:    string(change.Kind),
@@ -76,10 +76,10 @@ type schemaContractDiscardRowSkip struct {
 	mode   string
 }
 
-func resolveSchemaContractDecisionPrecedence(decisions []schemaContractDecision) []schemaContractDecision {
+func resolveSchemaContractDecisionPrecedence(decisions []SchemaContractDecision) []SchemaContractDecision {
 	skippedTables := make(map[string]schemaContractDiscardRowSkip)
 	for _, decision := range decisions {
-		if decision.Action != schemaContractActionDiscardedRow {
+		if decision.Action != SchemaContractActionDiscardedRow {
 			continue
 		}
 		skippedTables[schemaContractDecisionTableKey(decision)] = schemaContractDiscardRowSkip{
@@ -91,19 +91,19 @@ func resolveSchemaContractDecisionPrecedence(decisions []schemaContractDecision)
 		return decisions
 	}
 
-	resolved := make([]schemaContractDecision, len(decisions))
+	resolved := make([]SchemaContractDecision, len(decisions))
 	copy(resolved, decisions)
 	for i := range resolved {
 		decision := &resolved[i]
-		if decision.Action == schemaContractActionDiscardedRow ||
-			decision.Action == schemaContractActionFrozen {
+		if decision.Action == SchemaContractActionDiscardedRow ||
+			decision.Action == SchemaContractActionFrozen {
 			continue
 		}
 		skip, ok := skippedTables[schemaContractDecisionTableKey(*decision)]
 		if !ok {
 			continue
 		}
-		decision.Action = schemaContractActionReported
+		decision.Action = SchemaContractActionReported
 		decision.Reason = fmt.Sprintf(
 			"%s=%s skips table %s for this run; %s drift is reported without target changes",
 			skip.entity,
@@ -115,25 +115,25 @@ func resolveSchemaContractDecisionPrecedence(decisions []schemaContractDecision)
 	return resolved
 }
 
-func schemaContractDecisionTableKey(decision schemaContractDecision) string {
+func schemaContractDecisionTableKey(decision SchemaContractDecision) string {
 	return schemaEvolutionTableKey(decision.Schema, decision.Table)
 }
 
-func schemaContractDecisionTableLabel(decision schemaContractDecision) string {
+func schemaContractDecisionTableLabel(decision SchemaContractDecision) string {
 	if decision.Schema == "" {
 		return decision.Table
 	}
 	return decision.Schema + "." + decision.Table
 }
 
-func (o *Orchestrator) schemaContractModeForEntity(entity string) config.SchemaContractMode {
+func (e *Engine) schemaContractModeForEntity(entity string) config.SchemaContractMode {
 	switch entity {
-	case schemaContractEntityTables:
-		return o.config.Migration.SchemaContractTablesMode()
-	case schemaContractEntityColumns:
-		return o.config.Migration.SchemaContractColumnsMode()
-	case schemaContractEntityDataType:
-		return o.config.Migration.SchemaContractDataTypeMode()
+	case SchemaContractEntityTables:
+		return e.cfg.Migration.SchemaContractTablesMode()
+	case SchemaContractEntityColumns:
+		return e.cfg.Migration.SchemaContractColumnsMode()
+	case SchemaContractEntityDataType:
+		return e.cfg.Migration.SchemaContractDataTypeMode()
 	default:
 		return config.SchemaContractReport
 	}
@@ -142,17 +142,17 @@ func (o *Orchestrator) schemaContractModeForEntity(entity string) config.SchemaC
 func schemaContractEntity(change drift.Change) string {
 	switch change.Kind {
 	case drift.TableAdded, drift.TableDropped:
-		return schemaContractEntityTables
+		return SchemaContractEntityTables
 	case drift.AddedColumn, drift.DroppedColumn:
-		return schemaContractEntityColumns
+		return SchemaContractEntityColumns
 	case drift.NullabilityChange, drift.TypeWidened, drift.TypeNarrowed, drift.TypeChangedLossy:
-		return schemaContractEntityDataType
+		return SchemaContractEntityDataType
 	default:
 		return ""
 	}
 }
 
-func (o *Orchestrator) schemaContractActionAndReason(
+func (e *Engine) schemaContractActionAndReason(
 	change drift.Change,
 	report drift.Report,
 	entity string,
@@ -162,74 +162,74 @@ func (o *Orchestrator) schemaContractActionAndReason(
 ) (string, string) {
 	switch mode {
 	case config.SchemaContractFreeze:
-		return schemaContractActionFrozen, fmt.Sprintf("%s=freeze blocks %s before transfer", entity, change.Kind)
+		return SchemaContractActionFrozen, fmt.Sprintf("%s=freeze blocks %s before transfer", entity, change.Kind)
 	case config.SchemaContractReport:
-		return schemaContractActionReported, fmt.Sprintf("%s=report records drift without target schema changes", entity)
+		return SchemaContractActionReported, fmt.Sprintf("%s=report records drift without target schema changes", entity)
 	case config.SchemaContractDiscardRow:
 		return schemaContractDiscardRowAction(change, entity)
 	case config.SchemaContractDiscardValue:
-		return o.schemaContractDiscardValueAction(change, entity, tables)
+		return e.schemaContractDiscardValueAction(change, entity, tables)
 	case "", config.SchemaContractEvolve:
-		return o.schemaContractEvolveAction(change, report, entity, tables, allowSchemaEvolution)
+		return e.schemaContractEvolveAction(change, report, entity, tables, allowSchemaEvolution)
 	default:
-		return schemaContractActionReported, fmt.Sprintf("%s has unrecognized mode %q", entity, mode)
+		return SchemaContractActionReported, fmt.Sprintf("%s has unrecognized mode %q", entity, mode)
 	}
 }
 
 func schemaContractDiscardRowAction(change drift.Change, entity string) (string, string) {
 	switch entity {
-	case schemaContractEntityTables:
+	case SchemaContractEntityTables:
 		if change.Kind == drift.TableAdded {
-			return schemaContractActionDiscardedRow, "tables=discard_row skips newly added source tables for this run"
+			return SchemaContractActionDiscardedRow, "tables=discard_row skips newly added source tables for this run"
 		}
-		return schemaContractActionReported, "tables=discard_row reports dropped source tables and retains target tables"
-	case schemaContractEntityColumns:
+		return SchemaContractActionReported, "tables=discard_row reports dropped source tables and retains target tables"
+	case SchemaContractEntityColumns:
 		if change.Kind == drift.AddedColumn {
-			return schemaContractActionDiscardedRow, "columns=discard_row skips tables with newly added source columns"
+			return SchemaContractActionDiscardedRow, "columns=discard_row skips tables with newly added source columns"
 		}
-		return schemaContractActionReported, "columns=discard_row reports dropped source columns and omits them from writes"
-	case schemaContractEntityDataType:
-		return schemaContractActionDiscardedRow, "data_type=discard_row skips tables with data type/nullability drift"
+		return SchemaContractActionReported, "columns=discard_row reports dropped source columns and omits them from writes"
+	case SchemaContractEntityDataType:
+		return SchemaContractActionDiscardedRow, "data_type=discard_row skips tables with data type/nullability drift"
 	default:
-		return schemaContractActionReported, "discard_row is not defined for this drift category"
+		return SchemaContractActionReported, "discard_row is not defined for this drift category"
 	}
 }
 
-func (o *Orchestrator) schemaContractDiscardValueAction(
+func (e *Engine) schemaContractDiscardValueAction(
 	change drift.Change,
 	entity string,
 	tables []source.Table,
 ) (string, string) {
 	switch entity {
-	case schemaContractEntityColumns:
+	case SchemaContractEntityColumns:
 		if table, ok := schemaContractDecisionTable(tables, change); ok {
 			discardCols := map[string]struct{}{change.ObjectName: {}}
 			if err := rejectDiscardedAddedRequiredColumns(
 				table,
 				discardCols,
-				o.config.Migration.DateUpdatedColumns,
+				e.cfg.Migration.DateUpdatedColumns,
 			); err != nil {
-				return schemaContractActionBlocked, err.Error()
+				return SchemaContractActionBlocked, err.Error()
 			}
 		}
 		if change.Kind == drift.AddedColumn {
-			return schemaContractActionDiscardedValue, "columns=discard_value omits newly added source columns from the effective plan"
+			return SchemaContractActionDiscardedValue, "columns=discard_value omits newly added source columns from the effective plan"
 		}
-		return schemaContractActionReported, "columns=discard_value reports dropped source columns and retains target columns"
-	case schemaContractEntityDataType:
+		return SchemaContractActionReported, "columns=discard_value reports dropped source columns and retains target columns"
+	case SchemaContractEntityDataType:
 		if table, ok := schemaContractDecisionTable(tables, change); ok {
 			discardCols := map[string]struct{}{change.ObjectName: {}}
 			if err := rejectDiscardedRequiredDataTypeColumns(
 				table,
 				discardCols,
-				o.config.Migration.DateUpdatedColumns,
+				e.cfg.Migration.DateUpdatedColumns,
 			); err != nil {
-				return schemaContractActionBlocked, err.Error()
+				return SchemaContractActionBlocked, err.Error()
 			}
 		}
-		return schemaContractActionDiscardedValue, "data_type=discard_value omits affected non-required columns from transfer and validation"
+		return SchemaContractActionDiscardedValue, "data_type=discard_value omits affected non-required columns from transfer and validation"
 	default:
-		return schemaContractActionReported, "discard_value is not supported for this entity and is reported only"
+		return SchemaContractActionReported, "discard_value is not supported for this entity and is reported only"
 	}
 }
 
@@ -276,7 +276,7 @@ func schemaContractDecisionTable(tables []source.Table, change drift.Change) (so
 	return source.Table{}, false
 }
 
-func (o *Orchestrator) schemaContractEvolveAction(
+func (e *Engine) schemaContractEvolveAction(
 	change drift.Change,
 	report drift.Report,
 	entity string,
@@ -284,92 +284,92 @@ func (o *Orchestrator) schemaContractEvolveAction(
 	allowSchemaEvolution bool,
 ) (string, string) {
 	if !allowSchemaEvolution {
-		return schemaContractActionReported, fmt.Sprintf("%s=evolve is reported only in read-only mode", entity)
+		return SchemaContractActionReported, fmt.Sprintf("%s=evolve is reported only in read-only mode", entity)
 	}
 
 	switch entity {
-	case schemaContractEntityTables:
+	case SchemaContractEntityTables:
 		if change.Kind == drift.TableAdded {
-			if o.config.Migration.TargetMode == "upsert" {
+			if e.cfg.Migration.TargetMode == "upsert" {
 				if table, ok := schemaContractDecisionTable(tables, change); ok && !table.HasPK() {
-					return schemaContractActionBlocked, fmt.Sprintf(
+					return SchemaContractActionBlocked, fmt.Sprintf(
 						"schema contract cannot evolve added table %s: upsert mode requires a primary key",
 						table.FullName(),
 					)
 				}
 			}
-			return schemaContractActionEvolved, "tables=evolve creates newly added target tables where needed"
+			return SchemaContractActionEvolved, "tables=evolve creates newly added target tables where needed"
 		}
-		return schemaContractActionReported, "tables=evolve reports dropped source tables and retains target tables"
-	case schemaContractEntityColumns:
+		return SchemaContractActionReported, "tables=evolve reports dropped source tables and retains target tables"
+	case SchemaContractEntityColumns:
 		if change.Kind == drift.AddedColumn {
-			if o.config.Migration.TargetMode != "upsert" {
-				return schemaContractActionEvolved, fmt.Sprintf(
+			if e.cfg.Migration.TargetMode != "upsert" {
+				return SchemaContractActionEvolved, fmt.Sprintf(
 					"columns=evolve accepts newly added source columns through target_mode=%s",
-					o.config.Migration.TargetMode,
+					e.cfg.Migration.TargetMode,
 				)
 			}
 			if table, column, ok := schemaContractDecisionColumn(tables, change); ok {
 				if column.IsIdentity {
-					return schemaContractActionBlocked, fmt.Sprintf(
+					return SchemaContractActionBlocked, fmt.Sprintf(
 						"schema evolution cannot auto-add identity column %s.%s",
 						table.Name, column.Name,
 					)
 				}
 				if tablePrimaryKeyContains(table, column.Name) {
-					return schemaContractActionBlocked, fmt.Sprintf(
+					return SchemaContractActionBlocked, fmt.Sprintf(
 						"schema evolution cannot auto-add primary-key column %s.%s",
 						table.Name, column.Name,
 					)
 				}
 			}
-			return schemaContractActionEvolved, "columns=evolve adds compatible source columns where needed"
+			return SchemaContractActionEvolved, "columns=evolve adds compatible source columns where needed"
 		}
-		return schemaContractActionReported, "columns=evolve reports dropped source columns and omits them from writes"
-	case schemaContractEntityDataType:
-		if o.config.Migration.TargetMode != "upsert" {
-			return schemaContractActionEvolved, fmt.Sprintf(
+		return SchemaContractActionReported, "columns=evolve reports dropped source columns and omits them from writes"
+	case SchemaContractEntityDataType:
+		if e.cfg.Migration.TargetMode != "upsert" {
+			return SchemaContractActionEvolved, fmt.Sprintf(
 				"data_type=evolve accepts source type/nullability drift through target_mode=%s",
-				o.config.Migration.TargetMode,
+				e.cfg.Migration.TargetMode,
 			)
 		}
 		table, column, hasColumn := schemaContractDecisionColumn(tables, change)
 		if hasColumnDefaultDrift(report, change) || hasPrimaryKeyDrift(report, change) {
-			return schemaContractActionBlocked, "data_type=evolve blocks type/nullability drift when default or primary-key drift is also present"
+			return SchemaContractActionBlocked, "data_type=evolve blocks type/nullability drift when default or primary-key drift is also present"
 		}
 		if change.Kind == drift.TypeWidened && hasColumnNullabilityDrift(report, change) {
-			return schemaContractActionBlocked, "data_type=evolve blocks type widening while nullability drift is also present"
+			return SchemaContractActionBlocked, "data_type=evolve blocks type widening while nullability drift is also present"
 		}
 		if isNullabilityRelaxation(change) && hasColumnTypeDrift(report, change) {
-			return schemaContractActionBlocked, "data_type=evolve blocks nullability relaxation while type drift is also present"
+			return SchemaContractActionBlocked, "data_type=evolve blocks nullability relaxation while type drift is also present"
 		}
 		if hasColumn {
 			if column.IsIdentity {
-				return schemaContractActionBlocked, fmt.Sprintf(
+				return SchemaContractActionBlocked, fmt.Sprintf(
 					"schema evolution cannot auto-evolve identity column %s.%s",
 					table.Name, column.Name,
 				)
 			}
 			if tablePrimaryKeyContains(table, column.Name) {
-				return schemaContractActionBlocked, fmt.Sprintf(
+				return SchemaContractActionBlocked, fmt.Sprintf(
 					"schema evolution cannot auto-evolve primary-key column %s.%s",
 					table.Name, column.Name,
 				)
 			}
 			if change.Kind == drift.NullabilityChange &&
 				(change.Previous != "NOT NULL" || change.Current != "NULL" || !column.IsNullable) {
-				return schemaContractActionBlocked, fmt.Sprintf(
+				return SchemaContractActionBlocked, fmt.Sprintf(
 					"schema evolution cannot auto-tighten nullability for %s.%s (%s -> %s)",
 					table.Name, column.Name, change.Previous, change.Current,
 				)
 			}
 		}
 		if change.Kind == drift.TypeWidened || isNullabilityRelaxation(change) {
-			return schemaContractActionEvolved, "data_type=evolve applies deterministic safe type/nullability changes"
+			return SchemaContractActionEvolved, "data_type=evolve applies deterministic safe type/nullability changes"
 		}
-		return schemaContractActionBlocked, "data_type=evolve blocks unsafe narrowed, lossy, or tightening changes before transfer"
+		return SchemaContractActionBlocked, "data_type=evolve blocks unsafe narrowed, lossy, or tightening changes before transfer"
 	default:
-		return schemaContractActionReported, "drift category is outside schema_contract coverage"
+		return SchemaContractActionReported, "drift category is outside schema_contract coverage"
 	}
 }
 
@@ -394,17 +394,17 @@ func isNullabilityRelaxation(change drift.Change) bool {
 		change.Current == "NULL"
 }
 
-func (o *Orchestrator) auditSchemaContractDecisions(decisions []schemaContractDecision) {
+func (e *Engine) auditSchemaContractDecisions(decisions []SchemaContractDecision) {
 	if len(decisions) == 0 {
 		return
 	}
-	o.auditEvent("schema_contract_decisions", map[string]any{
+	e.auditEvent("schema_contract_decisions", map[string]any{
 		"count":     len(decisions),
 		"decisions": schemaContractDecisionAuditPayload(decisions),
 	})
 }
 
-func schemaContractDecisionAuditPayload(decisions []schemaContractDecision) []any {
+func schemaContractDecisionAuditPayload(decisions []SchemaContractDecision) []any {
 	out := make([]any, 0, len(decisions))
 	for _, decision := range decisions {
 		payload := map[string]any{
@@ -432,12 +432,12 @@ func schemaContractDecisionAuditPayload(decisions []schemaContractDecision) []an
 	return out
 }
 
-func formatSchemaContractViolation(decision schemaContractDecision) string {
+func formatSchemaContractViolation(decision SchemaContractDecision) string {
 	target := decision.Table
 	if decision.Schema != "" {
 		target = decision.Schema + "." + target
 	}
-	if decision.Entity != schemaContractEntityTables && decision.Object != "" {
+	if decision.Entity != SchemaContractEntityTables && decision.Object != "" {
 		target += "." + decision.Object
 	}
 	if decision.Reason == "" {
@@ -446,20 +446,20 @@ func formatSchemaContractViolation(decision schemaContractDecision) string {
 	return fmt.Sprintf("%s=%s blocked %s on %s: %s", decision.Entity, decision.Mode, decision.Drift, target, decision.Reason)
 }
 
-func (o *Orchestrator) schemaContractDecisionOutputForRun(runID string) []SchemaContractDecision {
-	if o == nil || o.config == nil || runID == "" {
+func (e *Engine) ContractDecisionOutputForRun(runID string) []SchemaContractDecision {
+	if e == nil || e.cfg == nil || runID == "" {
 		return nil
 	}
 
-	decisions, err := readSchemaContractDecisionsFromAudit(o.config.Migration.AuditDir, runID)
+	decisions, err := readSchemaContractDecisionsFromAudit(e.cfg.Migration.AuditDir, runID)
 	if err == nil && len(decisions) > 0 {
 		return decisions
 	}
 	if err != nil && !os.IsNotExist(err) {
 		logging.Debug("reading schema contract decisions from audit log: %v", err)
 	}
-	if o.schemaContractDecisionRunID == runID && len(o.lastSchemaContractDecisions) > 0 {
-		return cloneSchemaContractDecisions(o.lastSchemaContractDecisions)
+	if e.contractDecisionRunID == runID && len(e.lastContractDecisions) > 0 {
+		return cloneSchemaContractDecisions(e.lastContractDecisions)
 	}
 	return nil
 }

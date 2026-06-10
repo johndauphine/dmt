@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"encoding/json"
 	"errors"
+	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
 	"strings"
 	"testing"
 	"time"
@@ -222,7 +223,7 @@ func TestMigrationResultJSON(t *testing.T) {
 			RunID:  "schema-run",
 			Status: "failed",
 			SchemaContractDecisions: []SchemaContractDecision{{
-				Entity:   schemaContractEntityDataType,
+				Entity:   schemaevolution.SchemaContractEntityDataType,
 				Mode:     string(config.SchemaContractEvolve),
 				Drift:    string(drift.TypeNarrowed),
 				Schema:   "dbo",
@@ -230,7 +231,7 @@ func TestMigrationResultJSON(t *testing.T) {
 				Object:   "name",
 				Previous: "varchar(255)",
 				Current:  "varchar(50)",
-				Action:   schemaContractActionBlocked,
+				Action:   schemaevolution.SchemaContractActionBlocked,
 				Reason:   "data_type=evolve blocks unsafe narrowed, lossy, or tightening changes before transfer",
 			}},
 		}
@@ -247,7 +248,7 @@ func TestMigrationResultJSON(t *testing.T) {
 		if len(parsed.SchemaContractDecisions) != 1 {
 			t.Fatalf("decision count = %d, want 1", len(parsed.SchemaContractDecisions))
 		}
-		if parsed.SchemaContractDecisions[0].Action != schemaContractActionBlocked {
+		if parsed.SchemaContractDecisions[0].Action != schemaevolution.SchemaContractActionBlocked {
 			t.Fatalf("decision = %#v, want blocked action", parsed.SchemaContractDecisions[0])
 		}
 	})
@@ -318,13 +319,13 @@ func TestStatusResultJSON(t *testing.T) {
 			RunID:  "status-run-123",
 			Status: "running",
 			SchemaContractDecisions: []SchemaContractDecision{{
-				Entity: schemaContractEntityColumns,
+				Entity: schemaevolution.SchemaContractEntityColumns,
 				Mode:   string(config.SchemaContractDiscardRow),
 				Drift:  string(drift.AddedColumn),
 				Schema: "dbo",
 				Table:  "Users",
 				Object: "email",
-				Action: schemaContractActionDiscardedRow,
+				Action: schemaevolution.SchemaContractActionDiscardedRow,
 				Reason: "columns=discard_row skips tables with newly added source columns",
 			}},
 		}
@@ -341,7 +342,7 @@ func TestStatusResultJSON(t *testing.T) {
 		if len(parsed.SchemaContractDecisions) != 1 {
 			t.Fatalf("decision count = %d, want 1", len(parsed.SchemaContractDecisions))
 		}
-		if parsed.SchemaContractDecisions[0].Action != schemaContractActionDiscardedRow {
+		if parsed.SchemaContractDecisions[0].Action != schemaevolution.SchemaContractActionDiscardedRow {
 			t.Fatalf("decision = %#v, want discarded_row action", parsed.SchemaContractDecisions[0])
 		}
 	})

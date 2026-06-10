@@ -1,4 +1,4 @@
-package orchestrator
+package schemaevolution
 
 import (
 	"context"
@@ -249,12 +249,12 @@ func TestPruneDiscardedAddedColumnsRejectsPrimaryKeyColumn(t *testing.T) {
 
 func TestSchemaDriftReportFooterReadOnlyDoesNotReportDiscardForOtherPolicies(t *testing.T) {
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.AddedColumn, TableName: "Users"}}}
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode:      "upsert",
 		SchemaEvolution: &config.SchemaEvolutionConfig{},
 	}}}
 
-	got := o.schemaDriftReportFooter(report, false)
+	got := e.schemaDriftReportFooter(report, false)
 	if !strings.Contains(got, "read-only mode") {
 		t.Fatalf("schemaDriftReportFooter() = %q, want read-only mode", got)
 	}
@@ -875,9 +875,9 @@ func TestShouldApplySchemaEvolutionOnlyForOptInUpsert(t *testing.T) {
 			if tt.report.HasChanges() {
 				report = tt.report
 			}
-			o := &Orchestrator{config: &config.Config{Migration: tt.migration}}
-			if got := o.shouldApplySchemaEvolution(report); got != tt.want {
-				t.Fatalf("shouldApplySchemaEvolution() = %v, want %v", got, tt.want)
+			e := &Engine{cfg: &config.Config{Migration: tt.migration}}
+			if got := e.ShouldApplyEvolution(report); got != tt.want {
+				t.Fatalf("ShouldApplyEvolution() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1147,8 +1147,8 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := &Orchestrator{config: &config.Config{Migration: tt.migration}}
-			got := o.schemaDriftReportFooter(tt.report, tt.allow)
+			e := &Engine{cfg: &config.Config{Migration: tt.migration}}
+			got := e.schemaDriftReportFooter(tt.report, tt.allow)
 			if !strings.Contains(got, tt.want) {
 				t.Fatalf("schemaDriftReportFooter() = %q, want substring %q", got, tt.want)
 			}
@@ -1157,11 +1157,10 @@ func TestSchemaDriftReportFooterDescribesEffectiveSchemaEvolutionOutcome(t *test
 }
 
 func TestSchemaContractTablesDiscardRowSkipsAddedTables(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractDiscardRow},
 		}},
-		auditor: audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"},
@@ -1172,9 +1171,9 @@ func TestSchemaContractTablesDiscardRowSkipsAddedTables(t *testing.T) {
 		{Schema: "dbo", Name: "orders"},
 	}
 
-	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	got, err := e.EffectiveTables(report, tables)
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "users" {
 		t.Fatalf("effective tables = %#v, want only users", got)
@@ -1182,11 +1181,10 @@ func TestSchemaContractTablesDiscardRowSkipsAddedTables(t *testing.T) {
 }
 
 func TestSchemaContractColumnsDiscardRowSkipsTablesWithAddedColumns(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardRow},
 		}},
-		auditor: audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "orders", ObjectName: "new_status"},
@@ -1198,9 +1196,9 @@ func TestSchemaContractColumnsDiscardRowSkipsTablesWithAddedColumns(t *testing.T
 		{Schema: "dbo", Name: "orders"},
 	}
 
-	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	got, err := e.EffectiveTables(report, tables)
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "users" {
 		t.Fatalf("effective tables = %#v, want only users", got)
@@ -1215,7 +1213,7 @@ func TestFilterSchemaDriftReportForTablesRemovesSkippedTableChanges(t *testing.T
 	}}
 	tables := []source.Table{{Schema: "dbo", Name: "users"}}
 
-	got := filterSchemaDriftReportForTables(report, tables)
+	got := FilterDriftReportForTables(report, tables)
 	if len(got.Changes) != 1 {
 		t.Fatalf("filtered changes = %#v, want one change", got.Changes)
 	}
@@ -1225,11 +1223,10 @@ func TestFilterSchemaDriftReportForTablesRemovesSkippedTableChanges(t *testing.T
 }
 
 func TestSchemaContractColumnsDiscardValueRejectsAddedIdentityColumns(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
 		}},
-		auditor: audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.AddedColumn, Schema: "dbo", TableName: "orders", ObjectName: "line_id"},
@@ -1243,9 +1240,9 @@ func TestSchemaContractColumnsDiscardValueRejectsAddedIdentityColumns(t *testing
 		},
 	}}
 
-	_, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	_, err := e.EffectiveTables(report, tables)
 	if err == nil {
-		t.Fatal("effectiveTablesForSchemaEvolution() error = nil, want identity discard error")
+		t.Fatal("EffectiveTables() error = nil, want identity discard error")
 	}
 	if !strings.Contains(err.Error(), "identity column") {
 		t.Fatalf("error = %q, want identity column message", err)
@@ -1253,11 +1250,10 @@ func TestSchemaContractColumnsDiscardValueRejectsAddedIdentityColumns(t *testing
 }
 
 func TestSchemaContractDataTypeDiscardRowSkipsTablesWithDataTypeChanges(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardRow},
 		}},
-		auditor: audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.TypeWidened, Schema: "dbo", TableName: "orders", ObjectName: "description"},
@@ -1269,9 +1265,9 @@ func TestSchemaContractDataTypeDiscardRowSkipsTablesWithDataTypeChanges(t *testi
 		{Schema: "dbo", Name: "orders"},
 	}
 
-	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	got, err := e.EffectiveTables(report, tables)
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "users" {
 		t.Fatalf("effective tables = %#v, want only users", got)
@@ -1279,11 +1275,10 @@ func TestSchemaContractDataTypeDiscardRowSkipsTablesWithDataTypeChanges(t *testi
 }
 
 func TestSchemaContractDataTypeDiscardRowSnapshotPlanOmitsSkippedTables(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardRow},
 		}},
-		auditor: audit.Disabled(),
 	}
 	previous := source.Table{
 		Schema: "dbo",
@@ -1310,22 +1305,21 @@ func TestSchemaContractDataTypeDiscardRowSnapshotPlanOmitsSkippedTables(t *testi
 		[]drift.TableSnapshot{drift.BuildTableSnapshot(current), drift.BuildTableSnapshot(users)},
 	)
 
-	effective, err := o.effectiveTablesForSchemaEvolution(report, []source.Table{current, users})
+	effective, err := e.EffectiveTables(report, []source.Table{current, users})
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
-	snapshots := o.schemaSnapshotPlan(report, effective)
+	snapshots := e.schemaSnapshotPlan(report, effective)
 	if len(snapshots) != 1 || snapshots[0].Name != "users" {
 		t.Fatalf("snapshots = %#v, want only non-skipped users table", snapshots)
 	}
 }
 
 func TestSchemaContractDataTypeDiscardValuePrunesAffectedColumns(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
 		}},
-		auditor: audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.TypeNarrowed, Schema: "dbo", TableName: "orders", ObjectName: "description"},
@@ -1353,9 +1347,9 @@ func TestSchemaContractDataTypeDiscardValuePrunesAffectedColumns(t *testing.T) {
 		},
 	}}
 
-	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	got, err := e.EffectiveTables(report, tables)
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("len(effective tables) = %d, want 1", len(got))
@@ -1377,11 +1371,10 @@ func TestSchemaContractDataTypeDiscardValuePrunesAffectedColumns(t *testing.T) {
 }
 
 func TestSchemaContractDataTypeDiscardValueAllowsOnlyRequiredColumnsToRemain(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
 		}},
-		auditor: audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.TypeChangedLossy, Schema: "dbo", TableName: "orders", ObjectName: "description"},
@@ -1398,9 +1391,9 @@ func TestSchemaContractDataTypeDiscardValueAllowsOnlyRequiredColumnsToRemain(t *
 		},
 	}}
 
-	got, err := o.effectiveTablesForSchemaEvolution(report, tables)
+	got, err := e.EffectiveTables(report, tables)
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
 	if len(got) != 1 || len(got[0].Columns) != 1 || got[0].Columns[0].Name != "id" {
 		t.Fatalf("columns = %#v, want only required id column", got)
@@ -1411,11 +1404,10 @@ func TestSchemaContractDataTypeDiscardValueAllowsOnlyRequiredColumnsToRemain(t *
 }
 
 func TestSchemaContractDataTypeDiscardValueSnapshotPlanRetainsPreviousDiscardedMetadata(t *testing.T) {
-	o := &Orchestrator{
-		config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{
+		cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
 		}},
-		auditor: audit.Disabled(),
 	}
 	previous := source.Table{
 		Schema:     "dbo",
@@ -1460,9 +1452,9 @@ func TestSchemaContractDataTypeDiscardValueSnapshotPlanRetainsPreviousDiscardedM
 		[]drift.TableSnapshot{drift.BuildTableSnapshot(previous), drift.BuildTableSnapshot(items)},
 		[]drift.TableSnapshot{drift.BuildTableSnapshot(current), drift.BuildTableSnapshot(items)},
 	)
-	effective, err := o.effectiveTablesForSchemaEvolution(report, []source.Table{current, items})
+	effective, err := e.EffectiveTables(report, []source.Table{current, items})
 	if err != nil {
-		t.Fatalf("effectiveTablesForSchemaEvolution() error: %v", err)
+		t.Fatalf("EffectiveTables() error: %v", err)
 	}
 	var effectiveItems *source.Table
 	for i := range effective {
@@ -1477,7 +1469,7 @@ func TestSchemaContractDataTypeDiscardValueSnapshotPlanRetainsPreviousDiscardedM
 	if len(effectiveItems.ForeignKeys) != 0 {
 		t.Fatalf("effective order_items foreign keys = %#v, want FK referencing discarded column pruned", effectiveItems.ForeignKeys)
 	}
-	snapshots := o.schemaSnapshotPlan(report, effective)
+	snapshots := e.schemaSnapshotPlan(report, effective)
 	if len(snapshots) != 2 {
 		t.Fatalf("snapshot count = %d, want 2", len(snapshots))
 	}
@@ -1580,12 +1572,11 @@ func TestSchemaContractDataTypeDiscardValueRejectsPrimaryKeyAndIdentityColumns(t
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := &Orchestrator{
-				config: &config.Config{Migration: config.MigrationConfig{
+			e := &Engine{
+				cfg: &config.Config{Migration: config.MigrationConfig{
 					DateUpdatedColumns: []string{"updated_at"},
 					SchemaContract:     &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
 				}},
-				auditor: audit.Disabled(),
 			}
 			columnName := "id"
 			if tt.wantErr == "date tracking column" {
@@ -1595,9 +1586,9 @@ func TestSchemaContractDataTypeDiscardValueRejectsPrimaryKeyAndIdentityColumns(t
 				{Kind: drift.TypeChangedLossy, Schema: "dbo", TableName: "orders", ObjectName: columnName},
 			}}
 
-			_, err := o.effectiveTablesForSchemaEvolution(report, []source.Table{tt.table})
+			_, err := e.EffectiveTables(report, []source.Table{tt.table})
 			if err == nil {
-				t.Fatal("effectiveTablesForSchemaEvolution() error = nil, want discard guardrail error")
+				t.Fatal("EffectiveTables() error = nil, want discard guardrail error")
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %q, want %q", err, tt.wantErr)
@@ -1607,9 +1598,9 @@ func TestSchemaContractDataTypeDiscardValueRejectsPrimaryKeyAndIdentityColumns(t
 }
 
 func TestSchemaContractTableEvolveCreatesAddedTablesBeforeUpsert(t *testing.T) {
-	targetPool := &targetModeTestPool{existing: map[string]bool{"users": true}}
-	o := &Orchestrator{
-		config: &config.Config{
+	targetPool := &fakeTargetPool{existing: map[string]bool{"users": true}}
+	e := &Engine{
+		cfg: &config.Config{
 			Target: config.TargetConfig{Schema: "public"},
 			Migration: config.MigrationConfig{
 				TargetMode:     "upsert",
@@ -1617,7 +1608,6 @@ func TestSchemaContractTableEvolveCreatesAddedTablesBeforeUpsert(t *testing.T) {
 			},
 		},
 		targetPool: targetPool,
-		auditor:    audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
 	tables := []source.Table{{
@@ -1630,8 +1620,8 @@ func TestSchemaContractTableEvolveCreatesAddedTablesBeforeUpsert(t *testing.T) {
 		},
 	}}
 
-	if err := o.applySchemaContractTableEvolution(context.Background(), report, tables); err != nil {
-		t.Fatalf("applySchemaContractTableEvolution() error: %v", err)
+	if err := e.ApplyContractTableEvolution(context.Background(), report, tables); err != nil {
+		t.Fatalf("ApplyContractTableEvolution() error: %v", err)
 	}
 	if got, want := targetPool.createdTables(), []string{"orders"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("created tables = %v, want %v", got, want)
@@ -1642,9 +1632,9 @@ func TestSchemaContractTableEvolveCreatesAddedTablesBeforeUpsert(t *testing.T) {
 }
 
 func TestSchemaContractTableEvolveSkipsExistingTargetTables(t *testing.T) {
-	targetPool := &targetModeTestPool{existing: map[string]bool{"orders": true}}
-	o := &Orchestrator{
-		config: &config.Config{
+	targetPool := &fakeTargetPool{existing: map[string]bool{"orders": true}}
+	e := &Engine{
+		cfg: &config.Config{
 			Target: config.TargetConfig{Schema: "public"},
 			Migration: config.MigrationConfig{
 				TargetMode:     "upsert",
@@ -1652,13 +1642,12 @@ func TestSchemaContractTableEvolveSkipsExistingTargetTables(t *testing.T) {
 			},
 		},
 		targetPool: targetPool,
-		auditor:    audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
 	tables := []source.Table{{Schema: "dbo", Name: "orders", PrimaryKey: []string{"id"}}}
 
-	if err := o.applySchemaContractTableEvolution(context.Background(), report, tables); err != nil {
-		t.Fatalf("applySchemaContractTableEvolution() error: %v", err)
+	if err := e.ApplyContractTableEvolution(context.Background(), report, tables); err != nil {
+		t.Fatalf("ApplyContractTableEvolution() error: %v", err)
 	}
 	if got := targetPool.createdTables(); len(got) != 0 {
 		t.Fatalf("created tables = %v, want none", got)
@@ -1669,9 +1658,9 @@ func TestSchemaContractTableEvolveSkipsExistingTargetTables(t *testing.T) {
 }
 
 func TestSchemaContractTableEvolveRequiresPrimaryKeyForUpsert(t *testing.T) {
-	targetPool := &targetModeTestPool{}
-	o := &Orchestrator{
-		config: &config.Config{
+	targetPool := &fakeTargetPool{}
+	e := &Engine{
+		cfg: &config.Config{
 			Target: config.TargetConfig{Schema: "public"},
 			Migration: config.MigrationConfig{
 				TargetMode:     "upsert",
@@ -1679,14 +1668,13 @@ func TestSchemaContractTableEvolveRequiresPrimaryKeyForUpsert(t *testing.T) {
 			},
 		},
 		targetPool: targetPool,
-		auditor:    audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
 	tables := []source.Table{{Schema: "dbo", Name: "orders"}}
 
-	err := o.applySchemaContractTableEvolution(context.Background(), report, tables)
+	err := e.ApplyContractTableEvolution(context.Background(), report, tables)
 	if err == nil {
-		t.Fatal("applySchemaContractTableEvolution() error = nil, want primary-key error")
+		t.Fatal("ApplyContractTableEvolution() error = nil, want primary-key error")
 	}
 	if !strings.Contains(err.Error(), "requires a primary key") {
 		t.Fatalf("error = %q, want primary-key message", err)
@@ -1694,9 +1682,9 @@ func TestSchemaContractTableEvolveRequiresPrimaryKeyForUpsert(t *testing.T) {
 }
 
 func TestFinalizeSchemaContractTableEvolutionCreatesPostTransferDDL(t *testing.T) {
-	targetPool := &targetModeTestPool{}
-	o := &Orchestrator{
-		config: &config.Config{
+	targetPool := &fakeTargetPool{}
+	e := &Engine{
+		cfg: &config.Config{
 			Target: config.TargetConfig{Schema: "public"},
 			Migration: config.MigrationConfig{
 				TargetMode:             "upsert",
@@ -1705,7 +1693,6 @@ func TestFinalizeSchemaContractTableEvolutionCreatesPostTransferDDL(t *testing.T
 			},
 		},
 		targetPool: targetPool,
-		auditor:    audit.Disabled(),
 	}
 	report := drift.Report{Changes: []drift.Change{{Kind: drift.TableAdded, Schema: "dbo", TableName: "orders"}}}
 	tables := []source.Table{{
@@ -1723,7 +1710,7 @@ func TestFinalizeSchemaContractTableEvolutionCreatesPostTransferDDL(t *testing.T
 		},
 	}}
 
-	o.finalizeSchemaContractTableEvolution(context.Background(), report, tables)
+	e.FinalizeContractTableEvolution(context.Background(), report, tables)
 
 	if got, want := targetPool.resetTables(), []string{"orders"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("reset tables = %v, want %v", got, want)
@@ -1739,12 +1726,12 @@ func TestFinalizeSchemaContractTableEvolutionCreatesPostTransferDDL(t *testing.T
 	}
 }
 
-func enforceSchemaContractDecisionsForTest(o *Orchestrator, report drift.Report) error {
-	return enforceSchemaContractDecisions(o.schemaContractDecisions(report, nil, true))
+func enforceSchemaContractDecisionsForTest(e *Engine, report drift.Report) error {
+	return enforceSchemaContractDecisions(e.schemaContractDecisions(report, nil, true))
 }
 
 func TestSchemaContractFreezeFailsBeforeTargetPreparation(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{
 			Tables:   config.SchemaContractFreeze,
 			Columns:  config.SchemaContractFreeze,
@@ -1757,7 +1744,7 @@ func TestSchemaContractFreezeFailsBeforeTargetPreparation(t *testing.T) {
 		{Kind: drift.TypeWidened, TableName: "Users", ObjectName: "name"},
 	}}
 
-	err := enforceSchemaContractDecisionsForTest(o, report)
+	err := enforceSchemaContractDecisionsForTest(e, report)
 	if err == nil {
 		t.Fatal("enforceSchemaContractDecisions() error = nil, want freeze violation")
 	}
@@ -1774,7 +1761,7 @@ func TestSchemaContractFreezeFailsBeforeTargetPreparation(t *testing.T) {
 }
 
 func TestSchemaContractTableFreezeFormatsRealDriftTableTargetOnce(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractFreeze},
 	}}}
 	report := drift.Compare(nil, []drift.TableSnapshot{drift.BuildTableSnapshot(source.Table{
@@ -1782,7 +1769,7 @@ func TestSchemaContractTableFreezeFormatsRealDriftTableTargetOnce(t *testing.T) 
 		Name:   "Orders",
 	})})
 
-	err := enforceSchemaContractDecisionsForTest(o, report)
+	err := enforceSchemaContractDecisionsForTest(e, report)
 	if err == nil {
 		t.Fatal("enforceSchemaContractDecisions() error = nil, want freeze violation")
 	}
@@ -1795,7 +1782,7 @@ func TestSchemaContractTableFreezeFormatsRealDriftTableTargetOnce(t *testing.T) 
 }
 
 func TestSchemaContractDecisionsIncludeStructuredContext(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{
 			Tables:   config.SchemaContractDiscardRow,
 			Columns:  config.SchemaContractDiscardValue,
@@ -1808,31 +1795,31 @@ func TestSchemaContractDecisionsIncludeStructuredContext(t *testing.T) {
 		{Kind: drift.TypeNarrowed, Schema: "dbo", TableName: "Users", ObjectName: "name", Previous: "varchar(255)", Current: "varchar(50)"},
 	}}
 
-	got := o.schemaContractDecisions(report, nil, true)
+	got := e.schemaContractDecisions(report, nil, true)
 	if len(got) != 3 {
 		t.Fatalf("decision count = %d, want 3: %#v", len(got), got)
 	}
-	want := []schemaContractDecision{
+	want := []SchemaContractDecision{
 		{
-			Entity: schemaContractEntityTables,
+			Entity: SchemaContractEntityTables,
 			Mode:   string(config.SchemaContractDiscardRow),
 			Drift:  string(drift.TableAdded),
 			Schema: "dbo",
 			Table:  "Orders",
-			Action: schemaContractActionDiscardedRow,
+			Action: SchemaContractActionDiscardedRow,
 		},
 		{
-			Entity:  schemaContractEntityColumns,
+			Entity:  SchemaContractEntityColumns,
 			Mode:    string(config.SchemaContractDiscardValue),
 			Drift:   string(drift.AddedColumn),
 			Schema:  "dbo",
 			Table:   "Users",
 			Object:  "email",
 			Current: "varchar(255) NULL",
-			Action:  schemaContractActionDiscardedValue,
+			Action:  SchemaContractActionDiscardedValue,
 		},
 		{
-			Entity:   schemaContractEntityDataType,
+			Entity:   SchemaContractEntityDataType,
 			Mode:     string(config.SchemaContractFreeze),
 			Drift:    string(drift.TypeNarrowed),
 			Schema:   "dbo",
@@ -1840,7 +1827,7 @@ func TestSchemaContractDecisionsIncludeStructuredContext(t *testing.T) {
 			Object:   "name",
 			Previous: "varchar(255)",
 			Current:  "varchar(50)",
-			Action:   schemaContractActionFrozen,
+			Action:   SchemaContractActionFrozen,
 		},
 	}
 	for i := range want {
@@ -1862,7 +1849,7 @@ func TestSchemaContractDecisionsIncludeStructuredContext(t *testing.T) {
 }
 
 func TestSchemaContractDecisionsReportDroppedObjectsUnderDiscardModes(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{
 			Tables:  config.SchemaContractDiscardRow,
 			Columns: config.SchemaContractDiscardValue,
@@ -1873,12 +1860,12 @@ func TestSchemaContractDecisionsReportDroppedObjectsUnderDiscardModes(t *testing
 		{Kind: drift.DroppedColumn, Schema: "dbo", TableName: "Users", ObjectName: "legacy_code"},
 	}}
 
-	got := o.schemaContractDecisions(report, nil, true)
+	got := e.schemaContractDecisions(report, nil, true)
 	if len(got) != 2 {
 		t.Fatalf("decision count = %d, want 2: %#v", len(got), got)
 	}
 	for _, decision := range got {
-		if decision.Action != schemaContractActionReported {
+		if decision.Action != SchemaContractActionReported {
 			t.Fatalf("decision = %#v, want reported action for dropped object under discard modes", decision)
 		}
 		if decision.Reason == "" {
@@ -1888,7 +1875,7 @@ func TestSchemaContractDecisionsReportDroppedObjectsUnderDiscardModes(t *testing
 }
 
 func TestSchemaContractDataTypeEvolveUnsafeDecisionIsBlocked(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode:     "upsert",
 		SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
 	}}}
@@ -1906,17 +1893,17 @@ func TestSchemaContractDataTypeEvolveUnsafeDecisionIsBlocked(t *testing.T) {
 		Current:    "NOT NULL",
 	}}}
 
-	decisions := o.schemaContractDecisions(report, nil, true)
+	decisions := e.schemaContractDecisions(report, nil, true)
 	if len(decisions) != 2 {
 		t.Fatalf("decision count = %d, want 2: %#v", len(decisions), decisions)
 	}
 	for _, decision := range decisions {
 		if decision.Mode != string(config.SchemaContractEvolve) ||
-			decision.Action != schemaContractActionBlocked {
+			decision.Action != SchemaContractActionBlocked {
 			t.Fatalf("decision = %#v, want mode evolve action blocked", decision)
 		}
 	}
-	err := enforceSchemaContractDecisionsForTest(o, report)
+	err := enforceSchemaContractDecisionsForTest(e, report)
 	if err == nil {
 		t.Fatal("enforceSchemaContractDecisions() error = nil, want blocked unsafe evolve violation")
 	}
@@ -1926,7 +1913,7 @@ func TestSchemaContractDataTypeEvolveUnsafeDecisionIsBlocked(t *testing.T) {
 }
 
 func TestSchemaContractDataTypeEvolveSafeNullabilityRelaxationDecisionEvolves(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
 	}}}
 	report := drift.Report{Changes: []drift.Change{{
@@ -1937,17 +1924,17 @@ func TestSchemaContractDataTypeEvolveSafeNullabilityRelaxationDecisionEvolves(t 
 		Current:    "NULL",
 	}}}
 
-	decisions := o.schemaContractDecisions(report, nil, true)
+	decisions := e.schemaContractDecisions(report, nil, true)
 	if len(decisions) != 1 {
 		t.Fatalf("decision count = %d, want 1: %#v", len(decisions), decisions)
 	}
-	if decisions[0].Action != schemaContractActionEvolved {
+	if decisions[0].Action != SchemaContractActionEvolved {
 		t.Fatalf("decision = %#v, want evolved action for safe nullability relaxation", decisions[0])
 	}
 }
 
 func TestSchemaContractDataTypeDiscardValueRequiredColumnDecisionIsBlocked(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractDiscardValue},
 	}}}
 	report := drift.Report{Changes: []drift.Change{{
@@ -1967,11 +1954,11 @@ func TestSchemaContractDataTypeDiscardValueRequiredColumnDecisionIsBlocked(t *te
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, tables, true)
+	decisions := e.schemaContractDecisions(report, tables, true)
 	if len(decisions) != 1 {
 		t.Fatalf("decision count = %d, want 1: %#v", len(decisions), decisions)
 	}
-	if decisions[0].Action != schemaContractActionBlocked {
+	if decisions[0].Action != SchemaContractActionBlocked {
 		t.Fatalf("decision = %#v, want blocked action for required column discard", decisions[0])
 	}
 	if err := enforceSchemaContractDecisions(decisions); err == nil {
@@ -1980,7 +1967,7 @@ func TestSchemaContractDataTypeDiscardValueRequiredColumnDecisionIsBlocked(t *te
 }
 
 func TestSchemaContractColumnDiscardValueDateTrackingDecisionIsBlocked(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		DateUpdatedColumns: []string{"updated_at"},
 		SchemaContract:     &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
 	}}}
@@ -2000,20 +1987,20 @@ func TestSchemaContractColumnDiscardValueDateTrackingDecisionIsBlocked(t *testin
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, tables, true)
+	decisions := e.schemaContractDecisions(report, tables, true)
 	if len(decisions) != 1 {
 		t.Fatalf("decision count = %d, want 1: %#v", len(decisions), decisions)
 	}
-	if decisions[0].Action != schemaContractActionBlocked {
+	if decisions[0].Action != SchemaContractActionBlocked {
 		t.Fatalf("decision = %#v, want blocked action for date tracking column discard", decisions[0])
 	}
-	if _, _, err := pruneDiscardedAddedColumns(report, tables, o.config.Migration.DateUpdatedColumns); err == nil {
+	if _, _, err := pruneDiscardedAddedColumns(report, tables, e.cfg.Migration.DateUpdatedColumns); err == nil {
 		t.Fatal("pruneDiscardedAddedColumns() error = nil, want date tracking discard guardrail")
 	}
 }
 
 func TestSchemaContractDataTypeEvolveCombinedDriftDecisionIsBlocked(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode:     "upsert",
 		SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
 	}}}
@@ -2034,12 +2021,12 @@ func TestSchemaContractDataTypeEvolveCombinedDriftDecisionIsBlocked(t *testing.T
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, nil, true)
+	decisions := e.schemaContractDecisions(report, nil, true)
 	if len(decisions) != 2 {
 		t.Fatalf("decision count = %d, want 2: %#v", len(decisions), decisions)
 	}
 	for _, decision := range decisions {
-		if decision.Action != schemaContractActionBlocked {
+		if decision.Action != SchemaContractActionBlocked {
 			t.Fatalf("decision = %#v, want blocked action for combined data_type drift", decision)
 		}
 	}
@@ -2128,15 +2115,15 @@ func TestSchemaContractEvolveDecisionMirrorsPlannerGuardrails(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+			e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 				TargetMode:     "upsert",
 				SchemaContract: &tt.config,
 			}}}
-			decisions := o.schemaContractDecisions(tt.report, tt.tables, true)
+			decisions := e.schemaContractDecisions(tt.report, tt.tables, true)
 			if len(decisions) == 0 {
 				t.Fatal("schemaContractDecisions() returned no decisions")
 			}
-			if decisions[0].Action != schemaContractActionBlocked {
+			if decisions[0].Action != SchemaContractActionBlocked {
 				t.Fatalf("decision = %#v, want blocked action", decisions[0])
 			}
 			err := enforceSchemaContractDecisions(decisions)
@@ -2151,7 +2138,7 @@ func TestSchemaContractEvolveDecisionMirrorsPlannerGuardrails(t *testing.T) {
 }
 
 func TestSchemaContractDiscardRowDecisionPrecedenceReportsSkippedTableDrift(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode: "upsert",
 		SchemaContract: &config.SchemaContractConfig{
 			Columns:  config.SchemaContractDiscardRow,
@@ -2176,16 +2163,16 @@ func TestSchemaContractDiscardRowDecisionPrecedenceReportsSkippedTableDrift(t *t
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, nil, true)
+	decisions := e.schemaContractDecisions(report, nil, true)
 	if len(decisions) != 2 {
 		t.Fatalf("decision count = %d, want 2: %#v", len(decisions), decisions)
 	}
 	for _, decision := range decisions {
-		if decision.Action == schemaContractActionBlocked {
+		if decision.Action == SchemaContractActionBlocked {
 			t.Fatalf("decision = %#v, want skipped-table data_type drift to avoid blocked action", decision)
 		}
 	}
-	if decisions[1].Action != schemaContractActionReported ||
+	if decisions[1].Action != SchemaContractActionReported ||
 		!strings.Contains(decisions[1].Reason, "columns=discard_row skips table dbo.Users") {
 		t.Fatalf("data_type decision = %#v, want report-only skipped-table reason", decisions[1])
 	}
@@ -2193,7 +2180,7 @@ func TestSchemaContractDiscardRowDecisionPrecedenceReportsSkippedTableDrift(t *t
 		t.Fatalf("enforceSchemaContractDecisions() error = %v, want nil for skipped table drift", err)
 	}
 
-	footer := o.schemaDriftReportFooterWithDecisions(report, true, decisions)
+	footer := e.schemaDriftReportFooterWithDecisions(report, true, decisions)
 	if !strings.Contains(footer, "columns=discard_row; 1 change(s) will skip affected table(s) for this run") {
 		t.Fatalf("footer = %q, want columns discard_row skip wording", footer)
 	}
@@ -2203,7 +2190,7 @@ func TestSchemaContractDiscardRowDecisionPrecedenceReportsSkippedTableDrift(t *t
 }
 
 func TestSchemaContractEvolveDecisionsDoNotBlockDropRecreateTargetMode(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode: "drop_recreate",
 		SchemaContract: &config.SchemaContractConfig{
 			Columns:  config.SchemaContractEvolve,
@@ -2237,19 +2224,19 @@ func TestSchemaContractEvolveDecisionsDoNotBlockDropRecreateTargetMode(t *testin
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, tables, true)
+	decisions := e.schemaContractDecisions(report, tables, true)
 	if len(decisions) != 2 {
 		t.Fatalf("decision count = %d, want 2: %#v", len(decisions), decisions)
 	}
 	for _, decision := range decisions {
-		if decision.Action != schemaContractActionEvolved {
+		if decision.Action != SchemaContractActionEvolved {
 			t.Fatalf("decision = %#v, want evolved action for drop_recreate target rebuild", decision)
 		}
 	}
 	if err := enforceSchemaContractDecisions(decisions); err != nil {
 		t.Fatalf("enforceSchemaContractDecisions() error = %v, want nil for drop_recreate evolve", err)
 	}
-	footer := o.schemaDriftReportFooterWithDecisions(report, true, decisions)
+	footer := e.schemaDriftReportFooterWithDecisions(report, true, decisions)
 	if strings.Contains(footer, "will abort before transfer") {
 		t.Fatalf("footer = %q, should not abort for drop_recreate evolve decisions", footer)
 	}
@@ -2259,7 +2246,7 @@ func TestSchemaContractEvolveDecisionsDoNotBlockDropRecreateTargetMode(t *testin
 }
 
 func TestSchemaContractDataTypeEvolveFooterBlocksCombinedDrift(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode:     "upsert",
 		SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
 	}}}
@@ -2280,7 +2267,7 @@ func TestSchemaContractDataTypeEvolveFooterBlocksCombinedDrift(t *testing.T) {
 		},
 	}}
 
-	footer := o.schemaDriftReportFooter(report, true)
+	footer := e.schemaDriftReportFooter(report, true)
 	if !strings.Contains(footer, "2 unsafe data type/nullability change(s) will abort before transfer") {
 		t.Fatalf("footer = %q, want combined drift to be unsafe", footer)
 	}
@@ -2290,7 +2277,7 @@ func TestSchemaContractDataTypeEvolveFooterBlocksCombinedDrift(t *testing.T) {
 }
 
 func TestSchemaContractDecisionFooterBlocksRequiredDataTypeColumn(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode:     "upsert",
 		SchemaContract: &config.SchemaContractConfig{DataType: config.SchemaContractEvolve},
 	}}}
@@ -2311,8 +2298,8 @@ func TestSchemaContractDecisionFooterBlocksRequiredDataTypeColumn(t *testing.T) 
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, tables, true)
-	footer := o.schemaDriftReportFooterWithDecisions(report, true, decisions)
+	decisions := e.schemaContractDecisions(report, tables, true)
+	footer := e.schemaDriftReportFooterWithDecisions(report, true, decisions)
 	if !strings.Contains(footer, "data_type=evolve; 1 blocked change(s) will abort before transfer") {
 		t.Fatalf("footer = %q, want blocked data_type=evolve wording", footer)
 	}
@@ -2322,7 +2309,7 @@ func TestSchemaContractDecisionFooterBlocksRequiredDataTypeColumn(t *testing.T) 
 }
 
 func TestSchemaContractDecisionFooterSuppressesActionsWhenRunWillAbort(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		TargetMode: "upsert",
 		SchemaContract: &config.SchemaContractConfig{
 			Columns:  config.SchemaContractEvolve,
@@ -2347,8 +2334,8 @@ func TestSchemaContractDecisionFooterSuppressesActionsWhenRunWillAbort(t *testin
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, nil, true)
-	footer := o.schemaDriftReportFooterWithDecisions(report, true, decisions)
+	decisions := e.schemaContractDecisions(report, nil, true)
+	footer := e.schemaDriftReportFooterWithDecisions(report, true, decisions)
 	if !strings.Contains(footer, "data_type=evolve; 1 blocked change(s) will abort before transfer") {
 		t.Fatalf("footer = %q, want blocked data_type wording", footer)
 	}
@@ -2367,7 +2354,7 @@ func TestSchemaContractDecisionFooterSuppressesActionsWhenRunWillAbort(t *testin
 }
 
 func TestSchemaContractDecisionFooterBlocksDiscardValueDateTrackingColumn(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		DateUpdatedColumns: []string{"updated_at"},
 		SchemaContract:     &config.SchemaContractConfig{Columns: config.SchemaContractDiscardValue},
 	}}}
@@ -2387,8 +2374,8 @@ func TestSchemaContractDecisionFooterBlocksDiscardValueDateTrackingColumn(t *tes
 		},
 	}}
 
-	decisions := o.schemaContractDecisions(report, tables, true)
-	footer := o.schemaDriftReportFooterWithDecisions(report, true, decisions)
+	decisions := e.schemaContractDecisions(report, tables, true)
+	footer := e.schemaDriftReportFooterWithDecisions(report, true, decisions)
 	if !strings.Contains(footer, "columns=discard_value; 1 blocked change(s) will abort before transfer") {
 		t.Fatalf("footer = %q, want blocked columns=discard_value wording", footer)
 	}
@@ -2398,7 +2385,7 @@ func TestSchemaContractDecisionFooterBlocksDiscardValueDateTrackingColumn(t *tes
 }
 
 func TestSchemaContractEvolveDecisionsAreReportedInReadOnlyMode(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{
 			Tables:   config.SchemaContractEvolve,
 			Columns:  config.SchemaContractEvolve,
@@ -2411,12 +2398,12 @@ func TestSchemaContractEvolveDecisionsAreReportedInReadOnlyMode(t *testing.T) {
 		{Kind: drift.TypeChangedLossy, TableName: "Users", ObjectName: "name"},
 	}}
 
-	decisions := o.schemaContractDecisions(report, nil, false)
+	decisions := e.schemaContractDecisions(report, nil, false)
 	if len(decisions) != 3 {
 		t.Fatalf("decision count = %d, want 3: %#v", len(decisions), decisions)
 	}
 	for _, decision := range decisions {
-		if decision.Action != schemaContractActionReported {
+		if decision.Action != SchemaContractActionReported {
 			t.Fatalf("decision = %#v, want reported action in read-only mode", decision)
 		}
 	}
@@ -2438,27 +2425,27 @@ func TestSchemaContractNonFreezeModesDoNotRaiseFreezeViolations(t *testing.T) {
 	}
 	for _, mode := range modes {
 		t.Run(string(mode), func(t *testing.T) {
-			o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+			e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 				SchemaContract: &config.SchemaContractConfig{
 					Tables:   mode,
 					Columns:  mode,
 					DataType: mode,
 				},
 			}}}
-			if err := enforceSchemaContractDecisionsForTest(o, report); err != nil {
+			if err := enforceSchemaContractDecisionsForTest(e, report); err != nil {
 				t.Fatalf("enforceSchemaContractDecisions() error = %v, want nil", err)
 			}
 		})
 	}
 
 	t.Run("discard_value", func(t *testing.T) {
-		o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+		e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 			SchemaContract: &config.SchemaContractConfig{
 				Columns:  config.SchemaContractDiscardValue,
 				DataType: config.SchemaContractDiscardValue,
 			},
 		}}}
-		if err := enforceSchemaContractDecisionsForTest(o, drift.Report{Changes: report.Changes[1:]}); err != nil {
+		if err := enforceSchemaContractDecisionsForTest(e, drift.Report{Changes: report.Changes[1:]}); err != nil {
 			t.Fatalf("enforceSchemaContractDecisions() error = %v, want nil", err)
 		}
 	})
@@ -2470,19 +2457,23 @@ func TestAuditSchemaContractDecisionsWritesStructuredPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("audit.New() error: %v", err)
 	}
-	o := &Orchestrator{auditor: logger}
-	decisions := []schemaContractDecision{{
-		Entity:  schemaContractEntityColumns,
+	e := &Engine{audit: func(typeName string, fields map[string]any) {
+		if err := logger.RecordEvent(audit.Event{Type: typeName, Fields: fields}); err != nil {
+			t.Fatalf("audit record: %v", err)
+		}
+	}}
+	decisions := []SchemaContractDecision{{
+		Entity:  SchemaContractEntityColumns,
 		Mode:    string(config.SchemaContractDiscardValue),
 		Drift:   string(drift.AddedColumn),
 		Schema:  "dbo",
 		Table:   "Users",
 		Object:  "email",
 		Current: "varchar(255) NULL",
-		Action:  schemaContractActionDiscardedValue,
+		Action:  SchemaContractActionDiscardedValue,
 		Reason:  "columns=discard_value omits newly added source columns from the effective plan",
 	}, {
-		Entity:   schemaContractEntityDataType,
+		Entity:   SchemaContractEntityDataType,
 		Mode:     string(config.SchemaContractEvolve),
 		Drift:    string(drift.TypeWidened),
 		Schema:   "dbo",
@@ -2490,27 +2481,27 @@ func TestAuditSchemaContractDecisionsWritesStructuredPayload(t *testing.T) {
 		Object:   "name",
 		Previous: "varchar(50)",
 		Current:  "varchar(255)",
-		Action:   schemaContractActionEvolved,
+		Action:   SchemaContractActionEvolved,
 		Reason:   "data_type=evolve applies deterministic safe type/nullability changes",
 	}, {
-		Entity: schemaContractEntityTables,
+		Entity: SchemaContractEntityTables,
 		Mode:   string(config.SchemaContractDiscardRow),
 		Drift:  string(drift.TableAdded),
 		Schema: "dbo",
 		Table:  "Events",
-		Action: schemaContractActionDiscardedRow,
+		Action: SchemaContractActionDiscardedRow,
 		Reason: "tables=discard_row skips newly added source tables for this run",
 	}, {
-		Entity: schemaContractEntityTables,
+		Entity: SchemaContractEntityTables,
 		Mode:   string(config.SchemaContractFreeze),
 		Drift:  string(drift.TableDropped),
 		Schema: "dbo",
 		Table:  "Legacy",
-		Action: schemaContractActionFrozen,
+		Action: SchemaContractActionFrozen,
 		Reason: "tables=freeze blocks table_dropped before transfer",
 	}}
 
-	o.auditSchemaContractDecisions(decisions)
+	e.auditSchemaContractDecisions(decisions)
 	if err := logger.Close(); err != nil {
 		t.Fatalf("audit Close() error: %v", err)
 	}
@@ -2591,14 +2582,14 @@ func TestAuditSchemaContractDecisionsWritesStructuredPayload(t *testing.T) {
 }
 
 func TestSchemaContractTablesFreezeFailsOnDroppedTable(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractFreeze},
 	}}}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.TableDropped, TableName: "Legacy"},
 	}}
 
-	err := enforceSchemaContractDecisionsForTest(o, report)
+	err := enforceSchemaContractDecisionsForTest(e, report)
 	if err == nil {
 		t.Fatal("enforceSchemaContractDecisions() error = nil, want dropped-table freeze violation")
 	}
@@ -2608,14 +2599,14 @@ func TestSchemaContractTablesFreezeFailsOnDroppedTable(t *testing.T) {
 }
 
 func TestSchemaContractColumnsFreezeFailsOnDroppedColumn(t *testing.T) {
-	o := &Orchestrator{config: &config.Config{Migration: config.MigrationConfig{
+	e := &Engine{cfg: &config.Config{Migration: config.MigrationConfig{
 		SchemaContract: &config.SchemaContractConfig{Columns: config.SchemaContractFreeze},
 	}}}
 	report := drift.Report{Changes: []drift.Change{
 		{Kind: drift.DroppedColumn, TableName: "Users", ObjectName: "legacy_code"},
 	}}
 
-	err := enforceSchemaContractDecisionsForTest(o, report)
+	err := enforceSchemaContractDecisionsForTest(e, report)
 	if err == nil {
 		t.Fatal("enforceSchemaContractDecisions() error = nil, want dropped-column freeze violation")
 	}
@@ -2623,67 +2614,11 @@ func TestSchemaContractColumnsFreezeFailsOnDroppedColumn(t *testing.T) {
 		t.Fatalf("error = %q, want columns=freeze violation", err)
 	}
 
-	footer := o.schemaDriftReportFooter(report, true)
+	footer := e.schemaDriftReportFooter(report, true)
 	if !strings.Contains(footer, "will abort before transfer") {
 		t.Fatalf("footer = %q, want abort wording", footer)
 	}
 	if strings.Contains(footer, "target columns are retained") {
 		t.Fatalf("footer = %q, should not describe report-only retention under freeze", footer)
-	}
-}
-
-func TestValidateResumeMissingTargetTableRequiresPrimaryKeyForUpsert(t *testing.T) {
-	err := validateResumeMissingTargetTable(
-		source.Table{Schema: "dbo", Name: "events"},
-		config.MigrationConfig{TargetMode: "upsert"},
-		drift.Report{},
-	)
-	if err == nil {
-		t.Fatal("validateResumeMissingTargetTable() error = nil, want primary-key error")
-	}
-	if !strings.Contains(err.Error(), "source table has no primary key") {
-		t.Fatalf("error = %q, want primary-key message", err)
-	}
-
-	if err := validateResumeMissingTargetTable(
-		source.Table{Schema: "dbo", Name: "events"},
-		config.MigrationConfig{TargetMode: "drop_recreate"},
-		drift.Report{},
-	); err != nil {
-		t.Fatalf("drop_recreate missing target table validation error: %v", err)
-	}
-	if err := validateResumeMissingTargetTable(
-		source.Table{Schema: "dbo", Name: "events", PrimaryKey: []string{"id"}},
-		config.MigrationConfig{TargetMode: "upsert"},
-		drift.Report{},
-	); err != nil {
-		t.Fatalf("upsert table with primary key validation error: %v", err)
-	}
-}
-
-func TestValidateResumeMissingTargetTableHonorsSchemaContractReport(t *testing.T) {
-	table := source.Table{Schema: "dbo", Name: "events", PrimaryKey: []string{"id"}}
-	report := drift.Report{Changes: []drift.Change{{
-		Kind:      drift.TableAdded,
-		Schema:    "dbo",
-		TableName: "events",
-	}}}
-
-	err := validateResumeMissingTargetTable(table, config.MigrationConfig{
-		TargetMode:     "upsert",
-		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractReport},
-	}, report)
-	if err == nil {
-		t.Fatal("validateResumeMissingTargetTable() error = nil, want tables=report error")
-	}
-	if !strings.Contains(err.Error(), "tables=report") {
-		t.Fatalf("error = %q, want tables=report message", err)
-	}
-
-	if err := validateResumeMissingTargetTable(table, config.MigrationConfig{
-		TargetMode:     "upsert",
-		SchemaContract: &config.SchemaContractConfig{Tables: config.SchemaContractEvolve},
-	}, report); err != nil {
-		t.Fatalf("tables=evolve validation error: %v", err)
 	}
 }
