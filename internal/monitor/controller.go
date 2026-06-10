@@ -54,10 +54,10 @@ package monitor
 
 import (
 	"context"
-	"time"
-
+	"fmt"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/transfer"
+	"time"
 )
 
 // Controller is the rule-based runtime adjuster. Same lifecycle as
@@ -321,4 +321,376 @@ func (c *Controller) tick() {
 		return
 	}
 	logging.Debug("rule controller: %s — %s", decision.Knob, decision.Reasoning)
+}
+
+// Decision describes one runtime adjustment the controller wants to
+// make. nil from Evaluate means "no rule fires this tick"; a non-nil
+// Decision is always actionable (NewValue != PreviousValue, knob in
+// {"chunk_size","write_ahead_writers"}).
+type Decision struct {
+	Knob          string // "chunk_size" or "write_ahead_writers"
+	PreviousValue int
+	NewValue      int
+	Reasoning     string
+}
+
+// Evaluate inspects the latest metrics + cooldowns and returns the
+// next adjustment, or nil when no rule fires. Pure function — does
+// not mutate the controller's cooldown state. apply() is what
+// updates cooldowns after a successful adjustment.
+//
+// The now argument is the wall-clock value used for cooldown
+// comparisons. Production calls pass time.Now(); tests pass a fixed
+// time so cooldown windows are deterministic.
+func (c *Controller) Evaluate(now time.Time) *Decision {
+	recent := c.collector.GetRecentMetrics(queueGrowthLookback)
+	if len(recent) == 0 {
+		return nil
+	}
+	latest := recent[len(recent)-1]
+	cur := latest.CurrentConfig
+
+	// Rule 1: memory pressure → shrink chunk_size.
+	if latest.MemoryPercent > memoryPressureThreshold && c.knobReady("chunk_size", now) {
+		next := shrinkChunk(cur.ChunkSize, chunkShrinkFactor, c.minChunkSize)
+		if next < cur.ChunkSize {
+			return &Decision{
+				Knob:          "chunk_size",
+				PreviousValue: cur.ChunkSize,
+				NewValue:      next,
+				Reasoning: fmt.Sprintf(
+					"memory %.1f%% above %.0f%% threshold — shrinking chunk_size from %d to %d",
+					latest.MemoryPercent, memoryPressureThreshold, cur.ChunkSize, next,
+				),
+			}
+		}
+	}
+
+	// Rule 2: queue depth grew for N consecutive ticks → add a writer.
+	// Two suppression gates added in #199:
+	//   - Memory interlock: don't add a writer when memory% is already
+	//     in the "swamped" zone (≥80, below Rule 1's 90% OOM threshold).
+	//   - Throughput-aware: if the prior writer-add didn't improve the
+	//     recent-window mean throughput by ≥2%, the writer-side wasn't
+	//     the bottleneck — don't add another.
+	// Both gates are skip-only — when either fires, control falls through
+	// to Rules 3 and 4 normally.
+	if c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
+		suppressed := false
+		if latest.MemoryPercent >= writerAddMemoryInterlockThreshold {
+			suppressed = true
+		}
+		if !suppressed && c.lastWAWAddThroughputSet {
+			// `recent` is guaranteed non-empty here — Evaluate returns
+			// early when the metrics window is empty. So meanThroughput
+			// returns the actual mean (possibly 0 if every recent
+			// snapshot has zero throughput, which is the strongest
+			// possible "writers are stalled" signal — the gate must
+			// suppress in that case, not skip it.)
+			currentMean := meanThroughput(recent)
+			switch {
+			case c.lastWAWAddThroughput == 0:
+				// Prior add happened during a stall (baseline=0). Any
+				// positive throughput counts as improvement; continued
+				// zero is no improvement and must be suppressed.
+				// Special case because the proportional check below
+				// (0 < 0*1.02 = 0) wouldn't fire on continued zero.
+				if currentMean == 0 {
+					suppressed = true
+				}
+			case currentMean < c.lastWAWAddThroughput*writerAddMinImprovementRatio:
+				suppressed = true
+			}
+		}
+		if !suppressed {
+			next := cur.WriteAheadWriters + 1
+			if next <= c.maxWAW {
+				return &Decision{
+					Knob:          "write_ahead_writers",
+					PreviousValue: cur.WriteAheadWriters,
+					NewValue:      next,
+					Reasoning: fmt.Sprintf(
+						"queue_depth grew for %d consecutive ticks — adding writer (%d → %d)",
+						queueGrowthLookback, cur.WriteAheadWriters, next,
+					),
+				}
+			}
+		}
+	}
+
+	// Rule 3: NEW errors since last tick → back off parallelism.
+	//
+	// ErrorCount is the cumulative-since-run-start count from the
+	// runtime tuner. A naive `latest.ErrorCount > 0` check would
+	// re-fire the back-off rule every cooldown window after a single
+	// historical failure, eventually pinning WAW at 1 even when no
+	// new errors are occurring (Codex review on PR #194). Compare
+	// to the prior snapshot to detect NEW errors in the tick window
+	// instead.
+	//
+	// On the first tick (no prior snapshot), the rule doesn't fire
+	// — there's no baseline to delta against. The next tick will
+	// have a baseline.
+	if newErrors := newErrorsSinceLast(recent); newErrors > 0 && c.knobReady("write_ahead_writers", now) {
+		next := cur.WriteAheadWriters - 1
+		if next >= 1 {
+			return &Decision{
+				Knob:          "write_ahead_writers",
+				PreviousValue: cur.WriteAheadWriters,
+				NewValue:      next,
+				Reasoning: fmt.Sprintf(
+					"%d new error(s) since last tick — backing off writers (%d → %d)",
+					newErrors, cur.WriteAheadWriters, next,
+				),
+			}
+		}
+	}
+
+	// Rule 4: idle CPU + stable throughput → grow chunk_size.
+	if latest.CPUPercent < idleCPUThreshold && c.knobReady("chunk_size", now) && throughputStable(recent) {
+		next := growChunk(cur.ChunkSize, chunkGrowFactor, c.maxChunkSize)
+		if next > cur.ChunkSize {
+			return &Decision{
+				Knob:          "chunk_size",
+				PreviousValue: cur.ChunkSize,
+				NewValue:      next,
+				Reasoning: fmt.Sprintf(
+					"CPU %.1f%% below %.0f%% idle threshold + throughput stable for %d ticks — growing chunk_size from %d to %d",
+					latest.CPUPercent, idleCPUThreshold, throughputStabilityLookback, cur.ChunkSize, next,
+				),
+			}
+		}
+	}
+
+	return nil
+}
+
+// apply persists the decision via the tuner and starts the per-knob
+// cooldown. Cooldown is set ONLY after the tuner update succeeds —
+// without that ordering, a failed Update would leave the knob in
+// cooldown for 90s, suppressing retries even though no change took
+// effect (Copilot review on PR #194).
+func (c *Controller) apply(d *Decision) error {
+	before := c.latestSnapshot()
+	update := transfer.RuntimeUpdate{}
+	switch d.Knob {
+	case "chunk_size":
+		update.ChunkSize = &d.NewValue
+	case "write_ahead_writers":
+		update.WriteAheadWriters = &d.NewValue
+	default:
+		return fmt.Errorf("unknown knob %q", d.Knob)
+	}
+	if err := c.tuner.Update(update); err != nil {
+		return err
+	}
+	switch d.Knob {
+	case "chunk_size":
+		c.chunkSizeCooldownUntil = c.nowFn().Add(controllerCooldown)
+		// Reset the WAW throughput-aware baseline (#199): chunk-size
+		// changes alter the throughput surface, so prior WAW-add
+		// throughput isn't comparable. Treating the next WAW add as
+		// the first one (un-gated) is the safe default — the alternative
+		// is to keep a stale baseline that suppresses legit adds.
+		c.lastWAWAddThroughput = 0
+		c.lastWAWAddThroughputSet = false
+	case "write_ahead_writers":
+		c.writeAheadCooldownUntil = c.nowFn().Add(controllerCooldown)
+		// #199 throughput-aware gate (Codex review on PR #201):
+		//   - Increase (Rule 2 add): snapshot the recent-window mean
+		//     throughput so the next Rule 2 evaluation can verify
+		//     this add actually delivered.
+		//   - Decrease (Rule 3 error back-off): CLEAR the baseline.
+		//     The WAW count just changed under us, so the prior-add
+		//     throughput is no longer comparable; carrying it forward
+		//     would gate a recovery re-add against a stale "post-add"
+		//     reading and could suppress the recovery indefinitely.
+		// Use the same lookback window Evaluate uses for queueGrew so
+		// the comparison is apples-to-apples.
+		if d.NewValue > d.PreviousValue {
+			c.lastWAWAddThroughput = meanThroughput(c.collector.GetRecentMetrics(queueGrowthLookback))
+			c.lastWAWAddThroughputSet = true
+		} else {
+			c.lastWAWAddThroughput = 0
+			c.lastWAWAddThroughputSet = false
+		}
+	}
+	c.recordAdjustment(d, before)
+	return nil
+}
+
+func (c *Controller) latestSnapshot() PerformanceSnapshot {
+	recent := c.collector.GetRecentMetrics(1)
+	if len(recent) == 0 {
+		return PerformanceSnapshot{}
+	}
+	return recent[len(recent)-1]
+}
+
+func (c *Controller) recordAdjustment(d *Decision, before PerformanceSnapshot) {
+	if c.adjustmentRecorder == nil || c.runID == "" || d == nil {
+		return
+	}
+	record := AdjustmentRecord{
+		AdjustmentNumber: c.nextAdjustmentNumberValue(),
+		Timestamp:        c.nowFn(),
+		Action:           d.Knob,
+		Adjustments:      map[string]int{d.Knob: d.NewValue},
+		ThroughputBefore: before.Throughput,
+		CPUBefore:        before.CPUPercent,
+		MemoryBefore:     before.MemoryPercent,
+		Reasoning:        d.Reasoning,
+		Confidence:       "deterministic",
+	}
+	if err := c.adjustmentRecorder(c.runID, record); err != nil {
+		logging.Warn("rule controller: failed to persist runtime adjustment: %v", err)
+	}
+}
+
+func (c *Controller) nextAdjustmentNumberValue() int {
+	if c.nextAdjustmentNumber != nil {
+		return c.nextAdjustmentNumber()
+	}
+	c.adjustmentNumber++
+	return c.adjustmentNumber
+}
+
+// knobReady returns true when the named knob is past its cooldown
+// (or has never been adjusted, which is the zero-time deadline).
+func (c *Controller) knobReady(knob string, now time.Time) bool {
+	switch knob {
+	case "chunk_size":
+		return now.After(c.chunkSizeCooldownUntil) || now.Equal(c.chunkSizeCooldownUntil)
+	case "write_ahead_writers":
+		return now.After(c.writeAheadCooldownUntil) || now.Equal(c.writeAheadCooldownUntil)
+	default:
+		return false
+	}
+}
+
+// queueGrew returns true when the QueueDepth values across the
+// recent slice are strictly monotonically increasing AND the slice
+// has at least queueGrowthLookback entries. Strict monotonicity
+// avoids firing on flat queues (the consumer is keeping up) or
+// jittery queues (depth bouncing around but not trending).
+func queueGrew(recent []PerformanceSnapshot) bool {
+	if len(recent) < queueGrowthLookback {
+		return false
+	}
+	tail := recent[len(recent)-queueGrowthLookback:]
+	for i := 1; i < len(tail); i++ {
+		if tail[i].QueueDepth <= tail[i-1].QueueDepth {
+			return false
+		}
+	}
+	return true
+}
+
+// throughputStable returns true when the last throughputStabilityLookback
+// samples have a (max-min)/average within throughputStabilityRange.
+// Loose enough to tolerate tick-to-tick noise; tight enough that
+// real trends (a sustained drop or climb) are NOT classified as
+// stable.
+func throughputStable(recent []PerformanceSnapshot) bool {
+	if len(recent) < throughputStabilityLookback {
+		return false
+	}
+	tail := recent[len(recent)-throughputStabilityLookback:]
+	min, max := tail[0].Throughput, tail[0].Throughput
+	var sum float64
+	for _, s := range tail {
+		if s.Throughput < min {
+			min = s.Throughput
+		}
+		if s.Throughput > max {
+			max = s.Throughput
+		}
+		sum += s.Throughput
+	}
+	avg := sum / float64(len(tail))
+	if avg <= 0 {
+		// Zero-throughput window — caller decides; "stable" doesn't
+		// apply meaningfully. Returning false here means the grow
+		// rule won't fire when nothing's flowing.
+		return false
+	}
+	return (max-min)/avg <= throughputStabilityRange
+}
+
+// meanThroughput returns the arithmetic mean of Throughput across the
+// recent slice. Returns 0 on empty input. Note: 0 is also a legitimate
+// mean for non-empty input (every snapshot has zero throughput, the
+// "writers stalled" case), so callers that need to distinguish
+// "no baseline yet" from "baseline of zero" must track presence
+// separately — the #199 throughput-aware gate uses
+// lastWAWAddThroughputSet for that, with a special case for the
+// zero-baseline branch where the proportional check would otherwise
+// no-op.
+func meanThroughput(recent []PerformanceSnapshot) float64 {
+	if len(recent) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, s := range recent {
+		sum += s.Throughput
+	}
+	return sum / float64(len(recent))
+}
+
+// newErrorsSinceLast returns the count of errors that occurred between
+// the second-most-recent and most-recent snapshots (i.e., new errors
+// in the latest tick window). Returns 0 when there are fewer than 2
+// snapshots — no baseline to compare against, so we don't fire the
+// back-off rule on the first tick.
+//
+// Codex review on PR #194: ErrorCount is cumulative, so the original
+// `latest.ErrorCount > 0` check would re-fire on every tick after
+// any historical failure. This delta-based check fires only on NEW
+// errors, which is the actual control signal we want.
+func newErrorsSinceLast(recent []PerformanceSnapshot) int {
+	if len(recent) < 2 {
+		return 0
+	}
+	latest := recent[len(recent)-1]
+	prev := recent[len(recent)-2]
+	delta := latest.ErrorCount - prev.ErrorCount
+	if delta < 0 {
+		// Defensive: shouldn't happen since ErrorCount is monotonic
+		// per the tuner's atomic counter. Treat negative as zero.
+		return 0
+	}
+	return delta
+}
+
+// shrinkChunk multiplies cur by factor (0 < factor < 1) and floors
+// the result at minChunkSize. Truncation toward zero on the multiply
+// is fine here — for shrink we'd rather over-shrink slightly than
+// undershrink. minChunkSize=0 falls back to a defensive 1.
+func shrinkChunk(cur int, factor float64, minChunkSize int) int {
+	if minChunkSize <= 0 {
+		minChunkSize = 1
+	}
+	scaled := int(float64(cur) * factor)
+	if scaled < minChunkSize {
+		scaled = minChunkSize
+	}
+	return scaled
+}
+
+// growChunk multiplies cur by factor (factor > 1) and caps the
+// result at maxChunkSize. Rounds UP rather than truncating so a
+// small `cur × 1.10` doesn't stay at the original value (Copilot
+// review on PR #194 — int truncation could pin chunk_size at 1).
+// Guarantees at least +1 when growth would otherwise round to a
+// no-op. maxChunkSize=0 means uncapped (the driver-layer
+// HardChunkLimit isn't always known to the controller).
+func growChunk(cur int, factor float64, maxChunkSize int) int {
+	scaled := int(float64(cur)*factor + 0.5) // round half up
+	if scaled <= cur {
+		scaled = cur + 1
+	}
+	if maxChunkSize > 0 && scaled > maxChunkSize {
+		scaled = maxChunkSize
+	}
+	return scaled
 }
