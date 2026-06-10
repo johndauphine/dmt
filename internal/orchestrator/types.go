@@ -84,7 +84,7 @@ type Orchestrator struct {
 	opts       Options
 	targetMode TargetModeStrategy
 
-	// Set by transferAll after each run; used by UpdateAITuningResult to persist
+	// Set by transferAll after each run; used by UpdateTuningResult to persist
 	// retry pressure into ai_tuning_history.
 	lastChunkRetryCount int
 

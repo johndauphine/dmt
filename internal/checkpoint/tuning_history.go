@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// SaveAIAdjustment saves an AI adjustment record for historical analysis.
-func (s *State) SaveAIAdjustment(runID string, record AIAdjustmentRecord) error {
+// SaveRuntimeAdjustment saves an AI adjustment record for historical analysis.
+func (s *State) SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentRecord) error {
 	_, err := s.db.Exec(`
 		INSERT INTO ai_adjustments (
 			run_id, adjustment_number, timestamp, action, adjustments,
@@ -35,8 +35,8 @@ func (s *State) queryWithOptionalLimit(query string, limit int, args ...any) (*s
 	return s.db.Query(query, args...)
 }
 
-// GetAIAdjustments returns the most recent AI adjustment records across all runs.
-func (s *State) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
+// GetRuntimeAdjustments returns the most recent AI adjustment records across all runs.
+func (s *State) GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
 		       throughput_before, throughput_after, effect_percent,
@@ -52,8 +52,8 @@ func (s *State) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
 	return s.scanAIAdjustments(rows)
 }
 
-// GetAIAdjustmentsByAction returns AI adjustment records filtered by action type.
-func (s *State) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error) {
+// GetRuntimeAdjustmentsByAction returns AI adjustment records filtered by action type.
+func (s *State) GetRuntimeAdjustmentsByAction(action string, limit int) ([]RuntimeAdjustmentRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
 		       throughput_before, throughput_after, effect_percent,
@@ -70,11 +70,11 @@ func (s *State) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustme
 	return s.scanAIAdjustments(rows)
 }
 
-// scanAIAdjustments scans rows into AIAdjustmentRecord slice.
-func (s *State) scanAIAdjustments(rows *sql.Rows) ([]AIAdjustmentRecord, error) {
-	var records []AIAdjustmentRecord
+// scanAIAdjustments scans rows into RuntimeAdjustmentRecord slice.
+func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, error) {
+	var records []RuntimeAdjustmentRecord
 	for rows.Next() {
-		var r AIAdjustmentRecord
+		var r RuntimeAdjustmentRecord
 		var timestampStr, adjustmentsStr string
 		var reasoning, confidence sql.NullString
 		var throughputBefore, throughputAfter, effectPercent sql.NullFloat64
@@ -125,8 +125,8 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]AIAdjustmentRecord, error) 
 	return records, rows.Err()
 }
 
-// SaveAITuning saves tuning parameters from a migration run.
-func (s *State) SaveAITuning(record AITuningRecord) error {
+// SaveTuningRecord saves tuning parameters from a migration run.
+func (s *State) SaveTuningRecord(record TuningRecord) error {
 	wasAIUsed := 0
 	if record.WasAIUsed {
 		wasAIUsed = 1
@@ -172,7 +172,7 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 		record.Workers, record.ChunkSize, record.ReadAheadBuffers, record.WriteAheadWriters,
 		record.ParallelReaders, record.MaxPartitions, record.LargeTableThreshold,
 		record.MaxSourceConns, record.MaxTargetConns,
-		record.EstimatedMemoryMB, record.AIReasoning, wasAIUsed,
+		record.EstimatedMemoryMB, record.Reasoning, wasAIUsed,
 		nullStr(record.Platform), nullInt(record.TargetSharedBuffersMB), nullStr(record.TargetSyncCommit),
 		nullStr(record.TargetFsync), nullStr(record.TargetFullPageWrites), nullInt(record.TargetMaxWALSizeMB),
 		nullStr(record.TargetWALLevel), nullInt(record.SourceMaxServerMemoryMB),
@@ -185,7 +185,7 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 	return err
 }
 
-// UpdateAITuningResult updates the most recent tuning record that hasn't been
+// UpdateTuningResult updates the most recent tuning record that hasn't been
 // populated with results yet. This avoids race conditions with concurrent
 // analyze runs by targeting NULL final_throughput rather than MAX(id).
 //
@@ -195,7 +195,7 @@ func (s *State) SaveAITuning(record AITuningRecord) error {
 // adjustedAtRuntime marks the row as runtime-adjusted (#451): the run's
 // observed throughput blends multiple configs, so the deterministic tuner
 // excludes the row from regression / smoothed-bins / drift cohorts.
-func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+func (s *State) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	adjusted := 0
 	if adjustedAtRuntime {
 		adjusted = 1
@@ -211,9 +211,9 @@ func (s *State) UpdateAITuningResult(throughput float64, durationSecs float64, c
 	return err
 }
 
-// GetAITuningHistory returns AI tuning recommendations filtered by migration
+// GetTuningHistory returns AI tuning recommendations filtered by migration
 // direction (e.g., "mssql"→"postgres"). Pass limit=0 to fetch all records.
-func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
+func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]TuningRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, timestamp, source_db_type, target_db_type,
 		       total_tables, total_rows, avg_row_size_bytes,
@@ -237,9 +237,9 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 	}
 	defer rows.Close()
 
-	var records []AITuningRecord
+	var records []TuningRecord
 	for rows.Next() {
-		var r AITuningRecord
+		var r TuningRecord
 		var timestampStr string
 		var targetDBType, aiReasoning sql.NullString
 		var avgRowSize, cpuCores, memoryGB sql.NullInt64
@@ -337,7 +337,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 			r.TargetDBType = targetDBType.String
 		}
 		if aiReasoning.Valid {
-			r.AIReasoning = aiReasoning.String
+			r.Reasoning = aiReasoning.String
 		}
 		if avgRowSize.Valid {
 			r.AvgRowSizeBytes = avgRowSize.Int64
@@ -389,7 +389,7 @@ func (s *State) GetAITuningHistory(limit int, sourceType, targetType string) ([]
 // keep retry-rate denominators honest while the trajectory rows in the prompt
 // are bounded (issue #141). Records without a completed run are excluded via
 // `final_throughput > 0` — this correctly filters both NULL (the on-disk state
-// before UpdateAITuningResult fires) and 0 values, matching the prior Go-side
+// before UpdateTuningResult fires) and 0 values, matching the prior Go-side
 // `if h.FinalThroughput <= 0 { continue }` aggregation behavior.
 func (s *State) GetAITuningAggregatesByWaw(sourceType, targetType string) ([]WawAggregateRecord, error) {
 	rows, err := s.db.Query(`

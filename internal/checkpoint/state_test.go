@@ -124,7 +124,7 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	defer state.Close()
 
 	// Verify new columns exist by saving a record
-	record := AITuningRecord{
+	record := TuningRecord{
 		Timestamp:    time.Now(),
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
@@ -134,19 +134,19 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		ChunkSize:    50000,
 		WasAIUsed:    true,
 	}
-	if err := state.SaveAITuning(record); err != nil {
-		t.Fatalf("SaveAITuning() error: %v", err)
+	if err := state.SaveTuningRecord(record); err != nil {
+		t.Fatalf("SaveTuningRecord() error: %v", err)
 	}
 
 	// Update with throughput result
-	if err := state.UpdateAITuningResult(450000, 240.5, 0, false); err != nil {
-		t.Fatalf("UpdateAITuningResult() error: %v", err)
+	if err := state.UpdateTuningResult(450000, 240.5, 0, false); err != nil {
+		t.Fatalf("UpdateTuningResult() error: %v", err)
 	}
 
-	// Verify throughput is returned by GetAITuningHistory (filtered by direction)
-	history, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	// Verify throughput is returned by GetTuningHistory (filtered by direction)
+	history, err := state.GetTuningHistory(5, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory() error: %v", err)
+		t.Fatalf("GetTuningHistory() error: %v", err)
 	}
 	if len(history) != 1 {
 		t.Fatalf("Expected 1 record, got %d", len(history))
@@ -158,8 +158,8 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		t.Errorf("FinalDurationSecs = %f, want 240.5", history[0].FinalDurationSecs)
 	}
 
-	// Test that UpdateAITuningResult only targets records with NULL throughput
-	record2 := AITuningRecord{
+	// Test that UpdateTuningResult only targets records with NULL throughput
+	record2 := TuningRecord{
 		Timestamp:    time.Now().Add(time.Second), // Ensure distinct timestamp (stored as seconds)
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
@@ -169,16 +169,16 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		ChunkSize:    100000,
 		WasAIUsed:    true,
 	}
-	if err := state.SaveAITuning(record2); err != nil {
-		t.Fatalf("SaveAITuning(record2) error: %v", err)
+	if err := state.SaveTuningRecord(record2); err != nil {
+		t.Fatalf("SaveTuningRecord(record2) error: %v", err)
 	}
-	if err := state.UpdateAITuningResult(300000, 350.0, 2, false); err != nil {
-		t.Fatalf("UpdateAITuningResult(record2) error: %v", err)
+	if err := state.UpdateTuningResult(300000, 350.0, 2, false); err != nil {
+		t.Fatalf("UpdateTuningResult(record2) error: %v", err)
 	}
 
-	history, err = state.GetAITuningHistory(5, "mssql", "postgres")
+	history, err = state.GetTuningHistory(5, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory() error: %v", err)
+		t.Fatalf("GetTuningHistory() error: %v", err)
 	}
 	if len(history) != 2 {
 		t.Fatalf("Expected 2 records, got %d", len(history))
@@ -235,7 +235,7 @@ func TestGetAITuningAggregatesByWaw(t *testing.T) {
 		{waw: 4, throughput: 0, durationSecs: 0, retries: 0}, // excluded — incomplete
 	}
 	for i, f := range fx {
-		rec := AITuningRecord{
+		rec := TuningRecord{
 			Timestamp:         time.Now().Add(time.Duration(i) * time.Second),
 			SourceDBType:      "mssql",
 			TargetDBType:      "postgres",
@@ -244,12 +244,12 @@ func TestGetAITuningAggregatesByWaw(t *testing.T) {
 			WriteAheadWriters: f.waw,
 			WasAIUsed:         true,
 		}
-		if err := state.SaveAITuning(rec); err != nil {
-			t.Fatalf("SaveAITuning %d: %v", i, err)
+		if err := state.SaveTuningRecord(rec); err != nil {
+			t.Fatalf("SaveTuningRecord %d: %v", i, err)
 		}
 		if f.throughput > 0 {
-			if err := state.UpdateAITuningResult(f.throughput, f.durationSecs, f.retries, false); err != nil {
-				t.Fatalf("UpdateAITuningResult %d: %v", i, err)
+			if err := state.UpdateTuningResult(f.throughput, f.durationSecs, f.retries, false); err != nil {
+				t.Fatalf("UpdateTuningResult %d: %v", i, err)
 			}
 		}
 	}
@@ -307,7 +307,7 @@ func TestGetAITuningAggregatesByChunkSize(t *testing.T) {
 		{100000, 1100000},
 	}
 	for i, s := range specs {
-		rec := AITuningRecord{
+		rec := TuningRecord{
 			Timestamp:         time.Now().Add(time.Duration(i) * time.Second),
 			SourceDBType:      "mssql",
 			TargetDBType:      "postgres",
@@ -316,11 +316,11 @@ func TestGetAITuningAggregatesByChunkSize(t *testing.T) {
 			WriteAheadWriters: 1,
 			WasAIUsed:         true,
 		}
-		if err := state.SaveAITuning(rec); err != nil {
-			t.Fatalf("SaveAITuning %d: %v", i, err)
+		if err := state.SaveTuningRecord(rec); err != nil {
+			t.Fatalf("SaveTuningRecord %d: %v", i, err)
 		}
-		if err := state.UpdateAITuningResult(s.throughput, 20, 0, false); err != nil {
-			t.Fatalf("UpdateAITuningResult %d: %v", i, err)
+		if err := state.UpdateTuningResult(s.throughput, 20, 0, false); err != nil {
+			t.Fatalf("UpdateTuningResult %d: %v", i, err)
 		}
 	}
 
@@ -350,7 +350,7 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 	defer state.Close()
 
 	// Save records for two different directions
-	mssqlToPG := AITuningRecord{
+	mssqlToPG := TuningRecord{
 		Timestamp:    time.Now(),
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
@@ -360,7 +360,7 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 		ChunkSize:    12000,
 		WasAIUsed:    true,
 	}
-	pgToPG := AITuningRecord{
+	pgToPG := TuningRecord{
 		Timestamp:    time.Now(),
 		SourceDBType: "postgres",
 		TargetDBType: "postgres",
@@ -370,17 +370,17 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 		ChunkSize:    14000,
 		WasAIUsed:    true,
 	}
-	if err := state.SaveAITuning(mssqlToPG); err != nil {
-		t.Fatalf("SaveAITuning(mssql→pg) error: %v", err)
+	if err := state.SaveTuningRecord(mssqlToPG); err != nil {
+		t.Fatalf("SaveTuningRecord(mssql→pg) error: %v", err)
 	}
-	if err := state.SaveAITuning(pgToPG); err != nil {
-		t.Fatalf("SaveAITuning(pg→pg) error: %v", err)
+	if err := state.SaveTuningRecord(pgToPG); err != nil {
+		t.Fatalf("SaveTuningRecord(pg→pg) error: %v", err)
 	}
 
 	// Filtered by mssql→postgres should return only 1
-	mssqlOnly, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	mssqlOnly, err := state.GetTuningHistory(5, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory(mssql→pg) error: %v", err)
+		t.Fatalf("GetTuningHistory(mssql→pg) error: %v", err)
 	}
 	if len(mssqlOnly) != 1 {
 		t.Fatalf("Expected 1 mssql→pg record, got %d", len(mssqlOnly))
@@ -390,9 +390,9 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 	}
 
 	// Filtered by postgres→postgres should return only 1
-	pgOnly, err := state.GetAITuningHistory(5, "postgres", "postgres")
+	pgOnly, err := state.GetTuningHistory(5, "postgres", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory(pg→pg) error: %v", err)
+		t.Fatalf("GetTuningHistory(pg→pg) error: %v", err)
 	}
 	if len(pgOnly) != 1 {
 		t.Fatalf("Expected 1 pg→pg record, got %d", len(pgOnly))
@@ -402,9 +402,9 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 	}
 
 	// Filtered by nonexistent direction should return empty
-	none, err := state.GetAITuningHistory(5, "mysql", "postgres")
+	none, err := state.GetTuningHistory(5, "mysql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory(mysql→pg) error: %v", err)
+		t.Fatalf("GetTuningHistory(mysql→pg) error: %v", err)
 	}
 	if len(none) != 0 {
 		t.Fatalf("Expected 0 mysql→pg records, got %d", len(none))
@@ -420,7 +420,7 @@ func TestAITuningHistoryLimitZeroReturnsAll(t *testing.T) {
 
 	// Insert 7 records for the same direction
 	for i := 0; i < 7; i++ {
-		rec := AITuningRecord{
+		rec := TuningRecord{
 			Timestamp:    time.Now().Add(time.Duration(i) * time.Second),
 			SourceDBType: "mssql",
 			TargetDBType: "postgres",
@@ -430,24 +430,24 @@ func TestAITuningHistoryLimitZeroReturnsAll(t *testing.T) {
 			ChunkSize:    50000,
 			WasAIUsed:    true,
 		}
-		if err := state.SaveAITuning(rec); err != nil {
-			t.Fatalf("SaveAITuning(%d) error: %v", i, err)
+		if err := state.SaveTuningRecord(rec); err != nil {
+			t.Fatalf("SaveTuningRecord(%d) error: %v", i, err)
 		}
 	}
 
 	// limit=0 should return all 7
-	all, err := state.GetAITuningHistory(0, "mssql", "postgres")
+	all, err := state.GetTuningHistory(0, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory(0) error: %v", err)
+		t.Fatalf("GetTuningHistory(0) error: %v", err)
 	}
 	if len(all) != 7 {
 		t.Fatalf("limit=0: expected 7 records, got %d", len(all))
 	}
 
 	// limit=3 should return exactly 3
-	limited, err := state.GetAITuningHistory(3, "mssql", "postgres")
+	limited, err := state.GetTuningHistory(3, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory(3) error: %v", err)
+		t.Fatalf("GetTuningHistory(3) error: %v", err)
 	}
 	if len(limited) != 3 {
 		t.Fatalf("limit=3: expected 3 records, got %d", len(limited))
@@ -476,30 +476,30 @@ func TestAIAdjustmentsLimitZeroReturnsAll(t *testing.T) {
 
 	// Insert 4 adjustment records
 	for i := 0; i < 4; i++ {
-		rec := AIAdjustmentRecord{
+		rec := RuntimeAdjustmentRecord{
 			AdjustmentNumber: i + 1,
 			Timestamp:        time.Now().Add(time.Duration(i) * time.Second),
 			Action:           "scale_up",
 			Adjustments:      map[string]int{"workers": i + 2},
 		}
-		if err := state.SaveAIAdjustment("test-run", rec); err != nil {
-			t.Fatalf("SaveAIAdjustment(%d) error: %v", i, err)
+		if err := state.SaveRuntimeAdjustment("test-run", rec); err != nil {
+			t.Fatalf("SaveRuntimeAdjustment(%d) error: %v", i, err)
 		}
 	}
 
 	// limit=0 should return all 4
-	all, err := state.GetAIAdjustments(0)
+	all, err := state.GetRuntimeAdjustments(0)
 	if err != nil {
-		t.Fatalf("GetAIAdjustments(0) error: %v", err)
+		t.Fatalf("GetRuntimeAdjustments(0) error: %v", err)
 	}
 	if len(all) != 4 {
 		t.Fatalf("limit=0: expected 4 records, got %d", len(all))
 	}
 
 	// limit=2 should return exactly 2
-	limited, err := state.GetAIAdjustments(2)
+	limited, err := state.GetRuntimeAdjustments(2)
 	if err != nil {
-		t.Fatalf("GetAIAdjustments(2) error: %v", err)
+		t.Fatalf("GetRuntimeAdjustments(2) error: %v", err)
 	}
 	if len(limited) != 2 {
 		t.Fatalf("limit=2: expected 2 records, got %d", len(limited))
@@ -1008,7 +1008,7 @@ func TestClearPartitionTransferProgress_UnderscoreInTableName(t *testing.T) {
 
 // TestAITuningRegimeColumnsRoundTrip pins the #144 follow-up: the new regime
 // columns (platform, target_shared_buffers_mb, target_synchronous_commit, etc.)
-// must persist and round-trip correctly through SaveAITuning + GetAITuningHistory.
+// must persist and round-trip correctly through SaveTuningRecord + GetTuningHistory.
 // Pre-fix, the SQL didn't reference them, so a record with those fields set
 // would silently lose them.
 func TestAITuningRegimeColumnsRoundTrip(t *testing.T) {
@@ -1018,7 +1018,7 @@ func TestAITuningRegimeColumnsRoundTrip(t *testing.T) {
 	}
 	defer state.Close()
 
-	rec := AITuningRecord{
+	rec := TuningRecord{
 		Timestamp:               time.Now(),
 		SourceDBType:            "mssql",
 		TargetDBType:            "postgres",
@@ -1034,13 +1034,13 @@ func TestAITuningRegimeColumnsRoundTrip(t *testing.T) {
 		TargetWALLevel:          "replica",
 		SourceMaxServerMemoryMB: 8192,
 	}
-	if err := state.SaveAITuning(rec); err != nil {
-		t.Fatalf("SaveAITuning error: %v", err)
+	if err := state.SaveTuningRecord(rec); err != nil {
+		t.Fatalf("SaveTuningRecord error: %v", err)
 	}
 
-	out, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	out, err := state.GetTuningHistory(5, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory error: %v", err)
+		t.Fatalf("GetTuningHistory error: %v", err)
 	}
 	if len(out) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(out))
@@ -1083,19 +1083,19 @@ func TestAITuningRegimeColumnsNullForOldRecords(t *testing.T) {
 	defer state.Close()
 
 	// Save without setting any regime fields (simulates a pre-#144 record).
-	rec := AITuningRecord{
+	rec := TuningRecord{
 		Timestamp:    time.Now(),
 		SourceDBType: "mssql",
 		TargetDBType: "postgres",
 		Workers:      16,
 	}
-	if err := state.SaveAITuning(rec); err != nil {
-		t.Fatalf("SaveAITuning error: %v", err)
+	if err := state.SaveTuningRecord(rec); err != nil {
+		t.Fatalf("SaveTuningRecord error: %v", err)
 	}
 
-	out, err := state.GetAITuningHistory(5, "mssql", "postgres")
+	out, err := state.GetTuningHistory(5, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory error: %v", err)
+		t.Fatalf("GetTuningHistory error: %v", err)
 	}
 	got := out[0]
 	if got.Platform != "" {
@@ -1120,8 +1120,8 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 	}
 	defer state.Close()
 
-	mkRecord := func(offset time.Duration) AITuningRecord {
-		return AITuningRecord{
+	mkRecord := func(offset time.Duration) TuningRecord {
+		return TuningRecord{
 			Timestamp:    time.Now().Add(offset),
 			SourceDBType: "mssql",
 			TargetDBType: "postgres",
@@ -1132,22 +1132,22 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 		}
 	}
 
-	if err := state.SaveAITuning(mkRecord(0)); err != nil {
-		t.Fatalf("SaveAITuning(clean): %v", err)
+	if err := state.SaveTuningRecord(mkRecord(0)); err != nil {
+		t.Fatalf("SaveTuningRecord(clean): %v", err)
 	}
-	if err := state.UpdateAITuningResult(500_000, 100, 0, false); err != nil {
-		t.Fatalf("UpdateAITuningResult(clean): %v", err)
+	if err := state.UpdateTuningResult(500_000, 100, 0, false); err != nil {
+		t.Fatalf("UpdateTuningResult(clean): %v", err)
 	}
-	if err := state.SaveAITuning(mkRecord(time.Second)); err != nil {
-		t.Fatalf("SaveAITuning(adjusted): %v", err)
+	if err := state.SaveTuningRecord(mkRecord(time.Second)); err != nil {
+		t.Fatalf("SaveTuningRecord(adjusted): %v", err)
 	}
-	if err := state.UpdateAITuningResult(400_000, 120, 1, true); err != nil {
-		t.Fatalf("UpdateAITuningResult(adjusted): %v", err)
+	if err := state.UpdateTuningResult(400_000, 120, 1, true); err != nil {
+		t.Fatalf("UpdateTuningResult(adjusted): %v", err)
 	}
 
-	history, err := state.GetAITuningHistory(0, "mssql", "postgres")
+	history, err := state.GetTuningHistory(0, "mssql", "postgres")
 	if err != nil {
-		t.Fatalf("GetAITuningHistory: %v", err)
+		t.Fatalf("GetTuningHistory: %v", err)
 	}
 	if len(history) != 2 {
 		t.Fatalf("expected 2 records, got %d", len(history))

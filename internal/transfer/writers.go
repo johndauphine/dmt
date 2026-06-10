@@ -28,10 +28,10 @@ type writerPool struct {
 	upsertMergeChunkSizeFn func() int
 	batchSizeFn            func() int // dynamic writer batch size (for target DB sub-batching)
 
-	// AI-driven error recovery
-	tuner      RuntimeTuner
-	aiAdjuster WriteErrorAdjuster
-	tableName  string // original table name (for tuner per-table overrides)
+	// Rule-based write-error recovery
+	tuner              RuntimeTuner
+	writeErrorAdjuster WriteErrorAdjuster
+	tableName          string // original table name (for tuner per-table overrides)
 
 	// #229 observability: bytes_total uses this estimate to convert a
 	// row count into a wire-size approximation. Captured from the table's
@@ -60,10 +60,10 @@ type writerPoolConfig struct {
 	Prog                   *progress.Tracker
 	EnableAck              bool // Whether to enable ack channel for checkpointing
 
-	// AI-driven error recovery
-	Tuner      RuntimeTuner
-	AIAdjuster WriteErrorAdjuster
-	TableName  string
+	// Rule-based write-error recovery
+	Tuner     RuntimeTuner
+	Adjuster  WriteErrorAdjuster
+	TableName string
 
 	// BytesPerRow is the per-row size estimate for bytes_total metric (#229).
 	// Pull from driver.Table.GoHeapBytesPerRow at the call site so the metric
@@ -99,7 +99,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		upsertMergeChunkSizeFn: upsertFn,
 		batchSizeFn:            batchFn,
 		tuner:                  cfg.Tuner,
-		aiAdjuster:             cfg.AIAdjuster,
+		writeErrorAdjuster:     cfg.Adjuster,
 		tableName:              cfg.TableName,
 		bytesPerRow:            cfg.BytesPerRow,
 	}
@@ -118,7 +118,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 }
 
 // executeWrite handles both regular writes and upserts with chunking.
-// On failure, it asks the AI for a new chunk_size and retries with smaller sub-batches.
+// On failure, it asks the write-error adjuster for a new chunk_size and retries with smaller sub-batches.
 func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]any) error {
 	batchSize := wp.batchSizeFn()
 	// #229 observability: time the entire chunk write (including any
@@ -156,10 +156,10 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 	// label cardinality bounded for Prometheus.
 	observability.Global().IncErrors(wp.tableName, "transfer", classifyWriteError(err))
 
-	// Try AI-driven chunk size adjustment for error recovery
+	// Try rule-based chunk size adjustment for error recovery
 	newChunkSize := wp.evaluateAndAdjust(ctx, rows, err)
 	if newChunkSize <= 0 || newChunkSize >= len(rows) {
-		return err // AI says not a chunk_size issue, or can't help
+		return err // adjuster says not a chunk_size issue, or can't help
 	}
 
 	logging.Info("Retrying table %s with chunk_size=%d (was %d rows)", wp.tableName, newChunkSize, len(rows))
@@ -197,7 +197,7 @@ func classifyWriteError(err error) string {
 // evaluateAndAdjust asks the AI adjuster to recommend a new batch_size for the error.
 // Returns the recommended size, or 0 if the error is not batch-size related.
 func (wp *writerPool) evaluateAndAdjust(ctx context.Context, rows [][]any, writeErr error) int {
-	if wp.aiAdjuster == nil {
+	if wp.writeErrorAdjuster == nil {
 		return 0
 	}
 
@@ -210,7 +210,7 @@ func (wp *writerPool) evaluateAndAdjust(ctx context.Context, rows [][]any, write
 		TargetDBType: wp.tgtPool.DBType(),
 	}
 
-	newSize := wp.aiAdjuster.EvaluateWriteError(ctx, errCtx)
+	newSize := wp.writeErrorAdjuster.EvaluateWriteError(ctx, errCtx)
 	if newSize > 0 && wp.tuner != nil {
 		// Set both chunk size (for reader retry batching) and batch size (for writer sub-batching)
 		wp.tuner.SetTableChunkSize(wp.tableName, newSize)

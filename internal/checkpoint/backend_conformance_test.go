@@ -84,11 +84,11 @@ func TestStateBackendCapabilities(t *testing.T) {
 			if _, ok := backend.(HistoryBackend); ok != caps.Profiles {
 				t.Fatalf("HistoryBackend assertion = %v, Profiles capability = %v", ok, caps.Profiles)
 			}
-			if caps.AIAdjustmentHistory != tc.wantAIHistory {
-				t.Fatalf("AIAdjustmentHistory = %v, want %v", caps.AIAdjustmentHistory, tc.wantAIHistory)
+			if caps.RuntimeAdjustmentHistory != tc.wantAIHistory {
+				t.Fatalf("RuntimeAdjustmentHistory = %v, want %v", caps.RuntimeAdjustmentHistory, tc.wantAIHistory)
 			}
-			if caps.AITuningHistory != tc.wantAIHistory {
-				t.Fatalf("AITuningHistory = %v, want %v", caps.AITuningHistory, tc.wantAIHistory)
+			if caps.TuningHistory != tc.wantAIHistory {
+				t.Fatalf("TuningHistory = %v, want %v", caps.TuningHistory, tc.wantAIHistory)
 			}
 		})
 	}

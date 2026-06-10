@@ -167,7 +167,7 @@ type HistoryRecord struct {
 	Workers           int
 	ChunkSize         int
 	WriteAheadWriters int
-	// ParallelReaders and ReadAheadBuffers are persisted on AITuningRecord
+	// ParallelReaders and ReadAheadBuffers are persisted on TuningRecord
 	// but were dropped by the adapter before #219. Now carried through so
 	// the regression can learn from their variance once the exploration
 	// grid starts varying them.

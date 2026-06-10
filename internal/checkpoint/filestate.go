@@ -31,11 +31,11 @@ func (fs *FileState) Capabilities() BackendCapabilities {
 		SchemaSnapshots:      true,
 		FallbackEvents:       true,
 
-		RunHistory:          false,
-		RunConfigSnapshots:  false,
-		Profiles:            false,
-		AIAdjustmentHistory: false,
-		AITuningHistory:     false,
+		RunHistory:               false,
+		RunConfigSnapshots:       false,
+		Profiles:                 false,
+		RuntimeAdjustmentHistory: false,
+		TuningHistory:            false,
 	}
 }
 
@@ -327,32 +327,32 @@ func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema s
 	return fs.save()
 }
 
-func (fs *FileState) SaveAIAdjustment(runID string, record AIAdjustmentRecord) error {
+func (fs *FileState) SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentRecord) error {
 	return nil
 }
 
-// GetAIAdjustments returns empty slice for file state (doesn't persist AI history).
-func (fs *FileState) GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error) {
+// GetRuntimeAdjustments returns empty slice for file state (doesn't persist AI history).
+func (fs *FileState) GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, error) {
 	return nil, nil
 }
 
-// GetAIAdjustmentsByAction returns empty slice for file state.
-func (fs *FileState) GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error) {
+// GetRuntimeAdjustmentsByAction returns empty slice for file state.
+func (fs *FileState) GetRuntimeAdjustmentsByAction(action string, limit int) ([]RuntimeAdjustmentRecord, error) {
 	return nil, nil
 }
 
-// SaveAITuning is a no-op for file state (doesn't persist tuning history).
-func (fs *FileState) SaveAITuning(record AITuningRecord) error {
+// SaveTuningRecord is a no-op for file state (doesn't persist tuning history).
+func (fs *FileState) SaveTuningRecord(record TuningRecord) error {
 	return nil
 }
 
-// UpdateAITuningResult is a no-op for file state.
-func (fs *FileState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+// UpdateTuningResult is a no-op for file state.
+func (fs *FileState) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	return nil
 }
 
-// GetAITuningHistory returns empty slice for file state (doesn't persist tuning history).
-func (fs *FileState) GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error) {
+// GetTuningHistory returns empty slice for file state (doesn't persist tuning history).
+func (fs *FileState) GetTuningHistory(limit int, sourceType, targetType string) ([]TuningRecord, error) {
 	return nil, nil
 }
 

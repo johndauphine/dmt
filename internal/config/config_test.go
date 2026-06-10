@@ -759,7 +759,7 @@ func TestAutoTuneUserOverride(t *testing.T) {
 // user-override mechanism for parallel_readers and read_ahead_buffers
 // across the full round-trip: user sets explicit values in YAML →
 // applyDefaults snapshots them as Original* → tuner produces different
-// suggestions → ApplyAISuggestions must keep the user's values, NOT the
+// suggestions → ApplyTunerSuggestions must keep the user's values, NOT the
 // tuner's.
 //
 // Pre-#219 the tuner ignored these axes entirely so the override path
@@ -793,7 +793,7 @@ func TestApplyAISuggestions_UserOverridesPRRAB(t *testing.T) {
 		ParallelReaders:  2,
 		ReadAheadBuffers: 4,
 	}
-	cfg.ApplyAISuggestions(suggestions)
+	cfg.ApplyTunerSuggestions(suggestions)
 
 	if cfg.Migration.ParallelReaders != 6 {
 		t.Errorf("user override clobbered: ParallelReaders=%d, want 6 (user value)", cfg.Migration.ParallelReaders)
@@ -827,7 +827,7 @@ func TestApplyAISuggestions_AppliesPRRABWhenUnset(t *testing.T) {
 		ParallelReaders:  4,
 		ReadAheadBuffers: 8,
 	}
-	cfg.ApplyAISuggestions(suggestions)
+	cfg.ApplyTunerSuggestions(suggestions)
 
 	if cfg.Migration.ParallelReaders != 4 {
 		t.Errorf("tuner suggestion not applied: ParallelReaders=%d, want 4 (suggested)", cfg.Migration.ParallelReaders)
@@ -1156,7 +1156,7 @@ migration_defaults:
 		t.Fatalf("LoadBytes config: %v", err)
 	}
 
-	cfg.ApplyAISuggestions(&driver.SmartConfigSuggestions{
+	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
 		Workers:                 4,
 		ChunkSizeRecommendation: 12345,
 	})

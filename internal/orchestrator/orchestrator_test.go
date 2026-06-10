@@ -665,7 +665,7 @@ func TestRecordSuccessfulTuningResult(t *testing.T) {
 	o.recordSuccessfulTuningResult(1000, 2*time.Second)
 
 	if state.calls != 1 {
-		t.Fatalf("UpdateAITuningResult calls = %d, want 1", state.calls)
+		t.Fatalf("UpdateTuningResult calls = %d, want 1", state.calls)
 	}
 	if state.throughput != 500 {
 		t.Errorf("throughput = %f, want 500", state.throughput)
@@ -686,7 +686,7 @@ func TestRecordSuccessfulTuningResultSkipsInvalidDuration(t *testing.T) {
 	o.recordSuccessfulTuningResult(1000, -time.Second)
 
 	if state.calls != 0 {
-		t.Fatalf("UpdateAITuningResult calls = %d, want 0", state.calls)
+		t.Fatalf("UpdateTuningResult calls = %d, want 0", state.calls)
 	}
 }
 
@@ -801,7 +801,7 @@ type tuningResultState struct {
 	chunkRetryCount int
 }
 
-func (s *tuningResultState) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+func (s *tuningResultState) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	s.calls++
 	s.throughput = throughput
 	s.durationSecs = durationSecs

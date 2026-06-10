@@ -93,7 +93,7 @@ func (o *Orchestrator) performanceAutoTuneInput(suggestions *driver.SmartConfigS
 	return input
 }
 
-func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]checkpoint.AITuningRecord, []checkpoint.AIAdjustmentRecord) {
+func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]checkpoint.TuningRecord, []checkpoint.RuntimeAdjustmentRecord) {
 	if o == nil || o.state == nil || o.config == nil {
 		return nil, nil
 	}
@@ -101,7 +101,7 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]ch
 	sourceType := driver.Canonicalize(o.config.Source.Type)
 	targetType := driver.Canonicalize(o.config.Target.Type)
 
-	rows, err := adapter.GetAITuningHistory(0, sourceType, targetType)
+	rows, err := adapter.GetTuningHistory(0, sourceType, targetType)
 	if err != nil {
 		logging.DebugEvent("AI performance explanation recent run history unavailable",
 			"source_db", sourceType,
@@ -110,7 +110,7 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]ch
 		)
 		return nil, nil
 	}
-	recent := make([]checkpoint.AITuningRecord, 0, 5)
+	recent := make([]checkpoint.TuningRecord, 0, 5)
 	for _, row := range rows {
 		if !samePerformanceWorkload(input, row) || row.FinalThroughput <= 0 {
 			continue
@@ -120,7 +120,7 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]ch
 			break
 		}
 	}
-	adjustments, err := adapter.GetAIAdjustments(50)
+	adjustments, err := adapter.GetRuntimeAdjustments(50)
 	if err != nil {
 		logging.DebugEvent("AI performance explanation runtime adjustment history unavailable",
 			"error", logging.Scrub(err.Error()),
@@ -131,11 +131,11 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]ch
 	return recent, scopedPerformanceAdjustments(input, adjustments, runConfigs, 5)
 }
 
-func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []checkpoint.AIAdjustmentRecord, runConfigs map[string]string, limit int) []checkpoint.AIAdjustmentRecord {
+func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []checkpoint.RuntimeAdjustmentRecord, runConfigs map[string]string, limit int) []checkpoint.RuntimeAdjustmentRecord {
 	if limit <= 0 || len(adjustments) == 0 {
 		return nil
 	}
-	scoped := make([]checkpoint.AIAdjustmentRecord, 0, limit)
+	scoped := make([]checkpoint.RuntimeAdjustmentRecord, 0, limit)
 	for _, adjustment := range adjustments {
 		if strings.TrimSpace(adjustment.RunID) == "" {
 			continue
@@ -154,7 +154,7 @@ func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []chec
 	return scoped
 }
 
-func samePerformanceWorkload(input driver.AutoTuneInput, row checkpoint.AITuningRecord) bool {
+func samePerformanceWorkload(input driver.AutoTuneInput, row checkpoint.TuningRecord) bool {
 	return nonEmptyEqual(input.SourceHost, row.SourceHost) &&
 		input.SourcePort > 0 && input.SourcePort == row.SourcePort &&
 		nonEmptyEqual(input.SourceDatabase, row.SourceDatabase) &&

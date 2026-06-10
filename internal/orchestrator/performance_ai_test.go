@@ -171,7 +171,7 @@ func TestSamePerformanceWorkloadRequiresExactIdentity(t *testing.T) {
 		TargetDatabase: "target_prod",
 		TargetSchema:   "dbo",
 	}
-	row := checkpoint.AITuningRecord{
+	row := checkpoint.TuningRecord{
 		Timestamp:      time.Now(),
 		SourceHost:     input.SourceHost,
 		SourcePort:     input.SourcePort,
@@ -212,7 +212,7 @@ func TestScopedPerformanceAdjustmentsRequiresScopedRunConfig(t *testing.T) {
   "Target": {"Host":"target.internal","Port":1433,"Database":"target_prod","Schema":"dbo"}
 }`
 	otherRaw := strings.Replace(raw, "target_prod", "other_target", 1)
-	adjustments := []checkpoint.AIAdjustmentRecord{
+	adjustments := []checkpoint.RuntimeAdjustmentRecord{
 		{RunID: "other", Action: "other"},
 		{RunID: "", Action: "legacy"},
 		{RunID: "matching-ai", Action: "legacy", Confidence: "high"},
@@ -258,9 +258,9 @@ func TestRecordingWriteErrorAdjusterPersistsStructuralAdjustment(t *testing.T) {
 	if next != 500 {
 		t.Fatalf("next chunk size = %d, want 500", next)
 	}
-	records, err := state.GetAIAdjustments(0)
+	records, err := state.GetRuntimeAdjustments(0)
 	if err != nil {
-		t.Fatalf("GetAIAdjustments() error = %v", err)
+		t.Fatalf("GetRuntimeAdjustments() error = %v", err)
 	}
 	if len(records) != 1 {
 		t.Fatalf("records len = %d, want 1", len(records))

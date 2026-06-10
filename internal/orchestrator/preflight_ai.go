@@ -78,7 +78,7 @@ func (o *Orchestrator) recentRunsForAIReview() []aicopilot.RunHistorySummary {
 	if o == nil || o.state == nil || o.config == nil {
 		return nil
 	}
-	records, err := o.state.GetAITuningHistory(3, driver.Canonicalize(o.config.Source.Type), driver.Canonicalize(o.config.Target.Type))
+	records, err := o.state.GetTuningHistory(3, driver.Canonicalize(o.config.Source.Type), driver.Canonicalize(o.config.Target.Type))
 	if err != nil {
 		logging.DebugEvent("AI preflight review recent run history unavailable",
 			"source_db", driver.Canonicalize(o.config.Source.Type),
@@ -94,7 +94,7 @@ func (o *Orchestrator) recentRunsForAIReview() []aicopilot.RunHistorySummary {
 	return out
 }
 
-func runHistorySummaryForAI(r checkpoint.AITuningRecord) aicopilot.RunHistorySummary {
+func runHistorySummaryForAI(r checkpoint.TuningRecord) aicopilot.RunHistorySummary {
 	ts := ""
 	if !r.Timestamp.IsZero() {
 		ts = r.Timestamp.UTC().Format(time.RFC3339)

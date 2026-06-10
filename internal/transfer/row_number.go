@@ -27,7 +27,7 @@ func executeRowNumberPagination(
 	resumeRowsDone int64,
 	targetTableName string,
 	tuner RuntimeTuner,
-	aiAdjuster WriteErrorAdjuster,
+	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
 	db := srcPool.DB()
 	stats := &TransferStats{}
@@ -293,7 +293,7 @@ func executeRowNumberPagination(
 		Prog:                   prog,
 		EnableAck:              enableAck,
 		Tuner:                  tuner,
-		AIAdjuster:             aiAdjuster,
+		Adjuster:               writeErrorAdjuster,
 		TableName:              job.Table.Name,
 		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
 	})

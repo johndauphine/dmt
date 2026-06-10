@@ -48,7 +48,7 @@ All packages live under `internal/`. The key ones:
 | `checkpoint/` | State persistence — SQLite (default) or YAML file (Airflow/headless) |
 | `config/` | YAML parsing, secret expansion (`${env:VAR}`, `${file:/path}`), auto-tuning, driver validation |
 | `dbconfig/` | SourceConfig/TargetConfig structs — exists to break circular import between `config` and `driver` |
-| `monitor/` | Real-time AI performance monitoring with runtime adjustments |
+| `monitor/` | Rule-based runtime controller: polls metrics, adjusts parameters via `RuntimeTuner` |
 | `tui/` | Interactive terminal UI (Bubble Tea framework) |
 | `secrets/` | Loads `~/.secrets/dmt-config.yaml` for AI keys and provider settings |
 
@@ -109,7 +109,7 @@ The orchestrator (`orchestrator/orchestrator.go`) sequences 9 phases:
 AI fallback features share `AITypeMapper.CallAI()` with provider abstraction (Claude, OpenAI, Gemini, Ollama, LMStudio):
 
 1. **AI fallback type/DDL mapper** (`driver/ai_typemapper*.go`) — Handles Raw vendor types and unsupported DDL surfaces after the deterministic mapper declines. Local cache at `~/.dmt/type-cache.json` records source/provider/model/schema-hash metadata plus a checksum. In-flight dedup uses `sync.Map`; provider HTTP uses exponential backoff and honors `Retry-After`.
-2. **Smart Config** (`driver/ai_smartconfig.go`, `internal/tuning/`) — Deterministic tuner based on source stats, system resources, driver profiles, and completed-run history. `config.ApplyAISuggestions()` pins per-config and secrets-default values; generated defaults remain overrideable and debug output reports provenance.
+2. **Smart Config** (`driver/smartconfig.go`, `internal/tuning/`) — Deterministic tuner based on source stats, system resources, driver profiles, and completed-run history. `config.ApplyTunerSuggestions()` pins per-config and secrets-default values; generated defaults remain overrideable and debug output reports provenance.
 3. **Runtime Controller** (`monitor/`) — Rule-based controller that adjusts runtime parameters through `RuntimeTuner`; it does not call an LLM or mutate `*config.Config` during transfer.
 4. **Error Diagnosis** (`driver/diagnosis*.go`) — Deterministic catalog. Unmatched errors are counted as `errordiag` fallback-observability events for catalog growth, not sent to an AI provider.
 

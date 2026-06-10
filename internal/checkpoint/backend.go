@@ -21,11 +21,11 @@ type BackendCapabilities struct {
 	FallbackEvents       bool
 
 	// Optional history/config features.
-	RunHistory          bool
-	RunConfigSnapshots  bool
-	Profiles            bool
-	AIAdjustmentHistory bool
-	AITuningHistory     bool
+	RunHistory               bool
+	RunConfigSnapshots       bool
+	Profiles                 bool
+	RuntimeAdjustmentHistory bool
+	TuningHistory            bool
 }
 
 // HasRequiredRestartability returns true when all capabilities needed for safe
@@ -102,16 +102,16 @@ type StateBackend interface {
 	// Lifecycle
 	Close() error
 
-	// AI adjustment history. Check Capabilities().AIAdjustmentHistory before
+	// AI adjustment history. Check Capabilities().RuntimeAdjustmentHistory before
 	// expecting durable history; unsupported backends return empty/no-op.
-	SaveAIAdjustment(runID string, record AIAdjustmentRecord) error
-	GetAIAdjustments(limit int) ([]AIAdjustmentRecord, error)
-	GetAIAdjustmentsByAction(action string, limit int) ([]AIAdjustmentRecord, error)
+	SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentRecord) error
+	GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, error)
+	GetRuntimeAdjustmentsByAction(action string, limit int) ([]RuntimeAdjustmentRecord, error)
 
-	// AI tuning history for analyze command. Check Capabilities().AITuningHistory
+	// tuning history for analyze command. Check Capabilities().TuningHistory
 	// before expecting durable history; unsupported backends return empty/no-op.
-	SaveAITuning(record AITuningRecord) error
-	GetAITuningHistory(limit int, sourceType, targetType string) ([]AITuningRecord, error)
+	SaveTuningRecord(record TuningRecord) error
+	GetTuningHistory(limit int, sourceType, targetType string) ([]TuningRecord, error)
 	// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over the
 	// FULL ai_tuning_history (no limit). Pulled via SQL GROUP BY so the smartconfig
 	// can show bounded recent trajectory rows in the prompt while still presenting
@@ -123,7 +123,7 @@ type StateBackend interface {
 	// adjustedAtRuntime flags the row as runtime-adjusted (#451): the
 	// run's throughput blends multiple configs, so the deterministic
 	// tuner excludes the row from its training cohorts.
-	UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
+	UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 
 	// AI fallback events (#176). UPSERT semantics: each call bumps the
 	// count for (run_id, surface, fingerprint). The file backend is the
@@ -207,9 +207,9 @@ type HistoryBackend interface {
 // Ensure State implements HistoryBackend
 var _ HistoryBackend = (*State)(nil)
 
-// AITuningRecord represents historical tuning data from completed migrations.
+// TuningRecord represents historical tuning data from completed migrations.
 // These completed migration measurements feed future tuning recommendations.
-type AITuningRecord struct {
+type TuningRecord struct {
 	ID              int64     `json:"id"`
 	Timestamp       time.Time `json:"timestamp"`
 	SourceDBType    string    `json:"source_db_type"`
@@ -233,8 +233,8 @@ type AITuningRecord struct {
 	EstimatedMemoryMB   int64 `json:"estimated_memory_mb"`
 
 	// AI metadata
-	AIReasoning string `json:"ai_reasoning"`
-	WasAIUsed   bool   `json:"was_ai_used"` // Whether AI was used or formula fallback
+	Reasoning string `json:"ai_reasoning"`
+	WasAIUsed bool   `json:"was_ai_used"` // Whether AI was used or formula fallback
 
 	// Post-migration results (updated after run completes)
 	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
@@ -298,8 +298,8 @@ type ChunkSizeAggregateRecord struct {
 	AvgThroughput float64 `json:"avg_throughput"`
 }
 
-// AIAdjustmentRecord represents a historical AI adjustment decision.
-type AIAdjustmentRecord struct {
+// RuntimeAdjustmentRecord represents a historical runtime adjustment decision.
+type RuntimeAdjustmentRecord struct {
 	ID               int64          `json:"id"`
 	RunID            string         `json:"run_id"`
 	AdjustmentNumber int            `json:"adjustment_number"`
@@ -318,7 +318,7 @@ type AIAdjustmentRecord struct {
 }
 
 // AdjustmentsJSON returns the adjustments as a JSON string for storage.
-func (r AIAdjustmentRecord) AdjustmentsJSON() string {
+func (r RuntimeAdjustmentRecord) AdjustmentsJSON() string {
 	if r.Adjustments == nil {
 		return "{}"
 	}

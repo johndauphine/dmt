@@ -69,7 +69,7 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		return
 	}
 
-	record := checkpoint.AITuningRecord{
+	record := checkpoint.TuningRecord{
 		Timestamp:               time.Now(),
 		SourceDBType:            s.dbType,
 		TargetDBType:            s.targetDBType,
@@ -88,7 +88,7 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		MaxSourceConns:          s.suggestions.MaxSourceConnections,
 		MaxTargetConns:          s.suggestions.MaxTargetConnections,
 		EstimatedMemoryMB:       s.suggestions.EstimatedMemMB,
-		AIReasoning:             reasoning, // deterministic tuner's reasoning string
+		Reasoning:               reasoning, // deterministic tuner's reasoning string
 		WasAIUsed:               false,     // PR1 dropped the AI path entirely
 		Platform:                firstNonEmpty(actual.Platform, input.Platform),
 		TargetSharedBuffersMB:   actual.TargetSharedBuffersMB,
@@ -114,7 +114,7 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		TargetSchema:   input.TargetSchema,
 	}
 
-	if err := s.historyProvider.SaveAITuning(record); err != nil {
+	if err := s.historyProvider.SaveTuningRecord(record); err != nil {
 		logging.Debug("Failed to save tuning history: %v", err)
 	}
 }

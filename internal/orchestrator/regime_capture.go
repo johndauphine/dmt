@@ -25,8 +25,8 @@ import (
 // the corresponding field at its zero value. The smartconfig render path
 // treats zero values as "unknown" and tells the model to discount comparisons
 // against unknown rows.
-func captureDBTuning(ctx context.Context, sourceDB, targetDB *sql.DB, sourceType, targetType string) checkpoint.AITuningRecord {
-	rec := checkpoint.AITuningRecord{}
+func captureDBTuning(ctx context.Context, sourceDB, targetDB *sql.DB, sourceType, targetType string) checkpoint.TuningRecord {
+	rec := checkpoint.TuningRecord{}
 
 	captureCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -44,7 +44,7 @@ func captureDBTuning(ctx context.Context, sourceDB, targetDB *sql.DB, sourceType
 	return rec
 }
 
-func captureTargetPG(ctx context.Context, db *sql.DB, rec *checkpoint.AITuningRecord) {
+func captureTargetPG(ctx context.Context, db *sql.DB, rec *checkpoint.TuningRecord) {
 	type pgSetting struct {
 		name string
 		// dest receives the parsed value. For *int64 fields, parsePGSize
@@ -78,7 +78,7 @@ func captureTargetPG(ctx context.Context, db *sql.DB, rec *checkpoint.AITuningRe
 	}
 }
 
-func captureSourceMSSQL(ctx context.Context, db *sql.DB, rec *checkpoint.AITuningRecord) {
+func captureSourceMSSQL(ctx context.Context, db *sql.DB, rec *checkpoint.TuningRecord) {
 	// max server memory is the most-load-bearing source-side knob for
 	// large-dataset reads (the SO2013 8GB-vs-16GB experiment in BENCHMARKS.md).
 	var mb int64
@@ -139,7 +139,7 @@ func parsePGSize(raw string) (int64, bool) {
 // human-readable string, e.g.
 // "pg{shared_buffers=8192MB, sync_commit=off, fsync=on, ...}, mssql{max_server_memory=8192MB}".
 // Used in the smartconfig prompt to render per-row regime context.
-func formatTuningSnippet(r checkpoint.AITuningRecord) string {
+func formatTuningSnippet(r checkpoint.TuningRecord) string {
 	var pg []string
 	if r.TargetSharedBuffersMB > 0 {
 		pg = append(pg, fmt.Sprintf("shared_buffers=%dMB", r.TargetSharedBuffersMB))

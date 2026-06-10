@@ -46,7 +46,7 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 		Tier:                    "regression",
 		Reasoning:               "regression-selected WAW=2 from token=abc123",
 	}
-	payload := BuildPerformancePayload(input, suggestions, []checkpoint.AITuningRecord{{
+	payload := BuildPerformancePayload(input, suggestions, []checkpoint.TuningRecord{{
 		Timestamp:       time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
 		SourceDBType:    "postgres",
 		TargetDBType:    "mssql",
@@ -55,10 +55,10 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 		AvgRowSizeBytes: 500,
 		Workers:         6,
 		ChunkSize:       50000,
-		AIReasoning:     "history row used password=secret",
+		Reasoning:       "history row used password=secret",
 		FinalThroughput: 2500,
 		ChunkRetryCount: 2,
-	}}, []checkpoint.AIAdjustmentRecord{{
+	}}, []checkpoint.RuntimeAdjustmentRecord{{
 		Action:       "increase",
 		Adjustments:  map[string]int{"workers": 6, "invented_knob": 99},
 		CPUBefore:    70,
@@ -109,7 +109,7 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 }
 
 func TestBuildPerformancePayloadOmitsUnsafeRuntimeAdjustmentAction(t *testing.T) {
-	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.AIAdjustmentRecord{{
+	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.RuntimeAdjustmentRecord{{
 		Action:      "public.orders",
 		Adjustments: map[string]int{"workers": 4},
 		Reasoning:   "table-specific legacy action",
@@ -127,7 +127,7 @@ func TestBuildPerformancePayloadOmitsUnsafeRuntimeAdjustmentAction(t *testing.T)
 }
 
 func TestBuildPerformancePayloadOmitsNonDeterministicRuntimeAdjustments(t *testing.T) {
-	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.AIAdjustmentRecord{{
+	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.RuntimeAdjustmentRecord{{
 		Action:      "workers",
 		Adjustments: map[string]int{"workers": 99},
 		Confidence:  "high",

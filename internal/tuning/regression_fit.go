@@ -243,7 +243,7 @@ func distinctPairs(rows []HistoryRecord) []pairKey {
 
 // distinctModes is the placeholder for target_mode encoding. The model
 // spec calls for target_mode as a categorical fixed effect, but
-// HistoryRecord doesn't carry target_mode today (the AITuningRecord
+// HistoryRecord doesn't carry target_mode today (the TuningRecord
 // schema in checkpoint never persisted it). Returns an empty slice so
 // the design matrix has zero mode columns — fitRegression handles this
 // gracefully and Predict's mode parameter is silently ignored.

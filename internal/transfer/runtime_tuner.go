@@ -41,7 +41,7 @@ type RuntimeMetrics struct {
 	TotalTransferRows int64
 }
 
-// WriteErrorContext provides context about a write error for AI-driven chunk size adjustment.
+// WriteErrorContext provides context about a write error for rule-based chunk size adjustment.
 type WriteErrorContext struct {
 	TableName    string
 	ColumnCount  int
