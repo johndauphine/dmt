@@ -669,3 +669,33 @@ func TestCalculatePipelineBuffers(t *testing.T) {
 		})
 	}
 }
+
+// TestCalculatePipelineBuffers_OverheadSlotsReserved locks in the #465
+// accounting: reader scan accumulation and writer encode amplification
+// are reserved out of the budget before the channels split it, so the
+// queued depths plus overhead never exceed what the memory actually fits.
+func TestCalculatePipelineBuffers_OverheadSlotsReserved(t *testing.T) {
+	cfg := PipelineBufferConfig{
+		MemoryBudgetMB:   10, // tight: 10MB / 0.1MB-chunks = 104 total slots
+		ChunkSize:        1000,
+		RowBytes:         100,
+		NumWriters:       4,
+		NumReaders:       4,
+		ReadAheadBuffers: 3,
+	}
+	got := CalculatePipelineBuffers(cfg)
+
+	overhead := cfg.NumWriters*writerEncodeAmplification + cfg.NumReaders
+	totalSlots := int(int64(cfg.MemoryBudgetMB) * 1024 * 1024 / (int64(cfg.ChunkSize) * cfg.RowBytes))
+	if got.ChunkChanDepth+got.JobChanDepth+overhead > totalSlots {
+		t.Errorf("queued(%d+%d) + overhead(%d) = %d exceeds budget slots %d",
+			got.ChunkChanDepth, got.JobChanDepth, overhead,
+			got.ChunkChanDepth+got.JobChanDepth+overhead, totalSlots)
+	}
+	if got.JobChanDepth < cfg.NumWriters+1 {
+		t.Errorf("jobDepth %d below deadlock floor %d", got.JobChanDepth, cfg.NumWriters+1)
+	}
+	if got.ChunkChanDepth < cfg.NumReaders {
+		t.Errorf("chunkDepth %d below reader floor %d", got.ChunkChanDepth, cfg.NumReaders)
+	}
+}

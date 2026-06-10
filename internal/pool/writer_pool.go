@@ -36,16 +36,30 @@ type PipelineBufferSizes struct {
 // memory footprint without improving throughput.
 const maxBufferDepth = 200
 
+// writerEncodeAmplification models the driver-side write path holding a
+// second copy of a chunk while encoding it (#465): MySQL materializes a
+// multi-value INSERT string roughly the size of the data, and the
+// staging-table upsert paths buffer similarly. Counting each writer as two
+// chunk slots keeps the budget honest for the worst common case; engines
+// that stream (PG COPY) simply leave a little slack.
+const writerEncodeAmplification = 2
+
 // CalculatePipelineBuffers derives buffer depths for both chunkChan and jobChan
 // from a shared memory budget.
 //
-// The full pipeline memory model:
+// The full pipeline memory model (#465 — the complete in-flight inventory):
 //
-//	total_in_flight = chunkChanDepth + jobChanDepth + numWriters  (in chunks)
+//	total_in_flight = chunkChanDepth + jobChanDepth               (queued)
+//	                + numReaders                                  (chunk accumulating in scanRows before it occupies a slot)
+//	                + numWriters × writerEncodeAmplification      (chunk being written + driver-side encode copy)
 //	total_memory    = total_in_flight * chunkSize * rowBytes      (in bytes)
 //
-// Writers always hold one chunk each (non-negotiable). The remaining budget is
-// split between chunkChan (reader side) and jobChan (writer side).
+// Depths are computed once from the chunk size at pipeline start. The
+// runtime tuner may GROW chunk size mid-flight, in which case in-flight
+// memory exceeds this model and the transfer memory guard is the backstop;
+// a shrink just leaves slack. The reader/writer overhead slots are
+// reserved first; the remaining budget is split between chunkChan (reader
+// side) and jobChan (writer side).
 func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 	bytesPerChunk := int64(cfg.ChunkSize) * cfg.RowBytes
 	numReaders := cfg.NumReaders
@@ -71,15 +85,20 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 
 	budgetBytes := cfg.MemoryBudgetMB * 1024 * 1024
 
+	// Slots consumed outside the two channels: each writer holds a chunk
+	// plus its encode copy; each reader accumulates one chunk in scanRows
+	// before it ever occupies a chunkChan slot (#465).
+	overheadSlots := cfg.NumWriters*writerEncodeAmplification + numReaders
+
 	// Total chunk slots that fit in memory, capped to prevent excessive buffering
 	// on narrow-row tables where thousands of tiny chunks would fit in budget.
 	totalSlots := int(budgetBytes / bytesPerChunk)
-	if totalSlots > maxBufferDepth+cfg.NumWriters {
-		totalSlots = maxBufferDepth + cfg.NumWriters
+	if totalSlots > maxBufferDepth+overheadSlots {
+		totalSlots = maxBufferDepth + overheadSlots
 	}
 
-	// Writers always hold one chunk each — subtract those first
-	available := totalSlots - cfg.NumWriters
+	// Reserve the overhead slots first
+	available := totalSlots - overheadSlots
 	if available < minChunkDepth+minJobDepth {
 		return PipelineBufferSizes{
 			ChunkChanDepth: minChunkDepth,
