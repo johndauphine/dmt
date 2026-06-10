@@ -54,7 +54,7 @@ All packages live under `internal/`. The key ones:
 
 ### Driver Plugin System
 
-Drivers self-register via `init()` in each sub-package with the global registry (`driver/registry.go`). Lookup is case-insensitive. Drivers are activated by blank imports in `config/config.go` and `pool/factory.go`.
+Drivers self-register via `init()` in each sub-package with the global registry (`driver/registry.go`). Lookup is case-insensitive. Drivers are activated by blank imports in `config/drivers.go` and `pool/factory.go`.
 
 Each driver implements:
 - **`Driver`** (`driver/driver.go`) — Factory: `Name()`, `Aliases()`, `Defaults()`, `Dialect()`, `NewReader()`, `NewWriter()`
@@ -111,7 +111,7 @@ AI fallback features share `AITypeMapper.CallAI()` with provider abstraction (Cl
 
 ### Config System
 
-`config/config.go` loads YAML with secret expansion → driver defaults → auto-tuning.
+`config/load.go` loads YAML with secret expansion → driver defaults → auto-tuning.
 
 **Secret expansion** (before YAML parse): `${file:/path}`, `${env:VAR}`, `${VAR}` (legacy).
 
@@ -144,6 +144,8 @@ AI fallback features share `AITypeMapper.CallAI()` with provider abstraction (Cl
 **GOROOT Issue**: If you encounter "cannot find GOROOT directory", set `GOROOT` to your Go installation path.
 
 ## Development Workflow
+
+**File organization**: Every file should own a nameable concern (e.g. `dialect.go`, `preflight.go`, `writer_ddl.go`). Prefer 200-700 lines per file with a hard cap of 1000; when a file outgrows the cap, split it at a concern boundary, never by sharding a type's methods into `foo_helpers.go` / `foo_part2.go`-style buckets just to hit a size target. Platform build-tag files (`memory_darwin.go` etc.) are exempt from the size floor.
 
 **Testing conventions**:
 - Integration tests use `_integration_test.go` suffix and `testing.Short()` skip

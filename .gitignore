@@ -47,3 +47,6 @@ vendor/
 # scripts/integration-test.sh and scripts/fixtures/ci-mssql-pg.yaml.
 .dmt-ci-state/
 .claude/
+
+# Antigravity CLI local state
+.antigravitycli/

@@ -1,6 +1,11 @@
 package config
 
-import "github.com/johndauphine/dmt/internal/dbconfig"
+import (
+	"fmt"
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"gopkg.in/yaml.v3"
+	"strings"
+)
 
 // Type aliases for the shared connection-spec types. Keeping the concrete
 // structs in dbconfig lets config loading and driver construction depend on
@@ -621,4 +626,59 @@ type ValidationConfig struct {
 // LoadOptions controls configuration loading behavior.
 type LoadOptions struct {
 	SuppressWarnings bool
+}
+
+// Sanitized returns a copy of the config with sensitive fields redacted
+func (c *Config) Sanitized() *Config {
+	sanitized := *c // shallow copy
+
+	// Redact source credentials
+	sanitized.Source.Password = "[REDACTED]"
+
+	// Redact target credentials
+	sanitized.Target.Password = "[REDACTED]"
+
+	// Note: AI and Slack credentials are in global secrets file, not migration config
+
+	return &sanitized
+}
+
+// SanitizedYAML returns the config as YAML with sensitive fields redacted
+func (c *Config) SanitizedYAML() string {
+	sanitized := c.Sanitized()
+	data, err := yaml.Marshal(sanitized)
+	if err != nil {
+		return fmt.Sprintf("error marshaling config: %v", err)
+	}
+	return string(data)
+}
+
+// UnmarshalYAML accepts DLT's two schema_contract forms:
+//
+//	schema_contract: report
+//	schema_contract:
+//	  columns: discard_value
+//	  data_type: freeze
+func (c *SchemaContractConfig) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Tag == "!!null" || strings.TrimSpace(node.Value) == "" {
+			return nil
+		}
+		mode := SchemaContractMode(strings.TrimSpace(node.Value))
+		c.Tables = mode
+		c.Columns = mode
+		c.DataType = mode
+		return nil
+	case yaml.MappingNode:
+		type plain SchemaContractConfig
+		var decoded plain
+		if err := node.Decode(&decoded); err != nil {
+			return err
+		}
+		*c = SchemaContractConfig(decoded)
+		return nil
+	default:
+		return fmt.Errorf("migration.schema_contract must be a mode string or mapping")
+	}
 }
