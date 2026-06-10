@@ -130,12 +130,18 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 	// Phase 1: Reset sequences. Keep this serialized: shared or reused sequence
 	// objects are unusual, but parallel setval/reseed calls can make the final
 	// value depend on scheduling instead of table order.
-	logging.Debug("  Resetting sequences...")
-	for _, t := range tables {
-		table := t
-		if err := s.targetPool.ResetSequence(ctx, s.targetSchema, &table); err != nil {
-			logging.Warn("Warning: resetting sequence for %s: %v", table.Name, err)
+	if sr, ok := s.targetPool.(driver.SequenceResetter); ok {
+		logging.Debug("  Resetting sequences...")
+		for _, t := range tables {
+			table := t
+			if err := sr.ResetSequence(ctx, s.targetSchema, &table); err != nil {
+				logging.Warn("Warning: resetting sequence for %s: %v", table.Name, err)
+			}
 		}
+	} else {
+		// Capability degradation (#476): engines without sequences have
+		// nothing to reset — skip the phase with one message.
+		logging.Debug("  Skipping sequence reset: target engine %s has no sequence support", s.targetPool.DBType())
 	}
 
 	// Phase 2: Create indexes (if enabled) - parallel per table

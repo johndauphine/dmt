@@ -8,6 +8,16 @@ import (
 	"github.com/johndauphine/dmt/internal/stats"
 )
 
+// IncrementalDateReader is the optional capability of locating a
+// date-updated column and reading its high watermark (#476) — the
+// source side of incremental date-filtered sync. A source engine
+// without it degrades to full sync with one warning; date tracking is
+// a sync optimization, not a correctness requirement.
+type IncrementalDateReader interface {
+	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
+	GetMaxDateColumnValue(ctx context.Context, schema, table, column string) (*time.Time, error)
+}
+
 // Reader represents a database reader that can stream data from source tables.
 // This is the "Producer" in the Reader -> Queue -> Writer pipeline.
 type Reader interface {
@@ -31,12 +41,6 @@ type Reader interface {
 	// and ignore the flag.
 	GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error)
 	GetPartitionBoundaries(ctx context.Context, t *Table, numPartitions int) ([]Partition, error)
-	GetDateColumnInfo(ctx context.Context, schema, table string, candidates []string) (columnName, dataType string, found bool)
-	GetMaxDateColumnValue(ctx context.Context, schema, table, column string) (*time.Time, error)
-
-	// Data sampling for AI type mapping
-	SampleColumnValues(ctx context.Context, schema, table, column string, limit int) ([]string, error)
-	SampleRows(ctx context.Context, schema, table string, columns []string, limit int) (map[string][]string, error)
 
 	// Pool info
 	MaxConns() int

@@ -294,18 +294,6 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return err == nil, err
 }
 
-// GetTableDDL returns the CREATE TABLE DDL from sqlite_master.
-func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
-	var ddl sql.NullString
-	err := w.db.QueryRowContext(ctx,
-		`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`,
-		table).Scan(&ddl)
-	if err != nil || !ddl.Valid {
-		return ""
-	}
-	return ddl.String
-}
-
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	return w.GetRowCountExact(ctx, schema, table, false)
 }

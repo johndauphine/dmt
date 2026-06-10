@@ -351,6 +351,12 @@ type WriterCapabilities struct {
 	// ConstraintWriter: can the engine ADD CONSTRAINT (FK/CHECK) after
 	// CREATE TABLE? SQLite cannot — constraints are inline-only there.
 	ConstraintWriter bool
+	// Upserter: staging+MERGE / ON CONFLICT incremental writes.
+	// target_mode=upsert is rejected up front without it (#476).
+	Upserter bool
+	// SequenceResetter: post-transfer identity/sequence reset; engines
+	// without sequences skip the phase (#476).
+	SequenceResetter bool
 }
 
 // CheckWriterCapabilities asserts the writer's optional capabilities
@@ -358,8 +364,30 @@ type WriterCapabilities struct {
 // type's method set matters, no connection is made.
 func CheckWriterCapabilities(t *testing.T, w driver.Writer, want WriterCapabilities) {
 	t.Helper()
-	_, got := w.(driver.ConstraintWriter)
-	if got != want.ConstraintWriter {
+	if _, got := w.(driver.ConstraintWriter); got != want.ConstraintWriter {
 		t.Errorf("ConstraintWriter capability = %v, want %v — update the capability matrix or the writer's method set deliberately", got, want.ConstraintWriter)
+	}
+	if _, got := w.(driver.Upserter); got != want.Upserter {
+		t.Errorf("Upserter capability = %v, want %v — update the capability matrix or the writer's method set deliberately", got, want.Upserter)
+	}
+	if _, got := w.(driver.SequenceResetter); got != want.SequenceResetter {
+		t.Errorf("SequenceResetter capability = %v, want %v — update the capability matrix or the writer's method set deliberately", got, want.SequenceResetter)
+	}
+}
+
+// ReaderCapabilities declares the optional reader capabilities (#476).
+type ReaderCapabilities struct {
+	// IncrementalDateReader: date-updated column discovery + high
+	// watermark reads for incremental sync. Absence degrades affected
+	// tables to full sync.
+	IncrementalDateReader bool
+}
+
+// CheckReaderCapabilities asserts the reader's optional capabilities
+// match the declaration; pass a typed nil reader pointer.
+func CheckReaderCapabilities(t *testing.T, r driver.Reader, want ReaderCapabilities) {
+	t.Helper()
+	if _, got := r.(driver.IncrementalDateReader); got != want.IncrementalDateReader {
+		t.Errorf("IncrementalDateReader capability = %v, want %v — update the capability matrix or the reader's method set deliberately", got, want.IncrementalDateReader)
 	}
 }

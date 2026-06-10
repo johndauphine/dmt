@@ -85,5 +85,10 @@ func postgresPaginationCase() *conformance.PaginationCase {
 func TestWriterCapabilities(t *testing.T) {
 	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: true,
+		Upserter:         true,
+		SequenceResetter: true,
+	})
+	conformance.CheckReaderCapabilities(t, (*Reader)(nil), conformance.ReaderCapabilities{
+		IncrementalDateReader: true,
 	})
 }

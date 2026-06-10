@@ -38,11 +38,6 @@ type Writer interface {
 	CreateIndex(ctx context.Context, t *Table, idx *Index, targetSchema string) error
 	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
-	// DDL introspection
-	// GetTableDDL returns the CREATE TABLE DDL for an existing table.
-	// Returns empty string if DDL cannot be retrieved (non-fatal).
-	GetTableDDL(ctx context.Context, schema, table string) string
-
 	// Data operations
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)     // Tries fast first, falls back to exact
 	GetRowCountFast(ctx context.Context, schema, table string) (int64, error) // Fast approximate count from system statistics
@@ -52,13 +47,10 @@ type Writer interface {
 	// than dirty (#253). Other drivers don't have NOLOCK semantics
 	// and ignore the flag.
 	GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error)
-	ResetSequence(ctx context.Context, schema string, t *Table) error
 
-	// Bulk write - for drop_recreate mode
+	// Bulk write - for drop_recreate mode. Upsert is the optional
+	// Upserter capability; sequence reset is SequenceResetter (#476).
 	WriteBatch(ctx context.Context, opts WriteBatchOptions) error
-
-	// Upsert - for upsert mode with per-writer isolation
-	UpsertBatch(ctx context.Context, opts UpsertBatchOptions) error
 
 	// Raw SQL execution for cleanup and special operations
 	// Returns the number of rows affected and any error.
@@ -83,6 +75,21 @@ type Writer interface {
 // This is the pattern for engine-specific surfaces going forward: a
 // capability a new engine cannot honor must become an optional interface
 // with caller-side degradation, never a silent stub.
+// Upserter is the optional capability of incremental upsert writes
+// (staging + MERGE / ON CONFLICT) (#476). target_mode: upsert requires
+// it — the orchestrator rejects the run up front when the target engine
+// lacks it, instead of failing mid-transfer.
+type Upserter interface {
+	UpsertBatch(ctx context.Context, opts UpsertBatchOptions) error
+}
+
+// SequenceResetter is the optional capability of resetting target
+// identity/sequence values after transfer (#476). Engines without
+// sequences skip the reset phase with one uniform message.
+type SequenceResetter interface {
+	ResetSequence(ctx context.Context, schema string, t *Table) error
+}
+
 type ConstraintWriter interface {
 	CreateForeignKey(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string) error
 	CreateCheckConstraint(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string) error

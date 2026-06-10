@@ -58,8 +58,8 @@ Drivers self-register via `init()` in each sub-package with the global registry 
 
 Each driver implements:
 - **`Driver`** (`driver/driver.go`) — Factory: `Name()`, `Aliases()`, `Defaults()`, `Dialect()`, `NewReader()`, `NewWriter()`
-- **`Reader`** (`driver/reader.go`) — Schema extraction, row counts, partition boundaries, sampling (data streaming itself lives in `transfer/` — see pipeline below)
-- **`Writer`** (`driver/writer.go`) — DDL ops, `WriteBatch()` (bulk insert), `UpsertBatch()` (staging+MERGE)
+- **`Reader`** (`driver/reader.go`) — Schema extraction, row counts, partition boundaries (data streaming itself lives in `transfer/` — see pipeline below); optional capability: `IncrementalDateReader` (date-column sync tracking)
+- **`Writer`** (`driver/writer.go`) — DDL ops, `WriteBatch()` (bulk insert); optional capabilities: `Upserter` (staging+MERGE — required for `target_mode: upsert`), `SequenceResetter`, `ConstraintWriter` (post-transfer FK/CHECK)
 - **`TypeMapper`** (`driver/typemapper.go`) — Column-level type mapping; `TableTypeMapper` for full-table DDL via AI
 - **`Dialect`** (`driver/dialect.go`) — SQL syntax: `QuoteIdentifier()`, `BuildKeysetQuery()`, `BuildRowNumberQuery()`, `AIPromptAugmentation()`
 

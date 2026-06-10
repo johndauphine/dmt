@@ -311,25 +311,6 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return err == nil, err
 }
 
-// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
-// Returns empty string if DDL cannot be retrieved.
-func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
-	dbName := schema
-	if dbName == "" {
-		dbName = w.config.Database
-	}
-
-	// Use dialect's QualifyTable for proper identifier escaping (prevents SQL injection)
-	qualifiedTable := w.dialect.QualifyTable(dbName, table)
-	var tableName, createStmt string
-	err := w.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+qualifiedTable).Scan(&tableName, &createStmt)
-	if err != nil {
-		logging.Debug("Could not get table DDL for %s.%s: %v", dbName, table, err)
-		return ""
-	}
-	return createStmt
-}
-
 // ResetSequence resets AUTO_INCREMENT to max value.
 func (w *Writer) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
 	var identityCol string

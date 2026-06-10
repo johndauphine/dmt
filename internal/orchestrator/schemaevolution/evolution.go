@@ -280,13 +280,17 @@ func (e *Engine) FinalizeContractTableEvolution(ctx context.Context, report drif
 	logging.Info("%s: finalizing %d evolved target table(s) after transfer", label, len(addedTables))
 
 	resets := 0
-	for _, table := range addedTables {
-		t := table
-		if err := e.targetPool.ResetSequence(ctx, e.cfg.Target.Schema, &t); err != nil {
-			logging.Warn("%s: resetting sequence for evolved table %s: %v", label, t.Name, err)
-			continue
+	if sr, ok := e.targetPool.(driver.SequenceResetter); ok {
+		for _, table := range addedTables {
+			t := table
+			if err := sr.ResetSequence(ctx, e.cfg.Target.Schema, &t); err != nil {
+				logging.Warn("%s: resetting sequence for evolved table %s: %v", label, t.Name, err)
+				continue
+			}
+			resets++
 		}
-		resets++
+	} else {
+		logging.Debug("%s: skipping sequence reset: target engine %s has no sequence support", label, e.targetPool.DBType())
 	}
 
 	indexes := 0
