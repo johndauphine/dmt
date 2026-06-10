@@ -186,11 +186,7 @@ func (p *keysetRuntimeSourcePool) LoadForeignKeys(context.Context, *driver.Table
 func (p *keysetRuntimeSourcePool) LoadCheckConstraints(context.Context, *driver.Table) error {
 	return nil
 }
-func (p *keysetRuntimeSourcePool) ReadTable(context.Context, driver.ReadOptions) (<-chan driver.Batch, error) {
-	ch := make(chan driver.Batch)
-	close(ch)
-	return ch, nil
-}
+
 func (p *keysetRuntimeSourcePool) GetRowCount(context.Context, string, string) (int64, error) {
 	return 0, nil
 }

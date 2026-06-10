@@ -21,9 +21,6 @@ type Reader interface {
 	LoadForeignKeys(ctx context.Context, t *Table) error
 	LoadCheckConstraints(ctx context.Context, t *Table) error
 
-	// Data reading - returns channel for streaming batches
-	ReadTable(ctx context.Context, opts ReadOptions) (<-chan Batch, error)
-
 	// Metadata
 	GetRowCount(ctx context.Context, schema, table string) (int64, error)     // Tries fast first, falls back to exact
 	GetRowCountFast(ctx context.Context, schema, table string) (int64, error) // Fast approximate count from system statistics
@@ -45,64 +42,4 @@ type Reader interface {
 	MaxConns() int
 	DBType() string
 	PoolStats() stats.PoolStats
-}
-
-// ReadOptions configures how to read data from a table.
-type ReadOptions struct {
-	// Table is the source table to read from.
-	Table Table
-
-	// Columns is the list of columns to read.
-	Columns []string
-
-	// ColumnTypes contains the data types for each column.
-	ColumnTypes []string
-
-	// Partition specifies a partition to read (nil for whole table).
-	Partition *Partition
-
-	// ChunkSize is the number of rows per batch.
-	ChunkSize int
-
-	// DateFilter filters rows by a date column (for incremental sync).
-	DateFilter *DateFilter
-
-	// TargetDBType is the target database type (for spatial column conversion).
-	TargetDBType string
-
-	// StrictConsistency uses table hints for consistent reads (e.g., NOLOCK).
-	StrictConsistency bool
-}
-
-// Batch represents a batch of rows read from the source.
-type Batch struct {
-	// Rows contains the data, where each row is a slice of column values.
-	Rows [][]any
-
-	// Stats contains timing information for this batch.
-	Stats BatchStats
-
-	// LastKey is the last primary key value (for keyset pagination).
-	LastKey any
-
-	// RowNum is the current row number (for row number pagination).
-	RowNum int64
-
-	// Done indicates this is the final batch.
-	Done bool
-
-	// Error contains any error that occurred reading this batch.
-	Error error
-}
-
-// BatchStats contains timing information for a batch read operation.
-type BatchStats struct {
-	// QueryTime is the time spent executing the query.
-	QueryTime time.Duration
-
-	// ScanTime is the time spent scanning rows.
-	ScanTime time.Duration
-
-	// ReadEnd is when the batch read completed.
-	ReadEnd time.Time
 }
