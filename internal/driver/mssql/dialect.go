@@ -259,3 +259,9 @@ SQL Server-specific requirements:
 - Foreign key constraints must be dropped separately before the table can be dropped
 `
 }
+
+// ValueConverters delegates to the shared default normalization table
+// (#477) — see driver.DefaultValueConverters for the rationale.
+func (d *Dialect) ValueConverters(colTypes []string, targetDBType string) []func(any) any {
+	return driver.DefaultValueConverters(colTypes)
+}

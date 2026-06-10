@@ -38,6 +38,9 @@ func executeRowNumberPagination(
 		return nil, fmt.Errorf("no dialect registered for source DB type %q", srcPool.DBType())
 	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
+	// Source-dialect value normalization, resolved once per transfer (#477).
+	valueConvs := srcDialect.ValueConverters(colTypes, tgtPool.DBType())
+	convIdx := buildConvIdx(valueConvs)
 	tableHint := srcDialect.TableHint(cfg.Migration.StrictConsistency)
 
 	// Build ORDER BY clause from PK columns
@@ -168,7 +171,7 @@ func executeRowNumberPagination(
 
 			// Time the scan
 			scanStart := time.Now()
-			chunk, _, err := scanRows(rows, cols, colTypes)
+			chunk, _, err := scanRows(rows, len(cols), valueConvs, convIdx)
 			rows.Close()
 			scanTime := time.Since(scanStart)
 			if err != nil {
