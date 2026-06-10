@@ -194,6 +194,7 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			// rest of the tuning pipeline.
 			FinalThroughputBytes:    throughputBytesForHistory(r.FinalThroughput, r.AvgRowSizeBytes),
 			ChunkRetryCount:         r.ChunkRetryCount,
+			AdjustedAtRuntime:       r.AdjustedAtRuntime,
 			CPUCores:                r.CPUCores,
 			MemoryGB:                r.MemoryGB,
 			Platform:                r.Platform,

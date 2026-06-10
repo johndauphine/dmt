@@ -227,6 +227,14 @@ type HistoryRecord struct {
 	FinalThroughputBytes int64
 	ChunkRetryCount      int
 
+	// AdjustedAtRuntime is true when the runtime controller changed
+	// parameters mid-run (#451). The row's throughput is a blend across
+	// configs and can't be attributed to the recorded (WAW, CS, PR, RAB),
+	// so Tune drops such rows before every training cohort is built —
+	// regression, smoothed bins, drift detection, and the exploration
+	// bucket count. Pre-#451 rows are false and stay eligible.
+	AdjustedAtRuntime bool
+
 	// Regime classification fields (host)
 	CPUCores int
 	MemoryGB int
@@ -300,6 +308,21 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	if history != nil {
 		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
 			historyAvailable = true
+			// #451: runtime-adjusted rows are dropped before any cohort
+			// is built — regime filter, drift detector, outlier passes,
+			// the exploration bucket count, and both selection tiers all
+			// see only rows whose throughput is attributable to their
+			// recorded parameters. Emitted unconditionally (not deferred
+			// like the outlier reasoning) because the drop shapes every
+			// downstream decision, including which tier runs at all.
+			var adjustedDropped int
+			r, adjustedDropped = dropRuntimeAdjusted(r)
+			if adjustedDropped > 0 {
+				out.Reasoning = appendReasoning(out.Reasoning,
+					"history hygiene: %d runtime-adjusted run(s) excluded from tuning cohorts (#451)",
+					adjustedDropped,
+				)
+			}
 			regimeRows = filterByRegime(r, in, currentTuning)
 			// Defer the outlier-reasoning emission until we know which
 			// cohort drives the selector — Tier 1 (identity) may take

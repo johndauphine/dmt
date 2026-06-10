@@ -364,6 +364,7 @@ func (a *stateHistoryAdapter) GetAITuningHistory(limit int, sourceType, targetTy
 			FinalThroughput:      r.FinalThroughput,
 			FinalDurationSecs:    r.FinalDurationSecs,
 			ChunkRetryCount:      r.ChunkRetryCount,
+			AdjustedAtRuntime:    r.AdjustedAtRuntime,
 			// #144 regime fields
 			Platform:                r.Platform,
 			TargetSharedBuffersMB:   r.TargetSharedBuffersMB,
@@ -432,8 +433,8 @@ func (a *stateHistoryAdapter) SaveAITuning(record driver.AITuningRecord) error {
 }
 
 // UpdateAITuningResult updates the most recent tuning record with final migration throughput.
-func (a *stateHistoryAdapter) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int) error {
-	return a.state.UpdateAITuningResult(throughput, durationSecs, chunkRetryCount)
+func (a *stateHistoryAdapter) UpdateAITuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+	return a.state.UpdateAITuningResult(throughput, durationSecs, chunkRetryCount, adjustedAtRuntime)
 }
 
 // AnalyzeConfig analyzes the source database and emits tuning

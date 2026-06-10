@@ -29,7 +29,7 @@ func (m *mockHistoryProvider) SaveAITuning(record AITuningRecord) error {
 	return nil
 }
 
-func (m *mockHistoryProvider) UpdateAITuningResult(float64, float64, int) error {
+func (m *mockHistoryProvider) UpdateAITuningResult(float64, float64, int, bool) error {
 	return nil
 }
 
