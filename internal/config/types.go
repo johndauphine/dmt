@@ -312,6 +312,13 @@ type MigrationConfig struct {
 	// so they don't double-write (normalizeRuntimeTuningFields clears
 	// them anyway, but the tag belt-and-suspenders prevents accidental
 	// JSON collisions if normalize is ever skipped).
+	// Tuning is the coarse pre-run tuner switch (#461): "auto" (default,
+	// also the meaning of empty) derives parameters from system stats,
+	// driver profiles, and run history; "manual" disables derivation so
+	// configured values and formula defaults rule. Distinct from
+	// RuntimeTuning, which controls the mid-run rule-based controller.
+	Tuning string `yaml:"tuning,omitempty" json:"Tuning,omitempty"`
+
 	RuntimeTuning         *bool  `yaml:"runtime_tuning,omitempty" json:"AIAdjust"`
 	RuntimeTuningInterval string `yaml:"runtime_tuning_interval,omitempty" json:"AIAdjustInterval"`
 

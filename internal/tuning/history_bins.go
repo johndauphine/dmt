@@ -1,6 +1,9 @@
 package tuning
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // wawBin aggregates the rows at one WriteAheadWriters value.
 type wawBin struct {
@@ -154,4 +157,58 @@ func binMedianThroughput(bins []wawBin) float64 {
 		}
 	}
 	return medianOfFloats(eligible)
+}
+
+// pinnedAdviceMinGain is the relative throughput gain the best eligible
+// WAW bin must show over the pinned value's bin before override-cost
+// advice fires (#461). Below this, bin noise could be doing the talking
+// and the advice would nag users over nothing.
+const pinnedAdviceMinGain = 0.10
+
+// appendPinnedWAWAdvice compares the user-pinned write_ahead_writers
+// value against the best eligible WAW in the filtered history (#461).
+// Both sides must be measured: the pinned value's own bin needs
+// minRunsPerBin runs, and the recommendation comes from selectWAW's
+// retry-filtered shrunk means. Says nothing when the data can't carry
+// the claim — silence here means "no measured evidence", not "the pin
+// is fine".
+func appendPinnedWAWAdvice(out *Output, pinnedWAW int, rows []HistoryRecord) {
+	if len(rows) == 0 {
+		return
+	}
+	bins := aggregateByWAW(rows)
+	var pinnedBin *wawBin
+	for i := range bins {
+		if bins[i].WAW == pinnedWAW {
+			pinnedBin = &bins[i]
+			break
+		}
+	}
+	if pinnedBin == nil || pinnedBin.TotalRuns < minRunsPerBin {
+		return
+	}
+	bestWAW, _, ok := selectWAW(bins)
+	if !ok || bestWAW == pinnedWAW || pinnedBin.MeanThroughput <= 0 {
+		return
+	}
+	// selectWAW chooses on shrunk means (selection needs the shrinkage);
+	// the advice reports the chosen bin's MEASURED mean — quoting the
+	// shrunk estimate as an average would misstate the evidence (codex
+	// review). The bin exists and clears minRunsPerBin or selectWAW
+	// wouldn't have picked it.
+	var bestMean float64
+	for i := range bins {
+		if bins[i].WAW == bestWAW {
+			bestMean = bins[i].MeanThroughput
+			break
+		}
+	}
+	gain := bestMean/pinnedBin.MeanThroughput - 1
+	if gain < pinnedAdviceMinGain {
+		return
+	}
+	out.PinnedAdvice = append(out.PinnedAdvice, fmt.Sprintf(
+		"write_ahead_writers is pinned at %d (mean %.0f rows/s over %d comparable runs); history shows WAW=%d averaging %.0f rows/s (+%.0f%%) — remove the override to let the tuner manage it",
+		pinnedWAW, pinnedBin.MeanThroughput, pinnedBin.TotalRuns, bestWAW, bestMean, gain*100,
+	))
 }

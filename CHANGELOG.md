@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added measured override-cost advice: when a pinned `write_ahead_writers`
+  value's history bin materially underperforms the best comparable bin,
+  every run logs the measured means and delta next to the provenance line
+  (#461). Added `migration.tuning: auto|manual` as the coarse switch for
+  pre-run parameter derivation; per-knob pins remain the escape hatch.
+
+### Added
+
 - Added a run-start `Tuning provenance` log line showing which performance
   parameters are user-pinned (and therefore never tuned) versus
   tuner-derived; `config.yaml.example` now leaves tuning to the deterministic

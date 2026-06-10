@@ -89,6 +89,10 @@ type SmartConfigSuggestions struct {
 	// from tuning.Output.Tier. One of tuning.Tier* constants (#202).
 	Tier string
 
+	// PinnedAdvice carries measured override-cost findings (#461) from
+	// tuning.Output; logged by the orchestrator after the reasoning line.
+	PinnedAdvice []string
+
 	// Database tuning recommendations
 	SourceTuning *dbtuning.DatabaseTuning
 	TargetTuning *dbtuning.DatabaseTuning
@@ -206,6 +210,9 @@ type SmartConfigAnalyzer struct {
 	pendingSave              *pendingTuningSave
 	currentTuning            DBTuningSnapshot
 	forceExplore             bool        // mirrors cfg.Migration.Explore
+	pinnedWriteAheadWriters  *int        // user-pinned WAW for override-cost advice (#461); nil = tuner-managed
+	pinnedParallelReaders    *int        // user-pinned PR — advice filters history to the settings that will run
+	pinnedReadAheadBuffers   *int        // user-pinned RAB — same
 	exploreMode              string      // mirrors cfg.Migration.ExploreMode
 	targetProbe              TargetProbe // populated via SetTargetProbe (#166)
 	uncappedAvgRowBytes      int64       // pre-cap average row size from sampled tables (#166)
@@ -328,6 +335,24 @@ func (s *SmartConfigAnalyzer) SetTargetMode(mode string) {
 func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
 	s.forceExplore = force
 	s.exploreMode = mode
+}
+
+// SetPinnedWriteAheadWriters records the user-pinned WAW value so the
+// tuner can emit measured override-cost advice (#461). Call only when
+// config provenance marks write_ahead_writers as pinned.
+func (s *SmartConfigAnalyzer) SetPinnedWriteAheadWriters(v int) {
+	s.pinnedWriteAheadWriters = &v
+}
+
+// SetPinnedParallelReaders records a user-pinned parallel_readers value
+// so override-cost advice compares against the cohort that will run.
+func (s *SmartConfigAnalyzer) SetPinnedParallelReaders(v int) {
+	s.pinnedParallelReaders = &v
+}
+
+// SetPinnedReadAheadBuffers records a user-pinned read_ahead_buffers value.
+func (s *SmartConfigAnalyzer) SetPinnedReadAheadBuffers(v int) {
+	s.pinnedReadAheadBuffers = &v
 }
 
 // SetTableNameFilter restricts Analyze to the given set of table names

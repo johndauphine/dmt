@@ -134,6 +134,13 @@ migration:
     on_success: true
     on_failure: true
 
+  # Coarse tuner switch (#461). "auto" (default) derives performance
+  # parameters from your system, the workload, and run history.
+  # "manual" disables pre-run derivation entirely — configured values
+  # and formula defaults rule. (runtime_tuning above controls the
+  # separate mid-run controller.)
+  # tuning: auto
+
   # ---------------------------------------------------------------------
   # Advanced tuning overrides (uncomment only with a specific reason).
   # Any value you set here is PINNED: the tuner will never adjust it, it

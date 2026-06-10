@@ -65,6 +65,12 @@ func (c *Config) validate() error {
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
+
+	switch c.Migration.Tuning {
+	case "", "auto", "manual":
+	default:
+		return fmt.Errorf("migration.tuning must be 'auto' or 'manual' (got %q)", c.Migration.Tuning)
+	}
 	if err := c.validateDeletes(); err != nil {
 		return err
 	}

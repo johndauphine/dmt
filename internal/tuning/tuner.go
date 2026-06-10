@@ -79,6 +79,21 @@ type Input struct {
 	// "balanced" default.
 	ForceExplore       bool
 	ExplorationEpsilon float64
+
+	// PinnedWriteAheadWriters is the user-pinned WAW value, when the
+	// config provenance says the tuner may not adjust it (#461). Tune
+	// still computes its recommendation; this field only enables the
+	// measured override-cost advice in Output.PinnedAdvice. Nil when
+	// WAW is tuner-managed.
+	PinnedWriteAheadWriters *int
+
+	// PinnedParallelReaders / PinnedReadAheadBuffers mirror the pin for
+	// the reader knobs (#461). The override-cost advice filters history
+	// to the reader settings that will ACTUALLY run — pinned values win
+	// over the tuner's output, since ApplyTunerSuggestions will refuse
+	// to overwrite them (codex review).
+	PinnedParallelReaders  *int
+	PinnedReadAheadBuffers *int
 }
 
 // Tier names identify which selector ultimately picked the (WAW,
@@ -124,6 +139,13 @@ type Output struct {
 	// history, fetch failed, insufficient rows, etc.) rather than being
 	// empty.
 	Reasoning string
+
+	// PinnedAdvice carries measured override-cost findings (#461): when
+	// a user-pinned knob's history bin materially underperforms the best
+	// eligible bin, one line per finding states the measured means — no
+	// predictions, only bins with enough runs to trust. Empty when
+	// nothing is pinned or the history can't support a comparison.
+	PinnedAdvice []string
 }
 
 // DriverProfile is the per-target tuning profile, populated by the caller
@@ -337,6 +359,29 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	}
 	rows := regimeFilter.kept
 
+	// Override-cost advice (#461) is emitted per exit path below, from
+	// the cohort that path's selector actually consumed (identity rows
+	// for Tier 1, regime rows otherwise) and filtered to the current
+	// reader settings — the same apples-to-apples rule the smoothed-bins
+	// tier applies (codex review). Advising from rows the selector
+	// deliberately ignored could tell users to unpin based on
+	// incomparable history.
+	pinnedAdvice := func(cohort []HistoryRecord) {
+		if in.PinnedWriteAheadWriters == nil {
+			return
+		}
+		// Reader settings that will actually run: pins beat tuner output.
+		pr, rab := out.ParallelReaders, out.ReadAheadBuffers
+		if in.PinnedParallelReaders != nil {
+			pr = *in.PinnedParallelReaders
+		}
+		if in.PinnedReadAheadBuffers != nil {
+			rab = *in.PinnedReadAheadBuffers
+		}
+		appendPinnedWAWAdvice(&out, *in.PinnedWriteAheadWriters,
+			rowsAtReaderSettings(cohort, pr, rab))
+	}
+
 	// Forced/drift-triggered exploration takes precedence over every
 	// selection tier (including #215's Tier 1). Users invoking
 	// --explore explicitly want a planned-grid probe — overriding it
@@ -352,6 +397,9 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
 	if in.ForceExplore || driftDetected {
 		applyGridExploration(&out, in, profile, len(rows))
+		// Advice runs after the selector so the reader-settings filter
+		// uses the FINAL output readers, not baseline (codex review).
+		pinnedAdvice(rows)
 		finalizeTierAndReasoning(&out, history, historyAvailable)
 		applyMemoryClamp(&out, in)
 		return out
@@ -388,6 +436,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
 				applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
 			}
+			pinnedAdvice(identityFilter.kept)
 			finalizeTierAndReasoning(&out, history, historyAvailable)
 			applyMemoryClamp(&out, in)
 			return out
@@ -426,6 +475,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		}
 	}
 
+	pinnedAdvice(rows)
 	finalizeTierAndReasoning(&out, history, historyAvailable)
 	applyMemoryClamp(&out, in)
 	return out

@@ -39,16 +39,19 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		UncappedAvgRowBytes: in.UncappedAvgRowBytes,
 		LargestTableBytes:   in.LargestTableBytes,
 		// Workload identity passthrough (#215).
-		SourceHost:         in.SourceHost,
-		SourcePort:         in.SourcePort,
-		SourceDatabase:     in.SourceDatabase,
-		SourceSchema:       in.SourceSchema,
-		TargetHost:         in.TargetHost,
-		TargetPort:         in.TargetPort,
-		TargetDatabase:     in.TargetDatabase,
-		TargetSchema:       in.TargetSchema,
-		ForceExplore:       s.forceExplore,
-		ExplorationEpsilon: explorationEpsilon(s.exploreMode),
+		SourceHost:              in.SourceHost,
+		SourcePort:              in.SourcePort,
+		SourceDatabase:          in.SourceDatabase,
+		SourceSchema:            in.SourceSchema,
+		TargetHost:              in.TargetHost,
+		TargetPort:              in.TargetPort,
+		TargetDatabase:          in.TargetDatabase,
+		TargetSchema:            in.TargetSchema,
+		ForceExplore:            s.forceExplore,
+		ExplorationEpsilon:      explorationEpsilon(s.exploreMode),
+		PinnedWriteAheadWriters: s.pinnedWriteAheadWriters,
+		PinnedParallelReaders:   s.pinnedParallelReaders,
+		PinnedReadAheadBuffers:  s.pinnedReadAheadBuffers,
 	}
 }
 
@@ -267,6 +270,7 @@ func (s *SmartConfigAnalyzer) applyTuningOutput(out tuning.Output) {
 	s.suggestions.EstimatedMemMB = out.EstimatedMemMB
 	s.suggestions.Reasoning = out.Reasoning
 	s.suggestions.Tier = out.Tier
+	s.suggestions.PinnedAdvice = out.PinnedAdvice
 }
 
 // pendingTuningSave holds data for deferred tuning history save.
