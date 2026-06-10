@@ -4,11 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
-
 	"github.com/johndauphine/dmt/internal/audit"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
@@ -21,6 +16,10 @@ import (
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/target"
 	"github.com/johndauphine/dmt/internal/version"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 // New creates a new orchestrator with default options (SQLite state).
@@ -534,4 +533,86 @@ func (o *Orchestrator) filterTables(tables []source.Table) []source.Table {
 	}
 
 	return filtered
+}
+
+// loadSchemaMetadata intentionally ignores the target DDL creation flags.
+// create_indexes/create_foreign_keys/create_check_constraints decide what dmt
+// creates on the target; schema drift detection needs the complete source shape
+// so toggling those flags does not manufacture false index/FK/check drift.
+func (o *Orchestrator) loadSchemaMetadata(ctx context.Context, tables []source.Table) {
+	for i := range tables {
+		t := &tables[i]
+
+		if err := o.sourcePool.LoadIndexes(ctx, t); err != nil {
+			logging.Warn("Warning: loading indexes for %s: %v", t.Name, err)
+		}
+
+		if err := o.sourcePool.LoadForeignKeys(ctx, t); err != nil {
+			logging.Warn("Warning: loading FKs for %s: %v", t.Name, err)
+		}
+
+		if err := o.sourcePool.LoadCheckConstraints(ctx, t); err != nil {
+			logging.Warn("Warning: loading check constraints for %s: %v", t.Name, err)
+		}
+	}
+}
+
+func finalizableTables(tables []source.Table, failedTableNames map[string]bool) []source.Table {
+	success := make([]source.Table, 0, len(tables))
+	for _, table := range tables {
+		if failedTableNames[table.Name] {
+			continue
+		}
+
+		finalTable := table
+		if len(table.ForeignKeys) > 0 {
+			finalTable.ForeignKeys = filterFinalizationForeignKeys(table, failedTableNames)
+		}
+		success = append(success, finalTable)
+	}
+	return success
+}
+
+func filterFinalizationForeignKeys(table source.Table, failedTableNames map[string]bool) []source.ForeignKey {
+	foreignKeys := make([]source.ForeignKey, 0, len(table.ForeignKeys))
+	for _, fk := range table.ForeignKeys {
+		if failedTableNames[fk.RefTable] {
+			logging.Warn("Skipping FK %s on %s because referenced table %s failed transfer",
+				fk.Name, table.Name, fk.RefTable)
+			continue
+		}
+		foreignKeys = append(foreignKeys, fk)
+	}
+	return foreignKeys
+}
+
+// fallbackSink is the observability.FallbackSink adapter that pins
+// every RecordFallback write to the current run's row in the
+// checkpoint's fallback_events table. The orchestrator installs an
+// instance at Run/Resume start and clears it at teardown so a
+// long-running process (TUI, sidecar) doesn't keep writing to a
+// completed run's state.
+//
+// state is the backend the run is using (SQLite or FileState — both
+// implement SaveFallbackEvent). runID scopes every write so cross-
+// process `dmt status` queries can read just this run's counts (#176).
+type fallbackSink struct {
+	state checkpoint.StateBackend
+	runID string
+}
+
+func newFallbackSink(state checkpoint.StateBackend, runID string) *fallbackSink {
+	return &fallbackSink{state: state, runID: runID}
+}
+
+// SaveFallbackEvent forwards an in-process RecordFallback to the
+// checkpoint backend. Errors propagate to the observability package,
+// which logs them at debug — a state-write failure is not worth
+// failing the migration over, and the in-memory + Prometheus counters
+// still observed the event.
+func (s *fallbackSink) SaveFallbackEvent(surface, fingerprint string) error {
+	if s == nil || s.state == nil {
+		return nil
+	}
+	return s.state.SaveFallbackEvent(s.runID, surface, fingerprint)
 }
