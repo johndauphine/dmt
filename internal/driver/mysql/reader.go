@@ -99,15 +99,6 @@ func (r *Reader) PoolStats() stats.PoolStats {
 	}
 }
 
-// ReadTable reads data from a table and returns batches via a channel.
-func (r *Reader) ReadTable(ctx context.Context, opts driver.ReadOptions) (<-chan driver.Batch, error) {
-	return shared.StreamTable(ctx, shared.StreamConfig{
-		DB:      r.db,
-		Dialect: r.dialect,
-		Buffer:  4,
-	}, opts)
-}
-
 // GetRowCount returns the row count for a table.
 func (r *Reader) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
 	return shared.RowCountWithFallback(

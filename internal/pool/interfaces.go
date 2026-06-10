@@ -33,12 +33,6 @@ type (
 	// UpsertBatchOptions configures an upsert operation.
 	UpsertBatchOptions = driver.UpsertBatchOptions
 
-	// ReadOptions configures how to read data from a table.
-	ReadOptions = driver.ReadOptions
-
-	// Batch represents a batch of rows read from the source.
-	Batch = driver.Batch
-
 	// DateFilter specifies a filter on a date/timestamp column.
 	DateFilter = driver.DateFilter
 )

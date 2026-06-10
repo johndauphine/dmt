@@ -58,7 +58,7 @@ Drivers self-register via `init()` in each sub-package with the global registry 
 
 Each driver implements:
 - **`Driver`** (`driver/driver.go`) — Factory: `Name()`, `Aliases()`, `Defaults()`, `Dialect()`, `NewReader()`, `NewWriter()`
-- **`Reader`** (`driver/reader.go`) — Schema extraction, partitioned streaming via `ReadTable() <-chan Batch`, row counts, sampling
+- **`Reader`** (`driver/reader.go`) — Schema extraction, row counts, partition boundaries, sampling (data streaming itself lives in `transfer/` — see pipeline below)
 - **`Writer`** (`driver/writer.go`) — DDL ops, `WriteBatch()` (bulk insert), `UpsertBatch()` (staging+MERGE)
 - **`TypeMapper`** (`driver/typemapper.go`) — Column-level type mapping; `TableTypeMapper` for full-table DDL via AI
 - **`Dialect`** (`driver/dialect.go`) — SQL syntax: `QuoteIdentifier()`, `BuildKeysetQuery()`, `BuildRowNumberQuery()`, `AIPromptAugmentation()`
@@ -72,9 +72,11 @@ SQLite is intended primarily for testing dmt end-to-end without external databas
 ### Data Transfer Pipeline
 
 ```
-Source DB → ReadTable() → [parallel reader goroutines] → chunkChan (buffered) →
-Consumer loop → WriterPool (N goroutines) → WriteBatch/UpsertBatch → Target DB
-                                          → ackChan → checkpoint coordinator → SQLite
+Source DB → [parallel reader goroutines in transfer/keyset.go|row_number.go,
+             querying via Dialect.BuildKeysetQuery/BuildRowNumberQuery] →
+chunkChan (buffered) → Consumer loop → WriterPool (N goroutines) →
+WriteBatch/UpsertBatch → Target DB
+                       → ackChan → checkpoint coordinator → SQLite
 ```
 
 **Pagination strategy** (determined by PK type in `driver.Table`):

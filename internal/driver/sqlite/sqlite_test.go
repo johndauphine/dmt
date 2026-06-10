@@ -603,30 +603,10 @@ func TestReader_ReadTable_Keyset(t *testing.T) {
 		t.Errorf("expected single partition for sqlite; got %d", len(parts))
 	}
 
-	// Force keyset path with a partition that starts before any row.
-	// MinPK must be non-nil. SQLite ScanRows yields int64; the keyset
-	// query uses `> ?`, so a starting key below the min works.
-	startKey := int64(0)
-	ch, err := r.ReadTable(ctx, driver.ReadOptions{
-		Table:     *tbl,
-		Columns:   []string{"id", "v"},
-		Partition: &driver.Partition{MinPK: startKey, MaxPK: nil},
-		ChunkSize: 200,
-	})
-	if err != nil {
-		t.Fatalf("ReadTable: %v", err)
-	}
-
-	total := 0
-	for b := range ch {
-		if b.Error != nil {
-			t.Fatalf("batch error: %v", b.Error)
-		}
-		total += len(b.Rows)
-	}
-	if total != N {
-		t.Errorf("read back %d rows; expected %d", total, N)
-	}
+	// Round-trip read-back coverage lives in the transfer-pipeline
+	// integration tests; the dead driver-level ReadTable path was
+	// removed in #463.
+	_ = N
 }
 
 // ---------- Cross-engine type mapping ----------
