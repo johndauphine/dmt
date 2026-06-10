@@ -74,12 +74,7 @@ func (m *DeterministicMapper) CanMap(sourceDBType, targetDBType string) bool {
 // dialects this mapper can emit DDL for. Used by the registry/wiring
 // layer to advertise capabilities.
 func (m *DeterministicMapper) SupportedTargets() []string {
-	return []string{
-		typemap.DialectPostgres,
-		typemap.DialectMSSQL,
-		typemap.DialectMySQL,
-		typemap.DialectSQLite,
-	}
+	return deterministicDDLDialects()
 }
 
 // GenerateTableDDL implements TableTypeMapper. Assembles the source
@@ -188,13 +183,30 @@ func (m *DeterministicMapper) GenerateDropTableDDL(ctx context.Context, req Drop
 	return generateDropTable(req.TargetSchema, req.TableName, req.TargetDBType), nil
 }
 
-// isSupportedDialect returns true when the dialect string is one of
-// the three the deterministic mapper handles. Anything else → false
+// deterministicDDLDialects lists the dialects the deterministic mapper
+// can generate FULL DDL for — type fragments AND quoting/drop/index
+// syntax (internal/typemap/ddl). Deliberately NOT registry-backed
+// (codex review on #479): typemap.Register only supplies type
+// fragments, so a catalog engine that registered types alone must
+// still route to AI fallback here until #191 wires catalog DDL
+// templates into this gate as well.
+func deterministicDDLDialects() []string {
+	return []string{
+		typemap.DialectPostgres,
+		typemap.DialectMSSQL,
+		typemap.DialectMySQL,
+		typemap.DialectSQLite,
+	}
+}
+
+// isSupportedDialect returns true when the deterministic mapper can
+// fully handle the dialect (types + DDL syntax). Anything else → false
 // so wiring can route to AI fallback (#170) for unsupported dialects.
 func isSupportedDialect(dialect string) bool {
-	switch dialect {
-	case typemap.DialectPostgres, typemap.DialectMSSQL, typemap.DialectMySQL, typemap.DialectSQLite:
-		return true
+	for _, d := range deterministicDDLDialects() {
+		if d == dialect {
+			return true
+		}
 	}
 	return false
 }
