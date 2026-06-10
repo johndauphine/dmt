@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"runtime"
 	"strings"
 
@@ -92,7 +93,7 @@ func (o *Orchestrator) performanceAutoTuneInput(suggestions *driver.SmartConfigS
 	return input
 }
 
-func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]driver.AITuningRecord, []driver.AIAdjustmentRecord) {
+func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]checkpoint.AITuningRecord, []checkpoint.AIAdjustmentRecord) {
 	if o == nil || o.state == nil || o.config == nil {
 		return nil, nil
 	}
@@ -109,7 +110,7 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]dr
 		)
 		return nil, nil
 	}
-	recent := make([]driver.AITuningRecord, 0, 5)
+	recent := make([]checkpoint.AITuningRecord, 0, 5)
 	for _, row := range rows {
 		if !samePerformanceWorkload(input, row) || row.FinalThroughput <= 0 {
 			continue
@@ -130,11 +131,11 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]dr
 	return recent, scopedPerformanceAdjustments(input, adjustments, runConfigs, 5)
 }
 
-func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []driver.AIAdjustmentRecord, runConfigs map[string]string, limit int) []driver.AIAdjustmentRecord {
+func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []checkpoint.AIAdjustmentRecord, runConfigs map[string]string, limit int) []checkpoint.AIAdjustmentRecord {
 	if limit <= 0 || len(adjustments) == 0 {
 		return nil
 	}
-	scoped := make([]driver.AIAdjustmentRecord, 0, limit)
+	scoped := make([]checkpoint.AIAdjustmentRecord, 0, limit)
 	for _, adjustment := range adjustments {
 		if strings.TrimSpace(adjustment.RunID) == "" {
 			continue
@@ -153,7 +154,7 @@ func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []driv
 	return scoped
 }
 
-func samePerformanceWorkload(input driver.AutoTuneInput, row driver.AITuningRecord) bool {
+func samePerformanceWorkload(input driver.AutoTuneInput, row checkpoint.AITuningRecord) bool {
 	return nonEmptyEqual(input.SourceHost, row.SourceHost) &&
 		input.SourcePort > 0 && input.SourcePort == row.SourcePort &&
 		nonEmptyEqual(input.SourceDatabase, row.SourceDatabase) &&

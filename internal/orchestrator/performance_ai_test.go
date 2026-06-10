@@ -171,7 +171,7 @@ func TestSamePerformanceWorkloadRequiresExactIdentity(t *testing.T) {
 		TargetDatabase: "target_prod",
 		TargetSchema:   "dbo",
 	}
-	row := driver.AITuningRecord{
+	row := checkpoint.AITuningRecord{
 		Timestamp:      time.Now(),
 		SourceHost:     input.SourceHost,
 		SourcePort:     input.SourcePort,
@@ -212,7 +212,7 @@ func TestScopedPerformanceAdjustmentsRequiresScopedRunConfig(t *testing.T) {
   "Target": {"Host":"target.internal","Port":1433,"Database":"target_prod","Schema":"dbo"}
 }`
 	otherRaw := strings.Replace(raw, "target_prod", "other_target", 1)
-	adjustments := []driver.AIAdjustmentRecord{
+	adjustments := []checkpoint.AIAdjustmentRecord{
 		{RunID: "other", Action: "other"},
 		{RunID: "", Action: "legacy"},
 		{RunID: "matching-ai", Action: "legacy", Confidence: "high"},

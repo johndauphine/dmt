@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -68,7 +69,7 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		return
 	}
 
-	record := AITuningRecord{
+	record := checkpoint.AITuningRecord{
 		Timestamp:               time.Now(),
 		SourceDBType:            s.dbType,
 		TargetDBType:            s.targetDBType,
@@ -84,8 +85,8 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		ParallelReaders:         s.suggestions.ParallelReaders,
 		MaxPartitions:           s.suggestions.MaxPartitions,
 		LargeTableThreshold:     s.suggestions.LargeTableThreshold,
-		MaxSourceConnections:    s.suggestions.MaxSourceConnections,
-		MaxTargetConnections:    s.suggestions.MaxTargetConnections,
+		MaxSourceConns:          s.suggestions.MaxSourceConnections,
+		MaxTargetConns:          s.suggestions.MaxTargetConnections,
 		EstimatedMemoryMB:       s.suggestions.EstimatedMemMB,
 		AIReasoning:             reasoning, // deterministic tuner's reasoning string
 		WasAIUsed:               false,     // PR1 dropped the AI path entirely
