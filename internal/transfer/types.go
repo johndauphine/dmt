@@ -26,8 +26,10 @@ func sendChunkOrCancel(ctx context.Context, ch chan<- chunkResult, r chunkResult
 
 // ProgressSaver is an interface for saving transfer progress
 type ProgressSaver interface {
-	SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error
-	GetProgress(taskID int64) (lastPK any, rowsDone int64, err error)
+	// rangeState carries the keyset per-range watermarks as opaque JSON
+	// (#464); "" for ROW_NUMBER transfers and legacy rows.
+	SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error
+	GetProgress(taskID int64) (lastPK any, rowsDone int64, rangeState string, err error)
 }
 
 // DateFilter is an alias for driver.DateFilter for backward compatibility
@@ -83,6 +85,7 @@ type writeAck struct {
 
 type readerCheckpointState struct {
 	lastPK    any
+	maxPK     any // original range upper bound, persisted in range_state (#464)
 	lastPKInt int64
 	maxPKInt  int64
 	maxOK     bool

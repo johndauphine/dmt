@@ -138,6 +138,7 @@ type tableState struct {
 	TableName   string `yaml:"table_name,omitempty"`
 	PartitionID *int   `yaml:"partition_id,omitempty"`
 	LastPK      any    `yaml:"last_pk,omitempty"`
+	RangeState  string `yaml:"range_state,omitempty"`
 	RowsDone    int64  `yaml:"rows_done,omitempty"`
 	RowsTotal   int64  `yaml:"rows_total,omitempty"`
 	TaskID      int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility

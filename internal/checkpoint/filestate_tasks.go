@@ -106,7 +106,7 @@ func (fs *FileState) GetRunStats(runID string) (total, pending, running, success
 }
 
 // SaveTransferProgress saves chunk-level progress.
-func (fs *FileState) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error {
+func (fs *FileState) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -121,6 +121,7 @@ func (fs *FileState) SaveTransferProgress(taskID int64, tableName string, partit
 			ts.TableName = tableName
 			ts.PartitionID = pid
 			ts.LastPK = lastPK
+			ts.RangeState = rangeState
 			ts.RowsDone = rowsDone
 			ts.RowsTotal = rowsTotal
 			ts.Status = "running"
@@ -157,6 +158,7 @@ func (fs *FileState) GetTransferProgress(taskID int64) (*TransferProgress, error
 				TableName:   tableName,
 				PartitionID: pid,
 				LastPK:      string(lastPKJSON),
+				RangeState:  ts.RangeState,
 				RowsDone:    ts.RowsDone,
 				RowsTotal:   ts.RowsTotal,
 			}, nil

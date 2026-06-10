@@ -326,7 +326,7 @@ func executeRowNumberPagination(
 				freq := checkpointFreqFn()
 				if completedChunks%freq == 0 {
 					rowsDone := resumeRowsDone + wp.written()
-					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows); err != nil {
+					if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, lastCheckpointRowNum, rowsDone, partitionRows, ""); err != nil {
 						logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 					}
 				}
@@ -491,7 +491,7 @@ chunkLoop:
 		if enableAck {
 			finalRowNum = lastCheckpointRowNum
 		}
-		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows); err != nil {
+		if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows, ""); err != nil {
 			logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
 		}
 	}

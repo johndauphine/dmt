@@ -20,7 +20,9 @@ type keysetCheckpointCoordinator struct {
 	completedChunks int
 }
 
-func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone int64, totalWritten *int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
+// completed marks ranges already finished by a previous run segment
+// (#464 resume); nil means a fresh transfer with no completed ranges.
+func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, completed []bool, resumeRowsDone int64, totalWritten *int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
 	if job.Saver == nil || job.TaskID <= 0 {
 		return nil
 	}
@@ -39,6 +41,7 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone 
 	for i, pkr := range pkRanges {
 		states[i].pending = make(map[int64]writeAck)
 		states[i].lastPK = pkr.minPK
+		states[i].maxPK = pkr.maxPK
 		if lastPKInt, ok := parseNumericPK(pkr.minPK); ok {
 			states[i].lastPKInt = lastPKInt
 		}
@@ -48,6 +51,9 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, resumeRowsDone 
 			if states[i].lastPKInt >= maxPKInt {
 				states[i].complete = true
 			}
+		}
+		if completed != nil && completed[i] {
+			states[i].complete = true
 		}
 	}
 
@@ -88,7 +94,7 @@ func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 			safeLastPK := c.safeCheckpoint()
 			if safeLastPK != nil {
 				rowsDone := c.resumeRowsDone + atomic.LoadInt64(c.totalWritten)
-				if err := c.saver.SaveProgress(c.taskID, c.tableName, c.partitionID, safeLastPK, rowsDone, c.rowsTotal); err != nil {
+				if err := c.saver.SaveProgress(c.taskID, c.tableName, c.partitionID, safeLastPK, rowsDone, c.rowsTotal, encodeKeysetRangeState(c.states)); err != nil {
 					logging.Warn("Checkpoint save failed for %s: %v", c.tableName, err)
 				}
 			}
@@ -125,6 +131,15 @@ func (c *keysetCheckpointCoordinator) safeCheckpoint() any {
 		idx++
 	}
 	return c.states[idx].lastPK
+}
+
+// rangeState renders the current per-range watermarks for persistence;
+// "" when the coordinator is absent (no saver configured).
+func (c *keysetCheckpointCoordinator) rangeState() string {
+	if c == nil {
+		return ""
+	}
+	return encodeKeysetRangeState(c.states)
 }
 
 func (c *keysetCheckpointCoordinator) finalCheckpoint(fallback any) any {

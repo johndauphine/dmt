@@ -75,9 +75,12 @@ type TransferProgress struct {
 	TableName   string
 	PartitionID *int
 	LastPK      string
-	RowsDone    int64
-	RowsTotal   int64
-	UpdatedAt   time.Time
+	// RangeState is the keyset per-range watermark JSON (#464); empty on
+	// pre-migration rows and ROW_NUMBER tasks.
+	RangeState string
+	RowsDone   int64
+	RowsTotal  int64
+	UpdatedAt  time.Time
 }
 
 // TaskWithProgress combines task info with transfer progress

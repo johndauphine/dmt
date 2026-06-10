@@ -51,7 +51,7 @@ func TestRowNumberResumeCleanupClearsStalePartitionProgress(t *testing.T) {
 		}
 		partitionID := job.Partition.PartitionID
 		lastRowNum := job.Partition.StartRow + 1
-		if err := state.SaveTransferProgress(job.TaskID, table.Name, &partitionID, lastRowNum, 1, job.Partition.RowCount); err != nil {
+		if err := state.SaveTransferProgress(job.TaskID, table.Name, &partitionID, lastRowNum, 1, job.Partition.RowCount, ""); err != nil {
 			t.Fatalf("SaveTransferProgress partition %d: %v", partitionID, err)
 		}
 	}

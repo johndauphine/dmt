@@ -80,6 +80,7 @@ func TestKeysetRuntimeChunkSizeMutationCoversRowsAndCheckpoints(t *testing.T) {
 		nil,
 		nil,
 		0,
+		nil,
 		"items",
 		tuner,
 		nil,
@@ -355,7 +356,7 @@ type keysetRuntimeProgressSave struct {
 	rowsDone int64
 }
 
-func (s *keysetRuntimeProgressSaver) SaveProgress(_ int64, _ string, _ *int, lastPK any, rowsDone, _ int64) error {
+func (s *keysetRuntimeProgressSaver) SaveProgress(_ int64, _ string, _ *int, lastPK any, rowsDone, _ int64, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.saves = append(s.saves, keysetRuntimeProgressSave{
@@ -365,8 +366,8 @@ func (s *keysetRuntimeProgressSaver) SaveProgress(_ int64, _ string, _ *int, las
 	return nil
 }
 
-func (s *keysetRuntimeProgressSaver) GetProgress(int64) (any, int64, error) {
-	return nil, 0, nil
+func (s *keysetRuntimeProgressSaver) GetProgress(int64) (any, int64, string, error) {
+	return nil, 0, "", nil
 }
 
 func (s *keysetRuntimeProgressSaver) last() (keysetRuntimeProgressSave, bool) {

@@ -13,15 +13,15 @@ type fakeSaver struct {
 	lastPKs []any
 }
 
-func (f *fakeSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64) error {
+func (f *fakeSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastPKs = append(f.lastPKs, lastPK)
 	return nil
 }
 
-func (f *fakeSaver) GetProgress(taskID int64) (any, int64, error) {
-	return nil, 0, nil
+func (f *fakeSaver) GetProgress(taskID int64) (any, int64, string, error) {
+	return nil, 0, "", nil
 }
 
 func TestKeysetCheckpointCoordinatorOutOfOrderAcks(t *testing.T) {
@@ -37,7 +37,7 @@ func TestKeysetCheckpointCoordinatorOutOfOrderAcks(t *testing.T) {
 	}
 	var totalWritten int64
 
-	coord := newKeysetCheckpointCoordinator(job, pkRanges, 0, &totalWritten, func() int { return 1 })
+	coord := newKeysetCheckpointCoordinator(job, pkRanges, nil, 0, &totalWritten, func() int { return 1 })
 	if coord == nil {
 		t.Fatal("expected checkpoint coordinator")
 	}
