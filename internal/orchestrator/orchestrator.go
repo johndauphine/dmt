@@ -29,6 +29,11 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 
 // NewWithOptions creates a new orchestrator with custom options.
 func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
+	// Pace the GC against the same budget the pipeline buffers are sized
+	// from (#462). Idempotent and env-override-aware; the transfer memory
+	// guard remains the backstop.
+	cfg.ApplyRuntimeMemoryLimit()
+
 	// Create source pool using factory
 	sourcePool, err := pool.NewSourcePool(&cfg.Source, cfg.Migration.MaxSourceConnections)
 	if err != nil {

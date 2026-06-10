@@ -10,7 +10,6 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
-	"runtime/debug"
 	"time"
 )
 
@@ -123,15 +122,6 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 
 	// Log comprehensive configuration dump
 	logging.Debug("%s", o.config.DebugDump())
-
-	// Set runtime memory limit using Go's soft limit mechanism
-	// This tells the GC to work harder to stay under the limit
-	effectiveMemMB := o.config.AutoConfig().EffectiveMaxMemoryMB
-	if effectiveMemMB > 0 {
-		memLimitBytes := effectiveMemMB * 1024 * 1024
-		debug.SetMemoryLimit(memLimitBytes)
-		logging.Debug("Runtime memory limit set to %d MB (Go GC soft limit)", effectiveMemMB)
-	}
 
 	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
 		return fmt.Errorf("creating run: %w", err)
