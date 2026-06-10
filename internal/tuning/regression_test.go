@@ -7,10 +7,11 @@ import (
 )
 
 // TestFitRegression_InsufficientData verifies the fit refuses to solve
-// below the minRowsForRegression floor. Caller is expected to fall back
-// to the smoothed-bins tier on this error.
+// below the dof-based floor (#452): a single-pair cohort builds the
+// 8-feature model, so 8 + minRegressionDOF = 12 rows are required.
+// Caller is expected to fall back to the smoothed-bins tier on this error.
 func TestFitRegression_InsufficientData(t *testing.T) {
-	rows := make([]HistoryRecord, minRowsForRegression-1)
+	rows := make([]HistoryRecord, minRowsToAttemptRegression-1)
 	_, err := fitRegression(rows)
 	if !errors.Is(err, errInsufficientRowsForRegression) {
 		t.Fatalf("got %v, want errInsufficientRowsForRegression", err)
@@ -763,7 +764,7 @@ func TestFilterOutliersByResiduals_Run8Repro(t *testing.T) {
 
 // TestFilterOutliersByResiduals_BelowGate_FallsBack verifies the
 // dispatcher uses the marginal filter when the row count is below
-// 2×minRowsForRegression. Below the gate the regression's β isn't
+// residualFilterMinRows. Below the gate the regression's β isn't
 // trustworthy enough to drive principled drops — falling back to the
 // marginal-median rule preserves the pre-#225 safety net.
 func TestFilterOutliersByResiduals_BelowGate_FallsBack(t *testing.T) {
@@ -964,5 +965,77 @@ func TestFilterOutliersByResiduals_RetryRowsExempt(t *testing.T) {
 			t.Errorf("retry-row (index %d, %d retries) was wrongly flagged as outlier: t=%.2f",
 				outlierIdx, rows[outlierIdx].ChunkRetryCount, d.tStat)
 		}
+	}
+}
+
+// TestFitRegression_EngagesAtDOFFloor verifies the single-pair model
+// fits at exactly nFeat + minRegressionDOF = 12 rows (#452) — the row
+// count where the regression tier starts engaging for the cohort shape
+// production always produces (per-pair fetch → pair one-hot dropped,
+// modes never persisted).
+func TestFitRegression_EngagesAtDOFFloor(t *testing.T) {
+	rows := make([]HistoryRecord, minRowsToAttemptRegression)
+	for i := range rows {
+		waw := (i % 6) + 1
+		throughput := 100.0 + 50.0*float64(waw)
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50000,
+			AvgRowBytes:       500,
+			FinalThroughput:   throughput,
+			CPUCores:          16, MemoryGB: 48,
+		}
+	}
+	m, err := fitRegression(rows)
+	if err != nil {
+		t.Fatalf("fitRegression at the 12-row floor: %v", err)
+	}
+	if m.nFeat != 8 {
+		t.Errorf("nFeat = %d, want 8 (single-level pair one-hot must be dropped)", m.nFeat)
+	}
+	if len(m.pairs) != 0 {
+		t.Errorf("pairs = %v, want none encoded for a single-pair cohort", m.pairs)
+	}
+	if m.sigmaSq == nil {
+		t.Error("sigmaSq nil — dof floor should leave residual variance defined")
+	}
+}
+
+// TestFitRegression_MultiPairFloorScales verifies the dof-based floor
+// grows with the encoded feature count (#452): a two-pair cohort keeps
+// its one-hot columns (nFeat=10), so 13 rows refuse and 14 fit.
+func TestFitRegression_MultiPairFloorScales(t *testing.T) {
+	mkRows := func(n int) []HistoryRecord {
+		rows := make([]HistoryRecord, n)
+		for i := range rows {
+			src := "mssql"
+			if i%2 == 0 {
+				src = "mysql"
+			}
+			waw := (i % 6) + 1
+			rows[i] = HistoryRecord{
+				SourceDBType:      src,
+				TargetDBType:      "postgres",
+				WriteAheadWriters: waw,
+				ChunkSize:         50000,
+				AvgRowBytes:       500,
+				FinalThroughput:   100.0 + 50.0*float64(waw),
+				CPUCores:          16, MemoryGB: 48,
+			}
+		}
+		return rows
+	}
+
+	if _, err := fitRegression(mkRows(13)); !errors.Is(err, errInsufficientRowsForRegression) {
+		t.Fatalf("13 rows / 10 features: got %v, want errInsufficientRowsForRegression", err)
+	}
+	m, err := fitRegression(mkRows(14))
+	if err != nil {
+		t.Fatalf("14 rows / 10 features: %v", err)
+	}
+	if m.nFeat != 10 || len(m.pairs) != 2 {
+		t.Errorf("nFeat=%d pairs=%d, want 10 and 2 (multi-level pair one-hot kept)", m.nFeat, len(m.pairs))
 	}
 }

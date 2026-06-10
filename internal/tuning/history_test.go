@@ -432,12 +432,12 @@ func TestFormatRetryCellSkips_EmptyMapEmitsNone(t *testing.T) {
 // could ban a WAW from selection even though the current run would use
 // a clean reader combo.
 //
-// Setup: history has 20 rows, fewer than minRowsForRegression=30, so
-// the regression tier is skipped and applyHistorySelection falls to
-// smoothed bins.
-//   - 10 rows at WAW=2 / PR=4/RAB=8 with retries and 200K rows/s
+// Setup: history has 10 rows, fewer than minRowsToAttemptRegression=12
+// (#452), so the regression tier is skipped and applyHistorySelection
+// falls to smoothed bins.
+//   - 5 rows at WAW=2 / PR=4/RAB=8 with retries and 200K rows/s
 //     (the bad combo).
-//   - 10 rows at WAW=2 / PR=2/RAB=4 clean at 800K rows/s
+//   - 5 rows at WAW=2 / PR=2/RAB=4 clean at 800K rows/s
 //     (the current run's reader settings).
 //
 // Expected: smoothed bins picks WAW=2 — it should ignore the PR=4/RAB=8
@@ -445,7 +445,7 @@ func TestFormatRetryCellSkips_EmptyMapEmitsNone(t *testing.T) {
 // bin's retry rate would have excluded WAW=2 entirely.
 func TestApplyHistorySelection_SmoothedBinsFiltersByReaderSettings(t *testing.T) {
 	rows := []HistoryRecord{}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 5; i++ {
 		rows = append(rows, HistoryRecord{
 			WriteAheadWriters: 2,
 			ChunkSize:         50000,
@@ -493,9 +493,11 @@ func TestApplyHistorySelection_SmoothedBinsFiltersByReaderSettings(t *testing.T)
 // gracefully report it via reasoning rather than pick from contaminated
 // bins.
 func TestApplyHistorySelection_SmoothedBinsEmptyWhenNoMatchingReaderRows(t *testing.T) {
-	// 20 rows entirely at PR=4/RAB=8.
+	// 11 rows entirely at PR=4/RAB=8 — below minRowsToAttemptRegression
+	// (#452) so the regression tier is skipped and the smoothed-bins
+	// branch under test is the one that runs.
 	rows := []HistoryRecord{}
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 11; i++ {
 		rows = append(rows, HistoryRecord{
 			WriteAheadWriters: 2,
 			ChunkSize:         50000,
@@ -753,7 +755,7 @@ func TestApplyHistory_HighRetryAboveMedianStillSelected(t *testing.T) {
 }
 
 // TestApplyHistory_RegressionTier verifies the tiered dispatch fires the
-// regression once row count clears minRowsForRegression. With a synthetic
+// regression once row count clears the regression attempt gate (#452). With a synthetic
 // quadratic-peak fixture (throughput peaks at WAW=4), the regression
 // should pick WAW=4 — something the smoothed-bins tier with its
 // linear-mean comparison can't reliably do for non-monotone surfaces.
@@ -770,7 +772,7 @@ func TestApplyHistory_RegressionTier(t *testing.T) {
 
 	// 60 rows, throughput = 1000 - 50·(WAW-4)² + 100 (positive bias).
 	// WAW range 1..6 spread evenly; all clean (no retries) so RULE 1
-	// doesn't fire. Should clear minRowsForRegression and pick WAW=4.
+	// doesn't fire. Should clear the regression row floor and pick WAW=4.
 	// Reader settings pinned at baseline (PR=2, RAB=4) so the #221
 	// coverage gate keeps every WAW cell selectable.
 	rows := make([]HistoryRecord, 60)
@@ -1388,5 +1390,51 @@ func TestFormatPredictionInterval_EndpointsShareUnit(t *testing.T) {
 	}
 	if !strings.Contains(got, "GB/s") {
 		t.Errorf("PI with high ≥ 1 GB/s should render both endpoints in GB/s; got %q", got)
+	}
+}
+
+// TestApplyHistorySelection_RegressionEngagesMidWindow locks in the
+// #452 behavior change: a history in the 12-29 row window — which the
+// old 30-row floor consigned to WAW-only smoothed bins — now fires the
+// regression tier, which can place chunk size and detect a non-monotone
+// WAW peak. Fixture mirrors TestApplyHistory_RegressionTier's quadratic
+// peak at WAW=4, shrunk to 18 rows (3 per WAW cell so the #221 coverage
+// gate keeps every cell selectable).
+func TestApplyHistorySelection_RegressionEngagesMidWindow(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	out := baseline(in, profile)
+
+	rows := make([]HistoryRecord, 18)
+	for i := range rows {
+		waw := (i % 6) + 1
+		dev := waw - 4
+		thru := 1000.0 - 50.0*float64(dev*dev) + 100.0
+		rows[i] = HistoryRecord{
+			SourceDBType:      "mssql",
+			TargetDBType:      "postgres",
+			WriteAheadWriters: waw,
+			ChunkSize:         50_000,
+			AvgRowBytes:       500,
+			ParallelReaders:   2,
+			ReadAheadBuffers:  4,
+			FinalThroughput:   thru,
+			CPUCores:          16,
+			MemoryGB:          48,
+		}
+	}
+
+	applyHistorySelection(&out, in, profile, rows)
+
+	if out.Tier != TierRegression {
+		t.Fatalf("Tier = %q, want %q (18 rows must clear the #452 attempt gate); reasoning: %s", out.Tier, TierRegression, out.Reasoning)
+	}
+	if out.WriteAheadWriters != 4 {
+		t.Errorf("WAW = %d, want 4 (regression should detect the quadratic peak)", out.WriteAheadWriters)
 	}
 }

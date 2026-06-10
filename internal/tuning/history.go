@@ -50,9 +50,11 @@ const minRunsForRetryExclusion = 3
 // applyHistory layers history-aware selection on top of the baseline.
 // Tiered engagement (PR2 #179):
 //
-//	rows < minRunsPerBin (3)   → baseline stands (no history signal)
-//	rows < minRowsForRegression → smoothed bins from PR1
-//	rows ≥ minRowsForRegression → quadratic regression (PR2 §A)
+//	rows < minRunsPerBin (3)          → baseline stands (no history signal)
+//	rows < minRowsToAttemptRegression → smoothed bins from PR1
+//	rows ≥ minRowsToAttemptRegression → quadratic regression (PR2 §A);
+//	  fitRegression enforces the exact dof-based floor for the model it
+//	  builds (#452) and a refusal falls through to smoothed bins
 //
 // The regression tier picks both WAW and chunk_size from a small grid;
 // the smoothed-bins tier picks WAW only and leaves chunk_size at the
@@ -100,7 +102,7 @@ func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryP
 }
 
 // applyHistorySelection is the tier dispatcher: regression first when
-// rows ≥ minRowsForRegression, smoothed bins as fallback. Operates on
+// rows ≥ minRowsToAttemptRegression, smoothed bins as fallback. Operates on
 // pre-filtered rows; the caller (Tune or applyHistory) handles fetch +
 // regime + outlier filtering.
 func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) {
@@ -114,7 +116,7 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 	// regression's skip reason is appended to Reasoning so the
 	// fall-through to smoothed-bins is visible to the user — silence
 	// would hide why regression was tried but didn't pick (#202).
-	if len(rows) >= minRowsForRegression {
+	if len(rows) >= minRowsToAttemptRegression {
 		if applyHistoryRegression(out, in, profile, rows) {
 			return
 		}

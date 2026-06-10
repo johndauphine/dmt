@@ -357,7 +357,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	if historyAvailable && hasExactIdentity(in) {
 		identityRows := filterByExactIdentity(regimeRows, in)
 		identityFilter := filterOutliersForRegression(identityRows)
-		if len(identityFilter.kept) >= minRowsForRegression {
+		if len(identityFilter.kept) >= minRowsToAttemptRegression {
 			// Identity cohort wins — its drops are the ones the
 			// selector consumed, so emit those (not the regime pass).
 			appendOutlierReasoning(&out, identityFilter)

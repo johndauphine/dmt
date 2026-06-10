@@ -9,6 +9,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the deterministic tuner's regression tier rarely engaging: the row
+  floor is now degrees-of-freedom-based (12 rows for the production cohort
+  shape instead of 30), single-level categorical columns are dropped from
+  the design matrix, and the residual outlier filter keeps its conservative
+  60-row gate (#452).
+
 ## [5.2.0] - 2026-05-31
 
 ### Added

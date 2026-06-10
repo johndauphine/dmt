@@ -87,10 +87,10 @@ func (m *regressionModel) featureVector(waw int, csBytes int64, parallelReaders,
 }
 
 // tCritical returns the two-tailed 95% t-critical value for the given
-// degrees of freedom. Small lookup table for the dofs we actually see
-// (n - p where minRowsForRegression=30 and the largest model has
-// ~16 features, so dof typically ≥ 14). Falls back to 1.96 for large
-// dof (the t distribution converges to the normal).
+// degrees of freedom. Small lookup table for the dofs we actually see —
+// fitRegression's floor guarantees dof ≥ minRegressionDOF (=4), so the
+// table now starts at the dof≤4 row (#452). Falls back to 1.96 for
+// large dof (the t distribution converges to the normal).
 //
 // Returns 1.96 (the normal-approximation value) for dof > 100 and for
 // dof < 1 (degenerate; caller should be using a fallback marker
@@ -101,6 +101,8 @@ func tCritical(dof int) float64 {
 	switch {
 	case dof < 1:
 		return 1.96 // degenerate; caller won't reach this in practice
+	case dof <= 4:
+		return 2.78
 	case dof <= 5:
 		return 2.57
 	case dof <= 10:

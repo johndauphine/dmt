@@ -18,11 +18,13 @@ import (
 const studentizedOutlierThreshold = 3.0
 
 // residualFilterMinRows is the row-count gate below which the residual
-// filter is skipped and the marginal filter runs instead. Set at
-// 2×minRowsForRegression so the β estimate that drives the residuals
-// has enough data to be a trustworthy predictor before its predictions
-// are used to flag outliers — the bootstrapping caveat from #225.
-const residualFilterMinRows = 2 * minRowsForRegression
+// filter is skipped and the marginal filter runs instead. Pinned at 60
+// — the pre-#452 value of 2×minRowsForRegression(=30) — when the
+// selection tiers' row floor became dof-based. The residual filter uses
+// the model's own predictions to discard training data (#225's
+// bootstrapping caveat), so its conservative margin stays independent
+// of how early the selection tier is willing to engage.
+const residualFilterMinRows = 60
 
 // residualFilterDropCap is the maximum fraction of rows the residual
 // filter may discard in one pass. Caps the model from "defining
