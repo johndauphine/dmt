@@ -49,6 +49,14 @@ type Dialect interface {
 	// ColumnList formats a list of columns for SELECT.
 	ColumnList(cols []string) string
 
+	// ValueConverters resolves each source column type to a scan-value
+	// normalization func for the transfer pipeline (#477); nil entries
+	// mean pass-through. Resolved once per transfer, applied per value
+	// only on columns that convert. Built-in dialects delegate to
+	// DefaultValueConverters; catalog engines (#191) supply their own
+	// from catalog-declared rules.
+	ValueConverters(colTypes []string, targetDBType string) []func(any) any
+
 	// ColumnListForSelect formats columns for SELECT with spatial conversions.
 	// When reading from one database to write to another, spatial columns
 	// need to be converted to WKT text format.

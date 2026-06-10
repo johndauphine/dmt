@@ -304,3 +304,9 @@ MySQL-specific requirements:
 - Return all three statements as a single response, each ending with semicolon
 `
 }
+
+// ValueConverters delegates to the shared default normalization table
+// (#477) — see driver.DefaultValueConverters for the rationale.
+func (d *Dialect) ValueConverters(colTypes []string, targetDBType string) []func(any) any {
+	return driver.DefaultValueConverters(colTypes)
+}

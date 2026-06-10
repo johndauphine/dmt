@@ -3,6 +3,7 @@ package transfer
 import (
 	"database/sql"
 	"fmt"
+	"github.com/johndauphine/dmt/internal/driver"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -32,8 +33,9 @@ func BenchmarkScanRows(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	cols := []string{"id", "a", "b", "c", "d", "e", "f", "g"}
 	colTypes := []string{"int", "varchar", "bit", "datetime", "float", "int", "text", "uniqueidentifier"}
+	convs := driver.DefaultValueConverters(colTypes)
+	convIdx := buildConvIdx(convs)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -41,7 +43,7 @@ func BenchmarkScanRows(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		chunk, _, err := scanRows(rows, cols, colTypes)
+		chunk, _, err := scanRows(rows, len(colTypes), convs, convIdx)
 		rows.Close()
 		if err != nil {
 			b.Fatal(err)
