@@ -268,6 +268,12 @@ type noConstraintPool struct {
 	pool.TargetPool
 }
 
+// ResetSequence forwards so this fake isolates ONLY the constraint
+// capability (#476 moved ResetSequence off the core interface too).
+func (p *noConstraintPool) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
+	return p.TargetPool.(driver.SequenceResetter).ResetSequence(ctx, schema, t)
+}
+
 // TestDropRecreateFinalizeSkipsConstraintsWithoutCapability locks in the
 // #460 degradation contract: a target without ConstraintWriter finalizes
 // without error, creates no FKs or CHECKs, and everything else
@@ -298,5 +304,47 @@ func TestDropRecreateFinalizeSkipsConstraintsWithoutCapability(t *testing.T) {
 	}
 	if got := base.resetTables(); !reflect.DeepEqual(got, []string{"orders"}) {
 		t.Fatalf("sequence resets = %v, want [orders] (other phases must proceed)", got)
+	}
+}
+
+// noSequencePool exposes only the core Writer surface — no ResetSequence,
+// so it does not satisfy driver.SequenceResetter (#476).
+type noSequencePool struct {
+	pool.TargetPool
+}
+
+// CreateForeignKey/CreateCheckConstraint promote ConstraintWriter through
+// so this fake isolates ONLY the sequence capability.
+func (p *noSequencePool) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, s string) error {
+	return p.TargetPool.(driver.ConstraintWriter).CreateForeignKey(ctx, t, fk, s)
+}
+func (p *noSequencePool) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, s string) error {
+	return p.TargetPool.(driver.ConstraintWriter).CreateCheckConstraint(ctx, t, chk, s)
+}
+
+// TestDropRecreateFinalizeSkipsSequencesWithoutCapability locks in the
+// #476 degradation: a target without SequenceResetter finalizes without
+// error, resets nothing, and the other phases proceed.
+func TestDropRecreateFinalizeSkipsSequencesWithoutCapability(t *testing.T) {
+	base := &targetModeTestPool{}
+	strategy := &dropRecreateStrategy{
+		targetPool:   &noSequencePool{TargetPool: base},
+		targetSchema: "public",
+		createFKs:    true,
+	}
+	tables := []source.Table{{
+		Name:        "orders",
+		PrimaryKey:  []string{"id"},
+		ForeignKeys: []source.ForeignKey{{Name: "fk_customer"}},
+	}}
+
+	if err := strategy.Finalize(context.Background(), tables); err != nil {
+		t.Fatalf("Finalize() error: %v", err)
+	}
+	if got := base.resetTables(); len(got) != 0 {
+		t.Fatalf("sequences reset via missing capability: %v", got)
+	}
+	if got := base.createdForeignKeys(); !reflect.DeepEqual(got, []string{"orders.fk_customer"}) {
+		t.Fatalf("FKs = %v, want [orders.fk_customer] (other phases must proceed)", got)
 	}
 }

@@ -193,68 +193,6 @@ func (r *Reader) GetMaxDateColumnValue(ctx context.Context, schema, table, colum
 	return driver.ParseDateValue(raw)
 }
 
-// SampleColumnValues retrieves sample values from a column for AI type mapping context.
-func (r *Reader) SampleColumnValues(ctx context.Context, schema, table, column string, limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 5
-	}
-
-	if err := driver.ValidateIdentifier(schema); err != nil {
-		return nil, fmt.Errorf("invalid schema name: %w", err)
-	}
-	if err := driver.ValidateIdentifier(table); err != nil {
-		return nil, fmt.Errorf("invalid table name: %w", err)
-	}
-	if err := driver.ValidateIdentifier(column); err != nil {
-		return nil, fmt.Errorf("invalid column name: %w", err)
-	}
-
-	query := fmt.Sprintf(`
-		SELECT DISTINCT CAST(%s AS CHAR) AS sample_val
-		FROM %s
-		WHERE %s IS NOT NULL
-		LIMIT ?
-	`, r.dialect.QuoteIdentifier(column), r.dialect.QualifyTable(schema, table), r.dialect.QuoteIdentifier(column))
-
-	samples, err := shared.QuerySampleColumnValues(ctx, r.db, query, limit)
-	if err != nil {
-		return nil, fmt.Errorf("sampling column %s: %w", column, err)
-	}
-	return samples, nil
-}
-
-// SampleRows retrieves sample rows from a table for AI type mapping context.
-func (r *Reader) SampleRows(ctx context.Context, schema, table string, columns []string, limit int) (map[string][]string, error) {
-	if limit <= 0 {
-		limit = 5
-	}
-
-	if err := driver.ValidateIdentifier(schema); err != nil {
-		return nil, fmt.Errorf("invalid schema name: %w", err)
-	}
-	if err := driver.ValidateIdentifier(table); err != nil {
-		return nil, fmt.Errorf("invalid table name: %w", err)
-	}
-
-	var quotedCols []string
-	for _, col := range columns {
-		if err := driver.ValidateIdentifier(col); err != nil {
-			return nil, fmt.Errorf("invalid column name %s: %w", col, err)
-		}
-		quotedCols = append(quotedCols, fmt.Sprintf("CAST(%s AS CHAR)", r.dialect.QuoteIdentifier(col)))
-	}
-
-	query := fmt.Sprintf(`SELECT %s FROM %s LIMIT ?`,
-		strings.Join(quotedCols, ", "),
-		r.dialect.QualifyTable(schema, table))
-
-	result, err := shared.QuerySampleRows(ctx, r.db, query, columns, limit, limit)
-	if err != nil {
-		return nil, fmt.Errorf("sampling rows from %s: %w", table, err)
-	}
-	return result, nil
-}
-
 // ExtractSchema extracts table metadata from the database.
 func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Table, error) {
 	tables := []driver.Table{}

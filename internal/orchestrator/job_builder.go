@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"github.com/johndauphine/dmt/internal/driver"
 	"strings"
 	"time"
 
@@ -108,8 +109,19 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 		return nil
 	}
 
+	// Date tracking is an optional source capability (#476). Without it
+	// the table takes the existing "no date column" full-sync path; the
+	// builder logs the engine-level reason once via logDateTrackingSummary.
+	dateReader, ok := b.sourcePool.(driver.IncrementalDateReader)
+	if !ok {
+		result.Summary.TablesNoDateColumn++
+		result.Summary.NoDateColumnTables = append(result.Summary.NoDateColumnTables, t.Name)
+		logging.Debug("Table %s: full sync - source engine %s does not support date-column tracking", t.Name, b.sourcePool.DBType())
+		return nil
+	}
+
 	candidates := dateColumnCandidatesForTable(t, b.config.Migration.DateUpdatedColumns)
-	colName, colType, found := b.sourcePool.GetDateColumnInfo(
+	colName, colType, found := dateReader.GetDateColumnInfo(
 		ctx, t.Schema, t.Name, candidates)
 
 	if !found {
@@ -195,7 +207,11 @@ func (b *JobBuilder) lastSyncTimestamp(t *source.Table, applyDateFilter bool) *t
 }
 
 func (b *JobBuilder) recordSourceHighWatermark(ctx context.Context, t *source.Table, colName string, lastSync *time.Time, result *BuildResult) {
-	highWatermark, err := b.sourcePool.GetMaxDateColumnValue(ctx, t.Schema, t.Name, colName)
+	dateReader, ok := b.sourcePool.(driver.IncrementalDateReader)
+	if !ok {
+		return
+	}
+	highWatermark, err := dateReader.GetMaxDateColumnValue(ctx, t.Schema, t.Name, colName)
 	if err != nil {
 		logging.Warn("Failed to get source high watermark for %s.%s.%s: %v", t.Schema, t.Name, colName, err)
 		return

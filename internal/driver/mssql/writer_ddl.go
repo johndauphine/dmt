@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -217,88 +216,6 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 		) THEN 1 ELSE 0 END
 	`, sql.Named("schema", schema), sql.Named("table", table)).Scan(&exists)
 	return exists == 1, err
-}
-
-// GetTableDDL retrieves the CREATE TABLE DDL for an existing table.
-// Returns empty string if DDL cannot be retrieved.
-func (w *Writer) GetTableDDL(ctx context.Context, schema, table string) string {
-	// Build DDL from information_schema
-	rows, err := w.db.QueryContext(ctx, `
-		SELECT
-			COLUMN_NAME,
-			DATA_TYPE,
-			CHARACTER_MAXIMUM_LENGTH,
-			NUMERIC_PRECISION,
-			NUMERIC_SCALE,
-			IS_NULLABLE,
-			COLUMN_DEFAULT
-		FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
-		ORDER BY ORDINAL_POSITION
-	`, sql.Named("schema", schema), sql.Named("table", table))
-	if err != nil {
-		logging.Debug("Could not get table DDL for %s.%s: %v", schema, table, err)
-		return ""
-	}
-	defer rows.Close()
-
-	var sb strings.Builder
-	// Use dialect's QuoteIdentifier for proper escaping
-	fmt.Fprintf(&sb, "CREATE TABLE %s.%s (\n",
-		w.dialect.QuoteIdentifier(schema),
-		w.dialect.QuoteIdentifier(table))
-
-	first := true
-	for rows.Next() {
-		var colName, dataType, isNullable string
-		var charMaxLen, numPrecision, numScale sql.NullInt64
-		var colDefault sql.NullString
-
-		if err := rows.Scan(&colName, &dataType, &charMaxLen, &numPrecision, &numScale, &isNullable, &colDefault); err != nil {
-			logging.Debug("Failed to scan column for %s.%s: %v", schema, table, err)
-			continue
-		}
-
-		if !first {
-			sb.WriteString(",\n")
-		}
-		first = false
-
-		fmt.Fprintf(&sb, "    %s ", w.dialect.QuoteIdentifier(colName))
-
-		// Build type with precision
-		typeStr := dataType
-		if charMaxLen.Valid && charMaxLen.Int64 > 0 {
-			if charMaxLen.Int64 == -1 {
-				typeStr = fmt.Sprintf("%s(MAX)", dataType)
-			} else {
-				typeStr = fmt.Sprintf("%s(%d)", dataType, charMaxLen.Int64)
-			}
-		} else if numPrecision.Valid && numPrecision.Int64 > 0 {
-			if numScale.Valid && numScale.Int64 > 0 {
-				typeStr = fmt.Sprintf("%s(%d,%d)", dataType, numPrecision.Int64, numScale.Int64)
-			} else {
-				typeStr = fmt.Sprintf("%s(%d)", dataType, numPrecision.Int64)
-			}
-		}
-		sb.WriteString(typeStr)
-
-		if isNullable == "NO" {
-			sb.WriteString(" NOT NULL")
-		}
-		if colDefault.Valid && colDefault.String != "" {
-			fmt.Fprintf(&sb, " DEFAULT %s", colDefault.String)
-		}
-	}
-
-	// Check if any columns were found
-	if first {
-		logging.Debug("No columns found for table %s.%s", schema, table)
-		return ""
-	}
-
-	sb.WriteString("\n);")
-	return sb.String()
 }
 
 // ResetSequence resets identity sequence to max value.

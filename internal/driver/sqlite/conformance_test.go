@@ -86,5 +86,10 @@ func sqlitePaginationCase() *conformance.PaginationCase {
 func TestWriterCapabilities(t *testing.T) {
 	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: false,
+		Upserter:         true, // INSERT ... ON CONFLICT
+		SequenceResetter: true, // sqlite_sequence update for AUTOINCREMENT
+	})
+	conformance.CheckReaderCapabilities(t, (*Reader)(nil), conformance.ReaderCapabilities{
+		IncrementalDateReader: true,
 	})
 }

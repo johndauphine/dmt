@@ -2,6 +2,8 @@ package transfer
 
 import (
 	"context"
+	"fmt"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/pool"
 )
 
@@ -47,7 +49,15 @@ func writeChunkIdempotent(ctx context.Context, tgtPool pool.TargetPool, schema, 
 // colSRIDs is passed for geography/geometry SRID in STGeomFromText conversion (PG→MSSQL)
 func writeChunkUpsertWithWriter(ctx context.Context, tgtPool pool.TargetPool, schema, table string,
 	cols []string, colTypes []string, colSRIDs []int, pkCols []string, rows [][]any, writerID int, partitionID *int, batchSize int) error {
-	return tgtPool.UpsertBatch(ctx, pool.UpsertBatchOptions{
+	// Upsert is an optional capability (#476). The orchestrator rejects
+	// target_mode=upsert against incapable engines at construction, so
+	// this assertion is a backstop with a clear message, not a hot-path
+	// concern (a type assertion is ~ns against a network write).
+	up, ok := tgtPool.(driver.Upserter)
+	if !ok {
+		return fmt.Errorf("target engine %s does not support upsert", tgtPool.DBType())
+	}
+	return up.UpsertBatch(ctx, pool.UpsertBatchOptions{
 		Schema:      schema,
 		Table:       table,
 		Columns:     cols,

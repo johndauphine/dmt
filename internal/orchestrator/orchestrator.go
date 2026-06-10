@@ -72,6 +72,16 @@ func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
 		return nil, fmt.Errorf("creating target pool: %w", err)
 	}
 
+	// target_mode=upsert requires the Upserter capability (#476) —
+	// reject up front with a clear message instead of failing mid-transfer.
+	if cfg.Migration.TargetMode == "upsert" {
+		if _, ok := targetPool.(driver.Upserter); !ok {
+			sourcePool.Close()
+			targetPool.Close()
+			return nil, fmt.Errorf("target_mode \"upsert\" is not supported by target engine %s", targetPool.DBType())
+		}
+	}
+
 	state, err := newStateBackend(cfg, opts, true)
 	if err != nil {
 		sourcePool.Close()
