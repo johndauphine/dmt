@@ -17,6 +17,15 @@ import (
 func (o *Orchestrator) applyAITuning(ctx context.Context) {
 	logging.Debug("Running parameter tuning...")
 
+	// One line of parameter ownership (#461), deferred so it fires on
+	// every exit path — including the fallback-to-formula-defaults
+	// return when analysis fails (codex review). Pinned values silently
+	// disable tuning for that knob; surface them at INFO on every run
+	// instead of burying provenance in debug output.
+	defer func() {
+		logging.Info("Tuning provenance: %s", o.config.TuningProvenanceSummary())
+	}()
+
 	// Create analyzer (same pattern as AnalyzeConfig in healthcheck.go).
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
 

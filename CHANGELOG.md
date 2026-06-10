@@ -9,6 +9,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added a run-start `Tuning provenance` log line showing which performance
+  parameters are user-pinned (and therefore never tuned) versus
+  tuner-derived; `config.yaml.example` now leaves tuning to the deterministic
+  tuner by default, with pinning documented as an advanced override (#461).
+
 ### Fixed
 
 - Set the Go runtime soft memory limit (GOMEMLIMIT) from the effective

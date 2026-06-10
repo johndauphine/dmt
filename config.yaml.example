@@ -34,21 +34,12 @@ profile:
     Update this description for your environment.
 
 migration:
-  # Connection pool settings
-  max_source_connections: 12   # Source database connection pool size
-  max_target_connections: 12   # Target database connection pool size
-
-  # Rows per chunk for transfer
-  chunk_size: 200000
-
-  # Maximum partitions for large tables
-  max_partitions: 8
-
-  # Number of parallel transfer workers
-  workers: 8
-
-  # Tables larger than this will be partitioned (rows)
-  large_table_threshold: 5000000
+  # Performance tuning is automatic (#461): the deterministic tuner derives
+  # workers, chunk_size, connection pools, partitioning, and reader/writer
+  # parallelism from your system, the source workload, and completed-run
+  # history — and improves run over run. Leave this section free of tuning
+  # knobs unless you have a specific reason; see "Advanced tuning overrides"
+  # at the bottom of this section.
 
   # Tables to exclude from migration (glob patterns supported)
   exclude_tables:
@@ -142,6 +133,24 @@ migration:
   notify:
     on_success: true
     on_failure: true
+
+  # ---------------------------------------------------------------------
+  # Advanced tuning overrides (uncomment only with a specific reason).
+  # Any value you set here is PINNED: the tuner will never adjust it, it
+  # stops learning better values for that knob, and the run-start
+  # "Tuning provenance" log line will show it as pinned. Remove the
+  # override to hand the knob back to the tuner.
+  # ---------------------------------------------------------------------
+  # workers: 8                       # parallel table transfers
+  # chunk_size: 200000               # rows per transfer chunk
+  # write_ahead_writers: 4           # parallel writers per table
+  # parallel_readers: 2              # parallel readers per table (keyset only)
+  # read_ahead_buffers: 4            # reader-side buffered chunks
+  # max_partitions: 8                # partitions for large tables
+  # large_table_threshold: 5000000   # rows before a table is partitioned
+  # max_source_connections: 12       # source connection pool size
+  # max_target_connections: 12       # target connection pool size
+  # max_memory_mb: 8192              # cap the pipeline memory budget
 
 # Slack notifications (optional)
 slack:
