@@ -79,3 +79,11 @@ func postgresPaginationCase() *conformance.PaginationCase {
 		RowNumberArgs: []any{int64(50), int64(75), ts},
 	}
 }
+
+// TestWriterCapabilities pins the #460 capability matrix: postgres supports
+// post-transfer FK/CHECK creation.
+func TestWriterCapabilities(t *testing.T) {
+	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
+		ConstraintWriter: true,
+	})
+}

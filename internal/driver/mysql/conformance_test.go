@@ -77,3 +77,11 @@ func mysqlPaginationCase() *conformance.PaginationCase {
 		RowNumberArgs: []any{ts, int64(50), int64(75)},
 	}
 }
+
+// TestWriterCapabilities pins the #460 capability matrix: mysql supports
+// post-transfer FK/CHECK creation.
+func TestWriterCapabilities(t *testing.T) {
+	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
+		ConstraintWriter: true,
+	})
+}

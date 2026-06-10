@@ -170,17 +170,27 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 		for _, t := range tables {
 			totalFKs += len(t.ForeignKeys)
 		}
-		if totalFKs > 0 {
+		// Capability check (#460): engines that cannot ADD CONSTRAINT
+		// after CREATE TABLE (SQLite) don't implement ConstraintWriter —
+		// degrade with one audited message instead of per-FK stub warnings.
+		cw, hasConstraintWriter := s.targetPool.(driver.ConstraintWriter)
+		if totalFKs > 0 && !hasConstraintWriter {
+			logging.Warn("Skipping %d foreign keys: target engine %s does not support post-transfer constraint creation", totalFKs, s.targetPool.DBType())
+		}
+		if totalFKs > 0 && hasConstraintWriter {
 			logging.Debug("  Creating %d foreign keys in parallel...", totalFKs)
 		}
 
 		var fkWg sync.WaitGroup
 		for _, t := range tables {
+			if !hasConstraintWriter {
+				break
+			}
 			for _, fk := range t.ForeignKeys {
 				fkWg.Add(1)
 				go func(table source.Table, foreignKey source.ForeignKey) {
 					defer fkWg.Done()
-					if err := s.targetPool.CreateForeignKey(ctx, &table, &foreignKey, s.targetSchema); err != nil {
+					if err := cw.CreateForeignKey(ctx, &table, &foreignKey, s.targetSchema); err != nil {
 						logging.Warn("Warning: creating FK %s on %s: %v", foreignKey.Name, table.Name, err)
 						driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE FOREIGN KEY", err)
 					}
@@ -196,17 +206,24 @@ func (s *dropRecreateStrategy) Finalize(ctx context.Context, tables []source.Tab
 		for _, t := range tables {
 			totalChecks += len(t.CheckConstraints)
 		}
-		if totalChecks > 0 {
+		cw, hasConstraintWriter := s.targetPool.(driver.ConstraintWriter)
+		if totalChecks > 0 && !hasConstraintWriter {
+			logging.Warn("Skipping %d check constraints: target engine %s does not support post-transfer constraint creation", totalChecks, s.targetPool.DBType())
+		}
+		if totalChecks > 0 && hasConstraintWriter {
 			logging.Debug("  Creating %d check constraints in parallel...", totalChecks)
 		}
 
 		var chkWg sync.WaitGroup
 		for _, t := range tables {
+			if !hasConstraintWriter {
+				break
+			}
 			for _, chk := range t.CheckConstraints {
 				chkWg.Add(1)
 				go func(table source.Table, check source.CheckConstraint) {
 					defer chkWg.Done()
-					if err := s.targetPool.CreateCheckConstraint(ctx, &table, &check, s.targetSchema); err != nil {
+					if err := cw.CreateCheckConstraint(ctx, &table, &check, s.targetSchema); err != nil {
 						logging.Warn("Warning: creating CHECK %s on %s: %v", check.Name, table.Name, err)
 						driver.DiagnoseSchemaError(ctx, table.Name, table.Schema, s.sourceType, s.targetType, "CREATE CHECK CONSTRAINT", err)
 					}

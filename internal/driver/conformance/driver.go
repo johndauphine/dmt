@@ -342,3 +342,24 @@ func sameStrings(got, want []string) bool {
 	}
 	return true
 }
+
+// WriterCapabilities declares which optional writer capabilities an
+// engine is expected to implement (#460). The conformance harness
+// asserts declared == actual via type assertion, so a capability
+// silently gained or lost by a refactor fails the driver's tests.
+type WriterCapabilities struct {
+	// ConstraintWriter: can the engine ADD CONSTRAINT (FK/CHECK) after
+	// CREATE TABLE? SQLite cannot — constraints are inline-only there.
+	ConstraintWriter bool
+}
+
+// CheckWriterCapabilities asserts the writer's optional capabilities
+// match the declaration. Pass a typed nil writer pointer — only the
+// type's method set matters, no connection is made.
+func CheckWriterCapabilities(t *testing.T, w driver.Writer, want WriterCapabilities) {
+	t.Helper()
+	_, got := w.(driver.ConstraintWriter)
+	if got != want.ConstraintWriter {
+		t.Errorf("ConstraintWriter capability = %v, want %v — update the capability matrix or the writer's method set deliberately", got, want.ConstraintWriter)
+	}
+}

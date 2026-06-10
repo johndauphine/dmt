@@ -31,13 +31,11 @@ type Writer interface {
 	DropTable(ctx context.Context, schema, table string) error
 	TruncateTable(ctx context.Context, schema, table string) error
 	TableExists(ctx context.Context, schema, table string) (bool, error)
-	SetTableLogged(ctx context.Context, schema, table string) error
 
-	// Constraint operations
+	// Constraint operations. FK and CHECK creation are optional
+	// capabilities — see ConstraintWriter (#460).
 	CreatePrimaryKey(ctx context.Context, t *Table, targetSchema string) error
 	CreateIndex(ctx context.Context, t *Table, idx *Index, targetSchema string) error
-	CreateForeignKey(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string) error
-	CreateCheckConstraint(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string) error
 	HasPrimaryKey(ctx context.Context, schema, table string) (bool, error)
 
 	// DDL introspection
@@ -74,6 +72,20 @@ type Writer interface {
 	MaxConns() int
 	DBType() string
 	PoolStats() stats.PoolStats
+}
+
+// ConstraintWriter is the optional capability of creating foreign keys
+// and CHECK constraints after data transfer (#460). Engines that can only
+// declare these inline at CREATE TABLE time (SQLite) simply don't
+// implement it; callers type-assert and degrade with one uniform, audited
+// message instead of every such engine shipping warning no-op stubs.
+//
+// This is the pattern for engine-specific surfaces going forward: a
+// capability a new engine cannot honor must become an optional interface
+// with caller-side degradation, never a silent stub.
+type ConstraintWriter interface {
+	CreateForeignKey(ctx context.Context, t *Table, fk *ForeignKey, targetSchema string) error
+	CreateCheckConstraint(ctx context.Context, t *Table, chk *CheckConstraint, targetSchema string) error
 }
 
 // TableOptions contains options for table creation.

@@ -198,13 +198,6 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 	return exists, err
 }
 
-// SetTableLogged converts an UNLOGGED table to LOGGED.
-func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error {
-	sanitizedTable := sanitizePGTableName(table)
-	_, err := w.pool.Exec(ctx, fmt.Sprintf("ALTER TABLE %s SET LOGGED", w.dialect.QualifyTable(schema, sanitizedTable)))
-	return err
-}
-
 // CreatePrimaryKey creates the primary key constraint.
 // This is idempotent - it checks if a PK already exists before creating one.
 // AI-generated DDL includes the PK inline, so this check is necessary.

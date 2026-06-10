@@ -275,12 +275,9 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 	return err == nil, err
 }
 
-// SetTableLogged is a no-op for SQLite (no unlogged tables).
-func (w *Writer) SetTableLogged(ctx context.Context, schema, table string) error { return nil }
-
 // CreatePrimaryKey is a no-op — PK is declared in CREATE TABLE for
 // SQLite (ALTER TABLE in SQLite is restricted and can't add a PK after
-// the fact).
+// the fact), so the constraint already exists by the time this phase runs.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
 	return nil
 }
@@ -380,24 +377,6 @@ func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.I
 	}
 	_, err = w.db.ExecContext(ctx, ddl)
 	return err
-}
-
-// CreateForeignKey is a no-op with a warning for SQLite. SQLite cannot
-// add foreign keys via ALTER TABLE — they must be declared inline at
-// CREATE TABLE time. This driver targets test scenarios; users needing
-// FK enforcement should either include the FK in the source-side CREATE
-// TABLE (so the generated CREATE TABLE picks it up inline — possible
-// future enhancement) or recreate the table.
-func (w *Writer) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
-	logging.Warn("sqlite: skipping FK %s.%s — SQLite cannot ADD CONSTRAINT FK via ALTER TABLE", t.Name, fk.Name)
-	return nil
-}
-
-// CreateCheckConstraint is similarly a no-op with a warning. SQLite's
-// ALTER TABLE doesn't support ADD CONSTRAINT CHECK.
-func (w *Writer) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
-	logging.Warn("sqlite: skipping CHECK %s.%s — SQLite cannot ADD CONSTRAINT CHECK via ALTER TABLE", t.Name, chk.Name)
-	return nil
 }
 
 // WriteBatch writes rows using multi-row INSERTs inside a transaction.

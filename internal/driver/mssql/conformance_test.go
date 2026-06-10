@@ -97,3 +97,11 @@ func mssqlPaginationCase() *conformance.PaginationCase {
 		},
 	}
 }
+
+// TestWriterCapabilities pins the #460 capability matrix: mssql supports
+// post-transfer FK/CHECK creation.
+func TestWriterCapabilities(t *testing.T) {
+	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
+		ConstraintWriter: true,
+	})
+}

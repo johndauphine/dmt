@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"github.com/johndauphine/dmt/internal/pool"
 	"reflect"
 	"strings"
 	"sync"
@@ -126,6 +127,10 @@ type targetModeTestPool struct {
 	fks        []string
 	checks     []string
 }
+
+// DBType is needed by the #460 capability-skip message; the embedded
+// nil driver.Writer would otherwise panic on promotion.
+func (p *targetModeTestPool) DBType() string { return "faketest" }
 
 func (p *targetModeTestPool) DropTable(ctx context.Context, _, table string) error {
 	if err := ctx.Err(); err != nil {
@@ -253,4 +258,45 @@ func (p *targetModeTestPool) createdChecks() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.checks...)
+}
+
+// noConstraintPool wraps the test pool but exposes only the core
+// driver.Writer method set — FK/CHECK creation methods are not promoted,
+// so it does not satisfy driver.ConstraintWriter. Models an engine like
+// SQLite after the #460 capability split.
+type noConstraintPool struct {
+	pool.TargetPool
+}
+
+// TestDropRecreateFinalizeSkipsConstraintsWithoutCapability locks in the
+// #460 degradation contract: a target without ConstraintWriter finalizes
+// without error, creates no FKs or CHECKs, and everything else
+// (sequences, PKs, indexes) proceeds normally.
+func TestDropRecreateFinalizeSkipsConstraintsWithoutCapability(t *testing.T) {
+	base := &targetModeTestPool{}
+	strategy := &dropRecreateStrategy{
+		targetPool:   &noConstraintPool{TargetPool: base},
+		targetSchema: "public",
+		createFKs:    true,
+		createChecks: true,
+	}
+	tables := []source.Table{{
+		Name:             "orders",
+		PrimaryKey:       []string{"id"},
+		ForeignKeys:      []source.ForeignKey{{Name: "fk_customer"}},
+		CheckConstraints: []source.CheckConstraint{{Name: "chk_total"}},
+	}}
+
+	if err := strategy.Finalize(context.Background(), tables); err != nil {
+		t.Fatalf("Finalize() error: %v", err)
+	}
+	if got := base.createdForeignKeys(); len(got) != 0 {
+		t.Fatalf("foreign keys created via missing capability: %v", got)
+	}
+	if got := base.createdChecks(); len(got) != 0 {
+		t.Fatalf("check constraints created via missing capability: %v", got)
+	}
+	if got := base.resetTables(); !reflect.DeepEqual(got, []string{"orders"}) {
+		t.Fatalf("sequence resets = %v, want [orders] (other phases must proceed)", got)
+	}
 }
