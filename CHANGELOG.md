@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.3.0] - 2026-06-11
+
 ### Added
 
 - TUI command discovery now matches the real surface: autocomplete and
@@ -57,23 +59,17 @@ All notable changes to this project will be documented in this file.
   `--workers`, and `--skip-preflight`. `/resume` gains `--force-resume`
   and `--skip-preflight` (#439).
 
-### Added
-
 - TUI slash commands now share one argument parser: `@config` files,
   positionals, `--flag value`/`--flag=value`, and consistent errors for
   unknown flags and missing values across every command. New `/session`
   command holds sticky per-session defaults (config, profile, state-file,
   verbosity) so they don't have to be repeated on each command (#444).
 
-### Added
-
 - Added measured override-cost advice: when a pinned `write_ahead_writers`
   value's history bin materially underperforms the best comparable bin,
   every run logs the measured means and delta next to the provenance line
   (#461). Added `migration.tuning: auto|manual` as the coarse switch for
   pre-run parameter derivation; per-knob pins remain the escape hatch.
-
-### Added
 
 - Added a run-start `Tuning provenance` log line showing which performance
   parameters are user-pinned (and therefore never tuned) versus
@@ -88,16 +84,12 @@ All notable changes to this project will be documented in this file.
   minimum and deleting the faster readers' completed work. Pre-existing
   checkpoints resume with the legacy single-watermark behavior (#464).
 
-### Fixed
-
 - Set the Go runtime soft memory limit (GOMEMLIMIT) from the effective
   memory budget so GC paces against it natively; the transfer memory guard
   becomes the backstop and now uses a single process-wide heap sampler
   instead of per-chunk `ReadMemStats` calls, firing `FreeOSMemory` once per
   pressure episode instead of every 500ms (#462). An operator-supplied
   GOMEMLIMIT environment variable is honored untouched.
-
-### Fixed
 
 - Fixed tuning-history feedback contamination: runs where the runtime
   controller (or structural write-error adjuster) changed parameters
