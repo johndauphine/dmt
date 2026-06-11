@@ -72,15 +72,15 @@ var GlobalFlags = []FlagSpec{
 var Registry = []CommandSpec{
 	{Path: "run", Status: TUISupported, Flags: []FlagSpec{
 		{Name: "source-schema"}, {Name: "target-schema"}, {Name: "workers"},
-		{Name: "dry-run", Status: TUIPlanned, Ref: "#439"},
-		{Name: "ai-schema-advisor", Status: TUIPlanned, Ref: "#439"},
-		{Name: "explore", Status: TUISupported}, // /explore
-		{Name: "skip-preflight", Status: TUIPlanned, Ref: "#439"},
+		{Name: "dry-run", Status: TUISupported},           // /run --dry-run
+		{Name: "ai-schema-advisor", Status: TUISupported}, // /run --ai-schema-advisor
+		{Name: "explore", Status: TUISupported},           // /explore
+		{Name: "skip-preflight", Status: TUISupported},    // /run --skip-preflight
 		{Name: "confirm-backup", Status: TUICLIOnly, Ref: "TUI confirms interactively"},
 	}},
 	{Path: "resume", Status: TUISupported, Flags: []FlagSpec{
-		{Name: "force-resume", Status: TUIPlanned, Ref: "#439"},
-		{Name: "skip-preflight", Status: TUIPlanned, Ref: "#439"},
+		{Name: "force-resume", Status: TUISupported},   // /resume --force-resume
+		{Name: "skip-preflight", Status: TUISupported}, // /resume --skip-preflight
 	}},
 	{Path: "status", Status: TUISupported, Flags: flags("json")},
 	{Path: "validate", Status: TUISupported, Flags: []FlagSpec{

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -20,6 +21,72 @@ func (m *Model) parseOriginArgs(command string, parts []string) (configFile, pro
 	}
 	configFile, profileName = m.resolveOrigin(pa)
 	return configFile, profileName, nil
+}
+
+// runOverrides carries /run's per-invocation flag overrides (#439).
+// Zero values mean "not set" — the loaded config value stands, matching
+// the CLI's c.IsSet gate. exploreOnce/exploreMode come from /explore
+// session state rather than flags.
+type runOverrides struct {
+	sourceSchema    string
+	targetSchema    string
+	workers         int // 0 = unset
+	skipPreflight   string
+	dryRun          bool
+	aiSchemaAdvisor bool
+	exploreOnce     bool
+	exploreMode     string
+}
+
+// parseRunArgs parses /run's flags plus the config origin (#439).
+func (m *Model) parseRunArgs(parts []string) (configFile, profileName string, ov runOverrides, err error) {
+	strs := originFlags()
+	strs["--source-schema"] = "source-schema"
+	strs["--target-schema"] = "target-schema"
+	strs["--workers"] = "workers"
+	strs["--skip-preflight"] = "skip-preflight"
+	pa, err := parseSlashArgs(argSpec{
+		command: "/run",
+		strs:    strs,
+		bools: map[string]string{
+			"--dry-run":           "dry-run",
+			"--ai-schema-advisor": "ai-schema-advisor",
+		},
+	}, parts)
+	if err != nil {
+		return "", "", ov, err
+	}
+	if w, ok := pa.strs["workers"]; ok {
+		n, convErr := strconv.Atoi(w)
+		if convErr != nil || n < 1 {
+			return "", "", ov, fmt.Errorf("/run: --workers requires a positive integer, got %q", w)
+		}
+		ov.workers = n
+	}
+	ov.sourceSchema = pa.strs["source-schema"]
+	ov.targetSchema = pa.strs["target-schema"]
+	ov.skipPreflight = pa.strs["skip-preflight"]
+	ov.dryRun = pa.bools["dry-run"]
+	ov.aiSchemaAdvisor = pa.bools["ai-schema-advisor"]
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, ov, nil
+}
+
+// parseResumeArgs parses /resume [--force-resume] [--skip-preflight LIST]
+// plus the config origin (#439).
+func (m *Model) parseResumeArgs(parts []string) (configFile, profileName string, forceResume bool, skipPreflight string, err error) {
+	strs := originFlags()
+	strs["--skip-preflight"] = "skip-preflight"
+	pa, err := parseSlashArgs(argSpec{
+		command: "/resume",
+		strs:    strs,
+		bools:   map[string]string{"--force-resume": "force-resume"},
+	}, parts)
+	if err != nil {
+		return "", "", false, "", err
+	}
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.bools["force-resume"], pa.strs["skip-preflight"], nil
 }
 
 // parseHistoryArgs parses /history [--run ID] plus the config origin.
