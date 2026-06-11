@@ -41,6 +41,10 @@ func InitSecrets(force, withAI bool) (string, error) {
 	if err := os.WriteFile(secretsPath, []byte(template), 0600); err != nil {
 		return "", fmt.Errorf("writing secrets file: %w", err)
 	}
+	// Drop the package-level cache so a session that already called
+	// secrets.Load() (e.g. an earlier /run with no secrets file) sees
+	// the new file immediately — mirrors secrets.Save (codex).
+	secrets.Reset()
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Secrets file created: %s\n", secretsPath)
