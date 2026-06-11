@@ -273,7 +273,7 @@ func (m Model) runResumeCmd(configFile, profileName string, forceResume bool, sk
 	}
 }
 
-func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
+func (m Model) runValidateCmd(configFile, profileName string, aiTriage bool, timeout time.Duration) tea.Cmd {
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
 	stateFile := m.sessionGet("state-file")
@@ -308,11 +308,90 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 			}
 			defer orch.Close()
 
+			// AI triage path (#441): same flow as the CLI — detailed
+			// validation, then an advisory review of the result. The
+			// deterministic pass/fail verdict always renders; the AI
+			// review is additive.
+			if aiTriage {
+				result, validateErr := orch.ValidateDetailed(context.Background())
+				if timeout <= 0 {
+					timeout = 90 * time.Second
+				}
+				reviewCtx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				review := orch.ReviewValidationWithAI(reviewCtx, result, validateErr)
+				if validateErr != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Validation failed: %v\n", validateErr)))
+				} else {
+					p.Send(OutputMsg("Validation passed!\n"))
+				}
+				if review != nil {
+					p.Send(BoxedOutputMsg(command.FormatTriageReview(review)))
+				}
+				return
+			}
+
 			if err := orch.Validate(context.Background()); err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Validation failed: %v\n", err)))
 				return
 			}
 			p.Send(OutputMsg("Validation passed!\n"))
+		}()
+
+		return nil
+	}
+}
+
+// runDiagnoseCmd diagnoses the latest (or selected) failed run (#441).
+// Uses the diagnostics orchestrator like the CLI: state access without
+// requiring live source/target connections.
+func (m Model) runDiagnoseCmd(configFile, profileName, runID string, aiTriage bool, timeout time.Duration) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
+	return func() tea.Msg {
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
+		}
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
+			origin := "config: " + configFile
+			if profileName != "" {
+				origin = "profile: " + profileName
+			}
+			p.Send(OutputMsg(fmt.Sprintf("Diagnosing with %s\n", origin)))
+
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			orch, err := orchestrator.NewDiagnosticsWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			defer orch.Close()
+
+			if timeout <= 0 {
+				timeout = 90 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+
+			review, err := orch.DiagnoseRun(ctx, runID, aiTriage)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Diagnose failed: %v\n", err)))
+				return
+			}
+			p.Send(BoxedOutputMsg(command.FormatTriageReview(review)))
 		}()
 
 		return nil

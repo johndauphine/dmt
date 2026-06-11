@@ -84,11 +84,14 @@ var Registry = []CommandSpec{
 	}},
 	{Path: "status", Status: TUISupported, Flags: flags("json")},
 	{Path: "validate", Status: TUISupported, Flags: []FlagSpec{
-		{Name: "ai-triage", Status: TUIPlanned, Ref: "#441"},
-		{Name: "timeout"}, {Name: "json"},
+		{Name: "ai-triage", Status: TUISupported}, // /validate --ai-triage
+		{Name: "timeout"},
+		{Name: "json", Status: TUICLIOnly, Ref: "TUI renders the triage block; use the CLI for JSON"},
 	}},
-	{Path: "diagnose", Status: TUIPlanned, Ref: "#441",
-		Flags: flags("run", "ai-triage", "timeout", "json")},
+	{Path: "diagnose", Status: TUISupported, Flags: []FlagSpec{ // /diagnose
+		{Name: "run"}, {Name: "ai-triage"}, {Name: "timeout"},
+		{Name: "json", Status: TUICLIOnly, Ref: "TUI renders the triage block; use the CLI for JSON"},
+	}},
 	{Path: "history", Status: TUISupported, Flags: flags("run")},
 	{Path: "profile", Status: TUISupported},
 	{Path: "preflight", Status: TUISupported, // /preflight, /health-check
