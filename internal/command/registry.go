@@ -52,13 +52,13 @@ func flags(names ...string) []FlagSpec {
 var GlobalFlags = []FlagSpec{
 	{Name: "config", Status: TUISupported}, // @config / positional in TUI
 	{Name: "profile", Status: TUISupported},
-	{Name: "state-file", Status: TUIPlanned, Ref: "#444"},
-	{Name: "run-id", Status: TUIPlanned, Ref: "#444"},
+	{Name: "state-file", Status: TUISupported},        // /session state-file
+	{Name: "run-id", Status: TUIPlanned, Ref: "#441"}, // /diagnose --run covers the operator need
 	{Name: "output-json", Status: TUIPlanned, Ref: "#445"},
 	{Name: "output-file", Status: TUIPlanned, Ref: "#445"},
-	{Name: "log-format", Status: TUIPlanned, Ref: "#444"},
-	{Name: "verbosity", Status: TUISupported}, // /verbosity
-	{Name: "shutdown-timeout", Status: TUIPlanned, Ref: "#444"},
+	{Name: "log-format", Status: TUIPlanned, Ref: "#445"},       // /session key, lands with the observability batch
+	{Name: "verbosity", Status: TUISupported},                   // /verbosity
+	{Name: "shutdown-timeout", Status: TUIPlanned, Ref: "#445"}, // /session key, lands with the observability batch
 	{Name: "progress", Status: TUICLIOnly, Ref: "TUI renders its own progress"},
 	{Name: "progress-interval", Status: TUICLIOnly, Ref: "TUI renders its own progress"},
 	{Name: "metrics-addr", Status: TUIPlanned, Ref: "#445"},

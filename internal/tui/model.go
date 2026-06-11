@@ -49,6 +49,9 @@ const (
 
 // Model is the main TUI model - simplified single-viewport architecture
 type Model struct {
+	// session holds /session sticky defaults (#444); nil until first set.
+	session map[string]string
+
 	// Core components
 	viewport  viewport.Model
 	textInput textinput.Model

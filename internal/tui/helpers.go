@@ -12,109 +12,54 @@ import (
 
 // Helper functions
 
-func parseConfigArgs(parts []string) (string, string) {
-	configFile := "config.yaml"
-	profileName := ""
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		if arg == "--profile" && i+1 < len(parts) {
-			profileName = parts[i+1]
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "@") {
-			configFile = arg[1:]
-		} else {
-			configFile = arg
-		}
+// parseOriginArgs parses commands taking only the config origin (#444).
+func (m *Model) parseOriginArgs(command string, parts []string) (configFile, profileName string, err error) {
+	pa, err := parseSlashArgs(argSpec{command: command, strs: originFlags()}, parts)
+	if err != nil {
+		return "", "", err
 	}
-
-	return configFile, profileName
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, nil
 }
 
-func parseHistoryArgs(parts []string) (string, string, string) {
-	configFile := "config.yaml"
-	profileName := ""
-	runID := ""
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		switch arg {
-		case "--run":
-			if i+1 < len(parts) {
-				runID = parts[i+1]
-				i++
-			}
-		case "--profile":
-			if i+1 < len(parts) {
-				profileName = parts[i+1]
-				i++
-			}
-		default:
-			if strings.HasPrefix(arg, "@") {
-				configFile = arg[1:]
-			} else {
-				configFile = arg
-			}
-		}
+// parseHistoryArgs parses /history [--run ID] plus the config origin.
+func (m *Model) parseHistoryArgs(parts []string) (configFile, profileName, runID string, err error) {
+	strs := originFlags()
+	strs["--run"] = "run"
+	pa, err := parseSlashArgs(argSpec{command: "/history", strs: strs}, parts)
+	if err != nil {
+		return "", "", "", err
 	}
-
-	return configFile, profileName, runID
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.strs["run"], nil
 }
 
-func parseStatusArgs(parts []string) (string, string, bool) {
-	configFile := "config.yaml"
-	profileName := ""
-	detailed := false
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		switch arg {
-		case "--detailed", "-d":
-			detailed = true
-		case "--profile":
-			if i+1 < len(parts) {
-				profileName = parts[i+1]
-				i++
-			}
-		default:
-			if strings.HasPrefix(arg, "@") {
-				configFile = arg[1:]
-			} else {
-				configFile = arg
-			}
-		}
+// parseStatusArgs parses /status [-d|--detailed] plus the config origin.
+func (m *Model) parseStatusArgs(parts []string) (configFile, profileName string, detailed bool, err error) {
+	pa, err := parseSlashArgs(argSpec{
+		command: "/status",
+		strs:    originFlags(),
+		bools:   map[string]string{"-d": "detailed", "--detailed": "detailed"},
+	}, parts)
+	if err != nil {
+		return "", "", false, err
 	}
-
-	return configFile, profileName, detailed
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.bools["detailed"], nil
 }
 
-func parseAnalyzeArgs(parts []string) (string, string, bool) {
-	configFile := "config.yaml"
-	profileName := ""
-	apply := false
-
-	for i := 1; i < len(parts); i++ {
-		arg := parts[i]
-		switch arg {
-		case "--apply", "-a":
-			apply = true
-		case "--profile":
-			if i+1 < len(parts) {
-				profileName = parts[i+1]
-				i++
-			}
-		default:
-			if strings.HasPrefix(arg, "@") {
-				configFile = arg[1:]
-			} else {
-				configFile = arg
-			}
-		}
+// parseAnalyzeArgs parses /analyze [--apply] plus the config origin.
+func (m *Model) parseAnalyzeArgs(parts []string) (configFile, profileName string, apply bool, err error) {
+	pa, err := parseSlashArgs(argSpec{
+		command: "/analyze",
+		strs:    originFlags(),
+		bools:   map[string]string{"-a": "apply", "--apply": "apply"},
+	}, parts)
+	if err != nil {
+		return "", "", false, err
 	}
-
-	return configFile, profileName, apply
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.bools["apply"], nil
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {

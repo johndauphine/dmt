@@ -16,6 +16,9 @@ import (
 // Migration commands
 
 func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool, exploreMode string) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -44,7 +47,7 @@ func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool,
 			cfg.Migration.ExploreMode = exploreMode
 		}
 
-		orch, err := orchestrator.New(cfg)
+		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 		if err != nil {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
 		}
@@ -120,6 +123,9 @@ func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool,
 }
 
 func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
 	return func() (result tea.Msg) {
 		// Recover from any panics in this function
 		defer func() {
@@ -144,7 +150,7 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
 		}
 
-		orch, err := orchestrator.New(cfg)
+		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 		if err != nil {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
 		}
@@ -219,6 +225,9 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 }
 
 func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -243,7 +252,7 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
 			}
-			orch, err := orchestrator.New(cfg)
+			orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
@@ -278,6 +287,9 @@ func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
 }
 
 func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -309,7 +321,7 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 			}
 
 			// Try full orchestrator first (with both source and target)
-			orch, err := orchestrator.New(cfg)
+			orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 			if err != nil {
 				// Full connection failed - try source-only mode for analyze
 				p.Send(OutputMsg(fmt.Sprintf("⚠️  Warning: %v\n", err)))
@@ -361,6 +373,9 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 }
 
 func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -379,7 +394,7 @@ func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.C
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
 			}
-			orch, err := orchestrator.New(cfg)
+			orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
@@ -404,6 +419,9 @@ func (m Model) runStatusCmd(configFile, profileName string, detailed bool) tea.C
 }
 
 func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -422,7 +440,7 @@ func (m Model) runHistoryCmd(configFile, profileName, runID string) tea.Cmd {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
 			}
-			orch, err := orchestrator.New(cfg)
+			orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 			if err != nil {
 				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
 				return
