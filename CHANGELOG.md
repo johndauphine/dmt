@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `/preflight` TUI command (alias `/health-check`) runs the same
+  connectivity, privilege, version, and encoding checks as
+  `dmt preflight`, with `--skip-preflight` and `--ai-review` for the
+  advisory AI readiness review (#440).
+
 - `/run` now accepts the CLI run command's flags: `--dry-run` (with the
   same human-readable plan preview, including delete reconciliation),
   `--ai-schema-advisor`, `--source-schema`, `--target-schema`,

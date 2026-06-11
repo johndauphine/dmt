@@ -319,6 +319,67 @@ func (m Model) runValidateCmd(configFile, profileName string) tea.Cmd {
 	}
 }
 
+// runPreflightCmd runs connectivity + driver preflight checks (#440)
+// with the CLI's timeouts: 30s for the checks, a further 90s for the
+// optional AI readiness review. Rendering is the shared CLI formatter;
+// exit-code classification is CLI-only.
+func (m Model) runPreflightCmd(configFile, profileName, skipPreflight string, aiReview bool) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
+	return func() tea.Msg {
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
+		}
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
+			origin := "config: " + configFile
+			if profileName != "" {
+				origin = "profile: " + profileName
+			}
+			p.Send(OutputMsg(fmt.Sprintf("Running preflight checks with %s\n", origin)))
+
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			if skipPreflight != "" {
+				cfg.Migration.SkipPreflight = []string{skipPreflight}
+			}
+			orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+			defer orch.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			result, err := orch.HealthCheck(ctx)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Preflight failed: %v\n", err)))
+				return
+			}
+			if aiReview {
+				reviewCtx, reviewCancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer reviewCancel()
+				result.AIPreflightReview = orch.ReviewPreflightWithAI(reviewCtx, result)
+			}
+			p.Send(BoxedOutputMsg(command.FormatHealthCheckResult(result)))
+		}()
+
+		return nil
+	}
+}
+
 func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
 	return func() tea.Msg {
 		origin := "config: " + configFile
