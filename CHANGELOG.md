@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `/init-secrets` TUI command (`--with-ai`, `--force`) and
+  `/cache clear` (`--ai-only`; requires `--confirm` and names the exact
+  cache file and scope first). `/setup` is documented as the richer
+  guided path and `/wizard` as the lightweight config editor, and TUI
+  wording now says "smartconfig analysis" for the deterministic
+  analyzer, reserving "AI" for provider-backed features (#443).
+
 - New `/ai config-review` TUI command (alias `/ai runbook`) generates
   the same advisory config patch recommendations and migration runbook
   as `dmt ai config-review`, with `--timeout` and free-text `--request`.

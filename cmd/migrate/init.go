@@ -7,8 +7,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/secrets"
 
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
@@ -48,56 +48,11 @@ func initConfig(c *cli.Context) error {
 
 // initSecrets creates a secrets file for API keys and encryption
 func initSecrets(c *cli.Context) error {
-	force := c.Bool("force")
-	withAI := c.Bool("with-ai")
-
-	// Ensure secrets directory exists
-	secretsDir, err := secrets.EnsureSecretsDir()
+	out, err := command.InitSecrets(c.Bool("force"), c.Bool("with-ai"))
 	if err != nil {
-		return fmt.Errorf("creating secrets directory: %w", err)
+		return err
 	}
-
-	secretsPath := secrets.GetSecretsPath()
-
-	// Check if file exists (unless --force)
-	if !force {
-		if _, err := os.Stat(secretsPath); err == nil {
-			return fmt.Errorf("secrets file %s already exists (use --force to overwrite)", secretsPath)
-		}
-	}
-
-	// Default template is AI-free; --with-ai seeds the AI provider
-	// section. AI is optional in dmt (since #167) — the deterministic
-	// type mapper, error diagnosis catalog, and DB tuning analyzer all
-	// run without it.
-	var template string
-	if withAI {
-		template = secrets.GenerateTemplateWithAI()
-	} else {
-		template = secrets.GenerateTemplate()
-	}
-
-	// Write with secure permissions
-	if err := os.WriteFile(secretsPath, []byte(template), 0600); err != nil {
-		return fmt.Errorf("writing secrets file: %w", err)
-	}
-
-	fmt.Printf("Secrets file created: %s\n", secretsPath)
-	fmt.Printf("Directory: %s (permissions: 0700)\n", secretsDir)
-	fmt.Println("\nNext steps:")
-	fmt.Println("1. Set encryption.master_key for profile encryption:")
-	fmt.Println("   Generate with: openssl rand -base64 32")
-	if withAI {
-		fmt.Println("2. Edit the file to add your AI provider API key (required for AI features to work; leave blank to skip a provider)")
-		fmt.Println("3. You're ready to run `dmt run --config config.yaml`")
-	} else {
-		fmt.Println("2. You're ready to run `dmt run --config config.yaml`")
-		fmt.Println("\nAI features are OPTIONAL. To opt in later, APPEND an ai: section to")
-		fmt.Println("the file manually — do NOT run --force --with-ai, which would overwrite")
-		fmt.Println("any master_key / slack webhook values you set above.")
-	}
-	fmt.Println("\nIMPORTANT: Keep this file secure and never commit it to version control!")
-
+	fmt.Print(out)
 	return nil
 }
 

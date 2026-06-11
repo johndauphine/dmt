@@ -441,7 +441,7 @@ func (s *State) Process(input string) string {
 			s.CurrentStep = StepDone
 		}
 
-	// Phase 8: AI Analysis
+	// Phase 8: Smartconfig Analysis
 	case StepRunAnalysis:
 		v := strings.ToLower(input)
 		if v == "" {

@@ -103,10 +103,10 @@ var Registry = []CommandSpec{
 	{Path: "ai", Status: TUISupported}, // /ai config-review | runbook
 	{Path: "init", Status: TUICLIOnly, Ref: "/wizard and /setup cover interactive init",
 		Flags: flags("output", "advanced", "force")},
-	{Path: "init-secrets", Status: TUIPlanned, Ref: "#443",
+	{Path: "init-secrets", Status: TUISupported, // /init-secrets
 		Flags: flags("force", "with-ai")},
 	{Path: "setup", Status: TUISupported, Flags: flags("output", "force")},
-	{Path: "cache", Status: TUIPlanned, Ref: "#443"},
+	{Path: "cache", Status: TUISupported}, // /cache clear
 }
 
 // Subcommands carries the second-level paths; same enforcement.
@@ -124,7 +124,7 @@ var Subcommands = []CommandSpec{
 	}},
 	{Path: "ai evals", Status: TUICLIOnly, Ref: "developer/eval harness, no operator workflow",
 		Flags: flags("live", "list", "scenario", "timeout", "output-file")},
-	{Path: "cache clear", Status: TUIPlanned, Ref: "#443", Flags: flags("ai-only")},
+	{Path: "cache clear", Status: TUISupported, Flags: flags("ai-only")}, // /cache clear --ai-only
 }
 
 // Lookup returns the spec for a command path, checking Registry then

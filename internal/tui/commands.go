@@ -37,8 +37,14 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 	case "/help":
 		help := `Available Commands:
-  /setup                Guided setup: secrets, config, test, AI analysis
-  /wizard               Launch the configuration wizard
+  /setup                Guided setup: secrets, config, connection test,
+                        optional smartconfig analysis (the richer path)
+  /wizard               Lightweight config editor (create or edit one
+                        config file; /setup covers secrets + testing too)
+  /init-secrets         Create ~/.secrets/dmt-config.yaml (--with-ai
+                        seeds the optional AI section, --force overwrites)
+  /cache clear          Clear the local type-mapping cache (--ai-only
+                        keeps deterministic entries; asks for --confirm)
   /run [config_file]    Start migration (default: config.yaml)
   /run --profile NAME   Start migration using a saved profile
   /run --dry-run        Preview the migration plan without executing
@@ -88,6 +94,12 @@ Note: You can use @/path/to/file for config files.`
 
 	case "/session":
 		return m.handleSessionCommand(parts)
+
+	case "/init-secrets":
+		return handleInitSecretsCommand(parts)
+
+	case "/cache":
+		return handleCacheCommand(parts)
 
 	case "/logs":
 		logFile := "session.log"
