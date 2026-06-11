@@ -50,3 +50,6 @@ vendor/
 
 # Antigravity CLI local state
 .antigravitycli/
+
+# Compiled binary from `go build ./cmd/migrate` (correct output is ./dmt via make build)
+/migrate
