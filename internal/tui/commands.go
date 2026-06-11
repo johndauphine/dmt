@@ -49,6 +49,11 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /resume --profile NAME Resume using a saved profile
   /resume flags         --force-resume (resume despite config changes),
                         --skip-preflight LIST|all
+  /preflight [config_file]
+                        Verify connectivity, privileges, version, and
+                        other readiness checks (alias: /health-check)
+  /preflight flags      --skip-preflight LIST|all, --ai-review (advisory
+                        AI readiness review)
   /validate             Validate migration
   /config [config_file] Show configuration details
   /analyze [--apply]     Analyze source database and suggest configuration (--apply writes config)
@@ -253,6 +258,13 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 			return errOutput(err)
 		}
 		return m.runResumeCmd(configFile, profileName, forceResume, skipPreflight)
+
+	case "/preflight", "/health-check":
+		configFile, profileName, skipPreflight, aiReview, err := m.parsePreflightArgs(cmd, parts)
+		if err != nil {
+			return errOutput(err)
+		}
+		return m.runPreflightCmd(configFile, profileName, skipPreflight, aiReview)
 
 	case "/validate":
 		configFile, profileName, err := m.parseOriginArgs("/validate", parts)

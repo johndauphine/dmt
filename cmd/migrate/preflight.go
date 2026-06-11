@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 	"github.com/johndauphine/dmt/internal/orchestrator"
@@ -78,95 +77,13 @@ func healthCheck(c *cli.Context) error {
 		return nil
 	}
 
-	// Human-readable output
-	fmt.Println("\nHealth Check Results:")
-	fmt.Printf("  Source (%s): %s (%dms)\n",
-		result.SourceDBType,
-		boolToStatus(result.SourceConnected),
-		result.SourceLatencyMs)
-	if result.SourceError != "" {
-		fmt.Printf("    Error: %s\n", result.SourceError)
-	}
-	if result.SourceConnected && result.SourceTableCount > 0 {
-		fmt.Printf("    Tables: %d\n", result.SourceTableCount)
-	}
-
-	fmt.Printf("  Target (%s): %s (%dms)\n",
-		result.TargetDBType,
-		boolToStatus(result.TargetConnected),
-		result.TargetLatencyMs)
-	if result.TargetError != "" {
-		fmt.Printf("    Error: %s\n", result.TargetError)
-	}
-
-	if len(result.PreFlightFindings) > 0 {
-		fmt.Println("\n  Preflight findings:")
-		for _, f := range result.PreFlightFindings {
-			fmt.Printf("    [%s] %s/%s: %s\n", f.Severity, f.Side, f.Check, f.Message)
-			if f.Remedy != "" {
-				fmt.Printf("      remedy: %s\n", f.Remedy)
-			}
-		}
-	}
-
-	printAIPreflightReview(result.AIPreflightReview)
-
-	fmt.Printf("\n  Overall: %s\n", boolToHealthy(result.Healthy))
+	// Human-readable output -- same renderer the TUI uses (#440).
+	fmt.Print(command.FormatHealthCheckResult(result))
 
 	if !result.Healthy {
 		return preflightExitError(result)
 	}
 	return nil
-}
-
-func printAIPreflightReview(review *aicopilot.PreflightReview) {
-	if review == nil {
-		return
-	}
-	fmt.Println("\n  AI readiness review:")
-	fmt.Printf("    Status: %s", review.Status)
-	if review.Readiness != "" {
-		fmt.Printf(" (readiness: %s)", strings.ToUpper(review.Readiness))
-	}
-	fmt.Println()
-	if review.Provider != "" {
-		fmt.Printf("    Provider: %s", review.Provider)
-		if review.Model != "" {
-			fmt.Printf(" / %s", review.Model)
-		}
-		fmt.Println()
-	}
-	if review.Summary != "" {
-		fmt.Printf("    Summary: %s\n", review.Summary)
-	}
-	if review.Error != "" {
-		fmt.Printf("    Error: %s\n", review.Error)
-	}
-	if len(review.DeterministicBlockers) > 0 {
-		fmt.Println("    Deterministic blockers:")
-		for _, blocker := range review.DeterministicBlockers {
-			fmt.Printf("      - %s\n", blocker)
-		}
-	}
-	if len(review.Findings) > 0 {
-		fmt.Println("    AI advisory findings:")
-		for _, f := range review.Findings {
-			affected := f.Affected
-			if affected == "" {
-				affected = f.Category
-			}
-			fmt.Printf("      - [%s] %s: %s\n", f.Severity, affected, f.Rationale)
-			if f.NextAction != "" {
-				fmt.Printf("        next: %s\n", f.NextAction)
-			}
-		}
-	}
-	if len(review.Notes) > 0 {
-		fmt.Println("    Notes:")
-		for _, note := range review.Notes {
-			fmt.Printf("      - %s\n", note)
-		}
-	}
 }
 
 // preflightExitError classifies a failed preflight result into an exit code:
@@ -188,17 +105,4 @@ func preflightExitError(result *orchestrator.HealthCheckResult) error {
 		return exitcodes.NewExitError(fmt.Errorf("preflight failed: %d blocking finding(s)", errorCount), exitcodes.ConfigError)
 	}
 	return exitcodes.NewExitError(fmt.Errorf("preflight failed"), exitcodes.ConnectionError)
-}
-func boolToStatus(connected bool) string {
-	if connected {
-		return "OK"
-	}
-	return "FAILED"
-}
-
-func boolToHealthy(healthy bool) string {
-	if healthy {
-		return "HEALTHY"
-	}
-	return "UNHEALTHY"
 }

@@ -89,6 +89,23 @@ func (m *Model) parseResumeArgs(parts []string) (configFile, profileName string,
 	return configFile, profileName, pa.bools["force-resume"], pa.strs["skip-preflight"], nil
 }
 
+// parsePreflightArgs parses /preflight (alias /health-check) flags plus
+// the config origin (#440).
+func (m *Model) parsePreflightArgs(command string, parts []string) (configFile, profileName, skipPreflight string, aiReview bool, err error) {
+	strs := originFlags()
+	strs["--skip-preflight"] = "skip-preflight"
+	pa, err := parseSlashArgs(argSpec{
+		command: command,
+		strs:    strs,
+		bools:   map[string]string{"--ai-review": "ai-review"},
+	}, parts)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.strs["skip-preflight"], pa.bools["ai-review"], nil
+}
+
 // parseHistoryArgs parses /history [--run ID] plus the config origin.
 func (m *Model) parseHistoryArgs(parts []string) (configFile, profileName, runID string, err error) {
 	strs := originFlags()

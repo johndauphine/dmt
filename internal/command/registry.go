@@ -91,7 +91,7 @@ var Registry = []CommandSpec{
 		Flags: flags("run", "ai-triage", "timeout", "json")},
 	{Path: "history", Status: TUISupported, Flags: flags("run")},
 	{Path: "profile", Status: TUISupported},
-	{Path: "preflight", Status: TUIPlanned, Ref: "#440",
+	{Path: "preflight", Status: TUISupported, // /preflight, /health-check
 		Flags: flags("skip-preflight", "ai-review")},
 	{Path: "analyze", Status: TUISupported, Flags: []FlagSpec{
 		{Name: "apply"},
