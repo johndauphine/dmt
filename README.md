@@ -748,26 +748,28 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 
 ### Download pre-built binaries
 
-Download from [GitHub Releases](https://github.com/johndauphine/dmt/releases/latest):
+Download from [GitHub Releases](https://github.com/johndauphine/dmt/releases/latest).
+Releases ship raw binaries per platform plus a `checksums.txt`:
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-linux-amd64.tar.gz
-tar -xzf dmt-v3.53.0-linux-amd64.tar.gz
-chmod +x dmt-linux-amd64
-./dmt-linux-amd64 --version
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-linux-amd64
+chmod +x dmt-v5.3.0-linux-amd64 && ./dmt-v5.3.0-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-darwin-arm64.tar.gz
-tar -xzf dmt-v3.53.0-darwin-arm64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-darwin-arm64
+chmod +x dmt-v5.3.0-darwin-arm64 && ./dmt-v5.3.0-darwin-arm64 --version
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-darwin-amd64.tar.gz
-tar -xzf dmt-v3.53.0-darwin-amd64.tar.gz
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-darwin-amd64
+chmod +x dmt-v5.3.0-darwin-amd64
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v3.53.0/dmt-v3.53.0-windows-amd64.tar.gz -OutFile dmt.tar.gz
-tar -xzf dmt.tar.gz
+Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-windows-amd64.exe -OutFile dmt.exe
+
+# Verify a download (any platform)
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/checksums.txt
+shasum -a 256 -c --ignore-missing checksums.txt
 ```
 
 ### Build from source
