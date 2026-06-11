@@ -115,6 +115,24 @@ func (c *Catalog) Validate() error {
 	require(strings.Contains(c.Queries.RowCount, "%s"), "queries.row_count must contain the %s table placeholder")
 	require(c.Queries.DateColumn != "", "queries.date_column is required")
 	require(len(c.DateTypes) > 0, "date_types is required")
+
+	require(c.Connection.Backend != "", "connection.backend is required")
+	if c.Connection.Backend != "" {
+		if _, ok := knownBackends[c.Connection.Backend]; !ok {
+			errs = append(errs, fmt.Sprintf("connection.backend %q is not a known backend", c.Connection.Backend))
+		}
+	}
+	in := c.Introspection
+	require(in.ListTables != "", "introspection.list_tables is required")
+	require(in.DescribeTable != "", "introspection.describe_table is required")
+	require(in.IndexList != "", "introspection.index_list is required")
+	require(in.IndexColumns != "", "introspection.index_columns is required")
+	require(in.ForeignKeys != "", "introspection.foreign_keys is required")
+	if in.IdentityStrategy != "" {
+		if _, ok := identityStrategies[in.IdentityStrategy]; !ok {
+			errs = append(errs, fmt.Sprintf("introspection.identity_strategy %q is not a known strategy", in.IdentityStrategy))
+		}
+	}
 	require(c.ValueConverters == "" || c.ValueConverters == "default",
 		"value_converters: only the \"default\" strategy exists yet")
 

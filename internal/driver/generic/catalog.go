@@ -31,8 +31,9 @@ type Catalog struct {
 	Placeholder string         `yaml:"placeholder"` // "?", "$%d", "@p%d", ":%d"
 	TableHints  TableHintsSpec `yaml:"table_hints"`
 
-	Pagination PaginationSpec `yaml:"pagination"`
-	Queries    QueriesSpec    `yaml:"queries"`
+	Pagination    PaginationSpec    `yaml:"pagination"`
+	Queries       QueriesSpec       `yaml:"queries"`
+	Introspection IntrospectionSpec `yaml:"introspection"`
 
 	// DateTypes lists the engine's date/timestamp type names accepted
 	// for incremental sync columns.
@@ -55,6 +56,10 @@ type ConnectionSpec struct {
 	URLTemplate string `yaml:"url_template"`
 	DSNStrategy string `yaml:"dsn_strategy"`
 	DefaultPort int    `yaml:"default_port"`
+	// Backend is the database/sql driver name to open ("sqlite",
+	// "pgx", "sqlserver", "mysql"). The generic package blank-imports
+	// each supported backend in backends.go.
+	Backend string `yaml:"backend"`
 }
 
 // DefaultsSpec mirrors driver.DriverDefaults.
@@ -150,6 +155,40 @@ type QueriesSpec struct {
 	RowCount      string `yaml:"row_count"`
 	RowCountStats string `yaml:"row_count_stats"`
 	DateColumn    string `yaml:"date_column"`
+}
+
+// IntrospectionSpec carries the schema-extraction queries. Each query
+// must SELECT the canonical column shape documented on its field —
+// the generic Reader's row mapping is fixed; the catalog adapts the
+// engine's catalog tables to it. {?} placeholders are positional.
+type IntrospectionSpec struct {
+	// ListTables: no params → rows of (table_name).
+	ListTables string `yaml:"list_tables"`
+	// DescribeTable: param (table) → rows of (ordinal, name, decl_type,
+	// max_length, precision, scale, is_nullable 0|1, default_value,
+	// pk_ordinal 0=not in PK). Engines whose catalog can't compute
+	// length/precision/scale in SQL return NULLs and set
+	// ParseTypeParams.
+	DescribeTable string `yaml:"describe_table"`
+	// ParseTypeParams applies the declared-type parser ("VARCHAR(255)"
+	// → varchar/255, "NUMERIC(10,2)" → numeric/10/2) to fill
+	// max_length/precision/scale from decl_type.
+	ParseTypeParams bool `yaml:"parse_type_params"`
+	// IdentityStrategy names the Go routine that flags identity /
+	// auto-increment columns (imperative per engine). Empty = none.
+	IdentityStrategy string `yaml:"identity_strategy"`
+	// IndexList: param (table) → rows of (index_name, is_unique 0|1),
+	// excluding PK-backing indexes.
+	IndexList string `yaml:"index_list"`
+	// IndexColumns: param (index_name) → ordered rows of (column_name).
+	IndexColumns string `yaml:"index_columns"`
+	// ForeignKeys: param (table) → ordered rows of (fk_id, seq,
+	// ref_table, from_column, to_column, on_update, on_delete).
+	ForeignKeys string `yaml:"foreign_keys"`
+	// CheckConstraints: param (table) → rows of (name, expression).
+	// Empty means the engine can't surface CHECKs (sqlite: inline-only)
+	// and LoadCheckConstraints is a documented no-op.
+	CheckConstraints string `yaml:"check_constraints"`
 }
 
 // AISpec carries the prompt-augmentation literals.
