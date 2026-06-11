@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -48,6 +50,23 @@ var sessionValidators = map[string]func(value string) error{
 	},
 	"audit-tamper-evident": validateBoolValue,
 	"no-audit":             validateBoolValue,
+	"metrics-addr": func(value string) error {
+		if _, _, err := net.SplitHostPort(value); err != nil {
+			return fmt.Errorf("invalid metrics address %q (host:port or :port, e.g. :9090)", value)
+		}
+		return nil
+	},
+	"otel-endpoint": func(value string) error {
+		// Exactly the shape check SetupTracer applies at run start, so
+		// a bad endpoint fails here instead of silently disabling
+		// tracing. Note a bare "host:port" parses with an empty Host —
+		// the scheme is required, matching the runtime check.
+		u, err := url.Parse(value)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("invalid OTLP endpoint %q (use a URL like http://host:4318)", value)
+		}
+		return nil
+	},
 }
 
 func validateBoolValue(value string) error {

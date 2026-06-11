@@ -24,6 +24,15 @@ func TestSessionKeyValidation(t *testing.T) {
 	if out := runCmd(t, m.handleSessionCommand([]string{"/session", "metrics-addr", ":9090"})); !strings.Contains(out, "metrics-addr = :9090") {
 		t.Fatalf("metrics-addr output: %q", out)
 	}
+	if out := runCmd(t, m.handleSessionCommand([]string{"/session", "metrics-addr", "localhost"})); !strings.Contains(out, "invalid metrics address") {
+		t.Fatalf("bad metrics-addr output: %q", out)
+	}
+	if out := runCmd(t, m.handleSessionCommand([]string{"/session", "otel-endpoint", "localhost:4318"})); !strings.Contains(out, "invalid OTLP endpoint") {
+		t.Fatalf("schemeless otel-endpoint must fail like SetupTracer: %q", out)
+	}
+	if out := runCmd(t, m.handleSessionCommand([]string{"/session", "otel-endpoint", "http://localhost:4318"})); !strings.Contains(out, "otel-endpoint = http://localhost:4318") {
+		t.Fatalf("otel-endpoint output: %q", out)
+	}
 }
 
 // #445: only keys the operator actually set override the loaded config,
