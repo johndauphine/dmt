@@ -5,6 +5,7 @@ dmt-*
 
 # Config with secrets
 *.yaml
+!internal/driver/generic/catalogs/*.yaml
 *.yml
 !examples/*.yaml
 !examples/*.yml

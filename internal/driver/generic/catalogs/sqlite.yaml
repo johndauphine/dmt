@@ -1,0 +1,92 @@
+# SQLite catalog (#191 phase 1). The conversion target: every value
+# here mirrors the hand-written internal/driver/sqlite package, and the
+# differential test in dialect_differential_test.go proves the rendered
+# output identical method-by-method. SQLite is the permanent proof
+# fixture for the generic engine.
+name: sqlite
+aliases: [sqlite3, sqlitedb]
+
+connection:
+  dsn_strategy: sqlite_file      # imperative DSN: file/:memory:/pragmas
+
+defaults:
+  write_ahead_writers: 1         # file-based, single-writer constraint
+  scale_writers_with_cores: false
+
+capabilities:
+  upserter: true                 # INSERT ... ON CONFLICT
+  sequence_resetter: true        # sqlite_sequence update
+  constraint_writer: false       # FK/CHECK are inline-only (#460)
+  incremental_date_reader: true
+
+quoting:
+  identifier_format: '"%s"'
+  escaped_char: '"'
+  schema_ignored: true           # no schema concept; implicit "main"
+
+placeholder: "?"
+
+table_hints:
+  strict: ""
+  relaxed: ""
+
+pagination:
+  keyset:
+    query: |
+      SELECT {columns} FROM {table}
+      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      ORDER BY {pk}
+      LIMIT {?}
+    max_pk_clause: " AND {pk} <= {?}"
+    date_clause: " AND {date_column} > {?}"
+    args:
+      no_max: [last_pk, limit]
+      no_max_date: [last_pk, date_from, limit]
+      with_max: [last_pk, max_pk, limit]
+      with_max_date: [last_pk, max_pk, date_from, limit]
+
+  row_number:
+    # SQLite 3.25+ window functions; the date filter lives inside the
+    # subquery so __rn numbering reflects the filtered set.
+    query: |
+      SELECT {outer_columns} FROM (
+        SELECT {columns}, ROW_NUMBER() OVER (ORDER BY {order_by}) as __rn
+        FROM {table}{where_date}
+      )
+      WHERE __rn > {?} AND __rn <= {?}
+      ORDER BY __rn
+    date_clause: " WHERE {date_column} > {?}"
+    args:
+      no_date: [row_start, row_end]
+      date: [date_from, row_start, row_end]
+
+queries:
+  # Always a single partition: no parallelism benefit from splitting a
+  # single-file, single-writer database.
+  partition_boundaries: "SELECT 1 AS partition_id, MIN({pk}), MAX({pk}), COUNT(*) FROM {table}"
+  # No stats catalog comparable to information_schema — always COUNT(*).
+  row_count: "SELECT COUNT(*) FROM %s"
+  date_column: "SELECT type FROM pragma_table_info(?) WHERE name = ?"
+
+date_types: [datetime, timestamp, date, text]
+
+value_converters: default
+
+ai:
+  prompt_augmentation: |
+
+    SQLite-specific requirements:
+    - Use type affinity: INTEGER, REAL, TEXT, BLOB, NUMERIC, BOOLEAN, DATE, DATETIME.
+    - Auto-increment columns must be declared as "INTEGER PRIMARY KEY AUTOINCREMENT" inline.
+    - SQLite has no schema concept distinct from attached databases; do not qualify with schema.
+    - Foreign keys are only enforced when PRAGMA foreign_keys = ON (dmt sets this).
+    - ALTER TABLE in SQLite is limited; FK and CHECK constraints must be declared inline.
+  drop_table_prompt_augmentation: |
+
+    SQLite-specific requirements:
+    - Use DROP TABLE IF EXISTS to handle non-existent tables idempotently.
+    - SQLite does not support CASCADE for DROP TABLE; foreign-key enforcement
+      must be temporarily disabled if dependent tables exist:
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE IF EXISTS "<table>";
+        PRAGMA foreign_keys = ON;
