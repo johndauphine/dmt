@@ -41,8 +41,14 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /wizard               Launch the configuration wizard
   /run [config_file]    Start migration (default: config.yaml)
   /run --profile NAME   Start migration using a saved profile
+  /run --dry-run        Preview the migration plan without executing
+                        (add --ai-schema-advisor for advisory AI schema review)
+  /run flags            --source-schema NAME, --target-schema NAME,
+                        --workers N, --skip-preflight LIST|all
   /resume [config_file] Resume an interrupted migration
   /resume --profile NAME Resume using a saved profile
+  /resume flags         --force-resume (resume despite config changes),
+                        --skip-preflight LIST|all
   /validate             Validate migration
   /config [config_file] Show configuration details
   /analyze [--apply]     Analyze source database and suggest configuration (--apply writes config)
@@ -221,15 +227,19 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 				return OutputMsg("A migration is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
-		configFile, profileName, err := m.parseOriginArgs("/run", parts)
+		configFile, profileName, overrides, err := m.parseRunArgs(parts)
 		if err != nil {
 			return errOutput(err)
 		}
 		// Consume the one-shot Explore arm (#182): subsequent /run calls
-		// don't re-trigger it unless the user re-arms.
-		exploreOnce := m.exploreArmed
-		m.exploreArmed = false
-		return m.runMigrationCmd(configFile, profileName, exploreOnce, m.exploreMode)
+		// don't re-trigger it unless the user re-arms. A dry-run preview
+		// doesn't consume it — nothing actually ran.
+		if !overrides.dryRun {
+			overrides.exploreOnce = m.exploreArmed
+			m.exploreArmed = false
+		}
+		overrides.exploreMode = m.exploreMode
+		return m.runMigrationCmd(configFile, profileName, overrides)
 
 	case "/resume":
 		// Block if migration already running
@@ -238,11 +248,11 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 				return OutputMsg("A migration is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
-		configFile, profileName, err := m.parseOriginArgs("/resume", parts)
+		configFile, profileName, forceResume, skipPreflight, err := m.parseResumeArgs(parts)
 		if err != nil {
 			return errOutput(err)
 		}
-		return m.runResumeCmd(configFile, profileName)
+		return m.runResumeCmd(configFile, profileName, forceResume, skipPreflight)
 
 	case "/validate":
 		configFile, profileName, err := m.parseOriginArgs("/validate", parts)

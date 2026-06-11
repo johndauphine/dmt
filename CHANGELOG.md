@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `/run` now accepts the CLI run command's flags: `--dry-run` (with the
+  same human-readable plan preview, including delete reconciliation),
+  `--ai-schema-advisor`, `--source-schema`, `--target-schema`,
+  `--workers`, and `--skip-preflight`. `/resume` gains `--force-resume`
+  and `--skip-preflight` (#439).
+
+### Added
+
 - TUI slash commands now share one argument parser: `@config` files,
   positionals, `--flag value`/`--flag=value`, and consistent errors for
   unknown flags and missing values across every command. New `/session`

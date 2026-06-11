@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 	"github.com/johndauphine/dmt/internal/progress"
 
@@ -100,8 +101,8 @@ func runMigration(c *cli.Context) error {
 			return nil
 		}
 
-		// Human-readable output
-		printDryRunResult(result)
+		// Human-readable output — same renderer the TUI uses (#439).
+		fmt.Print(command.FormatDryRunResult(result))
 		return nil
 	}
 

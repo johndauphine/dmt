@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
@@ -15,7 +16,7 @@ import (
 
 // Migration commands
 
-func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool, exploreMode string) tea.Cmd {
+func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) tea.Cmd {
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
 	stateFile := m.sessionGet("state-file")
@@ -36,20 +37,60 @@ func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool,
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
 		}
 
+		// Apply flag overrides (#439) with the CLI's semantics: only an
+		// explicitly given flag replaces the loaded config value.
+		if ov.sourceSchema != "" {
+			cfg.Source.Schema = ov.sourceSchema
+		}
+		if ov.targetSchema != "" {
+			cfg.Target.Schema = ov.targetSchema
+		}
+		if ov.workers > 0 {
+			cfg.Migration.Workers = ov.workers
+		}
+		if ov.skipPreflight != "" {
+			cfg.Migration.SkipPreflight = []string{ov.skipPreflight}
+		}
+
 		// Apply /explore session state (#182). Arm overrides cfg.Migration.Explore
 		// for THIS run only; mode overrides cfg.Migration.ExploreMode for as long
 		// as it's set in the session. Empty mode leaves the loaded value alone so
 		// per-config / secrets-file values still take effect.
-		if exploreOnce {
+		if ov.exploreOnce {
 			cfg.Migration.Explore = true
 		}
-		if exploreMode != "" {
-			cfg.Migration.ExploreMode = exploreMode
+		if ov.exploreMode != "" {
+			cfg.Migration.ExploreMode = ov.exploreMode
 		}
 
-		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
+		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
+			StateFile:             stateFile,
+			EnableAISchemaAdvisor: ov.aiSchemaAdvisor,
+		})
 		if err != nil {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
+		}
+
+		// Dry-run preview (#439): same plan renderer as the CLI, no data
+		// movement, and no migrationStartedMsg so the UI never enters the
+		// "running" state.
+		if ov.dryRun {
+			p.Send(OutputMsg(fmt.Sprintf("Previewing migration with %s (dry run)\n", label)))
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+					}
+				}()
+				defer orch.Close()
+				result, err := orch.DryRun(context.Background())
+				if err != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Dry run failed: %v\n", err)))
+					return
+				}
+				p.Send(BoxedOutputMsg(command.FormatDryRunResult(result)))
+			}()
+			return nil
 		}
 
 		p.Send(OutputMsg(fmt.Sprintf("Starting migration with %s\n", label)))
@@ -122,7 +163,7 @@ func (m Model) runMigrationCmd(configFile, profileName string, exploreOnce bool,
 	}
 }
 
-func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
+func (m Model) runResumeCmd(configFile, profileName string, forceResume bool, skipPreflight string) tea.Cmd {
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
 	stateFile := m.sessionGet("state-file")
@@ -150,7 +191,15 @@ func (m Model) runResumeCmd(configFile, profileName string) tea.Cmd {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error loading config: %v", err)}
 		}
 
-		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
+		// Same flag plumbing as the CLI resume command (#439).
+		if skipPreflight != "" {
+			cfg.Migration.SkipPreflight = []string{skipPreflight}
+		}
+
+		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
+			StateFile:   stateFile,
+			ForceResume: forceResume,
+		})
 		if err != nil {
 			return MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error initializing: %v", err)}
 		}
