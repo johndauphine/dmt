@@ -398,8 +398,13 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	if in.ForceExplore || driftDetected {
 		applyGridExploration(&out, in, profile, len(rows))
 		// Advice runs after the selector so the reader-settings filter
-		// uses the FINAL output readers, not baseline (codex review).
-		pinnedAdvice(rows)
+		// uses the FINAL output readers, not baseline. Suppressed on
+		// drift: the tuner just declared this history stale, so means
+		// computed from it can't back an unpin recommendation (codex
+		// review on #461).
+		if !driftDetected {
+			pinnedAdvice(rows)
+		}
 		finalizeTierAndReasoning(&out, history, historyAvailable)
 		applyMemoryClamp(&out, in)
 		return out
