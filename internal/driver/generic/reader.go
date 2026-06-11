@@ -120,9 +120,13 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 	if len(t.PrimaryKey) == 0 {
 		return nil, fmt.Errorf("table %s has no primary key", t.Name)
 	}
-	q := strings.ReplaceAll(r.cat.Queries.PartitionBoundaries, "{n}", strconv.Itoa(numPartitions))
-	q = strings.ReplaceAll(q, "{pk}", r.dialect.QuoteIdentifier(t.PrimaryKey[0]))
-	q = strings.ReplaceAll(q, "{table}", r.dialect.QualifyTable(t.Schema, t.Name))
+	// Single-pass replacement: sequential ReplaceAll could re-expand a
+	// token appearing inside a quoted identifier (codex).
+	q := strings.NewReplacer(
+		"{n}", strconv.Itoa(numPartitions),
+		"{pk}", r.dialect.QuoteIdentifier(t.PrimaryKey[0]),
+		"{table}", r.dialect.QualifyTable(t.Schema, t.Name),
+	).Replace(r.cat.Queries.PartitionBoundaries)
 
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
