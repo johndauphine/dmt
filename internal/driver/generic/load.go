@@ -115,6 +115,8 @@ func (c *Catalog) Validate() error {
 	require(strings.Contains(c.Queries.RowCount, "%s"), "queries.row_count must contain the %s table placeholder")
 	require(c.Queries.DateColumn != "", "queries.date_column is required")
 	require(len(c.DateTypes) > 0, "date_types is required")
+	require(c.ValueConverters == "" || c.ValueConverters == "default",
+		"value_converters: only the \"default\" strategy exists yet")
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid catalog:\n  - %s", strings.Join(errs, "\n  - "))

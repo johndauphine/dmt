@@ -16,6 +16,9 @@ type Dialect struct {
 // NewDialect wraps a validated catalog.
 func NewDialect(cat *Catalog) *Dialect { return &Dialect{cat: cat} }
 
+// The generic dialect must satisfy the full driver contract.
+var _ driver.Dialect = (*Dialect)(nil)
+
 func (d *Dialect) DBType() string { return d.cat.Name }
 
 func (d *Dialect) QuoteIdentifier(name string) string {
@@ -172,6 +175,12 @@ func (d *Dialect) ValidDateTypes() map[string]bool {
 		m[t] = true
 	}
 	return m
+}
+
+// ValueConverters is strategy-selected (#477/#478); the only phase-1
+// strategy is the shared default normalization table.
+func (d *Dialect) ValueConverters(colTypes []string, targetDBType string) []func(any) any {
+	return driver.DefaultValueConverters(colTypes)
 }
 
 func (d *Dialect) AIPromptAugmentation() string { return d.cat.AI.PromptAugmentation }

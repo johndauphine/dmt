@@ -38,6 +38,11 @@ type Catalog struct {
 	// for incremental sync columns.
 	DateTypes []string `yaml:"date_types"`
 
+	// ValueConverters names the scan-value normalization strategy
+	// (audit: strategy-selected). Empty or "default" selects
+	// driver.DefaultValueConverters.
+	ValueConverters string `yaml:"value_converters"`
+
 	AI AISpec `yaml:"ai"`
 }
 

@@ -137,6 +137,25 @@ func TestSQLiteCatalogMatchesHandWrittenDialect(t *testing.T) {
 		}
 	})
 
+	t.Run("value converters", func(t *testing.T) {
+		colTypes := []string{"INTEGER", "TEXT", "bit", "datetime", "uniqueidentifier"}
+		samples := []any{int64(7), "x", []byte{1}, ts, []byte("0123456789abcdef")}
+		gotConvs := gen.ValueConverters(colTypes, "postgres")
+		wantConvs := ref.ValueConverters(colTypes, "postgres")
+		if len(gotConvs) != len(wantConvs) {
+			t.Fatalf("converter count: %d != %d", len(gotConvs), len(wantConvs))
+		}
+		// Functions can't be compared; their behavior on sample values can.
+		for i := range gotConvs {
+			for _, v := range append(samples, nil) {
+				got, want := applyConv(gotConvs[i], v), applyConv(wantConvs[i], v)
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("converter[%d](%T %v): %#v != %#v", i, v, v, got, want)
+				}
+			}
+		}
+	})
+
 	t.Run("ai augmentation", func(t *testing.T) {
 		// Compare trimmed: YAML block scalars and Go raw strings differ
 		// in leading/trailing newline shape; the prompt content is what
@@ -152,6 +171,13 @@ func TestSQLiteCatalogMatchesHandWrittenDialect(t *testing.T) {
 
 func normalizeSQL(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+func applyConv(conv func(any) any, v any) any {
+	if conv == nil {
+		return v
+	}
+	return conv(v)
 }
 
 // Catalog validation must reject the failure modes that would otherwise
