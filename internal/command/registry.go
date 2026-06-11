@@ -98,9 +98,9 @@ var Registry = []CommandSpec{
 		Flags: flags("skip-preflight", "ai-review")},
 	{Path: "analyze", Status: TUISupported, Flags: []FlagSpec{
 		{Name: "apply"},
-		{Name: "ai-explain", Status: TUIPlanned, Ref: "#442"},
+		{Name: "ai-explain", Status: TUISupported}, // /analyze --ai-explain
 	}},
-	{Path: "ai", Status: TUIPlanned, Ref: "#442"},
+	{Path: "ai", Status: TUISupported}, // /ai config-review | runbook
 	{Path: "init", Status: TUICLIOnly, Ref: "/wizard and /setup cover interactive init",
 		Flags: flags("output", "advanced", "force")},
 	{Path: "init-secrets", Status: TUIPlanned, Ref: "#443",
@@ -115,8 +115,13 @@ var Subcommands = []CommandSpec{
 	{Path: "profile list", Status: TUISupported},
 	{Path: "profile delete", Status: TUISupported, Flags: flags("name")},
 	{Path: "profile export", Status: TUISupported, Flags: flags("name", "out")},
-	{Path: "ai config-review", Status: TUIPlanned, Ref: "#442",
-		Flags: flags("request", "timeout", "state-file", "json", "output-json", "output-file")},
+	{Path: "ai config-review", Status: TUISupported, Flags: []FlagSpec{ // /ai config-review
+		{Name: "request"}, {Name: "timeout"},
+		{Name: "state-file"}, // /session state-file
+		{Name: "json", Status: TUICLIOnly, Ref: "TUI renders the review block; use the CLI for JSON"},
+		{Name: "output-json", Status: TUICLIOnly, Ref: "TUI renders the review block; use the CLI for JSON"},
+		{Name: "output-file", Status: TUICLIOnly, Ref: "TUI renders the review block; use the CLI for JSON"},
+	}},
 	{Path: "ai evals", Status: TUICLIOnly, Ref: "developer/eval harness, no operator workflow",
 		Flags: flags("live", "list", "scenario", "timeout", "output-file")},
 	{Path: "cache clear", Status: TUIPlanned, Ref: "#443", Flags: flags("ai-only")},

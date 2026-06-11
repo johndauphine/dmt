@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- New `/ai config-review` TUI command (alias `/ai runbook`) generates
+  the same advisory config patch recommendations and migration runbook
+  as `dmt ai config-review`, with `--timeout` and free-text `--request`.
+  `/analyze` gains `--ai-explain` for the advisory AI explanation of
+  deterministic smartconfig suggestions. `ai evals` stays CLI-only
+  (developer harness) (#442).
+
 - `/validate` now supports `--ai-triage` (advisory AI review of
   validation results with deterministic facts rendered first) and
   `--timeout`. New `/diagnose` TUI command mirrors `dmt diagnose`:

@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 
@@ -132,87 +132,7 @@ func flagExplicitlySet(c *cli.Context, name string) bool {
 	return set
 }
 
+// printAIConfigReview renders via the shared CLI/TUI formatter (#442).
 func printAIConfigReview(review *aicopilot.ConfigReview) {
-	if review == nil {
-		return
-	}
-	fmt.Println("\nAI config review and migration runbook:")
-	fmt.Printf("  Status: %s\n", review.Status)
-	if review.Provider != "" {
-		fmt.Printf("  Provider: %s", review.Provider)
-		if review.Model != "" {
-			fmt.Printf(" / %s", review.Model)
-		}
-		fmt.Println()
-	}
-	if review.Summary != "" {
-		fmt.Printf("  Summary: %s\n", review.Summary)
-	}
-	if review.RefusalReason != "" {
-		fmt.Printf("  Refusal: %s\n", review.RefusalReason)
-	}
-	if review.Error != "" {
-		fmt.Printf("  Error: %s\n", review.Error)
-	}
-
-	fmt.Println("\n  Patch recommendations (operator review required; no files were changed):")
-	if len(review.PatchRecommendations) == 0 {
-		fmt.Println("    - No config patch recommendations.")
-	}
-	for _, p := range review.PatchRecommendations {
-		fmt.Printf("    - %s %s", strings.ToUpper(p.Operation), p.Path)
-		if p.Value != nil {
-			fmt.Printf(" = %v", p.Value)
-		}
-		fmt.Println()
-		if p.Rationale != "" {
-			fmt.Printf("      rationale: %s\n", p.Rationale)
-		}
-		if p.Risk != "" {
-			fmt.Printf("      risk: %s\n", p.Risk)
-		}
-		if p.WhenToApply != "" {
-			fmt.Printf("      apply when: %s\n", p.WhenToApply)
-		}
-		if p.RequiresConfirmation {
-			fmt.Println("      confirmation: required")
-		}
-		for _, validationErr := range p.ValidationErrors {
-			fmt.Printf("      validation: %s\n", validationErr)
-		}
-	}
-
-	printConfigRunbook(review.Runbook)
-
-	if len(review.Notes) > 0 {
-		fmt.Println("\n  Notes:")
-		for _, note := range review.Notes {
-			fmt.Printf("    - %s\n", note)
-		}
-	}
-}
-
-func printConfigRunbook(runbook aicopilot.ConfigRunbook) {
-	if runbook.Title != "" {
-		fmt.Printf("\n  Runbook: %s\n", runbook.Title)
-	} else {
-		fmt.Println("\n  Runbook:")
-	}
-	if runbook.Summary != "" {
-		fmt.Printf("    %s\n", runbook.Summary)
-	}
-	printRunbookSteps("Prerequisites", runbook.BeforeRun)
-	printRunbookSteps("Run", runbook.Run)
-	printRunbookSteps("Validation", runbook.Validation)
-	printRunbookSteps("Rollback", runbook.Rollback)
-}
-
-func printRunbookSteps(label string, steps []string) {
-	if len(steps) == 0 {
-		return
-	}
-	fmt.Printf("    %s:\n", label)
-	for _, step := range steps {
-		fmt.Printf("      - %s\n", step)
-	}
+	fmt.Print(command.FormatConfigReview(review))
 }
