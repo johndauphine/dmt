@@ -49,6 +49,10 @@ type Catalog struct {
 	// driver.DefaultValueConverters.
 	ValueConverters string `yaml:"value_converters"`
 
+	// Preflight names the engine's preflight battery (imperative;
+	// strategy-selected). Empty selects the shared minimal battery.
+	Preflight string `yaml:"preflight_strategy"`
+
 	AI AISpec `yaml:"ai"`
 }
 

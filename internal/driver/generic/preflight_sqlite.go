@@ -1,4 +1,4 @@
-package sqlite
+package generic
 
 import (
 	"context"
@@ -10,10 +10,18 @@ import (
 	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
-// preFlight runs SQLite preflight checks. Returns findings in stable
-// order. Failures of individual probes surface as findings rather than
-// propagating.
-func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+// preflightFunc is the engine-specific preflight battery (imperative;
+// strategy-selected). Catalogs select via preflight_strategy.
+type preflightFunc func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding
+
+var preflightStrategies = map[string]preflightFunc{
+	"sqlite": sqlitePreFlight,
+}
+
+// sqlitePreFlight runs SQLite preflight checks (moved verbatim from
+// the hand-written driver). Returns findings in stable order. Failures
+// of individual probes surface as findings rather than propagating.
+func sqlitePreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	if db == nil {
 		return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
 			NilDatabaseRemedy: "internal error — please report",
@@ -21,16 +29,16 @@ func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []d
 	}
 
 	var findings []driver.PreFlightFinding
-	if f := checkConnection(ctx, db, req.Side); f != nil {
+	if f := sqliteCheckConnection(ctx, db, req.Side); f != nil {
 		findings = append(findings, *f)
 		return findings // can't run further checks without connectivity
 	}
-	findings = append(findings, checkIntegrity(ctx, db, req.Side)...)
-	findings = append(findings, checkBackupAck(ctx, db, req)...)
+	findings = append(findings, sqliteCheckIntegrity(ctx, db, req.Side)...)
+	findings = append(findings, sqliteCheckBackupAck(ctx, db, req)...)
 	return findings
 }
 
-func checkConnection(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
+func sqliteCheckConnection(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
 	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
 		Check:         "connection.alive",
 		MessagePrefix: "could not query database",
@@ -40,7 +48,7 @@ func checkConnection(ctx context.Context, db *sql.DB, side driver.PreFlightSide)
 
 // checkIntegrity runs PRAGMA integrity_check. It returns "ok" on a
 // healthy DB; any other value indicates corruption.
-func checkIntegrity(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
+func sqliteCheckIntegrity(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
 	rows, err := db.QueryContext(ctx, "PRAGMA integrity_check(1)")
 	if err != nil {
 		return []driver.PreFlightFinding{{
@@ -86,7 +94,7 @@ func checkIntegrity(ctx context.Context, db *sql.DB, side driver.PreFlightSide) 
 // checkBackupAck fires when target_mode is drop_recreate and the
 // operator hasn't acknowledged the backup (ConfirmBackup=false), and any
 // existing table holds rows.
-func checkBackupAck(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func sqliteCheckBackupAck(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
