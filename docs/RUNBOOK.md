@@ -119,6 +119,10 @@ add an advisory readiness summary without starting a transfer:
 dmt preflight --config production.yaml --ai-review
 ```
 
+From the interactive TUI, the equivalent is
+`/preflight @production.yaml --ai-review` (alias `/health-check`) —
+same checks, same renderer, no shell escape needed (#440).
+
 The AI review receives a redacted, structured payload: driver pair,
 schemas, migration policy knobs, connection/preflight status, and recent
 same-direction run summaries. It does not receive hosts, ports, database
@@ -423,6 +427,10 @@ If an AI provider is configured, dry-run can add advisory schema guidance:
 ```bash
 dmt run --config production.yaml --dry-run --ai-schema-advisor
 ```
+
+TUI equivalent: `/run @production.yaml --dry-run --ai-schema-advisor`
+renders the identical plan preview, including delete reconciliation and
+the advisory section (#439).
 
 The schema advisor receives a redacted drift payload and deterministic
 policy gates. It can explain risk and suggest a policy/runbook direction,
@@ -739,6 +747,13 @@ for an SRE:
 | `dmt analyze` | Inspects source schema and resource posture, recommends chunk size, worker count, date-column candidates, and tables to exclude. `--apply` writes suggestions to the analyzed config file's `migration:` section. Analyze is advisory and does not write `ai_tuning_history`; that history is reserved for completed migration measurements. | Once, when authoring a new config. Not part of the migration run itself. |
 | `dmt profile save / list / delete / export` | Stores or retrieves an encrypted config profile in the state DB. Requires `DMT_MASTER_KEY` (base64-encoded 32-byte key). | When you don't want plaintext config files on disk — Airflow deployments, shared workstations. |
 | `dmt init` / `dmt init-secrets` / `dmt setup` | One-time config bootstrap. Not run during production migrations. | Initial setup; never on the production critical path. |
+| `dmt diagnose` | Triages the latest (or `--run <id>`) failed run from checkpoint state: deterministic facts first, optional `--ai-triage` advisory analysis. Does not need live DB connections. | Post-failure: "why did Tuesday's run die, and what do I do next?" |
+
+Every workflow above has a TUI equivalent — launch `dmt` with no
+arguments and use `/run --dry-run`, `/preflight --ai-review`,
+`/validate --ai-triage`, `/diagnose --run <id>`, or
+`/ai config-review` (runbook + patch recommendations). The full
+mapping lives in [TUI_COMMANDS.md](TUI_COMMANDS.md).
 
 Two flags worth knowing across all commands:
 

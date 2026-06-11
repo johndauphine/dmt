@@ -37,8 +37,10 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 ```
 
 ### Features
-*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/wizard`, `/status`, `/analyze`).
-*   **Resume**: Use `/resume` to continue interrupted migrations.
+*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/preflight`, `/diagnose`, `/analyze`). The full CLI/TUI parity table lives in [docs/TUI_COMMANDS.md](docs/TUI_COMMANDS.md).
+*   **CLI parity**: `/run --dry-run` previews the plan, `/preflight --ai-review` checks readiness, `/validate --ai-triage` and `/diagnose` triage failures, `/ai config-review` generates patch recommendations and a runbook — the same renderers the CLI uses.
+*   **Session defaults**: `/session KEY VALUE` keeps sticky per-session defaults (config, profile, state-file, observability and audit settings) so they don't need repeating on every command.
+*   **Resume**: Use `/resume` to continue interrupted migrations (`--force-resume` after config changes).
 *   **Auto-Completion**:
     *   **Commands**: Tab-complete commands like `/validate` or `/history`.
     *   **Files**: Type `@` to browse and select configuration files from your current directory (e.g., `/run @conf<TAB>`).
@@ -704,7 +706,7 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 - **Configurable date columns** - tries multiple column names in order
 
 ### Interactive Mode (TUI)
-- **Slash commands** - `/run`, `/resume`, `/analyze`, `/wizard`, `/status`, `/history`, `/validate`, and more
+- **Slash commands** - `/run` (incl. `--dry-run`), `/resume`, `/preflight`, `/validate`, `/diagnose`, `/analyze`, `/ai config-review`, `/session`, `/init-secrets`, `/cache clear`, and more — see [docs/TUI_COMMANDS.md](docs/TUI_COMMANDS.md) for the CLI parity table
 - **Auto-completion** - tab-complete commands and `@` file browser for config selection
 - **Configuration wizard** - interactive setup for source, target, and tuning parameters
 - **Live monitoring** - real-time migration progress with log capture
