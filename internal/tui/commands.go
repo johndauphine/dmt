@@ -52,6 +52,8 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /profile list         List saved profiles
   /profile delete NAME  Delete a saved profile
   /profile export NAME  Export a profile to a config file
+  /session              Show sticky session defaults (config, profile, state-file, verbosity)
+  /session KEY VALUE    Set a session default; /session clear [KEY] unsets
   /verbosity [LEVEL]    Set log level (debug, info, warn, error)
   /explore              Show current exploration state
   /explore on|off       Arm/disarm next-run exploration probe
@@ -64,6 +66,9 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
 
 Note: You can use @/path/to/file for config files.`
 		return func() tea.Msg { return BoxedOutputMsg(help) }
+
+	case "/session":
+		return m.handleSessionCommand(parts)
 
 	case "/logs":
 		logFile := "session.log"
@@ -125,7 +130,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		m.setupState.SlackWebhook = loadedWebhook
 		m.setupState.SlackWebhookOriginal = loadedWebhook
 
-		configFile, profileName := parseConfigArgs(parts)
+		configFile, profileName, err := m.parseOriginArgs("/setup", parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		// Always honor the requested path so /setup @newfile.yaml saves
 		// to newfile.yaml even when it doesn't exist yet. The os.Stat
 		// branch below only decides whether to *load* it.
@@ -168,7 +176,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		m.textInput.Reset()
 		m.textInput.Placeholder = ""
 
-		configFile, profileName := parseConfigArgs(parts)
+		configFile, profileName, err := m.parseOriginArgs("/wizard", parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		m.wizardFile = configFile
 
 		var headerMsg string
@@ -210,7 +221,10 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 				return OutputMsg("A migration is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
-		configFile, profileName := parseConfigArgs(parts)
+		configFile, profileName, err := m.parseOriginArgs("/run", parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		// Consume the one-shot Explore arm (#182): subsequent /run calls
 		// don't re-trigger it unless the user re-arms.
 		exploreOnce := m.exploreArmed
@@ -224,30 +238,48 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 				return OutputMsg("A migration is already running. Wait for it to complete or press Ctrl+C to cancel.\n")
 			}
 		}
-		configFile, profileName := parseConfigArgs(parts)
+		configFile, profileName, err := m.parseOriginArgs("/resume", parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		return m.runResumeCmd(configFile, profileName)
 
 	case "/validate":
-		configFile, profileName := parseConfigArgs(parts)
+		configFile, profileName, err := m.parseOriginArgs("/validate", parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		return m.runValidateCmd(configFile, profileName)
 
 	case "/status":
-		configFile, profileName, detailed := parseStatusArgs(parts)
+		configFile, profileName, detailed, err := m.parseStatusArgs(parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		return m.runStatusCmd(configFile, profileName, detailed)
 
 	case "/history":
-		configFile, profileName, runID := parseHistoryArgs(parts)
+		configFile, profileName, runID, err := m.parseHistoryArgs(parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		return m.runHistoryCmd(configFile, profileName, runID)
 
 	case "/profile":
 		return m.handleProfileCommand(parts)
 
 	case "/analyze":
-		configFile, profileName, apply := parseAnalyzeArgs(parts)
+		configFile, profileName, apply, err := m.parseAnalyzeArgs(parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		return m.runAnalyzeCmd(configFile, profileName, apply)
 
 	case "/config":
-		configFile, profileName := parseConfigArgs(parts)
+		configFile, profileName, err := m.parseOriginArgs("/config", parts)
+		if err != nil {
+			return errOutput(err)
+		}
 		return m.runConfigCmd(configFile, profileName)
 
 	default:

@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- TUI slash commands now share one argument parser: `@config` files,
+  positionals, `--flag value`/`--flag=value`, and consistent errors for
+  unknown flags and missing values across every command. New `/session`
+  command holds sticky per-session defaults (config, profile, state-file,
+  verbosity) so they don't have to be repeated on each command (#444).
+
+### Added
+
 - Added measured override-cost advice: when a pinned `write_ahead_writers`
   value's history bin materially underperforms the best comparable bin,
   every run logs the measured means and delta next to the provenance line
