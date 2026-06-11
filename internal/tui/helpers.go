@@ -189,18 +189,60 @@ func (m *Model) parseStatusArgs(parts []string) (configFile, profileName string,
 	return configFile, profileName, pa.bools["detailed"], nil
 }
 
-// parseAnalyzeArgs parses /analyze [--apply] plus the config origin.
-func (m *Model) parseAnalyzeArgs(parts []string) (configFile, profileName string, apply bool, err error) {
+// parseAnalyzeArgs parses /analyze [--apply] [--ai-explain] plus the
+// config origin.
+func (m *Model) parseAnalyzeArgs(parts []string) (configFile, profileName string, apply, aiExplain bool, err error) {
 	pa, err := parseSlashArgs(argSpec{
 		command: "/analyze",
 		strs:    originFlags(),
-		bools:   map[string]string{"-a": "apply", "--apply": "apply"},
+		bools: map[string]string{
+			"-a": "apply", "--apply": "apply",
+			"--ai-explain": "ai-explain",
+		},
 	}, parts)
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, false, err
 	}
 	configFile, profileName = m.resolveOrigin(pa)
-	return configFile, profileName, pa.bools["apply"], nil
+	return configFile, profileName, pa.bools["apply"], pa.bools["ai-explain"], nil
+}
+
+// parseAIConfigReviewArgs parses /ai config-review (alias runbook)
+// flags plus the config origin (#442). --request is free text, so it
+// consumes the remainder of the line — put it last. parts[0] is the
+// synthetic "/ai config-review" command token.
+func parseAIConfigReviewArgs(m *Model, parts []string) (configFile, profileName, request string, timeout time.Duration, err error) {
+	command := parts[0]
+	for i, arg := range parts {
+		if i == 0 {
+			continue
+		}
+		if v, ok := strings.CutPrefix(arg, "--request="); ok {
+			request = strings.Join(append([]string{v}, parts[i+1:]...), " ")
+			parts = parts[:i]
+			break
+		}
+		if arg == "--request" {
+			if i+1 >= len(parts) {
+				return "", "", "", 0, fmt.Errorf("%s: flag --request requires a value (see /help)", command)
+			}
+			request = strings.Join(parts[i+1:], " ")
+			parts = parts[:i]
+			break
+		}
+	}
+	strs := originFlags()
+	strs["--timeout"] = "timeout"
+	pa, err := parseSlashArgs(argSpec{command: command, strs: strs}, parts)
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	timeout, err = parseTriageTimeout(command, pa.strs["timeout"])
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, request, timeout, nil
 }
 
 func parseProfileSaveArgs(parts []string) (string, string) {

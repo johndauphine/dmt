@@ -8,8 +8,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/johndauphine/dmt/internal/aicopilot"
 	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 )
@@ -475,7 +477,7 @@ func (m Model) runConfigCmd(configFile, profileName string) tea.Cmd {
 	}
 }
 
-func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd {
+func (m Model) runAnalyzeCmd(configFile, profileName string, apply, aiExplain bool) tea.Cmd {
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
 	stateFile := m.sessionGet("state-file")
@@ -547,6 +549,17 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 
 			p.Send(BoxedOutputMsg(suggestions.FormatYAML()))
 
+			// Advisory AI explanation of the deterministic suggestions
+			// (#442). Provider-unavailable states render inside the
+			// block; the deterministic output above already shipped.
+			if aiExplain {
+				reviewCtx, reviewCancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer reviewCancel()
+				if explanation := orch.ExplainPerformanceWithAI(reviewCtx, suggestions); explanation != nil {
+					p.Send(BoxedOutputMsg(command.FormatPerformanceExplanation(explanation)))
+				}
+			}
+
 			// Apply AI-tuned parameters to the analyzed config file if requested.
 			if apply {
 				if err := config.ApplyTuningToConfigFile(configFile, suggestions); err != nil {
@@ -555,6 +568,70 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply bool) tea.Cmd
 					p.Send(OutputMsg(fmt.Sprintf("\n✓ Applied AI-tuned parameters to %s\n", configFile)))
 				}
 			}
+		}()
+
+		return nil
+	}
+}
+
+// runAIConfigReviewCmd generates advisory config patch
+// recommendations and a migration runbook (#442) with the CLI's flow:
+// payload from the loaded config, provider from the global AI mapper,
+// explicit unavailable/error reviews instead of failures.
+func (m Model) runAIConfigReviewCmd(configFile, profileName, request string, timeout time.Duration) tea.Cmd {
+	// Capture session values synchronously (#444): the goroutine below
+	// must not read the live session map while the UI mutates it (codex).
+	stateFile := m.sessionGet("state-file")
+	return func() tea.Msg {
+		p := GetProgramRef()
+		if p == nil {
+			return OutputMsg("Internal error: no program reference\n")
+		}
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					p.Send(OutputMsg(fmt.Sprintf("Panic: %v\n", r)))
+				}
+			}()
+
+			origin := "config: " + configFile
+			if profileName != "" {
+				origin = "profile: " + profileName
+			}
+			p.Send(OutputMsg(fmt.Sprintf("Generating AI config review with %s\n", origin)))
+
+			cfg, err := loadConfigFromOrigin(configFile, profileName)
+			if err != nil {
+				p.Send(OutputMsg(fmt.Sprintf("Error: %v\n", err)))
+				return
+			}
+
+			payload := aicopilot.BuildConfigReviewPayload(cfg, aicopilot.ConfigReviewOptions{
+				OperatorRequest: request,
+				ConfigPath:      configFile,
+				ProfileName:     profileName,
+				StateFile:       stateFile,
+			})
+
+			var review *aicopilot.ConfigReview
+			client := driver.GetAIMapper()
+			if aicopilot.IsNilTextClient(client) {
+				review = aicopilot.UnavailableConfigReview("no AI provider configured in secrets", payload)
+			} else {
+				if timeout <= 0 {
+					timeout = 90 * time.Second
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				generated, err := aicopilot.GenerateConfigReview(ctx, client, payload)
+				if err != nil {
+					review = aicopilot.ErrorConfigReview(client.ProviderName(), client.Model(), err, payload)
+				} else {
+					review = generated
+				}
+			}
+			p.Send(BoxedOutputMsg(command.FormatConfigReview(review)))
 		}()
 
 		return nil

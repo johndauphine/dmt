@@ -59,7 +59,12 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /diagnose             Diagnose the latest failed run (--run ID for a
                         specific run, --ai-triage, --timeout D)
   /config [config_file] Show configuration details
-  /analyze [--apply]     Analyze source database and suggest configuration (--apply writes config)
+  /analyze [--apply]     Analyze source database and suggest configuration
+                        (--apply writes config, --ai-explain adds an
+                        advisory AI explanation)
+  /ai config-review     Advisory config patch recommendations + migration
+                        runbook (alias: /ai runbook); flags: --timeout D,
+                        --request TEXT (free text, put it last)
   /status [-d]          Show migration status (--detailed for task list)
   /history              Show migration history
   /profile save NAME    Save an encrypted profile
@@ -301,11 +306,14 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return m.handleProfileCommand(parts)
 
 	case "/analyze":
-		configFile, profileName, apply, err := m.parseAnalyzeArgs(parts)
+		configFile, profileName, apply, aiExplain, err := m.parseAnalyzeArgs(parts)
 		if err != nil {
 			return errOutput(err)
 		}
-		return m.runAnalyzeCmd(configFile, profileName, apply)
+		return m.runAnalyzeCmd(configFile, profileName, apply, aiExplain)
+
+	case "/ai":
+		return m.handleAICommand(parts)
 
 	case "/config":
 		configFile, profileName, err := m.parseOriginArgs("/config", parts)
@@ -316,6 +324,27 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 
 	default:
 		return func() tea.Msg { return OutputMsg("Unknown command: " + cmd + "\n") }
+	}
+}
+
+// handleAICommand dispatches /ai subcommands (#442). config-review and
+// its runbook alias generate advisory patch recommendations plus a
+// migration runbook; ai evals stays CLI-only (developer/eval harness,
+// see the parity registry).
+func (m *Model) handleAICommand(parts []string) tea.Cmd {
+	if len(parts) < 2 {
+		return errOutput(fmt.Errorf("/ai: usage: /ai config-review [@config|--profile NAME] [--timeout D] [--request TEXT]"))
+	}
+	switch parts[1] {
+	case "config-review", "runbook":
+		synthetic := append([]string{"/ai " + parts[1]}, parts[2:]...)
+		configFile, profileName, request, timeout, err := parseAIConfigReviewArgs(m, synthetic)
+		if err != nil {
+			return errOutput(err)
+		}
+		return m.runAIConfigReviewCmd(configFile, profileName, request, timeout)
+	default:
+		return errOutput(fmt.Errorf("/ai: unknown subcommand %q (try /ai config-review; ai evals is CLI-only)", parts[1]))
 	}
 }
 

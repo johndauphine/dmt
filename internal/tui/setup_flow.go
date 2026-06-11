@@ -51,7 +51,7 @@ func (m *Model) processSetupAutoSteps() tea.Cmd {
 			}
 			if m.setupState.RunAnalysis {
 				configPath := m.setupState.ConfigPath
-				return tea.Batch(wizardDone, m.runAnalyzeCmd(configPath, "", false))
+				return tea.Batch(wizardDone, m.runAnalyzeCmd(configPath, "", false, false))
 			}
 			return wizardDone
 		}
