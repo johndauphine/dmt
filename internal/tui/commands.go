@@ -54,7 +54,10 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
                         other readiness checks (alias: /health-check)
   /preflight flags      --skip-preflight LIST|all, --ai-review (advisory
                         AI readiness review)
-  /validate             Validate migration
+  /validate             Validate migration (--ai-triage for advisory AI
+                        review of failures, --timeout D e.g. 120s)
+  /diagnose             Diagnose the latest failed run (--run ID for a
+                        specific run, --ai-triage, --timeout D)
   /config [config_file] Show configuration details
   /analyze [--apply]     Analyze source database and suggest configuration (--apply writes config)
   /status [-d]          Show migration status (--detailed for task list)
@@ -267,11 +270,18 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		return m.runPreflightCmd(configFile, profileName, skipPreflight, aiReview)
 
 	case "/validate":
-		configFile, profileName, err := m.parseOriginArgs("/validate", parts)
+		configFile, profileName, aiTriage, timeout, err := m.parseValidateArgs(parts)
 		if err != nil {
 			return errOutput(err)
 		}
-		return m.runValidateCmd(configFile, profileName)
+		return m.runValidateCmd(configFile, profileName, aiTriage, timeout)
+
+	case "/diagnose":
+		configFile, profileName, runID, aiTriage, timeout, err := m.parseDiagnoseArgs(parts)
+		if err != nil {
+			return errOutput(err)
+		}
+		return m.runDiagnoseCmd(configFile, profileName, runID, aiTriage, timeout)
 
 	case "/status":
 		configFile, profileName, detailed, err := m.parseStatusArgs(parts)

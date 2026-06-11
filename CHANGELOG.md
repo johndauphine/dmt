@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `/validate` now supports `--ai-triage` (advisory AI review of
+  validation results with deterministic facts rendered first) and
+  `--timeout`. New `/diagnose` TUI command mirrors `dmt diagnose`:
+  triage the latest or a selected failed run with `--run`,
+  `--ai-triage`, and `--timeout` (#441).
+
 - New `/preflight` TUI command (alias `/health-check`) runs the same
   connectivity, privilege, version, and encoding checks as
   `dmt preflight`, with `--skip-preflight` and `--ai-review` for the

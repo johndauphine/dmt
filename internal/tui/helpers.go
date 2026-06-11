@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
@@ -104,6 +105,62 @@ func (m *Model) parsePreflightArgs(command string, parts []string) (configFile, 
 	}
 	configFile, profileName = m.resolveOrigin(pa)
 	return configFile, profileName, pa.strs["skip-preflight"], pa.bools["ai-review"], nil
+}
+
+// parseTriageTimeout converts a --timeout value (Go duration syntax,
+// e.g. "120s") with the CLI's <=0 → 90s default applied by callers.
+func parseTriageTimeout(command, value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid --timeout %q (use Go duration syntax, e.g. 90s)", command, value)
+	}
+	return d, nil
+}
+
+// parseValidateArgs parses /validate [--ai-triage] [--timeout D] plus
+// the config origin (#441).
+func (m *Model) parseValidateArgs(parts []string) (configFile, profileName string, aiTriage bool, timeout time.Duration, err error) {
+	strs := originFlags()
+	strs["--timeout"] = "timeout"
+	pa, err := parseSlashArgs(argSpec{
+		command: "/validate",
+		strs:    strs,
+		bools:   map[string]string{"--ai-triage": "ai-triage"},
+	}, parts)
+	if err != nil {
+		return "", "", false, 0, err
+	}
+	timeout, err = parseTriageTimeout("/validate", pa.strs["timeout"])
+	if err != nil {
+		return "", "", false, 0, err
+	}
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.bools["ai-triage"], timeout, nil
+}
+
+// parseDiagnoseArgs parses /diagnose [--run ID] [--ai-triage]
+// [--timeout D] plus the config origin (#441).
+func (m *Model) parseDiagnoseArgs(parts []string) (configFile, profileName, runID string, aiTriage bool, timeout time.Duration, err error) {
+	strs := originFlags()
+	strs["--run"] = "run"
+	strs["--timeout"] = "timeout"
+	pa, err := parseSlashArgs(argSpec{
+		command: "/diagnose",
+		strs:    strs,
+		bools:   map[string]string{"--ai-triage": "ai-triage"},
+	}, parts)
+	if err != nil {
+		return "", "", "", false, 0, err
+	}
+	timeout, err = parseTriageTimeout("/diagnose", pa.strs["timeout"])
+	if err != nil {
+		return "", "", "", false, 0, err
+	}
+	configFile, profileName = m.resolveOrigin(pa)
+	return configFile, profileName, pa.strs["run"], pa.bools["ai-triage"], timeout, nil
 }
 
 // parseHistoryArgs parses /history [--run ID] plus the config origin.
