@@ -133,6 +133,42 @@ func (c *Catalog) Validate() error {
 			errs = append(errs, fmt.Sprintf("introspection.identity_strategy %q is not a known strategy", in.IdentityStrategy))
 		}
 	}
+	require(in.ColumnExists != "", "introspection.column_exists is required")
+	require(in.TableExists != "", "introspection.table_exists is required")
+	require(in.HasPrimaryKey != "", "introspection.has_primary_key is required")
+
+	// Writer strategies: required, and capability declarations must
+	// match — a catalog claiming Upserter without an upsert strategy
+	// would pass conformance and fail mid-migration.
+	require(c.Bulk.Strategy != "", "bulk.strategy is required")
+	if c.Bulk.Strategy != "" {
+		if _, ok := bulkStrategies[c.Bulk.Strategy]; !ok {
+			errs = append(errs, fmt.Sprintf("bulk.strategy %q is not a known strategy", c.Bulk.Strategy))
+		}
+	}
+	if c.Bulk.RowConverter != "" {
+		if _, ok := rowConverters[c.Bulk.RowConverter]; !ok {
+			errs = append(errs, fmt.Sprintf("bulk.row_converter %q is not a known converter", c.Bulk.RowConverter))
+		}
+	}
+	require(c.Capabilities.Upserter == (c.Upsert.Strategy != ""),
+		"capabilities.upserter must match presence of upsert.strategy")
+	if c.Upsert.Strategy != "" {
+		if _, ok := upsertStrategies[c.Upsert.Strategy]; !ok {
+			errs = append(errs, fmt.Sprintf("upsert.strategy %q is not a known strategy", c.Upsert.Strategy))
+		}
+	}
+	require(c.Capabilities.SequenceResetter == (c.Sequence.Strategy != ""),
+		"capabilities.sequence_resetter must match presence of sequence.strategy")
+	if c.Sequence.Strategy != "" {
+		if _, ok := sequenceStrategies[c.Sequence.Strategy]; !ok {
+			errs = append(errs, fmt.Sprintf("sequence.strategy %q is not a known strategy", c.Sequence.Strategy))
+		}
+	}
+	require(len(c.DDL.DropTableStmts) > 0, "ddl.drop_table_stmts is required")
+	require(len(c.DDL.TruncateStmts) > 0, "ddl.truncate_stmts is required")
+	require(c.DDL.AddColumn != "", "ddl.add_column is required")
+	require(c.Context.VersionQuery != "", "context.version_query is required")
 	require(c.ValueConverters == "" || c.ValueConverters == "default",
 		"value_converters: only the \"default\" strategy exists yet")
 
