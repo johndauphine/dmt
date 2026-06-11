@@ -169,6 +169,11 @@ func (c *Catalog) Validate() error {
 	require(len(c.DDL.TruncateStmts) > 0, "ddl.truncate_stmts is required")
 	require(c.DDL.AddColumn != "", "ddl.add_column is required")
 	require(c.Context.VersionQuery != "", "context.version_query is required")
+	if c.Preflight != "" {
+		if _, ok := preflightStrategies[c.Preflight]; !ok {
+			errs = append(errs, fmt.Sprintf("preflight_strategy %q is not a known strategy", c.Preflight))
+		}
+	}
 	require(c.ValueConverters == "" || c.ValueConverters == "default",
 		"value_converters: only the \"default\" strategy exists yet")
 

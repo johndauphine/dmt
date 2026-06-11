@@ -14,11 +14,14 @@ import (
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
-func init() {
-	driver.Register(&Driver{})
-}
+// NOTE (#191 phase 1): this package no longer registers itself — the
+// catalog-driven generic engine registers "sqlite" from
+// internal/driver/generic/catalogs/sqlite.yaml. The hand-written
+// implementation remains as the differential-test oracle until the
+// benchmark-gated cleanup removes it.
 
 // Driver implements driver.Driver for SQLite.
 type Driver struct{}
@@ -61,9 +64,12 @@ func (d *Driver) ProbeTarget(ctx context.Context, db *sql.DB) driver.TargetProbe
 	return driver.TargetProbe{}
 }
 
-// PreFlight runs SQLite preflight checks.
+// PreFlight moved to the generic engine with the registration (#191):
+// the battery lives in internal/driver/generic/preflight_sqlite.go and
+// is selected by the catalog. The oracle keeps a minimal stub so the
+// type still satisfies driver.Driver for differential tests.
 func (d *Driver) PreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	return preFlight(ctx, db, req)
+	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{})
 }
 
 // Dialect returns the SQLite dialect.
