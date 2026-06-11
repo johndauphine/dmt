@@ -9,6 +9,7 @@ aliases: [sqlite3, sqlitedb]
 connection:
   backend: sqlite                # database/sql driver (modernc, pure Go)
   dsn_strategy: sqlite_file      # imperative DSN: file/:memory:/pragmas
+  single_writer: true            # file lock: one open write connection
 
 defaults:
   write_ahead_writers: 1         # file-based, single-writer constraint
@@ -99,6 +100,52 @@ introspection:
   # CHECKs are inline-only in CREATE TABLE and not surfaced — no query;
   # LoadCheckConstraints is a documented no-op (matches the hand-written
   # driver; cross-engine CHECK migration from sqlite is out of scope).
+  column_exists: "SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1"
+  table_exists: "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
+  has_primary_key: "SELECT 1 FROM pragma_table_info(?) WHERE pk > 0 LIMIT 1"
+
+ddl:
+  # No CREATE SCHEMA: a sqlite file IS the database.
+  create_schema: ""
+  # Toggle FK enforcement around the drop in case dependents exist.
+  drop_table_stmts:
+    - "PRAGMA foreign_keys = OFF"
+    - "DROP TABLE IF EXISTS {table}"
+    - "PRAGMA foreign_keys = ON"
+  # No TRUNCATE in sqlite; bare DELETE hits the truncate optimization.
+  truncate_stmts:
+    - "DELETE FROM {table}"
+  truncate_cleanup: "DELETE FROM sqlite_sequence WHERE name = ?"
+  add_column: "ALTER TABLE {table} ADD COLUMN {column} {type} NULL"
+  # PK is declared inline at CREATE TABLE; the phase is a no-op.
+  create_primary_key: ""
+  can_drop_not_null: false       # requires a table rebuild
+  can_alter_column_type: false   # requires a table rebuild
+
+bulk:
+  strategy: batched_insert
+  # SQLITE_MAX_VARIABLE_NUMBER on modernc (mainline >=3.32): one
+  # placeholder per cell, so rows-per-statement = this / columns.
+  max_bind_variables: 32766
+  row_converter: bool_to_int     # booleans stored as integers
+
+upsert:
+  strategy: insert_on_conflict   # INSERT ... ON CONFLICT DO UPDATE
+
+sequence:
+  strategy: sqlite_sequence      # lazy sqlite_sequence update/insert
+
+context:
+  version_query: "SELECT sqlite_version()"
+  version_prefix: "SQLite "
+  identifier_case: preserve
+  case_sensitive_identifiers: false
+  charset: UTF-8
+  encoding: UTF-8
+  max_identifier_length: 0       # no documented limit
+  varchar_semantics: char
+  bytes_per_char: 4
+  features: [WAL, FTS5, JSON1]
 
 date_types: [datetime, timestamp, date, text]
 

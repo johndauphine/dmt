@@ -1,0 +1,394 @@
+package generic
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/stats"
+)
+
+// Writer implements driver.Writer from a catalog: DDL comes from
+// catalog templates and the type-mapper engine, existence checks from
+// catalog queries, and the data paths from the named bulk/upsert/
+// sequence strategies. Optional capabilities (Upserter,
+// SequenceResetter) are exposed by wrapper types so the type-assertion
+// surface matches the catalog's capability declarations exactly.
+type Writer struct {
+	db               *sql.DB
+	config           *dbconfig.TargetConfig
+	maxConns         int
+	defaultBatchSize int
+	sourceType       string
+	cat              *Catalog
+	dialect          *Dialect
+
+	typeMapper         driver.TypeMapper
+	tableMapper        driver.TableTypeMapper
+	finalizationMapper driver.FinalizationDDLMapper
+	dbContext          *driver.DatabaseContext
+}
+
+// writerUpsertSeq is the {Upserter, SequenceResetter} capability combo
+// (sqlite's). Further combos are added as catalogs need them —
+// NewWriter rejects an undeclared combination loudly.
+type writerUpsertSeq struct{ *Writer }
+
+func (w *writerUpsertSeq) UpsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	return w.upsertBatch(ctx, opts)
+}
+
+func (w *writerUpsertSeq) ResetSequence(ctx context.Context, schema string, t *driver.Table) error {
+	return w.resetSequence(ctx, schema, t)
+}
+
+var (
+	_ driver.Writer           = (*Writer)(nil)
+	_ driver.Upserter         = (*writerUpsertSeq)(nil)
+	_ driver.SequenceResetter = (*writerUpsertSeq)(nil)
+)
+
+// NewWriter opens the catalog's backend as a write target.
+func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driver.WriterOptions) (driver.Writer, error) {
+	dialect := NewDialect(cat)
+	dsn := dialect.BuildDSN(cfg.Host, cfg.Port, cfg.Database, cfg.User, cfg.Password, cfg.DSNOptions())
+
+	db, err := sql.Open(knownBackends[cat.Connection.Backend], dsn)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, err)
+	}
+
+	if cat.Connection.SingleWriter {
+		// Single-writer engines (sqlite): serialize concurrent
+		// WriteBatch calls through the pool rather than hitting the
+		// file lock.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		maxConns = 1
+	} else {
+		db.SetMaxOpenConns(maxConns)
+		db.SetMaxIdleConns(maxConns)
+	}
+	db.SetConnMaxLifetime(30 * time.Minute)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, err)
+	}
+
+	if opts.TypeMapper == nil {
+		db.Close()
+		return nil, fmt.Errorf("TypeMapper is required")
+	}
+	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
+	if !ok {
+		db.Close()
+		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper")
+	}
+	driver.LogTypeMapperInit(opts.TypeMapper)
+	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
+
+	var version string
+	_ = db.QueryRow(cat.Context.VersionQuery).Scan(&version)
+	logging.Debug("Connected to %s target (catalog-driven): %s (%s)", cat.Name, cfg.Database, version)
+
+	w := &Writer{
+		db:               db,
+		config:           cfg,
+		maxConns:         maxConns,
+		defaultBatchSize: opts.BatchSize,
+		sourceType:       opts.SourceType,
+		cat:              cat,
+		dialect:          dialect,
+
+		typeMapper:         opts.TypeMapper,
+		tableMapper:        tableMapper,
+		finalizationMapper: finalizationMapper,
+	}
+	w.dbContext = &driver.DatabaseContext{
+		Version:                  cat.Context.VersionPrefix + version,
+		DatabaseName:             cfg.Database,
+		IdentifierCase:           cat.Context.IdentifierCase,
+		CaseSensitiveIdentifiers: cat.Context.CaseSensitiveIdentifiers,
+		Charset:                  cat.Context.Charset,
+		Encoding:                 cat.Context.Encoding,
+		MaxIdentifierLength:      cat.Context.MaxIdentifierLength,
+		VarcharSemantics:         cat.Context.VarcharSemantics,
+		BytesPerChar:             cat.Context.BytesPerChar,
+		Features:                 cat.Context.Features,
+	}
+
+	caps := cat.Capabilities
+	switch {
+	case caps.Upserter && caps.SequenceResetter && !caps.ConstraintWriter:
+		return &writerUpsertSeq{w}, nil
+	case !caps.Upserter && !caps.SequenceResetter && !caps.ConstraintWriter:
+		return w, nil
+	default:
+		db.Close()
+		return nil, fmt.Errorf("catalog %q declares a writer capability combination with no wrapper yet (upserter=%v sequence_resetter=%v constraint_writer=%v) — add one in writer.go",
+			cat.Name, caps.Upserter, caps.SequenceResetter, caps.ConstraintWriter)
+	}
+}
+
+func (w *Writer) Close()                         { w.db.Close() }
+func (w *Writer) Ping(ctx context.Context) error { return w.db.PingContext(ctx) }
+func (w *Writer) DB() *sql.DB                    { return w.db }
+func (w *Writer) MaxConns() int                  { return w.maxConns }
+func (w *Writer) DBType() string                 { return w.cat.Name }
+
+func (w *Writer) PoolStats() stats.PoolStats {
+	dbStats := w.db.Stats()
+	return stats.PoolStats{
+		DBType:      w.cat.Name,
+		MaxConns:    dbStats.MaxOpenConnections,
+		ActiveConns: dbStats.InUse,
+		IdleConns:   dbStats.Idle,
+		WaitCount:   dbStats.WaitCount,
+		WaitTimeMs:  dbStats.WaitDuration.Milliseconds(),
+	}
+}
+
+// CreateSchema renders the catalog template, or is a no-op for engines
+// without schemas.
+func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
+	if w.cat.DDL.CreateSchema == "" {
+		return nil
+	}
+	stmt := strings.ReplaceAll(w.cat.DDL.CreateSchema, "{schema}", w.dialect.QuoteIdentifier(schema))
+	_, err := w.db.ExecContext(ctx, stmt)
+	return err
+}
+
+func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema string) error {
+	return w.CreateTableWithOptions(ctx, t, targetSchema, driver.TableOptions{})
+}
+
+func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, targetSchema string, opts driver.TableOptions) error {
+	if w.cat.Quoting.SchemaIgnored {
+		targetSchema = ""
+	}
+	req := driver.TableDDLRequest{
+		SourceDBType:  w.sourceType,
+		TargetDBType:  w.cat.Name,
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		SourceContext: opts.SourceContext,
+		TargetContext: w.dbContext,
+	}
+	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
+	if err != nil {
+		return fmt.Errorf("DDL generation failed for table %s: %w", t.FullName(), err)
+	}
+	logging.Debug("Generated DDL for %s:\n%s", t.FullName(), resp.CreateTableDDL)
+	if _, err := w.db.ExecContext(ctx, resp.CreateTableDDL); err != nil {
+		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, resp.CreateTableDDL)
+	}
+	return nil
+}
+
+// AddColumn adds a nullable column, idempotently.
+func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return errors.New("table is required")
+	}
+	if column == nil {
+		return errors.New("column is required")
+	}
+
+	exists, err := w.columnExists(ctx, t.Name, column.Name)
+	if err != nil {
+		return fmt.Errorf("checking column %s.%s: %w", t.Name, column.Name, err)
+	}
+	if exists {
+		return nil
+	}
+
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, w.cat.Name, *column)
+	if err != nil {
+		return err
+	}
+	ddl := strings.NewReplacer(
+		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
+		"{column}", w.dialect.QuoteIdentifier(column.Name),
+		"{type}", mappedType,
+	).Replace(w.cat.DDL.AddColumn)
+	logging.Debug("Adding %s column with DDL: %s", w.cat.Name, ddl)
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) columnExists(ctx context.Context, table, column string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.ColumnExists, table, column).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// DropColumnNotNull returns the uniform rebuild-required error when the
+// catalog declares the engine can't relax NOT NULL in place.
+func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return errors.New("table is required")
+	}
+	if column == nil {
+		return errors.New("column is required")
+	}
+	if !w.cat.DDL.CanDropNotNull {
+		return fmt.Errorf("%s cannot relax NOT NULL for %s.%s without rebuilding the table",
+			w.cat.Name, t.Name, column.Name)
+	}
+	return fmt.Errorf("drop-not-null DDL template not yet defined for catalog %q", w.cat.Name)
+}
+
+// AlterColumnType — same shape as DropColumnNotNull.
+func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
+	if t == nil {
+		return errors.New("table is required")
+	}
+	if column == nil {
+		return errors.New("column is required")
+	}
+	if !w.cat.DDL.CanAlterColumnType {
+		return fmt.Errorf("%s cannot alter type for %s.%s without rebuilding the table",
+			w.cat.Name, t.Name, column.Name)
+	}
+	return fmt.Errorf("alter-column-type DDL template not yet defined for catalog %q", w.cat.Name)
+}
+
+func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
+	qualified := w.dialect.QualifyTable(schema, table)
+	for _, tmpl := range w.cat.DDL.DropTableStmts {
+		stmt := strings.ReplaceAll(tmpl, "{table}", qualified)
+		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("dropping %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
+	qualified := w.dialect.QualifyTable(schema, table)
+	for _, tmpl := range w.cat.DDL.TruncateStmts {
+		stmt := strings.ReplaceAll(tmpl, "{table}", qualified)
+		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	if w.cat.DDL.TruncateCleanup != "" {
+		// Best-effort, matching the hand-written writers (e.g. the
+		// sqlite_sequence row may not exist yet).
+		_, _ = w.db.ExecContext(ctx, w.cat.DDL.TruncateCleanup, table)
+	}
+	return nil
+}
+
+func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.TableExists, table).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// CreatePrimaryKey renders the catalog template, or is a no-op for
+// inline-PK engines.
+func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
+	if w.cat.DDL.CreatePrimaryKey == "" {
+		return nil
+	}
+	stmt := strings.NewReplacer(
+		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
+		"{columns}", w.dialect.ColumnList(t.PrimaryKey),
+	).Replace(w.cat.DDL.CreatePrimaryKey)
+	_, err := w.db.ExecContext(ctx, stmt)
+	return err
+}
+
+func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
+	var exists int
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.HasPrimaryKey, table).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
+	return w.GetRowCountExact(ctx, schema, table, false)
+}
+
+func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int64, error) {
+	return w.GetRowCountExact(ctx, schema, table, false)
+}
+
+func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
+	return shared.ExactRowCount(ctx, w.db, w.dialect, schema, table)
+}
+
+func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
+	if w.finalizationMapper == nil {
+		return errors.New("finalization mapper not available for index creation")
+	}
+	if w.cat.Quoting.SchemaIgnored {
+		targetSchema = ""
+	}
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:          driver.DDLTypeIndex,
+		SourceDBType:  w.sourceType,
+		TargetDBType:  w.cat.Name,
+		Table:         t,
+		Index:         idx,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("index DDL generation failed for %s.%s: %w", t.Name, idx.Name, err)
+	}
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
+}
+
+func (w *Writer) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
+	return bulkStrategies[w.cat.Bulk.Strategy](ctx, w.bulkEnv(), opts)
+}
+
+func (w *Writer) upsertBatch(ctx context.Context, opts driver.UpsertBatchOptions) error {
+	return upsertStrategies[w.cat.Upsert.Strategy](ctx, w.bulkEnv(), opts)
+}
+
+func (w *Writer) resetSequence(ctx context.Context, schema string, t *driver.Table) error {
+	return sequenceStrategies[w.cat.Sequence.Strategy](ctx, w.db, w.dialect, schema, t)
+}
+
+func (w *Writer) bulkEnv() bulkEnv {
+	convert := func(row []any) []any { return row }
+	if name := w.cat.Bulk.RowConverter; name != "" {
+		convert = rowConverters[name]
+	}
+	return bulkEnv{
+		db:        w.db,
+		dialect:   w.dialect,
+		batchSize: w.defaultBatchSize,
+		maxVars:   w.cat.Bulk.MaxBindVariables,
+		convert:   convert,
+	}
+}
+
+func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64, error) {
+	return shared.ExecRaw(ctx, w.db, query, args...)
+}
+
+func (w *Writer) QueryRowRaw(ctx context.Context, query string, dest any, args ...any) error {
+	return shared.QueryRowRaw(ctx, w.db, query, dest, args...)
+}

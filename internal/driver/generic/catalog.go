@@ -34,6 +34,11 @@ type Catalog struct {
 	Pagination    PaginationSpec    `yaml:"pagination"`
 	Queries       QueriesSpec       `yaml:"queries"`
 	Introspection IntrospectionSpec `yaml:"introspection"`
+	DDL           DDLSpec           `yaml:"ddl"`
+	Bulk          BulkSpec          `yaml:"bulk"`
+	Upsert        UpsertSpec        `yaml:"upsert"`
+	Sequence      SequenceSpec      `yaml:"sequence"`
+	Context       ContextSpec       `yaml:"context"`
 
 	// DateTypes lists the engine's date/timestamp type names accepted
 	// for incremental sync columns.
@@ -60,6 +65,9 @@ type ConnectionSpec struct {
 	// "pgx", "sqlserver", "mysql"). The generic package blank-imports
 	// each supported backend in backends.go.
 	Backend string `yaml:"backend"`
+	// SingleWriter caps the writer pool at one open connection
+	// (sqlite's file-lock constraint).
+	SingleWriter bool `yaml:"single_writer"`
 }
 
 // DefaultsSpec mirrors driver.DriverDefaults.
@@ -189,6 +197,77 @@ type IntrospectionSpec struct {
 	// Empty means the engine can't surface CHECKs (sqlite: inline-only)
 	// and LoadCheckConstraints is a documented no-op.
 	CheckConstraints string `yaml:"check_constraints"`
+	// ColumnExists: params (table, column) → a row iff present.
+	ColumnExists string `yaml:"column_exists"`
+	// TableExists: param (table) → a row iff present.
+	TableExists string `yaml:"table_exists"`
+	// HasPrimaryKey: param (table) → a row iff the table has a PK.
+	HasPrimaryKey string `yaml:"has_primary_key"`
+}
+
+// DDLSpec carries the writer's DDL templates. Statement lists use the
+// {table} token (dialect-qualified); empty templates mean the engine
+// doesn't support (or need) the operation and the writer degrades the
+// way the capability matrix declares.
+type DDLSpec struct {
+	// CreateSchema is the CREATE SCHEMA template ({schema}); empty =
+	// no-op (sqlite: a file IS the database).
+	CreateSchema string `yaml:"create_schema"`
+	// DropTableStmts run in order ({table}); engines that must toggle
+	// FK enforcement around the drop declare it here.
+	DropTableStmts []string `yaml:"drop_table_stmts"`
+	// TruncateStmts run in order ({table}).
+	TruncateStmts []string `yaml:"truncate_stmts"`
+	// TruncateCleanup is an optional parameterized statement run after
+	// truncate with the bare table name as its argument (sqlite:
+	// sqlite_sequence reset).
+	TruncateCleanup string `yaml:"truncate_cleanup"`
+	// AddColumn is the ALTER TABLE template: {table}, {column}, {type}.
+	AddColumn string `yaml:"add_column"`
+	// CreatePrimaryKey ({table}, {columns}); empty = no-op (inline-PK
+	// engines).
+	CreatePrimaryKey string `yaml:"create_primary_key"`
+	// CanDropNotNull / CanAlterColumnType: false returns the uniform
+	// "requires a table rebuild" error instead of attempting DDL.
+	CanDropNotNull     bool `yaml:"can_drop_not_null"`
+	CanAlterColumnType bool `yaml:"can_alter_column_type"`
+}
+
+// BulkSpec selects the bulk-write strategy.
+type BulkSpec struct {
+	Strategy string `yaml:"strategy"`
+	// MaxBindVariables is the engine's bind-variable ceiling per
+	// statement (sqlite: SQLITE_MAX_VARIABLE_NUMBER). 0 = unlimited.
+	MaxBindVariables int `yaml:"max_bind_variables"`
+	// RowConverter names the write-side value normalization (empty =
+	// pass through).
+	RowConverter string `yaml:"row_converter"`
+}
+
+// UpsertSpec selects the upsert strategy (capability Upserter).
+type UpsertSpec struct {
+	Strategy string `yaml:"strategy"`
+}
+
+// SequenceSpec selects the identity-reset strategy (capability
+// SequenceResetter).
+type SequenceSpec struct {
+	Strategy string `yaml:"strategy"`
+}
+
+// ContextSpec is the static driver.DatabaseContext metadata plus the
+// version query.
+type ContextSpec struct {
+	VersionQuery             string   `yaml:"version_query"`
+	VersionPrefix            string   `yaml:"version_prefix"`
+	IdentifierCase           string   `yaml:"identifier_case"`
+	CaseSensitiveIdentifiers bool     `yaml:"case_sensitive_identifiers"`
+	Charset                  string   `yaml:"charset"`
+	Encoding                 string   `yaml:"encoding"`
+	MaxIdentifierLength      int      `yaml:"max_identifier_length"`
+	VarcharSemantics         string   `yaml:"varchar_semantics"`
+	BytesPerChar             int      `yaml:"bytes_per_char"`
+	Features                 []string `yaml:"features"`
 }
 
 // AISpec carries the prompt-augmentation literals.
