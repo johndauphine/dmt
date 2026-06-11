@@ -105,16 +105,27 @@ type commandInfo struct {
 	Description string
 }
 
+// availableCommands drives autocomplete. TestTUICommandSurface pins it
+// against the parity registry (#446): every registry path the TUI
+// claims to support must appear here and in /help, so command
+// discovery cannot drift from the actual surface.
 var availableCommands = []commandInfo{
-	{"/run", "Start migration (default: config.yaml)"},
-	{"/resume", "Resume an interrupted migration"},
-	{"/validate", "Validate migration row counts"},
+	{"/run", "Start migration (--dry-run previews; see /help for flags)"},
+	{"/resume", "Resume an interrupted migration (--force-resume, --skip-preflight)"},
+	{"/preflight", "Run connectivity + readiness checks (--ai-review)"},
+	{"/health-check", "Alias of /preflight"},
+	{"/validate", "Validate migration row counts (--ai-triage)"},
+	{"/diagnose", "Diagnose the latest or a selected failed run (--run ID)"},
 	{"/config", "Show configuration details"},
-	{"/analyze", "Analyze source database and suggest config (--apply writes config)"},
+	{"/analyze", "Analyze source database and suggest config (--apply, --ai-explain)"},
+	{"/ai", "AI advisory: /ai config-review (alias: /ai runbook)"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
 	{"/setup", "Guided setup: secrets, config, connection test, smartconfig analysis"},
-	{"/wizard", "Launch configuration wizard"},
+	{"/wizard", "Lightweight config editor"},
+	{"/init-secrets", "Create the secrets file (--with-ai, --force)"},
+	{"/cache", "Type-mapping cache: /cache clear [--ai-only] --confirm"},
+	{"/session", "Sticky session defaults (config, state-file, observability, audit)"},
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
 	{"/verbosity", "Set log level (debug, info, warn, error)"},

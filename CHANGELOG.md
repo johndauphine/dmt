@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- TUI command discovery now matches the real surface: autocomplete and
+  `/help` list every supported command (`/preflight`, `/diagnose`,
+  `/ai`, `/session`, `/init-secrets`, `/cache`, ...) and a TUI-side
+  parity test pins them against the command registry so CLI/TUI drift
+  fails CI. New docs/TUI_COMMANDS.md parity table; README and RUNBOOK
+  gained TUI equivalents for preflight, dry-run, AI review, and
+  diagnose workflows (#446).
+
 - `/session` gains run observability and audit keys: `metrics-addr`,
   `otel-endpoint` (Prometheus/OTLP wiring identical to the CLI flags),
   `audit-dir`, `audit-tamper-evident`, `no-audit`, and `log-format`
