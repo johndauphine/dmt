@@ -212,13 +212,13 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 
 	for rows.Next() {
 		var (
-			ordinal              int
-			name                 string
-			declType             sql.NullString
-			maxLen, prec, scale  sql.NullInt64
-			nullable             int
-			dflt                 sql.NullString
-			pkOrd                int
+			ordinal             int
+			name                string
+			declType            sql.NullString
+			maxLen, prec, scale sql.NullInt64
+			nullable            int
+			dflt                sql.NullString
+			pkOrd               int
 		)
 		if err := rows.Scan(&ordinal, &name, &declType, &maxLen, &prec, &scale, &nullable, &dflt, &pkOrd); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
@@ -350,6 +350,13 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 				return err
 			}
 			idx.Columns = append(idx.Columns, c)
+		}
+		// A result set can fail after Next() returns false (context
+		// cancellation, driver read error); without this check the
+		// index would be appended with silently missing columns (codex).
+		if err := colRows.Err(); err != nil {
+			colRows.Close()
+			return fmt.Errorf("reading index columns for %s: %w", m.name, err)
 		}
 		colRows.Close()
 		t.Indexes = append(t.Indexes, idx)
