@@ -32,7 +32,7 @@ make setup-hooks
 
 ### Entry Point
 
-`cmd/migrate/main.go` — CLI using urfave/cli/v2. No-args launches TUI (`tui.Start()`). Commands: `run`, `resume`, `status`, `validate`, `history`, `profile`, `health-check`, `analyze`, `init`, `init-secrets`.
+`cmd/migrate/main.go` — CLI using urfave/cli/v2. No-args launches TUI (`tui.Start()`). Commands: `run`, `resume`, `status`, `validate`, `diagnose`, `history`, `profile`, `preflight` (alias `health-check`), `analyze`, `ai`, `setup`, `init`, `init-secrets`, `cache`. The TUI mirrors these (parity registry in `internal/command/registry.go`; table in `docs/TUI_COMMANDS.md`).
 
 ### Core Packages
 

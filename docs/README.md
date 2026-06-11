@@ -6,7 +6,13 @@ Technical documentation, planning documents, and implementation notes for dmt.
 
 | Document | Description |
 |----------|-------------|
+| [RUNBOOK.md](RUNBOOK.md) | Operator runbook: preflight, run, resume, validate, diagnose — CLI and TUI |
+| [TUI_COMMANDS.md](TUI_COMMANDS.md) | TUI / CLI command parity table and intentionally CLI-only surfaces |
 | [BENCHMARKS.md](BENCHMARKS.md) | Performance benchmarks comparing Go and Rust implementations |
+| [FIXTURES.md](FIXTURES.md) | Test/bench datasets: CI-friendly fixtures and manual SO2010/SO2013/WWI restores |
+| [OBSERVABILITY.md](OBSERVABILITY.md) | Prometheus metrics and OTLP tracing setup |
+| [SECURITY.md](SECURITY.md) | Security posture: secrets handling, redaction, permissions |
+| [AUDIT-LOG.md](AUDIT-LOG.md) | Audit log format and tamper-evident mode |
 | [AI_EVALS.md](AI_EVALS.md) | Repeatable live-provider evals for AI advisory prompt quality |
 | [RESTARTABILITY.md](RESTARTABILITY.md) | Checkpoint and resume functionality documentation |
 | [PRIVILEGES.md](PRIVILEGES.md) | Per-driver minimum DB privileges (source / target / drop_recreate / upsert) — operator-facing GRANT recipes aligned with `dmt preflight` (see [PRIVILEGES.md](PRIVILEGES.md#what-dmt-preflight-actually-probes) for the subset preflight actually probes) |
