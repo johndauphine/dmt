@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -155,6 +156,29 @@ func (c *Config) fillDefaultTunableProvenance() {
 	markInt(provenanceMigrationMaxRetries, c.Migration.MaxRetries, ProvenanceAutoDefault)
 	markInt(provenanceSourceChunkSize, c.Source.ChunkSize, ProvenanceAutoDefault)
 	markInt(provenanceTargetChunkSize, c.Target.ChunkSize, ProvenanceAutoDefault)
+}
+
+// TunableWriteAheadWriters is the exported provenance name for the
+// write_ahead_writers knob, for callers (the orchestrator) that need to
+// ask whether a specific tunable is pinned (#461).
+const (
+	TunableWriteAheadWriters = provenanceMigrationWriteAheadWriters
+	TunableParallelReaders   = provenanceMigrationParallelReaders
+	TunableReadAheadBuffers  = provenanceMigrationReadAheadBuffers
+)
+
+// PinnedTunables returns the provenance names of tunables pinned by the
+// user config or secrets defaults — the values the tuner will never
+// adjust (#461). Sorted for stable output.
+func (c *Config) PinnedTunables() []string {
+	var pinned []string
+	for name, src := range c.autoConfig.TunableValueProvenance {
+		if src == ProvenanceUserConfig || src == ProvenanceSecretsDefault {
+			pinned = append(pinned, name)
+		}
+	}
+	sort.Strings(pinned)
+	return pinned
 }
 
 // TuningProvenanceSummary renders one line of who-owns-what for the

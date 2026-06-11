@@ -32,3 +32,15 @@ func TestTuningProvenanceSummary_GroupsByOwnership(t *testing.T) {
 		t.Errorf("missing defaults group; got %q", got)
 	}
 }
+
+func TestPinnedTunables(t *testing.T) {
+	c := &Config{}
+	c.setTunableProvenance(provenanceMigrationWorkers, ProvenanceUserConfig)
+	c.setTunableProvenance(provenanceMigrationChunkSize, ProvenanceSmartConfig)
+	c.setTunableProvenance(TunableWriteAheadWriters, ProvenanceSecretsDefault)
+	got := c.PinnedTunables()
+	want := []string{provenanceMigrationWorkers, TunableWriteAheadWriters}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("PinnedTunables() = %v, want %v", got, want)
+	}
+}
