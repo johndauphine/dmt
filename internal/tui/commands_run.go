@@ -21,7 +21,7 @@ import (
 func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) tea.Cmd {
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
-	stateFile := m.sessionGet("state-file")
+	settings := m.captureRunSessionSettings()
 	return func() tea.Msg {
 		p := GetProgramRef()
 		if p == nil {
@@ -65,8 +65,10 @@ func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) 
 			cfg.Migration.ExploreMode = ov.exploreMode
 		}
 
+		applyAuditSessionSettings(cfg, settings)
+
 		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-			StateFile:             stateFile,
+			StateFile:             settings.stateFile,
 			EnableAISchemaAdvisor: ov.aiSchemaAdvisor,
 		})
 		if err != nil {
@@ -105,6 +107,11 @@ func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) 
 				}
 			}()
 			defer orch.Close()
+
+			// Observability from /session keys (#445): identical
+			// wiring to the CLI's --metrics-addr/--otel-endpoint.
+			stopObs := command.SetupObservability(settings.metricsAddr, settings.otelEndpoint, orch)
+			defer stopObs()
 
 			if profileName != "" {
 				orch.SetRunContext(profileName, "")
@@ -168,7 +175,7 @@ func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) 
 func (m Model) runResumeCmd(configFile, profileName string, forceResume bool, skipPreflight string) tea.Cmd {
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
-	stateFile := m.sessionGet("state-file")
+	settings := m.captureRunSessionSettings()
 	return func() (result tea.Msg) {
 		// Recover from any panics in this function
 		defer func() {
@@ -198,8 +205,10 @@ func (m Model) runResumeCmd(configFile, profileName string, forceResume bool, sk
 			cfg.Migration.SkipPreflight = []string{skipPreflight}
 		}
 
+		applyAuditSessionSettings(cfg, settings)
+
 		orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{
-			StateFile:   stateFile,
+			StateFile:   settings.stateFile,
 			ForceResume: forceResume,
 		})
 		if err != nil {
@@ -216,6 +225,11 @@ func (m Model) runResumeCmd(configFile, profileName string, forceResume bool, sk
 				}
 			}()
 			defer orch.Close()
+
+			// Observability from /session keys (#445): identical
+			// wiring to the CLI's --metrics-addr/--otel-endpoint.
+			stopObs := command.SetupObservability(settings.metricsAddr, settings.otelEndpoint, orch)
+			defer stopObs()
 
 			if profileName != "" {
 				orch.SetRunContext(profileName, "")
@@ -754,5 +768,20 @@ func (m Model) runShellCmd(shellCmd string) tea.Cmd {
 		}()
 
 		return nil
+	}
+}
+
+// applyAuditSessionSettings mirrors the CLI's --audit-dir /
+// --audit-tamper-evident / --no-audit overrides (#445): only a key the
+// operator actually set replaces the loaded config value.
+func applyAuditSessionSettings(cfg *config.Config, settings runSessionSettings) {
+	if settings.auditDir != "" {
+		cfg.Migration.AuditDir = settings.auditDir
+	}
+	if settings.auditTamperSet {
+		cfg.Migration.AuditTamperEvident = settings.auditTamperEvident
+	}
+	if settings.noAuditSet {
+		cfg.Migration.NoAudit = settings.noAudit
 	}
 }

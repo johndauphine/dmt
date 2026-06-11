@@ -47,25 +47,28 @@ func flags(names ...string) []FlagSpec {
 	return out
 }
 
-// GlobalFlags declares the app-level flags. Session-default ergonomics
-// for these land with #444; output/observability flags with #445.
+// GlobalFlags declares the app-level flags. Origin/state flags gained
+// session-default ergonomics with #444, observability/audit flags with
+// #445. JSON/file output modes are deliberately CLI-only: the TUI
+// renders structured blocks interactively, and /logs saves the session
+// transcript — automation belongs to the CLI.
 var GlobalFlags = []FlagSpec{
 	{Name: "config", Status: TUISupported}, // @config / positional in TUI
 	{Name: "profile", Status: TUISupported},
-	{Name: "state-file", Status: TUISupported},        // /session state-file
-	{Name: "run-id", Status: TUIPlanned, Ref: "#441"}, // /diagnose --run covers the operator need
-	{Name: "output-json", Status: TUIPlanned, Ref: "#445"},
-	{Name: "output-file", Status: TUIPlanned, Ref: "#445"},
-	{Name: "log-format", Status: TUIPlanned, Ref: "#445"},       // /session key, lands with the observability batch
-	{Name: "verbosity", Status: TUISupported},                   // /verbosity
-	{Name: "shutdown-timeout", Status: TUIPlanned, Ref: "#445"}, // /session key, lands with the observability batch
+	{Name: "state-file", Status: TUISupported}, // /session state-file
+	{Name: "run-id", Status: TUICLIOnly, Ref: "/diagnose --run covers the TUI need; explicit run IDs are an automation concern"},
+	{Name: "output-json", Status: TUICLIOnly, Ref: "automation output; TUI renders structured blocks"},
+	{Name: "output-file", Status: TUICLIOnly, Ref: "automation output; /logs saves the session transcript"},
+	{Name: "log-format", Status: TUISupported}, // /session log-format
+	{Name: "verbosity", Status: TUISupported},  // /verbosity
+	{Name: "shutdown-timeout", Status: TUICLIOnly, Ref: "TUI cancels interactively via Ctrl+C"},
 	{Name: "progress", Status: TUICLIOnly, Ref: "TUI renders its own progress"},
 	{Name: "progress-interval", Status: TUICLIOnly, Ref: "TUI renders its own progress"},
-	{Name: "metrics-addr", Status: TUIPlanned, Ref: "#445"},
-	{Name: "otel-endpoint", Status: TUIPlanned, Ref: "#445"},
-	{Name: "audit-dir", Status: TUIPlanned, Ref: "#445"},
-	{Name: "audit-tamper-evident", Status: TUIPlanned, Ref: "#445"},
-	{Name: "no-audit", Status: TUIPlanned, Ref: "#445"},
+	{Name: "metrics-addr", Status: TUISupported},         // /session metrics-addr
+	{Name: "otel-endpoint", Status: TUISupported},        // /session otel-endpoint
+	{Name: "audit-dir", Status: TUISupported},            // /session audit-dir
+	{Name: "audit-tamper-evident", Status: TUISupported}, // /session audit-tamper-evident
+	{Name: "no-audit", Status: TUISupported},             // /session no-audit
 }
 
 // Registry is the authoritative command/flag parity list.

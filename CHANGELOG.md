@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `/session` gains run observability and audit keys: `metrics-addr`,
+  `otel-endpoint` (Prometheus/OTLP wiring identical to the CLI flags),
+  `audit-dir`, `audit-tamper-evident`, `no-audit`, and `log-format`
+  (applies immediately). Values are validated when set. JSON/file
+  output modes stay CLI-only by policy: the TUI renders structured
+  blocks and `/logs` saves the session transcript (#445).
+
 - New `/init-secrets` TUI command (`--with-ai`, `--force`) and
   `/cache clear` (`--ai-only`; requires `--confirm` and names the exact
   cache file and scope first). `/setup` is documented as the richer
