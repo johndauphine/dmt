@@ -62,8 +62,8 @@ const (
 	StepConfigPath
 	StepWriteConfig // auto: write config file
 
-	// Phase 8: Optional AI Analysis
-	StepRunAnalysis // prompt: Run AI analysis? (y/n)
+	// Phase 8: Optional Smartconfig Analysis
+	StepRunAnalysis // prompt: Run smartconfig analysis? (y/n)
 
 	StepDone
 )
@@ -89,7 +89,7 @@ type State struct {
 	TargetConnOK  bool   // target connection test passed
 	ConfigPath    string // output config file path
 	Force         bool   // overwrite existing files
-	RunAnalysis   bool   // user wants to run AI analysis after setup
+	RunAnalysis   bool   // user wants to run smartconfig analysis after setup
 	LastConnError string // last connection test error message
 	// SlackWebhook holds the webhook URL for migration notifications.
 	// Callers should pre-populate from the existing secrets file before

@@ -98,7 +98,12 @@ func TestHappyPath(t *testing.T) {
 	}
 	s.Process("") // success
 
-	// No AI configured, so should skip to done
+	// Smartconfig analysis is deterministic (#443): offered whenever
+	// the source connection works, even with no AI configured.
+	if s.CurrentStep != StepRunAnalysis {
+		t.Fatalf("expected StepRunAnalysis, got %d", s.CurrentStep)
+	}
+	s.Process("n")
 	if s.CurrentStep != StepDone {
 		t.Fatalf("expected StepDone, got %d", s.CurrentStep)
 	}
@@ -510,7 +515,7 @@ func TestAnalysisYes(t *testing.T) {
 	}
 }
 
-func TestNoAnalysisWhenAINotConfigured(t *testing.T) {
+func TestAnalysisOfferedWithoutAI(t *testing.T) {
 	s := NewState()
 	s.Process("no_ai")
 	s.Process("n") // no AI
@@ -546,9 +551,14 @@ func TestNoAnalysisWhenAINotConfigured(t *testing.T) {
 	s.Process("out.yaml")
 	s.Process("") // write success
 
-	// No AI -> straight to done, skip analysis
-	if s.CurrentStep != StepDone {
-		t.Fatalf("expected StepDone (no analysis), got %d", s.CurrentStep)
+	// No AI still offers the deterministic smartconfig analysis (#443)
+	// because the source connection succeeded.
+	if s.CurrentStep != StepRunAnalysis {
+		t.Fatalf("expected StepRunAnalysis (deterministic, AI-free), got %d", s.CurrentStep)
+	}
+	s.Process("y")
+	if s.CurrentStep != StepDone || !s.RunAnalysis {
+		t.Fatalf("expected StepDone with RunAnalysis, got step %d analysis %v", s.CurrentStep, s.RunAnalysis)
 	}
 }
 

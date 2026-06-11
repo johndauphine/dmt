@@ -435,13 +435,15 @@ func (s *State) Process(input string) string {
 			s.CurrentStep = StepConfigPath
 			return fmt.Sprintf("Failed to save config: %s", input)
 		}
-		if s.AIConfigured && s.SourceConnOK {
+		// Smartconfig analysis is deterministic (#443) — offer it
+		// whenever the source connection works, with or without AI.
+		if s.SourceConnOK {
 			s.CurrentStep = StepRunAnalysis
 		} else {
 			s.CurrentStep = StepDone
 		}
 
-	// Phase 8: AI Analysis
+	// Phase 8: Smartconfig Analysis
 	case StepRunAnalysis:
 		v := strings.ToLower(input)
 		if v == "" {

@@ -565,7 +565,7 @@ func (m Model) runAnalyzeCmd(configFile, profileName string, apply, aiExplain bo
 				if err := config.ApplyTuningToConfigFile(configFile, suggestions); err != nil {
 					p.Send(OutputMsg(fmt.Sprintf("\n❌ Failed to apply tuning: %v\n", err)))
 				} else {
-					p.Send(OutputMsg(fmt.Sprintf("\n✓ Applied AI-tuned parameters to %s\n", configFile)))
+					p.Send(OutputMsg(fmt.Sprintf("\n✓ Applied smartconfig-tuned parameters to %s\n", configFile)))
 				}
 			}
 		}()

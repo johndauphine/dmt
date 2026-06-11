@@ -258,7 +258,7 @@ func (s *State) Prompt() PromptInfo {
 			IsAutoAction: true,
 		}
 
-	// Phase 8: AI Analysis (only reached when AI was configured;
+	// Phase 8: Smartconfig analysis (deterministic; AI not required —
 	// the deterministic analyze flow is run via `dmt analyze` separately.
 	// This step is the wizard-integrated convenience pass).
 	case StepRunAnalysis:

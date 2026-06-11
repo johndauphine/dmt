@@ -113,7 +113,7 @@ var availableCommands = []commandInfo{
 	{"/analyze", "Analyze source database and suggest config (--apply writes config)"},
 	{"/status", "Show migration status (--detailed for tasks)"},
 	{"/history", "Show migration history"},
-	{"/setup", "Guided setup: secrets, config, connection test, AI analysis"},
+	{"/setup", "Guided setup: secrets, config, connection test, smartconfig analysis"},
 	{"/wizard", "Launch configuration wizard"},
 	{"/logs", "Save session logs to file"},
 	{"/profile", "Manage encrypted profiles (save/list/delete/export)"},
