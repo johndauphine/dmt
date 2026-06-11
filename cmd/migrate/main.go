@@ -15,6 +15,15 @@ import (
 // main.go builds the CLI app and command tree. Command action implementations
 // live in the sibling files named for each command or shared helper area.
 func main() {
+	app := newApp()
+	runApp(app)
+}
+
+// newApp builds the CLI command tree. Extracted from main so the #438
+// parity test can enumerate every command and flag and assert each one
+// has a registry entry with an explicit TUI disposition — new CLI
+// surface cannot ship without declaring its TUI story.
+func newApp() *cli.App {
 	app := &cli.App{
 		Name:    version.Name,
 		Usage:   version.Description,
@@ -485,6 +494,12 @@ func main() {
 		},
 	}
 
+	return app
+}
+
+// runApp executes the CLI and owns exit-code handling, per the #438
+// split: urfave binding + exit codes stay in cmd/migrate.
+func runApp(app *cli.App) {
 	if err := app.Run(os.Args); err != nil {
 		code := exitcodes.FromError(err)
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
