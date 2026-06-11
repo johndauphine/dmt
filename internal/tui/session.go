@@ -78,7 +78,7 @@ func (m *Model) sessionSummary() string {
 		if val == "" {
 			val = "(unset)"
 		}
-		b.WriteString(fmt.Sprintf("  %-11s %-24s %s\n", k, val, sessionKeys[k]))
+		fmt.Fprintf(&b, "  %-11s %-24s %s\n", k, val, sessionKeys[k])
 	}
 	return b.String()
 }
