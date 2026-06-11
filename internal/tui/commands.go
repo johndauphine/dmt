@@ -77,7 +77,11 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /profile list         List saved profiles
   /profile delete NAME  Delete a saved profile
   /profile export NAME  Export a profile to a config file
-  /session              Show sticky session defaults (config, profile, state-file, verbosity)
+  /session              Show sticky session defaults: config, profile,
+                        state-file, verbosity, log-format, and per-run
+                        observability/audit keys (metrics-addr,
+                        otel-endpoint, audit-dir, audit-tamper-evident,
+                        no-audit)
   /session KEY VALUE    Set a session default; /session clear [KEY] unsets
   /verbosity [LEVEL]    Set log level (debug, info, warn, error)
   /explore              Show current exploration state
