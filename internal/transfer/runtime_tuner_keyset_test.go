@@ -14,7 +14,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/stats"
 
-	_ "github.com/johndauphine/dmt/internal/driver/sqlite"
+	_ "github.com/johndauphine/dmt/internal/driver/generic"
 )
 
 func TestKeysetRuntimeChunkSizeMutationCoversRowsAndCheckpoints(t *testing.T) {

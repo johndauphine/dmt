@@ -11,7 +11,7 @@ import (
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
-	_ "github.com/johndauphine/dmt/internal/driver/sqlite"
+	_ "github.com/johndauphine/dmt/internal/driver/generic"
 )
 
 // NewSourcePool creates a source pool based on the configuration type.

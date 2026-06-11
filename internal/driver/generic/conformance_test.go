@@ -1,4 +1,4 @@
-package sqlite
+package generic
 
 import (
 	"testing"
@@ -9,9 +9,13 @@ import (
 )
 
 func TestDriverConformance(t *testing.T) {
+	cat, err := LoadCatalog("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
 	conformance.RunDriverConformance(t, conformance.DriverCase{
 		Name:    "sqlite",
-		Driver:  &Driver{},
+		Driver:  NewDriver(cat),
 		Aliases: []string{"sqlite3", "sqlitedb"},
 
 		QuoteName:     `weird"name`,
@@ -84,12 +88,12 @@ func sqlitePaginationCase() *conformance.PaginationCase {
 // implement driver.ConstraintWriter — finalization skips FK/CHECK with
 // one audited message instead of per-constraint stub warnings.
 func TestWriterCapabilities(t *testing.T) {
-	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
+	conformance.CheckWriterCapabilities(t, (*writerUpsertSeq)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: false,
 		Upserter:         true, // INSERT ... ON CONFLICT
 		SequenceResetter: true, // sqlite_sequence update for AUTOINCREMENT
 	})
-	conformance.CheckReaderCapabilities(t, (*Reader)(nil), conformance.ReaderCapabilities{
+	conformance.CheckReaderCapabilities(t, (*readerWithDates)(nil), conformance.ReaderCapabilities{
 		IncrementalDateReader: true,
 	})
 }

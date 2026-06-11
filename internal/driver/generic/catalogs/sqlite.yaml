@@ -151,6 +151,8 @@ date_types: [datetime, timestamp, date, text]
 
 value_converters: default
 
+preflight_strategy: sqlite
+
 ai:
   prompt_augmentation: |
 
