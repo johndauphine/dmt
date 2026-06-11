@@ -7,6 +7,7 @@ name: sqlite
 aliases: [sqlite3, sqlitedb]
 
 connection:
+  backend: sqlite                # database/sql driver (modernc, pure Go)
   dsn_strategy: sqlite_file      # imperative DSN: file/:memory:/pragmas
 
 defaults:
@@ -67,6 +68,37 @@ queries:
   # No stats catalog comparable to information_schema — always COUNT(*).
   row_count: "SELECT COUNT(*) FROM %s"
   date_column: "SELECT type FROM pragma_table_info(?) WHERE name = ?"
+
+# Canonical introspection shapes (see IntrospectionSpec): the SQL
+# adapts sqlite's pragma table-valued functions to the generic
+# Reader's fixed row mappings.
+introspection:
+  list_tables: |
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  # (ordinal, name, decl_type, max_length, precision, scale,
+  #  is_nullable, default_value, pk_ordinal) — length/precision/scale
+  # are parsed from the declared type (parse_type_params), since
+  # sqlite stores "VARCHAR(255)" verbatim from CREATE TABLE.
+  describe_table: |
+    SELECT cid + 1, name, type, NULL, NULL, NULL,
+           CASE "notnull" WHEN 0 THEN 1 ELSE 0 END,
+           dflt_value, pk
+    FROM pragma_table_info(?)
+  parse_type_params: true
+  # AUTOINCREMENT is only recorded in the verbatim CREATE TABLE text.
+  identity_strategy: sqlite_autoincrement
+  index_list: |
+    SELECT name, "unique" FROM pragma_index_list(?) WHERE origin != 'pk'
+  index_columns: |
+    SELECT name FROM pragma_index_info(?) ORDER BY seqno
+  foreign_keys: |
+    SELECT id, seq, "table", "from", "to", on_update, on_delete
+    FROM pragma_foreign_key_list(?) ORDER BY id, seq
+  # CHECKs are inline-only in CREATE TABLE and not surfaced — no query;
+  # LoadCheckConstraints is a documented no-op (matches the hand-written
+  # driver; cross-engine CHECK migration from sqlite is out of scope).
 
 date_types: [datetime, timestamp, date, text]
 
