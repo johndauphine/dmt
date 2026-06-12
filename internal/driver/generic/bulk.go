@@ -18,11 +18,13 @@ import (
 // bulkEnv is what a strategy needs from the writer: the open pool, the
 // rendered identifiers, and the catalog's bind-variable budget.
 type bulkEnv struct {
-	db        *sql.DB
-	dialect   *Dialect
-	batchSize int // resolved default; opts.BatchSize overrides
-	maxVars   int // engine bind-variable ceiling; 0 = unlimited
-	convert   func([]any) []any
+	db             *sql.DB
+	dialect        *Dialect
+	batchSize      int // resolved default; opts.BatchSize overrides
+	maxVars        int // engine bind-variable ceiling; 0 = unlimited
+	convert        func([]any) []any
+	idempotentVerb string
+	engine         string
 }
 
 type bulkWriteFunc func(ctx context.Context, env bulkEnv, opts driver.WriteBatchOptions) error
@@ -99,7 +101,13 @@ func batchedInsert(ctx context.Context, env bulkEnv, opts driver.WriteBatchOptio
 		if len(opts.PKColumns) == 0 {
 			return fmt.Errorf("IdempotentOnDup requires PKColumns to be set")
 		}
-		verb = "INSERT OR IGNORE INTO"
+		if env.idempotentVerb == "" {
+			// Refuse rather than emit another engine's syntax (codex
+			// on #507): a ROW_NUMBER resume that can't dedupe must
+			// fail loudly so the operator restarts the table.
+			return fmt.Errorf("%s has no duplicate-skipping INSERT verb; idempotent replay is not supported — restart the table instead of resuming", env.engine)
+		}
+		verb = env.idempotentVerb
 	}
 
 	batchSize := resolveBatchSize(env, opts.BatchSize, len(opts.Columns))

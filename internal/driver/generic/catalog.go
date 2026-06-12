@@ -252,6 +252,12 @@ type BulkSpec struct {
 	// RowConverter names the write-side value normalization (empty =
 	// pass through).
 	RowConverter string `yaml:"row_converter"`
+	// IdempotentVerb is the INSERT verb that silently skips duplicate
+	// PKs, used by the #227 ROW_NUMBER resume path ("INSERT OR IGNORE
+	// INTO" on sqlite). Empty means the engine has no such verb and an
+	// idempotent replay is refused with a clear error instead of
+	// emitting another engine's syntax.
+	IdempotentVerb string `yaml:"idempotent_verb"`
 }
 
 // UpsertSpec selects the upsert strategy (capability Upserter).

@@ -80,7 +80,7 @@ introspection:
   # position among is_in_primary_key members.
   describe_table: |
     SELECT toInt32(position), name, type, NULL, NULL, NULL,
-           if(startsWith(type, 'Nullable('), 1, 0),
+           if(position(type, 'Nullable(') > 0, 1, 0),
            default_expression,
            if(is_in_primary_key, toInt32(position), 0)
     FROM system.columns
