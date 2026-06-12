@@ -16,6 +16,24 @@ var dsnStrategies = map[string]dsnFunc{
 	"sqlite_file":    sqliteFileDSN,
 	"clickhouse_url": clickhouseURLDSN,
 	"mysql_tcp":      mysqlTCPDSN,
+	"postgres_url":   postgresURLDSN,
+}
+
+// postgresURLDSN mirrors the hand-written postgres dialect: URL form
+// with escaped components and sslmode defaulting to prefer.
+func postgresURLDSN(host string, port int, database, user, password string, opts map[string]any) string {
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+		url.QueryEscape(user), url.QueryEscape(password), host, port, url.QueryEscape(database))
+	params := url.Values{}
+	if sslMode, ok := opts["sslmode"].(string); ok && sslMode != "" {
+		params.Set("sslmode", sslMode)
+	} else {
+		params.Set("sslmode", "prefer")
+	}
+	if len(params) > 0 {
+		dsn += "?" + params.Encode()
+	}
+	return dsn
 }
 
 // mysqlTCPDSN is the hand-written mysql dialect's BuildDSN moved

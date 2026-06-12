@@ -1,4 +1,4 @@
-package postgres
+package generic
 
 import (
 	"context"
@@ -15,33 +15,33 @@ import (
 // in stable order. All queries use the passed-in db handle and ctx; errors
 // from individual checks become SeverityError findings rather than propagating,
 // so a single broken probe doesn't mask the other findings.
-func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func postgresPreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
 		NilDatabaseRemedy: "this is an internal error — please report it with the dmt version",
 	},
 		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-			return shared.SingleFinding(checkConnectionPG(ctx, db, req.Side))
+			return shared.SingleFinding(pgPFCheckConnectionPG(ctx, db, req.Side))
 		},
 		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-			return checkVersionPG(ctx, db, req.Side)
+			return pgPFCheckVersionPG(ctx, db, req.Side)
 		},
 		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-			return checkEncodingPG(ctx, db, req.Side)
+			return pgPFCheckEncodingPG(ctx, db, req.Side)
 		},
-		checkPoolHeadroomPG,
-		checkPrivilegesPG,
-		checkDiskSpacePG,
-		checkBackupAcknowledgmentPG,
+		pgPFCheckPoolHeadroomPG,
+		pgPFCheckPrivilegesPG,
+		pgPFCheckDiskSpacePG,
+		pgPFCheckBackupAcknowledgmentPG,
 	)
 }
 
-// checkBackupAcknowledgmentPG fires only on the target side when
+// pgPFCheckBackupAcknowledgmentPG fires only on the target side when
 // target_mode is drop_recreate AND the operator hasn't set ConfirmBackup.
 // It looks for any non-empty user table in the target schema; a single hit
 // is enough to fail the check. Empty schemas (fresh DBs) pass silently.
 // Uses pg_class.reltuples (planner estimate) — accurate enough for
 // "is this table empty or not" without paying for COUNT(*) on large tables.
-func checkBackupAcknowledgmentPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func pgPFCheckBackupAcknowledgmentPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
@@ -83,22 +83,22 @@ func checkBackupAcknowledgmentPG(ctx context.Context, db *sql.DB, req driver.Pre
 	}}
 }
 
-// checkConnectionPG runs `SELECT 1`. The other checks all assume the DB is
+// pgPFCheckConnectionPG runs `SELECT 1`. The other checks all assume the DB is
 // reachable; if this fails everything downstream will too, so emit a single
 // connection-level error and let callers short-circuit (orchestrator may
 // choose to skip remaining checks on a hard connection failure).
-func checkConnectionPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
+func pgPFCheckConnectionPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
 	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
 		Remedy: "verify the host/port/credentials in your config and that the PostgreSQL server is reachable from this host",
 	})
 }
 
-// checkVersionPG verifies the server is on a supported major version. PG 12
+// pgPFCheckVersionPG verifies the server is on a supported major version. PG 12
 // is the floor because earlier versions lack features dmt's COPY+ON CONFLICT
 // path assumes (filterable indexes, INSERT...ON CONFLICT mature behavior).
 // PG 11 hit EOL in 2023; anything older is unsupported by the upstream
 // project too.
-func checkVersionPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
+func pgPFCheckVersionPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
 	var serverVersionNum string
 	if err := db.QueryRowContext(ctx, "SHOW server_version_num").Scan(&serverVersionNum); err != nil {
 		return []driver.PreFlightFinding{{
@@ -132,10 +132,10 @@ func checkVersionPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) 
 	return nil
 }
 
-// checkEncodingPG verifies the server's client_encoding is UTF8. dmt assumes
+// pgPFCheckEncodingPG verifies the server's client_encoding is UTF8. dmt assumes
 // UTF-8 on both sides for cross-engine identifier sanitization and text
 // transport; LATIN1/WIN1252 targets risk silent mojibake.
-func checkEncodingPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
+func pgPFCheckEncodingPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
 	var encoding string
 	if err := db.QueryRowContext(ctx, "SHOW server_encoding").Scan(&encoding); err != nil {
 		return []driver.PreFlightFinding{{
@@ -157,12 +157,12 @@ func checkEncodingPG(ctx context.Context, db *sql.DB, side driver.PreFlightSide)
 	return nil
 }
 
-// checkPoolHeadroomPG ensures the server has enough free connection slots
+// pgPFCheckPoolHeadroomPG ensures the server has enough free connection slots
 // for the planned migration. Compares max_connections against the current
 // session count, leaving a margin of 5 over migration.workers — enough for
 // the writer pool plus dmt's metadata queries plus a few reserved slots for
 // the operator's own tools.
-func checkPoolHeadroomPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func pgPFCheckPoolHeadroomPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	var maxConns, current int
 	if err := db.QueryRowContext(ctx, "SHOW max_connections").Scan(&maxConns); err != nil {
 		// Reading max_connections via SHOW requires a normal role; if it
@@ -192,11 +192,11 @@ func checkPoolHeadroomPG(ctx context.Context, db *sql.DB, req driver.PreFlightRe
 	)
 }
 
-// checkPrivilegesPG verifies the connected role has the privileges
+// pgPFCheckPrivilegesPG verifies the connected role has the privileges
 // downstream phases will need. Uses has_*_privilege() built-ins, which
 // honor role inheritance correctly (unlike querying information_schema
 // directly). Each check returns either a discrete finding or nil.
-func checkPrivilegesPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func pgPFCheckPrivilegesPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	var findings []driver.PreFlightFinding
 	schema := strings.TrimSpace(req.Schema)
 	if schema == "" {
@@ -207,18 +207,18 @@ func checkPrivilegesPG(ctx context.Context, db *sql.DB, req driver.PreFlightRequ
 		// Source needs SELECT on the schema's tables. has_schema_privilege
 		// with USAGE covers the ability to access objects in the schema at
 		// all; per-table SELECT is granular but USAGE is the cheap precondition.
-		findings = shared.AppendNonNilFinding(findings, pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side))
+		findings = shared.AppendNonNilFinding(findings, pgPFPgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side))
 		return findings
 	}
 
 	// Both target modes need USAGE + CREATE on the schema (for either
 	// CREATE TABLE in drop_recreate or temp staging in upsert).
-	findings = shared.AppendNonNilFinding(findings, pgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side))
-	findings = shared.AppendNonNilFinding(findings, pgHasSchemaPriv(ctx, db, schema, "CREATE", req.Side))
+	findings = shared.AppendNonNilFinding(findings, pgPFPgHasSchemaPriv(ctx, db, schema, "USAGE", req.Side))
+	findings = shared.AppendNonNilFinding(findings, pgPFPgHasSchemaPriv(ctx, db, schema, "CREATE", req.Side))
 	return findings
 }
 
-func pgHasSchemaPriv(ctx context.Context, db *sql.DB, schema, priv string, side driver.PreFlightSide) *driver.PreFlightFinding {
+func pgPFPgHasSchemaPriv(ctx context.Context, db *sql.DB, schema, priv string, side driver.PreFlightSide) *driver.PreFlightFinding {
 	var ok bool
 	if err := db.QueryRowContext(ctx,
 		"SELECT has_schema_privilege(current_user, $1, $2)",
@@ -243,12 +243,12 @@ func pgHasSchemaPriv(ctx context.Context, db *sql.DB, schema, priv string, side 
 	return nil
 }
 
-// checkDiskSpacePG compares the current database's size + the migration's
+// pgPFCheckDiskSpacePG compares the current database's size + the migration's
 // estimated bytes × 1.5 overhead against the tablespace's reported size on
 // disk. The overhead factor accounts for WAL, indexes built after data
 // load, and free-list churn. Only runs on the target side and when an
 // estimate was supplied.
-func checkDiskSpacePG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func pgPFCheckDiskSpacePG(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	if req.Side != driver.PreFlightSideTarget || req.EstimatedBytes <= 0 {
 		return nil
 	}
@@ -266,9 +266,9 @@ func checkDiskSpacePG(ctx context.Context, db *sql.DB, req driver.PreFlightReque
 		Check:    "disk.estimate",
 		Side:     req.Side,
 		Message: fmt.Sprintf("target db is %.1f GiB now; migration plans to add ~%.1f GiB (×1.5 overhead = %.1f GiB)",
-			gib(dbSize), gib(req.EstimatedBytes), gib(req.EstimatedBytes*3/2)),
+			pgPFGib(dbSize), pgPFGib(req.EstimatedBytes), pgPFGib(req.EstimatedBytes*3/2)),
 		Remedy: "verify the target volume has enough free space before starting; preflight cannot inspect the filesystem from SQL",
 	}}
 }
 
-func gib(b int64) float64 { return float64(b) / (1 << 30) }
+func pgPFGib(b int64) float64 { return float64(b) / (1 << 30) }

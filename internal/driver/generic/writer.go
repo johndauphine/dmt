@@ -31,6 +31,8 @@ type Writer struct {
 	cat              *Catalog
 	dialect          *Dialect
 
+	pgState *pgBulkState
+
 	typeMapper         driver.TypeMapper
 	tableMapper        driver.TableTypeMapper
 	finalizationMapper driver.FinalizationDDLMapper
@@ -118,6 +120,7 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	w := &Writer{
 		db:               db,
+		pgState:          &pgBulkState{},
 		config:           cfg,
 		maxConns:         maxConns,
 		defaultBatchSize: opts.BatchSize,
@@ -465,6 +468,7 @@ func (w *Writer) bulkEnv() bulkEnv {
 		idempotentSuffix: w.cat.Bulk.IdempotentSuffix,
 		transactional:    !w.cat.Bulk.NonTransactional,
 		engine:           w.cat.Name,
+		pgState:          w.pgState,
 	}
 }
 
