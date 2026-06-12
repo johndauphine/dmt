@@ -41,7 +41,7 @@ All packages live under `internal/`. The key ones:
 | Package | Purpose |
 |---------|---------|
 | `driver/` | Pluggable database drivers + AI integrations (type mapping, smart config, error diagnosis) |
-| `driver/postgres/`, `mssql/`, `mysql/` | Hand-written Reader/Writer/Dialect implementations (converging onto `generic/`, #509) |
+| `driver/postgres/`, `mssql/` | Hand-written oracle implementations awaiting removal (#509 cleanup; mysql and sqlite already removed) |
 | `driver/generic/` | Catalog-driven engine (#191): one Reader/Writer/Dialect, per-engine YAML catalogs (`sqlite` runs on it) |
 | `orchestrator/` | Migration workflow coordinator (9 task phases, retry logic, health checks) |
 | `transfer/` | Data transfer pipeline with read-ahead buffering, runtime tuning, checkpoint coordination |
