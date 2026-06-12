@@ -185,8 +185,14 @@ spatial_select:
 preflight_strategy: mysql
 
 bulk:
-  strategy: batched_insert
-  # 65535 placeholder ceiling per prepared statement.
+  # LOAD DATA LOCAL INFILE via go-sql-driver's Reader:: scheme — one
+  # statement per chunk, no bind-variable ceiling, no placeholder
+  # parsing. Falls back to batched_insert (with one audited warning)
+  # when the server has local_infile disabled, and for IdempotentOnDup
+  # replay (LOAD DATA IGNORE would mask conversion errors, #227).
+  strategy: mysql_load_data
+  # 65535 placeholder ceiling per prepared statement (the batched
+  # fallback path still honors it).
   max_bind_variables: 65535
   row_converter: bool_to_int
   # ON DUPLICATE KEY UPDATE pk = pk: replayed rows no-op (#227).

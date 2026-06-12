@@ -39,6 +39,8 @@ type bulkEnv struct {
 	sourceType string
 	// pgState caches the copy_from strategy's probed COPY byte budget.
 	pgState *pgBulkState
+	// myState caches the mysql_load_data strategy's local_infile probe.
+	myState *mysqlInfileState
 }
 
 type bulkWriteFunc func(ctx context.Context, env bulkEnv, opts driver.WriteBatchOptions) error

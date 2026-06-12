@@ -36,6 +36,7 @@ type Writer struct {
 	ident func(string) string
 
 	pgState *pgBulkState
+	myState *mysqlInfileState
 
 	typeMapper         driver.TypeMapper
 	tableMapper        driver.TableTypeMapper
@@ -130,6 +131,7 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 		db:               db,
 		ident:            sanitize,
 		pgState:          &pgBulkState{},
+		myState:          &mysqlInfileState{},
 		config:           cfg,
 		maxConns:         maxConns,
 		defaultBatchSize: opts.BatchSize,
@@ -516,6 +518,7 @@ func (w *Writer) bulkEnv() bulkEnv {
 		engine:           w.cat.Name,
 		sourceType:       w.sourceType,
 		pgState:          w.pgState,
+		myState:          w.myState,
 	}
 }
 
