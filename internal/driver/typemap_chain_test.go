@@ -404,11 +404,12 @@ func TestFallbackChain_SupportedTargets_UnionDedupes(t *testing.T) {
 	got := chain.SupportedTargets()
 
 	want := map[string]bool{
-		typemap.DialectPostgres: true,
-		typemap.DialectMSSQL:    true,
-		typemap.DialectMySQL:    true,
-		typemap.DialectSQLite:   true,
-		"oracle":                true,
+		typemap.DialectPostgres:   true,
+		typemap.DialectMSSQL:      true,
+		typemap.DialectMySQL:      true,
+		typemap.DialectSQLite:     true,
+		typemap.DialectClickHouse: true,
+		"oracle":                  true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %d targets, want %d (duplicates dropped); list=%v", len(got), len(want), got)

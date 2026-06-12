@@ -56,8 +56,10 @@ func clickhouseToCanonical(col ColumnInfo) CanonicalType {
 		return CanonicalType{Kind: KindBigInt}
 	case "UINT64", "INT128", "INT256", "UINT128", "UINT256":
 		// No canonical kind holds these without loss — keep the native
-		// name so the AI fallback (or a same-engine target) decides.
-		return CanonicalType{Kind: KindRaw, TypeName: col.UDTName}
+		// name (UNWRAPPED: nullability is re-applied from IsNullable at
+		// DDL emission, so returning the wrapped name would double-wrap)
+		// so the AI fallback or a same-engine target decides.
+		return CanonicalType{Kind: KindRaw, TypeName: udt}
 	case "FLOAT32":
 		return CanonicalType{Kind: KindFloat}
 	case "FLOAT64":
@@ -73,7 +75,7 @@ func clickhouseToCanonical(col ColumnInfo) CanonicalType {
 	case "IPV4", "IPV6":
 		return CanonicalType{Kind: KindText}
 	default:
-		return CanonicalType{Kind: KindRaw, TypeName: col.UDTName}
+		return CanonicalType{Kind: KindRaw, TypeName: udt}
 	}
 }
 

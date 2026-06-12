@@ -133,6 +133,20 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 
 	tbl := driverTableToDDL(req.Table, req.TargetSchema, req.TargetDBType)
 
+	// ClickHouse has no row-store secondary indexes, FKs, or CHECK
+	// constraints — emitting the generic forms would be invalid SQL
+	// that *succeeds* here and fails at the server. Return the
+	// sentinel so the fallback chain routes or skips cleanly (codex
+	// review on #507 PR 1). The capability matrix (#460) makes the
+	// orchestrator skip FK/CHECK phases for clickhouse targets anyway;
+	// this guard covers the direct finalization path.
+	if req.TargetDBType == typemap.DialectClickHouse {
+		switch req.Type {
+		case DDLTypeIndex, DDLTypeForeignKey, DDLTypeCheckConstraint:
+			return "", fmt.Errorf("%s on clickhouse: %w (no row-store index/FK/CHECK DDL)", req.Type, ErrUnsupportedDDL)
+		}
+	}
+
 	switch req.Type {
 	case DDLTypeIndex:
 		if req.Index == nil {
