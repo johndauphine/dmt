@@ -1,0 +1,10 @@
+./dialect.go
+./driver.go
+./reader.go
+./writer.go
+./writer_ddl.go
+./dialect_test.go
+./driver_test.go
+./scrub_test.go
+./writer_idempotent_test.go
+./writer_test.go

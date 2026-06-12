@@ -105,6 +105,7 @@ introspection:
 
 ddl:
   create_schema: "CREATE DATABASE IF NOT EXISTS {schema}"
+  create_schema_defaults_to_database: true
   drop_table_stmts:
     - "DROP TABLE IF EXISTS {table}"
   truncate_stmts:

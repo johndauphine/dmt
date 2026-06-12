@@ -1,0 +1,21 @@
+# test log
+getenv GOTMPDIR
+getenv TMPDIR
+open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T
+getenv GOTMPDIR
+getenv TMPDIR
+getenv DMT_SECRETS_FILE
+getenv HOME
+stat /Users/john/.secrets/dmt-config.yaml
+open /Users/john/.secrets/dmt-config.yaml
+getenv HOME
+open /Users/john/.dmt/type-cache.json
+stat /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleP2108392281
+stat /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleP2108392281
+stat /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleP2108392281/003
+stat /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleP2108392281/003/migrate.db
+open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleP2108392281/003/migrate.db
+open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T
+getenv GOTMPDIR
+getenv TMPDIR
+open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T

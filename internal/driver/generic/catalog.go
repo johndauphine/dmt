@@ -239,6 +239,12 @@ type DDLSpec struct {
 	// CreateSchema is the CREATE SCHEMA template ({schema}); empty =
 	// no-op (sqlite: a file IS the database).
 	CreateSchema string `yaml:"create_schema"`
+	// CreateSchemaDefaultsToDatabase substitutes the connection
+	// database when the configured schema is empty (clickhouse, where
+	// schema IS the database). Engines with a default-database notion
+	// (mysql) keep empty-schema as a no-op — least-privilege upsert
+	// users must not be forced through CREATE DATABASE.
+	CreateSchemaDefaultsToDatabase bool `yaml:"create_schema_defaults_to_database"`
 	// DropTableStmts run in order ({table}); engines that must toggle
 	// FK enforcement around the drop declare it here.
 	DropTableStmts []string `yaml:"drop_table_stmts"`
