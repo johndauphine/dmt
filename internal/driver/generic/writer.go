@@ -162,6 +162,11 @@ func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
 	if w.cat.DDL.CreateSchema == "" {
 		return nil
 	}
+	if schema == "" {
+		// Schema-as-database engines (clickhouse) accept configs with
+		// only target.database set (codex on #507).
+		schema = w.config.Database
+	}
 	stmt := strings.ReplaceAll(w.cat.DDL.CreateSchema, "{schema}", w.dialect.QuoteIdentifier(schema))
 	_, err := w.db.ExecContext(ctx, stmt)
 	return err
@@ -203,7 +208,7 @@ func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.
 		return errors.New("column is required")
 	}
 
-	exists, err := w.columnExists(ctx, t.Name, column.Name)
+	exists, err := w.columnExists(ctx, targetSchema, t.Name, column.Name)
 	if err != nil {
 		return fmt.Errorf("checking column %s.%s: %w", t.Name, column.Name, err)
 	}
@@ -225,9 +230,21 @@ func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.
 	return err
 }
 
-func (w *Writer) columnExists(ctx context.Context, table, column string) (bool, error) {
+// introArgs mirrors the reader: schema-keyed engines bind the schema
+// (falling back to the connection database) as the first parameter.
+func (w *Writer) introArgs(schema string, rest ...any) []any {
+	if !w.cat.Introspection.UsesSchema {
+		return rest
+	}
+	if schema == "" {
+		schema = w.config.Database
+	}
+	return append([]any{schema}, rest...)
+}
+
+func (w *Writer) columnExists(ctx context.Context, schema, table, column string) (bool, error) {
 	var exists int
-	err := w.db.QueryRowContext(ctx, w.cat.Introspection.ColumnExists, table, column).Scan(&exists)
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.ColumnExists, w.introArgs(schema, table, column)...).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -294,7 +311,7 @@ func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error 
 
 func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {
 	var exists int
-	err := w.db.QueryRowContext(ctx, w.cat.Introspection.TableExists, table).Scan(&exists)
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.TableExists, w.introArgs(schema, table)...).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -317,7 +334,7 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 
 func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
 	var exists int
-	err := w.db.QueryRowContext(ctx, w.cat.Introspection.HasPrimaryKey, table).Scan(&exists)
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.HasPrimaryKey, w.introArgs(schema, table)...).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

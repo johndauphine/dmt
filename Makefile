@@ -76,6 +76,17 @@ lint:
 # On native Linux, bind mounts use host ext4/xfs directly and don't have this penalty.
 # To remove named volumes: docker volume rm mssql-test-data pg-test-data mssql-bench-data pg-bench-data
 
+# ClickHouse test server for the catalog-engine integration tests
+# (internal/driver/generic/clickhouse_integration_test.go).
+clickhouse-test-up:
+	docker run -d --name clickhouse-test \
+		-e 'CLICKHOUSE_PASSWORD=TestPass2024' \
+		-p 8123:8123 -p 9000:9000 \
+		clickhouse/clickhouse-server:24.8
+
+clickhouse-test-down:
+	docker rm -f clickhouse-test
+
 test-dbs-up:
 	docker run -d --name mssql-test \
 		--user root \

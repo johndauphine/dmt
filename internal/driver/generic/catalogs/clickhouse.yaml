@@ -132,8 +132,11 @@ date_types: [date, date32, datetime, datetime64]
 value_converters: default
 
 bulk:
-  strategy: batched_insert       # multi-row INSERT; native columnar
-  max_bind_variables: 0          # batch is a PR-3 benchmark decision
+  # clickhouse-go converts multi-row INSERTs to native columnar blocks;
+  # measured 1.86M rows/s on 50k-row batches (#507 PR 3) — no separate
+  # native-batch strategy needed.
+  strategy: batched_insert
+  max_bind_variables: 0
   row_converter: ""
 
 context:
