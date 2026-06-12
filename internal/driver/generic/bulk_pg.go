@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/ident"
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -49,12 +50,12 @@ func init() {
 // debug-logged, not fatal (the sequence may not exist for non-serial
 // identities).
 func pgSetvalReset(ctx context.Context, db *sql.DB, dialect *Dialect, schema string, t *driver.Table) error {
-	sanitizedTable := sanitizePGTableName(t.Name)
+	sanitizedTable := ident.SanitizePG(t.Name)
 	for _, col := range t.Columns {
 		if !col.IsIdentity {
 			continue
 		}
-		sanitizedCol := sanitizePGIdentifier(col.Name)
+		sanitizedCol := ident.SanitizePG(col.Name)
 		seqName := fmt.Sprintf("%s_%s_seq", sanitizedTable, sanitizedCol)
 		query := fmt.Sprintf("SELECT setval('%s.%s', COALESCE((SELECT MAX(%s) FROM %s), 1))",
 			schema, seqName, dialect.QuoteIdentifier(sanitizedCol), dialect.QualifyTable(schema, sanitizedTable))
@@ -63,6 +64,15 @@ func pgSetvalReset(ctx context.Context, db *sql.DB, dialect *Dialect, schema str
 		}
 	}
 	return nil
+}
+
+// sanitizeAll returns a sanitized copy of the identifier list.
+func sanitizeAll(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = ident.SanitizePG(n)
+	}
+	return out
 }
 
 // withPgxConn runs fn on the native pgx connection underneath the
@@ -181,12 +191,12 @@ func pgCopyFromWrite(ctx context.Context, env bulkEnv, opts driver.WriteBatchOpt
 
 	return withPgxConn(ctx, env.db, func(conn *pgx.Conn) error {
 		// Identifiers were lowercased at create time — match them.
-		sanitizedTable := sanitizePGTableName(opts.Table)
+		sanitizedTable := ident.SanitizePG(opts.Table)
 		sanitizedCols := make([]string, len(opts.Columns))
 		for i, col := range opts.Columns {
-			sanitizedCols[i] = sanitizePGIdentifier(col)
+			sanitizedCols[i] = ident.SanitizePG(col)
 		}
-		ident := pgx.Identifier{opts.Schema, sanitizedTable}
+		copyTarget := pgx.Identifier{opts.Schema, sanitizedTable}
 
 		batchSize := pgCopyBatchSize(opts.Rows, pgCopyBudget(env.pgState, conn))
 
@@ -203,7 +213,7 @@ func pgCopyFromWrite(ctx context.Context, env bulkEnv, opts driver.WriteBatchOpt
 			}
 			subBatch := opts.Rows[start:end]
 			copyCtx, cancel := context.WithTimeout(ctx, pgCopyTimeout(subBatch))
-			_, err = tx.CopyFrom(copyCtx, ident, sanitizedCols, pgx.CopyFromRows(subBatch))
+			_, err = tx.CopyFrom(copyCtx, copyTarget, sanitizedCols, pgx.CopyFromRows(subBatch))
 			cancel()
 			if err != nil {
 				return fmt.Errorf("copy batch [%d:%d]: %w", start, end, err)
@@ -226,14 +236,14 @@ func pgWriteBatchIdempotent(ctx context.Context, env bulkEnv, opts driver.WriteB
 	}
 
 	return withPgxConn(ctx, env.db, func(conn *pgx.Conn) error {
-		sanitizedTable := sanitizePGTableName(opts.Table)
+		sanitizedTable := ident.SanitizePG(opts.Table)
 		sanitizedCols := make([]string, len(opts.Columns))
 		for i, col := range opts.Columns {
-			sanitizedCols[i] = sanitizePGIdentifier(col)
+			sanitizedCols[i] = ident.SanitizePG(col)
 		}
 		sanitizedPK := make([]string, len(opts.PKColumns))
 		for i, pk := range opts.PKColumns {
-			sanitizedPK[i] = sanitizePGIdentifier(pk)
+			sanitizedPK[i] = ident.SanitizePG(pk)
 		}
 
 		stagingKey := fmt.Sprintf("%s.%s.%d", opts.Schema, opts.Table, opts.WriterID)
@@ -303,6 +313,13 @@ func pgCopyStagingUpsert(ctx context.Context, env bulkEnv, opts driver.UpsertBat
 	}
 
 	return withPgxConn(ctx, env.db, func(conn *pgx.Conn) error {
+		// Identifiers were lowercased at create time — match them.
+		// Copies, not in-place: the caller's slices are shared across
+		// writer goroutines.
+		opts.Table = ident.SanitizePG(opts.Table)
+		opts.Columns = sanitizeAll(opts.Columns)
+		opts.PKColumns = sanitizeAll(opts.PKColumns)
+
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin transaction: %w", err)
@@ -352,22 +369,40 @@ func pgBuildUpsertSQL(dialect *Dialect, opts driver.UpsertBatchOptions, stagingT
 	}
 
 	var updateClauses []string
-	for _, col := range opts.Columns {
+	var targetCols, excludedCols []string
+	for i, col := range opts.Columns {
 		if pkSet[strings.ToLower(col)] {
 			continue
 		}
 		qCol := dialect.QuoteIdentifier(col)
 		updateClauses = append(updateClauses, fmt.Sprintf("%s = EXCLUDED.%s", qCol, qCol))
+
+		// Spatial types have no = operator, so they can't participate
+		// in IS DISTINCT FROM change detection (oracle parity).
+		colType := ""
+		if i < len(opts.ColumnTypes) {
+			colType = strings.ToLower(opts.ColumnTypes[i])
+		}
+		if colType != "geography" && colType != "geometry" {
+			targetCols = append(targetCols, fmt.Sprintf("%s.%s", dialect.QuoteIdentifier(opts.Table), qCol))
+			excludedCols = append(excludedCols, "EXCLUDED."+qCol)
+		}
 	}
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "INSERT INTO %s (%s) SELECT %s FROM %s ON CONFLICT (%s)",
 		dialect.QualifyTable(opts.Schema, opts.Table), colList, colList,
 		dialect.QuoteIdentifier(stagingTable), strings.Join(quotedPK, ", "))
-	if len(updateClauses) > 0 {
-		fmt.Fprintf(&sb, " DO UPDATE SET %s", strings.Join(updateClauses, ", "))
-	} else {
+	if len(updateClauses) == 0 {
 		sb.WriteString(" DO NOTHING")
+		return sb.String()
+	}
+	fmt.Fprintf(&sb, " DO UPDATE SET %s", strings.Join(updateClauses, ", "))
+	// Skip no-op updates: unchanged conflicting rows must not fire
+	// UPDATE triggers or write WAL.
+	if len(targetCols) > 0 {
+		fmt.Fprintf(&sb, " WHERE (%s) IS DISTINCT FROM (%s)",
+			strings.Join(targetCols, ", "), strings.Join(excludedCols, ", "))
 	}
 	return sb.String()
 }

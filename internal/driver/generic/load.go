@@ -180,6 +180,11 @@ func (c *Catalog) Validate() error {
 			errs = append(errs, fmt.Sprintf("preflight_strategy %q is not a known strategy", c.Preflight))
 		}
 	}
+	if c.Quoting.IdentifierSanitizer != "" {
+		if _, ok := identifierSanitizers[c.Quoting.IdentifierSanitizer]; !ok {
+			errs = append(errs, fmt.Sprintf("quoting.identifier_sanitizer %q is not a known strategy", c.Quoting.IdentifierSanitizer))
+		}
+	}
 	require(c.ValueConverters == "" || c.ValueConverters == "default",
 		"value_converters: only the \"default\" strategy exists yet")
 

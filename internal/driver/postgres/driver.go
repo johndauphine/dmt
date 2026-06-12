@@ -8,7 +8,6 @@ import (
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/driver/shared"
 )
 
 func init() {
@@ -62,10 +61,7 @@ func (d *Driver) ProbeTarget(_ context.Context, _ *sql.DB) driver.TargetProbe {
 // PreFlight runs PostgreSQL preflight checks (#228). Implementation lives
 // in preflight.go to keep this entry point lean.
 func (d *Driver) PreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	// Battery moved to the generic strategy library with the #509
-	// conversion; the oracle keeps the shared minimal battery until
-	// its removal.
-	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{})
+	return preFlight(ctx, db, req)
 }
 
 // Dialect returns the PostgreSQL dialect.
