@@ -17,10 +17,11 @@ import (
 // keeping the actual string values in one place to prevent drift
 // (Copilot review on PR #188).
 const (
-	DialectPostgres = typemap.DialectPostgres
-	DialectMSSQL    = typemap.DialectMSSQL
-	DialectMySQL    = typemap.DialectMySQL
-	DialectSQLite   = typemap.DialectSQLite
+	DialectPostgres   = typemap.DialectPostgres
+	DialectMSSQL      = typemap.DialectMSSQL
+	DialectMySQL      = typemap.DialectMySQL
+	DialectSQLite     = typemap.DialectSQLite
+	DialectClickHouse = typemap.DialectClickHouse
 )
 
 // QuoteIdentifier wraps an identifier in the target dialect's quoting
@@ -32,7 +33,7 @@ func QuoteIdentifier(name, dialect string) string {
 	switch dialect {
 	case DialectPostgres, DialectSQLite:
 		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-	case DialectMySQL:
+	case DialectMySQL, DialectClickHouse:
 		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 	case DialectMSSQL:
 		return "[" + strings.ReplaceAll(name, "]", "]]") + "]"

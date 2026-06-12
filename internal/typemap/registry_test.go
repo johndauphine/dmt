@@ -8,7 +8,7 @@ import (
 // TestRegistryBuiltins verifies the four built-in mappers are registered
 // and dispatch identically to the pre-#479 hardcoded switch.
 func TestRegistryBuiltins(t *testing.T) {
-	want := []string{DialectMSSQL, DialectMySQL, DialectPostgres, DialectSQLite}
+	want := []string{DialectClickHouse, DialectMSSQL, DialectMySQL, DialectPostgres, DialectSQLite}
 	if got := SupportedDialects(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("SupportedDialects() = %v, want %v", got, want)
 	}

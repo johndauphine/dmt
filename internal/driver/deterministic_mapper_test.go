@@ -95,10 +95,11 @@ func TestDeterministicMapper_SupportedTargets(t *testing.T) {
 	m := NewDeterministicMapper()
 	got := m.SupportedTargets()
 	want := map[string]bool{
-		typemap.DialectPostgres: true,
-		typemap.DialectMSSQL:    true,
-		typemap.DialectMySQL:    true,
-		typemap.DialectSQLite:   true,
+		typemap.DialectPostgres:   true,
+		typemap.DialectMSSQL:      true,
+		typemap.DialectMySQL:      true,
+		typemap.DialectSQLite:     true,
+		typemap.DialectClickHouse: true,
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %d targets, want %d (%v)", len(got), len(want), got)
