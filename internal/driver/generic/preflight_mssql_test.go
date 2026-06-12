@@ -1,4 +1,4 @@
-package mssql
+package generic
 
 import (
 	"context"
@@ -7,20 +7,23 @@ import (
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/driver"
-
-	_ "modernc.org/sqlite"
 )
 
-func TestCheckParallelBCPIndexRiskMSSQLWarnsForTargetNonclusteredIndexes(t *testing.T) {
-	db := openMSSQLCatalogSQLite(t)
-	seedMSSQLCatalogIndexes(t, db)
+// BCP index-risk preflight tests ported from the hand-written mssql
+// driver with its removal (#509 cleanup). A sqlite-backed fake of the
+// sys.* catalog keeps them hermetic — the modernc.org/sqlite driver is
+// already a generic backend import.
 
-	findings := checkParallelBCPIndexRiskMSSQL(context.Background(), db, driver.PreFlightRequest{
+func TestMssqlPFParallelBCPIndexRiskWarnsForTargetNonclusteredIndexes(t *testing.T) {
+	db := openMssqlCatalogSQLite(t)
+	seedMssqlCatalogIndexes(t, db)
+
+	findings := mssqlPFParallelBCPIndexRisk(context.Background(), db, driver.PreFlightRequest{
 		Side:   driver.PreFlightSideTarget,
 		Schema: "dbo",
 	})
 	if len(findings) != 1 {
-		t.Fatalf("checkParallelBCPIndexRiskMSSQL produced %d findings, want 1", len(findings))
+		t.Fatalf("mssqlPFParallelBCPIndexRisk produced %d findings, want 1", len(findings))
 	}
 
 	got := findings[0]
@@ -42,11 +45,11 @@ func TestCheckParallelBCPIndexRiskMSSQLWarnsForTargetNonclusteredIndexes(t *test
 	}
 }
 
-func TestCheckParallelBCPIndexRiskMSSQLSkipsSourceSide(t *testing.T) {
-	db := openMSSQLCatalogSQLite(t)
-	seedMSSQLCatalogIndexes(t, db)
+func TestMssqlPFParallelBCPIndexRiskSkipsSourceSide(t *testing.T) {
+	db := openMssqlCatalogSQLite(t)
+	seedMssqlCatalogIndexes(t, db)
 
-	findings := checkParallelBCPIndexRiskMSSQL(context.Background(), db, driver.PreFlightRequest{
+	findings := mssqlPFParallelBCPIndexRisk(context.Background(), db, driver.PreFlightRequest{
 		Side:   driver.PreFlightSideSource,
 		Schema: "dbo",
 	})
@@ -55,15 +58,15 @@ func TestCheckParallelBCPIndexRiskMSSQLSkipsSourceSide(t *testing.T) {
 	}
 }
 
-func TestCheckParallelBCPIndexRiskMSSQLNoWarnWithoutNonclusteredIndexes(t *testing.T) {
-	db := openMSSQLCatalogSQLite(t)
-	execMSSQLCatalogSQL(t, db, `INSERT INTO sys.schemas (schema_id, name) VALUES (1, 'dbo')`)
-	execMSSQLCatalogSQL(t, db, `INSERT INTO sys.tables (object_id, schema_id, name, is_ms_shipped) VALUES (10, 1, 'Users', 0)`)
-	execMSSQLCatalogSQL(t, db, `
+func TestMssqlPFParallelBCPIndexRiskNoWarnWithoutNonclusteredIndexes(t *testing.T) {
+	db := openMssqlCatalogSQLite(t)
+	execMssqlCatalogSQL(t, db, `INSERT INTO sys.schemas (schema_id, name) VALUES (1, 'dbo')`)
+	execMssqlCatalogSQL(t, db, `INSERT INTO sys.tables (object_id, schema_id, name, is_ms_shipped) VALUES (10, 1, 'Users', 0)`)
+	execMssqlCatalogSQL(t, db, `
 		INSERT INTO sys.indexes (object_id, name, type_desc, is_primary_key, is_disabled, is_hypothetical)
 		VALUES (10, 'PK_Users', 'CLUSTERED', 1, 0, 0)`)
 
-	findings := checkParallelBCPIndexRiskMSSQL(context.Background(), db, driver.PreFlightRequest{
+	findings := mssqlPFParallelBCPIndexRisk(context.Background(), db, driver.PreFlightRequest{
 		Side:   driver.PreFlightSideTarget,
 		Schema: "dbo",
 	})
@@ -72,7 +75,7 @@ func TestCheckParallelBCPIndexRiskMSSQLNoWarnWithoutNonclusteredIndexes(t *testi
 	}
 }
 
-func openMSSQLCatalogSQLite(t *testing.T) *sql.DB {
+func openMssqlCatalogSQLite(t *testing.T) *sql.DB {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", ":memory:")
@@ -92,12 +95,12 @@ func openMSSQLCatalogSQLite(t *testing.T) *sql.DB {
 		`CREATE TABLE sys.tables (object_id INTEGER PRIMARY KEY, schema_id INTEGER NOT NULL, name TEXT NOT NULL, is_ms_shipped INTEGER NOT NULL)`,
 		`CREATE TABLE sys.indexes (object_id INTEGER NOT NULL, name TEXT NOT NULL, type_desc TEXT NOT NULL, is_primary_key INTEGER NOT NULL, is_disabled INTEGER NOT NULL, is_hypothetical INTEGER NOT NULL)`,
 	} {
-		execMSSQLCatalogSQL(t, db, stmt)
+		execMssqlCatalogSQL(t, db, stmt)
 	}
 	return db
 }
 
-func seedMSSQLCatalogIndexes(t *testing.T, db *sql.DB) {
+func seedMssqlCatalogIndexes(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	for _, stmt := range []string{
@@ -109,14 +112,55 @@ func seedMSSQLCatalogIndexes(t *testing.T, db *sql.DB) {
 		`INSERT INTO sys.indexes (object_id, name, type_desc, is_primary_key, is_disabled, is_hypothetical) VALUES (20, 'IX_Posts_CreatedAt', 'NONCLUSTERED COLUMNSTORE', 0, 0, 0)`,
 		`INSERT INTO sys.indexes (object_id, name, type_desc, is_primary_key, is_disabled, is_hypothetical) VALUES (20, 'IX_Posts_Disabled', 'NONCLUSTERED', 0, 1, 0)`,
 	} {
-		execMSSQLCatalogSQL(t, db, stmt)
+		execMssqlCatalogSQL(t, db, stmt)
 	}
 }
 
-func execMSSQLCatalogSQL(t *testing.T, db *sql.DB, stmt string) {
+func execMssqlCatalogSQL(t *testing.T, db *sql.DB, stmt string) {
 	t.Helper()
 
 	if _, err := db.Exec(stmt); err != nil {
 		t.Fatalf("executing catalog SQL %q: %v", stmt, err)
+	}
+}
+
+// DSN encrypt passthrough (ported): encrypt=false must render the
+// go-mssqldb "disable" form, not "false".
+func TestSqlserverDSNEncrypt(t *testing.T) {
+	tests := []struct {
+		name     string
+		encrypt  bool
+		expected string
+	}{
+		{"encrypt true", true, "&encrypt=true"},
+		{"encrypt false uses disable", false, "&encrypt=disable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dsn := sqlserverURLDSN("localhost", 1433, "testdb", "sa", "pass", map[string]any{
+				"encrypt": tt.encrypt,
+			})
+			if !strings.Contains(dsn, tt.expected) {
+				t.Errorf("DSN with encrypt=%v should contain %q, got %q", tt.encrypt, tt.expected, dsn)
+			}
+		})
+	}
+}
+
+// The #253 NOLOCK contract on exact counts: relaxed reads keep the
+// dirty-read hint, strict_consistency drops it. (The hand-written
+// reader's buildExactRowCountQuery pinned the same strings.)
+func TestMssqlExactRowCountHint(t *testing.T) {
+	cat, err := LoadCatalog("mssql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDialect(cat)
+	if h := d.TableHint(false); h != "WITH (NOLOCK)" {
+		t.Errorf("relaxed hint = %q, want WITH (NOLOCK)", h)
+	}
+	if h := d.TableHint(true); h != "" {
+		t.Errorf("strict hint = %q, want empty", h)
 	}
 }

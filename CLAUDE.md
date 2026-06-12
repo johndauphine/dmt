@@ -41,8 +41,7 @@ All packages live under `internal/`. The key ones:
 | Package | Purpose |
 |---------|---------|
 | `driver/` | Pluggable database drivers + AI integrations (type mapping, smart config, error diagnosis) |
-| `driver/mssql/` | Hand-written oracle implementation awaiting removal (#509 cleanup; sqlite, mysql, postgres already removed) |
-| `driver/generic/` | Catalog-driven engine (#191): one Reader/Writer/Dialect, per-engine YAML catalogs (`sqlite` runs on it) |
+| `driver/generic/` | Catalog-driven engine (#191/#509): one Reader/Writer/Dialect; ALL engines run on per-engine YAML catalogs + named Go strategies |
 | `orchestrator/` | Migration workflow coordinator (9 task phases, retry logic, health checks) |
 | `transfer/` | Data transfer pipeline with read-ahead buffering, runtime tuning, checkpoint coordination |
 | `pool/` | WriterPool goroutine pool, driver factory |
