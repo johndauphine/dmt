@@ -49,6 +49,12 @@ type Catalog struct {
 	// driver.DefaultValueConverters.
 	ValueConverters string `yaml:"value_converters"`
 
+	// SpatialSelect wraps spatial columns in SELECT lists for
+	// cross-engine reads (PostGIS/MySQL geometry → WKT text that the
+	// target's staging path expects). Same-engine reads always use the
+	// plain column list.
+	SpatialSelect SpatialSelectSpec `yaml:"spatial_select"`
+
 	// Preflight names the engine's preflight battery (imperative;
 	// strategy-selected). Empty selects the shared minimal battery.
 	Preflight string `yaml:"preflight_strategy"`
@@ -89,6 +95,14 @@ type CapabilitiesSpec struct {
 	SequenceResetter      bool `yaml:"sequence_resetter"`
 	ConstraintWriter      bool `yaml:"constraint_writer"`
 	IncrementalDateReader bool `yaml:"incremental_date_reader"`
+}
+
+// SpatialSelectSpec declares the cross-engine SELECT wrapper for
+// spatial column types. Wrapper uses {col} for the quoted column name,
+// e.g. "ST_AsText({col}) AS {col}".
+type SpatialSelectSpec struct {
+	Types   []string `yaml:"types"`
+	Wrapper string   `yaml:"wrapper"`
 }
 
 // QuotingSpec is the identifier-quoting style.

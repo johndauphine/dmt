@@ -171,6 +171,14 @@ date_types: [datetime, timestamp, date]
 
 value_converters: default
 
+# Cross-engine reads convert MySQL spatial columns to WKT text (the
+# hand-written dialect's ST_AsText wrapping; regressed by the #516 flip
+# and restored here).
+spatial_select:
+  types: [geometry, point, linestring, polygon, multipoint,
+          multilinestring, multipolygon, geometrycollection]
+  wrapper: "ST_AsText({col}) AS {col}"
+
 preflight_strategy: mysql
 
 bulk:

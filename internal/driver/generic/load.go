@@ -187,6 +187,8 @@ func (c *Catalog) Validate() error {
 	}
 	require(c.ValueConverters == "" || c.ValueConverters == "default",
 		"value_converters: only the \"default\" strategy exists yet")
+	require(c.SpatialSelect.Wrapper == "" || (strings.Contains(c.SpatialSelect.Wrapper, "{col}") && len(c.SpatialSelect.Types) > 0),
+		"spatial_select: wrapper requires a {col} token and a non-empty types list")
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid catalog:\n  - %s", strings.Join(errs, "\n  - "))
