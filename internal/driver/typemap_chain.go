@@ -429,7 +429,7 @@ func conservativeTextType(targetDialect string) string {
 // without grepping the source.
 //
 // Exported (capitalized) so writers in sibling packages
-// (driver/postgres, driver/mssql, driver/mysql) can call it.
+// (now the generic catalog engine) can call it.
 func LogTypeMapperInit(m TypeMapper) {
 	switch t := m.(type) {
 	case *FallbackChain:
