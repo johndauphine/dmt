@@ -113,6 +113,9 @@ func TestMssqlCatalogDefaults(t *testing.T) {
 	if d.PacketSize != 32767 {
 		t.Errorf("Defaults().PacketSize = %d, want 32767", d.PacketSize)
 	}
+	if d.OptimumBulkChunkBytes != 1_500_000 {
+		t.Errorf("Defaults().OptimumBulkChunkBytes = %d, want 1500000 (measured sweep peak)", d.OptimumBulkChunkBytes)
+	}
 	if d.Port != 1433 || d.Schema != "dbo" {
 		t.Errorf("Defaults() port/schema = %d/%q, want 1433/dbo", d.Port, d.Schema)
 	}
