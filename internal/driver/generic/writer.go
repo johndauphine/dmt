@@ -377,11 +377,13 @@ func (w *Writer) bulkEnv() bulkEnv {
 		convert = rowConverters[name]
 	}
 	return bulkEnv{
-		db:        w.db,
-		dialect:   w.dialect,
-		batchSize: w.defaultBatchSize,
-		maxVars:   w.cat.Bulk.MaxBindVariables,
-		convert:   convert,
+		db:             w.db,
+		dialect:        w.dialect,
+		batchSize:      w.defaultBatchSize,
+		maxVars:        w.cat.Bulk.MaxBindVariables,
+		convert:        convert,
+		idempotentVerb: w.cat.Bulk.IdempotentVerb,
+		engine:         w.cat.Name,
 	}
 }
 

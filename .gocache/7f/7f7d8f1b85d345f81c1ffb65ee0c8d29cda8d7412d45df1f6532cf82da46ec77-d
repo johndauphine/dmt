@@ -1,0 +1,6 @@
+./doc.go
+./ge_noasm.go
+./gemv.go
+./l2norm.go
+./scal.go
+./stubs_noasm.go

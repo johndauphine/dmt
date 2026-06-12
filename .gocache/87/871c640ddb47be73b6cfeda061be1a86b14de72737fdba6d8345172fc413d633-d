@@ -1,0 +1,6 @@
+./memory.go
+./memory64.go
+./mmap_darwin.go
+./mmap_unix.go
+./nocounters.go
+./trace_disabled.go

@@ -174,6 +174,12 @@ type QueriesSpec struct {
 // the generic Reader's row mapping is fixed; the catalog adapts the
 // engine's catalog tables to it. {?} placeholders are positional.
 type IntrospectionSpec struct {
+	// UsesSchema: the engine's catalog tables are keyed by schema (or
+	// database) as well as table — ClickHouse's system.columns. When
+	// true, ListTables binds (schema) and the per-table queries bind
+	// (schema, table); the date_column query binds (schema, table,
+	// column). When false (sqlite), the schema is omitted entirely.
+	UsesSchema bool `yaml:"uses_schema"`
 	// ListTables: no params → rows of (table_name).
 	ListTables string `yaml:"list_tables"`
 	// DescribeTable: param (table) → rows of (ordinal, name, decl_type,
@@ -246,6 +252,12 @@ type BulkSpec struct {
 	// RowConverter names the write-side value normalization (empty =
 	// pass through).
 	RowConverter string `yaml:"row_converter"`
+	// IdempotentVerb is the INSERT verb that silently skips duplicate
+	// PKs, used by the #227 ROW_NUMBER resume path ("INSERT OR IGNORE
+	// INTO" on sqlite). Empty means the engine has no such verb and an
+	// idempotent replay is refused with a clear error instead of
+	// emitting another engine's syntax.
+	IdempotentVerb string `yaml:"idempotent_verb"`
 }
 
 // UpsertSpec selects the upsert strategy (capability Upserter).

@@ -1,0 +1,9 @@
+./dialect.go
+./driver.go
+./identifiers.go
+./preflight.go
+./reader.go
+./tcp_sndbuf.go
+./writer.go
+./writer_copy.go
+./writer_ddl.go

@@ -1,0 +1,166 @@
+# ClickHouse catalog (#507) — the first new engine on the catalog
+# framework. Columnar OLAP: the "schema" is the database, PRIMARY KEY
+# is the MergeTree ORDER BY key (not a constraint), nullability is a
+# Nullable(T) type wrapper, and there are no row-store secondary
+# indexes, FKs, CHECKs, upserts, or sequences. The conformance
+# DriverCase in conformance_clickhouse_test.go was written from the
+# engine's documentation first; this catalog satisfies it.
+name: clickhouse
+aliases: [ch]
+
+connection:
+  backend: clickhouse            # database/sql driver (clickhouse-go/v2)
+  dsn_strategy: clickhouse_url   # URL-escapes credentials
+  default_port: 9000             # native protocol
+
+defaults:
+  write_ahead_writers: 4
+  scale_writers_with_cores: true
+
+capabilities:
+  upserter: false                # MergeTree dedup is eventual, not upsert
+  sequence_resetter: false       # no sequences/identity
+  constraint_writer: false       # no post-transfer FK/CHECK DDL
+  incremental_date_reader: true
+
+quoting:
+  identifier_format: "`%s`"
+  escaped_char: "`"
+  schema_ignored: false          # schema = database; always qualify
+
+placeholder: "?"
+
+table_hints:
+  strict: ""
+  relaxed: ""
+
+pagination:
+  keyset:
+    query: |
+      SELECT {columns} FROM {table}
+      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      ORDER BY {pk}
+      LIMIT {?}
+    max_pk_clause: " AND {pk} <= {?}"
+    date_clause: " AND {date_column} > {?}"
+    args:
+      no_max: [last_pk, limit]
+      no_max_date: [last_pk, date_from, limit]
+      with_max: [last_pk, max_pk, limit]
+      with_max_date: [last_pk, max_pk, date_from, limit]
+
+  row_number:
+    # Window functions are GA; the date filter lives inside the
+    # subquery so __rn numbering reflects the filtered set.
+    query: |
+      SELECT {outer_columns} FROM (
+        SELECT {columns}, ROW_NUMBER() OVER (ORDER BY {order_by}) as __rn
+        FROM {table}{where_date}
+      )
+      WHERE __rn > {?} AND __rn <= {?}
+      ORDER BY __rn
+    date_clause: " WHERE {date_column} > {?}"
+    args:
+      no_date: [row_start, row_end]
+      date: [date_from, row_start, row_end]
+
+# system.* catalog tables are keyed by (database, table) — the schema
+# binds as the first parameter of every introspection query.
+introspection:
+  uses_schema: true
+  list_tables: |
+    SELECT name FROM system.tables
+    WHERE database = ? AND engine NOT IN ('View', 'MaterializedView')
+    ORDER BY name
+  # Canonical shape (ordinal, name, decl_type, max_length, precision,
+  # scale, is_nullable, default_value, pk_ordinal). The full type
+  # string (incl. Nullable/LowCardinality wrappers) feeds the typemap
+  # mapper, which parses parameters itself — no parse_type_params.
+  # pk_ordinal must be DENSE (1..k) among key members — loadColumns
+  # matches ordinals exactly — so rank key columns by position rather
+  # than reporting absolute positions (codex on #507).
+  describe_table: |
+    SELECT toInt32(position), name, type, NULL, NULL, NULL,
+           if(position(type, 'Nullable(') > 0, 1, 0),
+           default_expression,
+           if(is_in_primary_key,
+              toInt32(row_number() OVER (PARTITION BY is_in_primary_key ORDER BY position)),
+              0)
+    FROM system.columns
+    WHERE database = ? AND table = ?
+    ORDER BY position
+  parse_type_params: false
+  # Data-skipping indices are not row-store indexes and don't migrate;
+  # always-empty result sets keep LoadIndexes/LoadForeignKeys no-ops
+  # without special-casing the reader.
+  index_list: "SELECT name, 0 FROM system.tables WHERE 1 = 0"
+  index_columns: "SELECT name FROM system.tables WHERE 1 = 0"
+  foreign_keys: |
+    SELECT 0, 0, '', '', '', '', '' FROM system.tables WHERE 1 = 0
+  column_exists: |
+    SELECT 1 FROM system.columns WHERE database = ? AND table = ? AND name = ? LIMIT 1
+  table_exists: "SELECT 1 FROM system.tables WHERE database = ? AND name = ? LIMIT 1"
+  has_primary_key: |
+    SELECT 1 FROM system.columns WHERE database = ? AND table = ? AND is_in_primary_key LIMIT 1
+
+ddl:
+  create_schema: "CREATE DATABASE IF NOT EXISTS {schema}"
+  drop_table_stmts:
+    - "DROP TABLE IF EXISTS {table}"
+  truncate_stmts:
+    - "TRUNCATE TABLE {table}"
+  # Schema-evolution columns arrive nullable; ClickHouse spells that as
+  # a type wrapper.
+  add_column: "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} Nullable({type})"
+  create_primary_key: ""         # ORDER BY key is set at CREATE TABLE
+  can_drop_not_null: false
+  can_alter_column_type: false
+
+# No parallel-read benefit measured yet; single partition until the
+# benchmark PR justifies a range-split query (intDiv buckets).
+queries:
+  partition_boundaries: "SELECT 1 AS partition_id, MIN({pk}), MAX({pk}), COUNT(*) FROM {table}"
+  row_count: "SELECT COUNT(*) FROM %s"
+  # Normalized in SQL so the generic date matcher sees the bare lowered
+  # family name ("datetime64", not "DateTime64(3, 'UTC')").
+  date_column: |
+    SELECT lower(splitByChar('(', replaceOne(replaceOne(type, 'Nullable(', ''), 'LowCardinality(', ''))[1])
+    FROM system.columns WHERE database = ? AND table = ? AND name = ?
+
+date_types: [date, date32, datetime, datetime64]
+
+value_converters: default
+
+bulk:
+  strategy: batched_insert       # multi-row INSERT; native columnar
+  max_bind_variables: 0          # batch is a PR-3 benchmark decision
+  row_converter: ""
+
+context:
+  version_query: "SELECT version()"
+  version_prefix: "ClickHouse "
+  identifier_case: preserve
+  case_sensitive_identifiers: true
+  charset: UTF-8
+  encoding: UTF-8
+  max_identifier_length: 0
+  varchar_semantics: char
+  bytes_per_char: 1
+  features: [MergeTree, window_functions]
+
+ai:
+  prompt_augmentation: |
+
+    ClickHouse-specific requirements:
+    - Every CREATE TABLE must declare ENGINE = MergeTree and an ORDER BY key
+      (use ORDER BY tuple() when no natural key exists).
+    - Nullability is a type wrapper: Nullable(T), never a NOT NULL constraint.
+    - There is no VARCHAR length; use String (FixedString(N) only for
+      genuinely fixed-width values).
+    - No foreign keys, CHECK constraints, secondary row-store indexes,
+      sequences, or AUTO_INCREMENT.
+  drop_table_prompt_augmentation: |
+
+    ClickHouse-specific requirements:
+    - Use DROP TABLE IF EXISTS; there is no CASCADE and no FK enforcement
+      to disable.

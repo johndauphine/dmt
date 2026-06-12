@@ -1,0 +1,7 @@
+./canonical.go
+./clickhouse.go
+./mssql.go
+./mysql.go
+./postgres.go
+./registry.go
+./sqlite.go

@@ -1,0 +1,6 @@
+./catalog.go
+./inspector.go
+./mssql.go
+./mysql.go
+./postgres.go
+./rules.go

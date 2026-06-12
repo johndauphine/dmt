@@ -1,0 +1,6 @@
+./diff.go
+./report.go
+./signature.go
+./snapshot.go
+./diff_test.go
+./snapshot_test.go

@@ -1,0 +1,16 @@
+./args.go
+./capture.go
+./commands.go
+./commands_maintenance.go
+./commands_profile.go
+./commands_run.go
+./git.go
+./helpers.go
+./model.go
+./model_init.go
+./model_update.go
+./model_view.go
+./session.go
+./setup_flow.go
+./styles.go
+./wizard.go

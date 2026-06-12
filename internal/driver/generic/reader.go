@@ -150,10 +150,25 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 	return parts, nil
 }
 
+// introArgs prepends the schema for engines whose catalog tables are
+// schema-keyed (IntrospectionSpec.UsesSchema). An empty schema falls
+// back to the connection's database — engines like ClickHouse treat
+// schema AS the database, and a config that only sets database is
+// valid (codex on #507; mirrors the MySQL convention).
+func (r *Reader) introArgs(schema string, rest ...any) []any {
+	if !r.cat.Introspection.UsesSchema {
+		return rest
+	}
+	if schema == "" {
+		schema = r.config.Database
+	}
+	return append([]any{schema}, rest...)
+}
+
 // ExtractSchema walks the catalog's list_tables / describe_table
 // queries and maps their canonical shapes onto driver.Table.
 func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Table, error) {
-	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.ListTables)
+	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.ListTables, r.introArgs(schema)...)
 	if err != nil {
 		return nil, fmt.Errorf("querying tables: %w", err)
 	}
@@ -202,7 +217,7 @@ func schemaOrEmpty(cat *Catalog, schema string) string {
 // decl_type, max_length, precision, scale, is_nullable, default_value,
 // pk_ordinal).
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
-	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.DescribeTable, t.Name)
+	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.DescribeTable, r.introArgs(t.Schema, t.Name)...)
 	if err != nil {
 		return fmt.Errorf("querying columns for %s: %w", t.Name, err)
 	}
@@ -316,7 +331,7 @@ func parseDeclaredType(decl string) (base string, maxLen, precision, scale int) 
 // LoadIndexes maps index_list (index_name, is_unique) + index_columns
 // (column_name, ordered).
 func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
-	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexList, t.Name)
+	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexList, r.introArgs(t.Schema, t.Name)...)
 	if err != nil {
 		return fmt.Errorf("querying indexes for %s: %w", t.Name, err)
 	}
@@ -343,7 +358,7 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 
 	for _, m := range metas {
 		idx := driver.Index{Name: m.name, IsUnique: m.unique}
-		colRows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexColumns, m.name)
+		colRows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexColumns, r.introArgs(t.Schema, m.name)...)
 		if err != nil {
 			return fmt.Errorf("loading index columns for %s: %w", m.name, err)
 		}
@@ -372,7 +387,7 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 // from_column, to_column, on_update, on_delete), grouping by fk_id in
 // first-seen order.
 func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
-	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.ForeignKeys, t.Name)
+	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.ForeignKeys, r.introArgs(t.Schema, t.Name)...)
 	if err != nil {
 		return fmt.Errorf("querying FKs for %s: %w", t.Name, err)
 	}
@@ -430,7 +445,7 @@ func (r *Reader) LoadCheckConstraints(ctx context.Context, t *driver.Table) erro
 	if q == "" {
 		return nil
 	}
-	rows, err := r.db.QueryContext(ctx, q, t.Name)
+	rows, err := r.db.QueryContext(ctx, q, r.introArgs(t.Schema, t.Name)...)
 	if err != nil {
 		return fmt.Errorf("querying CHECK constraints for %s: %w", t.Name, err)
 	}
@@ -451,7 +466,7 @@ func (r *readerWithDates) GetDateColumnInfo(ctx context.Context, schema, table s
 	valid := r.dialect.ValidDateTypes()
 	for _, col := range candidates {
 		var dt sql.NullString
-		err := r.db.QueryRowContext(ctx, r.cat.Queries.DateColumn, table, col).Scan(&dt)
+		err := r.db.QueryRowContext(ctx, r.cat.Queries.DateColumn, r.introArgs(schema, table, col)...).Scan(&dt)
 		if err != nil || !dt.Valid {
 			continue
 		}

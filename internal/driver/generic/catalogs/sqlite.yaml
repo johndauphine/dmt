@@ -128,6 +128,7 @@ bulk:
   # placeholder per cell, so rows-per-statement = this / columns.
   max_bind_variables: 32766
   row_converter: bool_to_int     # booleans stored as integers
+  idempotent_verb: "INSERT OR IGNORE INTO"  # #227 resume replay
 
 upsert:
   strategy: insert_on_conflict   # INSERT ... ON CONFLICT DO UPDATE
