@@ -25,9 +25,13 @@ defaults:
   packet_size: 32767             # 32KB max — significantly improves throughput
   write_ahead_writers: 2
   scale_writers_with_cores: true # parallel BCP without TABLOCK
-  # Unmeasured — smartconfig falls back to its conservative default. A
-  # target-side throughput sweep (separate issue) populates this. #166.
-  optimum_bulk_chunk_bytes: 0
+  # 1.5 MB per chunk — measured peak of a 7-point sweep on the M5 Pro
+  # SO2010 pg→mssql fixture (in-VM, proxy-free): 0.7MB→592K,
+  # 1.4MB→625K (peak), 2.8MB→581K, 5.7MB→553K, 11.3MB→385K rows/s;
+  # 22.6MB chunks fail outright (server drops the BCP stream
+  # mid-bulk). Parallel BCP without TABLOCK favors short lock windows
+  # — the opposite end of the curve from postgres COPY's 25 MB.
+  optimum_bulk_chunk_bytes: 1500000
 
 capabilities:
   upserter: true                 # staging + MERGE
