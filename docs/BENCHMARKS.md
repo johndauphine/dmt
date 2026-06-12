@@ -66,6 +66,42 @@ Both implementations achieve similar throughput for bulk loads (~290K rows/sec M
 ### 3. Go Has Lower Memory Usage
 Go uses significantly less memory for PostgreSQL to MSSQL migrations. The recent optimizations also reduced MSSQL→PG upsert memory usage by eliminating millions of small allocations per chunk.
 
+## Docker Host↔VM Proxy Ceiling (June 2026 — read this before comparing numbers)
+
+Forensics from #527 settled why current host-side runs trail the published
+high-water marks. Measured on M5 Pro, Docker Desktop (VM 18 CPUs), tuned
+containers, fresh PG volume, all-catalog-engine main (`f5ed8a46`):
+
+| dmt location | Transfer-only (MSSQL→PG) | Overall | Wall time |
+|---|---|---|---|
+| Host (via port-forward proxy) | 520–562K rows/s | ~495K rows/s | 34–36s |
+| Inside the Docker network | **1,117–1,188K rows/s** | **878–920K rows/s** | **16–17s** |
+
+The cause is Docker Desktop's host↔VM network path, which caps **aggregate**
+throughput at ~222MB/s regardless of connection count:
+
+| Test (Posts table, 3.28GB COPY text) | Throughput |
+|---|---|
+| 1 COPY stream, host → container via port-forward | 222MB/s |
+| 4 parallel COPY streams via port-forward | 222MB/s aggregate (no scaling) |
+| 1 COPY stream inside the container | 273MB/s |
+| 4 parallel COPY streams inside the container | **678MB/s (near-linear)** |
+
+Implications:
+
+- The "Posts cliff" (wide-row tail at ~200K rows/s) is this byte ceiling
+  expressed in rows/sec on 10×-wider rows — not a scheduling or code issue.
+  Cost-ordered (LPT) job dispatch was implemented and measured **neutral**.
+- Code is not a variable: the #509 oracle-vs-catalog gates measured parity,
+  and the in-VM run reproduces the historical ~1.2M rows/s band on today's
+  code.
+- **Methodology**: headline numbers should be measured with dmt running
+  inside the Docker network (static linux build,
+  `docker run --network <dbnet> -v ...`), or host-side numbers must be
+  reported with this ceiling noted. The proxy's speed also drifts across
+  Docker Desktop versions, which explains older host-side measurements that
+  exceed today's host-side ceiling.
+
 ## M5 Pro vs M3 Max Comparison (StackOverflow2010, drop_recreate)
 
 ### Test Environment
