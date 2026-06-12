@@ -1,7 +1,0 @@
-./doc.go
-./partition.go
-./preflight.go
-./schema.go
-./sqlops.go
-./sqlquerier.go
-./sqlshape.go

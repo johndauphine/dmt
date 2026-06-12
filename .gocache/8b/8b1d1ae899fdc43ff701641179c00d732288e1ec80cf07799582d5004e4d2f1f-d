@@ -1,8 +1,0 @@
-./column.go
-./create.go
-./defaults.go
-./finalize.go
-./identifier.go
-./index.go
-./keycols.go
-./schema.go

@@ -1,3 +1,0 @@
-./controller.go
-./metrics_collector.go
-./write_error_adjuster.go

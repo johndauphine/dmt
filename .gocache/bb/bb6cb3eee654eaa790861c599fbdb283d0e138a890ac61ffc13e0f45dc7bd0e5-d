@@ -1,6 +1,0 @@
-./controller.go
-./metrics_collector.go
-./write_error_adjuster.go
-./controller_test.go
-./metrics_collector_test.go
-./write_error_adjuster_test.go

@@ -1,7 +1,0 @@
-./actions.go
-./connection_config.go
-./conntest.go
-./helpers.go
-./process.go
-./prompt.go
-./setup.go

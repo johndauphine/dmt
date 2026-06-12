@@ -1,7 +1,0 @@
-./doc.go
-./hamming.go
-./jaro-winkler.go
-./jaro.go
-./soundex.go
-./ukkonen.go
-./wagner-fischer.go

@@ -1,9 +1,0 @@
-./catalog.go
-./inspector.go
-./mssql.go
-./mysql.go
-./postgres.go
-./rules.go
-./catalog_test.go
-./inspector_test.go
-./rules_test.go

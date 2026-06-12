@@ -1,9 +1,0 @@
-# test log
-getenv GOTMPDIR
-getenv TMPDIR
-stat /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestAuditSchemaContractDecisionsWritesStructuredPayload3626824726/001
-open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestAuditSchemaContractDecisionsWritesStructuredPayload3626824726/001/schema-contract.ndjson
-open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestAuditSchemaContractDecisionsWritesStructuredPayload3626824726/001/schema-contract.ndjson
-open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestAuditSchemaContractDecisionsWritesStructuredPayload3626824726/001/schema-contract.ndjson
-open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T/TestAuditSchemaContractDecisionsWritesStructuredPayload3626824726/001/schema-contract.ndjson
-open /var/folders/3f/rp92x_b122qfn9scj8vngql40000gn/T
