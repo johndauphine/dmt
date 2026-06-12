@@ -174,6 +174,12 @@ type QueriesSpec struct {
 // the generic Reader's row mapping is fixed; the catalog adapts the
 // engine's catalog tables to it. {?} placeholders are positional.
 type IntrospectionSpec struct {
+	// UsesSchema: the engine's catalog tables are keyed by schema (or
+	// database) as well as table — ClickHouse's system.columns. When
+	// true, ListTables binds (schema) and the per-table queries bind
+	// (schema, table); the date_column query binds (schema, table,
+	// column). When false (sqlite), the schema is omitted entirely.
+	UsesSchema bool `yaml:"uses_schema"`
 	// ListTables: no params → rows of (table_name).
 	ListTables string `yaml:"list_tables"`
 	// DescribeTable: param (table) → rows of (ordinal, name, decl_type,

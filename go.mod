@@ -3,6 +3,7 @@ module github.com/johndauphine/dmt
 go 1.25.0
 
 require (
+	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -26,6 +27,8 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/ClickHouse/ch-go v0.71.0 // indirect
+	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -38,6 +41,8 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/go-faster/city v1.0.1 // indirect
+	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
@@ -48,6 +53,7 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
+	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
@@ -60,6 +66,8 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/paulmach/orb v0.12.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
@@ -67,7 +75,9 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shoenig/go-m1cpu v0.2.1 // indirect
+	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
@@ -78,6 +88,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20250506013437-ce4c2cf36ca6 // indirect
 	golang.org/x/net v0.53.0 // indirect
