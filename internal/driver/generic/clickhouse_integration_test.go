@@ -50,7 +50,13 @@ func bootstrapClickhouseDB(t *testing.T) {
 		}
 		t.Skipf("clickhouse not reachable: %v", err)
 	}
-	if _, err := db.Exec("CREATE DATABASE IF NOT EXISTS dmt_it"); err != nil {
+	// Drop + recreate for isolation: a previous run (or the bench
+	// test) may have left tables behind, and the end-to-end test
+	// asserts exact schema contents (codex).
+	if _, err := db.Exec("DROP DATABASE IF EXISTS dmt_it"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE DATABASE dmt_it"); err != nil {
 		t.Fatal(err)
 	}
 }

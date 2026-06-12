@@ -162,6 +162,11 @@ func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
 	if w.cat.DDL.CreateSchema == "" {
 		return nil
 	}
+	if schema == "" {
+		// Schema-as-database engines (clickhouse) accept configs with
+		// only target.database set (codex on #507).
+		schema = w.config.Database
+	}
 	stmt := strings.ReplaceAll(w.cat.DDL.CreateSchema, "{schema}", w.dialect.QuoteIdentifier(schema))
 	_, err := w.db.ExecContext(ctx, stmt)
 	return err
