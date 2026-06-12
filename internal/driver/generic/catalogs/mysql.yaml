@@ -1,0 +1,217 @@
+# MySQL catalog (#509) — first of the three built-in row-store
+# conversions onto the generic engine. Every value mirrors the
+# hand-written internal/driver/mysql package; the conformance case and
+# the differential integration tests pin the equivalence. The schema
+# is the database (information_schema keys by TABLE_SCHEMA).
+name: mysql
+aliases: [mariadb, maria]
+
+connection:
+  backend: mysql                 # go-sql-driver/mysql
+  dsn_strategy: mysql_tcp        # credential escaping + #252 TLS normalization
+  default_port: 3306
+
+defaults:
+  ssl_mode: require              # maps to tls=true (fail closed, #252)
+  write_ahead_writers: 2
+  scale_writers_with_cores: true
+
+capabilities:
+  upserter: true                 # INSERT ... AS new ON DUPLICATE KEY UPDATE
+  sequence_resetter: true        # ALTER TABLE ... AUTO_INCREMENT
+  constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
+  incremental_date_reader: true
+
+quoting:
+  identifier_format: "`%s`"
+  escaped_char: "`"
+  schema_ignored: false
+
+placeholder: "?"
+
+table_hints:
+  strict: ""
+  relaxed: ""
+
+pagination:
+  keyset:
+    query: |
+      SELECT {columns} FROM {table}
+      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      ORDER BY {pk}
+      LIMIT {?}
+    max_pk_clause: " AND {pk} <= {?}"
+    date_clause: " AND {date_column} > {?}"
+    args:
+      no_max: [last_pk, limit]
+      no_max_date: [last_pk, date_from, limit]
+      with_max: [last_pk, max_pk, limit]
+      with_max_date: [last_pk, max_pk, date_from, limit]
+
+  row_number:
+    # MySQL requires an alias on derived tables (AS numbered).
+    query: |
+      SELECT {outer_columns} FROM (
+        SELECT {columns}, ROW_NUMBER() OVER (ORDER BY {order_by}) as __rn
+        FROM {table}{where_date}
+      ) AS numbered
+      WHERE __rn > {?} AND __rn <= {?}
+      ORDER BY __rn
+    date_clause: " WHERE {date_column} > {?}"
+    args:
+      no_date: [row_start, row_end]
+      date: [date_from, row_start, row_end]
+
+introspection:
+  uses_schema: true
+  list_tables: |
+    SELECT TABLE_NAME FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+    ORDER BY TABLE_NAME
+  # Canonical 9-col shape + is_identity (identity_in_describe): MySQL
+  # exposes auto_increment in EXTRA, so no Go identity strategy.
+  # PK ordinals come dense from KEY_COLUMN_USAGE.
+  describe_table: |
+    SELECT c.ORDINAL_POSITION, c.COLUMN_NAME, c.DATA_TYPE,
+           c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
+           IF(c.IS_NULLABLE = 'YES', 1, 0), c.COLUMN_DEFAULT,
+           COALESCE(k.ORDINAL_POSITION, 0),
+           IF(c.EXTRA LIKE '%auto_increment%', 1, 0)
+    FROM information_schema.COLUMNS c
+    LEFT JOIN information_schema.KEY_COLUMN_USAGE k
+      ON k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME
+     AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME = 'PRIMARY'
+    WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ?
+    ORDER BY c.ORDINAL_POSITION
+  identity_in_describe: true
+  index_list: |
+    SELECT INDEX_NAME, IF(MAX(NON_UNIQUE) = 0, 1, 0)
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME != 'PRIMARY'
+    GROUP BY INDEX_NAME
+    ORDER BY INDEX_NAME
+  index_columns: |
+    SELECT COLUMN_NAME FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = ? AND INDEX_NAME = ?
+    ORDER BY SEQ_IN_INDEX
+  # Canonical 8-col FK shape with real constraint names; fk_id is a
+  # dense rank so multi-column FKs group correctly.
+  foreign_keys: |
+    SELECT DENSE_RANK() OVER (ORDER BY kcu.CONSTRAINT_NAME),
+           kcu.ORDINAL_POSITION, kcu.CONSTRAINT_NAME,
+           kcu.REFERENCED_TABLE_SCHEMA,
+           kcu.REFERENCED_TABLE_NAME, kcu.COLUMN_NAME,
+           kcu.REFERENCED_COLUMN_NAME, rc.UPDATE_RULE, rc.DELETE_RULE
+    FROM information_schema.KEY_COLUMN_USAGE kcu
+    JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+      ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+     AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+    WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ?
+      AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+    ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
+  check_constraints: |
+    SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE
+    FROM information_schema.CHECK_CONSTRAINTS cc
+    JOIN information_schema.TABLE_CONSTRAINTS tc
+      ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+     AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+    WHERE tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ?
+      AND tc.CONSTRAINT_TYPE = 'CHECK'
+    ORDER BY cc.CONSTRAINT_NAME
+  column_exists: |
+    SELECT 1 FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1
+  table_exists: |
+    SELECT 1 FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+  has_primary_key: |
+    SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
+    WHERE CONSTRAINT_TYPE = 'PRIMARY KEY' AND TABLE_SCHEMA = ? AND TABLE_NAME = ?
+  avg_row_length: |
+    SELECT IFNULL(AVG_ROW_LENGTH, 0) FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+
+ddl:
+  create_schema: "CREATE DATABASE IF NOT EXISTS {schema}"
+  # FK toggles around destructive ops (multiStatements is on in the DSN
+  # but the generic writer runs list entries separately, equivalent).
+  drop_table_stmts:
+    - "SET FOREIGN_KEY_CHECKS = 0"
+    - "DROP TABLE IF EXISTS {table}"
+    - "SET FOREIGN_KEY_CHECKS = 1"
+  truncate_stmts:
+    - "SET FOREIGN_KEY_CHECKS = 0"
+    - "TRUNCATE TABLE {table}"
+    - "SET FOREIGN_KEY_CHECKS = 1"
+  add_column: "ALTER TABLE {table} ADD COLUMN {column} {type} NULL"
+  create_primary_key: ""         # PK is created with the table
+  can_drop_not_null: true
+  drop_not_null: "ALTER TABLE {table} MODIFY COLUMN {column} {type} NULL{default_clause}"
+  can_alter_column_type: true
+  alter_column_type: "ALTER TABLE {table} MODIFY COLUMN {column} {type} {nullability}{default_clause}"
+
+queries:
+  # NTILE buckets: real multi-partition parallel reads.
+  partition_boundaries: |
+    SELECT partition_id, MIN({pk}), MAX({pk}), COUNT(*) FROM (
+      SELECT {pk}, NTILE({n}) OVER (ORDER BY {pk}) as partition_id FROM {table}
+    ) AS numbered
+    GROUP BY partition_id ORDER BY partition_id
+  row_count: "SELECT COUNT(*) FROM %s"
+  # Parameterized stats form (binds schema, table).
+  row_count_stats: |
+    SELECT TABLE_ROWS FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+  date_column: |
+    SELECT DATA_TYPE FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+
+date_types: [datetime, timestamp, date]
+
+value_converters: default
+
+preflight_strategy: mysql
+
+bulk:
+  strategy: batched_insert
+  # 65535 placeholder ceiling per prepared statement.
+  max_bind_variables: 65535
+  row_converter: bool_to_int
+  # ON DUPLICATE KEY UPDATE pk = pk: replayed rows no-op (#227).
+  # Deliberately NOT INSERT IGNORE — that also masks conversion errors.
+  idempotent_suffix: "ON DUPLICATE KEY UPDATE {pk} = {pk}"
+  # The hand-written writer autocommits per batch; preserve those
+  # failure/resume semantics.
+  non_transactional: true
+
+upsert:
+  strategy: insert_on_duplicate  # AS new alias form (8.0.19+)
+
+sequence:
+  strategy: mysql_auto_increment
+
+context:
+  version_query: "SELECT VERSION()"
+  version_prefix: ""
+  identifier_case: preserve
+  case_sensitive_identifiers: false
+  charset: utf8mb4
+  encoding: utf8mb4
+  max_identifier_length: 64
+  varchar_semantics: char
+  bytes_per_char: 4
+  features: [InnoDB, window_functions]
+
+ai:
+  prompt_augmentation: |
+
+    MySQL-specific requirements:
+    - Use backtick-quoted identifiers.
+    - TEXT/BLOB columns cannot be PRIMARY KEY or UNIQUE without a prefix
+      length; use bounded VARCHAR/VARBINARY for keyed columns.
+    - AUTO_INCREMENT requires the column to be a key.
+  drop_table_prompt_augmentation: |
+
+    MySQL-specific requirements:
+    - Disable foreign key checks around the drop:
+        SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS `<table>`; SET FOREIGN_KEY_CHECKS = 1;

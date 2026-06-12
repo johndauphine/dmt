@@ -4,7 +4,7 @@ import "testing"
 
 // TestParseMySQLVersion covers the SHOW VERSION() string shapes the
 // preflight check has to handle: bare MySQL semver, vendor-suffixed
-// MySQL, and MariaDB. mysqlPF_parseMySQLVersion returns ok=false rather than
+// MySQL, and MariaDB. mysqlPFParseMySQLVersion returns ok=false rather than
 // guessing — better to warn than to assert version compatibility on a
 // malformed input.
 func TestParseMySQLVersion(t *testing.T) {
@@ -20,7 +20,7 @@ func TestParseMySQLVersion(t *testing.T) {
 		{in: "8.0.35-mysql", wantMajor: 8, wantMinor: 0, wantOK: true},
 		{in: "10.6.12-MariaDB", wantMajor: 10, wantMinor: 6, wantOK: true},
 		// MariaDB sometimes emits e.g. "5.5.5-10.4.22-MariaDB" via the
-		// fake-major version-string compatibility hack. mysqlPF_parseMySQLVersion
+		// fake-major version-string compatibility hack. mysqlPFParseMySQLVersion
 		// returns the FIRST major.minor it sees — caller is expected to
 		// detect "MariaDB" in the raw string and adjust the floor.
 		{in: "5.5.5-10.4.22-MariaDB", wantMajor: 5, wantMinor: 5, wantOK: true},
@@ -31,16 +31,16 @@ func TestParseMySQLVersion(t *testing.T) {
 		{in: "  8.0.35  ", wantMajor: 8, wantMinor: 0, wantOK: true},
 	}
 	for _, tc := range cases {
-		major, minor, ok := mysqlPF_parseMySQLVersion(tc.in)
+		major, minor, ok := mysqlPFParseMySQLVersion(tc.in)
 		if ok != tc.wantOK {
-			t.Errorf("mysqlPF_parseMySQLVersion(%q) ok = %v, want %v", tc.in, ok, tc.wantOK)
+			t.Errorf("mysqlPFParseMySQLVersion(%q) ok = %v, want %v", tc.in, ok, tc.wantOK)
 			continue
 		}
 		if !ok {
 			continue
 		}
 		if major != tc.wantMajor || minor != tc.wantMinor {
-			t.Errorf("mysqlPF_parseMySQLVersion(%q) = (%d, %d), want (%d, %d)",
+			t.Errorf("mysqlPFParseMySQLVersion(%q) = (%d, %d), want (%d, %d)",
 				tc.in, major, minor, tc.wantMajor, tc.wantMinor)
 		}
 	}
@@ -145,9 +145,9 @@ func TestGrantsInclude(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := mysqlPF_grantsInclude(tc.grants, tc.priv, tc.dbName)
+			got := mysqlPFGrantsInclude(tc.grants, tc.priv, tc.dbName)
 			if got != tc.want {
-				t.Errorf("mysqlPF_grantsInclude(%v, %q, %q) = %v, want %v", tc.grants, tc.priv, tc.dbName, got, tc.want)
+				t.Errorf("mysqlPFGrantsInclude(%v, %q, %q) = %v, want %v", tc.grants, tc.priv, tc.dbName, got, tc.want)
 			}
 		})
 	}

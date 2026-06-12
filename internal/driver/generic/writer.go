@@ -13,6 +13,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/stats"
+	typeddl "github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
 // Writer implements driver.Writer from a catalog: DDL comes from
@@ -282,7 +283,7 @@ func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column 
 		return fmt.Errorf("%s cannot relax NOT NULL for %s.%s without rebuilding the table",
 			w.cat.Name, t.Name, column.Name)
 	}
-	return fmt.Errorf("drop-not-null DDL template not yet defined for catalog %q", w.cat.Name)
+	return w.alterColumn(ctx, w.cat.DDL.DropNotNull, t, column, targetSchema, "NULL")
 }
 
 // AlterColumnType — same shape as DropColumnNotNull.
@@ -297,7 +298,44 @@ func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *d
 		return fmt.Errorf("%s cannot alter type for %s.%s without rebuilding the table",
 			w.cat.Name, t.Name, column.Name)
 	}
-	return fmt.Errorf("alter-column-type DDL template not yet defined for catalog %q", w.cat.Name)
+	nullability := "NOT NULL"
+	if column.IsNullable {
+		nullability = "NULL"
+	}
+	return w.alterColumn(ctx, w.cat.DDL.AlterColumnType, t, column, targetSchema, nullability)
+}
+
+// alterColumn renders an in-place MODIFY/ALTER COLUMN template with
+// the mapped type and a translated default clause (the hand-written
+// mysql writer's shape, generalized).
+func (w *Writer) alterColumn(ctx context.Context, tmpl string, t *driver.Table, column *driver.Column, targetSchema, nullability string) error {
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, w.cat.Name, *column)
+	if err != nil {
+		return err
+	}
+	defaultClause := ""
+	if column.DefaultValue != "" {
+		isBool := false
+		switch strings.ToLower(column.DataType) {
+		case "bool", "boolean", "bit":
+			isBool = true
+		}
+		expr := typeddl.FormatDDLDefault(column.DefaultValue,
+			driver.Canonicalize(w.sourceType), w.cat.Name, isBool)
+		if expr != "" {
+			defaultClause = " " + typeddl.FormatDefaultClause(expr, mappedType, w.cat.Name)
+		}
+	}
+	stmt := strings.NewReplacer(
+		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
+		"{column}", w.dialect.QuoteIdentifier(column.Name),
+		"{type}", mappedType,
+		"{nullability}", nullability,
+		"{default_clause}", defaultClause,
+	).Replace(tmpl)
+	logging.Debug("Altering %s column with DDL: %s", w.cat.Name, stmt)
+	_, err = w.db.ExecContext(ctx, stmt)
+	return err
 }
 
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {

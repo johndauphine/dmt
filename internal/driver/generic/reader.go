@@ -105,7 +105,17 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 	if r.cat.Queries.RowCountStats == "" {
 		return r.GetRowCountExact(ctx, schema, table, false)
 	}
-	query := fmt.Sprintf(r.cat.Queries.RowCountStats, r.dialect.QualifyTable(schema, table))
+	stats := r.cat.Queries.RowCountStats
+	if strings.Contains(stats, "?") {
+		// Parameterized form (mysql information_schema.TABLES) — binds
+		// (schema, table) like the introspection queries.
+		var n sql.NullInt64
+		if err := r.db.QueryRowContext(ctx, stats, r.introArgs(schema, table)...).Scan(&n); err != nil {
+			return 0, err
+		}
+		return n.Int64, nil
+	}
+	query := fmt.Sprintf(stats, r.dialect.QualifyTable(schema, table))
 	return shared.QueryExactRowCount(ctx, r.db, query)
 }
 
@@ -200,6 +210,12 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 		}
 		t.RowCount = count
 		t.EstimatedRowSize = t.GoHeapBytesPerRow()
+		if q := r.cat.Introspection.AvgRowLength; q != "" {
+			var avg sql.NullInt64
+			if err := r.db.QueryRowContext(ctx, q, r.introArgs(t.Schema, t.Name)...).Scan(&avg); err == nil && avg.Int64 > 0 {
+				t.EstimatedRowSize = avg.Int64
+			}
+		}
 
 		tables = append(tables, t)
 	}
@@ -238,8 +254,13 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			nullable            int
 			dflt                sql.NullString
 			pkOrd               int
+			isIdentity          int
 		)
-		if err := rows.Scan(&ordinal, &name, &declType, &maxLen, &prec, &scale, &nullable, &dflt, &pkOrd); err != nil {
+		dests := []any{&ordinal, &name, &declType, &maxLen, &prec, &scale, &nullable, &dflt, &pkOrd}
+		if r.cat.Introspection.IdentityInDescribe {
+			dests = append(dests, &isIdentity)
+		}
+		if err := rows.Scan(dests...); err != nil {
 			return fmt.Errorf("scanning column: %w", err)
 		}
 
@@ -252,6 +273,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			IsNullable:   nullable == 1,
 			DefaultValue: dflt.String,
 			OrdinalPos:   ordinal,
+			IsIdentity:   isIdentity == 1,
 		}
 		if r.cat.Introspection.ParseTypeParams {
 			base, l, p, s := parseDeclaredType(declType.String)
@@ -404,19 +426,27 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 	for rows.Next() {
 		var (
 			id, seq                  int
+			fkName, refSchema        sql.NullString
 			refTable, fromCol, toCol string
 			onUpdate, onDelete       sql.NullString
 		)
-		if err := rows.Scan(&id, &seq, &refTable, &fromCol, &toCol, &onUpdate, &onDelete); err != nil {
+		if err := rows.Scan(&id, &seq, &fkName, &refSchema, &refTable, &fromCol, &toCol, &onUpdate, &onDelete); err != nil {
 			return err
+		}
+		name := fkName.String
+		if name == "" {
+			// Engines without constraint names in their catalog output
+			// (sqlite pragma) get the synthesized form.
+			name = fmt.Sprintf("fk_%s_%d", t.Name, id)
 		}
 		entry, ok := groups[id]
 		if !ok {
 			entry = &fkEntry{fk: &driver.ForeignKey{
-				Name:     fmt.Sprintf("fk_%s_%d", t.Name, id),
-				RefTable: refTable,
-				OnUpdate: onUpdate.String,
-				OnDelete: onDelete.String,
+				Name:      name,
+				RefSchema: refSchema.String,
+				RefTable:  refTable,
+				OnUpdate:  onUpdate.String,
+				OnDelete:  onDelete.String,
 			}}
 			groups[id] = entry
 			order = append(order, id)
