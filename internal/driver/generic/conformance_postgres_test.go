@@ -6,9 +6,6 @@ import (
 
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/conformance"
-	// Registers the hand-written driver so the harness's registered
-	// subtest resolves; removed with the #509 flip.
-	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 // The postgres DriverCase against the CATALOG engine (#509). Identical

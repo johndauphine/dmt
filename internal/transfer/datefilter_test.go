@@ -11,7 +11,6 @@ import (
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
-	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
@@ -36,14 +35,14 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "postgres",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `"ModifiedDate" > $4`,
+			wantClause: `"ModifiedDate" > $3`,
 		},
 		{
 			name:       "postgres with date filter no maxPK",
 			dbType:     "postgres",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `"ModifiedDate" > $3`,
+			wantClause: `"ModifiedDate" > $2`,
 		},
 		{
 			name:       "mssql no date filter",
@@ -125,7 +124,7 @@ func TestBuildRowNumberQueryWithDateFilter(t *testing.T) {
 			name:       "postgres with date filter",
 			dbType:     "postgres",
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: `"ModifiedDate" > $3`,
+			wantClause: `"ModifiedDate" > $1`,
 		},
 		{
 			name:       "mssql with date filter",

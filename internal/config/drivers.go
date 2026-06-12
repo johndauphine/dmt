@@ -4,8 +4,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
-	_ "github.com/johndauphine/dmt/internal/driver/mysql"
-	_ "github.com/johndauphine/dmt/internal/driver/postgres"
+
 	"os"
 	"path/filepath"
 	"strings"

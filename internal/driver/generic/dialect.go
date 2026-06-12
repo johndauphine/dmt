@@ -72,11 +72,32 @@ func (d *Dialect) ColumnList(cols []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// ColumnListForSelect is strategy-selected per the audit; no phase-1
-// catalog declares select wrappers (sqlite has no spatial types), so
-// the plain quoted list is the only strategy yet.
+// ColumnListForSelect quotes the column list, wrapping spatial columns
+// per the catalog's spatial_select spec on cross-engine reads (the
+// hand-written postgres/mysql dialects' ST_AsText conversion — targets'
+// staging paths expect WKT text).
 func (d *Dialect) ColumnListForSelect(cols, colTypes []string, targetDBType string) string {
-	return d.ColumnList(cols)
+	sp := d.cat.SpatialSelect
+	if sp.Wrapper == "" || targetDBType == d.cat.Name {
+		return d.ColumnList(cols)
+	}
+	spatial := make(map[string]bool, len(sp.Types))
+	for _, t := range sp.Types {
+		spatial[t] = true
+	}
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		colType := ""
+		if i < len(colTypes) {
+			colType = strings.ToLower(colTypes[i])
+		}
+		if spatial[colType] {
+			quoted[i] = strings.ReplaceAll(sp.Wrapper, "{col}", d.QuoteIdentifier(c))
+			continue
+		}
+		quoted[i] = d.QuoteIdentifier(c)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *driver.DateFilter) string {

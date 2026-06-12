@@ -187,6 +187,12 @@ date_types:
 
 value_converters: default
 
+# Cross-engine reads convert PostGIS columns to WKT text — the MSSQL
+# spatial staging path (and other targets) expect it.
+spatial_select:
+  types: [geometry, geography]
+  wrapper: "ST_AsText({col}) AS {col}"
+
 preflight_strategy: postgres
 
 bulk:
