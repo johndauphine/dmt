@@ -10,9 +10,10 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 
 	// Register SQL drivers for connection testing.
+	// mysql/postgres/sqlite/clickhouse register via the catalog-driven
+	// generic engine (#509); mssql still self-registers.
+	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
-	_ "github.com/johndauphine/dmt/internal/driver/mysql"
-	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 // sqlDriverNames maps DMT driver names to database/sql driver names.

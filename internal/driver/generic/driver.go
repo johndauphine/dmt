@@ -68,7 +68,7 @@ func (d *Driver) NewWriter(cfg *dbconfig.TargetConfig, maxConns int, opts driver
 // by the package's own tests; panicking here matches the registry's
 // duplicate-registration policy.
 func init() {
-	for _, name := range []string{"sqlite", "clickhouse", "mysql"} {
+	for _, name := range []string{"sqlite", "clickhouse", "mysql", "postgres"} {
 		cat, err := LoadCatalog(name)
 		if err != nil {
 			panic("generic: embedded catalog " + name + ": " + err.Error())

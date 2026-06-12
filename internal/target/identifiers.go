@@ -3,10 +3,10 @@ package target
 import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/ident"
-	// Import driver packages to register dialects
+	// Import driver packages to register dialects. postgres and mysql
+	// register via the catalog-driven generic engine (#509).
+	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
-	_ "github.com/johndauphine/dmt/internal/driver/mysql"
-	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 // Package-level dialect instances for identifier quoting

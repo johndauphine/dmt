@@ -10,8 +10,6 @@ import (
 	// Import driver packages to trigger init() registration
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
-	_ "github.com/johndauphine/dmt/internal/driver/mysql"
-	_ "github.com/johndauphine/dmt/internal/driver/postgres"
 )
 
 // NewSourcePool creates a source pool based on the configuration type.
