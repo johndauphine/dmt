@@ -125,8 +125,10 @@ func (c *Catalog) Validate() error {
 	in := c.Introspection
 	require(in.ListTables != "", "introspection.list_tables is required")
 	require(in.DescribeTable != "", "introspection.describe_table is required")
-	require(in.IndexList != "", "introspection.index_list is required")
-	require(in.IndexColumns != "", "introspection.index_columns is required")
+	require(in.IndexList != "" || in.IndexListAgg != "",
+		"introspection.index_list (or index_list_agg) is required")
+	require(in.IndexColumns != "" || in.IndexListAgg != "",
+		"introspection.index_columns (or index_list_agg) is required")
 	require(in.ForeignKeys != "", "introspection.foreign_keys is required")
 	if in.IdentityStrategy != "" {
 		if _, ok := identityStrategies[in.IdentityStrategy]; !ok {
@@ -179,6 +181,14 @@ func (c *Catalog) Validate() error {
 		if _, ok := preflightStrategies[c.Preflight]; !ok {
 			errs = append(errs, fmt.Sprintf("preflight_strategy %q is not a known strategy", c.Preflight))
 		}
+	}
+	if v := c.Connection.ValidateStrategy; v != "" {
+		if _, ok := connectionValidators[v]; !ok {
+			errs = append(errs, fmt.Sprintf("connection.validate_strategy %q is not a known strategy", v))
+		}
+	}
+	if ps := c.Queries.PartitionStrategy; ps != "" && ps != "min_max_even" {
+		errs = append(errs, fmt.Sprintf("queries.partition_strategy %q is not a known strategy", ps))
 	}
 	if c.Quoting.IdentifierSanitizer != "" {
 		if _, ok := identifierSanitizers[c.Quoting.IdentifierSanitizer]; !ok {

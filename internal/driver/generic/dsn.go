@@ -17,6 +17,7 @@ var dsnStrategies = map[string]dsnFunc{
 	"clickhouse_url": clickhouseURLDSN,
 	"mysql_tcp":      mysqlTCPDSN,
 	"postgres_url":   postgresURLDSN,
+	"sqlserver_url":  sqlserverURLDSN,
 }
 
 // postgresURLDSN mirrors the hand-written postgres dialect: URL form
@@ -33,6 +34,43 @@ func postgresURLDSN(host string, port int, database, user, password string, opts
 	if len(params) > 0 {
 		dsn += "?" + params.Encode()
 	}
+	return dsn
+}
+
+// sqlserverURLDSN is the hand-written mssql dialect's BuildDSN moved
+// verbatim (#509): URL form with escaped credentials, encrypt /
+// TrustServerCertificate / packet-size passthrough, and bounded
+// connect timeouts so logins can't hang indefinitely.
+func sqlserverURLDSN(host string, port int, database, user, password string, opts map[string]any) string {
+	encodedUser := url.QueryEscape(user)
+	encodedPassword := url.QueryEscape(password)
+	encodedDatabase := url.QueryEscape(database)
+
+	dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
+		encodedUser, encodedPassword, host, port, encodedDatabase)
+
+	if encrypt, ok := opts["encrypt"].(bool); ok {
+		if encrypt {
+			dsn += "&encrypt=true"
+		} else {
+			dsn += "&encrypt=disable"
+		}
+	}
+	if trustCert, ok := opts["trustServerCertificate"].(bool); ok && trustCert {
+		dsn += "&TrustServerCertificate=true"
+	}
+	if packetSize, ok := opts["packetSize"].(int); ok && packetSize > 0 {
+		// "packet size" is the go-mssqldb parameter name; + is URL encoding for space
+		dsn += fmt.Sprintf("&packet%%20size=%d", packetSize)
+	}
+
+	if _, ok := opts["connection timeout"]; !ok {
+		dsn += "&connection+timeout=30"
+	}
+	if _, ok := opts["dial timeout"]; !ok {
+		dsn += "&dial+timeout=15"
+	}
+
 	return dsn
 }
 

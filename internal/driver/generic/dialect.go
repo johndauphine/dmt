@@ -3,6 +3,7 @@ package generic
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 )
@@ -136,7 +137,7 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 		case "max_pk":
 			args = append(args, maxPK)
 		case "date_from":
-			args = append(args, dateFilter.Timestamp)
+			args = append(args, d.dateArg(dateFilter.Timestamp))
 		case "limit":
 			args = append(args, limit)
 		}
@@ -166,7 +167,7 @@ func (d *Dialect) BuildRowNumberArgs(rowNum int64, limit int, dateFilter *driver
 	for _, sym := range order {
 		switch sym {
 		case "date_from":
-			args = append(args, dateFilter.Timestamp)
+			args = append(args, d.dateArg(dateFilter.Timestamp))
 		case "row_start":
 			args = append(args, rowNum)
 		case "row_end":
@@ -208,6 +209,16 @@ func (d *Dialect) AIPromptAugmentation() string { return d.cat.AI.PromptAugmenta
 
 func (d *Dialect) AIDropTablePromptAugmentation() string {
 	return d.cat.AI.DropTablePromptAugmentation
+}
+
+// dateArg binds a date-filter timestamp: engines with a declared
+// date_arg_format (mssql) get the UTC-formatted string form; everyone
+// else binds time.Time directly.
+func (d *Dialect) dateArg(ts time.Time) any {
+	if layout := d.cat.Pagination.DateArgFormat; layout != "" {
+		return ts.UTC().Format(layout)
+	}
+	return ts
 }
 
 // render substitutes the shared tokens, then numbers the {?} parameter

@@ -34,6 +34,9 @@ type bulkEnv struct {
 	// batches, which the resume path expects.
 	transactional bool
 	engine        string
+	// sourceType is the migration's source engine — cross-engine
+	// branches (mssql spatial staging) key off it.
+	sourceType string
 	// pgState caches the copy_from strategy's probed COPY byte budget.
 	pgState *pgBulkState
 }

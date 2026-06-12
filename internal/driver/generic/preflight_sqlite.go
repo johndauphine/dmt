@@ -21,6 +21,7 @@ var preflightStrategies = map[string]preflightFunc{
 	"sqlite":   sqlitePreFlight,
 	"mysql":    mysqlPreFlight,
 	"postgres": postgresPreFlight,
+	"mssql":    mssqlPreFlight,
 }
 
 // sqlitePreFlight runs SQLite preflight checks (moved verbatim from

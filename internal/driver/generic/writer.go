@@ -204,7 +204,12 @@ func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
 		// only target.database set (codex on #507).
 		schema = w.config.Database
 	}
-	stmt := strings.ReplaceAll(w.cat.DDL.CreateSchema, "{schema}", w.dialect.QuoteIdentifier(schema))
+	stmt := strings.NewReplacer(
+		"{schema}", w.dialect.QuoteIdentifier(schema),
+		// {schema_raw} embeds the name in a string literal (mssql's
+		// conditional IF SCHEMA_ID(...) form); single quotes doubled.
+		"{schema_raw}", strings.ReplaceAll(schema, "'", "''"),
+	).Replace(w.cat.DDL.CreateSchema)
 	_, err := w.db.ExecContext(ctx, stmt)
 	return err
 }
@@ -490,6 +495,7 @@ func (w *Writer) bulkEnv() bulkEnv {
 		idempotentSuffix: w.cat.Bulk.IdempotentSuffix,
 		transactional:    !w.cat.Bulk.NonTransactional,
 		engine:           w.cat.Name,
+		sourceType:       w.sourceType,
 		pgState:          w.pgState,
 	}
 }

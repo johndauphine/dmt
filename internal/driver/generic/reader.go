@@ -62,6 +62,13 @@ func NewReader(cat *Catalog, cfg *dbconfig.SourceConfig, maxConns int) (driver.R
 		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, logging.ScrubError(err))
 	}
 
+	if v := cat.Connection.ValidateStrategy; v != "" {
+		if err := connectionValidators[v](db, cfg.Database); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+
 	logging.Debug("Connected to %s source (catalog-driven): %s", cat.Name, cfg.Database)
 
 	r := &Reader{db: db, config: cfg, maxConns: maxConns, cat: cat, dialect: dialect}
@@ -122,8 +129,19 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 	return shared.QueryExactRowCount(ctx, r.db, query)
 }
 
-func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
-	return shared.ExactRowCount(ctx, r.db, r.dialect, schema, table)
+// GetRowCountExact honors strict_consistency for hinted engines:
+// mssql's relaxed default is a dirty NOLOCK count; strict drops the
+// hint (#253). Engines with empty table_hints are unaffected.
+func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, strictConsistency bool) (int64, error) {
+	suffix := ""
+	if hint := r.dialect.TableHint(strictConsistency); hint != "" {
+		suffix = " " + hint
+	}
+	query, err := shared.ExactRowCountQueryWithSuffix(r.dialect, schema, table, suffix)
+	if err != nil {
+		return 0, err
+	}
+	return shared.QueryExactRowCount(ctx, r.db, query)
 }
 
 // GetPartitionBoundaries runs the catalog's partition query, which
@@ -132,6 +150,9 @@ func (r *Reader) GetRowCountExact(ctx context.Context, schema, table string, _ b
 func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
 	if len(t.PrimaryKey) == 0 {
 		return nil, fmt.Errorf("table %s has no primary key", t.Name)
+	}
+	if r.cat.Queries.PartitionStrategy == "min_max_even" {
+		return r.partitionMinMaxEven(ctx, t, numPartitions)
 	}
 	// Single-pass replacement: sequential ReplaceAll could re-expand a
 	// token appearing inside a quoted identifier (codex).
@@ -359,6 +380,9 @@ func parseDeclaredType(decl string) (base string, maxLen, precision, scale int) 
 // LoadIndexes maps index_list (index_name, is_unique) + index_columns
 // (column_name, ordered).
 func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
+	if r.cat.Introspection.IndexListAgg != "" {
+		return r.loadIndexesAgg(ctx, t)
+	}
 	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexList, r.introArgs(t.Schema, t.Name)...)
 	if err != nil {
 		return fmt.Errorf("querying indexes for %s: %w", t.Name, err)
@@ -533,9 +557,106 @@ func (r *readerWithDates) GetMaxDateColumnValue(ctx context.Context, schema, tab
 	query := fmt.Sprintf("SELECT MAX(%s) FROM %s",
 		r.dialect.QuoteIdentifier(column),
 		r.dialect.QualifyTable(schema, table))
+	if tmpl := r.cat.Queries.MaxDate; tmpl != "" {
+		// mssql casts through datetime2(7): go-mssqldb scans
+		// MAX(datetime) rounded to milliseconds, which can make an
+		// equal source row compare greater than the persisted
+		// watermark on the next run.
+		query = strings.NewReplacer(
+			"{column}", r.dialect.QuoteIdentifier(column),
+			"{table}", r.dialect.QualifyTable(schema, table),
+		).Replace(tmpl)
+	}
 	var raw any
 	if err := r.db.QueryRowContext(ctx, query).Scan(&raw); err != nil {
 		return nil, fmt.Errorf("querying max %s: %w", column, err)
 	}
 	return driver.ParseDateValue(raw)
+}
+
+// partitionMinMaxEven is the min_max_even partition strategy (mssql's
+// hand-written fast path): MIN/MAX index seeks plus even PK ranges
+// instead of an NTILE full scan. Row counts are stats-estimated and
+// spread evenly; the last partition takes the range remainder.
+func (r *Reader) partitionMinMaxEven(ctx context.Context, t *driver.Table, numPartitions int) ([]driver.Partition, error) {
+	if len(t.PrimaryKey) != 1 {
+		return nil, fmt.Errorf("partitioning requires single-column PK")
+	}
+
+	pkCol := r.dialect.QuoteIdentifier(t.PrimaryKey[0])
+	qualifiedTable := r.dialect.QualifyTable(t.Schema, t.Name)
+	hint := ""
+	if h := r.dialect.TableHint(false); h != "" {
+		hint = " " + h
+	}
+
+	var minPK, maxPK int64
+	query := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s%s", pkCol, pkCol, qualifiedTable, hint)
+	if err := r.db.QueryRowContext(ctx, query).Scan(&minPK, &maxPK); err != nil {
+		return nil, fmt.Errorf("getting MIN/MAX: %w", err)
+	}
+
+	rowCount, _ := r.GetRowCountFast(ctx, t.Schema, t.Name)
+	if rowCount == 0 {
+		rowCount = maxPK - minPK + 1
+	}
+
+	rangeSize := maxPK - minPK + 1
+	partitionSize := rangeSize / int64(numPartitions)
+	rowsPerPartition := rowCount / int64(numPartitions)
+
+	var partitions []driver.Partition
+	for i := 0; i < numPartitions; i++ {
+		start := minPK + int64(i)*partitionSize
+		end := minPK + int64(i+1)*partitionSize - 1
+		if i == numPartitions-1 {
+			end = maxPK
+		}
+		partitions = append(partitions, driver.Partition{
+			TableName:        t.FullName(),
+			PartitionID:      i + 1,
+			MinPK:            start,
+			MaxPK:            end,
+			RowCount:         rowsPerPartition,
+			IsFirstPartition: i == 0,
+		})
+	}
+
+	logging.Debug("  %s: %d partitions via MIN/MAX (range %d-%d)", t.Name, numPartitions, minPK, maxPK)
+	return partitions, nil
+}
+
+// indexAggDelimiter separates aggregated column names in
+// index_list_agg results — CHAR(1) (SOH) cannot appear in a valid
+// identifier on any supported engine.
+const indexAggDelimiter = "\x01"
+
+// loadIndexesAgg maps the single-query index form: one row per index
+// of (name, is_unique, is_clustered, key columns, include columns),
+// the column lists CHAR(1)-joined.
+func (r *Reader) loadIndexesAgg(ctx context.Context, t *driver.Table) error {
+	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexListAgg, r.introArgs(t.Schema, t.Name)...)
+	if err != nil {
+		return fmt.Errorf("querying indexes for %s: %w", t.Name, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			idx                 driver.Index
+			isUnique, isClust   int
+			colsStr, includeStr string
+		)
+		if err := rows.Scan(&idx.Name, &isUnique, &isClust, &colsStr, &includeStr); err != nil {
+			return err
+		}
+		idx.IsUnique = isUnique == 1
+		idx.IsClustered = isClust == 1
+		idx.Columns = strings.Split(colsStr, indexAggDelimiter)
+		if includeStr != "" {
+			idx.IncludeCols = strings.Split(includeStr, indexAggDelimiter)
+		}
+		t.Indexes = append(t.Indexes, idx)
+	}
+	return rows.Err()
 }

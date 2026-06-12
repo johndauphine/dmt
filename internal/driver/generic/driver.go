@@ -28,6 +28,8 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		Port:                  d.cat.Connection.DefaultPort,
 		Schema:                d.cat.Defaults.Schema,
 		SSLMode:               d.cat.Defaults.SSLMode,
+		Encrypt:               d.cat.Defaults.Encrypt,
+		PacketSize:            d.cat.Defaults.PacketSize,
 		WriteAheadWriters:     d.cat.Defaults.WriteAheadWriters,
 		ScaleWritersWithCores: d.cat.Defaults.ScaleWritersWithCores,
 		OptimumBulkChunkBytes: int64(d.cat.Defaults.OptimumBulkChunkBytes),
