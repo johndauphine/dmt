@@ -20,8 +20,16 @@ import (
 // detail only).
 func clickhouseToCanonical(col ColumnInfo) CanonicalType {
 	udt := strings.TrimSpace(col.UDTName)
-	udt = unwrapCHType(udt, "Nullable")
-	udt = unwrapCHType(udt, "LowCardinality")
+	// Wrappers nest in either order (LowCardinality(Nullable(String))
+	// and Nullable(LowCardinality(String)) are both valid) — strip
+	// until a fixed point (codex).
+	for {
+		next := unwrapCHType(unwrapCHType(udt, "Nullable"), "LowCardinality")
+		if next == udt {
+			break
+		}
+		udt = next
+	}
 	upper := strings.ToUpper(udt)
 
 	// Parameterized families first.
