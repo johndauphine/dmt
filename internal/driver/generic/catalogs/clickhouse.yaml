@@ -76,13 +76,16 @@ introspection:
   # scale, is_nullable, default_value, pk_ordinal). The full type
   # string (incl. Nullable/LowCardinality wrappers) feeds the typemap
   # mapper, which parses parameters itself — no parse_type_params.
-  # pk_ordinal approximates the sorting-key position by column
-  # position among is_in_primary_key members.
+  # pk_ordinal must be DENSE (1..k) among key members — loadColumns
+  # matches ordinals exactly — so rank key columns by position rather
+  # than reporting absolute positions (codex on #507).
   describe_table: |
     SELECT toInt32(position), name, type, NULL, NULL, NULL,
            if(position(type, 'Nullable(') > 0, 1, 0),
            default_expression,
-           if(is_in_primary_key, toInt32(position), 0)
+           if(is_in_primary_key,
+              toInt32(row_number() OVER (PARTITION BY is_in_primary_key ORDER BY position)),
+              0)
     FROM system.columns
     WHERE database = ? AND table = ?
     ORDER BY position
