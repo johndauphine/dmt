@@ -16,6 +16,12 @@ var postgresCases = []struct {
 	mustCateg string // optional expected Category
 }{
 	{
+		pattern:   "postgres_not_accepting_connections",
+		errMsg:    `pinging postgres database: server error: FATAL: the database system is not yet accepting connections (SQLSTATE 57P03)`,
+		mustMatch: "crash recovery",
+		mustCateg: "connection",
+	},
+	{
 		pattern:   "pg_duplicate_key",
 		errMsg:    `pq: duplicate key value violates unique constraint "users_email_key"`,
 		mustMatch: "users_email_key",

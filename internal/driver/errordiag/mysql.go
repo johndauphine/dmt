@@ -14,6 +14,27 @@ import (
 // patterns before generic ones.
 var mysqlPatterns = []Pattern{
 	{
+		// go-sql-driver surfaces this when the server closes the
+		// connection mid-statement — observed live when mysqld was
+		// OOM-killed under bulk load (#509 benchmarks) and on
+		// wait_timeout expiry during long stalls.
+		Name:  "mysql_invalid_connection",
+		Regex: regexp.MustCompile(`invalid connection`),
+		Diagnose: func(m []string) Diagnosis {
+			return Diagnosis{
+				Cause: "The MySQL server closed the connection mid-operation — typically the server was killed (container OOM under bulk-load memory pressure), restarted, or idle past wait_timeout.",
+				Suggestions: []string{
+					"Check whether the server restarted: `docker inspect <container> --format '{{.State.OOMKilled}} {{.RestartCount}}'` or the mysqld error log.",
+					"If OOM: raise the container memory limit or lower innodb_buffer_pool_size — bulk loads need headroom beyond the buffer pool (redo log + per-connection buffers).",
+					"If long stalls precede it: raise wait_timeout / net_write_timeout on the server.",
+					"The run is resumable: `dmt resume` continues from the last checkpoint.",
+				},
+				Confidence: "medium",
+				Category:   "connection",
+			}
+		},
+	},
+	{
 		Name:  "mysql_duplicate_entry",
 		Regex: regexp.MustCompile(`Duplicate entry '([^']*)' for key '([^']+)'`),
 		Diagnose: func(m []string) Diagnosis {
