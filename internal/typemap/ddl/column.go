@@ -72,8 +72,11 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 
 	// ClickHouse expresses nullability as a type wrapper, not a column
 	// constraint (#507): wrap nullable columns, never emit NOT NULL
-	// (non-nullable is already the default).
-	if targetDialect == DialectClickHouse && col.IsNullable {
+	// (non-nullable is already the default). Key columns are never
+	// wrapped — the MergeTree sorting key rejects nullable columns,
+	// and a PK is semantically non-null regardless of what the source
+	// metadata claims (sqlite reports rowid-alias PKs as nullable).
+	if targetDialect == DialectClickHouse && col.IsNullable && !isPK {
 		typeStr = "Nullable(" + typeStr + ")"
 	}
 
