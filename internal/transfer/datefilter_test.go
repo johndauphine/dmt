@@ -1,7 +1,6 @@
 package transfer
 
 import (
-	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -9,7 +8,6 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	// Import driver packages to register dialects
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
-	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 )
 
@@ -56,14 +54,14 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 			dbType:     "mssql",
 			hasMaxPK:   true,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @lastSyncDate, 126)",
+			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @p4, 126)",
 		},
 		{
 			name:       "mssql with date filter no maxPK",
 			dbType:     "mssql",
 			hasMaxPK:   false,
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @lastSyncDate, 126)",
+			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @p3, 126)",
 		},
 		{
 			name:       "mysql with date filter",
@@ -130,7 +128,7 @@ func TestBuildRowNumberQueryWithDateFilter(t *testing.T) {
 			name:       "mssql with date filter",
 			dbType:     "mssql",
 			dateFilter: &DateFilter{Column: "ModifiedDate", Timestamp: testTime},
-			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @lastSyncDate, 126)",
+			wantClause: "CONVERT(datetime2(7), [ModifiedDate]) > CONVERT(datetime2(7), @p1, 126)",
 		},
 		{
 			name:       "mysql with date filter",
@@ -277,17 +275,19 @@ func TestBuildKeysetArgsWithDateFilter(t *testing.T) {
 				if tt.dbType == "postgres" && !found {
 					t.Error("Expected timestamp argument for postgres with date filter")
 				}
+				// The catalog dialect binds the watermark positionally
+				// as the formatted datetime2(7) string (the hand-written
+				// dialect used sql.Named — same value, different carrier).
 				if tt.dbType == "mssql" {
 					foundString := false
+					want := testTime.UTC().Format("2006-01-02T15:04:05.9999999")
 					for _, arg := range args {
-						named, ok := arg.(sql.NamedArg)
-						if !ok || named.Name != "lastSyncDate" {
-							continue
+						if s, ok := arg.(string); ok && s == want {
+							foundString = true
 						}
-						_, foundString = named.Value.(string)
 					}
 					if !foundString {
-						t.Error("Expected MSSQL lastSyncDate argument as a datetime2 string")
+						t.Error("Expected MSSQL date argument as a datetime2(7) string")
 					}
 				}
 			}

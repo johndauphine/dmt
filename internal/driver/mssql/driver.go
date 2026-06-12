@@ -8,9 +8,11 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 )
 
-func init() {
-	driver.Register(&Driver{})
-}
+// NOTE (#509): this package no longer registers itself — the
+// catalog-driven generic engine registers "mssql" from
+// internal/driver/generic/catalogs/mssql.yaml. The hand-written
+// implementation remains as the differential-test oracle until the
+// benchmark-gated cleanup removes it.
 
 // Driver implements driver.Driver for Microsoft SQL Server.
 type Driver struct{}
