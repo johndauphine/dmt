@@ -14,6 +14,26 @@ import (
 // a generic constraint violation).
 var postgresPatterns = []Pattern{
 	{
+		// SQLSTATE 57P03 — the server is up but still in crash
+		// recovery or startup. Observed live after a Docker VM
+		// restart with fsync=off (#509 benchmarks): connections fail
+		// for the recovery window, then succeed.
+		Name:  "postgres_not_accepting_connections",
+		Regex: regexp.MustCompile(`the database system is (?:not yet accepting connections|starting up|in recovery mode)`),
+		Diagnose: func(m []string) Diagnosis {
+			return Diagnosis{
+				Cause: "PostgreSQL is running but still starting up or replaying WAL (crash recovery) — it refuses connections until recovery completes.",
+				Suggestions: []string{
+					"Wait and retry — recovery usually completes in seconds to minutes; `pg_isready` reports when it is done.",
+					"If the server was shut down uncleanly (container restart, power loss), this is expected once; recurring recovery points at repeated unclean shutdowns.",
+					"The run is resumable: `dmt resume` continues from the last checkpoint once the server accepts connections.",
+				},
+				Confidence: "high",
+				Category:   "connection",
+			}
+		},
+	},
+	{
 		Name:  "pg_duplicate_key",
 		Regex: regexp.MustCompile(`duplicate key value violates unique constraint "([^"]+)"`),
 		Diagnose: func(m []string) Diagnosis {

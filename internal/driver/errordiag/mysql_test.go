@@ -12,6 +12,12 @@ var mysqlCases = []struct {
 	mustCateg string
 }{
 	{
+		pattern:   "mysql_invalid_connection",
+		errMsg:    `writing chunk: inserting batch into comments: invalid connection`,
+		mustMatch: "closed the connection",
+		mustCateg: "connection",
+	},
+	{
 		pattern:   "mysql_duplicate_entry",
 		errMsg:    `Error 1062 (23000): Duplicate entry 'alice@x.com' for key 'users.email_unique'`,
 		mustMatch: "email_unique",
