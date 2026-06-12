@@ -151,12 +151,18 @@ func (r *Reader) GetPartitionBoundaries(ctx context.Context, t *driver.Table, nu
 }
 
 // introArgs prepends the schema for engines whose catalog tables are
-// schema-keyed (IntrospectionSpec.UsesSchema).
+// schema-keyed (IntrospectionSpec.UsesSchema). An empty schema falls
+// back to the connection's database — engines like ClickHouse treat
+// schema AS the database, and a config that only sets database is
+// valid (codex on #507; mirrors the MySQL convention).
 func (r *Reader) introArgs(schema string, rest ...any) []any {
-	if r.cat.Introspection.UsesSchema {
-		return append([]any{schema}, rest...)
+	if !r.cat.Introspection.UsesSchema {
+		return rest
 	}
-	return rest
+	if schema == "" {
+		schema = r.config.Database
+	}
+	return append([]any{schema}, rest...)
 }
 
 // ExtractSchema walks the catalog's list_tables / describe_table

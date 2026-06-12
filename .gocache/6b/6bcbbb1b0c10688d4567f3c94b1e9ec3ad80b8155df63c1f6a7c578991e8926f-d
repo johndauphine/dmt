@@ -1,0 +1,13 @@
+./canonical.go
+./clickhouse.go
+./mssql.go
+./mysql.go
+./postgres.go
+./registry.go
+./sqlite.go
+./canonical_test.go
+./clickhouse_test.go
+./mssql_test.go
+./mysql_test.go
+./postgres_test.go
+./registry_test.go

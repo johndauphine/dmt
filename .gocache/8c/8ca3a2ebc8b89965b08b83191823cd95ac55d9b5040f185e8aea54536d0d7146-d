@@ -1,0 +1,7 @@
+./dialect.go
+./driver.go
+./preflight.go
+./reader.go
+./writer.go
+./writer_ddl.go
+./writer_upsert.go

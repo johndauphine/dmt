@@ -1,0 +1,15 @@
+./column.go
+./create.go
+./defaults.go
+./finalize.go
+./identifier.go
+./index.go
+./keycols.go
+./schema.go
+./column_test.go
+./create_clickhouse_test.go
+./create_test.go
+./defaults_test.go
+./finalize_test.go
+./identifier_test.go
+./index_test.go

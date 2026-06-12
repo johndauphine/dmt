@@ -1,0 +1,7 @@
+./audit.go
+./hash.go
+./json.go
+./logger.go
+./path.go
+./scrub.go
+./audit_test.go

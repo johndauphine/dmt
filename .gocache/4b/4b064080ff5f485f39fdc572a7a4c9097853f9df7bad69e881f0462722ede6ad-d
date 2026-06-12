@@ -1,0 +1,13 @@
+./aireview.go
+./cache.go
+./dryrun.go
+./initsecrets.go
+./observability.go
+./options.go
+./preflight.go
+./registry.go
+./triage.go
+./aireview_test.go
+./dryrun_test.go
+./preflight_test.go
+./triage_test.go
