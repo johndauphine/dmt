@@ -95,12 +95,17 @@ Implications:
 - Code is not a variable: the #509 oracle-vs-catalog gates measured parity,
   and the in-VM run reproduces the historical ~1.2M rows/s band on today's
   code.
+- **The historical host-side numbers were real, on a faster proxy.** The
+  900K–1,357K measurements above were ordinary host-side runs on engine
+  29.3.1 — a 14s run implies ~450–470MB/s aggregate through the proxy,
+  ~2× what engine 29.4.1 (Docker Desktop 4.71.0) delivers on the same
+  machine. The port-forward path regressed with the Docker update; disk
+  I/O (measured separately above) did not regress enough to explain it.
 - **Methodology**: headline numbers should be measured with dmt running
   inside the Docker network (static linux build,
-  `docker run --network <dbnet> -v ...`), or host-side numbers must be
-  reported with this ceiling noted. The proxy's speed also drifts across
-  Docker Desktop versions, which explains older host-side measurements that
-  exceed today's host-side ceiling.
+  `docker run --network <dbnet> -v ...`), which sidesteps proxy-version
+  drift entirely. Host-side numbers are only comparable across identical
+  Docker Desktop versions and must note the engine version.
 
 ## M5 Pro vs M3 Max Comparison (StackOverflow2010, drop_recreate)
 
