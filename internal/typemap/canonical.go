@@ -116,10 +116,11 @@ type DdlType struct {
 // Kept as string constants rather than an enum because the package
 // boundary needs to stay clean of any internal/driver import.
 const (
-	DialectPostgres = "postgres"
-	DialectMSSQL    = "mssql"
-	DialectMySQL    = "mysql"
-	DialectSQLite   = "sqlite"
+	DialectPostgres   = "postgres"
+	DialectMSSQL      = "mssql"
+	DialectMySQL      = "mysql"
+	DialectSQLite     = "sqlite"
+	DialectClickHouse = "clickhouse"
 )
 
 // ColumnInfo is the per-column metadata the mappers consume. Mirrors the

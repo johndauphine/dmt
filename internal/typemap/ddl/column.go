@@ -70,6 +70,13 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 		}
 	}
 
+	// ClickHouse expresses nullability as a type wrapper, not a column
+	// constraint (#507): wrap nullable columns, never emit NOT NULL
+	// (non-nullable is already the default).
+	if targetDialect == DialectClickHouse && col.IsNullable {
+		typeStr = "Nullable(" + typeStr + ")"
+	}
+
 	parts := []string{fmt.Sprintf("    %s %s", quoted, typeStr)}
 
 	// NOT NULL suppression: PG/MSSQL/MySQL all imply NOT NULL on PK
@@ -86,7 +93,7 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 			suppressNotNull = false
 		}
 	}
-	if !col.IsNullable && !suppressNotNull {
+	if !col.IsNullable && !suppressNotNull && targetDialect != DialectClickHouse {
 		parts = append(parts, "NOT NULL")
 	}
 

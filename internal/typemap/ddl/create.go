@@ -44,7 +44,7 @@ func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) s
 		parts = append(parts, GenerateColumnDef(col, table.Constraints, table.Indexes, sourceDialect, targetDialect))
 	}
 
-	if pk := primaryKeyConstraint(table.Constraints); pk != nil {
+	if pk := primaryKeyConstraint(table.Constraints); pk != nil && targetDialect != DialectClickHouse {
 		// SQLite emits the PRIMARY KEY inline on auto-increment columns
 		// (INTEGER PRIMARY KEY AUTOINCREMENT). Skip the table-level PK
 		// constraint in that case to avoid a duplicate declaration.
@@ -55,6 +55,16 @@ func GenerateCreateTable(table TableInfo, sourceDialect, targetDialect string) s
 
 	body := strings.Join(parts, ",\n")
 	tableSuffix := mysqlInlineTableComment(table, targetDialect)
+	// ClickHouse: PRIMARY KEY becomes the MergeTree ORDER BY key — a
+	// sorting/uniquing hint, not a constraint (#507). A table without a
+	// PK gets ORDER BY tuple() (valid, unsorted).
+	if targetDialect == DialectClickHouse {
+		orderBy := "tuple()"
+		if pk := primaryKeyConstraint(table.Constraints); pk != nil && len(pk.Columns) > 0 {
+			orderBy = "(" + strings.Join(quoteColumnList(pk.Columns, targetDialect), ", ") + ")"
+		}
+		tableSuffix += " ENGINE = MergeTree ORDER BY " + orderBy
+	}
 
 	return fmt.Sprintf("CREATE TABLE %s (\n%s\n)%s;", qname, body, tableSuffix)
 }

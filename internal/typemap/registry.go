@@ -21,10 +21,11 @@ type DialectMapper struct {
 var (
 	registryMu     sync.RWMutex
 	dialectMappers = map[string]DialectMapper{
-		DialectPostgres: {ToCanonical: postgresToCanonical, FromCanonical: postgresFromCanonical},
-		DialectMSSQL:    {ToCanonical: mssqlToCanonical, FromCanonical: mssqlFromCanonical},
-		DialectMySQL:    {ToCanonical: mysqlToCanonical, FromCanonical: mysqlFromCanonical},
-		DialectSQLite:   {ToCanonical: sqliteToCanonical, FromCanonical: sqliteFromCanonical},
+		DialectPostgres:   {ToCanonical: postgresToCanonical, FromCanonical: postgresFromCanonical},
+		DialectMSSQL:      {ToCanonical: mssqlToCanonical, FromCanonical: mssqlFromCanonical},
+		DialectMySQL:      {ToCanonical: mysqlToCanonical, FromCanonical: mysqlFromCanonical},
+		DialectSQLite:     {ToCanonical: sqliteToCanonical, FromCanonical: sqliteFromCanonical},
+		DialectClickHouse: {ToCanonical: clickhouseToCanonical, FromCanonical: clickhouseFromCanonical},
 	}
 )
 

@@ -196,6 +196,7 @@ func deterministicDDLDialects() []string {
 		typemap.DialectMSSQL,
 		typemap.DialectMySQL,
 		typemap.DialectSQLite,
+		typemap.DialectClickHouse,
 	}
 }
 
