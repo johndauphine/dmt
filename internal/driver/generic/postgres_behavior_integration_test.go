@@ -1,0 +1,301 @@
+package generic
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"os"
+	"reflect"
+	"testing"
+
+	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/driver"
+)
+
+// Live postgres behavior tests (#509 cleanup). These replace the
+// differential proof that compared the catalog engine against the
+// hand-written driver: with the oracle removed, the expectations the
+// differential established are pinned here as literals.
+//
+// Requires the pg-bench container (localhost:5432, postgres/TestPass2024).
+// Skips when unreachable unless PG_REQUIRED=1.
+
+const pgDSNBase = "postgres://postgres:TestPass2024@localhost:5432/"
+
+func pgBootstrap(t *testing.T, dbName string) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("integration test; -short set")
+	}
+	raw, err := sql.Open("pgx", pgDSNBase+"postgres?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := raw.Ping(); err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but unreachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	if _, err := raw.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", dbName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec("CREATE DATABASE " + dbName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func pgExecAll(t *testing.T, dbName string, stmts []string) {
+	t.Helper()
+	db, err := sql.Open("pgx", pgDSNBase+dbName+"?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("exec %q: %v", s, err)
+		}
+	}
+}
+
+var pgFixtureDDL = []string{
+	`CREATE TABLE users (
+		id SERIAL PRIMARY KEY,
+		name VARCHAR(120) NOT NULL,
+		bio TEXT,
+		balance NUMERIC(10,2) DEFAULT 0.00,
+		active BOOLEAN NOT NULL DEFAULT true,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`,
+	`CREATE INDEX idx_users_name ON users(name)`,
+	`CREATE UNIQUE INDEX idx_users_name_created ON users(name, created_at)`,
+	`INSERT INTO users (name, balance) VALUES ('a', 1.50), ('b', 2.50), ('c', 0)`,
+}
+
+func TestPostgresCatalogReaderBehavior(t *testing.T) {
+	ctx := context.Background()
+	const dbName = "dmt_pgbehav_src"
+	pgBootstrap(t, dbName)
+	pgExecAll(t, dbName, pgFixtureDDL)
+
+	cfg := &dbconfig.SourceConfig{
+		Type: "postgres", Host: "localhost", Port: 5432,
+		Database: dbName, User: "postgres", Password: "TestPass2024",
+		Schema: "public", SSLMode: "disable",
+	}
+	cat, err := LoadCatalog("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewReader(cat, cfg, 4)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	tables, err := r.ExtractSchema(ctx, "public")
+	if err != nil {
+		t.Fatalf("ExtractSchema: %v", err)
+	}
+	if len(tables) != 1 || tables[0].Name != "users" {
+		t.Fatalf("tables = %+v", tables)
+	}
+	users := &tables[0]
+	if !reflect.DeepEqual(users.PrimaryKey, []string{"id"}) {
+		t.Errorf("users PK = %v", users.PrimaryKey)
+	}
+	// serial → nextval default → identity.
+	if !users.Columns[0].IsIdentity {
+		t.Errorf("id should be identity: %+v", users.Columns[0])
+	}
+
+	if err := r.LoadIndexes(ctx, users); err != nil {
+		t.Fatal(err)
+	}
+	if len(users.Indexes) != 2 ||
+		users.Indexes[0].Name != "idx_users_name" || users.Indexes[0].IsUnique ||
+		users.Indexes[1].Name != "idx_users_name_created" || !users.Indexes[1].IsUnique ||
+		!reflect.DeepEqual(users.Indexes[1].Columns, []string{"name", "created_at"}) {
+		t.Errorf("indexes = %+v", users.Indexes)
+	}
+
+	// pg-as-source FK/CHECK introspection is intentionally empty (#518
+	// tracks the fix — the hand-written reader never migrated them).
+	if err := r.LoadForeignKeys(ctx, users); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.LoadCheckConstraints(ctx, users); err != nil {
+		t.Fatal(err)
+	}
+	if len(users.ForeignKeys) != 0 || len(users.CheckConstraints) != 0 {
+		t.Errorf("FK/CHECK should be empty until #518: %+v %+v", users.ForeignKeys, users.CheckConstraints)
+	}
+
+	n, err := r.GetRowCountExact(ctx, "public", "users", false)
+	if err != nil || n != 3 {
+		t.Errorf("count = %d (%v), want 3", n, err)
+	}
+
+	parts, err := r.GetPartitionBoundaries(ctx, users, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 || !parts[0].IsFirstPartition || parts[1].IsFirstPartition {
+		t.Errorf("partitions: %+v", parts)
+	}
+
+	rd := r.(driver.IncrementalDateReader)
+	col, typ, found := rd.GetDateColumnInfo(ctx, "public", "users", []string{"missing", "created_at"})
+	if col != "created_at" || typ != "timestamp" || !found {
+		t.Errorf("date info: (%q,%q,%v)", col, typ, found)
+	}
+}
+
+// Writer behavior: the op sequence the differential ran (including the
+// mixed-case MSSQL-shaped names that exercise identifier_sanitizer),
+// with the observable state asserted directly.
+func TestPostgresCatalogWriterBehavior(t *testing.T) {
+	ctx := context.Background()
+	const dbName = "dmt_pgbehav_tgt"
+	pgBootstrap(t, dbName)
+
+	tm, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := LoadCatalog("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWriter(cat, &dbconfig.TargetConfig{
+		Type: "postgres", Host: "localhost", Port: 5432,
+		Database: dbName, User: "postgres", Password: "TestPass2024",
+		Schema: "public", SSLMode: "disable", ChunkSize: 1000,
+	}, 4, driver.WriterOptions{BatchSize: 1000, SourceType: "postgres", TypeMapper: tm})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	defer w.Close()
+
+	tbl := &driver.Table{
+		Name: "ItemEvents",
+		Columns: []driver.Column{
+			{Name: "Id", DataType: "int4", IsIdentity: true, OrdinalPos: 1},
+			{Name: "Name", DataType: "varchar", MaxLength: 80, IsNullable: false, OrdinalPos: 2},
+			{Name: "Active", DataType: "bool", IsNullable: true, OrdinalPos: 3},
+			{Name: "Price", DataType: "numeric", Precision: 10, Scale: 2, IsNullable: true, OrdinalPos: 4},
+		},
+		PrimaryKey: []string{"Id"},
+	}
+	cols := []string{"Id", "Name", "Active", "Price"}
+	rows := [][]any{
+		{int64(1), "a", true, 1.50},
+		{int64(2), "b", false, 2.25},
+		{int64(3), "c", nil, nil},
+	}
+
+	if err := w.CreateTable(ctx, tbl, "public"); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	// drop_recreate rerun: DropTable must hit the sanitized name or
+	// the second CreateTable fails with "already exists".
+	if err := w.DropTable(ctx, "public", tbl.Name); err != nil {
+		t.Fatalf("DropTable: %v", err)
+	}
+	if err := w.CreateTable(ctx, tbl, "public"); err != nil {
+		t.Fatalf("CreateTable after drop: %v", err)
+	}
+	// Orchestrator calls CreatePrimaryKey after transfer — must no-op.
+	if err := w.CreatePrimaryKey(ctx, tbl, "public"); err != nil {
+		t.Fatalf("CreatePrimaryKey: %v", err)
+	}
+	if err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+		Schema: "public", Table: "ItemEvents", Columns: cols, Rows: rows,
+	}); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	// #227 idempotent replay is a no-op.
+	if err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+		Schema: "public", Table: "ItemEvents", Columns: cols, Rows: rows,
+		IdempotentOnDup: true, PKColumns: []string{"Id"},
+	}); err != nil {
+		t.Fatalf("idempotent WriteBatch: %v", err)
+	}
+	if err := w.(driver.Upserter).UpsertBatch(ctx, driver.UpsertBatchOptions{
+		Schema: "public", Table: "ItemEvents", Columns: cols, PKColumns: []string{"Id"},
+		Rows: [][]any{
+			{int64(2), "b-updated", true, 9.99},
+			{int64(4), "d", false, 4.00},
+		},
+	}); err != nil {
+		t.Fatalf("UpsertBatch: %v", err)
+	}
+	if err := w.(driver.SequenceResetter).ResetSequence(ctx, "public", tbl); err != nil {
+		t.Fatalf("ResetSequence: %v", err)
+	}
+	newCol := &driver.Column{Name: "Note", DataType: "text", IsNullable: true}
+	if err := w.AddColumn(ctx, tbl, newCol, "public"); err != nil {
+		t.Fatalf("AddColumn: %v", err)
+	}
+	if err := w.AddColumn(ctx, tbl, newCol, "public"); err != nil {
+		t.Fatalf("AddColumn idempotent: %v", err)
+	}
+	relax := &driver.Column{Name: "Name", DataType: "varchar", MaxLength: 80, IsNullable: true}
+	if err := w.DropColumnNotNull(ctx, tbl, relax, "public"); err != nil {
+		t.Fatalf("DropColumnNotNull: %v", err)
+	}
+
+	db, err := sql.Open("pgx", pgDSNBase+dbName+"?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var data []string
+	dataRows, err := db.Query("SELECT id, name, active, price FROM itemevents ORDER BY id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dataRows.Next() {
+		var id int64
+		var name string
+		var active, price sql.NullString
+		if err := dataRows.Scan(&id, &name, &active, &price); err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, fmt.Sprintf("%d|%s|%s|%s", id, name, active.String, price.String))
+	}
+	dataRows.Close()
+	want := []string{"1|a|true|1.50", "2|b-updated|true|9.99", "3|c||", "4|d|false|4.00"}
+	if !reflect.DeepEqual(data, want) {
+		t.Errorf("data = %v, want %v", data, want)
+	}
+
+	// ResetSequence positioned the backing sequence at MAX(id).
+	var lastVal sql.NullInt64
+	_ = db.QueryRow(`SELECT last_value FROM pg_sequences
+		WHERE schemaname = 'public'
+		AND sequencename = replace(replace(pg_get_serial_sequence('public.itemevents','id'), 'public.', ''), '"', '')`).Scan(&lastVal)
+	if lastVal.Int64 != 4 {
+		t.Errorf("sequence last_value = %d, want 4", lastVal.Int64)
+	}
+
+	var nameNullable string
+	if err := db.QueryRow(`SELECT is_nullable FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'itemevents' AND column_name = 'name'`).Scan(&nameNullable); err != nil {
+		t.Fatal(err)
+	}
+	if nameNullable != "YES" {
+		t.Errorf("name nullable = %q after DropColumnNotNull, want YES", nameNullable)
+	}
+	var noteType string
+	if err := db.QueryRow(`SELECT udt_name FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'itemevents' AND column_name = 'note'`).Scan(&noteType); err != nil {
+		t.Fatal(err)
+	}
+	if noteType != "text" {
+		t.Errorf("note type = %q, want text", noteType)
+	}
+}
