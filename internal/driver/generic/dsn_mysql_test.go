@@ -1,13 +1,16 @@
-package mysql
+package generic
 
 import (
 	"strings"
 	"testing"
 )
 
-func TestBuildDSNTimeouts(t *testing.T) {
-	d := &Dialect{}
-	dsn := d.BuildDSN("localhost", 3306, "testdb", "root", "pass", map[string]any{})
+// DSN tests ported from the hand-written mysql dialect with its
+// removal (#509 cleanup) — they pin the #252 fail-closed TLS contract
+// and the read/write timeout defaults on mysqlTCPDSN.
+
+func TestMysqlDSNTimeouts(t *testing.T) {
+	dsn := mysqlTCPDSN("localhost", 3306, "testdb", "root", "pass", map[string]any{})
 
 	if !strings.Contains(dsn, "writeTimeout=5m") {
 		t.Errorf("DSN missing writeTimeout: %s", dsn)
@@ -17,14 +20,12 @@ func TestBuildDSNTimeouts(t *testing.T) {
 	}
 }
 
-func TestBuildDSNTimeoutOverride(t *testing.T) {
-	d := &Dialect{}
-	dsn := d.BuildDSN("localhost", 3306, "testdb", "root", "pass", map[string]any{
+func TestMysqlDSNTimeoutOverride(t *testing.T) {
+	dsn := mysqlTCPDSN("localhost", 3306, "testdb", "root", "pass", map[string]any{
 		"writeTimeout": "10m",
 		"readTimeout":  "10m",
 	})
 
-	// User-provided values should not be overridden
 	if strings.Contains(dsn, "writeTimeout=5m") {
 		t.Errorf("DSN should not override user writeTimeout: %s", dsn)
 	}
@@ -33,31 +34,24 @@ func TestBuildDSNTimeoutOverride(t *testing.T) {
 	}
 }
 
-// TestBuildDSN_SSLMode_KeyNormalization is the core regression guard
-// for #252: dbconfig.DSNOptions emits the Postgres-style key
-// `sslmode`, but the MySQL dialect historically read only `ssl_mode`,
-// so configured TLS settings were silently ignored. Both keys must
-// now produce byte-for-byte identical DSNs — asserting equality is
-// stricter than asserting both contain `tls=true`, and would catch a
-// regression where e.g. one path picked up a different default.
-func TestBuildDSN_SSLMode_KeyNormalization(t *testing.T) {
-	d := &Dialect{}
-
-	mysqlKey := d.BuildDSN("localhost", 3306, "db", "u", "p", map[string]any{"ssl_mode": "require"})
-	pgKey := d.BuildDSN("localhost", 3306, "db", "u", "p", map[string]any{"sslmode": "require"})
+// TestMysqlDSN_SSLMode_KeyNormalization is the core regression guard
+// for #252: dbconfig.DSNOptions emits the Postgres-style key `sslmode`,
+// but the MySQL DSN builder historically read only `ssl_mode`, so
+// configured TLS settings were silently ignored. Both keys must
+// produce byte-for-byte identical DSNs.
+func TestMysqlDSN_SSLMode_KeyNormalization(t *testing.T) {
+	mysqlKey := mysqlTCPDSN("localhost", 3306, "db", "u", "p", map[string]any{"ssl_mode": "require"})
+	pgKey := mysqlTCPDSN("localhost", 3306, "db", "u", "p", map[string]any{"sslmode": "require"})
 
 	if mysqlKey != pgKey {
 		t.Errorf("ssl_mode and sslmode keys produced different DSNs:\n  ssl_mode: %s\n  sslmode : %s", mysqlKey, pgKey)
 	}
-	// Sanity check: the normalized DSN still honors the configured mode.
 	if !strings.Contains(mysqlKey, "tls=true") {
 		t.Errorf("normalized DSN doesn't include expected tls=true: %s", mysqlKey)
 	}
 }
 
-func TestBuildDSN_SSLMode_AllModes(t *testing.T) {
-	d := &Dialect{}
-
+func TestMysqlDSN_SSLMode_AllModes(t *testing.T) {
 	cases := []struct {
 		mode    string
 		wantTLS string
@@ -85,23 +79,41 @@ func TestBuildDSN_SSLMode_AllModes(t *testing.T) {
 			if tc.mode != "" {
 				opts["ssl_mode"] = tc.mode
 			}
-			dsn := d.BuildDSN("localhost", 3306, "db", "u", "p", opts)
+			dsn := mysqlTCPDSN("localhost", 3306, "db", "u", "p", opts)
 			want := "tls=" + tc.wantTLS
 			if !strings.Contains(dsn, want) {
 				t.Errorf("ssl_mode=%q produced DSN %s; want it to contain %q", tc.mode, dsn, want)
 			}
-			// `tls=preferred` (downgradeable) must only ever appear
-			// when the operator explicitly typed "preferred" — never
-			// from any other configured value or from the default.
+			// Downgradeable TLS only on explicit operator opt-in.
 			if tc.mode != "preferred" && strings.Contains(dsn, "tls=preferred") {
 				t.Errorf("ssl_mode=%q produced downgradeable tls=preferred unexpectedly; DSN: %s", tc.mode, dsn)
 			}
-			// `skip-verify` (TLS without any verification) was the
-			// pre-#252 mapping for verify-ca. It should never appear
-			// from any configured mode.
+			// skip-verify (TLS without verification) must never appear.
 			if strings.Contains(dsn, "tls=skip-verify") {
 				t.Errorf("ssl_mode=%q produced tls=skip-verify (no verification); DSN: %s", tc.mode, dsn)
 			}
 		})
+	}
+}
+
+// The #227 resume contract: mysql converts duplicate-key conflicts to
+// no-ops via PK self-assignment, never INSERT IGNORE (which also masks
+// data-conversion errors, silently dropping rows on resume). The live
+// idempotent-replay behavior is pinned by the integration test; this
+// pins the catalog declaration that drives it.
+func TestMysqlCatalogIdempotentSuffix(t *testing.T) {
+	cat, err := LoadCatalog("mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Bulk.IdempotentVerb != "" {
+		t.Errorf("mysql must use the suffix form, not a verb (got %q)", cat.Bulk.IdempotentVerb)
+	}
+	want := "ON DUPLICATE KEY UPDATE {pk} = {pk}"
+	if cat.Bulk.IdempotentSuffix != want {
+		t.Errorf("idempotent_suffix = %q, want %q", cat.Bulk.IdempotentSuffix, want)
+	}
+	if strings.Contains(strings.ToUpper(cat.Bulk.IdempotentSuffix+cat.Bulk.IdempotentVerb), "IGNORE") {
+		t.Error("INSERT IGNORE is forbidden — it masks data-conversion errors")
 	}
 }

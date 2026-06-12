@@ -8,7 +8,6 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	// Import driver packages to register dialects
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
-	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
