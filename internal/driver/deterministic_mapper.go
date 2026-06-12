@@ -166,11 +166,18 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 		if req.ForeignKey == nil {
 			return "", fmt.Errorf("DDLTypeForeignKey requires ForeignKey field")
 		}
-		return ddl.GenerateAddForeignKey(tbl, driverFKToConstraint(*req.ForeignKey, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
+		return ddl.GenerateAddForeignKey(tbl, driverFKToConstraint(*req.ForeignKey, req.Table.Schema, req.TargetSchema, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
 
 	case DDLTypeCheckConstraint:
 		if req.CheckConstraint == nil {
 			return "", fmt.Errorf("DDLTypeCheckConstraint requires CheckConstraint field")
+		}
+		// Expressions that keep source-only syntax after deterministic
+		// normalization must route to the AI fallback — emitting them
+		// fails at Exec where the fallback chain can't see it.
+		if ddl.CheckExpressionNeedsFallback(req.CheckConstraint.Definition, req.SourceDBType, req.TargetDBType) {
+			return "", fmt.Errorf("check %q: %w (source-dialect cast syntax survives normalization)",
+				req.CheckConstraint.Name, ErrUnsupportedDDL)
 		}
 		return ddl.GenerateAddCheck(tbl, driverCheckToConstraint(*req.CheckConstraint, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
 
@@ -430,7 +437,14 @@ func unsupportedIndexFeature(idx Index) string {
 //
 // Constraint name + columns + referenced table/columns are sanitized
 // for PG targets to match the rest of dmt's PG flow.
-func driverFKToConstraint(fk ForeignKey, targetDialect string) ddl.Constraint {
+//
+// References INTO the migrated schema follow the data to the TARGET
+// schema (#518 — a pg source's "public" reached an mssql target as
+// REFERENCES [public].[users], which fails because the data lives in
+// [dbo]). References to OTHER source schemas are preserved verbatim:
+// dmt didn't move those tables, so rewriting them would point the
+// constraint at the wrong place (codex).
+func driverFKToConstraint(fk ForeignKey, sourceSchema, targetSchema, targetDialect string) ddl.Constraint {
 	cols := make([]string, len(fk.Columns))
 	for i, c := range fk.Columns {
 		cols[i] = sanitizeForTarget(c, targetDialect)
@@ -439,12 +453,16 @@ func driverFKToConstraint(fk ForeignKey, targetDialect string) ddl.Constraint {
 	for i, c := range fk.RefColumns {
 		refCols[i] = sanitizeForTarget(c, targetDialect)
 	}
+	refSchema := fk.RefSchema
+	if refSchema == "" || refSchema == sourceSchema {
+		refSchema = targetSchema
+	}
 	return ddl.Constraint{
 		Name:    sanitizeForTarget(fk.Name, targetDialect),
 		Type:    ddl.ConstraintForeignKey,
 		Columns: cols,
 		ForeignKey: &ddl.ForeignKey{
-			RefSchema:  sanitizeForTarget(fk.RefSchema, targetDialect),
+			RefSchema:  sanitizeForTarget(refSchema, targetDialect),
 			RefTable:   sanitizeForTarget(fk.RefTable, targetDialect),
 			RefColumns: refCols,
 			DeleteRule: fk.OnDelete,
