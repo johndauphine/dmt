@@ -1,5 +1,0 @@
-./logging.go
-./scrub.go
-./logging_test.go
-./scrub_test.go
-./structured_test.go

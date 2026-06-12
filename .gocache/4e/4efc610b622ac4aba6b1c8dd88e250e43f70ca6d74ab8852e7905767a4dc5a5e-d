@@ -1,9 +1,0 @@
-./aireview.go
-./cache.go
-./dryrun.go
-./initsecrets.go
-./observability.go
-./options.go
-./preflight.go
-./registry.go
-./triage.go

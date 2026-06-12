@@ -1,5 +1,0 @@
-./canonicalize.go
-./null_parity.go
-./runner.go
-./sample_row.go
-./types.go

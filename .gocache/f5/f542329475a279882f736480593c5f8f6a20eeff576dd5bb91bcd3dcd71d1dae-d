@@ -1,5 +1,0 @@
-./factory.go
-./interfaces.go
-./writer_pool.go
-./writer_pool_ack_test.go
-./writer_pool_test.go

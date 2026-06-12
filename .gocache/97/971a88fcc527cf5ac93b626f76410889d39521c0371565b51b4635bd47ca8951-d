@@ -1,9 +1,0 @@
-./doc.go
-./messages.go
-./mssql.go
-./namer.go
-./pg.go
-./querier.go
-./quoter.go
-./registry.go
-./savepoint.go

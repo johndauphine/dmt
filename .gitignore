@@ -3,6 +3,9 @@ dmt
 dmt-*
 *.exe
 
+# Local Go build cache (set as GOCACHE during offline CI runs)
+.gocache/
+
 # Config with secrets
 *.yaml
 !internal/driver/generic/catalogs/*.yaml

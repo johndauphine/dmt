@@ -1,5 +1,0 @@
-./fallback.go
-./metrics.go
-./tracer.go
-./fallback_test.go
-./metrics_test.go
