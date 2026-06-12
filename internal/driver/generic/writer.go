@@ -49,10 +49,26 @@ func (w *writerUpsertSeq) ResetSequence(ctx context.Context, schema string, t *d
 	return w.resetSequence(ctx, schema, t)
 }
 
+// writerFull is the all-capabilities combo (mysql/postgres/mssql).
+type writerFull struct{ writerUpsertSeq }
+
+func (w *writerFull) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
+	return w.finalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type: driver.DDLTypeForeignKey, Table: t, ForeignKey: fk, TargetSchema: targetSchema,
+	}, "FK", fk.Name)
+}
+
+func (w *writerFull) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
+	return w.finalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type: driver.DDLTypeCheckConstraint, Table: t, CheckConstraint: chk, TargetSchema: targetSchema,
+	}, "CHECK", chk.Name)
+}
+
 var (
 	_ driver.Writer           = (*Writer)(nil)
 	_ driver.Upserter         = (*writerUpsertSeq)(nil)
 	_ driver.SequenceResetter = (*writerUpsertSeq)(nil)
+	_ driver.ConstraintWriter = (*writerFull)(nil)
 )
 
 // NewWriter opens the catalog's backend as a write target.
@@ -127,6 +143,8 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	caps := cat.Capabilities
 	switch {
+	case caps.Upserter && caps.SequenceResetter && caps.ConstraintWriter:
+		return &writerFull{writerUpsertSeq{w}}, nil
 	case caps.Upserter && caps.SequenceResetter && !caps.ConstraintWriter:
 		return &writerUpsertSeq{w}, nil
 	case !caps.Upserter && !caps.SequenceResetter && !caps.ConstraintWriter:
@@ -394,14 +412,36 @@ func (w *Writer) bulkEnv() bulkEnv {
 		convert = rowConverters[name]
 	}
 	return bulkEnv{
-		db:             w.db,
-		dialect:        w.dialect,
-		batchSize:      w.defaultBatchSize,
-		maxVars:        w.cat.Bulk.MaxBindVariables,
-		convert:        convert,
-		idempotentVerb: w.cat.Bulk.IdempotentVerb,
-		engine:         w.cat.Name,
+		db:               w.db,
+		dialect:          w.dialect,
+		batchSize:        w.defaultBatchSize,
+		maxVars:          w.cat.Bulk.MaxBindVariables,
+		convert:          convert,
+		idempotentVerb:   w.cat.Bulk.IdempotentVerb,
+		idempotentSuffix: w.cat.Bulk.IdempotentSuffix,
+		transactional:    !w.cat.Bulk.NonTransactional,
+		engine:           w.cat.Name,
 	}
+}
+
+// finalizationDDL generates and executes constraint DDL through the
+// type-mapper engine — the same path CreateIndex uses.
+func (w *Writer) finalizationDDL(ctx context.Context, req driver.FinalizationDDLRequest, kind, name string) error {
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for %s creation", kind)
+	}
+	if w.cat.Quoting.SchemaIgnored {
+		req.TargetSchema = ""
+	}
+	req.SourceDBType = w.sourceType
+	req.TargetDBType = w.cat.Name
+	req.TargetContext = w.dbContext
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+	if err != nil {
+		return fmt.Errorf("%s DDL generation failed for %s.%s: %w", kind, req.Table.Name, name, err)
+	}
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
 }
 
 func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64, error) {

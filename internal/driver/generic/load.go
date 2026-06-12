@@ -146,6 +146,8 @@ func (c *Catalog) Validate() error {
 			errs = append(errs, fmt.Sprintf("bulk.strategy %q is not a known strategy", c.Bulk.Strategy))
 		}
 	}
+	require(!(c.Bulk.IdempotentVerb != "" && c.Bulk.IdempotentSuffix != ""),
+		"bulk: idempotent_verb and idempotent_suffix are mutually exclusive")
 	if c.Bulk.RowConverter != "" {
 		if _, ok := rowConverters[c.Bulk.RowConverter]; !ok {
 			errs = append(errs, fmt.Sprintf("bulk.row_converter %q is not a known converter", c.Bulk.RowConverter))

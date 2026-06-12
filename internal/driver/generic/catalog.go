@@ -254,10 +254,17 @@ type BulkSpec struct {
 	RowConverter string `yaml:"row_converter"`
 	// IdempotentVerb is the INSERT verb that silently skips duplicate
 	// PKs, used by the #227 ROW_NUMBER resume path ("INSERT OR IGNORE
-	// INTO" on sqlite). Empty means the engine has no such verb and an
-	// idempotent replay is refused with a clear error instead of
+	// INTO" on sqlite). IdempotentSuffix is the trailing-clause form
+	// ("ON DUPLICATE KEY UPDATE {pk} = {pk}" on mysql; {pk} renders as
+	// the quoted first PK column). At most one may be set; neither
+	// means idempotent replay is refused with a clear error instead of
 	// emitting another engine's syntax.
-	IdempotentVerb string `yaml:"idempotent_verb"`
+	IdempotentVerb   string `yaml:"idempotent_verb"`
+	IdempotentSuffix string `yaml:"idempotent_suffix"`
+	// NonTransactional disables the one-transaction wrapper around a
+	// batch sequence (mysql autocommits per statement, matching its
+	// hand-written writer's resume semantics).
+	NonTransactional bool `yaml:"non_transactional"`
 }
 
 // UpsertSpec selects the upsert strategy (capability Upserter).
