@@ -2,10 +2,10 @@ package config
 
 import (
 	"github.com/johndauphine/dmt/internal/driver"
+	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 	_ "github.com/johndauphine/dmt/internal/driver/mysql"
 	_ "github.com/johndauphine/dmt/internal/driver/postgres"
-	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +39,7 @@ func availableDriverTypes() []string {
 //
 // Today the only file-based driver is sqlite (registered as primary
 // name "sqlite" with aliases "sqlite3" / "sqlitedb" — see
-// internal/driver/sqlite/driver.go Aliases()). The alias forms are
+// the sqlite catalog in internal/driver/generic/catalogs). The alias forms are
 // handled correctly here because canonicalDriverName resolves through
 // driver.Get(...).Name(), which collapses aliases to the canonical
 // primary name before comparison.

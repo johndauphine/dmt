@@ -1,4 +1,6 @@
-package sqlite
+// Ported from the hand-written sqlite package when #506 removed it —
+// the same behavioral expectations now run against the catalog engine.
+package generic
 
 import (
 	"context"
@@ -26,7 +28,7 @@ func memoryDBPath(t *testing.T, name string) string {
 // ---------- Dialect ----------
 
 func TestDialect_QuoteAndQualify(t *testing.T) {
-	d := &Dialect{}
+	d := NewDialect(testCatalog(t))
 
 	if got := d.QuoteIdentifier(`my"col`); got != `"my""col"` {
 		t.Errorf("QuoteIdentifier: got %q, want %q", got, `"my""col"`)
@@ -43,7 +45,7 @@ func TestDialect_QuoteAndQualify(t *testing.T) {
 }
 
 func TestDialect_BuildDSN(t *testing.T) {
-	d := &Dialect{}
+	d := NewDialect(testCatalog(t))
 
 	// File path passes through; PRAGMAs are baked in.
 	dsn := d.BuildDSN("", 0, "/tmp/test.db", "", "", nil)
@@ -72,13 +74,22 @@ func TestDialect_BuildDSN(t *testing.T) {
 
 // newTestWriter builds a Writer pointed at a fresh temp .db file. The
 // caller must Close.
-func newTestWriter(t *testing.T, path string) *Writer {
+func testCatalog(t *testing.T) *Catalog {
+	t.Helper()
+	cat, err := LoadCatalog("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cat
+}
+
+func newTestWriter(t *testing.T, path string) driver.Writer {
 	t.Helper()
 	tm, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
 	if err != nil {
 		t.Fatalf("GetTypeMapper: %v", err)
 	}
-	w, err := NewWriter(
+	w, err := NewWriter(testCatalog(t),
 		&dbconfig.TargetConfig{Type: "sqlite", Database: path, ChunkSize: 1000},
 		1,
 		driver.WriterOptions{
@@ -93,9 +104,9 @@ func newTestWriter(t *testing.T, path string) *Writer {
 	return w
 }
 
-func newTestReader(t *testing.T, path string) *Reader {
+func newTestReader(t *testing.T, path string) driver.Reader {
 	t.Helper()
-	r, err := NewReader(
+	r, err := NewReader(testCatalog(t),
 		&dbconfig.SourceConfig{Type: "sqlite", Database: path, ChunkSize: 1000},
 		2,
 	)
@@ -248,7 +259,7 @@ func TestWriter_AddColumn(t *testing.T) {
 
 	var colType string
 	var notNull int
-	err := w.db.QueryRowContext(ctx,
+	err := w.DB().QueryRowContext(ctx,
 		`SELECT type, "notnull" FROM pragma_table_info(?) WHERE name = ?`,
 		"users", "email").Scan(&colType, &notNull)
 	if err != nil {
@@ -263,7 +274,7 @@ func TestWriter_AddColumn(t *testing.T) {
 }
 
 func TestWriter_DropColumnNotNullUnsupported(t *testing.T) {
-	w := &Writer{}
+	w := &Writer{cat: testCatalog(t)}
 	err := w.DropColumnNotNull(
 		context.Background(),
 		&driver.Table{Name: "users"},
@@ -279,7 +290,7 @@ func TestWriter_DropColumnNotNullUnsupported(t *testing.T) {
 }
 
 func TestWriter_AlterColumnTypeUnsupported(t *testing.T) {
-	w := &Writer{}
+	w := &Writer{cat: testCatalog(t)}
 	err := w.AlterColumnType(
 		context.Background(),
 		&driver.Table{Name: "users"},
@@ -345,7 +356,7 @@ func TestWriter_IdempotentOnDup(t *testing.T) {
 
 	// INSERT OR IGNORE preserves the original value (does NOT update).
 	var label string
-	if err := w.db.QueryRow(`SELECT label FROM items WHERE id = 1`).Scan(&label); err != nil {
+	if err := w.DB().QueryRow(`SELECT label FROM items WHERE id = 1`).Scan(&label); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if label != "one" {
@@ -373,7 +384,7 @@ func TestWriter_UpsertBatch(t *testing.T) {
 	}
 
 	// First write seeds the table.
-	if err := w.UpsertBatch(ctx, driver.UpsertBatchOptions{
+	if err := w.(driver.Upserter).UpsertBatch(ctx, driver.UpsertBatchOptions{
 		Table:     "kv",
 		Columns:   []string{"k", "v"},
 		PKColumns: []string{"k"},
@@ -384,7 +395,7 @@ func TestWriter_UpsertBatch(t *testing.T) {
 
 	// Second write changes "a" and adds "c". UPSERT should update "a"
 	// and insert "c".
-	if err := w.UpsertBatch(ctx, driver.UpsertBatchOptions{
+	if err := w.(driver.Upserter).UpsertBatch(ctx, driver.UpsertBatchOptions{
 		Table:     "kv",
 		Columns:   []string{"k", "v"},
 		PKColumns: []string{"k"},
@@ -394,7 +405,7 @@ func TestWriter_UpsertBatch(t *testing.T) {
 	}
 
 	var v int64
-	if err := w.db.QueryRow(`SELECT v FROM kv WHERE k = 'a'`).Scan(&v); err != nil {
+	if err := w.DB().QueryRow(`SELECT v FROM kv WHERE k = 'a'`).Scan(&v); err != nil {
 		t.Fatalf("read a: %v", err)
 	}
 	if v != 99 {
@@ -411,7 +422,7 @@ func TestReader_SchemaExtraction(t *testing.T) {
 
 	// Seed the database directly via raw SQL so we exercise the
 	// reader's introspection path without depending on the writer.
-	dsn := (&Dialect{}).BuildDSN("", 0, path, "", "", nil)
+	dsn := (NewDialect(testCatalog(t))).BuildDSN("", 0, path, "", "", nil)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -515,7 +526,7 @@ func TestReader_SchemaExtraction(t *testing.T) {
 
 func TestReader_GetDateColumnInfo_AcceptsConfiguredTextColumn(t *testing.T) {
 	path := memoryDBPath(t, "date_column_text")
-	dsn := (&Dialect{}).BuildDSN("", 0, path, "", "", nil)
+	dsn := (NewDialect(testCatalog(t))).BuildDSN("", 0, path, "", "", nil)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -535,7 +546,7 @@ func TestReader_GetDateColumnInfo_AcceptsConfiguredTextColumn(t *testing.T) {
 	r := newTestReader(t, path)
 	defer r.Close()
 
-	col, dataType, found := r.GetDateColumnInfo(
+	col, dataType, found := r.(driver.IncrementalDateReader).GetDateColumnInfo(
 		context.Background(), "", "events", []string{"missing", "updated_at"})
 	if !found {
 		t.Fatal("expected configured TEXT date column to be found")
@@ -801,7 +812,18 @@ func TestGenerateTableDDL_SqliteTarget_IdentityOutsidePK(t *testing.T) {
 
 func TestEndToEnd_PostgresSchemaToSqlite(t *testing.T) {
 	path := memoryDBPath(t, "pg_to_sqlite")
-	w := newTestWriter(t, path)
+	// Built directly (not via newTestWriter) so the typemap chain maps
+	// postgres-source types to sqlite-target types.
+	tm, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWriter(testCatalog(t),
+		&dbconfig.TargetConfig{Type: "sqlite", Database: path, ChunkSize: 1000}, 1,
+		driver.WriterOptions{BatchSize: 1000, SourceType: "postgres", TypeMapper: tm})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer w.Close()
 	ctx := context.Background()
 
@@ -819,10 +841,6 @@ func TestEndToEnd_PostgresSchemaToSqlite(t *testing.T) {
 		PrimaryKey: []string{"id"},
 	}
 	src.PopulatePKColumns()
-
-	// Override sourceType so the writer asks the typemap chain to map
-	// from postgres-source types to sqlite-target types.
-	w.sourceType = "postgres"
 
 	if err := w.CreateTable(ctx, src, ""); err != nil {
 		t.Fatalf("CreateTable (pg→sqlite): %v", err)
@@ -866,9 +884,9 @@ func TestParseSqliteType(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {
-			b, m, p, s := parseSqliteType(tc.in)
+			b, m, p, s := parseDeclaredType(tc.in)
 			if b != tc.wantBase || m != tc.wantMax || p != tc.wantPrec || s != tc.wantScale {
-				t.Errorf("parseSqliteType(%q) = (%q, %d, %d, %d); want (%q, %d, %d, %d)",
+				t.Errorf("parseDeclaredType(%q) = (%q, %d, %d, %d); want (%q, %d, %d, %d)",
 					tc.in, b, m, p, s, tc.wantBase, tc.wantMax, tc.wantPrec, tc.wantScale)
 			}
 		})
@@ -882,7 +900,7 @@ func TestParseSqliteType(t *testing.T) {
 func TestReader_BoundedTypesPreserved(t *testing.T) {
 	path := memoryDBPath(t, "bounded_types")
 
-	dsn := (&Dialect{}).BuildDSN("", 0, path, "", "", nil)
+	dsn := (NewDialect(testCatalog(t))).BuildDSN("", 0, path, "", "", nil)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
