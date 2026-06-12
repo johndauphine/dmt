@@ -124,14 +124,42 @@ introspection:
     WHERE n.nspname = $1 AND t.relname = $2 AND i.relname = $3
     ORDER BY k.ordinality
   index_columns_by_table: true
-  # Parity with the hand-written reader, whose LoadForeignKeys and
-  # LoadCheckConstraints are no-op stubs — pg-as-source has never
-  # migrated FKs/CHECKs (tracked as a follow-up; fixing it here would
-  # be a behavior change smuggled into the conversion).
-  # ($1/$2 are consumed but unused: pgx rejects unbound extra args.)
+  # Canonical per-row 9-column shape grouped by name (#518 — the
+  # hand-written reader's no-op stubs meant pg-as-source never migrated
+  # FKs/CHECKs; the conversion mirrored that for parity, fixed here).
+  # pg_constraint arrays unnest WITH ORDINALITY to pair conkey/confkey
+  # column positions in declaration order.
   foreign_keys: |
-    SELECT 0, 0, '', '', '', '', '', '', ''
-    WHERE $1::text IS NOT NULL AND $2::text IS NOT NULL AND false
+    SELECT 0, k.ord, con.conname,
+           rns.nspname, rcl.relname,
+           a.attname, ra.attname,
+           CASE con.confupdtype
+             WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
+             WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL'
+             WHEN 'd' THEN 'SET DEFAULT' END,
+           CASE con.confdeltype
+             WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT'
+             WHEN 'c' THEN 'CASCADE' WHEN 'n' THEN 'SET NULL'
+             WHEN 'd' THEN 'SET DEFAULT' END
+    FROM pg_constraint con
+    JOIN pg_class cl ON cl.oid = con.conrelid
+    JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+    JOIN pg_class rcl ON rcl.oid = con.confrelid
+    JOIN pg_namespace rns ON rns.oid = rcl.relnamespace
+    CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(attnum, fattnum, ord)
+    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+    JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.fattnum
+    WHERE con.contype = 'f' AND ns.nspname = $1 AND cl.relname = $2
+    ORDER BY con.conname, k.ord
+  # pg_get_expr yields the bare expression — the finalization DDL
+  # generator adds the CHECK (...) wrapper itself.
+  check_constraints: |
+    SELECT con.conname, pg_get_expr(con.conbin, con.conrelid)
+    FROM pg_constraint con
+    JOIN pg_class cl ON cl.oid = con.conrelid
+    JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+    WHERE con.contype = 'c' AND ns.nspname = $1 AND cl.relname = $2
+    ORDER BY con.conname
   column_exists: |
     SELECT 1 FROM information_schema.columns
     WHERE table_schema = $1 AND table_name = $2 AND column_name = $3 LIMIT 1

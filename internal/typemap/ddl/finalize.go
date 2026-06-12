@@ -18,6 +18,7 @@ package ddl
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -99,8 +100,98 @@ func GenerateAddCheck(table TableInfo, c Constraint, sourceDialect, targetDialec
 		"ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s);",
 		tableName,
 		QuoteIdentifier(c.Name, targetDialect),
-		c.CheckExpression,
+		normalizeCheckExpression(c.CheckExpression, sourceDialect, targetDialect),
 	)
+}
+
+// pgTextCastRe matches PostgreSQL text-type casts: ::text,
+// ::character varying(120), ::varchar, ::bpchar, ::char(8). These are
+// noise pg_get_expr adds around plain string comparisons; stripping
+// them preserves semantics while making the expression portable.
+// Non-text casts (::numeric, ::timestamp, ...) stay — those can change
+// comparison semantics, so they remain an AI-fallback surface.
+var pgTextCastRe = regexp.MustCompile(`::(character varying|varchar|bpchar|character|char|text)(\(\d+\))?`)
+
+// normalizeCheckExpression applies deterministic cross-dialect rewrites
+// to CHECK expressions on their way out of the source dialect (#518).
+// Cast stripping only touches text OUTSIDE single-quoted literals —
+// a literal like 'foo::text' must keep its bytes (codex).
+func normalizeCheckExpression(expr, sourceDialect, targetDialect string) string {
+	if sourceDialect == targetDialect {
+		return expr
+	}
+	if isPGDialect(sourceDialect) {
+		expr = mapOutsideQuotes(expr, func(seg string) string {
+			return pgTextCastRe.ReplaceAllString(seg, "")
+		})
+	}
+	return expr
+}
+
+// CheckExpressionNeedsFallback reports whether a CHECK expression still
+// contains source-dialect-only syntax after deterministic normalization
+// — the caller must route it to the AI fallback instead of emitting DDL
+// the target cannot parse (codex on #518: a surviving ::numeric cast
+// would otherwise fail at Exec without ever reaching the fallback).
+func CheckExpressionNeedsFallback(expr, sourceDialect, targetDialect string) bool {
+	if sourceDialect == targetDialect {
+		return false
+	}
+	if !isPGDialect(sourceDialect) || isPGDialect(targetDialect) {
+		return false
+	}
+	normalized := normalizeCheckExpression(expr, sourceDialect, targetDialect)
+	needs := false
+	mapOutsideQuotes(normalized, func(seg string) string {
+		if strings.Contains(seg, "::") {
+			needs = true
+		}
+		return seg
+	})
+	return needs
+}
+
+func isPGDialect(d string) bool {
+	switch d {
+	case "postgres", "postgresql", "pg":
+		return true
+	}
+	return false
+}
+
+// mapOutsideQuotes applies fn to the segments of expr outside
+// single-quoted SQL literals. Literal bodies (including ” escapes,
+// which read as an empty literal immediately followed by another) pass
+// through untouched.
+func mapOutsideQuotes(expr string, fn func(string) string) string {
+	var b strings.Builder
+	rest := expr
+	for {
+		i := strings.IndexByte(rest, '\'')
+		if i < 0 {
+			b.WriteString(fn(rest))
+			return b.String()
+		}
+		b.WriteString(fn(rest[:i]))
+		// Copy the quoted literal verbatim, honoring '' escapes.
+		j := i + 1
+		for {
+			k := strings.IndexByte(rest[j:], '\'')
+			if k < 0 {
+				// Unterminated literal — copy the remainder untouched.
+				b.WriteString(rest[i:])
+				return b.String()
+			}
+			j += k + 1
+			if j < len(rest) && rest[j] == '\'' {
+				j++ // escaped quote, literal continues
+				continue
+			}
+			break
+		}
+		b.WriteString(rest[i:j])
+		rest = rest[j:]
+	}
 }
 
 // quoteColumnList is the common helper for FK / UNIQUE / index column

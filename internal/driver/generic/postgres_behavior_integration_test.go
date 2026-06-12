@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
@@ -71,7 +72,16 @@ var pgFixtureDDL = []string{
 	)`,
 	`CREATE INDEX idx_users_name ON users(name)`,
 	`CREATE UNIQUE INDEX idx_users_name_created ON users(name, created_at)`,
+	`CREATE TABLE orders (
+		region VARCHAR(10) NOT NULL,
+		order_no INT NOT NULL,
+		user_id INT,
+		PRIMARY KEY (order_no, region),
+		CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+		CONSTRAINT chk_region CHECK (region <> '')
+	)`,
 	`INSERT INTO users (name, balance) VALUES ('a', 1.50), ('b', 2.50), ('c', 0)`,
+	`INSERT INTO orders (region, order_no, user_id) VALUES ('us', 1, 1), ('eu', 2, 2)`,
 }
 
 func TestPostgresCatalogReaderBehavior(t *testing.T) {
@@ -99,10 +109,10 @@ func TestPostgresCatalogReaderBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractSchema: %v", err)
 	}
-	if len(tables) != 1 || tables[0].Name != "users" {
+	if len(tables) != 2 || tables[0].Name != "orders" || tables[1].Name != "users" {
 		t.Fatalf("tables = %+v", tables)
 	}
-	users := &tables[0]
+	users, orders := &tables[1], &tables[0]
 	if !reflect.DeepEqual(users.PrimaryKey, []string{"id"}) {
 		t.Errorf("users PK = %v", users.PrimaryKey)
 	}
@@ -121,16 +131,33 @@ func TestPostgresCatalogReaderBehavior(t *testing.T) {
 		t.Errorf("indexes = %+v", users.Indexes)
 	}
 
-	// pg-as-source FK/CHECK introspection is intentionally empty (#518
-	// tracks the fix — the hand-written reader never migrated them).
-	if err := r.LoadForeignKeys(ctx, users); err != nil {
+	// #518: pg-as-source FK/CHECK introspection. The hand-written
+	// reader never implemented these (no-op stubs); the catalog fixes
+	// that, so pg sources now round-trip constraints.
+	if err := r.LoadForeignKeys(ctx, orders); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.LoadCheckConstraints(ctx, users); err != nil {
+	if err := r.LoadCheckConstraints(ctx, orders); err != nil {
 		t.Fatal(err)
 	}
-	if len(users.ForeignKeys) != 0 || len(users.CheckConstraints) != 0 {
-		t.Errorf("FK/CHECK should be empty until #518: %+v %+v", users.ForeignKeys, users.CheckConstraints)
+	if len(orders.ForeignKeys) != 1 {
+		t.Fatalf("orders FKs: %+v", orders.ForeignKeys)
+	}
+	fk := orders.ForeignKeys[0]
+	if fk.Name != "fk_orders_user" || fk.RefTable != "users" || fk.RefSchema != "public" ||
+		!reflect.DeepEqual(fk.Columns, []string{"user_id"}) ||
+		!reflect.DeepEqual(fk.RefColumns, []string{"id"}) ||
+		fk.OnDelete != "CASCADE" || fk.OnUpdate != "NO ACTION" {
+		t.Errorf("fk_orders_user wrong: %+v", fk)
+	}
+	if len(orders.CheckConstraints) != 1 || orders.CheckConstraints[0].Name != "chk_region" {
+		t.Fatalf("orders checks: %+v", orders.CheckConstraints)
+	}
+	// Bare expression — the finalization DDL generator adds the
+	// CHECK (...) wrapper, so a leading CHECK here would double it.
+	def := orders.CheckConstraints[0].Definition
+	if !strings.Contains(def, "region") || strings.Contains(def, "CHECK") {
+		t.Errorf("chk_region definition = %q, want bare expression", def)
 	}
 
 	n, err := r.GetRowCountExact(ctx, "public", "users", false)
