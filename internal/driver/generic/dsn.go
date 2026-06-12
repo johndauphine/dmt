@@ -13,7 +13,24 @@ type dsnFunc func(host string, port int, database, user, password string, opts m
 // dsnStrategies is the named registry catalogs select from via
 // connection.dsn_strategy. Load-time validation rejects unknown names.
 var dsnStrategies = map[string]dsnFunc{
-	"sqlite_file": sqliteFileDSN,
+	"sqlite_file":    sqliteFileDSN,
+	"clickhouse_url": clickhouseURLDSN,
+}
+
+// clickhouseURLDSN builds the clickhouse-go v2 URL form with proper
+// escaping — a raw template would misparse credentials containing
+// URL-reserved characters (codex on #507).
+func clickhouseURLDSN(host string, port int, database, user, password string, _ map[string]any) string {
+	q := url.Values{}
+	q.Set("username", user)
+	q.Set("password", password)
+	u := url.URL{
+		Scheme:   "clickhouse",
+		Host:     fmt.Sprintf("%s:%d", host, port),
+		Path:     "/" + database,
+		RawQuery: q.Encode(),
+	}
+	return u.String()
 }
 
 // sqliteFileDSN mirrors the hand-written sqlite dialect's BuildDSN:
