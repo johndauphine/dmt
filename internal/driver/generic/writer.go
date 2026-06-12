@@ -182,6 +182,12 @@ func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
 		return nil
 	}
 	if schema == "" {
+		if !w.cat.DDL.CreateSchemaDefaultsToDatabase {
+			// Matching the hand-written engines: empty schema means
+			// "use the connection's default database" — a no-op, and
+			// least-privilege users never need CREATE (codex on #509).
+			return nil
+		}
 		// Schema-as-database engines (clickhouse) accept configs with
 		// only target.database set (codex on #507).
 		schema = w.config.Database

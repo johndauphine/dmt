@@ -14,10 +14,6 @@ import (
 // preFlight runs MySQL preflight checks (#228) and returns findings in
 // stable order. Individual probe failures become findings rather than
 // propagating.
-func init() {
-	preflightStrategies["mysql"] = mysqlPreFlight
-}
-
 func mysqlPreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
 		NilDatabaseRemedy: "internal error — please report",

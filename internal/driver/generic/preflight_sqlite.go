@@ -14,8 +14,12 @@ import (
 // strategy-selected). Catalogs select via preflight_strategy.
 type preflightFunc func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding
 
+// Entries live in this literal (not per-file init funcs): the driver
+// registration init() validates catalogs against this map, and Go runs
+// var initializers before any init(), keeping ordering safe.
 var preflightStrategies = map[string]preflightFunc{
 	"sqlite": sqlitePreFlight,
+	"mysql":  mysqlPreFlight,
 }
 
 // sqlitePreFlight runs SQLite preflight checks (moved verbatim from
