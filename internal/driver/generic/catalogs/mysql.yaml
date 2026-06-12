@@ -94,11 +94,11 @@ introspection:
     SELECT COLUMN_NAME FROM information_schema.STATISTICS
     WHERE TABLE_SCHEMA = ? AND INDEX_NAME = ?
     ORDER BY SEQ_IN_INDEX
-  # Canonical 8-col FK shape with real constraint names; fk_id is a
-  # dense rank so multi-column FKs group correctly.
+  # Canonical FK shape with real constraint names; grouping is by name
+  # so fk_id can be a constant — keeps the query window-function-free
+  # for MySQL 5.7.
   foreign_keys: |
-    SELECT DENSE_RANK() OVER (ORDER BY kcu.CONSTRAINT_NAME),
-           kcu.ORDINAL_POSITION, kcu.CONSTRAINT_NAME,
+    SELECT 0, kcu.ORDINAL_POSITION, kcu.CONSTRAINT_NAME,
            kcu.REFERENCED_TABLE_SCHEMA,
            kcu.REFERENCED_TABLE_NAME, kcu.COLUMN_NAME,
            kcu.REFERENCED_COLUMN_NAME, rc.UPDATE_RULE, rc.DELETE_RULE

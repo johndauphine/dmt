@@ -79,7 +79,7 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	db, err := sql.Open(knownBackends[cat.Connection.Backend], dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, err)
+		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, logging.ScrubError(err))
 	}
 
 	if cat.Connection.SingleWriter {
@@ -97,7 +97,7 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, err)
+		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, logging.ScrubError(err))
 	}
 
 	if opts.TypeMapper == nil {

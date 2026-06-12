@@ -46,7 +46,7 @@ func NewReader(cat *Catalog, cfg *dbconfig.SourceConfig, maxConns int) (driver.R
 
 	db, err := sql.Open(knownBackends[cat.Connection.Backend], dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, err)
+		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, logging.ScrubError(err))
 	}
 
 	db.SetMaxOpenConns(maxConns)
@@ -59,7 +59,7 @@ func NewReader(cat *Catalog, cfg *dbconfig.SourceConfig, maxConns int) (driver.R
 
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, err)
+		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, logging.ScrubError(err))
 	}
 
 	logging.Debug("Connected to %s source (catalog-driven): %s", cat.Name, cfg.Database)
@@ -420,8 +420,8 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 		fromCols []string
 		toCols   []string
 	}
-	groups := make(map[int]*fkEntry)
-	var order []int
+	groups := make(map[string]*fkEntry)
+	var order []string
 
 	for rows.Next() {
 		var (
@@ -439,7 +439,10 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 			// (sqlite pragma) get the synthesized form.
 			name = fmt.Sprintf("fk_%s_%d", t.Name, id)
 		}
-		entry, ok := groups[id]
+		// Group by constraint name, not fk_id: named engines can then
+		// emit a constant id, which keeps the query free of window
+		// functions (MySQL 5.7 has none; codex on #509).
+		entry, ok := groups[name]
 		if !ok {
 			entry = &fkEntry{fk: &driver.ForeignKey{
 				Name:      name,
@@ -448,8 +451,8 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 				OnUpdate:  onUpdate.String,
 				OnDelete:  onDelete.String,
 			}}
-			groups[id] = entry
-			order = append(order, id)
+			groups[name] = entry
+			order = append(order, name)
 		}
 		entry.fromCols = append(entry.fromCols, fromCol)
 		entry.toCols = append(entry.toCols, toCol)
@@ -458,8 +461,8 @@ func (r *Reader) LoadForeignKeys(ctx context.Context, t *driver.Table) error {
 		return err
 	}
 
-	for _, id := range order {
-		entry := groups[id]
+	for _, key := range order {
+		entry := groups[key]
 		entry.fk.Columns = entry.fromCols
 		entry.fk.RefColumns = entry.toCols
 		t.ForeignKeys = append(t.ForeignKeys, *entry.fk)
