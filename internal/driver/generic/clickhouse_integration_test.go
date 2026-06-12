@@ -39,6 +39,9 @@ func clickhouseTarget(t *testing.T) *dbconfig.TargetConfig {
 // step does for the other engines).
 func bootstrapClickhouseDB(t *testing.T) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("integration test; -short set")
+	}
 	db, err := sql.Open("clickhouse", "clickhouse://localhost:9000/default?password=TestPass2024&username=default")
 	if err != nil {
 		t.Fatal(err)
