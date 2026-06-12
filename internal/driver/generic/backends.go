@@ -17,4 +17,5 @@ var knownBackends = map[string]string{
 	"sqlite":     "sqlite",
 	"clickhouse": "clickhouse",
 	"mysql":      "mysql",
+	"pgx":        "pgx",
 }

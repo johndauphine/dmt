@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
@@ -266,6 +267,76 @@ func runPaginationConformance(t *testing.T, d driver.Dialect, pc PaginationCase)
 		gotArgs := d.BuildRowNumberArgs(pc.RowNum, pc.Limit, pc.DateFilter)
 		assertArgs(t, gotArgs, pc.RowNumberArgs)
 	})
+
+	// The dated cases above pin exact SQL; the date-free variants are
+	// only checked for the universal invariant that every placeholder in
+	// the query has exactly one bound argument (a mismatched catalog args
+	// list slipped past the dated-only cases once).
+	t.Run("placeholder/arg parity across variants", func(t *testing.T) {
+		variants := []struct {
+			name  string
+			query string
+			args  []any
+		}{
+			{"keyset no max no date",
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, nil),
+				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, false, nil)},
+			{"keyset with max no date",
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, nil),
+				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, true, nil)},
+			{"keyset no max dated",
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, pc.DateFilter),
+				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, false, pc.DateFilter)},
+			{"keyset with max dated",
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, pc.DateFilter),
+				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, true, pc.DateFilter)},
+			{"row number no date",
+				d.BuildRowNumberQuery(pc.Columns, pc.OrderBy, pc.Schema, pc.Table, pc.TableHint, nil),
+				d.BuildRowNumberArgs(pc.RowNum, pc.Limit, nil)},
+			{"row number dated",
+				d.BuildRowNumberQuery(pc.Columns, pc.OrderBy, pc.Schema, pc.Table, pc.TableHint, pc.DateFilter),
+				d.BuildRowNumberArgs(pc.RowNum, pc.Limit, pc.DateFilter)},
+		}
+		for _, v := range variants {
+			assertPlaceholderParity(t, d, v.name, v.query, v.args)
+		}
+	})
+}
+
+// assertPlaceholderParity verifies every bound argument has a matching
+// placeholder in the query and vice versa. Named arguments (sql.Named,
+// used by MSSQL) are matched by @name; positional schemes ("?") by
+// occurrence count; numbered schemes ($1/@p1) by consecutive presence.
+func assertPlaceholderParity(t *testing.T, d driver.Dialect, name, query string, args []any) {
+	t.Helper()
+	named := 0
+	for _, a := range args {
+		if na, ok := a.(sql.NamedArg); ok {
+			named++
+			if !strings.Contains(query, "@"+na.Name) {
+				t.Errorf("%s: arg @%s has no placeholder in query\nquery: %s", name, na.Name, query)
+			}
+		}
+	}
+	if named > 0 {
+		if named != len(args) {
+			t.Errorf("%s: mixed named and positional args: %v", name, args)
+		}
+		return
+	}
+
+	var bound int
+	if p := d.ParameterPlaceholder(1); p == d.ParameterPlaceholder(2) {
+		bound = strings.Count(query, p)
+	} else {
+		for strings.Contains(query, d.ParameterPlaceholder(bound+1)) {
+			bound++
+		}
+	}
+	if bound != len(args) {
+		t.Errorf("%s: query binds %d placeholders but args has %d values\nquery: %s\nargs: %v",
+			name, bound, len(args), query, args)
+	}
 }
 
 func validatePaginationCase(t *testing.T, pc PaginationCase) {

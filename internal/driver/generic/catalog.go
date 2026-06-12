@@ -102,6 +102,13 @@ type QuotingSpec struct {
 	// SchemaIgnored marks engines with no schema concept (sqlite):
 	// QualifyTable returns only the quoted table name.
 	SchemaIgnored bool `yaml:"schema_ignored"`
+	// IdentifierSanitizer names a writer-side identifier rewrite
+	// strategy ("postgres" → ident.SanitizePG). The writer applies it
+	// to source-derived table/column names before quoting so DDL and
+	// introspection match what CreateTable emitted (the deterministic
+	// mapper sanitizes its own DDL with the same function). Readers
+	// never sanitize — source names are used verbatim.
+	IdentifierSanitizer string `yaml:"identifier_sanitizer"`
 }
 
 // TableHintsSpec carries the two TableHint literals keyed by the

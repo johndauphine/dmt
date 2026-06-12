@@ -1,0 +1,224 @@
+# PostgreSQL catalog (#509) — second of the three built-in row-store
+# conversions. The COPY bulk strategies (copy_from / pg_copy_staging)
+# reach the native pgx connection beneath the database/sql pool.
+#
+# Placeholder numbering note: the hand-written dialect used a fixed
+# $-numbering scheme (pk=$1, limit=$2, date last) regardless of textual
+# position; the catalog renderer numbers {?} by occurrence. The two are
+# semantically identical bindings — the conformance case pins the
+# occurrence-numbered form.
+name: postgres
+aliases: [postgresql, pg]
+
+connection:
+  backend: pgx                   # jackc/pgx stdlib database/sql driver
+  dsn_strategy: postgres_url     # escaped URL, sslmode default prefer
+  default_port: 5432
+
+defaults:
+  schema: public
+  ssl_mode: require              # secure default; DSN falls back to prefer only if explicitly cleared
+  write_ahead_writers: 2
+  scale_writers_with_cores: true
+  # 25 MB per chunk — measured plateau on M5 Pro 48GB SO2010 mssql→pg
+  # fixture (#164 n=15 sweep). See docs/BENCHMARKS.md "Chunk Size vs
+  # Memory-Fit Ceiling".
+  optimum_bulk_chunk_bytes: 25000000
+
+capabilities:
+  upserter: true                 # staging + COPY + ON CONFLICT DO UPDATE
+  sequence_resetter: true        # setval(<table>_<col>_seq, MAX)
+  constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
+  incremental_date_reader: true
+
+quoting:
+  identifier_format: '"%s"'
+  escaped_char: '"'
+  schema_ignored: false
+  # Writer-side DDL/introspection rewrites source names with
+  # ident.SanitizePG — the deterministic mapper lowercases CREATE TABLE
+  # identifiers the same way, so lookups must match (MSSQL "LinkTypes"
+  # lands as "linktypes").
+  identifier_sanitizer: postgres
+
+placeholder: "$%d"
+
+table_hints:
+  strict: ""
+  relaxed: ""
+
+pagination:
+  keyset:
+    query: |
+      SELECT {columns} FROM {table}
+      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      ORDER BY {pk}
+      LIMIT {?}
+    max_pk_clause: " AND {pk} <= {?}"
+    date_clause: " AND {date_column} > {?}"
+    args:
+      no_max: [last_pk, limit]
+      no_max_date: [last_pk, date_from, limit]
+      with_max: [last_pk, max_pk, limit]
+      with_max_date: [last_pk, max_pk, date_from, limit]
+
+  row_number:
+    query: |
+      WITH numbered AS (
+        SELECT {columns}, ROW_NUMBER() OVER (ORDER BY {order_by}) as __rn
+        FROM {table}{where_date}
+      )
+      SELECT {outer_columns} FROM numbered
+      WHERE __rn > {?} AND __rn <= {?}
+      ORDER BY __rn
+    date_clause: " WHERE {date_column} > {?}"
+    args:
+      no_date: [row_start, row_end]
+      date: [date_from, row_start, row_end]
+
+introspection:
+  uses_schema: true
+  list_tables: |
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+    ORDER BY table_name
+  # Canonical shape + is_identity: serial/identity columns surface as
+  # nextval(...) defaults — computable in SQL.
+  describe_table: |
+    SELECT c.ordinal_position, c.column_name, c.udt_name,
+           COALESCE(c.character_maximum_length, 0),
+           COALESCE(c.numeric_precision, 0),
+           COALESCE(c.numeric_scale, 0),
+           CASE WHEN c.is_nullable = 'YES' THEN 1 ELSE 0 END,
+           COALESCE(c.column_default, ''),
+           COALESCE(pk.ord, 0),
+           CASE WHEN c.column_default LIKE 'nextval%' THEN 1 ELSE 0 END
+    FROM information_schema.columns c
+    LEFT JOIN (
+      SELECT a.attname, array_position(i.indkey, a.attnum) + 1 AS ord
+      FROM pg_index i
+      JOIN pg_class cl ON cl.oid = i.indrelid
+      JOIN pg_namespace n ON n.oid = cl.relnamespace
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+      WHERE i.indisprimary AND n.nspname = $1 AND cl.relname = $2
+    ) pk ON pk.attname = c.column_name
+    WHERE c.table_schema = $1 AND c.table_name = $2
+    ORDER BY c.ordinal_position
+  identity_in_describe: true
+  index_list: |
+    SELECT i.relname, CASE WHEN ix.indisunique THEN 1 ELSE 0 END
+    FROM pg_index ix
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_class t ON t.oid = ix.indrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = $1 AND t.relname = $2 AND NOT ix.indisprimary
+    ORDER BY i.relname
+  index_columns: |
+    SELECT a.attname
+    FROM pg_index ix
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_class t ON t.oid = ix.indrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ordinality)
+    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+    WHERE n.nspname = $1 AND t.relname = $2 AND i.relname = $3
+    ORDER BY k.ordinality
+  index_columns_by_table: true
+  # Parity with the hand-written reader, whose LoadForeignKeys and
+  # LoadCheckConstraints are no-op stubs — pg-as-source has never
+  # migrated FKs/CHECKs (tracked as a follow-up; fixing it here would
+  # be a behavior change smuggled into the conversion).
+  # ($1/$2 are consumed but unused: pgx rejects unbound extra args.)
+  foreign_keys: |
+    SELECT 0, 0, '', '', '', '', '', '', ''
+    WHERE $1::text IS NOT NULL AND $2::text IS NOT NULL AND false
+  column_exists: |
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = $1 AND table_name = $2 AND column_name = $3 LIMIT 1
+  table_exists: |
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = $1 AND table_name = $2
+  has_primary_key: |
+    SELECT 1 FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2 LIMIT 1
+  # pg_relation_size / n_live_tup; the generic reader applies
+  # max(static, db) semantics.
+  avg_row_length: |
+    SELECT CASE WHEN n_live_tup > 0
+      THEN pg_relation_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
+      ELSE 0 END
+    FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2
+
+ddl:
+  create_schema: "CREATE SCHEMA IF NOT EXISTS {schema}"
+  drop_table_stmts:
+    - "DROP TABLE IF EXISTS {table} CASCADE"
+  truncate_stmts:
+    - "TRUNCATE TABLE {table} CASCADE"
+  add_column: "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type} NULL"
+  create_primary_key: "ALTER TABLE {table} ADD PRIMARY KEY ({columns})"
+  can_drop_not_null: true
+  drop_not_null: "ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL"
+  can_alter_column_type: true
+  alter_column_type: "ALTER TABLE {table} ALTER COLUMN {column} TYPE {type} USING {column}::{type}"
+
+queries:
+  partition_boundaries: |
+    SELECT partition_id, MIN({pk}), MAX({pk}), COUNT(*) FROM (
+      SELECT {pk}, NTILE({n}) OVER (ORDER BY {pk}) as partition_id FROM {table}
+    ) sub
+    GROUP BY partition_id ORDER BY partition_id
+  row_count: "SELECT COUNT(*) FROM %s"
+  row_count_stats: |
+    SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables
+    WHERE schemaname = $1 AND relname = $2
+  date_column: |
+    SELECT udt_name FROM information_schema.columns
+    WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+
+date_types:
+  - timestamp
+  - timestamptz
+  - date
+  - timestamp without time zone
+  - timestamp with time zone
+
+value_converters: default
+
+preflight_strategy: postgres
+
+bulk:
+  strategy: copy_from            # pgx COPY, SO_SNDBUF-probed sub-batches
+  max_bind_variables: 0          # COPY has no bind-variable ceiling
+
+upsert:
+  strategy: pg_copy_staging      # temp staging + COPY + ON CONFLICT
+
+sequence:
+  strategy: pg_setval
+
+context:
+  version_query: "SELECT version()"
+  version_prefix: ""
+  identifier_case: lower
+  case_sensitive_identifiers: true
+  charset: UTF8
+  encoding: UTF8
+  max_identifier_length: 63
+  varchar_semantics: char
+  bytes_per_char: 4
+  features: [COPY, window_functions]
+
+ai:
+  prompt_augmentation: |
+
+    PostgreSQL-specific requirements:
+    - Use lowercase identifiers (dmt sanitizes source names to lowercase).
+    - Use GENERATED BY DEFAULT AS IDENTITY (or SERIAL) for auto-increment.
+    - TEXT has no length limit; prefer it over VARCHAR without length.
+  drop_table_prompt_augmentation: |
+
+    PostgreSQL-specific requirements:
+    - Use DROP TABLE IF EXISTS ... CASCADE to handle dependent objects.

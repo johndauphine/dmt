@@ -18,8 +18,9 @@ type preflightFunc func(ctx context.Context, db *sql.DB, req driver.PreFlightReq
 // registration init() validates catalogs against this map, and Go runs
 // var initializers before any init(), keeping ordering safe.
 var preflightStrategies = map[string]preflightFunc{
-	"sqlite": sqlitePreFlight,
-	"mysql":  mysqlPreFlight,
+	"sqlite":   sqlitePreFlight,
+	"mysql":    mysqlPreFlight,
+	"postgres": postgresPreFlight,
 }
 
 // sqlitePreFlight runs SQLite preflight checks (moved verbatim from

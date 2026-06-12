@@ -31,6 +31,12 @@ type Writer struct {
 	cat              *Catalog
 	dialect          *Dialect
 
+	// ident rewrites source-derived identifiers before quoting
+	// (quoting.identifier_sanitizer); identity when unset.
+	ident func(string) string
+
+	pgState *pgBulkState
+
 	typeMapper         driver.TypeMapper
 	tableMapper        driver.TableTypeMapper
 	finalizationMapper driver.FinalizationDDLMapper
@@ -116,8 +122,14 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 	_ = db.QueryRow(cat.Context.VersionQuery).Scan(&version)
 	logging.Debug("Connected to %s target (catalog-driven): %s (%s)", cat.Name, cfg.Database, version)
 
+	sanitize := identifierSanitizers[cat.Quoting.IdentifierSanitizer]
+	if sanitize == nil {
+		sanitize = func(name string) string { return name }
+	}
 	w := &Writer{
 		db:               db,
+		ident:            sanitize,
+		pgState:          &pgBulkState{},
 		config:           cfg,
 		maxConns:         maxConns,
 		defaultBatchSize: opts.BatchSize,
@@ -246,8 +258,8 @@ func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.
 		return err
 	}
 	ddl := strings.NewReplacer(
-		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
-		"{column}", w.dialect.QuoteIdentifier(column.Name),
+		"{table}", w.dialect.QualifyTable(targetSchema, w.ident(t.Name)),
+		"{column}", w.dialect.QuoteIdentifier(w.ident(column.Name)),
 		"{type}", mappedType,
 	).Replace(w.cat.DDL.AddColumn)
 	logging.Debug("Adding %s column with DDL: %s", w.cat.Name, ddl)
@@ -269,7 +281,7 @@ func (w *Writer) introArgs(schema string, rest ...any) []any {
 
 func (w *Writer) columnExists(ctx context.Context, schema, table, column string) (bool, error) {
 	var exists int
-	err := w.db.QueryRowContext(ctx, w.cat.Introspection.ColumnExists, w.introArgs(schema, table, column)...).Scan(&exists)
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.ColumnExists, w.introArgs(schema, w.ident(table), w.ident(column))...).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -333,8 +345,8 @@ func (w *Writer) alterColumn(ctx context.Context, tmpl string, t *driver.Table, 
 		}
 	}
 	stmt := strings.NewReplacer(
-		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
-		"{column}", w.dialect.QuoteIdentifier(column.Name),
+		"{table}", w.dialect.QualifyTable(targetSchema, w.ident(t.Name)),
+		"{column}", w.dialect.QuoteIdentifier(w.ident(column.Name)),
 		"{type}", mappedType,
 		"{nullability}", nullability,
 		"{default_clause}", defaultClause,
@@ -345,7 +357,7 @@ func (w *Writer) alterColumn(ctx context.Context, tmpl string, t *driver.Table, 
 }
 
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	qualified := w.dialect.QualifyTable(schema, table)
+	qualified := w.dialect.QualifyTable(schema, w.ident(table))
 	for _, tmpl := range w.cat.DDL.DropTableStmts {
 		stmt := strings.ReplaceAll(tmpl, "{table}", qualified)
 		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
@@ -356,7 +368,7 @@ func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 }
 
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
-	qualified := w.dialect.QualifyTable(schema, table)
+	qualified := w.dialect.QualifyTable(schema, w.ident(table))
 	for _, tmpl := range w.cat.DDL.TruncateStmts {
 		stmt := strings.ReplaceAll(tmpl, "{table}", qualified)
 		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
@@ -373,7 +385,7 @@ func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error 
 
 func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {
 	var exists int
-	err := w.db.QueryRowContext(ctx, w.cat.Introspection.TableExists, w.introArgs(schema, table)...).Scan(&exists)
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.TableExists, w.introArgs(schema, w.ident(table))...).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -381,22 +393,35 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 }
 
 // CreatePrimaryKey renders the catalog template, or is a no-op for
-// inline-PK engines.
+// inline-PK engines. CreateTable already emits the PK inline, so the
+// template only fires for tables that exist without one
+// (resume/evolution flows) — never twice.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
-	if w.cat.DDL.CreatePrimaryKey == "" {
+	if w.cat.DDL.CreatePrimaryKey == "" || len(t.PrimaryKey) == 0 {
 		return nil
 	}
+	hasPK, err := w.HasPrimaryKey(ctx, targetSchema, t.Name)
+	if err != nil {
+		return fmt.Errorf("checking for existing PK on %s: %w", t.Name, err)
+	}
+	if hasPK {
+		return nil
+	}
+	cols := make([]string, len(t.PrimaryKey))
+	for i, c := range t.PrimaryKey {
+		cols[i] = w.ident(c)
+	}
 	stmt := strings.NewReplacer(
-		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
-		"{columns}", w.dialect.ColumnList(t.PrimaryKey),
+		"{table}", w.dialect.QualifyTable(targetSchema, w.ident(t.Name)),
+		"{columns}", w.dialect.ColumnList(cols),
 	).Replace(w.cat.DDL.CreatePrimaryKey)
-	_, err := w.db.ExecContext(ctx, stmt)
+	_, err = w.db.ExecContext(ctx, stmt)
 	return err
 }
 
 func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {
 	var exists int
-	err := w.db.QueryRowContext(ctx, w.cat.Introspection.HasPrimaryKey, w.introArgs(schema, table)...).Scan(&exists)
+	err := w.db.QueryRowContext(ctx, w.cat.Introspection.HasPrimaryKey, w.introArgs(schema, w.ident(table))...).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -412,7 +437,7 @@ func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int
 }
 
 func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {
-	return shared.ExactRowCount(ctx, w.db, w.dialect, schema, table)
+	return shared.ExactRowCount(ctx, w.db, w.dialect, schema, w.ident(table))
 }
 
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
@@ -465,6 +490,7 @@ func (w *Writer) bulkEnv() bulkEnv {
 		idempotentSuffix: w.cat.Bulk.IdempotentSuffix,
 		transactional:    !w.cat.Bulk.NonTransactional,
 		engine:           w.cat.Name,
+		pgState:          w.pgState,
 	}
 }
 

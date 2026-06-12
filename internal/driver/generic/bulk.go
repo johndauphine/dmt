@@ -34,6 +34,8 @@ type bulkEnv struct {
 	// batches, which the resume path expects.
 	transactional bool
 	engine        string
+	// pgState caches the copy_from strategy's probed COPY byte budget.
+	pgState *pgBulkState
 }
 
 type bulkWriteFunc func(ctx context.Context, env bulkEnv, opts driver.WriteBatchOptions) error

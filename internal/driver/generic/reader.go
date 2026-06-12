@@ -106,9 +106,12 @@ func (r *Reader) GetRowCountFast(ctx context.Context, schema, table string) (int
 		return r.GetRowCountExact(ctx, schema, table, false)
 	}
 	stats := r.cat.Queries.RowCountStats
-	if strings.Contains(stats, "?") {
-		// Parameterized form (mysql information_schema.TABLES) — binds
-		// (schema, table) like the introspection queries.
+	if strings.Contains(stats, r.dialect.ParameterPlaceholder(1)) {
+		// Parameterized form (mysql information_schema.TABLES, pg
+		// pg_stat_user_tables) — binds (schema, table) like the
+		// introspection queries. Detected via the engine's own
+		// placeholder scheme ("?", "$1", ...); the unparameterized form
+		// is a %s format string instead.
 		var n sql.NullInt64
 		if err := r.db.QueryRowContext(ctx, stats, r.introArgs(schema, table)...).Scan(&n); err != nil {
 			return 0, err
@@ -212,7 +215,10 @@ func (r *Reader) ExtractSchema(ctx context.Context, schema string) ([]driver.Tab
 		t.EstimatedRowSize = t.GoHeapBytesPerRow()
 		if q := r.cat.Introspection.AvgRowLength; q != "" {
 			var avg sql.NullInt64
-			if err := r.db.QueryRowContext(ctx, q, r.introArgs(t.Schema, t.Name)...).Scan(&avg); err == nil && avg.Int64 > 0 {
+			// max(static, db): stats only widen the estimate (matches
+			// the hand-written pg/mysql readers — an undercounting
+			// stats view must not shrink the memory guardrail input).
+			if err := r.db.QueryRowContext(ctx, q, r.introArgs(t.Schema, t.Name)...).Scan(&avg); err == nil && avg.Int64 > t.EstimatedRowSize {
 				t.EstimatedRowSize = avg.Int64
 			}
 		}
