@@ -1,0 +1,285 @@
+# SQL Server catalog (#509) — last of the three built-in row-store
+# conversions. Bulk writes use the TDS bulk-copy protocol (mssql_bcp,
+# no TABLOCK — parallel writers per table); upsert and idempotent
+# replay stage into #temp tables and MERGE (mssql_merge).
+#
+# Placeholder note: the hand-written dialect used sql.Named arguments
+# (@limit, @lastPK, @lastSyncDate); the catalog renderer numbers {?} by
+# occurrence as @p1, @p2, ... with positional binding — go-mssqldb
+# treats @pN args positionally, so the (placeholder, argument) bindings
+# are semantically identical. TOP ({?}) precedes the WHERE clause, so
+# the limit binds first in every keyset variant.
+name: mssql
+aliases: [sqlserver, sql-server]
+
+connection:
+  backend: sqlserver             # microsoft/go-mssqldb
+  dsn_strategy: sqlserver_url    # encrypt/TrustServerCertificate/packet size
+  default_port: 1433
+  # STRING_AGG (introspection) needs compatibility level 140+.
+  validate_strategy: mssql_compat
+
+defaults:
+  schema: dbo
+  encrypt: true                  # secure default
+  packet_size: 32767             # 32KB max — significantly improves throughput
+  write_ahead_writers: 2
+  scale_writers_with_cores: true # parallel BCP without TABLOCK
+  # Unmeasured — smartconfig falls back to its conservative default. A
+  # target-side throughput sweep (separate issue) populates this. #166.
+  optimum_bulk_chunk_bytes: 0
+
+capabilities:
+  upserter: true                 # staging + MERGE
+  sequence_resetter: true        # DBCC CHECKIDENT RESEED
+  constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
+  incremental_date_reader: true
+
+quoting:
+  identifier_format: "[%s]"
+  escaped_char: "]"
+  schema_ignored: false
+
+placeholder: "@p%d"
+
+table_hints:
+  strict: ""
+  relaxed: "WITH (NOLOCK)"
+
+pagination:
+  keyset:
+    query: |
+      SELECT TOP ({?}) {columns}
+      FROM {table} {hint}
+      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      ORDER BY {pk}
+    max_pk_clause: " AND {pk} <= {?}"
+    # Rows with NULL dates are excluded (they haven't been modified).
+    date_clause: " AND CONVERT(datetime2(7), {date_column}) > CONVERT(datetime2(7), {?}, 126)"
+    args:
+      no_max: [limit, last_pk]
+      no_max_date: [limit, last_pk, date_from]
+      with_max: [limit, last_pk, max_pk]
+      with_max_date: [limit, last_pk, max_pk, date_from]
+
+  row_number:
+    query: |
+      WITH numbered AS (
+        SELECT {columns}, ROW_NUMBER() OVER (ORDER BY {order_by}) as __rn
+        FROM {table} {hint}{where_date}
+      )
+      SELECT {outer_columns} FROM numbered
+      WHERE __rn > {?} AND __rn <= {?}
+      ORDER BY __rn
+    date_clause: " WHERE CONVERT(datetime2(7), {date_column}) > CONVERT(datetime2(7), {?}, 126)"
+    args:
+      no_date: [row_start, row_end]
+      date: [date_from, row_start, row_end]
+
+  # SQL Server datetime compares on 3.33ms ticks; the filter casts both
+  # sides to datetime2(7) and binds the watermark as 7-fraction ISO
+  # text (style 126).
+  date_arg_format: "2006-01-02T15:04:05.9999999"
+
+introspection:
+  uses_schema: true
+  list_tables: |
+    SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = @p1
+    ORDER BY TABLE_NAME
+  # Canonical shape + is_identity (COLUMNPROPERTY); PK ordinals join
+  # through KEY_COLUMN_USAGE.
+  describe_table: |
+    SELECT c.ORDINAL_POSITION, c.COLUMN_NAME, c.DATA_TYPE,
+           ISNULL(c.CHARACTER_MAXIMUM_LENGTH, 0),
+           ISNULL(c.NUMERIC_PRECISION, 0),
+           ISNULL(c.NUMERIC_SCALE, 0),
+           CASE WHEN c.IS_NULLABLE = 'YES' THEN 1 ELSE 0 END,
+           ISNULL(c.COLUMN_DEFAULT, ''),
+           ISNULL(pk.ord, 0),
+           ISNULL(COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity'), 0)
+    FROM INFORMATION_SCHEMA.COLUMNS c
+    LEFT JOIN (
+      SELECT kcu.COLUMN_NAME, kcu.ORDINAL_POSITION AS ord
+      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+        ON kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+        AND kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+        AND kcu.TABLE_NAME = tc.TABLE_NAME
+      WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+        AND tc.TABLE_SCHEMA = @p1 AND tc.TABLE_NAME = @p2
+    ) pk ON pk.COLUMN_NAME = c.COLUMN_NAME
+    WHERE c.TABLE_SCHEMA = @p1 AND c.TABLE_NAME = @p2
+    ORDER BY c.ORDINAL_POSITION
+  identity_in_describe: true
+  # Single-query aggregated index form: include columns and the
+  # clustered flag matter for target-side recreation. CHAR(1) joins —
+  # SOH can't appear in an identifier. The key aggregate excludes
+  # included columns (key_ordinal 0): the hand-written reader counted
+  # them in both lists, which corrupts covering-index recreation
+  # (codex on #509 — the differential normalizes the oracle's defect).
+  index_list_agg: |
+    SELECT
+      i.name,
+      CASE WHEN i.is_unique = 1 THEN 1 ELSE 0 END,
+      CASE WHEN i.type_desc = 'CLUSTERED' THEN 1 ELSE 0 END,
+      STRING_AGG(CASE WHEN ic.is_included_column = 0 THEN c.name END, CHAR(1))
+        WITHIN GROUP (ORDER BY ic.key_ordinal),
+      ISNULL(STRING_AGG(CASE WHEN ic.is_included_column = 1 THEN c.name END, CHAR(1))
+        WITHIN GROUP (ORDER BY ic.key_ordinal), '')
+    FROM sys.indexes i
+    JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+    JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+    JOIN sys.tables tb ON i.object_id = tb.object_id
+    JOIN sys.schemas s ON tb.schema_id = s.schema_id
+    WHERE s.name = @p1 AND tb.name = @p2
+      AND i.is_primary_key = 0 AND i.type > 0
+    GROUP BY i.name, i.is_unique, i.type_desc
+    ORDER BY i.name
+  # Canonical per-row 9-column shape, grouped by name in the reader
+  # (the hand-written STRING_AGG form is equivalent; per-row needs no
+  # delimiter tricks).
+  foreign_keys: |
+    SELECT fk.object_id, fkc.constraint_column_id, fk.name,
+           rs.name, rt.name, c.name, rc.name,
+           CASE fk.update_referential_action
+             WHEN 0 THEN 'NO ACTION' WHEN 1 THEN 'CASCADE'
+             WHEN 2 THEN 'SET NULL' WHEN 3 THEN 'SET DEFAULT'
+           END,
+           CASE fk.delete_referential_action
+             WHEN 0 THEN 'NO ACTION' WHEN 1 THEN 'CASCADE'
+             WHEN 2 THEN 'SET NULL' WHEN 3 THEN 'SET DEFAULT'
+           END
+    FROM sys.foreign_keys fk
+    JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+    JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
+    JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
+    JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id
+    JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+    JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
+    JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id
+    WHERE ps.name = @p1 AND pt.name = @p2
+    ORDER BY fk.name, fkc.constraint_column_id
+  check_constraints: |
+    SELECT cc.name, cc.definition
+    FROM sys.check_constraints cc
+    JOIN sys.tables t ON cc.parent_object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE s.name = @p1 AND t.name = @p2
+    ORDER BY cc.name
+  column_exists: |
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2 AND COLUMN_NAME = @p3
+  table_exists: |
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
+  has_primary_key: |
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+    WHERE CONSTRAINT_TYPE = 'PRIMARY KEY'
+      AND TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2
+  # sys.dm_db_partition_stats actual page usage; the generic reader
+  # applies max(static, db) semantics.
+  avg_row_length: |
+    SELECT CASE WHEN SUM(p.rows) > 0
+      THEN SUM(a.total_pages) * 8 * 1024 / SUM(p.rows)
+      ELSE 0 END
+    FROM sys.tables t
+    INNER JOIN sys.indexes i ON t.object_id = i.object_id
+    INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+    INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+    INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE s.name = @p1 AND t.name = @p2 AND i.index_id <= 1
+
+ddl:
+  # Conditional one-batch form: CREATE SCHEMA must be alone in its
+  # batch, so it runs through EXEC.
+  create_schema: |
+    IF SCHEMA_ID(N'{schema_raw}') IS NULL
+    BEGIN
+      DECLARE @sql nvarchar(300) = N'CREATE SCHEMA ' + QUOTENAME(N'{schema_raw}');
+      EXEC(@sql)
+    END
+  drop_table_stmts:
+    - "DROP TABLE IF EXISTS {table}"
+  truncate_stmts:
+    - "TRUNCATE TABLE {table}"
+  add_column: "ALTER TABLE {table} ADD {column} {type} NULL"
+  create_primary_key: ""         # PK is created with the table
+  can_drop_not_null: true
+  drop_not_null: "ALTER TABLE {table} ALTER COLUMN {column} {type} NULL"
+  can_alter_column_type: true
+  alter_column_type: "ALTER TABLE {table} ALTER COLUMN {column} {type} {nullability}"
+
+queries:
+  # min_max_even: MIN/MAX index seeks + even PK ranges — NTILE over a
+  # 10M+ row table is a full scan. The NTILE query remains for the
+  # Dialect.PartitionBoundariesQuery surface.
+  partition_strategy: min_max_even
+  partition_boundaries: |
+    WITH numbered AS (
+      SELECT {pk}, NTILE({n}) OVER (ORDER BY {pk}) as partition_id FROM {table}
+    )
+    SELECT partition_id, MIN({pk}), MAX({pk}), COUNT(*) FROM numbered
+    GROUP BY partition_id ORDER BY partition_id
+  row_count: "SELECT COUNT(*) FROM %s"
+  row_count_stats: |
+    SELECT SUM(p.rows)
+    FROM sys.partitions p
+    JOIN sys.tables t ON p.object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE s.name = @p1 AND t.name = @p2 AND p.index_id IN (0, 1)
+  date_column: |
+    SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = @p1 AND TABLE_NAME = @p2 AND COLUMN_NAME = @p3
+  # datetime2(7) cast keeps SQL Server's full tick precision in the
+  # scanned watermark (datetime scans round to milliseconds).
+  max_date: "SELECT CONVERT(datetime2(7), MAX({column})) FROM {table}"
+
+date_types:
+  - datetime
+  - datetime2
+  - smalldatetime
+  - date
+  - datetimeoffset
+
+value_converters: default
+
+# Cross-engine reads convert SQL Server spatial columns to WKT text
+# (method syntax — geography/geometry are CLR types).
+spatial_select:
+  types: [geography, geometry]
+  wrapper: "{col}.STAsText() AS {col}"
+
+preflight_strategy: mssql
+
+bulk:
+  strategy: mssql_bcp            # TDS bulk copy, no TABLOCK, sub-batched
+  max_bind_variables: 0          # BCP has no bind-variable ceiling
+
+upsert:
+  strategy: mssql_merge          # #temp staging + MERGE with deadlock retry
+
+sequence:
+  strategy: mssql_checkident
+
+context:
+  version_query: "SELECT @@VERSION"
+  version_prefix: ""
+  identifier_case: insensitive
+  case_sensitive_identifiers: false
+  charset: SQL_Latin1_General_CP1
+  encoding: UTF-16LE
+  max_identifier_length: 128
+  varchar_semantics: byte        # VARCHAR = bytes, NVARCHAR = chars
+  bytes_per_char: 2              # NVARCHAR uses 2 bytes per char
+  features: [NVARCHAR, VARCHAR_MAX, DATETIME2, JSON]
+
+ai:
+  prompt_augmentation: ""
+  drop_table_prompt_augmentation: |
+
+    SQL Server-specific requirements:
+    - SQL Server does not support CASCADE DROP
+    - Use DROP TABLE IF EXISTS with schema-qualified table name
+    - Quote identifiers with square brackets []
+    - Foreign key constraints must be dropped separately before the table can be dropped

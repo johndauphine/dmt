@@ -78,12 +78,18 @@ type ConnectionSpec struct {
 	// SingleWriter caps the writer pool at one open connection
 	// (sqlite's file-lock constraint).
 	SingleWriter bool `yaml:"single_writer"`
+	// ValidateStrategy names a post-connect gate run by NewReader
+	// ("mssql_compat" requires compatibility level 140+ for
+	// STRING_AGG). Connection fails when the gate errors.
+	ValidateStrategy string `yaml:"validate_strategy"`
 }
 
 // DefaultsSpec mirrors driver.DriverDefaults.
 type DefaultsSpec struct {
 	Schema                string `yaml:"schema"`
 	SSLMode               string `yaml:"ssl_mode"`
+	Encrypt               bool   `yaml:"encrypt"`
+	PacketSize            int    `yaml:"packet_size"`
 	WriteAheadWriters     int    `yaml:"write_ahead_writers"`
 	ScaleWritersWithCores bool   `yaml:"scale_writers_with_cores"`
 	OptimumBulkChunkBytes int    `yaml:"optimum_bulk_chunk_bytes"`
@@ -138,6 +144,11 @@ type TableHintsSpec struct {
 type PaginationSpec struct {
 	Keyset    KeysetSpec    `yaml:"keyset"`
 	RowNumber RowNumberSpec `yaml:"row_number"`
+	// DateArgFormat, when set, binds date-filter arguments as
+	// UTC-formatted strings in this Go layout instead of time.Time
+	// (mssql compares via CONVERT(datetime2(7), ..., 126), which
+	// needs the 7-fraction ISO text form).
+	DateArgFormat string `yaml:"date_arg_format"`
 }
 
 // KeysetSpec renders the keyset queries. Query is the base template;
@@ -188,6 +199,14 @@ type QueriesSpec struct {
 	RowCount      string `yaml:"row_count"`
 	RowCountStats string `yaml:"row_count_stats"`
 	DateColumn    string `yaml:"date_column"`
+	// MaxDate overrides the plain MAX({column}) watermark query;
+	// tokens {column} (quoted) and {table} (qualified). mssql casts
+	// through datetime2(7) to keep full tick precision.
+	MaxDate string `yaml:"max_date"`
+	// PartitionStrategy selects an imperative partitioner instead of
+	// PartitionBoundaries ("min_max_even": MIN/MAX index seeks + even
+	// ranges — mssql's fast path; NTILE over 10M+ rows is a full scan).
+	PartitionStrategy string `yaml:"partition_strategy"`
 }
 
 // IntrospectionSpec carries the schema-extraction queries. Each query
@@ -229,6 +248,12 @@ type IntrospectionSpec struct {
 	// IndexList: param (table) → rows of (index_name, is_unique 0|1),
 	// excluding PK-backing indexes.
 	IndexList string `yaml:"index_list"`
+	// IndexListAgg is the single-query alternative to IndexList +
+	// IndexColumns: one row per index of (name, is_unique,
+	// is_clustered, key columns, include columns), the column lists
+	// CHAR(1)-joined (identifiers cannot contain SOH). Used by engines
+	// whose indexes carry include columns (mssql).
+	IndexListAgg string `yaml:"index_list_agg"`
 	// IndexColumns: param (index_name) → ordered rows of (column_name).
 	// With IndexColumnsByTable, params are (table, index_name) —
 	// engines where index names are only unique per table (mysql).
