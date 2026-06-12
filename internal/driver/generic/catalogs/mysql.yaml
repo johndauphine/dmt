@@ -159,6 +159,9 @@ queries:
     ) AS numbered
     GROUP BY partition_id ORDER BY partition_id
   row_count: "SELECT COUNT(*) FROM %s"
+  # Feeds the packet-aware chunk cap: smartconfig limits chunk_size to
+  # (max_allowed_packet * 0.8) / avg_row_bytes.
+  probe_max_allowed_packet: "SELECT @@max_allowed_packet"
   # Parameterized stats form (binds schema, table).
   row_count_stats: |
     SELECT TABLE_ROWS FROM information_schema.TABLES

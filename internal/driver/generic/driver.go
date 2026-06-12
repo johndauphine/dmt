@@ -7,6 +7,7 @@ import (
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/shared"
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // Driver implements driver.Driver from a catalog — the factory the
@@ -41,9 +42,26 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 // (mysql max_allowed_packet in phase 3).
 func (d *Driver) HardChunkLimit(avgRowBytes int64) int { return 0 }
 
-// ProbeTarget: no phase-1 catalog has runtime tunables to probe.
+// ProbeTarget queries the target for runtime values that affect
+// chunk_size selection when the catalog declares a probe. Failures
+// degrade gracefully — an empty TargetProbe falls back to the
+// memory-budget-only chunk size. (The hand-written mysql driver probed
+// @@max_allowed_packet; the #516 flip silently lost it until the
+// oracle-removal audit.)
 func (d *Driver) ProbeTarget(ctx context.Context, db *sql.DB) driver.TargetProbe {
-	return driver.TargetProbe{}
+	var probe driver.TargetProbe
+	q := d.cat.Queries.ProbeMaxAllowedPacket
+	if q == "" || db == nil {
+		return probe
+	}
+	var packet int64
+	if err := db.QueryRowContext(ctx, q).Scan(&packet); err != nil {
+		logging.Debug("%s: max-packet probe failed: %v (continuing without packet-aware chunk cap)", d.cat.Name, err)
+		return probe
+	}
+	probe.MaxAllowedPacket = packet
+	logging.Debug("%s: probed max packet = %d bytes (%.1f MB)", d.cat.Name, packet, float64(packet)/1024/1024)
+	return probe
 }
 
 // PreFlight runs the catalog's named preflight battery, or the shared

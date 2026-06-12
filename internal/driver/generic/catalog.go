@@ -207,6 +207,11 @@ type QueriesSpec struct {
 	// PartitionBoundaries ("min_max_even": MIN/MAX index seeks + even
 	// ranges — mssql's fast path; NTILE over 10M+ rows is a full scan).
 	PartitionStrategy string `yaml:"partition_strategy"`
+	// ProbeMaxAllowedPacket, when set, is run by ProbeTarget against a
+	// live target connection and feeds the packet-aware chunk cap
+	// (smartconfig: (value * 0.8) / avg_row_bytes). MySQL's
+	// @@max_allowed_packet is the only engine cap today.
+	ProbeMaxAllowedPacket string `yaml:"probe_max_allowed_packet"`
 }
 
 // IntrospectionSpec carries the schema-extraction queries. Each query
