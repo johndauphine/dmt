@@ -24,7 +24,16 @@ type bulkEnv struct {
 	maxVars        int // engine bind-variable ceiling; 0 = unlimited
 	convert        func([]any) []any
 	idempotentVerb string
-	engine         string
+	// idempotentSuffix is the trailing-clause alternative to the verb
+	// ("ON DUPLICATE KEY UPDATE {pk} = {pk}" on mysql); {pk} renders
+	// as the quoted first PK column.
+	idempotentSuffix string
+	// transactional wraps all batches in one transaction. Engines that
+	// autocommit per statement (mysql, matching its hand-written
+	// writer) set false; a mid-write failure then keeps earlier
+	// batches, which the resume path expects.
+	transactional bool
+	engine        string
 }
 
 type bulkWriteFunc func(ctx context.Context, env bulkEnv, opts driver.WriteBatchOptions) error
@@ -36,7 +45,8 @@ var bulkStrategies = map[string]bulkWriteFunc{
 }
 
 var upsertStrategies = map[string]upsertFunc{
-	"insert_on_conflict": insertOnConflict,
+	"insert_on_conflict":  insertOnConflict,
+	"insert_on_duplicate": insertOnDuplicate,
 }
 
 // rowConverters normalize Go values for the engine's bind layer
@@ -96,46 +106,87 @@ func batchedInsert(ctx context.Context, env bulkEnv, opts driver.WriteBatchOptio
 	colList := env.dialect.ColumnList(opts.Columns)
 	fullTable := env.dialect.QualifyTable(opts.Schema, opts.Table)
 
-	verb := "INSERT INTO"
+	verb, suffix := "INSERT INTO", ""
 	if opts.IdempotentOnDup {
 		if len(opts.PKColumns) == 0 {
 			return fmt.Errorf("IdempotentOnDup requires PKColumns to be set")
 		}
-		if env.idempotentVerb == "" {
+		switch {
+		case env.idempotentVerb != "":
+			verb = env.idempotentVerb
+		case env.idempotentSuffix != "":
+			suffix = " " + strings.ReplaceAll(env.idempotentSuffix, "{pk}", env.dialect.QuoteIdentifier(opts.PKColumns[0]))
+		default:
 			// Refuse rather than emit another engine's syntax (codex
 			// on #507): a ROW_NUMBER resume that can't dedupe must
 			// fail loudly so the operator restarts the table.
-			return fmt.Errorf("%s has no duplicate-skipping INSERT verb; idempotent replay is not supported — restart the table instead of resuming", env.engine)
+			return fmt.Errorf("%s has no duplicate-skipping INSERT form; idempotent replay is not supported — restart the table instead of resuming", env.engine)
 		}
-		verb = env.idempotentVerb
 	}
 
 	batchSize := resolveBatchSize(env, opts.BatchSize, len(opts.Columns))
 
-	tx, err := env.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
-		}
-		batch := opts.Rows[start:end]
-		query := fmt.Sprintf("%s %s (%s) VALUES %s",
-			verb, fullTable, colList, valuesPlaceholders(len(opts.Columns), len(batch)))
+	return env.runBatches(ctx, opts.Rows, batchSize, func(exec execer, batch [][]any) error {
+		query := fmt.Sprintf("%s %s (%s) VALUES %s%s",
+			verb, fullTable, colList, valuesPlaceholders(len(opts.Columns), len(batch)), suffix)
 		args := make([]any, 0, len(batch)*len(opts.Columns))
 		for _, row := range batch {
 			args = append(args, env.convert(row)...)
 		}
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		if _, err := exec.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("inserting batch into %s: %w", opts.Table, err)
 		}
-	}
+		return nil
+	})
+}
 
-	return tx.Commit()
+// execer is the slice of *sql.DB / *sql.Tx the strategies need.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sqlResult, error)
+}
+
+type sqlResult = sql.Result
+
+type dbExecer struct{ db *sql.DB }
+
+func (e dbExecer) ExecContext(ctx context.Context, q string, a ...any) (sqlResult, error) {
+	return e.db.ExecContext(ctx, q, a...)
+}
+
+type txExecer struct{ tx *sql.Tx }
+
+func (e txExecer) ExecContext(ctx context.Context, q string, a ...any) (sqlResult, error) {
+	return e.tx.ExecContext(ctx, q, a...)
+}
+
+// runBatches walks the rows in batches through fn, inside one
+// transaction when the engine is transactional, autocommitting per
+// statement otherwise (matching the respective hand-written writers).
+func (env bulkEnv) runBatches(ctx context.Context, rows [][]any, batchSize int, fn func(exec execer, batch [][]any) error) error {
+	var exec execer = dbExecer{env.db}
+	var tx *sql.Tx
+	if env.transactional {
+		var err error
+		tx, err = env.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("beginning transaction: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		exec = txExecer{tx}
+	}
+	for start := 0; start < len(rows); start += batchSize {
+		end := start + batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if err := fn(exec, rows[start:end]); err != nil {
+			return err
+		}
+	}
+	if tx != nil {
+		return tx.Commit()
+	}
+	return nil
 }
 
 // insertOnConflict upserts via INSERT ... ON CONFLICT (pk) DO UPDATE
@@ -178,30 +229,65 @@ func insertOnConflict(ctx context.Context, env bulkEnv, opts driver.UpsertBatchO
 
 	batchSize := resolveBatchSize(env, opts.BatchSize, len(opts.Columns))
 
-	tx, err := env.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	for start := 0; start < len(opts.Rows); start += batchSize {
-		end := start + batchSize
-		if end > len(opts.Rows) {
-			end = len(opts.Rows)
-		}
-		batch := opts.Rows[start:end]
+	return env.runBatches(ctx, opts.Rows, batchSize, func(exec execer, batch [][]any) error {
 		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s%s",
 			fullTable, colList, valuesPlaceholders(len(opts.Columns), len(batch)), upsertSuffix)
 		args := make([]any, 0, len(batch)*len(opts.Columns))
 		for _, row := range batch {
 			args = append(args, env.convert(row)...)
 		}
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		if _, err := exec.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("upserting batch into %s: %w", opts.Table, err)
 		}
+		return nil
+	})
+}
+
+// insertOnDuplicate upserts via MySQL's INSERT ... AS new ON DUPLICATE
+// KEY UPDATE col = new.col (8.0.19+ alias form; the VALUES() function
+// is deprecated). Extracted from the hand-written mysql writer.
+func insertOnDuplicate(ctx context.Context, env bulkEnv, opts driver.UpsertBatchOptions) error {
+	if len(opts.Rows) == 0 {
+		return nil
+	}
+	if len(opts.PKColumns) == 0 {
+		return fmt.Errorf("upsert requires primary key columns")
 	}
 
-	return tx.Commit()
+	colList := env.dialect.ColumnList(opts.Columns)
+	fullTable := env.dialect.QualifyTable(opts.Schema, opts.Table)
+
+	pkSet := make(map[string]bool)
+	for _, pk := range opts.PKColumns {
+		pkSet[strings.ToLower(pk)] = true
+	}
+	var updateClauses []string
+	for _, col := range opts.Columns {
+		if pkSet[strings.ToLower(col)] {
+			continue
+		}
+		qCol := env.dialect.QuoteIdentifier(col)
+		updateClauses = append(updateClauses, fmt.Sprintf("%s = new.%s", qCol, qCol))
+	}
+	updateClause := ""
+	if len(updateClauses) > 0 {
+		updateClause = " ON DUPLICATE KEY UPDATE " + strings.Join(updateClauses, ", ")
+	}
+
+	batchSize := resolveBatchSize(env, opts.BatchSize, len(opts.Columns))
+
+	return env.runBatches(ctx, opts.Rows, batchSize, func(exec execer, batch [][]any) error {
+		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s AS new%s",
+			fullTable, colList, valuesPlaceholders(len(opts.Columns), len(batch)), updateClause)
+		args := make([]any, 0, len(batch)*len(opts.Columns))
+		for _, row := range batch {
+			args = append(args, env.convert(row)...)
+		}
+		if _, err := exec.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("upserting batch into %s: %w", opts.Table, err)
+		}
+		return nil
+	})
 }
 
 func valuesPlaceholders(numCols, numRows int) string {
@@ -222,7 +308,39 @@ func valuesPlaceholders(numCols, numRows int) string {
 type sequenceFunc func(ctx context.Context, db *sql.DB, dialect *Dialect, schema string, t *driver.Table) error
 
 var sequenceStrategies = map[string]sequenceFunc{
-	"sqlite_sequence": sqliteSequenceReset,
+	"sqlite_sequence":      sqliteSequenceReset,
+	"mysql_auto_increment": mysqlAutoIncrementReset,
+}
+
+// mysqlAutoIncrementReset mirrors the hand-written mysql writer:
+// ALTER TABLE ... AUTO_INCREMENT = MAX(identity)+1.
+func mysqlAutoIncrementReset(ctx context.Context, db *sql.DB, dialect *Dialect, schema string, t *driver.Table) error {
+	var identityCol string
+	for _, c := range t.Columns {
+		if c.IsIdentity {
+			identityCol = c.Name
+			break
+		}
+	}
+	if identityCol == "" {
+		return nil
+	}
+
+	var maxVal int64
+	err := db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) FROM %s",
+			dialect.QuoteIdentifier(identityCol),
+			dialect.QualifyTable(schema, t.Name))).Scan(&maxVal)
+	if err != nil {
+		return fmt.Errorf("getting max value for %s.%s: %w", t.Name, identityCol, err)
+	}
+	if maxVal == 0 {
+		return nil
+	}
+	_, err = db.ExecContext(ctx,
+		fmt.Sprintf("ALTER TABLE %s AUTO_INCREMENT = %d",
+			dialect.QualifyTable(schema, t.Name), maxVal+1))
+	return err
 }
 
 // sqliteSequenceReset mirrors the hand-written writer: sqlite_sequence

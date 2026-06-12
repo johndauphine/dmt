@@ -5,6 +5,7 @@ import (
 	// select via connection.backend. The Go SQL driver dependency is
 	// the one per-engine cost a catalog cannot eliminate.
 	_ "github.com/ClickHouse/clickhouse-go/v2" // backend "clickhouse" (pure Go)
+	_ "github.com/go-sql-driver/mysql"         // backend "mysql"
 	_ "modernc.org/sqlite"                     // backend "sqlite" (pure Go, no cgo)
 )
 
@@ -15,4 +16,5 @@ import (
 var knownBackends = map[string]string{
 	"sqlite":     "sqlite",
 	"clickhouse": "clickhouse",
+	"mysql":      "mysql",
 }

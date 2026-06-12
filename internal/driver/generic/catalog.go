@@ -195,13 +195,29 @@ type IntrospectionSpec struct {
 	// IdentityStrategy names the Go routine that flags identity /
 	// auto-increment columns (imperative per engine). Empty = none.
 	IdentityStrategy string `yaml:"identity_strategy"`
+	// IdentityInDescribe: the engine's catalog exposes identity as a
+	// column expression (mysql EXTRA LIKE '%auto_increment%'), so
+	// describe_table returns a 10th column (is_identity 0|1) instead
+	// of needing a Go strategy.
+	IdentityInDescribe bool `yaml:"identity_in_describe"`
+	// AvgRowLength is an optional stats query — params like the other
+	// per-table queries — returning the engine's average row size in
+	// bytes (mysql information_schema.TABLES.AVG_ROW_LENGTH). Empty
+	// falls back to the Go heap estimate.
+	AvgRowLength string `yaml:"avg_row_length"`
 	// IndexList: param (table) → rows of (index_name, is_unique 0|1),
 	// excluding PK-backing indexes.
 	IndexList string `yaml:"index_list"`
 	// IndexColumns: param (index_name) → ordered rows of (column_name).
-	IndexColumns string `yaml:"index_columns"`
-	// ForeignKeys: param (table) → ordered rows of (fk_id, seq,
-	// ref_table, from_column, to_column, on_update, on_delete).
+	// With IndexColumnsByTable, params are (table, index_name) —
+	// engines where index names are only unique per table (mysql).
+	IndexColumns        string `yaml:"index_columns"`
+	IndexColumnsByTable bool   `yaml:"index_columns_by_table"`
+	// ForeignKeys: param (table) → ordered rows of (fk_id, seq, name,
+	// ref_schema, ref_table, from_column, to_column, on_update,
+	// on_delete). An empty name falls back to the synthesized
+	// fk_<table>_<id> form (sqlite has no constraint names in pragma
+	// output); ref_schema is empty for schema-less engines.
 	ForeignKeys string `yaml:"foreign_keys"`
 	// CheckConstraints: param (table) → rows of (name, expression).
 	// Empty means the engine can't surface CHECKs (sqlite: inline-only)
@@ -241,6 +257,11 @@ type DDLSpec struct {
 	// "requires a table rebuild" error instead of attempting DDL.
 	CanDropNotNull     bool `yaml:"can_drop_not_null"`
 	CanAlterColumnType bool `yaml:"can_alter_column_type"`
+	// DropNotNull / AlterColumnType templates ({table}, {column},
+	// {type}, {nullability}, {default_clause}); required when the
+	// corresponding Can* flag is true.
+	DropNotNull     string `yaml:"drop_not_null"`
+	AlterColumnType string `yaml:"alter_column_type"`
 }
 
 // BulkSpec selects the bulk-write strategy.
@@ -254,10 +275,17 @@ type BulkSpec struct {
 	RowConverter string `yaml:"row_converter"`
 	// IdempotentVerb is the INSERT verb that silently skips duplicate
 	// PKs, used by the #227 ROW_NUMBER resume path ("INSERT OR IGNORE
-	// INTO" on sqlite). Empty means the engine has no such verb and an
-	// idempotent replay is refused with a clear error instead of
+	// INTO" on sqlite). IdempotentSuffix is the trailing-clause form
+	// ("ON DUPLICATE KEY UPDATE {pk} = {pk}" on mysql; {pk} renders as
+	// the quoted first PK column). At most one may be set; neither
+	// means idempotent replay is refused with a clear error instead of
 	// emitting another engine's syntax.
-	IdempotentVerb string `yaml:"idempotent_verb"`
+	IdempotentVerb   string `yaml:"idempotent_verb"`
+	IdempotentSuffix string `yaml:"idempotent_suffix"`
+	// NonTransactional disables the one-transaction wrapper around a
+	// batch sequence (mysql autocommits per statement, matching its
+	// hand-written writer's resume semantics).
+	NonTransactional bool `yaml:"non_transactional"`
 }
 
 // UpsertSpec selects the upsert strategy (capability Upserter).

@@ -8,6 +8,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -101,7 +102,10 @@ func (d *Driver) ProbeTarget(ctx context.Context, db *sql.DB) driver.TargetProbe
 
 // PreFlight runs MySQL preflight checks (#228). Implementation in preflight.go.
 func (d *Driver) PreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	return preFlight(ctx, db, req)
+	// Battery moved to the generic strategy library with the #509
+	// conversion; the oracle keeps the shared minimal battery until
+	// its removal.
+	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{})
 }
 
 // Dialect returns the MySQL dialect.

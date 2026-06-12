@@ -95,7 +95,7 @@ introspection:
   index_columns: |
     SELECT name FROM pragma_index_info(?) ORDER BY seqno
   foreign_keys: |
-    SELECT id, seq, "table", "from", "to", on_update, on_delete
+    SELECT id, seq, '' AS name, '' AS ref_schema, "table", "from", "to", on_update, on_delete
     FROM pragma_foreign_key_list(?) ORDER BY id, seq
   # CHECKs are inline-only in CREATE TABLE and not surfaced — no query;
   # LoadCheckConstraints is a documented no-op (matches the hand-written

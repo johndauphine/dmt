@@ -131,6 +131,12 @@ func GenerateColumnDef(col Column, constraints []Constraint, indexes []Index, so
 // MySQL version. dmt targets MySQL 8.0.13+ for this feature; older
 // MySQL gets a clear CREATE TABLE error rather than silent
 // truncation. (Codex review on PR #207.)
+// FormatDefaultClause is the exported form for the generic writer's
+// column-alter templates (#509).
+func FormatDefaultClause(expr, targetType, targetDialect string) string {
+	return formatDefaultClause(expr, targetType, targetDialect)
+}
+
 func formatDefaultClause(expr, targetType, targetDialect string) string {
 	if targetDialect == DialectMySQL && needsMySQLKeyPrefix(targetType) {
 		return "DEFAULT (" + expr + ")"

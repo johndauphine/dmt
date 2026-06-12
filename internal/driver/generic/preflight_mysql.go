@@ -1,4 +1,4 @@
-package mysql
+package generic
 
 import (
 	"context"
@@ -14,31 +14,35 @@ import (
 // preFlight runs MySQL preflight checks (#228) and returns findings in
 // stable order. Individual probe failures become findings rather than
 // propagating.
-func preFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func init() {
+	preflightStrategies["mysql"] = mysqlPreFlight
+}
+
+func mysqlPreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	return shared.RunPreFlight(ctx, db, req, shared.PreFlightRunConfig{
 		NilDatabaseRemedy: "internal error — please report",
 	},
 		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-			return shared.SingleFinding(checkConnectionMySQL(ctx, db, req.Side))
+			return shared.SingleFinding(mysqlPFCheckConnectionMySQL(ctx, db, req.Side))
 		},
 		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-			return checkVersionMySQL(ctx, db, req.Side)
+			return mysqlPFCheckVersionMySQL(ctx, db, req.Side)
 		},
 		func(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-			return checkEncodingMySQL(ctx, db, req.Side)
+			return mysqlPFCheckEncodingMySQL(ctx, db, req.Side)
 		},
-		checkPoolHeadroomMySQL,
-		checkPrivilegesMySQL,
-		checkBackupAcknowledgmentMySQL,
+		mysqlPFCheckPoolHeadroomMySQL,
+		mysqlPFCheckPrivilegesMySQL,
+		mysqlPFCheckBackupAcknowledgmentMySQL,
 	)
 }
 
-// checkBackupAcknowledgmentMySQL fires when target_mode is drop_recreate
+// mysqlPFCheckBackupAcknowledgmentMySQL fires when target_mode is drop_recreate
 // and ConfirmBackup wasn't set. information_schema.tables.TABLE_ROWS is
 // a stats estimate (not exact for InnoDB) but adequate for the
 // "is the table non-empty" question — false positives would only have
 // us be more cautious, not less.
-func checkBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func mysqlPFCheckBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	if !shared.BackupAcknowledgmentRequired(req) {
 		return nil
 	}
@@ -87,13 +91,13 @@ func checkBackupAcknowledgmentMySQL(ctx context.Context, db *sql.DB, req driver.
 	}}
 }
 
-func checkConnectionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
+func mysqlPFCheckConnectionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) *driver.PreFlightFinding {
 	return shared.CheckConnection(ctx, db, side, shared.ConnectionCheckConfig{
 		Remedy: "verify host/port/credentials in your config and that the MySQL server is reachable",
 	})
 }
 
-// checkVersionMySQL enforces MySQL 5.7 (or MariaDB 10.3) as the floor.
+// mysqlPFCheckVersionMySQL enforces MySQL 5.7 (or MariaDB 10.3) as the floor.
 // 5.7 introduced JSON and is the oldest version still receiving fixes;
 // 5.6 is unsupported upstream. MariaDB 10.3 is the matching JSON-capable
 // floor.
@@ -103,7 +107,7 @@ func checkConnectionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlight
 // or above" accept it. We have to peel that prefix off before parsing or
 // the floor check would treat MariaDB 10.x as MySQL 5.5 and fail every
 // modern MariaDB server (Copilot review).
-func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
+func mysqlPFCheckVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
 	var v string
 	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&v); err != nil {
 		return []driver.PreFlightFinding{{
@@ -116,9 +120,9 @@ func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSid
 	isMaria := strings.Contains(strings.ToLower(v), "mariadb")
 	parseable := v
 	if isMaria {
-		parseable = stripMariaDBCompatPrefix(v)
+		parseable = mysqlPFStripMariaDBCompatPrefix(v)
 	}
-	major, minor, ok := parseMySQLVersion(parseable)
+	major, minor, ok := mysqlPFParseMySQLVersion(parseable)
 	if !ok {
 		return []driver.PreFlightFinding{{
 			Severity: driver.SeverityWarn,
@@ -148,13 +152,13 @@ func checkVersionMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSid
 	return nil
 }
 
-// stripMariaDBCompatPrefix removes MariaDB's legacy "5.5.5-" client-
+// mysqlPFStripMariaDBCompatPrefix removes MariaDB's legacy "5.5.5-" client-
 // compatibility prefix from a VERSION() string. Real MariaDB versions
 // have always started at 10.0; anything beginning with "5.5.5-" followed
 // by another major.minor is the compatibility hack and the real version
 // is the segment after the prefix. Inputs that don't match the hack
 // pattern are returned unchanged.
-func stripMariaDBCompatPrefix(v string) string {
+func mysqlPFStripMariaDBCompatPrefix(v string) string {
 	const prefix = "5.5.5-"
 	trimmed := strings.TrimSpace(v)
 	if !strings.HasPrefix(trimmed, prefix) {
@@ -163,10 +167,10 @@ func stripMariaDBCompatPrefix(v string) string {
 	return trimmed[len(prefix):]
 }
 
-// parseMySQLVersion extracts (major, minor) from strings like
+// mysqlPFParseMySQLVersion extracts (major, minor) from strings like
 // "5.7.43" or "8.0.35-mysql" or "10.6.12-MariaDB". Returns ok=false when
 // the input doesn't start with two dot-separated numbers.
-func parseMySQLVersion(v string) (int, int, bool) {
+func mysqlPFParseMySQLVersion(v string) (int, int, bool) {
 	v = strings.TrimSpace(v)
 	parts := strings.SplitN(v, ".", 3)
 	if len(parts) < 2 {
@@ -193,11 +197,11 @@ func parseMySQLVersion(v string) (int, int, bool) {
 	return major, minor, true
 }
 
-// checkEncodingMySQL warns when the database default charset isn't
+// mysqlPFCheckEncodingMySQL warns when the database default charset isn't
 // utf8mb4. The legacy 'utf8' alias maps to utf8mb3 which silently drops
 // 4-byte sequences (emoji, supplementary plane CJK) and is a known
 // data-loss footgun on migrations.
-func checkEncodingMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
+func mysqlPFCheckEncodingMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSide) []driver.PreFlightFinding {
 	var name, charset string
 	if err := db.QueryRowContext(ctx,
 		"SHOW VARIABLES LIKE 'character_set_database'").Scan(&name, &charset); err != nil {
@@ -228,9 +232,9 @@ func checkEncodingMySQL(ctx context.Context, db *sql.DB, side driver.PreFlightSi
 	return nil
 }
 
-// checkPoolHeadroomMySQL compares @@max_connections against Threads_connected.
+// mysqlPFCheckPoolHeadroomMySQL compares @@max_connections against Threads_connected.
 // Both are usually readable by any login; failures fall back to info-level.
-func checkPoolHeadroomMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+func mysqlPFCheckPoolHeadroomMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
 	var maxConns int64
 	if err := db.QueryRowContext(ctx, "SELECT @@max_connections").Scan(&maxConns); err != nil {
 		return []driver.PreFlightFinding{{
@@ -254,12 +258,12 @@ func checkPoolHeadroomMySQL(ctx context.Context, db *sql.DB, req driver.PreFligh
 	return shared.PoolHeadroomFinding(req, maxConns, current, "increase @@max_connections or reduce migration.workers")
 }
 
-// checkPrivilegesMySQL uses SHOW GRANTS rather than information_schema —
+// mysqlPFCheckPrivilegesMySQL uses SHOW GRANTS rather than information_schema —
 // it's the canonical way to introspect MySQL/MariaDB grants and handles
 // proxy users, roles (MySQL 8+, MariaDB 10.0.5+), and grant_option
 // correctly. We parse the grant strings for the verbs we need.
-func checkPrivilegesMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
-	grants, err := loadGrantsMySQL(ctx, db)
+func mysqlPFCheckPrivilegesMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+	grants, err := mysqlPFLoadGrantsMySQL(ctx, db)
 	if err != nil {
 		return []driver.PreFlightFinding{{
 			Severity: driver.SeverityError,
@@ -295,39 +299,39 @@ func checkPrivilegesMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightR
 
 	var findings []driver.PreFlightFinding
 	for _, p := range required {
-		if !grantsInclude(grants, p, dbName) {
+		if !mysqlPFGrantsInclude(grants, p, dbName) {
 			findings = append(findings, driver.PreFlightFinding{
 				Severity: driver.SeverityError,
 				Check:    "privileges." + strings.ToLower(p),
 				Side:     req.Side,
-				Message:  fmt.Sprintf("connected user lacks %s privilege on %s per SHOW GRANTS", p, formatScope(dbName)),
-				Remedy:   fmt.Sprintf("GRANT %s ON %s.* TO CURRENT_USER();", p, formatDBForGrant(dbName)),
+				Message:  fmt.Sprintf("connected user lacks %s privilege on %s per SHOW GRANTS", p, mysqlPFFormatScope(dbName)),
+				Remedy:   fmt.Sprintf("GRANT %s ON %s.* TO CURRENT_USER();", p, mysqlPFFormatDBForGrant(dbName)),
 			})
 		}
 	}
 	return findings
 }
 
-// formatScope produces the human-readable scope label for grant messages.
+// mysqlPFFormatScope produces the human-readable scope label for grant messages.
 // Empty dbName means "scope unresolved" — the message says "any schema"
 // since the check fell back to global matching.
-func formatScope(dbName string) string {
+func mysqlPFFormatScope(dbName string) string {
 	if dbName == "" {
 		return "any database"
 	}
 	return fmt.Sprintf("`%s`", dbName)
 }
 
-// formatDBForGrant returns the right substitution for the remedy text:
+// mysqlPFFormatDBForGrant returns the right substitution for the remedy text:
 // the schema name when known, otherwise <db> as a placeholder.
-func formatDBForGrant(dbName string) string {
+func mysqlPFFormatDBForGrant(dbName string) string {
 	if dbName == "" {
 		return "<db>"
 	}
 	return fmt.Sprintf("`%s`", dbName)
 }
 
-func loadGrantsMySQL(ctx context.Context, db *sql.DB) ([]string, error) {
+func mysqlPFLoadGrantsMySQL(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, "SHOW GRANTS")
 	if err != nil {
 		return nil, err
@@ -344,7 +348,7 @@ func loadGrantsMySQL(ctx context.Context, db *sql.DB) ([]string, error) {
 	return grants, rows.Err()
 }
 
-// grantsInclude reports whether any grant line confers privilege p with
+// mysqlPFGrantsInclude reports whether any grant line confers privilege p with
 // a scope that covers dbName. A grant scope of "*.*" (global) always
 // matches; "<db>.*" or "<db>.<obj>" matches only if <db> == dbName
 // (case-sensitive comparison — MySQL identifier case sensitivity depends
@@ -356,14 +360,14 @@ func loadGrantsMySQL(ctx context.Context, db *sql.DB) ([]string, error) {
 // dbName == "" disables scope filtering and reverts to the pre-Copilot
 // behavior (any grant scope counts) — used as a fallback when DATABASE()
 // resolution failed.
-func grantsInclude(grants []string, p, dbName string) bool {
+func mysqlPFGrantsInclude(grants []string, p, dbName string) bool {
 	upperP := strings.ToUpper(p)
 	for _, g := range grants {
-		privs, scopeDB, ok := parseGrantLine(g)
+		privs, scopeDB, ok := mysqlPFParseGrantLine(g)
 		if !ok {
 			continue
 		}
-		if !grantHasVerb(privs, upperP) {
+		if !mysqlPFGrantHasVerb(privs, upperP) {
 			continue
 		}
 		if dbName == "" || scopeDB == "*" || scopeDB == dbName {
@@ -373,12 +377,12 @@ func grantsInclude(grants []string, p, dbName string) bool {
 	return false
 }
 
-// parseGrantLine extracts the upper-cased privilege-list segment and the
+// mysqlPFParseGrantLine extracts the upper-cased privilege-list segment and the
 // database identifier from the ON clause. Returns ok=false when the line
 // doesn't match the GRANT ... ON <db>.<obj> shape (proxy grants, role
 // grants, etc. fall through). scopeDB == "*" represents the global
 // "ON *.*" scope; otherwise it's the unquoted database identifier.
-func parseGrantLine(g string) (privs, scopeDB string, ok bool) {
+func mysqlPFParseGrantLine(g string) (privs, scopeDB string, ok bool) {
 	upper := strings.ToUpper(g)
 	if !strings.HasPrefix(upper, "GRANT ") {
 		return "", "", false
@@ -413,9 +417,9 @@ func parseGrantLine(g string) (privs, scopeDB string, ok bool) {
 	return privs, dbPart, true
 }
 
-// grantHasVerb checks whether the comma-separated privilege list contains
+// mysqlPFGrantHasVerb checks whether the comma-separated privilege list contains
 // verb v (or ALL PRIVILEGES / ALL).
-func grantHasVerb(privs, v string) bool {
+func mysqlPFGrantHasVerb(privs, v string) bool {
 	for _, tok := range strings.Split(privs, ",") {
 		tok = strings.TrimSpace(tok)
 		if tok == "ALL PRIVILEGES" || tok == "ALL" {

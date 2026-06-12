@@ -96,7 +96,7 @@ introspection:
   index_list: "SELECT name, 0 FROM system.tables WHERE 1 = 0"
   index_columns: "SELECT name FROM system.tables WHERE 1 = 0"
   foreign_keys: |
-    SELECT 0, 0, '', '', '', '', '' FROM system.tables WHERE 1 = 0
+    SELECT 0, 0, '', '', '', '', '', '', '' FROM system.tables WHERE 1 = 0
   column_exists: |
     SELECT 1 FROM system.columns WHERE database = ? AND table = ? AND name = ? LIMIT 1
   table_exists: "SELECT 1 FROM system.tables WHERE database = ? AND name = ? LIMIT 1"

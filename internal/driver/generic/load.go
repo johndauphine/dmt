@@ -146,6 +146,8 @@ func (c *Catalog) Validate() error {
 			errs = append(errs, fmt.Sprintf("bulk.strategy %q is not a known strategy", c.Bulk.Strategy))
 		}
 	}
+	require(c.Bulk.IdempotentVerb == "" || c.Bulk.IdempotentSuffix == "",
+		"bulk: idempotent_verb and idempotent_suffix are mutually exclusive")
 	if c.Bulk.RowConverter != "" {
 		if _, ok := rowConverters[c.Bulk.RowConverter]; !ok {
 			errs = append(errs, fmt.Sprintf("bulk.row_converter %q is not a known converter", c.Bulk.RowConverter))
@@ -168,6 +170,10 @@ func (c *Catalog) Validate() error {
 	require(len(c.DDL.DropTableStmts) > 0, "ddl.drop_table_stmts is required")
 	require(len(c.DDL.TruncateStmts) > 0, "ddl.truncate_stmts is required")
 	require(c.DDL.AddColumn != "", "ddl.add_column is required")
+	require(!c.DDL.CanDropNotNull || c.DDL.DropNotNull != "",
+		"ddl.drop_not_null template required when can_drop_not_null")
+	require(!c.DDL.CanAlterColumnType || c.DDL.AlterColumnType != "",
+		"ddl.alter_column_type template required when can_alter_column_type")
 	require(c.Context.VersionQuery != "", "context.version_query is required")
 	if c.Preflight != "" {
 		if _, ok := preflightStrategies[c.Preflight]; !ok {

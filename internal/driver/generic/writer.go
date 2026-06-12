@@ -13,6 +13,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/stats"
+	typeddl "github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
 // Writer implements driver.Writer from a catalog: DDL comes from
@@ -49,10 +50,26 @@ func (w *writerUpsertSeq) ResetSequence(ctx context.Context, schema string, t *d
 	return w.resetSequence(ctx, schema, t)
 }
 
+// writerFull is the all-capabilities combo (mysql/postgres/mssql).
+type writerFull struct{ writerUpsertSeq }
+
+func (w *writerFull) CreateForeignKey(ctx context.Context, t *driver.Table, fk *driver.ForeignKey, targetSchema string) error {
+	return w.finalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type: driver.DDLTypeForeignKey, Table: t, ForeignKey: fk, TargetSchema: targetSchema,
+	}, "FK", fk.Name)
+}
+
+func (w *writerFull) CreateCheckConstraint(ctx context.Context, t *driver.Table, chk *driver.CheckConstraint, targetSchema string) error {
+	return w.finalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type: driver.DDLTypeCheckConstraint, Table: t, CheckConstraint: chk, TargetSchema: targetSchema,
+	}, "CHECK", chk.Name)
+}
+
 var (
 	_ driver.Writer           = (*Writer)(nil)
 	_ driver.Upserter         = (*writerUpsertSeq)(nil)
 	_ driver.SequenceResetter = (*writerUpsertSeq)(nil)
+	_ driver.ConstraintWriter = (*writerFull)(nil)
 )
 
 // NewWriter opens the catalog's backend as a write target.
@@ -62,7 +79,7 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	db, err := sql.Open(knownBackends[cat.Connection.Backend], dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, err)
+		return nil, fmt.Errorf("opening %s connection: %w", cat.Name, logging.ScrubError(err))
 	}
 
 	if cat.Connection.SingleWriter {
@@ -80,7 +97,7 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, err)
+		return nil, fmt.Errorf("pinging %s database: %w", cat.Name, logging.ScrubError(err))
 	}
 
 	if opts.TypeMapper == nil {
@@ -127,6 +144,8 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 
 	caps := cat.Capabilities
 	switch {
+	case caps.Upserter && caps.SequenceResetter && caps.ConstraintWriter:
+		return &writerFull{writerUpsertSeq{w}}, nil
 	case caps.Upserter && caps.SequenceResetter && !caps.ConstraintWriter:
 		return &writerUpsertSeq{w}, nil
 	case !caps.Upserter && !caps.SequenceResetter && !caps.ConstraintWriter:
@@ -264,7 +283,7 @@ func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column 
 		return fmt.Errorf("%s cannot relax NOT NULL for %s.%s without rebuilding the table",
 			w.cat.Name, t.Name, column.Name)
 	}
-	return fmt.Errorf("drop-not-null DDL template not yet defined for catalog %q", w.cat.Name)
+	return w.alterColumn(ctx, w.cat.DDL.DropNotNull, t, column, targetSchema, "NULL")
 }
 
 // AlterColumnType — same shape as DropColumnNotNull.
@@ -279,7 +298,44 @@ func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *d
 		return fmt.Errorf("%s cannot alter type for %s.%s without rebuilding the table",
 			w.cat.Name, t.Name, column.Name)
 	}
-	return fmt.Errorf("alter-column-type DDL template not yet defined for catalog %q", w.cat.Name)
+	nullability := "NOT NULL"
+	if column.IsNullable {
+		nullability = "NULL"
+	}
+	return w.alterColumn(ctx, w.cat.DDL.AlterColumnType, t, column, targetSchema, nullability)
+}
+
+// alterColumn renders an in-place MODIFY/ALTER COLUMN template with
+// the mapped type and a translated default clause (the hand-written
+// mysql writer's shape, generalized).
+func (w *Writer) alterColumn(ctx context.Context, tmpl string, t *driver.Table, column *driver.Column, targetSchema, nullability string) error {
+	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, w.cat.Name, *column)
+	if err != nil {
+		return err
+	}
+	defaultClause := ""
+	if column.DefaultValue != "" {
+		isBool := false
+		switch strings.ToLower(column.DataType) {
+		case "bool", "boolean", "bit":
+			isBool = true
+		}
+		expr := typeddl.FormatDDLDefault(column.DefaultValue,
+			driver.Canonicalize(w.sourceType), w.cat.Name, isBool)
+		if expr != "" {
+			defaultClause = " " + typeddl.FormatDefaultClause(expr, mappedType, w.cat.Name)
+		}
+	}
+	stmt := strings.NewReplacer(
+		"{table}", w.dialect.QualifyTable(targetSchema, t.Name),
+		"{column}", w.dialect.QuoteIdentifier(column.Name),
+		"{type}", mappedType,
+		"{nullability}", nullability,
+		"{default_clause}", defaultClause,
+	).Replace(tmpl)
+	logging.Debug("Altering %s column with DDL: %s", w.cat.Name, stmt)
+	_, err = w.db.ExecContext(ctx, stmt)
+	return err
 }
 
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
@@ -394,14 +450,36 @@ func (w *Writer) bulkEnv() bulkEnv {
 		convert = rowConverters[name]
 	}
 	return bulkEnv{
-		db:             w.db,
-		dialect:        w.dialect,
-		batchSize:      w.defaultBatchSize,
-		maxVars:        w.cat.Bulk.MaxBindVariables,
-		convert:        convert,
-		idempotentVerb: w.cat.Bulk.IdempotentVerb,
-		engine:         w.cat.Name,
+		db:               w.db,
+		dialect:          w.dialect,
+		batchSize:        w.defaultBatchSize,
+		maxVars:          w.cat.Bulk.MaxBindVariables,
+		convert:          convert,
+		idempotentVerb:   w.cat.Bulk.IdempotentVerb,
+		idempotentSuffix: w.cat.Bulk.IdempotentSuffix,
+		transactional:    !w.cat.Bulk.NonTransactional,
+		engine:           w.cat.Name,
 	}
+}
+
+// finalizationDDL generates and executes constraint DDL through the
+// type-mapper engine — the same path CreateIndex uses.
+func (w *Writer) finalizationDDL(ctx context.Context, req driver.FinalizationDDLRequest, kind, name string) error {
+	if w.finalizationMapper == nil {
+		return fmt.Errorf("finalization mapper not available for %s creation", kind)
+	}
+	if w.cat.Quoting.SchemaIgnored {
+		req.TargetSchema = ""
+	}
+	req.SourceDBType = w.sourceType
+	req.TargetDBType = w.cat.Name
+	req.TargetContext = w.dbContext
+	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+	if err != nil {
+		return fmt.Errorf("%s DDL generation failed for %s.%s: %w", kind, req.Table.Name, name, err)
+	}
+	_, err = w.db.ExecContext(ctx, ddl)
+	return err
 }
 
 func (w *Writer) ExecRaw(ctx context.Context, query string, args ...any) (int64, error) {
