@@ -433,12 +433,31 @@ func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool,
 	return err == nil, err
 }
 
+// GetRowCount tries the stats-based count first, matching the
+// hand-written writers — the validator's timeout fallback depends on
+// GetRowCountFast being genuinely cheap (sys.partitions /
+// pg_stat_user_tables), not a second unbounded COUNT(*).
 func (w *Writer) GetRowCount(ctx context.Context, schema, table string) (int64, error) {
-	return w.GetRowCountExact(ctx, schema, table, false)
+	return shared.RowCountWithFallback(
+		func() (int64, error) { return w.GetRowCountFast(ctx, schema, table) },
+		func() (int64, error) { return w.GetRowCountExact(ctx, schema, table, false) },
+	)
 }
 
 func (w *Writer) GetRowCountFast(ctx context.Context, schema, table string) (int64, error) {
-	return w.GetRowCountExact(ctx, schema, table, false)
+	stats := w.cat.Queries.RowCountStats
+	if stats == "" {
+		return w.GetRowCountExact(ctx, schema, table, false)
+	}
+	if strings.Contains(stats, w.dialect.ParameterPlaceholder(1)) {
+		var n sql.NullInt64
+		if err := w.db.QueryRowContext(ctx, stats, w.introArgs(schema, w.ident(table))...).Scan(&n); err != nil {
+			return 0, err
+		}
+		return n.Int64, nil
+	}
+	query := fmt.Sprintf(stats, w.dialect.QualifyTable(schema, w.ident(table)))
+	return shared.QueryExactRowCount(ctx, w.db, query)
 }
 
 func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ bool) (int64, error) {

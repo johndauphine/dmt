@@ -3,7 +3,6 @@ package config
 import (
 	"github.com/johndauphine/dmt/internal/driver"
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
-	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 
 	"os"
 	"path/filepath"

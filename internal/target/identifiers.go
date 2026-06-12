@@ -6,7 +6,6 @@ import (
 	// Import driver packages to register dialects. postgres and mysql
 	// register via the catalog-driven generic engine (#509).
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
-	_ "github.com/johndauphine/dmt/internal/driver/mssql"
 )
 
 // Package-level dialect instances for identifier quoting

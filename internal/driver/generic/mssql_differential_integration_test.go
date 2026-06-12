@@ -363,6 +363,22 @@ func TestMssqlCatalogMatchesHandWrittenWriter(t *testing.T) {
 		t.Fatalf("state diverges:\n  generic: %v\n  mssql:   %v", got, want)
 	}
 
+	// Validation's timeout fallback depends on a genuinely cheap
+	// stats-based count (sys.partitions) on the writer side.
+	t.Run("writer fast counts match", func(t *testing.T) {
+		g, err := genW.GetRowCountFast(ctx, "dbo", "Items")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := refW.GetRowCountFast(ctx, "dbo", "Items")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g != r {
+			t.Errorf("fast count: %d != %d", g, r)
+		}
+	})
+
 	// Generic-only (oracle defect, fixed in the catalog engine): bulk
 	// load must KEEP_NULLS — without it SQL Server writes the column
 	// DEFAULT over source NULLs.
