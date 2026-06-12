@@ -322,11 +322,21 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
-	// Calculate stats for notification
+	// Calculate stats for notification. Use checkpointed rows-done
+	// (the same source as the run-summary box), not the source-side
+	// RowCount estimates — those come from stats-based fast counts and
+	// under-report (#498: the mysql estimate was 768K rows short). The
+	// progress tracker is not suitable either: it re-counts replayed
+	// chunks on retry.
 	duration := time.Since(startTime)
-	var totalRows int64
-	for _, t := range successTables {
-		totalRows += t.RowCount
+	totalRows, rowsErr := o.transferredRowsFromState(runID)
+	if rowsErr != nil || totalRows == 0 {
+		// State unavailable (or nothing transferred this run) — fall
+		// back to the per-table estimates rather than reporting zero.
+		totalRows = 0
+		for _, t := range successTables {
+			totalRows += t.RowCount
+		}
 	}
 	throughput := float64(totalRows) / duration.Seconds()
 

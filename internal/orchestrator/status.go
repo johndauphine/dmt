@@ -640,3 +640,22 @@ func printFallbackCounts(counts map[string]int64) {
 	}
 	fmt.Printf("AI fallbacks: %s\n", strings.Join(parts, ", "))
 }
+
+// transferredRowsFromState sums the checkpointed RowsDone across the
+// run's transfer tasks — the accurate row total for final summaries
+// (#498). Source-side RowCount is a stats estimate that under-reports,
+// and the live progress tracker re-counts replayed chunks on retry;
+// the checkpoint watermark is immune to both.
+func (o *Orchestrator) transferredRowsFromState(runID string) (int64, error) {
+	tasks, err := o.state.GetTasksWithProgress(runID)
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, t := range tasks {
+		if strings.HasPrefix(t.TaskKey, "transfer:") {
+			total += t.RowsDone
+		}
+	}
+	return total, nil
+}
