@@ -19,7 +19,7 @@ func TestClickHouseToCanonical(t *testing.T) {
 		{"LowCardinality(Nullable(FixedString(4)))", KindChar},
 		{"Int8", KindSmallInt},
 		{"Int16", KindSmallInt},
-		{"UInt8", KindInteger},
+		{"UInt8", KindSmallInt},
 		{"UInt16", KindInteger},
 		{"Int32", KindInteger},
 		{"UInt32", KindBigInt},

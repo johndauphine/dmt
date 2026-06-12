@@ -54,9 +54,10 @@ func clickhouseToCanonical(col ColumnInfo) CanonicalType {
 	switch upper {
 	case "BOOL", "BOOLEAN":
 		return CanonicalType{Kind: KindBoolean}
-	case "INT8", "INT16":
+	case "INT8", "INT16", "UINT8":
+		// UInt8 max (255) fits SmallInt.
 		return CanonicalType{Kind: KindSmallInt}
-	case "UINT8", "UINT16", "INT32":
+	case "UINT16", "INT32":
 		// UInt16 max (65535) exceeds SmallInt; promote to Integer.
 		return CanonicalType{Kind: KindInteger}
 	case "UINT32", "INT64":
