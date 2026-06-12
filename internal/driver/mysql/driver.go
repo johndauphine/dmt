@@ -12,9 +12,11 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
-func init() {
-	driver.Register(&Driver{})
-}
+// NOTE (#509): this package no longer registers itself — the
+// catalog-driven generic engine registers "mysql" from
+// internal/driver/generic/catalogs/mysql.yaml. The hand-written
+// implementation remains as the differential-test oracle until the
+// benchmark-gated cleanup removes it.
 
 // Driver implements driver.Driver for MySQL/MariaDB databases.
 type Driver struct{}
