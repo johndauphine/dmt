@@ -380,7 +380,11 @@ func (r *Reader) LoadIndexes(ctx context.Context, t *driver.Table) error {
 
 	for _, m := range metas {
 		idx := driver.Index{Name: m.name, IsUnique: m.unique}
-		colRows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexColumns, r.introArgs(t.Schema, m.name)...)
+		colArgs := []any{m.name}
+		if r.cat.Introspection.IndexColumnsByTable {
+			colArgs = []any{t.Name, m.name}
+		}
+		colRows, err := r.db.QueryContext(ctx, r.cat.Introspection.IndexColumns, r.introArgs(t.Schema, colArgs...)...)
 		if err != nil {
 			return fmt.Errorf("loading index columns for %s: %w", m.name, err)
 		}

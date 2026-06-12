@@ -209,7 +209,10 @@ type IntrospectionSpec struct {
 	// excluding PK-backing indexes.
 	IndexList string `yaml:"index_list"`
 	// IndexColumns: param (index_name) → ordered rows of (column_name).
-	IndexColumns string `yaml:"index_columns"`
+	// With IndexColumnsByTable, params are (table, index_name) —
+	// engines where index names are only unique per table (mysql).
+	IndexColumns        string `yaml:"index_columns"`
+	IndexColumnsByTable bool   `yaml:"index_columns_by_table"`
 	// ForeignKeys: param (table) → ordered rows of (fk_id, seq, name,
 	// ref_schema, ref_table, from_column, to_column, on_update,
 	// on_delete). An empty name falls back to the synthesized
