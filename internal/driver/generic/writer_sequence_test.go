@@ -5,13 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/driver/sqlite"
 )
 
 func testTable() *driver.Table {
@@ -27,32 +25,24 @@ func testTable() *driver.Table {
 	}
 }
 
-func openWriters(t *testing.T) (gen, ref driver.Writer, genPath, refPath string) {
+func openWriter(t *testing.T) (gen driver.Writer, genPath string) {
 	t.Helper()
 	tm, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wopts := driver.WriterOptions{BatchSize: 1000, SourceType: "sqlite", TypeMapper: tm}
-
 	cat, err := LoadCatalog("sqlite")
 	if err != nil {
 		t.Fatal(err)
 	}
 	genPath = filepath.Join(t.TempDir(), "gen.db")
-	gen, err = NewWriter(cat, &dbconfig.TargetConfig{Type: "sqlite", Database: genPath, ChunkSize: 1000}, 1, wopts)
+	gen, err = NewWriter(cat, &dbconfig.TargetConfig{Type: "sqlite", Database: genPath, ChunkSize: 1000}, 1,
+		driver.WriterOptions{BatchSize: 1000, SourceType: "sqlite", TypeMapper: tm})
 	if err != nil {
 		t.Fatalf("generic NewWriter: %v", err)
 	}
 	t.Cleanup(gen.Close)
-
-	refPath = filepath.Join(t.TempDir(), "ref.db")
-	refW, err := sqlite.NewWriter(&dbconfig.TargetConfig{Type: "sqlite", Database: refPath, ChunkSize: 1000}, 1, wopts)
-	if err != nil {
-		t.Fatalf("sqlite NewWriter: %v", err)
-	}
-	t.Cleanup(refW.Close)
-	return gen, refW, genPath, refPath
+	return gen, genPath
 }
 
 // dump reads observable database state: the verbatim DDL of every
@@ -111,25 +101,23 @@ func dump(t *testing.T, path string) map[string]any {
 	return state
 }
 
-// The PR-3 acceptance bar: an identical operation sequence through the
-// catalog-driven and hand-written writers leaves byte-identical
-// observable database state (DDL text, data, sequence counters).
-func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
+// The full writer operation sequence with literal state assertions.
+// These expectations were proven byte-identical to the hand-written
+// sqlite writer by the differential test that ran until #506.
+func TestSQLiteCatalogWriterSequence(t *testing.T) {
 	ctx := context.Background()
-	gen, ref, genPath, refPath := openWriters(t)
+	gen, genPath := openWriter(t)
 	tbl := testTable()
 
-	// Each step runs against both writers; state is compared after the
-	// full sequence and at checkpoints marked compare().
-	compare := func(stage string) {
+	expect := func(stage string, check func(state map[string]any) string) {
 		t.Helper()
-		got, want := dump(t, genPath), dump(t, refPath)
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("state diverges after %s:\n  generic: %v\n  sqlite:  %v", stage, got, want)
+		state := dump(t, genPath)
+		if msg := check(state); msg != "" {
+			t.Fatalf("after %s: %s\nstate: %v", stage, msg, state)
 		}
 	}
 
-	for _, w := range []driver.Writer{gen, ref} {
+	for _, w := range []driver.Writer{gen} {
 		if err := w.CreateSchema(ctx, "ignored"); err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +137,15 @@ func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
 			t.Fatal(err) // no-op on sqlite
 		}
 	}
-	compare("create table")
+	expect("create table", func(st map[string]any) string {
+		ddl, _ := st["ddl:items"].(string)
+		for _, frag := range []string{"CREATE TABLE", "AUTOINCREMENT"} {
+			if !strings.Contains(ddl, frag) {
+				return "DDL missing " + frag + ": " + ddl
+			}
+		}
+		return ""
+	})
 
 	cols := []string{"id", "name", "active", "price"}
 	rows := [][]any{
@@ -157,7 +153,7 @@ func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
 		{int64(2), "b", false, 2.25},
 		{int64(3), "c", nil, nil},
 	}
-	for _, w := range []driver.Writer{gen, ref} {
+	for _, w := range []driver.Writer{gen} {
 		if err := w.WriteBatch(ctx, driver.WriteBatchOptions{
 			Table: "items", Columns: cols, Rows: rows,
 		}); err != nil {
@@ -172,9 +168,21 @@ func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	compare("write batch + idempotent replay")
+	expect("write batch + idempotent replay", func(st map[string]any) string {
+		rows, _ := st["data:items"].([][]any)
+		if len(rows) != 3 {
+			return fmt.Sprintf("rows = %d, want 3 (replay must not duplicate)", len(rows))
+		}
+		if rows[0][1] != "a" || rows[0][2] != int64(1) || rows[0][3] != 1.5 {
+			return fmt.Sprintf("row1 = %v (bool→int and values)", rows[0])
+		}
+		if rows[2][2] != nil || rows[2][3] != nil {
+			return fmt.Sprintf("row3 NULLs = %v", rows[2])
+		}
+		return ""
+	})
 
-	for _, w := range []driver.Writer{gen, ref} {
+	for _, w := range []driver.Writer{gen} {
 		up, ok := w.(driver.Upserter)
 		if !ok {
 			t.Fatal("writer must expose Upserter (catalog declares it)")
@@ -196,10 +204,23 @@ func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	compare("upsert + sequence reset")
+	expect("upsert + sequence reset", func(st map[string]any) string {
+		rows, _ := st["data:items"].([][]any)
+		if len(rows) != 4 {
+			return fmt.Sprintf("rows = %d, want 4", len(rows))
+		}
+		if rows[1][1] != "b-updated" || rows[1][3] != 9.99 {
+			return fmt.Sprintf("upsert update row = %v", rows[1])
+		}
+		seq, _ := st["sequence"].([]string)
+		if len(seq) != 2 || seq[0] != "items" || seq[1] != "4" {
+			return fmt.Sprintf("sequence = %v, want [items 4]", seq)
+		}
+		return ""
+	})
 
 	newCol := &driver.Column{Name: "note", DataType: "text", IsNullable: true}
-	for _, w := range []driver.Writer{gen, ref} {
+	for _, w := range []driver.Writer{gen} {
 		if err := w.AddColumn(ctx, tbl, newCol, ""); err != nil {
 			t.Fatal(err)
 		}
@@ -215,9 +236,15 @@ func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
 			t.Fatal("AlterColumnType must error on sqlite")
 		}
 	}
-	compare("add column")
+	expect("add column", func(st map[string]any) string {
+		ddl, _ := st["ddl:items"].(string)
+		if !strings.Contains(ddl, `"note"`) {
+			return "added column missing from DDL: " + ddl
+		}
+		return ""
+	})
 
-	for _, w := range []driver.Writer{gen, ref} {
+	for _, w := range []driver.Writer{gen} {
 		n, err := w.GetRowCount(ctx, "", "items")
 		if err != nil || n != 4 {
 			t.Fatalf("GetRowCount: %d %v", n, err)
@@ -229,5 +256,10 @@ func TestSQLiteCatalogMatchesHandWrittenWriter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	compare("truncate + drop")
+	expect("truncate + drop", func(st map[string]any) string {
+		if _, ok := st["ddl:items"]; ok {
+			return "items table still exists after drop"
+		}
+		return ""
+	})
 }

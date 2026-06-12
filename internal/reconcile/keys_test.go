@@ -7,7 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	drvsqlite "github.com/johndauphine/dmt/internal/driver/sqlite"
+	"github.com/johndauphine/dmt/internal/driver"
+	_ "github.com/johndauphine/dmt/internal/driver/generic"
 	_ "modernc.org/sqlite"
 )
 
@@ -19,7 +20,7 @@ func TestScanKeys(t *testing.T) {
 	`)
 
 	var got [][]any
-	err := ScanKeys(context.Background(), db, &drvsqlite.Dialect{}, "", "items", []string{"id"}, 2,
+	err := ScanKeys(context.Background(), db, driver.GetDialect("sqlite"), "", "items", []string{"id"}, 2,
 		func(keys [][]any) error {
 			got = append(got, copyKeys(keys)...)
 			return nil
@@ -50,7 +51,7 @@ func TestFindTargetOnlyKeys(t *testing.T) {
 	missing, err := FindTargetOnlyKeys(
 		context.Background(),
 		source, target,
-		&drvsqlite.Dialect{}, &drvsqlite.Dialect{},
+		driver.GetDialect("sqlite"), driver.GetDialect("sqlite"),
 		KeyDiffOptions{
 			Table:      "items",
 			KeyColumns: []string{"id"},
@@ -84,7 +85,7 @@ func TestDeleteKeys(t *testing.T) {
 	deleted, err := DeleteKeys(
 		context.Background(),
 		db,
-		&drvsqlite.Dialect{},
+		driver.GetDialect("sqlite"),
 		"", "items",
 		[]string{"id"},
 		[][]any{{int64(2)}, {int64(4)}},
@@ -119,7 +120,7 @@ func TestDeleteKeysHonorsCanceledContext(t *testing.T) {
 	deleted, err := DeleteKeys(
 		ctx,
 		db,
-		&drvsqlite.Dialect{},
+		driver.GetDialect("sqlite"),
 		"", "items",
 		[]string{"id"},
 		[][]any{{int64(1)}},

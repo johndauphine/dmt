@@ -41,7 +41,8 @@ All packages live under `internal/`. The key ones:
 | Package | Purpose |
 |---------|---------|
 | `driver/` | Pluggable database drivers + AI integrations (type mapping, smart config, error diagnosis) |
-| `driver/postgres/`, `mssql/`, `mysql/` | Database-specific Reader/Writer/Dialect implementations |
+| `driver/postgres/`, `mssql/`, `mysql/` | Hand-written Reader/Writer/Dialect implementations (converging onto `generic/`, #509) |
+| `driver/generic/` | Catalog-driven engine (#191): one Reader/Writer/Dialect, per-engine YAML catalogs (`sqlite` runs on it) |
 | `orchestrator/` | Migration workflow coordinator (9 task phases, retry logic, health checks) |
 | `transfer/` | Data transfer pipeline with read-ahead buffering, runtime tuning, checkpoint coordination |
 | `pool/` | WriterPool goroutine pool, driver factory |
@@ -67,7 +68,7 @@ Driver aliases: `mssql` (sqlserver, sql-server), `postgres` (postgresql, pg), `m
 
 MSSQL sets `ScaleWritersWithCores: true`: the target writer uses parallel BCP without TABLOCK by default. PostgreSQL/MySQL also set `true`; SQLite sets `false` and pins to a single writer (file-based, single-writer constraint). MSSQL `drop_recreate` builds non-PK indexes after transfer; for upsert or other loads into existing indexed tables, reduce `migration.write_ahead_writers` or rebuild secondary indexes around the migration if contention appears.
 
-SQLite is intended primarily for testing dmt end-to-end without external database servers — fixtures live in `.db` files and round-trip through the same pipeline. Cross-engine type mapping is supported: sqlite→{mssql,postgres,mysql} and {mssql,postgres,mysql}→sqlite both go through the deterministic typemap. `GetPartitionBoundaries` always returns a single partition for SQLite (no parallelism benefit from splitting). FK and CHECK constraints can only be declared inline at CREATE TABLE time on SQLite, so its writer does not implement `driver.ConstraintWriter` (#460) — finalization skips FK/CHECK creation with one audited message; users who need FK enforcement should run sqlite as source rather than target.
+SQLite is intended primarily for testing dmt end-to-end without external database servers — fixtures live in `.db` files and round-trip through the same pipeline. Cross-engine type mapping is supported: sqlite→{mssql,postgres,mysql} and {mssql,postgres,mysql}→sqlite both go through the deterministic typemap. `GetPartitionBoundaries` always returns a single partition for SQLite (no parallelism benefit from splitting). FK and CHECK constraints can only be declared inline at CREATE TABLE time on SQLite, so the sqlite catalog declares `constraint_writer: false` (#460, #191) — finalization skips FK/CHECK creation with one audited message; users who need FK enforcement should run sqlite as source rather than target.
 
 **Capability interfaces (#460)**: a writer surface an engine cannot honor must be an optional interface (e.g. `driver.ConstraintWriter` for post-transfer FK/CHECK creation) with caller-side type assertion and uniform degradation — never a silent or warning no-op stub on the engine. The conformance harness pins each driver's capability matrix (`conformance.CheckWriterCapabilities`); a new engine declares what it supports there.
 

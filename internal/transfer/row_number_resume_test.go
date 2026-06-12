@@ -11,7 +11,7 @@ import (
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
-	sqlitedriver "github.com/johndauphine/dmt/internal/driver/sqlite"
+	generic "github.com/johndauphine/dmt/internal/driver/generic"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
 )
@@ -162,9 +162,9 @@ func rowNumberResumeJob(table source.Table, taskID int64, saver ProgressSaver, p
 	}
 }
 
-func newRowNumberResumeSQLiteReader(t *testing.T, name string) *sqlitedriver.Reader {
+func newRowNumberResumeSQLiteReader(t *testing.T, name string) driver.Reader {
 	t.Helper()
-	reader, err := sqlitedriver.NewReader(
+	reader, err := generic.NewReader(mustCatalog(t),
 		&dbconfig.SourceConfig{
 			Type:      "sqlite",
 			Database:  filepath.Join(t.TempDir(), name+".db"),
@@ -178,13 +178,13 @@ func newRowNumberResumeSQLiteReader(t *testing.T, name string) *sqlitedriver.Rea
 	return reader
 }
 
-func newRowNumberResumeSQLiteWriter(t *testing.T, name string) *sqlitedriver.Writer {
+func newRowNumberResumeSQLiteWriter(t *testing.T, name string) driver.Writer {
 	t.Helper()
 	typeMapper, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
 	if err != nil {
 		t.Fatalf("GetTypeMapper: %v", err)
 	}
-	writer, err := sqlitedriver.NewWriter(
+	writer, err := generic.NewWriter(mustCatalog(t),
 		&dbconfig.TargetConfig{
 			Type:      "sqlite",
 			Database:  filepath.Join(t.TempDir(), name+".db"),
@@ -290,4 +290,13 @@ func assertRowNumberResumeSummary(t *testing.T, state *checkpoint.State, runID, 
 		t.Fatalf("partition summary = (rowsDone=%d partitions=%d), want (rowsDone=%d partitions=%d)",
 			summary.RowsDone, summary.PartitionsWithProgress, wantRowsDone, wantPartitions)
 	}
+}
+
+func mustCatalog(t *testing.T) *generic.Catalog {
+	t.Helper()
+	cat, err := generic.LoadCatalog("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cat
 }
