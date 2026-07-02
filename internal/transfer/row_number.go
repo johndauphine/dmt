@@ -75,12 +75,16 @@ func executeRowNumberPagination(
 		}
 	}
 
-	// Determine row range for this job
+	// Determine row range for this job. The final ROW_NUMBER range is
+	// intentionally unbounded so stats-estimated RowCount undercounts cannot
+	// drop tail rows.
 	var startRow, endRow int64
+	boundedEnd := false
 	if job.Partition != nil && job.Partition.EndRow > 0 {
 		// Partitioned: use partition boundaries
 		startRow = job.Partition.StartRow
 		endRow = job.Partition.EndRow
+		boundedEnd = job.Partition.EndRow < job.Table.RowCount
 	} else {
 		// Non-partitioned: process entire table
 		startRow = 0
@@ -106,7 +110,7 @@ func executeRowNumberPagination(
 	if initialRowNum < startRow {
 		initialRowNum = startRow
 	}
-	if initialRowNum > endRow {
+	if boundedEnd && initialRowNum > endRow {
 		initialRowNum = endRow
 	}
 
@@ -133,7 +137,7 @@ func executeRowNumberPagination(
 		rowNum := initialRowNum
 		seq := int64(0)
 
-		for rowNum < endRow {
+		for !boundedEnd || rowNum < endRow {
 			select {
 			case <-readerCtx.Done():
 				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{err: readerCtx.Err()})
@@ -152,8 +156,12 @@ func executeRowNumberPagination(
 
 			// Adjust chunk size if near end of partition
 			effectiveChunkSize := chunkSize
-			if rowNum+int64(chunkSize) > endRow {
+			if boundedEnd && rowNum+int64(chunkSize) > endRow {
 				effectiveChunkSize = int(endRow - rowNum)
+			}
+			if effectiveChunkSize <= 0 {
+				sendChunkOrCancel(readerCtx, chunkChan, chunkResult{done: true})
+				return
 			}
 
 			// ROW_NUMBER pagination with direction-aware syntax
@@ -271,11 +279,9 @@ func executeRowNumberPagination(
 
 	rnJobBufSize := rnBufs.JobChanDepth
 
-	// #227: on ROW_NUMBER resume, route plain inserts through the
+	// #227/#540: on ROW_NUMBER replay, route plain inserts through the
 	// idempotent-on-dup path so replayed committed rows become no-ops.
-	// Gate on job.IsResume because a crash before the first checkpoint can
-	// leave resumeLastPK nil even though target rows already exist.
-	idempotentOnDup := job.IsResume && cfg.Migration.TargetMode != "upsert" && job.Table.HasPK()
+	idempotentOnDup := (job.IsResume || job.ReplayPossible) && cfg.Migration.TargetMode != "upsert" && job.Table.HasPK()
 
 	wp := newWriterPool(ctx, writerPoolConfig{
 		NumWriters:             numWriters,

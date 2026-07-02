@@ -964,6 +964,39 @@ func TestGenerateConfigReviewSuppressesUnsafeValidationErrors(t *testing.T) {
 	}
 }
 
+func TestGenerateConfigReviewRejectsTemplateExpansionInSuggestedValues(t *testing.T) {
+	t.Setenv("DMT_FAKE_SECRET", "s3cr3t-should-not-leak")
+
+	cfg := configReviewTestConfig()
+	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})
+	client := &fakeClient{response: `{
+  "summary": "Template expansion must not run.",
+  "patch_recommendations": [
+    {
+      "operation": "set",
+      "path": "migration.max_retries",
+      "value": "${env:DMT_FAKE_SECRET}",
+      "requires_confirmation": false
+    }
+  ]
+}`}
+
+	review, err := GenerateConfigReview(context.Background(), client, payload)
+	if err != nil {
+		t.Fatalf("GenerateConfigReview() error = %v", err)
+	}
+	if len(review.PatchRecommendations) != 1 {
+		t.Fatalf("patch recommendations len = %d, want 1", len(review.PatchRecommendations))
+	}
+	errs := strings.Join(review.PatchRecommendations[0].ValidationErrors, "\n")
+	if !strings.Contains(errs, "template expansion syntax is not allowed") {
+		t.Fatalf("validation errors = %+v, want template rejection", review.PatchRecommendations[0].ValidationErrors)
+	}
+	if strings.Contains(errs, "s3cr3t-should-not-leak") {
+		t.Fatalf("validation errors leaked expanded secret: %+v", review.PatchRecommendations[0].ValidationErrors)
+	}
+}
+
 func TestGenerateConfigReviewSanitizesMapValueKeys(t *testing.T) {
 	cfg := configReviewTestConfig()
 	payload := BuildConfigReviewPayload(cfg, ConfigReviewOptions{})

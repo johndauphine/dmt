@@ -337,9 +337,13 @@ func (c *FallbackChain) findApproximateColumns(req TableDDLRequest) []string {
 // helper that needs to ask "what would the deterministic mapper do
 // with this column?" gets the same answer those production paths do.
 func driverColumnToTypemapColumnInfo(col Column) typemap.ColumnInfo {
+	fullType := col.FullDataType
+	if fullType == "" {
+		fullType = col.DataType
+	}
 	return typemap.ColumnInfo{
 		UDTName:                col.DataType,
-		DataType:               col.DataType,
+		DataType:               fullType,
 		CharacterMaximumLength: nullableInt(col.MaxLength),
 		NumericPrecision:       nullableInt(col.Precision),
 		NumericScale:           nullableInt(col.Scale),

@@ -365,6 +365,9 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 
 		taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
 		taskID, _ := b.state.CreateTask(runID, "transfer", taskKey)
+		if err := b.clearRowNumberProgressOnBoundaryChange(taskID, taskKey, p.RowCount); err != nil {
+			return err
+		}
 
 		result.Jobs = append(result.Jobs, transfer.Job{
 			Table:      t,
@@ -375,6 +378,22 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 		})
 	}
 
+	return nil
+}
+
+func (b *JobBuilder) clearRowNumberProgressOnBoundaryChange(taskID int64, taskKey string, rowCount int64) error {
+	progress, err := b.state.GetTransferProgress(taskID)
+	if err != nil {
+		return fmt.Errorf("getting existing ROW_NUMBER progress for %s: %w", taskKey, err)
+	}
+	if progress == nil || progress.RowsTotal == 0 || progress.RowsTotal == rowCount {
+		return nil
+	}
+	logging.Warn("ROW_NUMBER partition boundary changed for %s (rows_total %d -> %d), clearing stale checkpoint",
+		taskKey, progress.RowsTotal, rowCount)
+	if err := b.state.ClearTransferProgress(taskID); err != nil {
+		return fmt.Errorf("clearing stale ROW_NUMBER progress for %s: %w", taskKey, err)
+	}
 	return nil
 }
 

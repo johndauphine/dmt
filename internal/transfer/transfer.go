@@ -48,6 +48,7 @@ func Execute(
 		}
 		if resumeLastPK != nil {
 			logging.Debug("Resuming %s at row %d (checkpoint: %v)", job.Table.Name, resumeRowsDone, resumeLastPK)
+			job.ReplayPossible = true
 		}
 		// Per-range watermarks (#464): only meaningful on the keyset
 		// path; legacy rows (and ROW_NUMBER tasks) have none.

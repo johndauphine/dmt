@@ -257,8 +257,8 @@ func schemaOrEmpty(cat *Catalog, schema string) string {
 }
 
 // loadColumns maps describe_table's canonical shape: (ordinal, name,
-// decl_type, max_length, precision, scale, is_nullable, default_value,
-// pk_ordinal).
+// decl_type, [full_decl_type], max_length, precision, scale, is_nullable,
+// default_value, pk_ordinal, [is_identity]).
 func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 	rows, err := r.db.QueryContext(ctx, r.cat.Introspection.DescribeTable, r.introArgs(t.Schema, t.Name)...)
 	if err != nil {
@@ -277,13 +277,18 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			ordinal             int
 			name                string
 			declType            sql.NullString
+			fullDeclType        sql.NullString
 			maxLen, prec, scale sql.NullInt64
 			nullable            int
 			dflt                sql.NullString
 			pkOrd               int
 			isIdentity          int
 		)
-		dests := []any{&ordinal, &name, &declType, &maxLen, &prec, &scale, &nullable, &dflt, &pkOrd}
+		dests := []any{&ordinal, &name, &declType}
+		if r.cat.Introspection.FullTypeInDescribe {
+			dests = append(dests, &fullDeclType)
+		}
+		dests = append(dests, &maxLen, &prec, &scale, &nullable, &dflt, &pkOrd)
 		if r.cat.Introspection.IdentityInDescribe {
 			dests = append(dests, &isIdentity)
 		}
@@ -294,6 +299,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		col := driver.Column{
 			Name:         name,
 			DataType:     strings.ToLower(strings.TrimSpace(declType.String)),
+			FullDataType: strings.ToLower(strings.TrimSpace(fullDeclType.String)),
 			MaxLength:    int(maxLen.Int64),
 			Precision:    int(prec.Int64),
 			Scale:        int(scale.Int64),
@@ -306,6 +312,9 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 			base, l, p, s := parseDeclaredType(declType.String)
 			col.DataType = base
 			col.MaxLength, col.Precision, col.Scale = l, p, s
+		}
+		if col.FullDataType == "" {
+			col.FullDataType = col.DataType
 		}
 		t.Columns = append(t.Columns, col)
 

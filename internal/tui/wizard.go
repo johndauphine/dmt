@@ -14,7 +14,11 @@ import (
 
 func (m *Model) handleWizardStep(input string) tea.Cmd {
 	if input != "" {
-		m.appendOutput(styleUserInput.Render("> "+input) + "\n")
+		echo := input
+		if isWizardPasswordStep(m.wizardStep) {
+			echo = "******"
+		}
+		m.appendOutput(styleUserInput.Render("> "+echo) + "\n")
 		m.textInput.Reset()
 	} else {
 		m.appendOutput(styleUserInput.Render("  (default)") + "\n")
@@ -27,6 +31,10 @@ func (m *Model) handleWizardStep(input string) tea.Cmd {
 	prompt := m.renderWizardPrompt()
 	m.appendOutput(prompt)
 	return nil
+}
+
+func isWizardPasswordStep(step wizardStep) bool {
+	return step == stepSourcePass || step == stepTargetPass
 }
 
 func (m *Model) processWizardInput(input string) tea.Cmd {

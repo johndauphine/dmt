@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,6 +331,38 @@ func TestReconcileDeletesIfDueSetsStrictValidation(t *testing.T) {
 	}
 }
 
+func TestReconcileDeletesIfDueAbortsNearTotalTargetOnlyKeys(t *testing.T) {
+	sourceDB := openDeleteRuntimeDB(t)
+	defer sourceDB.Close()
+	targetDB := openDeleteRuntimeDB(t)
+	defer targetDB.Close()
+	execDeleteRuntimeSQL(t, sourceDB, `CREATE TABLE items (id INTEGER PRIMARY KEY);`)
+	execDeleteRuntimeSQL(t, targetDB, `
+		CREATE TABLE items (id INTEGER PRIMARY KEY);
+		INSERT INTO items (id) VALUES (1), (2), (3);
+	`)
+
+	state := &deletePreviewState{}
+	orch := deleteRuntimeOrchestrator(sourceDB, targetDB, state)
+	err := orch.reconcileDeletesIfDue(
+		context.Background(),
+		"run-delete",
+		[]source.Table{{Name: "items", PrimaryKey: []string{"id"}}},
+	)
+	if err == nil {
+		t.Fatal("reconcileDeletesIfDue() error = nil, want near-total delete guard")
+	}
+	if !strings.Contains(err.Error(), "would delete 3 of 3 target row") {
+		t.Fatalf("error = %q, want guard details", err)
+	}
+	if got := countDeleteRuntimeRows(t, targetDB); got != 3 {
+		t.Fatalf("target rows after aborted reconciliation = %d, want 3", got)
+	}
+	if state.recordCalls != 0 {
+		t.Fatalf("record success calls = %d, want 0", state.recordCalls)
+	}
+}
+
 func TestReconcileDeletesIfDueDoesNotSetStrictValidationWhenNotDue(t *testing.T) {
 	sourceDB := openDeleteRuntimeDB(t)
 	defer sourceDB.Close()
@@ -452,6 +485,13 @@ type deleteRuntimeTargetPool struct {
 func (p *deleteRuntimeTargetPool) DB() *sql.DB { return p.db }
 func (p *deleteRuntimeTargetPool) DBType() string {
 	return "sqlite"
+}
+func (p *deleteRuntimeTargetPool) GetRowCountExact(context.Context, string, string, bool) (int64, error) {
+	var count int64
+	if err := p.db.QueryRow("SELECT COUNT(*) FROM items").Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func deleteRuntimeOrchestrator(

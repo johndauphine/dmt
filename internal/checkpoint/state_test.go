@@ -578,6 +578,40 @@ func TestSyncTimestamps(t *testing.T) {
 	}
 }
 
+func TestSanitizeStoredConfigsRedactsAIAndSlackSecrets(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	const runID = "secret-run"
+	rawConfig := `{"Source":{"Password":"[REDACTED]"},"Target":{"Password":"[REDACTED]"},"AI":{"Provider":"openai","APIKey":"sk-live-secret"},"Slack":{"WebhookURL":"https://hooks.slack.com/services/secret","Channel":"#ops"}}`
+	if _, err := state.db.Exec(
+		`INSERT INTO runs (id, source_schema, target_schema, status, phase, started_at, config) VALUES (?, ?, ?, ?, ?, datetime('now'), ?)`,
+		runID, "dbo", "public", "running", "initializing", rawConfig,
+	); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	if err := state.sanitizeStoredConfigs(); err != nil {
+		t.Fatalf("sanitizeStoredConfigs() error: %v", err)
+	}
+
+	var got string
+	if err := state.db.QueryRow(`SELECT config FROM runs WHERE id = ?`, runID).Scan(&got); err != nil {
+		t.Fatalf("query config: %v", err)
+	}
+	for _, leaked := range []string{"sk-live-secret", "hooks.slack.com/services/secret"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("sanitized config leaked %q: %s", leaked, got)
+		}
+	}
+	if strings.Count(got, "[REDACTED]") < 4 {
+		t.Fatalf("sanitized config = %s, want passwords, AI key, and Slack webhook redacted", got)
+	}
+}
+
 func TestUpdateRunConfig(t *testing.T) {
 	state, err := New(t.TempDir())
 	if err != nil {

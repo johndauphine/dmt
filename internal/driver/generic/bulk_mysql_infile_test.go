@@ -29,6 +29,21 @@ func TestRenderInfileTSV(t *testing.T) {
 	}
 }
 
+func TestRenderInfileTSVTimeUsesUTC(t *testing.T) {
+	loc := time.FixedZone("source-local", -4*60*60)
+	ts := time.Date(2024, 6, 15, 8, 30, 0, 123456000, loc)
+
+	got, err := renderInfileTSV([][]any{{ts}}, func(r []any) []any { return r })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := "2024-06-15 12:30:00.123456\n"
+	if string(got) != want {
+		t.Fatalf("rendered timestamp = %q, want %q", got, want)
+	}
+}
+
 // Round-trip property: escaping must be reversible under LOAD DATA's
 // default ESCAPED BY '\' scheme for every special byte.
 func TestWriteInfileEscapedSpecials(t *testing.T) {

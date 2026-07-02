@@ -258,91 +258,9 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	// Check for chunk-level progress to avoid unnecessary truncation
 	progressSaver := checkpoint.NewProgressSaver(o.state)
 	for _, t := range tablesToTransfer {
-		taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-		taskID, _ := o.state.CreateTask(run.ID, "transfer", taskKey)
-
-		exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
-		if err != nil {
+		if err := o.prepareResumeTargetTable(ctx, run.ID, t, schemaDriftReport, progressSaver); err != nil {
 			o.state.CompleteRun(run.ID, "failed", err.Error())
-			return fmt.Errorf("checking table %s: %w", t.Name, err)
-		}
-		if !exists {
-			if err := validateResumeMissingTargetTable(t, o.config.Migration, schemaDriftReport); err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return err
-			}
-			// Table doesn't exist - clear any stale progress before creating it.
-			// If cleanup fails, leaving the target missing is safer than creating
-			// an empty target beside stale partition checkpoints (#266).
-			if err := o.clearResumeProgress(run.ID, taskKey, taskID, t.Name); err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return err
-			}
-			if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return fmt.Errorf("creating table %s: %w", t.Name, err)
-			}
-			// Idempotent-INSERT-on-resume depends on the PK existing on the
-			// target. AI-generated CREATE TABLE DDL usually includes the PK
-			// inline, but CreatePrimaryKey is idempotent (no-op if PK exists)
-			// so call it defensively when re-creating a missing table on resume.
-			if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return fmt.Errorf("ensuring PK on %s: %w", t.Name, err)
-			}
-		} else {
-			// Table exists - check if we have saved chunk progress
-			lastPK, rowsDone, _, err := progressSaver.GetProgress(taskID)
-			if err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return fmt.Errorf("getting progress for %s: %w", t.Name, err)
-			}
-
-			// Match the partitioning decision made in job_builder.go:
-			// large + HasPK is partitioned (keyset for single-int PK,
-			// ROW_NUMBER otherwise).
-			isPartitioned := t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasPK()
-			expectedRows, hasProgress, err := o.expectedResumeRows(
-				run.ID, taskKey, isPartitioned, lastPK, rowsDone,
-			)
-			if err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return err
-			}
-
-			if !hasProgress {
-				if isPartitioned {
-					continue
-				}
-				// No chunk progress - truncate to ensure clean re-transfer.
-				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-					o.state.CompleteRun(run.ID, "failed", err.Error())
-					return fmt.Errorf("truncating table %s: %w", t.Name, err)
-				}
-				continue
-			}
-
-			// Have saved progress - verify target row count matches it.
-			// If target has fewer rows than saved progress, data was lost;
-			// clear all table + partition progress and start fresh.
-			targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
-			if err != nil {
-				o.state.CompleteRun(run.ID, "failed", err.Error())
-				return fmt.Errorf("getting row count for %s: %w", t.Name, err)
-			}
-			if targetCount < expectedRows {
-				logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
-					t.Name, targetCount, expectedRows)
-				if err := o.clearResumeProgress(run.ID, taskKey, taskID, t.Name); err != nil {
-					o.state.CompleteRun(run.ID, "failed", err.Error())
-					return err
-				}
-				if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
-					o.state.CompleteRun(run.ID, "failed", err.Error())
-					return fmt.Errorf("truncating table %s: %w", t.Name, err)
-				}
-			}
-			// If target has >= expectedRows, resume from saved progress.
+			return err
 		}
 	}
 
@@ -466,6 +384,95 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	if partialErr {
 		return &PartialMigrationError{Failed: tableFailures}
 	}
+	return nil
+}
+
+func (o *Orchestrator) prepareResumeTargetTable(
+	ctx context.Context,
+	runID string,
+	t source.Table,
+	schemaDriftReport drift.Report,
+	progressSaver *checkpoint.ProgressSaver,
+) error {
+	taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+	taskID, err := o.state.CreateTask(runID, "transfer", taskKey)
+	if err != nil {
+		return fmt.Errorf("creating task for %s: %w", t.Name, err)
+	}
+
+	exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
+	if err != nil {
+		return fmt.Errorf("checking table %s: %w", t.Name, err)
+	}
+	if !exists {
+		if err := validateResumeMissingTargetTable(t, o.config.Migration, schemaDriftReport); err != nil {
+			return err
+		}
+		// Table doesn't exist - clear any stale progress before creating it.
+		// If cleanup fails, leaving the target missing is safer than creating
+		// an empty target beside stale partition checkpoints (#266).
+		if err := o.clearResumeProgress(runID, taskKey, taskID, t.Name); err != nil {
+			return err
+		}
+		if err := o.targetPool.CreateTable(ctx, &t, o.config.Target.Schema); err != nil {
+			return fmt.Errorf("creating table %s: %w", t.Name, err)
+		}
+		// Idempotent-INSERT-on-resume depends on the PK existing on the
+		// target. AI-generated CREATE TABLE DDL usually includes the PK
+		// inline, but CreatePrimaryKey is idempotent (no-op if PK exists)
+		// so call it defensively when re-creating a missing table on resume.
+		if err := o.targetPool.CreatePrimaryKey(ctx, &t, o.config.Target.Schema); err != nil {
+			return fmt.Errorf("ensuring PK on %s: %w", t.Name, err)
+		}
+		return nil
+	}
+
+	// Table exists - check if we have saved chunk progress.
+	lastPK, rowsDone, _, err := progressSaver.GetProgress(taskID)
+	if err != nil {
+		return fmt.Errorf("getting progress for %s: %w", t.Name, err)
+	}
+
+	// Match the partitioning decision made in job_builder.go:
+	// large + HasPK is partitioned (keyset for single-int PK,
+	// ROW_NUMBER otherwise).
+	isPartitioned := t.IsLarge(o.config.Migration.LargeTableThreshold) && t.HasPK()
+	expectedRows, hasProgress, err := o.expectedResumeRows(
+		runID, taskKey, isPartitioned, lastPK, rowsDone,
+	)
+	if err != nil {
+		return err
+	}
+
+	if !hasProgress {
+		if isPartitioned || o.config.Migration.TargetMode == "upsert" {
+			return nil
+		}
+		// No chunk progress - truncate to ensure clean re-transfer.
+		if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+			return fmt.Errorf("truncating table %s: %w", t.Name, err)
+		}
+		return nil
+	}
+
+	// Have saved progress - verify target row count matches it. In upsert mode
+	// rowsDone can include updates and target-only retained rows are valid, so
+	// a smaller target count is not proof that a destructive restart is safe.
+	targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
+	if err != nil {
+		return fmt.Errorf("getting row count for %s: %w", t.Name, err)
+	}
+	if targetCount < expectedRows && o.config.Migration.TargetMode != "upsert" {
+		logging.Warn("  Warning: %s has %d rows but expected %d - restarting transfer",
+			t.Name, targetCount, expectedRows)
+		if err := o.clearResumeProgress(runID, taskKey, taskID, t.Name); err != nil {
+			return err
+		}
+		if err := o.targetPool.TruncateTable(ctx, o.config.Target.Schema, t.Name); err != nil {
+			return fmt.Errorf("truncating table %s: %w", t.Name, err)
+		}
+	}
+	// If target has >= expectedRows, resume from saved progress.
 	return nil
 }
 

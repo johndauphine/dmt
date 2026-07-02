@@ -14,9 +14,11 @@ import (
 // FileState implements StateBackend using a single YAML file.
 // Designed for Airflow and headless environments where SQLite is impractical.
 type FileState struct {
-	path  string
-	mu    sync.RWMutex
-	state *fileStateData
+	path          string
+	mu            sync.RWMutex
+	state         *fileStateData
+	taskIDCounter int64
+	taskKeysByID  map[int64]string
 }
 
 // Capabilities reports the file backend's supported behavior.
@@ -149,7 +151,9 @@ type tableState struct {
 // If the file exists, it loads the existing state.
 func NewFileState(path string) (*FileState, error) {
 	fs := &FileState{
-		path: path,
+		path:          path,
+		taskIDCounter: 1000,
+		taskKeysByID:  make(map[int64]string),
 		state: &fileStateData{
 			Tables: make(map[string]tableState),
 		},
@@ -169,7 +173,52 @@ func NewFileState(path string) (*FileState, error) {
 		}
 	}
 
+	if err := fs.rebuildTaskIndexLocked(); err != nil {
+		return nil, err
+	}
+
 	return fs, nil
+}
+
+func (fs *FileState) rebuildTaskIndexLocked() error {
+	fs.taskKeysByID = make(map[int64]string, len(fs.state.Tables))
+	fs.taskIDCounter = 1000
+	for key, ts := range fs.state.Tables {
+		if ts.TaskID <= 0 {
+			continue
+		}
+		if existing, ok := fs.taskKeysByID[ts.TaskID]; ok {
+			return fmt.Errorf("duplicate task id %d in file state for %q and %q", ts.TaskID, existing, key)
+		}
+		fs.taskKeysByID[ts.TaskID] = key
+		if ts.TaskID > fs.taskIDCounter {
+			fs.taskIDCounter = ts.TaskID
+		}
+	}
+	return nil
+}
+
+func (fs *FileState) nextTaskIDLocked() int64 {
+	fs.taskIDCounter++
+	return fs.taskIDCounter
+}
+
+func (fs *FileState) rememberTaskIDLocked(taskID int64, taskKey string) {
+	if taskID > 0 {
+		fs.taskKeysByID[taskID] = taskKey
+	}
+}
+
+func (fs *FileState) taskKeyForIDLocked(taskID int64) (string, bool) {
+	key, ok := fs.taskKeysByID[taskID]
+	if !ok {
+		return "", false
+	}
+	if ts, exists := fs.state.Tables[key]; !exists || ts.TaskID != taskID {
+		delete(fs.taskKeysByID, taskID)
+		return "", false
+	}
+	return key, true
 }
 
 // save writes the current state to the YAML file using the standard

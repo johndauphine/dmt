@@ -237,6 +237,21 @@ func (o *Orchestrator) runDeleteReconciliation(
 		if err != nil {
 			return result, fmt.Errorf("reconciling deletes for %s: %w", table.FullName(), err)
 		}
+		targetCount, err := o.targetPool.GetRowCountExact(
+			ctx,
+			o.config.Target.Schema,
+			table.Name,
+			o.config.Migration.StrictConsistency,
+		)
+		if err != nil {
+			return result, fmt.Errorf("counting target keys for delete reconciliation guard on %s: %w", table.FullName(), err)
+		}
+		if shouldAbortDeleteReconciliation(missing, targetCount) {
+			return result, fmt.Errorf(
+				"delete reconciliation for %s would delete %d of %d target row(s); aborting because this likely indicates key fingerprint mismatch",
+				table.FullName(), missing, targetCount,
+			)
+		}
 		deleted, err := reconcile.DeleteKeys(
 			ctx,
 			o.targetPool.DB(),
@@ -275,6 +290,13 @@ func (o *Orchestrator) runDeleteReconciliation(
 	logging.Info("Delete reconciliation complete: %d candidate(s), %d deleted",
 		result.CandidateRows, result.DeletedRows)
 	return result, nil
+}
+
+func shouldAbortDeleteReconciliation(candidateRows, targetRows int64) bool {
+	if candidateRows <= 0 || targetRows <= 0 {
+		return false
+	}
+	return float64(candidateRows)/float64(targetRows) >= 0.95
 }
 
 func (o *Orchestrator) saveSkippedNoPKDeleteTables(

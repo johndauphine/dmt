@@ -419,7 +419,7 @@ func (s *State) tableColumns(table string) ([]string, error) {
 	return cols, rows.Err()
 }
 
-// sanitizeStoredConfigs removes any passwords accidentally stored in config JSON
+// sanitizeStoredConfigs removes any secrets accidentally stored in config JSON.
 func (s *State) sanitizeStoredConfigs() error {
 	rows, err := s.db.Query(`SELECT id, config FROM runs WHERE config IS NOT NULL AND config != ''`)
 	if err != nil {
@@ -439,8 +439,14 @@ func (s *State) sanitizeStoredConfigs() error {
 			continue
 		}
 
-		// Check if this config contains unredacted passwords
-		if !strings.Contains(configStr, `"Password"`) {
+		// Avoid parsing most already-clean rows without making the scrubber
+		// password-only. Older rows may contain AI/Slack secrets even when DB
+		// passwords were already redacted.
+		if !strings.Contains(configStr, `"Password"`) &&
+			!strings.Contains(configStr, `"APIKey"`) &&
+			!strings.Contains(configStr, `"api_key"`) &&
+			!strings.Contains(configStr, `"WebhookURL"`) &&
+			!strings.Contains(configStr, `"webhook_url"`) {
 			continue
 		}
 
@@ -459,10 +465,24 @@ func (s *State) sanitizeStoredConfigs() error {
 				}
 			}
 		}
+		if ai, ok := configMap["AI"].(map[string]any); ok {
+			if key, ok := ai["APIKey"].(string); ok && key != "" && key != "[REDACTED]" {
+				ai["APIKey"] = "[REDACTED]"
+				modified = true
+			}
+			if key, ok := ai["api_key"].(string); ok && key != "" && key != "[REDACTED]" {
+				ai["api_key"] = "[REDACTED]"
+				modified = true
+			}
+		}
 		// Also sanitize Slack webhook
 		if slack, ok := configMap["Slack"].(map[string]any); ok {
 			if wh, ok := slack["WebhookURL"].(string); ok && wh != "" && wh != "[REDACTED]" {
 				slack["WebhookURL"] = "[REDACTED]"
+				modified = true
+			}
+			if wh, ok := slack["webhook_url"].(string); ok && wh != "" && wh != "[REDACTED]" {
+				slack["webhook_url"] = "[REDACTED]"
 				modified = true
 			}
 		}

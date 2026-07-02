@@ -141,7 +141,7 @@ func writeInfileValue(buf *bytes.Buffer, v any) error {
 			buf.WriteByte('0')
 		}
 	case time.Time:
-		buf.WriteString(val.Format("2006-01-02 15:04:05.000000"))
+		buf.WriteString(val.UTC().Format("2006-01-02 15:04:05.000000"))
 	default:
 		// Unknown driver-specific type: defer to fmt, escaped.
 		writeInfileEscaped(buf, []byte(fmt.Sprintf("%v", val)))

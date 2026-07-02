@@ -245,6 +245,11 @@ type IntrospectionSpec struct {
 	// describe_table returns a 10th column (is_identity 0|1) instead
 	// of needing a Go strategy.
 	IdentityInDescribe bool `yaml:"identity_in_describe"`
+	// FullTypeInDescribe: describe_table returns a full dialect type
+	// declaration immediately after decl_type. MySQL uses this for
+	// COLUMN_TYPE ("int unsigned", "enum('a','b')") while retaining
+	// DATA_TYPE as the base dispatch type.
+	FullTypeInDescribe bool `yaml:"full_type_in_describe"`
 	// AvgRowLength is an optional stats query — params like the other
 	// per-table queries — returning the engine's average row size in
 	// bytes (mysql information_schema.TABLES.AVG_ROW_LENGTH). Empty

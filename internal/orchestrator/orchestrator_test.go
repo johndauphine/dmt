@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
@@ -658,6 +659,82 @@ func TestExpectedResumeRowsUsesPartitionProgress(t *testing.T) {
 	}
 }
 
+func TestPrepareResumeTargetTableUpsertSkipsDestructiveRestarts(t *testing.T) {
+	tests := []struct {
+		name         string
+		targetMode   string
+		progress     *checkpoint.TransferProgress
+		targetRows   int64
+		wantTruncate bool
+		wantClear    bool
+	}{
+		{
+			name:         "drop_recreate without progress truncates existing small table",
+			targetMode:   "drop_recreate",
+			wantTruncate: true,
+		},
+		{
+			name:       "upsert without progress leaves existing table intact",
+			targetMode: "upsert",
+		},
+		{
+			name:         "drop_recreate short target restarts from scratch",
+			targetMode:   "drop_recreate",
+			progress:     &checkpoint.TransferProgress{LastPK: "10", RowsDone: 50},
+			targetRows:   10,
+			wantTruncate: true,
+			wantClear:    true,
+		},
+		{
+			name:       "upsert short target count resumes idempotently",
+			targetMode: "upsert",
+			progress:   &checkpoint.TransferProgress{LastPK: "10", RowsDone: 50},
+			targetRows: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &resumePrepState{progress: tt.progress}
+			targetPool := &targetModeTestPool{
+				existing:  map[string]bool{"events": true},
+				rowCounts: map[string]int64{"events": tt.targetRows},
+			}
+			o := &Orchestrator{
+				config: &config.Config{
+					Target: config.TargetConfig{Schema: "public"},
+					Migration: config.MigrationConfig{
+						TargetMode:          tt.targetMode,
+						LargeTableThreshold: 1_000_000,
+					},
+				},
+				state:      state,
+				targetPool: targetPool,
+			}
+
+			err := o.prepareResumeTargetTable(
+				context.Background(),
+				"run-536",
+				source.Table{Schema: "dbo", Name: "events", RowCount: 100},
+				drift.Report{},
+				checkpoint.NewProgressSaver(state),
+			)
+			if err != nil {
+				t.Fatalf("prepareResumeTargetTable() error = %v", err)
+			}
+
+			truncated := targetPool.truncatedTables()
+			if (len(truncated) > 0) != tt.wantTruncate {
+				t.Fatalf("truncated tables = %v, want truncate=%t", truncated, tt.wantTruncate)
+			}
+			if (state.clearCalls > 0 || state.partitionClearCalls > 0) != tt.wantClear {
+				t.Fatalf("clear calls = table:%d partition:%d, want clear=%t",
+					state.clearCalls, state.partitionClearCalls, tt.wantClear)
+			}
+		})
+	}
+}
+
 func TestRecordSuccessfulTuningResult(t *testing.T) {
 	state := &tuningResultState{}
 	o := &Orchestrator{state: state, lastChunkRetryCount: 3}
@@ -793,6 +870,38 @@ func (s *resumeProgressSummaryState) GetPartitionTransferProgressSummary(
 	return s.summary, s.err
 }
 
+type resumePrepState struct {
+	checkpoint.StateBackend
+	progress            *checkpoint.TransferProgress
+	clearCalls          int
+	partitionClearCalls int
+}
+
+func (s *resumePrepState) CreateTask(string, string, string) (int64, error) {
+	return 42, nil
+}
+
+func (s *resumePrepState) GetTransferProgress(int64) (*checkpoint.TransferProgress, error) {
+	return s.progress, nil
+}
+
+func (s *resumePrepState) GetPartitionTransferProgressSummary(
+	string,
+	string,
+) (checkpoint.PartitionProgressSummary, error) {
+	return checkpoint.PartitionProgressSummary{}, nil
+}
+
+func (s *resumePrepState) ClearTransferProgress(int64) error {
+	s.clearCalls++
+	return nil
+}
+
+func (s *resumePrepState) ClearPartitionTransferProgress(string, string) error {
+	s.partitionClearCalls++
+	return nil
+}
+
 type tuningResultState struct {
 	checkpoint.StateBackend
 	calls           int
@@ -845,6 +954,29 @@ func TestComputeConfigHash_FailOnSchemaDriftInvariant(t *testing.T) {
 	if baseHash != otherHash {
 		t.Errorf("flipping MigrationConfig.FailOnSchemaDrift changed the resume config hash; "+
 			"json:\"-\" tag on the field is missing or has regressed (base=%s, other=%s)",
+			baseHash, otherHash)
+	}
+}
+
+func TestComputeConfigHash_AIAndSlackSecretRotationInvariant(t *testing.T) {
+	base := &config.Config{
+		Source: config.SourceConfig{Type: "mssql", Host: "h", Port: 1433, Database: "d", User: "u", Password: "p"},
+		Target: config.TargetConfig{Type: "postgres", Host: "h", Port: 5432, Database: "d", User: "u", Password: "p"},
+		AI:     &config.AIConfig{Provider: "openai", Model: "gpt-test", APIKey: "sk-old"},
+		Slack:  &config.SlackConfig{WebhookURL: "https://hooks.slack.com/services/old", Channel: "#ops"},
+	}
+	other := *base
+	otherAI := *base.AI
+	otherAI.APIKey = "sk-new"
+	otherSlack := *base.Slack
+	otherSlack.WebhookURL = "https://hooks.slack.com/services/new"
+	other.AI = &otherAI
+	other.Slack = &otherSlack
+
+	baseHash := computeConfigHash(base)
+	otherHash := computeConfigHash(&other)
+	if baseHash != otherHash {
+		t.Errorf("rotating AI/Slack secrets changed the resume config hash (base=%s, other=%s)",
 			baseHash, otherHash)
 	}
 }

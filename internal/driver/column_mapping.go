@@ -14,6 +14,7 @@ func MapColumnType(mapper TypeMapper, sourceDBType, targetDBType string, column 
 		SourceDBType: sourceDBType,
 		TargetDBType: targetDBType,
 		DataType:     column.DataType,
+		FullDataType: column.FullDataType,
 		MaxLength:    column.MaxLength,
 		Precision:    column.Precision,
 		Scale:        column.Scale,

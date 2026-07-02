@@ -105,6 +105,7 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 			SourceDBType: req.SourceDBType,
 			TargetDBType: req.TargetDBType,
 			DataType:     col.DataType,
+			FullDataType: col.FullDataType,
 			MaxLength:    col.MaxLength,
 			Precision:    col.Precision,
 			Scale:        col.Scale,
@@ -289,15 +290,16 @@ func sanitizeForTarget(name, targetDialect string) string {
 
 // typeInfoToTypemapColumn projects a TypeInfo (column-level request)
 // down to the typemap.ColumnInfo the canonical mapper consumes.
-// dmt's TypeInfo carries DataType only — typemap needs both UDTName
-// (its primary dispatch key) and DataType. dmt's three readers all
-// store udt_name-style values in DataType (PG udt_name, MSSQL/MySQL
-// data_type), so passing DataType through as both fields works for
-// the dispatch.
+// dmt's TypeInfo carries DataType for dispatch plus optional FullDataType for
+// dialect-specific modifiers such as MySQL COLUMN_TYPE.
 func typeInfoToTypemapColumn(info TypeInfo) typemap.ColumnInfo {
+	fullType := info.FullDataType
+	if fullType == "" {
+		fullType = info.DataType
+	}
 	return typemap.ColumnInfo{
 		UDTName:                info.DataType,
-		DataType:               info.DataType,
+		DataType:               fullType,
 		CharacterMaximumLength: nullableInt(info.MaxLength),
 		NumericPrecision:       nullableInt(info.Precision),
 		NumericScale:           nullableInt(info.Scale),
@@ -319,10 +321,14 @@ func typeInfoToTypemapColumn(info TypeInfo) typemap.ColumnInfo {
 // CREATE TABLE column "CreatedAt" would survive case-preserved while
 // later INSERT / index code looks up "createdat" — mismatch.
 func driverColumnToDDL(col Column, targetDialect string) ddl.Column {
+	fullType := col.FullDataType
+	if fullType == "" {
+		fullType = col.DataType
+	}
 	return ddl.Column{
 		Name:                   sanitizeForTarget(col.Name, targetDialect),
 		UDTName:                col.DataType,
-		DataType:               col.DataType,
+		DataType:               fullType,
 		CharacterMaximumLength: nullableInt(col.MaxLength),
 		NumericPrecision:       nullableInt(col.Precision),
 		NumericScale:           nullableInt(col.Scale),
