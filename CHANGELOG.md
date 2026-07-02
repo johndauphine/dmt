@@ -18,6 +18,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- AI-generated finalization DDL (indexes, foreign keys, check constraints) is
+  now validated as a single statement that targets the expected table before
+  it executes, instead of a prefix-only check. A prompt-injected or misbehaving
+  model can no longer smuggle a trailing statement (e.g.
+  `... ; DROP TABLE users;`) or retarget another table. The validator rejects
+  SQL comments and dialect string-escaping it cannot faithfully model
+  (backslash escapes, Postgres dollar-quoting) so a real statement separator
+  can't hide from the scan, and the prompts frame source-derived identifiers,
+  filters, and expressions as untrusted data (#561).
+
 - Secret template expansion (`${env:}`/`${file:}`/`${VAR}`) now happens
   per-scalar on the parsed YAML node tree instead of as raw text substitution
   over the whole document. A secret value containing `#`, a newline, or `:`
