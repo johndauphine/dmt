@@ -18,6 +18,37 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A resume that fails before the transfer phase for an environmental reason
+  (preflight check, schema extraction, target preparation, or Ctrl+C) now
+  leaves the run resumable instead of marking it `failed`. Previously such a
+  failure orphaned all checkpointed progress — `GetLastIncompleteRun` only
+  returns `running` runs, so the next `dmt resume` found nothing and the whole
+  migration had to restart (#566).
+
+- The resume summary, throughput, and AI tuning history now count only the rows
+  moved during that resume (checkpointed cumulative minus the count captured
+  before the resume started transferring), not the source-side `RowCount`
+  estimates or each table's full size. Feeding cumulative full-migration rows
+  over a resume-only duration inflated the throughput persisted to
+  `ai_tuning_history` and skewed smartconfig training (#565).
+
+- The AI table-DDL cache key now includes each column's `IsIdentity` and
+  `DefaultValue` (both feed the generated CREATE TABLE), so toggling a column's
+  identity or default — type unchanged — no longer serves stale cached DDL that
+  silently drops the identity/default on the target (#560).
+
+- The AI type-mapping cache (`~/.dmt/type-cache.json`) is now written
+  atomically (temp file + fsync + rename) and in-process saves are serialized,
+  so concurrent or crash-interrupted writes can't tear the file. A torn file
+  fails its checksum on load and discards the whole cache, re-billing every
+  previously-paid AI mapping. `dmt cache clear --ai-only` uses the same atomic
+  write (#563).
+
+- `GetLastSyncTimestamp` now checks the scan error before inspecting the
+  result, so a real DB error (e.g. "database is locked") propagates instead of
+  being swallowed as "never synced" — which silently downgraded date-based
+  incremental sync to a full-table reload (#564).
+
 - The chunk-size retry after a write error no longer duplicates rows on
   non-transactional (MySQL batched-INSERT) targets. Earlier sub-batches of a
   failed chunk autocommit independently, so retrying the whole chunk from row 0

@@ -16,6 +16,15 @@ import (
 	"time"
 )
 
+// abandonResumeAttempt records a pre-transfer resume failure but leaves the run
+// resumable — it does NOT mark the run 'failed'. Reserved for environmental or
+// transient failures (preflight, schema extraction) the operator is expected to
+// fix and retry; marking the run failed would orphan all checkpointed progress,
+// because GetLastIncompleteRun only returns 'running' runs (#566).
+func (o *Orchestrator) abandonResumeAttempt(runID string, err error, startTime time.Time) {
+	o.notifyFailure(runID, err, time.Since(startTime))
+}
+
 // Resume continues an interrupted migration
 func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	run, err := o.state.GetLastIncompleteRun()
@@ -139,8 +148,11 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	o.setPhase("preflight")
 	logging.Debug("Running preflight checks...")
 	if err := o.runPreFlight(ctx); err != nil {
-		o.state.CompleteRun(run.ID, "failed", err.Error())
-		o.notifyFailure(run.ID, err, time.Since(startTime))
+		// A pre-transfer preflight failure is environmental (target
+		// unreachable, privileges revoked, connection headroom held by
+		// another process) — the operator is expected to fix it and retry.
+		// Leave the run resumable rather than marking it failed (#566).
+		o.abandonResumeAttempt(run.ID, err, startTime)
 		return err
 	}
 
@@ -153,8 +165,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	logging.Debug("Extracting schema...")
 	tables, err := o.sourcePool.ExtractSchema(ctx, o.config.Source.Schema)
 	if err != nil {
-		o.state.CompleteRun(run.ID, "failed", err.Error())
-		o.notifyFailure(run.ID, err, time.Since(startTime))
+		// Pre-transfer schema extraction failure is typically transient
+		// (source briefly unreachable). Keep the run resumable rather than
+		// marking it failed and orphaning checkpointed progress (#566).
+		o.abandonResumeAttempt(run.ID, err, startTime)
 		return fmt.Errorf("extracting schema: %w", err)
 	}
 	o.loadSchemaMetadata(ctx, tables)
@@ -267,12 +281,27 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	progressSaver := checkpoint.NewProgressSaver(o.state)
 	for _, t := range tablesToTransfer {
 		if err := o.prepareResumeTargetTable(ctx, run.ID, t, schemaDriftReport, progressSaver); err != nil {
-			o.state.CompleteRun(run.ID, "failed", err.Error())
+			// Target preparation runs before any data is moved this resume and
+			// touches the target (row counts, truncate, create table/PK). A
+			// cancellation (Ctrl+C) or transient failure here must leave the run
+			// resumable — marking it failed would orphan all checkpointed
+			// progress, and it's asymmetric with the same interruption handled
+			// during transfer below (#566). Tasks were already reset to pending
+			// by MarkRunAsResumed above.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				logging.Info("Migration interrupted during target preparation - run 'resume' to continue")
+				return err
+			}
+			o.abandonResumeAttempt(run.ID, err, startTime)
 			return err
 		}
 	}
 
-	// Transfer only the incomplete tables
+	// Transfer only the incomplete tables. Capture the checkpointed row count
+	// BEFORE this resume moves anything so the summary/tuning throughput counts
+	// only rows moved this resume, not the cumulative full-migration total that
+	// persists in transfer_progress from the original run (#565).
+	rowsBeforeResume, _ := o.transferredRowsFromState(run.ID)
 	o.setPhase("transfer")
 	logging.Debug("Transferring data...")
 	transferStart := time.Now()
@@ -340,14 +369,23 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		}
 	}
 
-	// Calculate stats - only count rows from tables we attempted to transfer that succeeded
+	// Count rows actually transferred this resume from checkpoint state (the
+	// same source as the run-summary box), not the source-side RowCount
+	// estimates — those are stats-based, under-report (#498), and count each
+	// table's FULL size even when the resume only moved a remaining fraction,
+	// skewing the throughput persisted into ai_tuning_history (#565). Mirror
+	// Run()'s #498 handling exactly.
 	duration := time.Since(startTime)
-	var totalRows int64
-	for _, t := range tablesToTransfer {
-		if !failedTableNames[t.Name] {
-			totalRows += t.RowCount
+	totalRows := o.summaryRowsTransferred(run.ID, rowsBeforeResume, func() int64 {
+		// Fallback only: state unavailable or no progress recorded this resume.
+		var est int64
+		for _, t := range tablesToTransfer {
+			if !failedTableNames[t.Name] {
+				est += t.RowCount
+			}
 		}
-	}
+		return est
+	})
 	throughput := float64(totalRows) / duration.Seconds()
 
 	// Determine final status and send appropriate notification

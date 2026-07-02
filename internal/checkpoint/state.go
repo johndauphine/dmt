@@ -153,11 +153,19 @@ func (s *State) GetLastSyncTimestamp(sourceSchema, tableName, targetSchema strin
 		WHERE source_schema = ? AND table_name = ? AND target_schema = ?
 	`, sourceSchema, tableName, targetSchema).Scan(&tsStr)
 
-	if err == sql.ErrNoRows || !tsStr.Valid {
+	// Check the scan error BEFORE inspecting tsStr: a failed Scan (e.g.
+	// "database is locked" under multi-process contention) leaves tsStr
+	// zero-valued, so testing !tsStr.Valid first would swallow the error and
+	// report "never synced" — silently degrading incremental sync to a full
+	// reload (#564).
+	if err == sql.ErrNoRows {
 		return nil, nil // No previous sync
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !tsStr.Valid {
+		return nil, nil // Row exists but timestamp is NULL — treat as no sync
 	}
 
 	ts, err := time.Parse(time.RFC3339Nano, tsStr.String)

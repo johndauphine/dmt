@@ -69,6 +69,7 @@ type AITypeMapper struct {
 	cache          *TypeMappingCache
 	cacheFile      string
 	cacheMu        sync.RWMutex
+	saveMu         sync.Mutex // Serialize cache saves (callers release cacheMu first, #563)
 	requestsMu     sync.Mutex // Serialize API requests to avoid rate limiting
 	budgetMu       sync.Mutex
 	requestsUsed   int
