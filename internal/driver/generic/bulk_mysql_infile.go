@@ -3,9 +3,11 @@ package generic
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,12 +83,76 @@ func mysqlLoadDataWrite(ctx context.Context, env bulkEnv, opts driver.WriteBatch
 		env.dialect.QualifyTable(opts.Schema, opts.Table),
 		env.dialect.ColumnList(opts.Columns),
 	)
-	// One autocommitted statement per chunk — the same resume
-	// granularity as the non-transactional batched-INSERT path.
-	if _, err := env.db.ExecContext(ctx, stmt); err != nil {
+	// One autocommitted statement per chunk — the same resume granularity as
+	// the non-transactional batched-INSERT path. Pin a connection so the
+	// post-load warning check reads THIS statement's diagnostics.
+	conn, err := env.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("LOAD DATA into %s: acquiring connection: %w", opts.Table, err)
+	}
+	defer conn.Close()
+
+	res, err := conn.ExecContext(ctx, stmt)
+	if err != nil {
 		return fmt.Errorf("LOAD DATA into %s: %w", opts.Table, err)
 	}
+
+	// LOAD DATA LOCAL runs with implicit-IGNORE semantics: duplicate-key rows
+	// are silently discarded and data-conversion errors are demoted to
+	// warnings (strict sql_mode does not apply with LOCAL). The batched-INSERT
+	// path errors on those, so verify the load matches that path's strictness
+	// before acking the chunk — a dropped row (RowsAffected mismatch) or an
+	// Error/Warning-level conversion is otherwise undetectable and even passes
+	// row-count validation (#544).
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("LOAD DATA into %s: reading affected rows: %w", opts.Table, err)
+	}
+	if affected != int64(len(opts.Rows)) {
+		return fmt.Errorf("LOAD DATA into %s loaded %d of %d rows: rows were silently dropped (duplicate key or unparseable) under LOAD DATA's implicit IGNORE",
+			opts.Table, affected, len(opts.Rows))
+	}
+	if n, detail := mysqlLoadDataWarnings(ctx, conn); n > 0 {
+		return fmt.Errorf("LOAD DATA into %s raised %d warning(s): values were silently adjusted (truncation/clamping/default substitution): %s",
+			opts.Table, n, detail)
+	}
 	return nil
+}
+
+// mysqlLoadDataWarnings reports how many warnings the last statement on conn
+// raised, plus a short sample of their messages. SHOW WARNINGS reads the
+// connection's diagnostics area without clearing it, so it must run on the same
+// connection immediately after the LOAD DATA. Best-effort: a query error yields
+// 0, since the RowsAffected check already guards against dropped rows.
+func mysqlLoadDataWarnings(ctx context.Context, conn *sql.Conn) (int, string) {
+	rows, err := conn.QueryContext(ctx, "SHOW WARNINGS")
+	if err != nil {
+		return 0, ""
+	}
+	defer rows.Close()
+
+	var count int
+	var sample []string
+	for rows.Next() {
+		var level, message string
+		var code int
+		if err := rows.Scan(&level, &code, &message); err != nil {
+			break
+		}
+		// Note-level diagnostics (e.g. decimal fractional rounding like
+		// 1.505 -> DECIMAL(_,2)) are tolerated by the strict batched-INSERT
+		// path as well, so only Error/Warning count as silent loss. Failing
+		// on Note too would make the load stricter than its own fallback and
+		// make success depend on @@local_infile (#544 review).
+		if strings.EqualFold(level, "Note") {
+			continue
+		}
+		count++
+		if len(sample) < 3 {
+			sample = append(sample, fmt.Sprintf("%s %d: %s", level, code, message))
+		}
+	}
+	return count, strings.Join(sample, "; ")
 }
 
 // renderInfileTSV renders rows in LOAD DATA's default-compatible TSV

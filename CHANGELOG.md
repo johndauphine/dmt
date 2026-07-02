@@ -18,6 +18,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- MySQL `LOAD DATA LOCAL INFILE` bulk loads now verify the load was lossless
+  before acking a chunk: a `RowsAffected` mismatch (duplicate-key rows silently
+  dropped under LOAD DATA's implicit IGNORE) or an Error/Warning-level
+  conversion (string truncation, out-of-range clamping, bad datetime) now fails
+  the chunk instead of silently corrupting data. Note-level adjustments (e.g.
+  decimal fractional rounding) are tolerated to match the batched-INSERT path's
+  strict-mode behavior (#544).
+
 - PostgreSQL source introspection now flags `GENERATED ALWAYS/BY DEFAULT AS
   IDENTITY` columns (PG 10+, which have a NULL default) as identity, not only
   legacy `serial`/`nextval` columns. Previously such columns lost their
