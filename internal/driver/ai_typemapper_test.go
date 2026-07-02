@@ -440,23 +440,30 @@ func TestOpenAICompatRequestKeepsDeterministicTemperature(t *testing.T) {
 }
 
 func TestAnthropicRequestOmitsSamplingForSonnet5(t *testing.T) {
-	reqBody := newAnthropicRequest("claude-sonnet-5", 100, "", "map varbinary to postgres")
+	for _, model := range []string{
+		"claude-sonnet-5",
+		"claude-sonnet-5-20260630",
+	} {
+		t.Run(model, func(t *testing.T) {
+			reqBody := newAnthropicRequest(model, 100, "", "map varbinary to postgres")
 
-	raw, err := json.Marshal(reqBody)
-	if err != nil {
-		t.Fatalf("marshal anthropic request: %v", err)
-	}
+			raw, err := json.Marshal(reqBody)
+			if err != nil {
+				t.Fatalf("marshal anthropic request: %v", err)
+			}
 
-	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal anthropic request: %v", err)
-	}
+			var got map[string]any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("unmarshal anthropic request: %v", err)
+			}
 
-	if _, ok := got["temperature"]; ok {
-		t.Fatalf("temperature should be omitted for claude-sonnet-5, got %s", raw)
-	}
-	if got["model"] != "claude-sonnet-5" {
-		t.Fatalf("model = %v, want claude-sonnet-5", got["model"])
+			if _, ok := got["temperature"]; ok {
+				t.Fatalf("temperature should be omitted for %s, got %s", model, raw)
+			}
+			if got["model"] != model {
+				t.Fatalf("model = %v, want %s", got["model"], model)
+			}
+		})
 	}
 }
 

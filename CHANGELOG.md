@@ -150,9 +150,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Updated Anthropic defaults and examples to use Claude Sonnet 5
-  (`claude-sonnet-5`), and omit non-default Anthropic sampling parameters for
-  models that reject them.
+- Updated Anthropic defaults, generated templates, and active configuration
+  examples to use Claude Sonnet 5 (`claude-sonnet-5`), and omit non-default
+  Anthropic sampling parameters for model families that reject them. Historical
+  benchmark notes still name the model used for those recorded runs.
 
 ### Deprecated
 

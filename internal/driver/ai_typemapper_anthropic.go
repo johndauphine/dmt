@@ -118,16 +118,19 @@ func newAnthropicRequest(model string, maxTokens int, systemPrompt, prompt strin
 }
 
 func anthropicRejectsNonDefaultSampling(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "claude-sonnet-5",
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, family := range []string{
+		"claude-sonnet-5",
 		"claude-opus-4-7",
 		"claude-opus-4-8",
 		"claude-fable-5",
-		"claude-mythos-5":
-		return true
-	default:
-		return false
+		"claude-mythos-5",
+	} {
+		if model == family || strings.HasPrefix(model, family+"-") {
+			return true
+		}
 	}
+	return false
 }
 
 func anthropicResponseText(resp anthropicResponse) string {
