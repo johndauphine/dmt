@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
@@ -313,4 +314,115 @@ func TestMySQLCatalogWriterBehavior(t *testing.T) {
 	if noteType != "text" {
 		t.Errorf("note type = %q, want text", noteType)
 	}
+}
+
+// TestMySQLLoadDataRejectsSilentLoss pins #544: LOAD DATA LOCAL runs with
+// implicit-IGNORE semantics, so duplicate-key rows are silently dropped and
+// out-of-range/too-long values are silently adjusted. WriteBatch must now
+// detect both (RowsAffected mismatch and post-load warnings) and fail the
+// chunk instead of acking a lossy load.
+func TestMySQLLoadDataRejectsSilentLoss(t *testing.T) {
+	ctx := context.Background()
+	const dbName = "dmt_behav_infile544"
+	mysqlBootstrap(t, dbName)
+
+	// Confirm the LOAD DATA path is actually exercised (not the batched
+	// fallback), otherwise this test wouldn't cover the fix.
+	raw, err := sql.Open("mysql", "root:TestPass2024@tcp(localhost:3306)/"+dbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var localInfile int
+	if err := raw.QueryRow("SELECT @@local_infile").Scan(&localInfile); err != nil {
+		t.Fatal(err)
+	}
+	if localInfile != 1 {
+		t.Skip("server @@local_infile disabled; WriteBatch would use the batched fallback, not LOAD DATA")
+	}
+	if _, err := raw.Exec(
+		`CREATE TABLE dup_target (id INT PRIMARY KEY, name VARCHAR(50), UNIQUE KEY uq_name (name))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`CREATE TABLE trunc_target (id INT PRIMARY KEY, name VARCHAR(50))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`CREATE TABLE dec_target (id INT PRIMARY KEY, amt DECIMAL(10,2))`); err != nil {
+		t.Fatal(err)
+	}
+
+	tm, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := LoadCatalog("mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWriter(cat, &dbconfig.TargetConfig{
+		Type: "mysql", Host: "localhost", Port: 3306,
+		Database: dbName, User: "root", Password: "TestPass2024",
+		SSLMode: "disable", ChunkSize: 1000,
+	}, 4, driver.WriterOptions{BatchSize: 1000, SourceType: "mysql", TypeMapper: tm})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	defer w.Close()
+
+	t.Run("duplicate on unique index is not silently dropped", func(t *testing.T) {
+		// Both rows have name='same' — the second collides on uq_name and
+		// LOAD DATA's implicit IGNORE would drop it (RowsAffected 1 != 2).
+		err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+			Schema: dbName, Table: "dup_target",
+			Columns: []string{"id", "name"},
+			Rows:    [][]any{{int64(1), "same"}, {int64(2), "same"}},
+		})
+		if err == nil {
+			t.Fatal("expected WriteBatch to fail on a silently-dropped duplicate row")
+		}
+		if !strings.Contains(err.Error(), "loaded 1 of 2") {
+			t.Fatalf("error should report the dropped row, got: %v", err)
+		}
+	})
+
+	t.Run("silently-truncated value is not accepted", func(t *testing.T) {
+		// A 60-char value into VARCHAR(50): LOAD DATA truncates it with a
+		// Warning-level diagnostic (RowsAffected still matches), which the
+		// warning check catches — parity with the batched path's Error 1406.
+		err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+			Schema: dbName, Table: "trunc_target",
+			Columns: []string{"id", "name"},
+			Rows:    [][]any{{int64(1), strings.Repeat("x", 60)}},
+		})
+		if err == nil {
+			t.Fatal("expected WriteBatch to fail on a silently-truncated value")
+		}
+		if !strings.Contains(err.Error(), "warning") {
+			t.Fatalf("error should report the adjustment warning, got: %v", err)
+		}
+	})
+
+	t.Run("decimal fractional rounding (Note-level) is tolerated", func(t *testing.T) {
+		// 1/3 into DECIMAL(10,2) rounds to 0.33 with a NOTE (not a Warning).
+		// The strict batched-INSERT path also tolerates this, so LOAD DATA must
+		// not be stricter than its own fallback (#544 review) — WriteBatch must
+		// succeed, otherwise success would depend on @@local_infile.
+		err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+			Schema: dbName, Table: "dec_target",
+			Columns: []string{"id", "amt"},
+			Rows:    [][]any{{int64(1), float64(1) / float64(3)}},
+		})
+		if err != nil {
+			t.Fatalf("decimal rounding is a Note, not loss — WriteBatch must succeed, got: %v", err)
+		}
+		var amt string
+		if err := raw.QueryRow("SELECT amt FROM dec_target WHERE id = 1").Scan(&amt); err != nil {
+			t.Fatal(err)
+		}
+		if amt != "0.33" {
+			t.Errorf("amt = %q, want 0.33 (rounded)", amt)
+		}
+	})
 }

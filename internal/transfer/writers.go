@@ -2,9 +2,11 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/pool"
@@ -162,11 +164,35 @@ func (wp *writerPool) executeWrite(ctx context.Context, writerID int, rows [][]a
 		return err // adjuster says not a chunk_size issue, or can't help
 	}
 
-	logging.Info("Retrying table %s with chunk_size=%d (was %d rows)", wp.tableName, newChunkSize, len(rows))
+	// On a non-transactional target the failed attempt may have committed a
+	// prefix of the chunk (autocommit per sub-batch). Retrying from row 0 would
+	// re-insert that prefix — and drop_recreate has no PK on the target during
+	// transfer to absorb the duplicates. Resume the retry after the committed
+	// rows; transactional targets roll back and report no committed prefix (#541).
+	//
+	// Only the plain write path duplicates this way. The upsert and
+	// idempotent-on-dup paths are keyed on an existing PK, so re-writing a
+	// committed prefix is a harmless no-op — and their PartialWriteError offset
+	// is measured within an inner merge sub-chunk rather than against `rows`, so
+	// it must NOT be applied here (review N1). Leave those retrying from row 0.
+	retryRows := rows
+	if !wp.useUpsert && !wp.idempotentOnDup {
+		var pw *driver.PartialWriteError
+		if errors.As(err, &pw) && pw.Committed > 0 {
+			if pw.Committed >= len(rows) {
+				return err // nothing left to retry cleanly; surface the failure
+			}
+			retryRows = rows[pw.Committed:]
+			logging.Info("Table %s: %d rows committed before failure; retrying the remaining %d",
+				wp.tableName, pw.Committed, len(retryRows))
+		}
+	}
+
+	logging.Info("Retrying table %s with chunk_size=%d (was %d rows)", wp.tableName, newChunkSize, len(retryRows))
 	observability.Global().IncRetries(wp.tableName)
 
 	// Retry with smaller sub-batches
-	return wp.retryWithChunkSize(ctx, writerID, rows, newChunkSize)
+	return wp.retryWithChunkSize(ctx, writerID, retryRows, newChunkSize)
 }
 
 // classifyWriteError maps a write error to one of a small set of class

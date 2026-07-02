@@ -18,6 +18,30 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The chunk-size retry after a write error no longer duplicates rows on
+  non-transactional (MySQL batched-INSERT) targets. Earlier sub-batches of a
+  failed chunk autocommit independently, so retrying the whole chunk from row 0
+  re-inserted them (drop_recreate has no PK on the target during transfer to
+  absorb the duplicates). The write path now reports how many rows committed
+  (`driver.PartialWriteError`) and the retry resumes after that prefix.
+  Transactional targets (PostgreSQL/SQL Server/SQLite) roll the failed chunk
+  back and are unaffected (#541).
+
+- MySQL `LOAD DATA LOCAL INFILE` bulk loads now verify the load was lossless
+  before acking a chunk: a `RowsAffected` mismatch (duplicate-key rows silently
+  dropped under LOAD DATA's implicit IGNORE) or an Error/Warning-level
+  conversion (string truncation, out-of-range clamping, bad datetime) now fails
+  the chunk instead of silently corrupting data. Note-level adjustments (e.g.
+  decimal fractional rounding) are tolerated to match the batched-INSERT path's
+  strict-mode behavior (#544).
+
+- PostgreSQL source introspection now flags `GENERATED ALWAYS/BY DEFAULT AS
+  IDENTITY` columns (PG 10+, which have a NULL default) as identity, not only
+  legacy `serial`/`nextval` columns. Previously such columns lost their
+  auto-generation on the target (created as plain integers) and were skipped by
+  sequence reset; they now map to the target's SERIAL/IDENTITY/AUTO_INCREMENT
+  form and get their sequence reset (#546).
+
 - The SQL Server identity reseed (`DBCC CHECKIDENT`) now escapes single quotes
   in the qualified table name before interpolating it into the statement's
   string literal. A legal table name containing an apostrophe (e.g.
