@@ -25,7 +25,7 @@ target:
 ai:
   api_key: ${ANTHROPIC_API_KEY}
   provider: anthropic
-  model: claude-haiku-4-5-20251001
+  model: claude-sonnet-5
 
 migration:
   target_mode: drop_recreate

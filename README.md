@@ -188,14 +188,14 @@ migration:
 ai:
   api_key: ${ANTHROPIC_API_KEY}
   provider: anthropic              # Also: openai, gemini, ollama, lmstudio
-  model: claude-haiku-4-5-20251001 # Recommended (cheapest, same results as Sonnet)
+  model: claude-sonnet-5           # Recommended default
   timeout_seconds: 30
 ```
 
 ### Cost
 
 - **API Calls**: ~1-2 per minute (60s cache + 90s cooldown between adjustments)
-- **Cost**: ~$0.005-0.01 per hour with Haiku
+- **Cost**: Model-dependent; AI calls are sparse and cached
 - **Fallback**: Heuristic rules apply if AI unavailable
 
 ### Troubleshooting
@@ -281,7 +281,7 @@ ai:
   providers:
     anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
-      model: "claude-haiku-4-5-20251001"
+      model: "claude-sonnet-5"
 ```
 
 All AI features share common configuration under the `ai` section.
@@ -301,7 +301,7 @@ This auto-enables AI type mapping. Provider defaults to Anthropic.
 
 | Provider | Config Value | Default Model | API Key Variable |
 |----------|--------------|---------------|------------------|
-| **Anthropic** (default) | `anthropic` | `claude-haiku-4-5-20251001` | `ANTHROPIC_API_KEY` |
+| **Anthropic** (default) | `anthropic` | `claude-sonnet-5` | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `openai` | `gpt-5.5` | `OPENAI_API_KEY` |
 | **Google Gemini** | `gemini` | `gemini-2.0-flash` | `GEMINI_API_KEY` |
 | **Ollama** (local) | `ollama` | - | - |
@@ -313,7 +313,7 @@ This auto-enables AI type mapping. Provider defaults to Anthropic.
 ai:
   api_key: ${ANTHROPIC_API_KEY}  # Required - your API key
   provider: anthropic            # Optional - anthropic (default), openai, gemini, ollama, lmstudio
-  model: claude-haiku-4-5-20251001  # Optional - uses provider default if not set
+  model: claude-sonnet-5         # Optional - uses provider default if not set
 
   type_mapping:
     enabled: true                # Auto-enabled when api_key is set
@@ -978,7 +978,7 @@ The `ai` section configures AI-powered features.
 |-----------|----------|---------|-------------|
 | `ai.api_key` | Yes (if using AI) | - | API key for the AI provider |
 | `ai.provider` | No | `anthropic` | AI provider: `anthropic`, `openai`, `gemini`, `ollama`, or `lmstudio` |
-| `ai.model` | No | Provider default | Model to use (e.g., `claude-haiku-4-5-20251001`, `gpt-5.5`, `gemini-2.0-flash`) |
+| `ai.model` | No | Provider default | Model to use (e.g., `claude-sonnet-5`, `gpt-5.5`, `gemini-2.0-flash`) |
 | `ai.timeout_seconds` | No | `30` | API request timeout |
 | `ai.type_mapping.enabled` | No | Auto | Enable AI type mapping (auto-enabled when api_key is set) |
 | `ai.type_mapping.cache_file` | No | `~/.dmt/type-cache.json` | Path to cache AI type mappings |

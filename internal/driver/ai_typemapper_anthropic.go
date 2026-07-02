@@ -13,9 +13,14 @@ import (
 type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
-	Temperature float64            `json:"temperature"`
+	Temperature *float64           `json:"temperature,omitempty"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
 	System      string             `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
+}
+
+type anthropicThinking struct {
+	Type string `json:"type"`
 }
 
 type anthropicMessage struct {
@@ -37,34 +42,8 @@ type anthropicResponse struct {
 func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
 
-	// Detect if this is a type mapping query (short, simple) vs a complex query.
-	// DDL generation prompts need raw SQL output, while runtime controller/smart config
-	// prompts need structured JSON output. Use prompt content to distinguish.
-	maxTokens := 1024
-	systemPrompt := ""
-	if len(prompt) > 500 {
-		maxTokens = 4096
-		upperPrompt := strings.ToUpper(prompt[:min(len(prompt), 200)])
-		isDDL := strings.Contains(upperPrompt, "CREATE TABLE") ||
-			strings.Contains(upperPrompt, "CREATE INDEX") ||
-			strings.Contains(upperPrompt, "ALTER TABLE") ||
-			strings.Contains(upperPrompt, "DROP TABLE")
-		if isDDL {
-			systemPrompt = "You are a database migration expert. Return ONLY the raw SQL statement. No JSON, no markdown, no explanation."
-		} else {
-			systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
-		}
-	}
-
-	reqBody := anthropicRequest{
-		Model:       model,
-		MaxTokens:   maxTokens,
-		Temperature: 0,
-		System:      systemPrompt,
-		Messages: []anthropicMessage{
-			{Role: "user", Content: prompt},
-		},
-	}
+	maxTokens, systemPrompt := m.anthropicRequestOptions(prompt)
+	reqBody := newAnthropicRequest(model, maxTokens, systemPrompt, prompt)
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -99,9 +78,89 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 		return "", fmt.Errorf("API error: %s", anthropicResp.Error.Message)
 	}
 
-	if len(anthropicResp.Content) == 0 || anthropicResp.Content[0].Text == "" {
+	text := anthropicResponseText(anthropicResp)
+	if text == "" {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return anthropicResp.Content[0].Text, nil
+	return text, nil
+}
+
+func (m *AITypeMapper) anthropicRequestOptions(prompt string) (int, string) {
+	// Detect if this is a type mapping query (short, simple) vs a complex query.
+	// DDL generation prompts need raw SQL output, while runtime controller/smart config
+	// prompts need structured JSON output. Use prompt content to distinguish.
+	maxTokens := 1024
+	systemPrompt := ""
+	if len(prompt) > 500 {
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
+		upperPrompt := strings.ToUpper(prompt[:min(len(prompt), 200)])
+		isDDL := strings.Contains(upperPrompt, "CREATE TABLE") ||
+			strings.Contains(upperPrompt, "CREATE INDEX") ||
+			strings.Contains(upperPrompt, "ALTER TABLE") ||
+			strings.Contains(upperPrompt, "DROP TABLE")
+		if isDDL {
+			systemPrompt = "You are a database migration expert. Return ONLY the raw SQL statement. No JSON, no markdown, no explanation."
+		} else {
+			systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
+		}
+	}
+
+	return maxTokens, systemPrompt
+}
+
+func newAnthropicRequest(model string, maxTokens int, systemPrompt, prompt string) anthropicRequest {
+	reqBody := anthropicRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		System:    systemPrompt,
+		Messages: []anthropicMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+
+	if !anthropicRejectsNonDefaultSampling(model) {
+		temperature := 0.0
+		reqBody.Temperature = &temperature
+	}
+	if anthropicAdaptiveThinkingDefault(model) {
+		reqBody.Thinking = &anthropicThinking{Type: "disabled"}
+	}
+
+	return reqBody
+}
+
+func anthropicRejectsNonDefaultSampling(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	for _, family := range []string{
+		"claude-sonnet-5",
+		"claude-opus-4-7",
+		"claude-opus-4-8",
+		"claude-fable-5",
+		"claude-mythos-5",
+	} {
+		if model == family || strings.HasPrefix(model, family+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+func anthropicAdaptiveThinkingDefault(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-")
+}
+
+func anthropicResponseText(resp anthropicResponse) string {
+	var parts []string
+	for _, content := range resp.Content {
+		if content.Text == "" {
+			continue
+		}
+		if content.Type != "" && content.Type != "text" {
+			continue
+		}
+		parts = append(parts, content.Text)
+	}
+	return strings.Join(parts, "\n")
 }

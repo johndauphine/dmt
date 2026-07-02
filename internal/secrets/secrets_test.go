@@ -17,7 +17,7 @@ ai:
   providers:
     anthropic:
       api_key: "test-key"
-      model: "claude-haiku-4-5-20251001"
+      model: "claude-sonnet-5"
     ollama:
       base_url: "http://localhost:11434"
       model: "llama3"
@@ -161,7 +161,7 @@ ai:
   default_provider: anthropic
   providers:
     anthropic:
-      model: "claude-haiku-4-5-20251001"
+      model: "claude-sonnet-5"
 
 encryption:
   master_key: "test"
@@ -224,7 +224,7 @@ func TestGetEffectiveModel(t *testing.T) {
 
 	// Should return default model when not specified
 	model := provider.GetEffectiveModel("anthropic")
-	if model != "claude-haiku-4-5-20251001" {
+	if model != "claude-sonnet-5" {
 		t.Errorf("Expected default Anthropic model, got %q", model)
 	}
 

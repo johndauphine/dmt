@@ -91,7 +91,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"anthropic", "claude-haiku-4-5-20251001"},
+		{"anthropic", "claude-sonnet-5"},
 		{"openai", "gpt-5.5"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},
@@ -332,14 +332,7 @@ func TestAITypeMapper_AnthropicAPI(t *testing.T) {
 }
 
 func TestAnthropicRequestIncludesDeterministicDefaults(t *testing.T) {
-	reqBody := anthropicRequest{
-		Model:       "claude-test",
-		MaxTokens:   100,
-		Temperature: 0,
-		Messages: []anthropicMessage{
-			{Role: "user", Content: "map varbinary to postgres"},
-		},
-	}
+	reqBody := newAnthropicRequest("claude-test", 100, "", "map varbinary to postgres")
 
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
@@ -357,6 +350,9 @@ func TestAnthropicRequestIncludesDeterministicDefaults(t *testing.T) {
 	}
 	if temperature != 0 {
 		t.Fatalf("temperature = %v, want 0", temperature)
+	}
+	if _, ok := got["thinking"]; ok {
+		t.Fatalf("thinking should be omitted for legacy Anthropic models, got %s", raw)
 	}
 }
 
@@ -443,6 +439,72 @@ func TestOpenAICompatRequestKeepsDeterministicTemperature(t *testing.T) {
 	}
 	if temperature != 0 {
 		t.Fatalf("temperature = %v, want 0", temperature)
+	}
+}
+
+func TestAnthropicRequestOmitsSamplingForSonnet5(t *testing.T) {
+	for _, model := range []string{
+		"claude-sonnet-5",
+		"claude-sonnet-5-20260630",
+	} {
+		t.Run(model, func(t *testing.T) {
+			reqBody := newAnthropicRequest(model, 100, "", "map varbinary to postgres")
+
+			raw, err := json.Marshal(reqBody)
+			if err != nil {
+				t.Fatalf("marshal anthropic request: %v", err)
+			}
+
+			var got map[string]any
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("unmarshal anthropic request: %v", err)
+			}
+
+			if _, ok := got["temperature"]; ok {
+				t.Fatalf("temperature should be omitted for %s, got %s", model, raw)
+			}
+			if got["model"] != model {
+				t.Fatalf("model = %v, want %s", got["model"], model)
+			}
+			thinking, ok := got["thinking"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected thinking field for %s, got %s", model, raw)
+			}
+			if thinking["type"] != "disabled" {
+				t.Fatalf("thinking.type = %v, want disabled", thinking["type"])
+			}
+		})
+	}
+}
+
+func TestAnthropicComplexPromptUsesConfiguredMaxTokens(t *testing.T) {
+	provider := testProvider("test-api-key")
+	provider.MaxTokens = 12000
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+
+	maxTokens, systemPrompt := mapper.anthropicRequestOptions(strings.Repeat("map this database schema\n", 30))
+
+	if maxTokens != 12000 {
+		t.Fatalf("max tokens = %d, want configured value 12000", maxTokens)
+	}
+	if !strings.Contains(systemPrompt, "Return ONLY valid JSON") {
+		t.Fatalf("system prompt = %q, want JSON-only instruction", systemPrompt)
+	}
+}
+
+func TestAnthropicResponseTextSkipsThinkingBlocks(t *testing.T) {
+	response := anthropicResponse{
+		Content: []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{
+			{Type: "thinking"},
+			{Type: "text", Text: `{"ok":true}`},
+		},
+	}
+
+	if got := anthropicResponseText(response); got != `{"ok":true}` {
+		t.Fatalf("response text = %q, want text block", got)
 	}
 }
 
