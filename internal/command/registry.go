@@ -79,7 +79,7 @@ var Registry = []CommandSpec{
 		{Name: "ai-schema-advisor", Status: TUISupported}, // /run --ai-schema-advisor
 		{Name: "explore", Status: TUISupported},           // /explore
 		{Name: "skip-preflight", Status: TUISupported},    // /run --skip-preflight
-		{Name: "confirm-backup", Status: TUICLIOnly, Ref: "TUI confirms interactively"},
+		{Name: "confirm-backup", Status: TUISupported, Ref: "/run --confirm-backup"},
 	}},
 	{Path: "resume", Status: TUISupported, Flags: []FlagSpec{
 		{Name: "force-resume", Status: TUISupported},   // /resume --force-resume

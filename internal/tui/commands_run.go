@@ -63,6 +63,13 @@ func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) 
 		if ov.skipPreflight != "" {
 			cfg.Migration.SkipPreflight = []string{ov.skipPreflight}
 		}
+		// /run --confirm-backup: acknowledge the drop_recreate backup gate the
+		// preflight enforces against a non-empty target (#568) — same effect as
+		// the CLI's --confirm-backup, so TUI users have a compliant path other
+		// than hand-editing YAML or skipping preflight.
+		if ov.confirmBackup {
+			cfg.Migration.ConfirmBackup = true
+		}
 
 		// Apply /explore session state (#182). Arm overrides cfg.Migration.Explore
 		// for THIS run only; mode overrides cfg.Migration.ExploreMode for as long

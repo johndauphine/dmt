@@ -50,7 +50,8 @@ func (m *Model) handleCommand(cmdStr string) tea.Cmd {
   /run --dry-run        Preview the migration plan without executing
                         (add --ai-schema-advisor for advisory AI schema review)
   /run flags            --source-schema NAME, --target-schema NAME,
-                        --workers N, --skip-preflight LIST|all
+                        --workers N, --skip-preflight LIST|all,
+                        --confirm-backup (ack the drop_recreate backup gate)
   /resume [config_file] Resume an interrupted migration
   /resume --profile NAME Resume using a saved profile
   /resume flags         --force-resume (resume despite config changes),

@@ -35,6 +35,7 @@ type runOverrides struct {
 	skipPreflight   string
 	dryRun          bool
 	aiSchemaAdvisor bool
+	confirmBackup   bool
 	exploreOnce     bool
 	exploreMode     string
 }
@@ -52,6 +53,7 @@ func (m *Model) parseRunArgs(parts []string) (configFile, profileName string, ov
 		bools: map[string]string{
 			"--dry-run":           "dry-run",
 			"--ai-schema-advisor": "ai-schema-advisor",
+			"--confirm-backup":    "confirm-backup",
 		},
 	}, parts)
 	if err != nil {
@@ -69,6 +71,7 @@ func (m *Model) parseRunArgs(parts []string) (configFile, profileName string, ov
 	ov.skipPreflight = pa.strs["skip-preflight"]
 	ov.dryRun = pa.bools["dry-run"]
 	ov.aiSchemaAdvisor = pa.bools["ai-schema-advisor"]
+	ov.confirmBackup = pa.bools["confirm-backup"]
 	configFile, profileName = m.resolveOrigin(pa)
 	return configFile, profileName, ov, nil
 }

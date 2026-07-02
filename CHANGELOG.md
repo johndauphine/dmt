@@ -18,6 +18,21 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `sanitizeErrorResponse` no longer panics (or mis-redacts) on API error bodies
+  containing runes whose `strings.ToLower` changes byte length (e.g. U+023A
+  `Ⱥ`). It searched a lowercased copy but sliced the original with those
+  offsets, so a length-shifting rune before a key token could push the index
+  past the string and cause an out-of-range slice — turning an ordinary API
+  error into a run-aborting panic. It now folds only ASCII case
+  (length-preserving) for the search (#562).
+
+- The TUI now offers `/run --confirm-backup`, acknowledging the drop_recreate
+  backup gate the preflight enforces against a non-empty target. The
+  command-parity registry previously claimed the TUI "confirms interactively",
+  but no such surface existed — TUI users hit a blocking finding whose only
+  workarounds were hand-editing the YAML or skipping preflight entirely. The
+  registry now names the real flag (#568).
+
 - TUI robustness cluster: (a) `/run`//`/resume` now mark the migration running
   synchronously, so a second `/run`//`/resume` issued while connections are
   still dialing is rejected instead of starting a second concurrent migration
