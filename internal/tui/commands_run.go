@@ -22,7 +22,17 @@ func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) 
 	// Capture session values synchronously (#444): the goroutine below
 	// must not read the live session map while the UI mutates it (codex).
 	settings := m.captureRunSessionSettings()
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
+		// A panic in the synchronous prelude (config load, NewWithOptions
+		// dialing a driver) must resolve to a MigrationDoneMsg — /run already
+		// set migrationStatus="running", so otherwise it sticks "running"
+		// forever and every future /run or /resume is rejected (#557). Mirrors
+		// runResumeCmd's top-level recover.
+		defer func() {
+			if r := recover(); r != nil {
+				result = MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error: %v", r)}
+			}
+		}()
 		p := GetProgramRef()
 		if p == nil {
 			return MigrationDoneMsg{Status: "failed", Message: "Internal error: no program reference"}
@@ -128,33 +138,45 @@ func (m Model) runMigrationCmd(configFile, profileName string, ov runOverrides) 
 				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error creating pipe: %v", pipeErr)})
 				return
 			}
-			origStdout := os.Stdout
-			origStderr := os.Stderr
-			os.Stdout = w
-			os.Stderr = w
-			logging.SetOutput(w)
-
 			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				buf := make([]byte, 1024)
-				for {
-					n, err := r.Read(buf)
-					if n > 0 {
-						p.Send(OutputMsg(string(buf[:n])))
+			// Hold stdoutMu for the whole run so the migration owns the global
+			// os.Stdout/os.Stderr redirect exclusively — a concurrent /status or
+			// /history capture (possible in the connection-dial window before
+			// mode becomes ModeMigration) blocks rather than racing the globals
+			// and restoring the migration's now-closed pipe. All cleanup is
+			// deferred so an orch.Run panic (caught by the outer recover) can't
+			// leave the mutex wedged or os.Stdout stuck on the closed pipe (#556).
+			runErr := func() error {
+				stdoutMu.Lock()
+				defer stdoutMu.Unlock()
+				origStdout := os.Stdout
+				origStderr := os.Stderr
+				os.Stdout = w
+				os.Stderr = w
+				logging.SetOutput(w)
+				defer func() {
+					w.Close()
+					os.Stdout = origStdout
+					os.Stderr = origStderr
+					logging.SetOutput(origStdout)
+				}()
+
+				go func() {
+					defer close(done)
+					buf := make([]byte, 1024)
+					for {
+						n, err := r.Read(buf)
+						if n > 0 {
+							p.Send(OutputMsg(string(buf[:n])))
+						}
+						if err != nil {
+							break
+						}
 					}
-					if err != nil {
-						break
-					}
-				}
+				}()
+
+				return orch.Run(ctx)
 			}()
-
-			runErr := orch.Run(ctx)
-
-			w.Close()
-			os.Stdout = origStdout
-			os.Stderr = origStderr
-			logging.SetOutput(origStdout)
 			<-done
 
 			if runErr != nil {
@@ -245,33 +267,41 @@ func (m Model) runResumeCmd(configFile, profileName string, forceResume bool, sk
 				p.Send(MigrationDoneMsg{Status: "failed", Message: fmt.Sprintf("Error creating pipe: %v", pipeErr)})
 				return
 			}
-			origStdout := os.Stdout
-			origStderr := os.Stderr
-			os.Stdout = w
-			os.Stderr = w
-			logging.SetOutput(w)
-
 			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				buf := make([]byte, 1024)
-				for {
-					n, err := r.Read(buf)
-					if n > 0 {
-						p.Send(OutputMsg(string(buf[:n])))
+			// Same exclusive, panic-safe stdout redirect as the /run path — a
+			// concurrent /status capture in the dial window must not race the
+			// globals or restore the resume's now-closed pipe (#556).
+			runErr := func() error {
+				stdoutMu.Lock()
+				defer stdoutMu.Unlock()
+				origStdout := os.Stdout
+				origStderr := os.Stderr
+				os.Stdout = w
+				os.Stderr = w
+				logging.SetOutput(w)
+				defer func() {
+					w.Close()
+					os.Stdout = origStdout
+					os.Stderr = origStderr
+					logging.SetOutput(origStdout)
+				}()
+
+				go func() {
+					defer close(done)
+					buf := make([]byte, 1024)
+					for {
+						n, err := r.Read(buf)
+						if n > 0 {
+							p.Send(OutputMsg(string(buf[:n])))
+						}
+						if err != nil {
+							break
+						}
 					}
-					if err != nil {
-						break
-					}
-				}
+				}()
+
+				return orch.Resume(ctx)
 			}()
-
-			runErr := orch.Resume(ctx)
-
-			w.Close()
-			os.Stdout = origStdout
-			os.Stderr = origStderr
-			logging.SetOutput(origStdout)
 			<-done
 
 			if runErr != nil {

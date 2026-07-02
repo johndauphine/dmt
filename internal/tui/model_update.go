@@ -115,6 +115,16 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 				m.appendOutput(styleSystemOutput.Render("Wizard cancelled") + "\n")
 				return m, nil
 			}
+			// Don't quit out from under a running migration — an accidental Esc
+			// during a long transfer would kill the process mid-flight with no
+			// context cancellation or checkpoint flush, leaving un-acked progress
+			// (and partial data on ROW_NUMBER tables, which have no resume
+			// cleanup). Cancel gracefully like Ctrl+C instead (#558).
+			if m.migrationCancel != nil && m.migrationStatus == "running" {
+				m.migrationCancel()
+				m.appendOutput(styleSystemOutput.Render("Cancelling migration... please wait") + "\n")
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case tea.KeyEnter:
@@ -356,8 +366,12 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 		}
 
 	case TickMsg:
-		m.gitInfo = GetGitInfo()
-		return m, tickCmd()
+		// Fetch git info off the event loop (#559) and schedule the next tick.
+		// Update only stores the result, in the gitInfoMsg case below.
+		return m, tea.Batch(tickCmd(), gitInfoCmd())
+
+	case gitInfoMsg:
+		m.gitInfo = GitInfo(msg)
 	}
 
 	m.textInput, tiCmd = m.textInput.Update(msg)

@@ -268,6 +268,17 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 			m.exploreArmed = false
 		}
 		overrides.exploreMode = m.exploreMode
+		// Mark running synchronously (on the single-threaded Update loop) so a
+		// second /run or /resume issued while connections are still dialing —
+		// before the async migrationStartedMsg round-trips — is rejected by the
+		// guard above rather than starting a second concurrent migration. The
+		// MigrationDoneMsg handler resets it, including on early-start failure.
+		// A dry-run never enters the running state (it sends neither
+		// migrationStartedMsg nor MigrationDoneMsg), so it must not be marked
+		// running — that would stick forever and block all future runs (#557).
+		if !overrides.dryRun {
+			m.migrationStatus = "running"
+		}
 		return m.runMigrationCmd(configFile, profileName, overrides)
 
 	case "/resume":
@@ -281,6 +292,9 @@ Built with Go and Bubble Tea.`, version.Version, version.Description)
 		if err != nil {
 			return errOutput(err)
 		}
+		// Mark running synchronously so a concurrent /run or /resume in the
+		// connection-dial window is rejected by the guard (#557).
+		m.migrationStatus = "running"
 		return m.runResumeCmd(configFile, profileName, forceResume, skipPreflight)
 
 	case "/preflight", "/health-check":
