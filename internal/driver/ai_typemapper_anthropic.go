@@ -14,8 +14,13 @@ type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
 	Temperature *float64           `json:"temperature,omitempty"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
 	System      string             `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
+}
+
+type anthropicThinking struct {
+	Type string `json:"type"`
 }
 
 type anthropicMessage struct {
@@ -37,25 +42,7 @@ type anthropicResponse struct {
 func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (string, error) {
 	model := m.provider.GetEffectiveModel(m.providerName)
 
-	// Detect if this is a type mapping query (short, simple) vs a complex query.
-	// DDL generation prompts need raw SQL output, while runtime controller/smart config
-	// prompts need structured JSON output. Use prompt content to distinguish.
-	maxTokens := 1024
-	systemPrompt := ""
-	if len(prompt) > 500 {
-		maxTokens = 4096
-		upperPrompt := strings.ToUpper(prompt[:min(len(prompt), 200)])
-		isDDL := strings.Contains(upperPrompt, "CREATE TABLE") ||
-			strings.Contains(upperPrompt, "CREATE INDEX") ||
-			strings.Contains(upperPrompt, "ALTER TABLE") ||
-			strings.Contains(upperPrompt, "DROP TABLE")
-		if isDDL {
-			systemPrompt = "You are a database migration expert. Return ONLY the raw SQL statement. No JSON, no markdown, no explanation."
-		} else {
-			systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
-		}
-	}
-
+	maxTokens, systemPrompt := m.anthropicRequestOptions(prompt)
 	reqBody := newAnthropicRequest(model, maxTokens, systemPrompt, prompt)
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -99,6 +86,29 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 	return text, nil
 }
 
+func (m *AITypeMapper) anthropicRequestOptions(prompt string) (int, string) {
+	// Detect if this is a type mapping query (short, simple) vs a complex query.
+	// DDL generation prompts need raw SQL output, while runtime controller/smart config
+	// prompts need structured JSON output. Use prompt content to distinguish.
+	maxTokens := 1024
+	systemPrompt := ""
+	if len(prompt) > 500 {
+		maxTokens = m.provider.GetEffectiveMaxTokens(m.providerName)
+		upperPrompt := strings.ToUpper(prompt[:min(len(prompt), 200)])
+		isDDL := strings.Contains(upperPrompt, "CREATE TABLE") ||
+			strings.Contains(upperPrompt, "CREATE INDEX") ||
+			strings.Contains(upperPrompt, "ALTER TABLE") ||
+			strings.Contains(upperPrompt, "DROP TABLE")
+		if isDDL {
+			systemPrompt = "You are a database migration expert. Return ONLY the raw SQL statement. No JSON, no markdown, no explanation."
+		} else {
+			systemPrompt = "You are a database migration tuning assistant. Return ONLY valid JSON. No markdown fences, no explanation outside the JSON."
+		}
+	}
+
+	return maxTokens, systemPrompt
+}
+
 func newAnthropicRequest(model string, maxTokens int, systemPrompt, prompt string) anthropicRequest {
 	reqBody := anthropicRequest{
 		Model:     model,
@@ -112,6 +122,9 @@ func newAnthropicRequest(model string, maxTokens int, systemPrompt, prompt strin
 	if !anthropicRejectsNonDefaultSampling(model) {
 		temperature := 0.0
 		reqBody.Temperature = &temperature
+	}
+	if anthropicAdaptiveThinkingDefault(model) {
+		reqBody.Thinking = &anthropicThinking{Type: "disabled"}
 	}
 
 	return reqBody
@@ -131,6 +144,11 @@ func anthropicRejectsNonDefaultSampling(model string) bool {
 		}
 	}
 	return false
+}
+
+func anthropicAdaptiveThinkingDefault(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-")
 }
 
 func anthropicResponseText(resp anthropicResponse) string {

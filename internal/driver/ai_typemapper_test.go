@@ -351,6 +351,9 @@ func TestAnthropicRequestIncludesDeterministicDefaults(t *testing.T) {
 	if temperature != 0 {
 		t.Fatalf("temperature = %v, want 0", temperature)
 	}
+	if _, ok := got["thinking"]; ok {
+		t.Fatalf("thinking should be omitted for legacy Anthropic models, got %s", raw)
+	}
 }
 
 func TestOpenAIRequestOmitsTemperatureForGPT5Models(t *testing.T) {
@@ -463,7 +466,29 @@ func TestAnthropicRequestOmitsSamplingForSonnet5(t *testing.T) {
 			if got["model"] != model {
 				t.Fatalf("model = %v, want %s", got["model"], model)
 			}
+			thinking, ok := got["thinking"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected thinking field for %s, got %s", model, raw)
+			}
+			if thinking["type"] != "disabled" {
+				t.Fatalf("thinking.type = %v, want disabled", thinking["type"])
+			}
 		})
+	}
+}
+
+func TestAnthropicComplexPromptUsesConfiguredMaxTokens(t *testing.T) {
+	provider := testProvider("test-api-key")
+	provider.MaxTokens = 12000
+	mapper := testMapperWithTempCache(t, "anthropic", provider)
+
+	maxTokens, systemPrompt := mapper.anthropicRequestOptions(strings.Repeat("map this database schema\n", 30))
+
+	if maxTokens != 12000 {
+		t.Fatalf("max tokens = %d, want configured value 12000", maxTokens)
+	}
+	if !strings.Contains(systemPrompt, "Return ONLY valid JSON") {
+		t.Fatalf("system prompt = %q, want JSON-only instruction", systemPrompt)
 	}
 }
 
