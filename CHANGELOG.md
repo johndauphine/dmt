@@ -18,6 +18,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Secret template expansion (`${env:}`/`${file:}`/`${VAR}`) now happens
+  per-scalar on the parsed YAML node tree instead of as raw text substitution
+  over the whole document. A secret value containing `#`, a newline, or `:`
+  (e.g. `secret #2024`, a PEM key, a JSON blob) can no longer be truncated as
+  a YAML comment or inject/override config structure such as the target
+  connection. Embedded and multiple templates within one value still resolve
+  (#552).
+
 - `secrets.Save` no longer silently rewrites `~/.secrets/dmt-config.yaml`
   from a zero-value config when the existing file has a YAML syntax error —
   it now surfaces the parse error and refuses to write, preserving the

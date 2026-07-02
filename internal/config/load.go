@@ -5,7 +5,6 @@ import (
 	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
-	"regexp"
 )
 
 // Load reads configuration from a YAML file.
@@ -26,41 +25,6 @@ func LoadWithOptions(path string, opts LoadOptions) (*Config, error) {
 	}
 
 	return LoadBytes(data)
-}
-
-// expandYAMLTemplates expands ${file:path} and ${env:VAR} templates in YAML string.
-// Also supports legacy ${VAR} syntax for backward compatibility.
-// This runs before YAML parsing to allow templates in any field.
-//
-// Security note: File paths are not restricted, but referenced files must use
-// owner-only permissions. Use trusted private secret paths and avoid
-// user-controlled paths.
-func expandYAMLTemplates(yamlStr string) (string, error) {
-	// Pattern to match ${file:path}, ${env:VAR}, or ${VAR} in YAML
-	// - file: allows any path characters (user responsibility to use safe paths)
-	// - env: restricted to valid env var names [A-Za-z_][A-Za-z0-9_]*
-	// - legacy ${VAR}: also restricted to valid env var names
-	pattern := regexp.MustCompile(`\$\{file:([^}]+)\}|\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}|\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-
-	var firstErr error
-	result := pattern.ReplaceAllStringFunc(yamlStr, func(match string) string {
-		// If we've already encountered an error, leave subsequent matches unchanged
-		if firstErr != nil {
-			return match
-		}
-
-		expanded, err := expandTemplateValue(match)
-		if err != nil {
-			firstErr = err
-			return match // Keep original on error
-		}
-		return expanded
-	})
-
-	if firstErr != nil {
-		return "", firstErr
-	}
-	return result, nil
 }
 
 // Expand resolves a single ${env:...}, ${file:...}, or legacy ${VAR}
@@ -104,15 +68,24 @@ func LoadRaw(path string) (*Config, error) {
 
 // LoadBytes reads configuration from YAML bytes.
 func LoadBytes(data []byte) (*Config, error) {
-	// Expand templates (${file:path}, ${env:VAR}, and legacy ${VAR} syntax)
-	expanded, err := expandYAMLTemplates(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("expanding templates: %w", err)
+	// Parse first, then expand ${file:}/${env:}/${VAR} templates per-scalar on
+	// the node tree — NOT as raw text substitution over the document. A secret
+	// value is stored as a literal scalar node value, so characters like '#',
+	// newlines, or ':' inside a secret are preserved verbatim and cannot
+	// truncate the value (YAML comment) or inject config structure (#552).
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
+	if node.Kind != 0 {
+		if err := expandAllTemplates(&node); err != nil {
+			return nil, fmt.Errorf("expanding templates: %w", err)
+		}
+		if err := node.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("parsing config: %w", err)
+		}
 	}
 
 	// Apply defaults

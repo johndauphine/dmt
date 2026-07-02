@@ -14,9 +14,40 @@ import (
 // - filePattern: ${file:/path/to/file} - any path characters allowed
 // - envPattern: ${env:VAR_NAME} - valid env var names only [A-Za-z_][A-Za-z0-9_]*
 // - legacyEnvPattern: ${VAR_NAME} - legacy shorthand for ${env:VAR_NAME}
+//
+// The *Pattern vars are anchored (^...$) and match a value that is entirely a
+// single template. embeddedTemplatePattern is the unanchored form used to
+// expand one or more templates appearing anywhere within a scalar value.
 var filePattern = regexp.MustCompile(`^\$\{file:(.+)\}$`)
 var envPattern = regexp.MustCompile(`^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$`)
 var legacyEnvPattern = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+var embeddedTemplatePattern = regexp.MustCompile(`\$\{file:([^}]+)\}|\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}|\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEmbeddedTemplates expands every ${file:...}/${env:...}/${VAR} template
+// occurring anywhere within a single scalar string, leaving the surrounding
+// text intact (so composite values like "host=${env:HOST}" work). The result
+// is the literal scalar content — callers set it as a yaml.Node value, so a
+// '#', newline, or ':' in an expanded secret stays part of the string and
+// cannot truncate or inject YAML structure the way whole-document text
+// substitution could (#552).
+func expandEmbeddedTemplates(value string) (string, error) {
+	var firstErr error
+	result := embeddedTemplatePattern.ReplaceAllStringFunc(value, func(match string) string {
+		if firstErr != nil {
+			return match
+		}
+		expanded, err := expandTemplateValue(match)
+		if err != nil {
+			firstErr = err
+			return match
+		}
+		return expanded
+	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return result, nil
+}
 
 // expandTemplateValue expands template patterns in a string value.
 // Supported patterns:
@@ -63,11 +94,22 @@ func expandTemplateValue(value string) (string, error) {
 	return value, nil
 }
 
+// expandRawNonStringTemplates expands templates in non-string scalar fields
+// only, leaving string placeholders literal. Used by LoadRaw so the setup
+// wizard can round-trip ${env:...} secrets back to disk unresolved.
 func expandRawNonStringTemplates(node *yaml.Node) error {
-	return expandRawNode(node, reflect.TypeOf(Config{}))
+	return expandRawNode(node, reflect.TypeOf(Config{}), false)
 }
 
-func expandRawNode(node *yaml.Node, typ reflect.Type) error {
+// expandAllTemplates expands templates in every scalar field, including
+// strings. Used by the runtime load path (LoadBytes) so connection secrets
+// resolve before use, per-scalar on the parsed node tree rather than as raw
+// text substitution over the document (#552).
+func expandAllTemplates(node *yaml.Node) error {
+	return expandRawNode(node, reflect.TypeOf(Config{}), true)
+}
+
+func expandRawNode(node *yaml.Node, typ reflect.Type, expandStrings bool) error {
 	if node == nil {
 		return nil
 	}
@@ -77,9 +119,9 @@ func expandRawNode(node *yaml.Node, typ reflect.Type) error {
 		if len(node.Content) == 0 {
 			return nil
 		}
-		return expandRawNode(node.Content[0], typ)
+		return expandRawNode(node.Content[0], typ, expandStrings)
 	case yaml.MappingNode:
-		return expandRawMapping(node, derefType(typ))
+		return expandRawMapping(node, derefType(typ), expandStrings)
 	case yaml.SequenceNode:
 		typ = derefType(typ)
 		if typ.Kind() != reflect.Slice && typ.Kind() != reflect.Array {
@@ -87,42 +129,66 @@ func expandRawNode(node *yaml.Node, typ reflect.Type) error {
 		}
 		elemType := typ.Elem()
 		for _, child := range node.Content {
-			if err := expandRawNode(child, elemType); err != nil {
+			if err := expandRawNode(child, elemType, expandStrings); err != nil {
 				return err
 			}
 		}
 	case yaml.ScalarNode:
-		return expandRawScalar(node, derefType(typ))
+		return expandRawScalar(node, derefType(typ), expandStrings)
 	}
 
 	return nil
 }
 
-func expandRawMapping(node *yaml.Node, typ reflect.Type) error {
-	if typ.Kind() != reflect.Struct {
-		return nil
-	}
-
-	fields := yamlFieldTypes(typ)
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		key := node.Content[i]
-		value := node.Content[i+1]
-		fieldType, ok := fields[key.Value]
-		if !ok {
-			continue
+func expandRawMapping(node *yaml.Node, typ reflect.Type, expandStrings bool) error {
+	switch typ.Kind() {
+	case reflect.Struct:
+		fields := yamlFieldTypes(typ)
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i]
+			value := node.Content[i+1]
+			fieldType, ok := fields[key.Value]
+			if !ok {
+				continue
+			}
+			if err := expandRawNode(value, fieldType, expandStrings); err != nil {
+				return err
+			}
 		}
-		if err := expandRawNode(value, fieldType); err != nil {
+	case reflect.Map:
+		elemType := typ.Elem()
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			value := node.Content[i+1]
+			if err := expandRawNode(value, elemType, expandStrings); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func expandRawScalar(node *yaml.Node, typ reflect.Type, expandStrings bool) error {
+	if typ.Kind() == reflect.String {
+		if !expandStrings || !embeddedTemplatePattern.MatchString(node.Value) {
+			return nil
+		}
+		// Expand one or more embedded templates and store the result as the
+		// literal scalar value. Force the !!str tag so the expanded content
+		// is decoded verbatim — a secret containing '#', a newline, or ':'
+		// cannot truncate the value or inject config structure (#552).
+		expanded, err := expandEmbeddedTemplates(node.Value)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func expandRawScalar(node *yaml.Node, typ reflect.Type) error {
-	if typ.Kind() == reflect.String || !isTemplateValue(node.Value) {
+		node.Value = expanded
+		node.Tag = "!!str"
+		node.Style = 0
 		return nil
 	}
 
+	if !isTemplateValue(node.Value) {
+		return nil
+	}
 	expanded, err := Expand(node.Value)
 	if err != nil {
 		return err
