@@ -18,6 +18,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- TUI robustness cluster: (a) `/run`//`/resume` now mark the migration running
+  synchronously, so a second `/run`//`/resume` issued while connections are
+  still dialing is rejected instead of starting a second concurrent migration
+  (#557); (b) `/status`//`/history` capture no longer deadlocks on output larger
+  than the OS pipe buffer (it drains concurrently) and the per-command
+  `os.Stdout` redirect is serialized against the migration's, panic-safely, so
+  the two can't race the global or restore each other's closed pipe (#556);
+  (c) Esc during a running migration now cancels it gracefully (context cancel +
+  checkpoint flush) like Ctrl+C instead of killing the process mid-flight (#558);
+  (d) the periodic `git` status refresh runs off the Bubble Tea event loop, so a
+  slow `git status` (large repo, NFS/WSL2) no longer freezes the UI every tick
+  (#559).
+
 - A resume that fails before the transfer phase for an environmental reason
   (preflight check, schema extraction, target preparation, or Ctrl+C) now
   leaves the run resumable instead of marking it `failed`. Previously such a

@@ -83,6 +83,13 @@ func GetProgramRef() *tea.Program {
 	return programRef
 }
 
+// stdoutMu serializes every global os.Stdout/os.Stderr redirect in the TUI —
+// the migration's (commands_run.go) and each command capture's — so the two
+// never race on the process-global or restore each other's now-closed pipe.
+// The base session redirect (CaptureOutput) is installed once at startup before
+// any of this runs and is not part of the mutual exclusion (#556).
+var stdoutMu sync.Mutex
+
 // CaptureToString captures stdout from a function and returns it as a string.
 // Used for commands like /status and /history that print to stdout.
 func CaptureToString(fn func() error) (string, error) {
@@ -91,29 +98,50 @@ func CaptureToString(fn func() error) (string, error) {
 		return "", fmt.Errorf("creating pipe: %w", err)
 	}
 
-	origStdout := os.Stdout
-	os.Stdout = w
-
-	// Run the function
-	fnErr := fn()
-
-	// Restore stdout and close writer
-	w.Close()
-	os.Stdout = origStdout
-
-	// Read captured output
-	var buf []byte
-	readBuf := make([]byte, 1024)
-	for {
-		n, readErr := r.Read(readBuf)
-		if n > 0 {
-			buf = append(buf, readBuf[:n]...)
+	// Drain the read end concurrently while fn writes. Output larger than the
+	// OS pipe buffer (~64KB; /status --detailed on 700+ tables exceeds it) would
+	// otherwise block the writer forever with no reader — hanging the command
+	// goroutine permanently, so its `defer orch.Close()` never runs and the
+	// orchestrator's DB + checkpoint SQLite handles leak for the TUI's life
+	// (#556).
+	captured := make(chan []byte, 1)
+	go func() {
+		var buf []byte
+		readBuf := make([]byte, 4096)
+		for {
+			n, readErr := r.Read(readBuf)
+			if n > 0 {
+				buf = append(buf, readBuf[:n]...)
+			}
+			if readErr != nil {
+				break
+			}
 		}
-		if readErr != nil {
-			break
-		}
-	}
+		captured <- buf
+	}()
+
+	// Redirect under stdoutMu so this capture is mutually exclusive with the
+	// migration's redirect: origStdout is always the stable base, never a peer's
+	// transient pipe, so the restore can't clobber it. Every cleanup step is
+	// deferred and a panicking fn is recovered, so a panic never leaves the
+	// mutex wedged or os.Stdout pointing at this closed pipe (#556).
+	fnErr := func() (err error) {
+		stdoutMu.Lock()
+		defer stdoutMu.Unlock()
+		origStdout := os.Stdout
+		os.Stdout = w
+		defer func() {
+			os.Stdout = origStdout
+			w.Close()
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic while capturing output: %v", r)
+			}
+		}()
+		return fn()
+	}()
+
+	out := <-captured
 	r.Close()
 
-	return string(buf), fnErr
+	return string(out), fnErr
 }
