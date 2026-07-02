@@ -2280,3 +2280,138 @@ func TestOpenAIResponse_ErrorMessage(t *testing.T) {
 		})
 	}
 }
+
+// TestTableCacheKeyIncludesIsIdentity pins #560: the AI table-DDL cache key must
+// change when a column's IsIdentity changes (type unchanged), otherwise a
+// drop_recreate re-run serves DDL generated before the identity change and the
+// target loses its identity/sequence.
+func TestTableCacheKeyIncludesIsIdentity(t *testing.T) {
+	m := testMapperWithTempCache(t, "anthropic", testProvider("test-key"))
+
+	req := func(col Column) TableDDLRequest {
+		return TableDDLRequest{
+			SourceDBType: "mssql", TargetDBType: "postgres", TargetSchema: "public",
+			SourceTable: &Table{
+				Schema: "dbo", Name: "users",
+				Columns:    []Column{col},
+				PrimaryKey: []string{"id"},
+			},
+		}
+	}
+	base := Column{Name: "id", DataType: "int"}
+
+	// IsIdentity and DefaultValue both feed the DDL prompt payload
+	// (buildTableDDLPromptJSON), so changing either must change the key (#560).
+	withIdentity := base
+	withIdentity.IsIdentity = true
+	withDefault := base
+	withDefault.DefaultValue = "0"
+
+	baseKey := m.tableCacheKey(req(base))
+	if m.tableCacheKey(req(withIdentity)) == baseKey {
+		t.Fatal("cache key must differ when IsIdentity differs")
+	}
+	if m.tableCacheKey(req(withDefault)) == baseKey {
+		t.Fatal("cache key must differ when DefaultValue differs")
+	}
+	// Identical requests still produce identical keys (unchanged schema hits cache).
+	if m.tableCacheKey(req(base)) != baseKey {
+		t.Fatal("cache key must be stable for identical requests")
+	}
+}
+
+// TestAITypeMapper_ConcurrentSaveCacheIsAtomic pins #563: concurrent saveCache
+// calls must not race or tear the file. saveCache runs without cacheMu held
+// (callers release it first), so it uses a dedicated saveMu plus temp+rename;
+// after a storm of concurrent saves the file must still load with a valid
+// checksum and all entries. Run under -race.
+func TestAITypeMapper_ConcurrentSaveCacheIsAtomic(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheFile := filepath.Join(tmpDir, "type-cache.json")
+	mapper := &AITypeMapper{
+		providerName:   "anthropic",
+		provider:       testProvider("test-key"),
+		cache:          NewTypeMappingCache(),
+		cacheFile:      cacheFile,
+		timeoutSeconds: 30,
+	}
+	for i := 0; i < 50; i++ {
+		mapper.cache.Set(fmt.Sprintf("k:%d", i), fmt.Sprintf("v%d", i))
+	}
+
+	// A concurrent reader must never observe a torn/partial file: loadCache
+	// returns an error on invalid JSON or a checksum mismatch. A non-atomic
+	// in-place write lets the reader catch a mid-truncate/mid-write state;
+	// temp+rename makes every observation a complete file.
+	stop := make(chan struct{})
+	var readErr atomic.Value
+	var readerWG sync.WaitGroup
+	readerWG.Add(1)
+	go func() {
+		defer readerWG.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r := &AITypeMapper{
+				providerName:   "anthropic",
+				provider:       testProvider("test-key"),
+				cache:          NewTypeMappingCache(),
+				cacheFile:      cacheFile,
+				timeoutSeconds: 30,
+			}
+			if err := r.loadCache(); err != nil {
+				readErr.Store(err)
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 40; j++ {
+				if err := mapper.saveCache(); err != nil {
+					t.Errorf("saveCache: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	readerWG.Wait()
+	if e := readErr.Load(); e != nil {
+		t.Fatalf("concurrent reader observed a torn cache file: %v", e)
+	}
+
+	// The file must be valid (loadable, checksum OK) with every entry — a torn
+	// or partial write would fail the checksum and discard the whole cache.
+	reload := &AITypeMapper{
+		providerName:   "anthropic",
+		provider:       testProvider("test-key"),
+		cache:          NewTypeMappingCache(),
+		cacheFile:      cacheFile,
+		timeoutSeconds: 30,
+	}
+	if err := reload.loadCache(); err != nil {
+		t.Fatalf("loadCache after concurrent saves: %v", err)
+	}
+	if reload.CacheSize() != 50 {
+		t.Errorf("cache size = %d, want 50 (torn/discarded cache?)", reload.CacheSize())
+	}
+
+	// No staging temp file must be left behind.
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("leaked temp cache file: %s", e.Name())
+		}
+	}
+}

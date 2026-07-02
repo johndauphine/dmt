@@ -110,8 +110,15 @@ func (m *AITypeMapper) tableCacheKey(req TableDDLRequest) string {
 		req.SourceDBType, req.TargetDBType, req.TargetSchema, req.SourceTable.Schema, req.SourceTable.Name)
 
 	for _, col := range req.SourceTable.Columns {
-		fmt.Fprintf(&sb, "%s:%s:%d:%d:%d:%v;",
-			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale, col.IsNullable)
+		// The key must capture every column attribute the DDL prompt payload
+		// depends on, so a schema change invalidates the cached DDL instead of
+		// serving the stale form (#560). buildTableDDLPromptJSON emits both
+		// IsIdentity (IDENTITY/AUTO_INCREMENT) and DefaultValue, so both belong
+		// in the key. (SourceContext/TargetContext also influence the prompt and
+		// are a known remaining gap — see the AI table-DDL cache-key follow-up.)
+		fmt.Fprintf(&sb, "%s:%s:%d:%d:%d:%v:%v:%s;",
+			col.Name, col.DataType, col.MaxLength, col.Precision, col.Scale,
+			col.IsNullable, col.IsIdentity, col.DefaultValue)
 	}
 
 	// Add PK info

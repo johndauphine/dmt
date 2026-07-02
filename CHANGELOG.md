@@ -18,6 +18,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The AI table-DDL cache key now includes each column's `IsIdentity` and
+  `DefaultValue` (both feed the generated CREATE TABLE), so toggling a column's
+  identity or default — type unchanged — no longer serves stale cached DDL that
+  silently drops the identity/default on the target (#560).
+
+- The AI type-mapping cache (`~/.dmt/type-cache.json`) is now written
+  atomically (temp file + fsync + rename) and in-process saves are serialized,
+  so concurrent or crash-interrupted writes can't tear the file. A torn file
+  fails its checksum on load and discards the whole cache, re-billing every
+  previously-paid AI mapping. `dmt cache clear --ai-only` uses the same atomic
+  write (#563).
+
 - `GetLastSyncTimestamp` now checks the scan error before inspecting the
   result, so a real DB error (e.g. "database is locked") propagates instead of
   being swallowed as "never synced" — which silently downgraded date-based

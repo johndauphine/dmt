@@ -257,10 +257,13 @@ func (m *AITypeMapper) loadCache() error {
 }
 
 func (m *AITypeMapper) saveCache() error {
-	dir := filepath.Dir(m.cacheFile)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("creating cache directory: %w", err)
-	}
+	// Serialize saves. Callers release cacheMu before calling saveCache, so
+	// without a dedicated lock two goroutines could interleave truncate/write
+	// and tear the file. A torn or partial file fails the checksum on load and
+	// the whole cache is discarded, re-billing every previously-paid mapping
+	// (#563).
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 
 	payload := cacheFilePayload{
 		Version:  cacheFileFormatVersion,
@@ -276,10 +279,45 @@ func (m *AITypeMapper) saveCache() error {
 		return fmt.Errorf("marshaling cache: %w", err)
 	}
 
-	if err := os.WriteFile(m.cacheFile, data, 0600); err != nil {
-		return fmt.Errorf("writing cache file: %w", err)
+	return atomicWriteCacheFile(m.cacheFile, data, 0600)
+}
+
+// atomicWriteCacheFile writes data to path atomically: it stages the content in
+// a temp file in the same directory, fsyncs it, then renames it over the target.
+// A reader therefore never observes a partial file, and a crash or interleaved
+// write can't corrupt the cache — a torn file would fail the checksum on load
+// and discard every previously-paid mapping (#563).
+func atomicWriteCacheFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("creating cache directory: %w", err)
 	}
 
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.")
+	if err != nil {
+		return fmt.Errorf("creating temp cache file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op after a successful rename; cleans up on error
+
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp cache file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing temp cache file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fsync temp cache file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp cache file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("renaming cache file into place: %w", err)
+	}
 	return nil
 }
 
@@ -360,8 +398,10 @@ func ClearAICacheEntries(cacheFile string) (int, error) {
 	if err != nil {
 		return cleared, fmt.Errorf("marshaling cache: %w", err)
 	}
-	if err := os.WriteFile(cacheFile, rewritten, 0600); err != nil {
-		return cleared, fmt.Errorf("writing cache file: %w", err)
+	// Same file, same atomicity requirement as saveCache — `dmt cache clear`
+	// must not tear the cache (#563).
+	if err := atomicWriteCacheFile(cacheFile, rewritten, 0600); err != nil {
+		return cleared, err
 	}
 	return cleared, nil
 }
