@@ -3,6 +3,7 @@ package secrets
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -402,4 +403,102 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestSaveRefusesToOverwriteMalformedFile(t *testing.T) {
+	// Regression for #551: a malformed existing secrets file used to
+	// silently parse into a zero-value Config, and Save would then write
+	// only the new section — destroying the encryption master key (and
+	// with it every AES-GCM-encrypted profile), other AI providers, the
+	// Slack webhook, and migration defaults. Save must now surface the
+	// parse error and leave the file untouched.
+	tmpDir := t.TempDir()
+	secretsFile := filepath.Join(tmpDir, "test-secrets.yaml")
+	malformed := "encryption:\n  master_key: \"do-not-lose-me\nai:\n  default_provider: anthropic\n"
+	if err := os.WriteFile(secretsFile, []byte(malformed), 0600); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	os.Setenv(SecretsFileEnvVar, secretsFile)
+	defer os.Unsetenv(SecretsFileEnvVar)
+
+	updates := &Config{AI: AIConfig{
+		DefaultProvider: "openai",
+		Providers:       map[string]*Provider{"openai": {APIKey: "new-key"}},
+	}}
+	if err := Save(updates); err == nil {
+		t.Fatal("expected parse error refusing to overwrite malformed secrets file")
+	}
+
+	// File contents must be byte-for-byte unchanged after the refused write.
+	got, err := os.ReadFile(secretsFile)
+	if err != nil {
+		t.Fatalf("read after refused write: %v", err)
+	}
+	if string(got) != malformed {
+		t.Fatalf("malformed secrets file was modified despite refused write\nwant: %q\ngot:  %q", malformed, string(got))
+	}
+}
+
+func TestSavePreservesExistingSectionsAndLeavesNoTemp(t *testing.T) {
+	// Regression for #551: a partial Save (adding one AI provider) must
+	// preserve the master key and other providers, and the atomic write
+	// must not leak a temp file next to the target.
+	tmpDir := t.TempDir()
+	secretsFile := filepath.Join(tmpDir, "test-secrets.yaml")
+	seed := `
+ai:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      api_key: "keep-anthropic"
+encryption:
+  master_key: "keep-master-key"
+`
+	if err := os.WriteFile(secretsFile, []byte(seed), 0600); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	os.Setenv(SecretsFileEnvVar, secretsFile)
+	defer os.Unsetenv(SecretsFileEnvVar)
+
+	updates := &Config{AI: AIConfig{
+		Providers: map[string]*Provider{"openai": {APIKey: "add-openai"}},
+	}}
+	if err := Save(updates); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	Reset()
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+	if cfg.Encryption.MasterKey != "keep-master-key" {
+		t.Fatalf("master_key not preserved, got %q", cfg.Encryption.MasterKey)
+	}
+	if cfg.AI.Providers["anthropic"] == nil || cfg.AI.Providers["anthropic"].APIKey != "keep-anthropic" {
+		t.Fatal("existing anthropic provider clobbered by partial Save")
+	}
+	if cfg.AI.Providers["openai"] == nil || cfg.AI.Providers["openai"].APIKey != "add-openai" {
+		t.Fatal("openai provider not merged in by Save")
+	}
+
+	// The atomic temp+rename must not leave a staging file behind.
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Fatalf("atomic write leaked a temp file: %s", e.Name())
+		}
+	}
+
+	// Mode must remain 0600 after the rename.
+	info, err := os.Stat(secretsFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != SecureFileMode {
+		t.Fatalf("secrets file mode = %v, want %v", info.Mode().Perm(), os.FileMode(SecureFileMode))
+	}
 }

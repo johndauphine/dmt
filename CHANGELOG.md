@@ -18,6 +18,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `secrets.Save` no longer silently rewrites `~/.secrets/dmt-config.yaml`
+  from a zero-value config when the existing file has a YAML syntax error —
+  it now surfaces the parse error and refuses to write, preserving the
+  encryption master key, other AI providers, the Slack webhook, and
+  migration defaults. Both `Save` and `SaveSlackWebhook` now write
+  atomically (temp file + fsync + rename) so a crash mid-write can't
+  truncate the secrets file and lose the master key (#551).
+
 - Hardened P1 migration safety paths: resume/upsert handling, delete
   reconciliation key matching, ROW_NUMBER/keyset retry behavior, MySQL
   type introspection and DDL execution, secret redaction, file checkpoint

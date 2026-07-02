@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -113,7 +114,16 @@ func Save(updates *Config) error {
 	existing := &Config{}
 	data, err := os.ReadFile(path)
 	if err == nil {
-		_ = yaml.Unmarshal(data, existing)
+		// Surface parse errors instead of swallowing them. A malformed
+		// existing file would otherwise leave `existing` as the zero
+		// Config, and the merge+write below would clobber the encryption
+		// master key, other AI providers, the Slack webhook, and
+		// migration defaults with just the new section — silently
+		// destroying every AES-GCM-encrypted profile. Mirror
+		// SaveSlackWebhook: refuse to write, caller hand-fixes the YAML.
+		if err := yaml.Unmarshal(data, existing); err != nil {
+			return fmt.Errorf("parsing existing secrets file (refusing to overwrite): %w", err)
+		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("reading existing secrets file: %w", err)
 	}
@@ -132,8 +142,9 @@ func Save(updates *Config) error {
 		return err
 	}
 
-	// Write with secure permissions
-	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
+	// Write atomically (temp file + rename) so a crash mid-write can't
+	// truncate the secrets file and lose the master key.
+	if err := atomicWriteFile(path, newData, SecureFileMode); err != nil {
 		return fmt.Errorf("writing secrets file: %w", err)
 	}
 
@@ -177,11 +188,74 @@ func SaveSlackWebhook(url string) error {
 		return err
 	}
 
-	if err := os.WriteFile(path, newData, SecureFileMode); err != nil {
+	if err := atomicWriteFile(path, newData, SecureFileMode); err != nil {
 		return fmt.Errorf("writing secrets file: %w", err)
 	}
 
 	Reset()
+	return nil
+}
+
+// atomicWriteFile writes data to path atomically: it stages the content
+// in a temp file in the same directory, fsyncs it, renames it into place,
+// then fsyncs the parent directory so the rename survives power loss. A
+// crash at any point leaves the original secrets file intact rather than
+// truncated — losing the encryption master key is unrecoverable, so the
+// write must be all-or-nothing. The temp is created in the same directory
+// as the target so the rename stays within one filesystem (cross-fs
+// rename is not atomic).
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+
+	if err := os.MkdirAll(dir, SecureDirMode); err != nil {
+		return fmt.Errorf("creating secrets dir: %w", err)
+	}
+
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.")
+	if err != nil {
+		return fmt.Errorf("creating temp secrets file: %w", err)
+	}
+	tmpName := f.Name()
+	// No-op on the happy path (rename removes tmpName); cleans up the
+	// partial file on every error path so we don't leak temps.
+	defer os.Remove(tmpName)
+
+	// Nail down the mode so the temp never widens permissions during the
+	// brief window before the rename.
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return fmt.Errorf("chmod temp secrets file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("writing temp secrets file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("fsync temp secrets file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing temp secrets file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("renaming secrets file into place: %w", err)
+	}
+
+	// fsync the parent dir on POSIX so the rename itself is durable.
+	// Skipped on Windows, where Sync on a directory handle is unsupported
+	// and would fail every save (see checkpoint.atomicWriteFile).
+	if runtime.GOOS != "windows" {
+		d, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("opening secrets dir for fsync: %w", err)
+		}
+		syncErr := d.Sync()
+		_ = d.Close()
+		if syncErr != nil {
+			return fmt.Errorf("fsync secrets dir: %w", syncErr)
+		}
+	}
 	return nil
 }
 
