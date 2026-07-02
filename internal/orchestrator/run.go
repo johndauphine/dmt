@@ -178,6 +178,17 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	o.progress.SetTablesTotal(len(tables))
 	logging.Debug("Found %d tables", len(tables))
 
+	// Fail before any DDL if source identifiers collide under PostgreSQL
+	// sanitization — otherwise drop_recreate would silently destroy a
+	// colliding table's data (#553).
+	if o.config.Target.Type == "postgres" {
+		if err := o.checkPGIdentifierCollisions(tables); err != nil {
+			o.state.CompleteRun(runID, "failed", err.Error())
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
+		}
+	}
+
 	// Apply AI-recommended parameters (if AI is available)
 	o.applyTuning(ctx)
 

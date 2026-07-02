@@ -406,6 +406,19 @@ func (o *Orchestrator) SetProgressReporter(reporter progress.Reporter, interval 
 	o.progress.SetReporter(reporter, interval)
 }
 
+// checkPGIdentifierCollisions fails the migration before any DDL runs if two
+// source identifiers would sanitize to the same PostgreSQL name. In
+// drop_recreate a table-name collision silently destroys one table's data and
+// a column-name collision produces invalid DDL, so this is a hard gate rather
+// than a warning (#553). No-op for non-PostgreSQL targets (caller-gated).
+func (o *Orchestrator) checkPGIdentifierCollisions(tables []source.Table) error {
+	tableInfos := make([]target.TableInfo, len(tables))
+	for i := range tables {
+		tableInfos[i] = &tables[i]
+	}
+	return target.DetectPGIdentifierCollisions(tableInfos)
+}
+
 // logPGIdentifierChanges logs any identifier name changes applied during PostgreSQL migration
 func (o *Orchestrator) logPGIdentifierChanges(tables []source.Table) {
 	// Convert to TableInfo interface slice

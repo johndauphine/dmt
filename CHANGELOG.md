@@ -26,6 +26,14 @@ All notable changes to this project will be documented in this file.
   atomically (temp file + fsync + rename) so a crash mid-write can't
   truncate the secrets file and lose the master key (#551).
 
+- PostgreSQL migrations now fail before any DDL when two source identifiers
+  would sanitize to the same PostgreSQL name (e.g. `Order Items` /
+  `Order-Items`, or `Users` / `USERS` under a case-sensitive source
+  collation) instead of silently destroying a colliding table's data in
+  drop_recreate. `ident.SanitizePG` also truncates identifiers to
+  PostgreSQL's 63-byte limit with a disambiguating hash suffix so distinct
+  long names no longer collapse into the same relation (#553).
+
 - Hardened P1 migration safety paths: resume/upsert handling, delete
   reconciliation key matching, ROW_NUMBER/keyset retry behavior, MySQL
   type introspection and DDL execution, secret redaction, file checkpoint
