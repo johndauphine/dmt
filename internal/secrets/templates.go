@@ -58,7 +58,7 @@ const aiSection = `ai:
     # Cloud providers (require API key)
     anthropic:
       api_key: ""  # Get from https://console.anthropic.com/
-      model: "claude-haiku-4-5-20251001"  # optional
+      model: "claude-sonnet-5"  # optional
       # max_requests: 100  # optional, max uncached AI calls per dmt process/run
 
     openai:

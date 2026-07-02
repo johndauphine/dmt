@@ -13,7 +13,7 @@ import (
 type anthropicRequest struct {
 	Model       string             `json:"model"`
 	MaxTokens   int                `json:"max_tokens"`
-	Temperature float64            `json:"temperature"`
+	Temperature *float64           `json:"temperature,omitempty"`
 	System      string             `json:"system,omitempty"`
 	Messages    []anthropicMessage `json:"messages"`
 }
@@ -56,15 +56,7 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 		}
 	}
 
-	reqBody := anthropicRequest{
-		Model:       model,
-		MaxTokens:   maxTokens,
-		Temperature: 0,
-		System:      systemPrompt,
-		Messages: []anthropicMessage{
-			{Role: "user", Content: prompt},
-		},
-	}
+	reqBody := newAnthropicRequest(model, maxTokens, systemPrompt, prompt)
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -99,9 +91,55 @@ func (m *AITypeMapper) queryAnthropicAPI(ctx context.Context, prompt string) (st
 		return "", fmt.Errorf("API error: %s", anthropicResp.Error.Message)
 	}
 
-	if len(anthropicResp.Content) == 0 || anthropicResp.Content[0].Text == "" {
+	text := anthropicResponseText(anthropicResp)
+	if text == "" {
 		return "", fmt.Errorf("empty response from API")
 	}
 
-	return anthropicResp.Content[0].Text, nil
+	return text, nil
+}
+
+func newAnthropicRequest(model string, maxTokens int, systemPrompt, prompt string) anthropicRequest {
+	reqBody := anthropicRequest{
+		Model:     model,
+		MaxTokens: maxTokens,
+		System:    systemPrompt,
+		Messages: []anthropicMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+
+	if !anthropicRejectsNonDefaultSampling(model) {
+		temperature := 0.0
+		reqBody.Temperature = &temperature
+	}
+
+	return reqBody
+}
+
+func anthropicRejectsNonDefaultSampling(model string) bool {
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "claude-sonnet-5",
+		"claude-opus-4-7",
+		"claude-opus-4-8",
+		"claude-fable-5",
+		"claude-mythos-5":
+		return true
+	default:
+		return false
+	}
+}
+
+func anthropicResponseText(resp anthropicResponse) string {
+	var parts []string
+	for _, content := range resp.Content {
+		if content.Text == "" {
+			continue
+		}
+		if content.Type != "" && content.Type != "text" {
+			continue
+		}
+		parts = append(parts, content.Text)
+	}
+	return strings.Join(parts, "\n")
 }

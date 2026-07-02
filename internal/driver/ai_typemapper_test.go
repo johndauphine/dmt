@@ -91,7 +91,7 @@ func TestNewAITypeMapper_DefaultModel(t *testing.T) {
 		provider      string
 		expectedModel string
 	}{
-		{"anthropic", "claude-haiku-4-5-20251001"},
+		{"anthropic", "claude-sonnet-5"},
 		{"openai", "gpt-5.5"},
 		{"gemini", "gemini-2.0-flash"},
 		{"ollama", "llama3"},
@@ -332,14 +332,7 @@ func TestAITypeMapper_AnthropicAPI(t *testing.T) {
 }
 
 func TestAnthropicRequestIncludesDeterministicDefaults(t *testing.T) {
-	reqBody := anthropicRequest{
-		Model:       "claude-test",
-		MaxTokens:   100,
-		Temperature: 0,
-		Messages: []anthropicMessage{
-			{Role: "user", Content: "map varbinary to postgres"},
-		},
-	}
+	reqBody := newAnthropicRequest("claude-test", 100, "", "map varbinary to postgres")
 
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
@@ -443,6 +436,43 @@ func TestOpenAICompatRequestKeepsDeterministicTemperature(t *testing.T) {
 	}
 	if temperature != 0 {
 		t.Fatalf("temperature = %v, want 0", temperature)
+	}
+}
+
+func TestAnthropicRequestOmitsSamplingForSonnet5(t *testing.T) {
+	reqBody := newAnthropicRequest("claude-sonnet-5", 100, "", "map varbinary to postgres")
+
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal anthropic request: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal anthropic request: %v", err)
+	}
+
+	if _, ok := got["temperature"]; ok {
+		t.Fatalf("temperature should be omitted for claude-sonnet-5, got %s", raw)
+	}
+	if got["model"] != "claude-sonnet-5" {
+		t.Fatalf("model = %v, want claude-sonnet-5", got["model"])
+	}
+}
+
+func TestAnthropicResponseTextSkipsThinkingBlocks(t *testing.T) {
+	response := anthropicResponse{
+		Content: []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{
+			{Type: "thinking"},
+			{Type: "text", Text: `{"ok":true}`},
+		},
+	}
+
+	if got := anthropicResponseText(response); got != `{"ok":true}` {
+		t.Fatalf("response text = %q, want text block", got)
 	}
 }
 

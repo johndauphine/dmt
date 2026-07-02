@@ -122,7 +122,7 @@ var KnownProviders = map[string]struct {
 
 // DefaultModels maps providers to their default models
 var DefaultModels = map[string]string{
-	"anthropic": "claude-haiku-4-5-20251001",
+	"anthropic": "claude-sonnet-5",
 	"openai":    "gpt-5.5",
 	"gemini":    "gemini-2.0-flash",
 	"ollama":    "llama3",

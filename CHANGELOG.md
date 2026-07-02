@@ -148,6 +148,12 @@ All notable changes to this project will be documented in this file.
   config/runbook review, and performance explanation copilot flows (#400,
   #401, #402).
 
+### Changed
+
+- Updated Anthropic defaults and examples to use Claude Sonnet 5
+  (`claude-sonnet-5`), and omit non-default Anthropic sampling parameters for
+  models that reject them.
+
 ### Deprecated
 
 - `migration.schema_evolution` now emits a runtime deprecation warning because
