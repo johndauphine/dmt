@@ -44,7 +44,14 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 	keyPatterns := []string{"sk-", "api-", "key-", "secret-", "token-"}
 	for _, pattern := range keyPatterns {
 		for {
-			idx := strings.Index(strings.ToLower(s), pattern)
+			// Search a case-folded copy but slice the original — so fold ONLY
+			// ASCII case (asciiLower), which preserves byte length. strings.ToLower
+			// can change the byte length of some Unicode runes (İ -> i̇ shifts
+			// every later index), misaligning the slice offsets: worst case an
+			// out-of-range panic on an ordinary API-error path, lesser case wrong
+			// bytes redacted. The key patterns are ASCII, so ASCII folding still
+			// matches them (#562).
+			idx := strings.Index(asciiLower(s), pattern)
 			if idx == -1 {
 				break
 			}
@@ -57,6 +64,26 @@ func sanitizeErrorResponse(body []byte, maxLen int) string {
 	}
 
 	return s
+}
+
+// asciiLower lowercases only ASCII A-Z, leaving every other byte unchanged so
+// the result has exactly the same byte length as the input — a prerequisite for
+// using its match offsets to slice the original string (#562).
+func asciiLower(s string) string {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			if b == nil {
+				b = []byte(s)
+			}
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	if b == nil {
+		return s
+	}
+	return string(b)
 }
 
 // isRetryableError determines if an error is transient and should be retried.

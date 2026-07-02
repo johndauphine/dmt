@@ -2415,3 +2415,46 @@ func TestAITypeMapper_ConcurrentSaveCacheIsAtomic(t *testing.T) {
 		}
 	}
 }
+
+// TestSanitizeErrorResponseNonASCII pins #562: an error body with a rune whose
+// ToLower changes byte length before a key token must not panic — the old code
+// searched a ToLower copy and sliced the original with the shifted offset.
+// U+023A (Ⱥ, 2 bytes) lowercases to U+2C65 (ⱥ, 3 bytes), so each one shifts a
+// later "sk-" match index past the original's length → an out-of-range slice
+// panic on an ordinary API-error path. Redaction (incl. case-insensitive
+// matches) must still work.
+func TestSanitizeErrorResponseNonASCII(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		leak string // substring that must be gone
+	}{
+		{
+			name: "length-increasing lowering rune before key does not panic",
+			body: strings.Repeat("Ⱥ", 50) + "sk-SUPERSECRETKEY12345",
+			leak: "sk-SUPERSECRETKEY12345",
+		},
+		{
+			name: "uppercase key matched case-insensitively",
+			body: "error: SK-ANOTHERSECRET99999 was rejected",
+			leak: "SK-ANOTHERSECRET99999",
+		},
+		{
+			name: "length-increasing rune interspersed with a key",
+			body: "Ⱥ prefix API-KEYMATERIALABCDEF Ⱥ suffix",
+			leak: "API-KEYMATERIALABCDEF",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := sanitizeErrorResponse([]byte(tc.body), 500) // must not panic
+			if strings.Contains(out, tc.leak) {
+				t.Fatalf("key material not redacted: %q", out)
+			}
+			if !strings.Contains(out, "[REDACTED]") {
+				t.Fatalf("expected a [REDACTED] marker: %q", out)
+			}
+		})
+	}
+}
