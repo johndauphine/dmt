@@ -18,6 +18,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- PostgreSQL source introspection now flags `GENERATED ALWAYS/BY DEFAULT AS
+  IDENTITY` columns (PG 10+, which have a NULL default) as identity, not only
+  legacy `serial`/`nextval` columns. Previously such columns lost their
+  auto-generation on the target (created as plain integers) and were skipped by
+  sequence reset; they now map to the target's SERIAL/IDENTITY/AUTO_INCREMENT
+  form and get their sequence reset (#546).
+
 - The SQL Server identity reseed (`DBCC CHECKIDENT`) now escapes single quotes
   in the qualified table name before interpolating it into the statement's
   string literal. A legal table name containing an apostrophe (e.g.

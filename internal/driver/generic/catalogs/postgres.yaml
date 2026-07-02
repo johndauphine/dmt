@@ -82,8 +82,10 @@ introspection:
     SELECT table_name FROM information_schema.tables
     WHERE table_schema = $1 AND table_type = 'BASE TABLE'
     ORDER BY table_name
-  # Canonical shape + is_identity: serial/identity columns surface as
-  # nextval(...) defaults — computable in SQL.
+  # Canonical shape + is_identity: legacy serial columns surface as
+  # nextval(...) defaults, while GENERATED ... AS IDENTITY columns (PG 10+,
+  # NULL default) surface via information_schema.columns.is_identity = 'YES'.
+  # Detect both so identity is not silently dropped from the target DDL (#546).
   describe_table: |
     SELECT c.ordinal_position, c.column_name, c.udt_name,
            COALESCE(c.character_maximum_length, 0),
@@ -92,7 +94,7 @@ introspection:
            CASE WHEN c.is_nullable = 'YES' THEN 1 ELSE 0 END,
            COALESCE(c.column_default, ''),
            COALESCE(pk.ord, 0),
-           CASE WHEN c.column_default LIKE 'nextval%' THEN 1 ELSE 0 END
+           CASE WHEN c.is_identity = 'YES' OR c.column_default LIKE 'nextval%' THEN 1 ELSE 0 END
     FROM information_schema.columns c
     LEFT JOIN (
       SELECT a.attname, array_position(i.indkey, a.attnum) + 1 AS ord
