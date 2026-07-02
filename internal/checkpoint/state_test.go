@@ -1194,3 +1194,34 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 		t.Error("clean run should read back AdjustedAtRuntime=false")
 	}
 }
+
+// TestGetLastSyncTimestampSurfacesQueryError pins #564: a real DB error (not
+// ErrNoRows) must propagate, not be swallowed as "never synced" — otherwise a
+// transient "database is locked" silently downgrades incremental sync to a full
+// reload.
+func TestGetLastSyncTimestampSurfacesQueryError(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	// No prior sync → (nil, nil).
+	ts, err := state.GetLastSyncTimestamp("dbo", "users", "public")
+	if err != nil || ts != nil {
+		t.Fatalf("no prior sync: got (%v, %v), want (nil, nil)", ts, err)
+	}
+
+	// Force a genuine query error (not ErrNoRows) by removing the table the
+	// query reads; the error must propagate rather than returning (nil, nil).
+	if _, err := state.db.Exec(`DROP TABLE table_sync_timestamps`); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	ts, err = state.GetLastSyncTimestamp("dbo", "users", "public")
+	if err == nil {
+		t.Fatalf("expected the query error to propagate, got (%v, nil) — DB error swallowed as never-synced", ts)
+	}
+	if ts != nil {
+		t.Errorf("timestamp should be nil on error, got %v", ts)
+	}
+}

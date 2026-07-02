@@ -18,6 +18,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `GetLastSyncTimestamp` now checks the scan error before inspecting the
+  result, so a real DB error (e.g. "database is locked") propagates instead of
+  being swallowed as "never synced" — which silently downgraded date-based
+  incremental sync to a full-table reload (#564).
+
 - The chunk-size retry after a write error no longer duplicates rows on
   non-transactional (MySQL batched-INSERT) targets. Earlier sub-batches of a
   failed chunk autocommit independently, so retrying the whole chunk from row 0
