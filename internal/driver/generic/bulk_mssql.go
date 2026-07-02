@@ -52,9 +52,20 @@ func mssqlCheckidentReset(ctx context.Context, db *sql.DB, dialect *Dialect, sch
 		return nil
 	}
 
-	_, err = db.ExecContext(ctx, fmt.Sprintf("DBCC CHECKIDENT ('%s', RESEED, %d)",
-		dialect.QualifyTable(schema, t.Name), maxVal))
+	_, err = db.ExecContext(ctx, mssqlCheckidentStatement(dialect, schema, t.Name, maxVal))
 	return err
+}
+
+// mssqlCheckidentStatement builds the DBCC CHECKIDENT reseed statement. The
+// table name is passed to DBCC as a single-quoted *string literal*, so the
+// bracket-quoted identifier must additionally have its single quotes doubled.
+// Without this, a legal SQL Server name containing an apostrophe (e.g.
+// [It's Data]) breaks TaskResetSequences, and a hostile source table name
+// could terminate the literal and inject SQL into the privileged target
+// session (#548).
+func mssqlCheckidentStatement(dialect *Dialect, schema, table string, maxVal int64) string {
+	literal := strings.ReplaceAll(dialect.QualifyTable(schema, table), "'", "''")
+	return fmt.Sprintf("DBCC CHECKIDENT ('%s', RESEED, %d)", literal, maxVal)
 }
 
 // convertRowForBulkCopy normalizes []byte values for the TDS protocol:
@@ -521,6 +532,12 @@ func mssqlGetStagingTableColumns(ctx context.Context, conn *sql.Conn, stagingTab
 		}
 		cols = append(cols, colName)
 	}
+	// A result set can fail after Next() returns false (mid-set driver/network
+	// error or context cancellation); without this the loop ends early and
+	// silently returns a truncated column list (#567).
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if len(cols) == 0 {
 		return nil, fmt.Errorf("no columns found for staging table %s", stagingTable)
 	}
@@ -570,6 +587,12 @@ func mssqlGetSpatialColumns(ctx context.Context, conn *sql.Conn, stagingTable st
 			return nil, err
 		}
 		spatialCols = append(spatialCols, col)
+	}
+	// Surface a mid-set read error instead of returning a partial list — a
+	// missed spatial column would never be re-typed to nvarchar(max) before
+	// staging, misattributing the later failure (#567).
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return spatialCols, nil
 }
@@ -670,8 +693,17 @@ func mssqlBuildMerge(dialect *Dialect, targetTable, stagingTable string, cols, p
 				continue
 			}
 
+			// Compare byte-exact via VARBINARY. A plain `<>` uses the target
+			// column's collation, so under SQL Server's default
+			// case-insensitive, ANSI-padded collation ('smith' = 'Smith',
+			// 'a' = 'a ') a case-only or trailing-space change is seen as "no
+			// change" and WHEN MATCHED is skipped — the target silently keeps
+			// the stale value. CONVERT(VARBINARY(MAX), ...) is collation- and
+			// padding-independent and valid for every scalar type `<>` already
+			// supported (spatial columns are skipped above). NULL transitions
+			// are still handled by the IS NULL / IS NOT NULL disjuncts (#547).
 			changeDetection = append(changeDetection, fmt.Sprintf(
-				"(target.%s <> source.%s OR "+
+				"(CONVERT(VARBINARY(MAX), target.%s) <> CONVERT(VARBINARY(MAX), source.%s) OR "+
 					"(target.%s IS NULL AND source.%s IS NOT NULL) OR "+
 					"(target.%s IS NOT NULL AND source.%s IS NULL))",
 				quotedCol, quotedCol, quotedCol, quotedCol, quotedCol, quotedCol))

@@ -18,6 +18,59 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The SQL Server identity reseed (`DBCC CHECKIDENT`) now escapes single quotes
+  in the qualified table name before interpolating it into the statement's
+  string literal. A legal table name containing an apostrophe (e.g.
+  `[It's Data]`) no longer breaks sequence reset, and a hostile source table
+  name can no longer terminate the literal to inject SQL into the target
+  session (#548).
+
+- SQL Server upsert MERGE change detection now compares values byte-exactly
+  (`CONVERT(VARBINARY(MAX), …)`) instead of a collation-sensitive `<>`.
+  Under the default case-insensitive, ANSI-padded collation a case-only or
+  trailing-space source change (e.g. `smith` → `Smith`) was seen as "no
+  change" and silently left the target stale; it now propagates on
+  `WHEN MATCHED` (#547).
+
+- SQL Server staging/spatial column introspection now checks `rows.Err()`
+  after iterating, so a mid-result-set read error or cancellation surfaces
+  instead of silently returning a truncated column list (which could drop a
+  spatial column from WKT re-typing) (#567).
+
+- AI-generated finalization DDL (indexes, foreign keys, check constraints) is
+  now validated as a single statement that targets the expected table before
+  it executes, instead of a prefix-only check. A prompt-injected or misbehaving
+  model can no longer smuggle a trailing statement (e.g.
+  `... ; DROP TABLE users;`) or retarget another table. The validator rejects
+  SQL comments and dialect string-escaping it cannot faithfully model
+  (backslash escapes, Postgres dollar-quoting) so a real statement separator
+  can't hide from the scan, and the prompts frame source-derived identifiers,
+  filters, and expressions as untrusted data (#561).
+
+- Secret template expansion (`${env:}`/`${file:}`/`${VAR}`) now happens
+  per-scalar on the parsed YAML node tree instead of as raw text substitution
+  over the whole document. A secret value containing `#`, a newline, or `:`
+  (e.g. `secret #2024`, a PEM key, a JSON blob) can no longer be truncated as
+  a YAML comment or inject/override config structure such as the target
+  connection. Embedded and multiple templates within one value still resolve
+  (#552).
+
+- `secrets.Save` no longer silently rewrites `~/.secrets/dmt-config.yaml`
+  from a zero-value config when the existing file has a YAML syntax error —
+  it now surfaces the parse error and refuses to write, preserving the
+  encryption master key, other AI providers, the Slack webhook, and
+  migration defaults. Both `Save` and `SaveSlackWebhook` now write
+  atomically (temp file + fsync + rename) so a crash mid-write can't
+  truncate the secrets file and lose the master key (#551).
+
+- PostgreSQL migrations now fail before any DDL when two source identifiers
+  would sanitize to the same PostgreSQL name (e.g. `Order Items` /
+  `Order-Items`, or `Users` / `USERS` under a case-sensitive source
+  collation) instead of silently destroying a colliding table's data in
+  drop_recreate. `ident.SanitizePG` also truncates identifiers to
+  PostgreSQL's 63-byte limit with a disambiguating hash suffix so distinct
+  long names no longer collapse into the same relation (#553).
+
 - Hardened P1 migration safety paths: resume/upsert handling, delete
   reconciliation key matching, ROW_NUMBER/keyset retry behavior, MySQL
   type introspection and DDL execution, secret redaction, file checkpoint
