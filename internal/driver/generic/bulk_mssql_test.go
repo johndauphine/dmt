@@ -11,6 +11,50 @@ import (
 // #227 MERGE shapes, and the staging-name uniqueness contract on the
 // generic strategy implementations.
 
+func TestMSSQLCheckidentStatementQuotingAndInjection(t *testing.T) {
+	cat, err := LoadCatalog("mssql")
+	if err != nil {
+		t.Fatalf("LoadCatalog(mssql): %v", err)
+	}
+	d := NewDialect(cat)
+
+	t.Run("apostrophe in name is escaped for the string literal", func(t *testing.T) {
+		got := mssqlCheckidentStatement(d, "dbo", "It's Data", 42)
+		want := "DBCC CHECKIDENT ('[dbo].[It''s Data]', RESEED, 42)"
+		if got != want {
+			t.Fatalf("got  %q\nwant %q", got, want)
+		}
+	})
+
+	t.Run("apostrophe in schema is escaped too", func(t *testing.T) {
+		got := mssqlCheckidentStatement(d, "O'Brien", "t", 7)
+		want := "DBCC CHECKIDENT ('[O''Brien].[t]', RESEED, 7)"
+		if got != want {
+			t.Fatalf("got  %q\nwant %q", got, want)
+		}
+	})
+
+	t.Run("injection payload cannot break out of the literal", func(t *testing.T) {
+		// A hostile source table name that tries to terminate the literal and
+		// append its own statement. After escaping, every apostrophe in the
+		// name must be doubled so the whole thing stays one string argument.
+		evil := "x]', RESEED, 1); DROP TABLE [y]--"
+		got := mssqlCheckidentStatement(d, "dbo", evil, 1)
+
+		// The statement is the fixed DBCC template with exactly one opening and
+		// one closing literal quote around the (escaped) argument.
+		if !strings.HasPrefix(got, "DBCC CHECKIDENT ('") || !strings.HasSuffix(got, "', RESEED, 1)") {
+			t.Fatalf("statement shape changed unexpectedly: %q", got)
+		}
+		inner := strings.TrimSuffix(strings.TrimPrefix(got, "DBCC CHECKIDENT ('"), "', RESEED, 1)")
+		// No bare (un-doubled) single quote may remain inside the literal —
+		// that is exactly what would let the payload close the string early.
+		if strings.Contains(strings.ReplaceAll(inner, "''", ""), "'") {
+			t.Fatalf("un-escaped single quote survived in literal argument: %q", inner)
+		}
+	})
+}
+
 func TestConvertRowForBulkCopyConvertsUTF8TextBytes(t *testing.T) {
 	row := []any{
 		[]byte("München"),
@@ -190,6 +234,41 @@ func TestMssqlBuildMerge_SpatialForcesUnconditionalUpdate(t *testing.T) {
 	allSpatial := mssqlBuildMerge(d, "[dbo].[t]", "#stg", []string{"id", "geo"}, []string{"id"}, spatial, true, false)
 	if strings.Contains(allSpatial, "AND ()") {
 		t.Errorf("all-spatial table rendered the empty predicate:\n%s", allSpatial)
+	}
+}
+
+// TestMssqlBuildMerge_ChangeDetectionIsByteExact pins #547: the WHEN
+// MATCHED change-detection predicate must compare values byte-exactly
+// (VARBINARY) rather than with a bare `<>`, otherwise SQL Server's
+// default case-insensitive, ANSI-padded collation drops case-only and
+// trailing-space changes and the sync silently diverges.
+func TestMssqlBuildMerge_ChangeDetectionIsByteExact(t *testing.T) {
+	cat, err := LoadCatalog("mssql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDialect(cat)
+
+	cols := []string{"id", "name"}
+	pkCols := []string{"id"}
+	upsert := mssqlBuildMerge(d, "[dbo].[users]", "#stg", cols, pkCols, nil, false, false)
+
+	// The non-PK column must be compared byte-exact, both sides converted.
+	if !strings.Contains(upsert, "CONVERT(VARBINARY(MAX), target.[name]) <> CONVERT(VARBINARY(MAX), source.[name])") {
+		t.Errorf("change detection must compare [name] byte-exact via VARBINARY:\n%s", upsert)
+	}
+	// A bare collation-sensitive comparison of the column must NOT appear.
+	if strings.Contains(upsert, "target.[name] <> source.[name]") {
+		t.Errorf("change detection still uses a collation-sensitive `<>` for [name]:\n%s", upsert)
+	}
+	// NULL-transition disjuncts preserved.
+	if !strings.Contains(upsert, "target.[name] IS NULL AND source.[name] IS NOT NULL") ||
+		!strings.Contains(upsert, "target.[name] IS NOT NULL AND source.[name] IS NULL") {
+		t.Errorf("NULL-transition predicates must be preserved:\n%s", upsert)
+	}
+	// The PK is not part of change detection.
+	if strings.Contains(upsert, "CONVERT(VARBINARY(MAX), target.[id])") {
+		t.Errorf("PK column must not appear in change detection:\n%s", upsert)
 	}
 }
 

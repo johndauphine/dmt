@@ -18,6 +18,25 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The SQL Server identity reseed (`DBCC CHECKIDENT`) now escapes single quotes
+  in the qualified table name before interpolating it into the statement's
+  string literal. A legal table name containing an apostrophe (e.g.
+  `[It's Data]`) no longer breaks sequence reset, and a hostile source table
+  name can no longer terminate the literal to inject SQL into the target
+  session (#548).
+
+- SQL Server upsert MERGE change detection now compares values byte-exactly
+  (`CONVERT(VARBINARY(MAX), …)`) instead of a collation-sensitive `<>`.
+  Under the default case-insensitive, ANSI-padded collation a case-only or
+  trailing-space source change (e.g. `smith` → `Smith`) was seen as "no
+  change" and silently left the target stale; it now propagates on
+  `WHEN MATCHED` (#547).
+
+- SQL Server staging/spatial column introspection now checks `rows.Err()`
+  after iterating, so a mid-result-set read error or cancellation surfaces
+  instead of silently returning a truncated column list (which could drop a
+  spatial column from WKT re-typing) (#567).
+
 - AI-generated finalization DDL (indexes, foreign keys, check constraints) is
   now validated as a single statement that targets the expected table before
   it executes, instead of a prefix-only check. A prompt-injected or misbehaving
