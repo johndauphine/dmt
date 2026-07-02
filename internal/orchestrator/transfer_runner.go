@@ -410,7 +410,11 @@ retryLoop:
 		if runtimeAdjustments != nil {
 			writeErrAdjuster = recordingWriteErrorAdjuster{base: writeErrAdjuster, recorder: runtimeAdjustments}
 		}
-		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, j, r.progress, tuner, writeErrAdjuster)
+		attemptJob := j
+		if attempt > 0 {
+			attemptJob.ReplayPossible = true
+		}
+		stats, err = transfer.Execute(ctx, r.sourcePool, r.targetPool, r.config, attemptJob, r.progress, tuner, writeErrAdjuster)
 		if err == nil {
 			break
 		}

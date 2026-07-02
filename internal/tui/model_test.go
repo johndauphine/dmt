@@ -93,3 +93,35 @@ func TestTinyTerminalDoesNotPanic(t *testing.T) {
 		})
 	}
 }
+
+func TestWizardPasswordStepMasksEcho(t *testing.T) {
+	m := InitialModel()
+	m.mode = ModeWizard
+	m.wizardStep = stepSourcePass
+
+	m.handleWizardStep("hunter2")
+
+	out := m.content.String()
+	if strings.Contains(out, "hunter2") {
+		t.Fatalf("wizard output leaked plaintext password: %q", out)
+	}
+	if !strings.Contains(out, "******") {
+		t.Fatalf("wizard output = %q, want masked password echo", out)
+	}
+	if m.wizardData.Source.Password != "hunter2" {
+		t.Fatalf("stored password = %q, want original value", m.wizardData.Source.Password)
+	}
+}
+
+func TestWizardNonSecretStepEchoesInput(t *testing.T) {
+	m := InitialModel()
+	m.mode = ModeWizard
+	m.wizardStep = stepSourceUser
+
+	m.handleWizardStep("alice")
+
+	out := m.content.String()
+	if !strings.Contains(out, "alice") {
+		t.Fatalf("wizard output = %q, want non-secret echo", out)
+	}
+}

@@ -2557,6 +2557,17 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 		Migration: MigrationConfig{
 			TargetMode: "drop_recreate",
 		},
+		AI: &AIConfig{
+			Provider: "openai",
+			Model:    "gpt-test",
+			APIKey:   "sk-secret",
+		},
+		Slack: &SlackConfig{
+			WebhookURL: "https://hooks.slack.com/services/secret",
+			Channel:    "#ops",
+			Username:   "dmt",
+			Enabled:    true,
+		},
 	}
 
 	sanitized := cfg.Sanitized()
@@ -2568,10 +2579,31 @@ func TestSanitizedRedactsPasswords(t *testing.T) {
 	if sanitized.Target.Password != "[REDACTED]" {
 		t.Errorf("Target password not redacted: %s", sanitized.Target.Password)
 	}
+	if sanitized.AI == nil || sanitized.AI.APIKey != "[REDACTED]" {
+		t.Fatalf("AI API key not redacted: %#v", sanitized.AI)
+	}
+	if sanitized.Slack == nil || sanitized.Slack.WebhookURL != "[REDACTED]" {
+		t.Fatalf("Slack webhook not redacted: %#v", sanitized.Slack)
+	}
+	if sanitized.AI.Provider != "openai" || sanitized.AI.Model != "gpt-test" {
+		t.Fatalf("AI non-secret fields changed: %#v", sanitized.AI)
+	}
+	if sanitized.Slack.Channel != "#ops" || sanitized.Slack.Username != "dmt" || !sanitized.Slack.Enabled {
+		t.Fatalf("Slack non-secret fields changed: %#v", sanitized.Slack)
+	}
 
 	// Verify original is unchanged
 	if cfg.Source.Password == "[REDACTED]" {
 		t.Error("Original source password was modified")
+	}
+	if cfg.Target.Password == "[REDACTED]" {
+		t.Error("Original target password was modified")
+	}
+	if cfg.AI.APIKey == "[REDACTED]" {
+		t.Error("Original AI API key was modified")
+	}
+	if cfg.Slack.WebhookURL == "[REDACTED]" {
+		t.Error("Original Slack webhook was modified")
 	}
 }
 

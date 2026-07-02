@@ -119,7 +119,9 @@ type targetModeTestPool struct {
 	mu         sync.Mutex
 	createErrs map[string]error
 	existing   map[string]bool
+	rowCounts  map[string]int64
 	dropped    []string
+	truncated  []string
 	created    []string
 	primaryKey []string
 	resets     []string
@@ -139,6 +141,16 @@ func (p *targetModeTestPool) DropTable(ctx context.Context, _, table string) err
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.dropped = append(p.dropped, table)
+	return nil
+}
+
+func (p *targetModeTestPool) TruncateTable(ctx context.Context, _, table string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.truncated = append(p.truncated, table)
 	return nil
 }
 
@@ -166,6 +178,15 @@ func (p *targetModeTestPool) TableExists(ctx context.Context, _, table string) (
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.existing[table], nil
+}
+
+func (p *targetModeTestPool) GetRowCount(ctx context.Context, _, table string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rowCounts[table], nil
 }
 
 func (p *targetModeTestPool) CreatePrimaryKey(ctx context.Context, table *driver.Table, _ string) error {
@@ -222,6 +243,12 @@ func (p *targetModeTestPool) droppedTables() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.dropped...)
+}
+
+func (p *targetModeTestPool) truncatedTables() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.truncated...)
 }
 
 func (p *targetModeTestPool) createdTables() []string {

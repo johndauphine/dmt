@@ -365,22 +365,16 @@ func (w *Writer) alterColumn(ctx context.Context, tmpl string, t *driver.Table, 
 
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
 	qualified := w.dialect.QualifyTable(schema, w.ident(table))
-	for _, tmpl := range w.cat.DDL.DropTableStmts {
-		stmt := strings.ReplaceAll(tmpl, "{table}", qualified)
-		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("dropping %s: %w", table, err)
-		}
+	if err := w.execDDLStatementList(ctx, w.cat.DDL.DropTableStmts, qualified); err != nil {
+		return fmt.Errorf("dropping %s: %w", table, err)
 	}
 	return nil
 }
 
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
 	qualified := w.dialect.QualifyTable(schema, w.ident(table))
-	for _, tmpl := range w.cat.DDL.TruncateStmts {
-		stmt := strings.ReplaceAll(tmpl, "{table}", qualified)
-		if _, err := w.db.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
+	if err := w.execDDLStatementList(ctx, w.cat.DDL.TruncateStmts, qualified); err != nil {
+		return err
 	}
 	if w.cat.DDL.TruncateCleanup != "" {
 		// Best-effort, matching the hand-written writers (e.g. the
@@ -388,6 +382,46 @@ func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error 
 		_, _ = w.db.ExecContext(ctx, w.cat.DDL.TruncateCleanup, table)
 	}
 	return nil
+}
+
+func (w *Writer) execDDLStatementList(ctx context.Context, templates []string, qualifiedTable string) error {
+	if len(templates) == 0 {
+		return nil
+	}
+	if len(templates) == 1 {
+		stmt := strings.ReplaceAll(templates[0], "{table}", qualifiedTable)
+		_, err := w.db.ExecContext(ctx, stmt)
+		return err
+	}
+
+	conn, err := w.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	fkChecksDisabled := false
+	for _, tmpl := range templates {
+		stmt := strings.ReplaceAll(tmpl, "{table}", qualifiedTable)
+		if isMySQLDisableFKChecks(w.cat.Name, stmt) && !fkChecksDisabled {
+			fkChecksDisabled = true
+			defer func() {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if _, err := conn.ExecContext(cleanupCtx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+					logging.Warn("failed to restore mysql FOREIGN_KEY_CHECKS after DDL: %v", err)
+				}
+			}()
+		}
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isMySQLDisableFKChecks(catalogName, stmt string) bool {
+	return catalogName == "mysql" && strings.EqualFold(strings.TrimSpace(stmt), "SET FOREIGN_KEY_CHECKS = 0")
 }
 
 func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {

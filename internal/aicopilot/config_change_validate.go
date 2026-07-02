@@ -65,6 +65,9 @@ func validateAIConfigChangeNestedPaths(path string, value any) string {
 }
 
 func validateAIConfigChangeValue(path string, value any, ctx aiConfigChangeContext) error {
+	if err := rejectAIConfigTemplateSyntax(path, value); err != nil {
+		return err
+	}
 	doc, err := yaml.Marshal(aiConfigChangeDocument(path, value, ctx))
 	if err != nil {
 		return err
@@ -73,6 +76,43 @@ func validateAIConfigChangeValue(path string, value any, ctx aiConfigChangeConte
 		return err
 	}
 	return validateAIConfigRuntimeValue(path, value)
+}
+
+func rejectAIConfigTemplateSyntax(path string, value any) error {
+	if containsConfigTemplateSyntax(path) {
+		return fmt.Errorf("template expansion syntax is not allowed in AI config suggestions")
+	}
+	return rejectAIConfigTemplateSyntaxValue(value)
+}
+
+func rejectAIConfigTemplateSyntaxValue(value any) error {
+	switch v := value.(type) {
+	case string:
+		if containsConfigTemplateSyntax(v) {
+			return fmt.Errorf("template expansion syntax is not allowed in AI config suggestions")
+		}
+	case map[string]any:
+		for key, nested := range v {
+			if containsConfigTemplateSyntax(key) {
+				return fmt.Errorf("template expansion syntax is not allowed in AI config suggestions")
+			}
+			if err := rejectAIConfigTemplateSyntaxValue(nested); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if err := rejectAIConfigTemplateSyntaxValue(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func containsConfigTemplateSyntax(s string) bool {
+	start := strings.Index(s, "${")
+	return start >= 0 && strings.Contains(s[start+2:], "}")
 }
 
 func normalizeAIConfigChangePath(path string) (string, bool) {

@@ -134,6 +134,83 @@ func TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleProgress(t *
 	assertRowNumberResumeSummary(t, state, runID, taskPrefix, 6, 2)
 }
 
+func TestRowNumberReadsPastEstimatedRowCount(t *testing.T) {
+	ctx := context.Background()
+
+	src := newRowNumberResumeSQLiteReader(t, "source")
+	defer src.Close()
+	tgt := newRowNumberResumeSQLiteWriter(t, "target")
+	defer tgt.Close()
+
+	table := rowNumberResumeTable()
+	table.RowCount = 4 // Deliberately under the six real source rows.
+	orders := []rowNumberResumeOrder{
+		{Tenant: "acct-a", Code: "ord-001", Amount: 10, Note: "one"},
+		{Tenant: "acct-a", Code: "ord-002", Amount: 20, Note: "two"},
+		{Tenant: "acct-b", Code: "ord-001", Amount: 30, Note: "three"},
+		{Tenant: "acct-b", Code: "ord-002", Amount: 40, Note: "four"},
+		{Tenant: "acct-c", Code: "ord-001", Amount: 50, Note: "five"},
+		{Tenant: "acct-c", Code: "ord-002", Amount: 60, Note: "six"},
+	}
+	createRowNumberResumeTable(t, ctx, src.DB())
+	createRowNumberResumeTable(t, ctx, tgt.DB())
+	insertRowNumberResumeOrders(t, ctx, src.DB(), orders)
+
+	cfg := rowNumberResumeConfig()
+	cfg.Migration.LargeTableThreshold = 1_000_000 // single ROW_NUMBER job
+
+	stats, err := Execute(ctx, src, tgt, cfg, Job{Table: table}, progress.New(), nil)
+	if err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if stats.Rows != int64(len(orders)) {
+		t.Fatalf("stats.Rows = %d, want %d", stats.Rows, len(orders))
+	}
+	assertRowNumberResumeTarget(t, ctx, tgt.DB(), orders)
+}
+
+func TestRowNumberReplayPossibleEnablesIdempotentWritesWithoutResume(t *testing.T) {
+	ctx := context.Background()
+
+	src := newRowNumberResumeSQLiteReader(t, "source")
+	defer src.Close()
+	tgt := newRowNumberResumeSQLiteWriter(t, "target")
+	defer tgt.Close()
+
+	table := rowNumberResumeTable()
+	orders := []rowNumberResumeOrder{
+		{Tenant: "acct-a", Code: "ord-001", Amount: 10, Note: "one"},
+		{Tenant: "acct-a", Code: "ord-002", Amount: 20, Note: "two"},
+		{Tenant: "acct-b", Code: "ord-001", Amount: 30, Note: "three"},
+		{Tenant: "acct-b", Code: "ord-002", Amount: 40, Note: "four"},
+		{Tenant: "acct-c", Code: "ord-001", Amount: 50, Note: "five"},
+		{Tenant: "acct-c", Code: "ord-002", Amount: 60, Note: "six"},
+	}
+	createRowNumberResumeTable(t, ctx, src.DB())
+	createRowNumberResumeTable(t, ctx, tgt.DB())
+	insertRowNumberResumeOrders(t, ctx, src.DB(), orders)
+	insertRowNumberResumeOrders(t, ctx, tgt.DB(), orders[:2])
+
+	cfg := rowNumberResumeConfig()
+	job := Job{
+		Table: table,
+		Partition: &source.Partition{
+			TableName:        table.Name,
+			PartitionID:      1,
+			StartRow:         0,
+			EndRow:           table.RowCount,
+			RowCount:         table.RowCount,
+			IsFirstPartition: true,
+		},
+		ReplayPossible: true,
+	}
+
+	if _, err := Execute(ctx, src, tgt, cfg, job, progress.New(), nil); err != nil {
+		t.Fatalf("Execute() with replay possible error: %v", err)
+	}
+	assertRowNumberResumeTarget(t, ctx, tgt.DB(), orders)
+}
+
 func rowNumberResumeTable() source.Table {
 	t := source.Table{
 		Schema: "main",
@@ -150,6 +227,26 @@ func rowNumberResumeTable() source.Table {
 	}
 	t.PopulatePKColumns()
 	return t
+}
+
+func rowNumberResumeConfig() *config.Config {
+	return &config.Config{
+		Source: config.SourceConfig{Type: "sqlite"},
+		Target: config.TargetConfig{Type: "sqlite", ChunkSize: 2},
+		Migration: config.MigrationConfig{
+			ChunkSize:            2,
+			TargetMode:           "drop_recreate",
+			WriteAheadWriters:    1,
+			ReadAheadBuffers:     1,
+			CheckpointFrequency:  1,
+			UpsertMergeChunkSize: 2,
+			MaxSourceConnections: 1,
+			MaxTargetConnections: 1,
+			Workers:              1,
+			LargeTableThreshold:  1,
+			MaxPartitions:        2,
+		},
+	}
 }
 
 func rowNumberResumeJob(table source.Table, taskID int64, saver ProgressSaver, partition source.Partition) Job {

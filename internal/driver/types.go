@@ -109,6 +109,7 @@ func (t *Table) GetColumnNames() []string {
 type Column struct {
 	Name         string   `json:"name"`
 	DataType     string   `json:"data_type"`
+	FullDataType string   `json:"full_data_type,omitempty"`
 	MaxLength    int      `json:"max_length"`
 	Precision    int      `json:"precision"`
 	Scale        int      `json:"scale"`

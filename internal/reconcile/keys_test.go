@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 	_ "github.com/johndauphine/dmt/internal/driver/generic"
@@ -152,6 +153,52 @@ func TestKeyFingerprintNormalizesCommonDriverValues(t *testing.T) {
 
 	if _, err := KeyFingerprint([]any{nil}); err == nil {
 		t.Fatal("KeyFingerprint(nil) error = nil, want error")
+	}
+}
+
+func TestKeyFingerprintCanonicalizesCrossDriverValues(t *testing.T) {
+	tests := []struct {
+		name string
+		a    any
+		b    any
+	}{
+		{
+			name: "mssql uniqueidentifier bytes match canonical uuid string",
+			a: []byte{
+				0x67, 0x45, 0x3e, 0x12,
+				0x9b, 0xe8,
+				0xd3, 0x12,
+				0xa4, 0x56,
+				0x42, 0x66, 0x14, 0x17, 0x40, 0x00,
+			},
+			b: "123e4567-e89b-12d3-a456-426614174000",
+		},
+		{
+			name: "decimal text bytes match integer",
+			a:    []byte("42"),
+			b:    int64(42),
+		},
+		{
+			name: "mysql datetime bytes match time",
+			a:    []byte("2020-01-01 00:00:00"),
+			b:    time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fpA, err := KeyFingerprint([]any{tt.a})
+			if err != nil {
+				t.Fatalf("KeyFingerprint(a) error: %v", err)
+			}
+			fpB, err := KeyFingerprint([]any{tt.b})
+			if err != nil {
+				t.Fatalf("KeyFingerprint(b) error: %v", err)
+			}
+			if fpA != fpB {
+				t.Fatalf("fingerprints differ: %q != %q", fpA, fpB)
+			}
+		})
 	}
 }
 

@@ -645,7 +645,17 @@ func (c *Config) Sanitized() *Config {
 	// Redact target credentials
 	sanitized.Target.Password = "[REDACTED]"
 
-	// Note: AI and Slack credentials are in global secrets file, not migration config
+	if c.AI != nil {
+		ai := *c.AI
+		ai.APIKey = "[REDACTED]"
+		sanitized.AI = &ai
+	}
+
+	if c.Slack != nil {
+		slack := *c.Slack
+		slack.WebhookURL = "[REDACTED]"
+		sanitized.Slack = &slack
+	}
 
 	return &sanitized
 }

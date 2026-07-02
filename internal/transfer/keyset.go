@@ -74,7 +74,10 @@ func executeKeysetPagination(
 			srcDialect.QuoteIdentifier(pkCol), srcDialect.QuoteIdentifier(pkCol),
 			srcDialect.QualifyTable(job.Table.Schema, job.Table.Name), tableHint)
 		err := db.QueryRowContext(ctx, minMaxQuery).Scan(&minPKVal, &maxPKVal)
-		if err != nil || minPKVal == nil {
+		if err != nil {
+			return nil, fmt.Errorf("keyset boundary query: %w", err)
+		}
+		if minPKVal == nil {
 			return stats, nil // Empty table
 		}
 	}

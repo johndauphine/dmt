@@ -154,6 +154,12 @@ type TypeInfo struct {
 	// DataType is the source column's data type.
 	DataType string
 
+	// FullDataType is the dialect-specific full type declaration when it
+	// differs from DataType, such as MySQL COLUMN_TYPE ("int unsigned",
+	// "enum('a','b')"). Deterministic mappers use DataType for dispatch and
+	// FullDataType for source-specific modifiers.
+	FullDataType string
+
 	// MaxLength is the maximum length for string types (-1 for MAX).
 	MaxLength int
 

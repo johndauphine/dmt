@@ -481,6 +481,72 @@ tables:
 	}
 }
 
+func TestFileStateSeedsTaskIDCounterFromLoadedState(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateFile := filepath.Join(tmpDir, "state.yaml")
+
+	existingState := `run_id: existing123
+started_at: 2025-12-20T10:00:00Z
+status: running
+source_schema: dbo
+target_schema: public
+tables:
+  transfer:dbo.Users:
+    status: running
+    table_name: Users
+    last_pk: 5000
+    rows_done: 50
+    rows_total: 100
+    task_id: 1001
+  transfer:dbo.Posts:
+    status: running
+    table_name: Posts
+    last_pk: 9000
+    rows_done: 90
+    rows_total: 100
+    task_id: 1002
+`
+	if err := os.WriteFile(stateFile, []byte(existingState), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fs, err := NewFileState(stateFile)
+	if err != nil {
+		t.Fatalf("NewFileState: %v", err)
+	}
+
+	newID, err := fs.CreateTask("existing123", "transfer", "transfer:dbo.Comments")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if newID != 1003 {
+		t.Fatalf("new task id = %d, want 1003", newID)
+	}
+
+	if err := fs.SaveTransferProgress(newID, "Comments", nil, 42, 4, 10, ""); err != nil {
+		t.Fatalf("SaveTransferProgress(new): %v", err)
+	}
+	if err := fs.SaveTransferProgress(1002, "Posts", nil, 9100, 91, 100, ""); err != nil {
+		t.Fatalf("SaveTransferProgress(existing): %v", err)
+	}
+
+	newProgress, err := fs.GetTransferProgress(newID)
+	if err != nil {
+		t.Fatalf("GetTransferProgress(new): %v", err)
+	}
+	if newProgress == nil || newProgress.TableName != "Comments" || newProgress.RowsDone != 4 {
+		t.Fatalf("new progress = %+v, want Comments rows_done=4", newProgress)
+	}
+
+	existingProgress, err := fs.GetTransferProgress(1002)
+	if err != nil {
+		t.Fatalf("GetTransferProgress(existing): %v", err)
+	}
+	if existingProgress == nil || existingProgress.TableName != "Posts" || existingProgress.RowsDone != 91 {
+		t.Fatalf("existing progress = %+v, want Posts rows_done=91", existingProgress)
+	}
+}
+
 // TestAtomicWriteFile_CreatesMissingDir covers the directory-missing
 // branch of #254's acceptance criteria: NewFileState may be pointed
 // at a nested path whose parent dirs don't exist yet. atomicWriteFile

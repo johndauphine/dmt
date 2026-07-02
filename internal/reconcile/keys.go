@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"strconv"
@@ -281,12 +282,99 @@ func cloneKey(key []any) []any {
 func normalizeValue(value any) any {
 	switch v := value.(type) {
 	case []byte:
-		return string(v)
+		if len(v) == 16 {
+			return formatMixedEndianUUID(v)
+		}
+		return canonicalStringValue(string(v))
+	case string:
+		return canonicalStringValue(v)
 	case time.Time:
 		return v.UTC()
 	default:
 		return v
 	}
+}
+
+func canonicalStringValue(value string) any {
+	if value == "" || value != strings.TrimSpace(value) {
+		return value
+	}
+	if uuid, ok := canonicalUUIDString(value); ok {
+		return uuid
+	}
+	if i, ok := canonicalIntegerString(value); ok {
+		return i
+	}
+	if ts, ok := canonicalTimeString(value); ok {
+		return ts
+	}
+	return value
+}
+
+func canonicalIntegerString(value string) (any, bool) {
+	if value == "" {
+		return nil, false
+	}
+	if strings.HasPrefix(value, "+") {
+		return nil, false
+	}
+	if i, err := strconv.ParseInt(value, 10, 64); err == nil && strconv.FormatInt(i, 10) == value {
+		return i, true
+	}
+	if u, err := strconv.ParseUint(value, 10, 64); err == nil && strconv.FormatUint(u, 10) == value {
+		return u, true
+	}
+	return nil, false
+}
+
+func canonicalTimeString(value string) (time.Time, bool) {
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if ts, err := time.Parse(layout, value); err == nil {
+			return ts.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func canonicalUUIDString(value string) (string, bool) {
+	if len(value) != 36 {
+		return "", false
+	}
+	for i, r := range value {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return "", false
+			}
+		default:
+			if !isHexRune(r) {
+				return "", false
+			}
+		}
+	}
+	return strings.ToLower(value), true
+}
+
+func isHexRune(r rune) bool {
+	return ('0' <= r && r <= '9') || ('a' <= r && r <= 'f') || ('A' <= r && r <= 'F')
+}
+
+func formatMixedEndianUUID(b []byte) string {
+	if len(b) != 16 {
+		return hex.EncodeToString(b)
+	}
+	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[3], b[2], b[1], b[0],
+		b[5], b[4],
+		b[7], b[6],
+		b[8], b[9],
+		b[10], b[11], b[12], b[13], b[14], b[15])
 }
 
 // KeyFingerprint returns a stable, length-delimited representation of one key

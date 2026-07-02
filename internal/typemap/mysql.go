@@ -24,10 +24,19 @@ func mysqlToCanonical(col ColumnInfo) CanonicalType {
 		}
 		return CanonicalType{Kind: KindSmallInt}
 	case "smallint":
+		if isMySQLUnsigned(col) {
+			return CanonicalType{Kind: KindInteger}
+		}
 		return CanonicalType{Kind: KindSmallInt}
 	case "mediumint", "int":
+		if isMySQLUnsigned(col) && udt == "int" {
+			return CanonicalType{Kind: KindBigInt}
+		}
 		return CanonicalType{Kind: KindInteger}
 	case "bigint":
+		if isMySQLUnsigned(col) {
+			return CanonicalType{Kind: KindDecimal, Precision: IntPtr(20), Scale: IntPtr(0)}
+		}
 		return CanonicalType{Kind: KindBigInt}
 	case "float":
 		return CanonicalType{Kind: KindFloat}
@@ -98,10 +107,7 @@ func mysqlToCanonical(col ColumnInfo) CanonicalType {
 	case "bit":
 		// BIT(1) is the conventional Boolean; BIT(N) for N>1 has no
 		// portable equivalent.
-		precision := 1
-		if col.NumericPrecision != nil {
-			precision = *col.NumericPrecision
-		}
+		precision := mysqlBitPrecision(col)
 		if precision == 1 {
 			return CanonicalType{Kind: KindBoolean}
 		}
@@ -222,6 +228,29 @@ func mysqlFromCanonical(ct CanonicalType) DdlType {
 // stay SmallInt.
 func isTinyintBool(col ColumnInfo) bool {
 	return col.UDTName == "tinyint" && strings.HasPrefix(col.DataType, "tinyint(1)")
+}
+
+func isMySQLUnsigned(col ColumnInfo) bool {
+	return strings.Contains(strings.ToLower(col.DataType), " unsigned")
+}
+
+func mysqlBitPrecision(col ColumnInfo) int {
+	if col.NumericPrecision != nil {
+		return *col.NumericPrecision
+	}
+	dt := strings.ToLower(strings.TrimSpace(col.DataType))
+	if !strings.HasPrefix(dt, "bit(") {
+		return 1
+	}
+	end := strings.IndexByte(dt, ')')
+	if end <= len("bit(") {
+		return 1
+	}
+	var precision int
+	if _, err := fmt.Sscanf(dt[len("bit("):end], "%d", &precision); err == nil && precision > 0 {
+		return precision
+	}
+	return 1
 }
 
 // MySQL text/blob tier byte caps. Matches the MySQL data dictionary:

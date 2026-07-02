@@ -52,6 +52,12 @@ type Job struct {
 	// the idempotent-on-dup writer path (#227 codex follow-up) for ALL
 	// partitions of the table on resume, not just those with saved progress.
 	IsResume bool
+
+	// ReplayPossible is true when this execution may replay rows already
+	// committed by an earlier in-process attempt. Fresh first attempts keep
+	// plain INSERT behavior; retries can opt into ROW_NUMBER duplicate-safe
+	// writes without pretending to be a cross-process resume.
+	ReplayPossible bool
 }
 
 // chunkResult holds a chunk of data for the read-ahead pipeline
