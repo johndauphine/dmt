@@ -406,11 +406,31 @@ func (o *Orchestrator) SetProgressReporter(reporter progress.Reporter, interval 
 	o.progress.SetReporter(reporter, interval)
 }
 
-// checkPGIdentifierCollisions fails the migration before any DDL runs if two
-// source identifiers would sanitize to the same PostgreSQL name. In
-// drop_recreate a table-name collision silently destroys one table's data and
-// a column-name collision produces invalid DDL, so this is a hard gate rather
-// than a warning (#553). No-op for non-PostgreSQL targets (caller-gated).
+// enforcePGIdentifierCollisionGate fails the migration before any DDL runs when
+// the target is PostgreSQL and two source identifiers would sanitize to the
+// same name. In drop_recreate a table-name collision silently destroys one
+// table's data and a column-name collision produces invalid DDL, so this is a
+// hard gate rather than a warning (#553).
+//
+// It is keyed on targetPool.DBType() — the canonical, alias-resolved engine
+// name — NOT the raw config value: PostgreSQL is also selected via the "pg" and
+// "postgresql" aliases, and the sanitization / drop_recreate / transfer paths
+// all key on DBType() == "postgres". Keying this gate on the raw config string
+// would let those aliases skip the gate while the destructive paths still run,
+// reintroducing the silent data loss.
+func (o *Orchestrator) enforcePGIdentifierCollisionGate(tables []source.Table) error {
+	if !o.targetIsPostgres() {
+		return nil
+	}
+	return o.checkPGIdentifierCollisions(tables)
+}
+
+// targetIsPostgres reports whether the target engine is PostgreSQL by its
+// canonical name, resolving aliases like "pg"/"postgresql".
+func (o *Orchestrator) targetIsPostgres() bool {
+	return o.targetPool.DBType() == "postgres"
+}
+
 func (o *Orchestrator) checkPGIdentifierCollisions(tables []source.Table) error {
 	tableInfos := make([]target.TableInfo, len(tables))
 	for i := range tables {

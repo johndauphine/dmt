@@ -183,12 +183,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 
 	// Fail before touching the target if source identifiers collide under
 	// PostgreSQL sanitization (#553) — same hard gate as the initial run.
-	if o.config.Target.Type == "postgres" {
-		if err := o.checkPGIdentifierCollisions(tables); err != nil {
-			o.state.CompleteRun(run.ID, "failed", err.Error())
-			o.notifyFailure(run.ID, err, time.Since(startTime))
-			return err
-		}
+	if err := o.enforcePGIdentifierCollisionGate(tables); err != nil {
+		o.state.CompleteRun(run.ID, "failed", err.Error())
+		o.notifyFailure(run.ID, err, time.Since(startTime))
+		return err
 	}
 
 	// Apply AI-recommended parameters (if AI is available)
@@ -387,7 +385,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	}
 
 	// Log identifier changes for PostgreSQL targets
-	if o.config.Target.Type == "postgres" {
+	if o.targetIsPostgres() {
 		o.logPGIdentifierChanges(tablesToTransfer)
 	}
 

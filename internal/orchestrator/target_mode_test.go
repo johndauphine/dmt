@@ -128,11 +128,18 @@ type targetModeTestPool struct {
 	indexes    []string
 	fks        []string
 	checks     []string
+	dbType     string // overrides DBType() when set (canonical engine name)
 }
 
 // DBType is needed by the #460 capability-skip message; the embedded
-// nil driver.Writer would otherwise panic on promotion.
-func (p *targetModeTestPool) DBType() string { return "faketest" }
+// nil driver.Writer would otherwise panic on promotion. Defaults to
+// "faketest"; set dbType to model a specific (canonical) target engine.
+func (p *targetModeTestPool) DBType() string {
+	if p.dbType != "" {
+		return p.dbType
+	}
+	return "faketest"
+}
 
 func (p *targetModeTestPool) DropTable(ctx context.Context, _, table string) error {
 	if err := ctx.Err(); err != nil {
