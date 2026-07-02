@@ -18,6 +18,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The chunk-size retry after a write error no longer duplicates rows on
+  non-transactional (MySQL batched-INSERT) targets. Earlier sub-batches of a
+  failed chunk autocommit independently, so retrying the whole chunk from row 0
+  re-inserted them (drop_recreate has no PK on the target during transfer to
+  absorb the duplicates). The write path now reports how many rows committed
+  (`driver.PartialWriteError`) and the retry resumes after that prefix.
+  Transactional targets (PostgreSQL/SQL Server/SQLite) roll the failed chunk
+  back and are unaffected (#541).
+
 - MySQL `LOAD DATA LOCAL INFILE` bulk loads now verify the load was lossless
   before acking a chunk: a `RowsAffected` mismatch (duplicate-key rows silently
   dropped under LOAD DATA's implicit IGNORE) or an Error/Warning-level

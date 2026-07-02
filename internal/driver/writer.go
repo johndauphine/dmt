@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/johndauphine/dmt/internal/stats"
 )
@@ -162,6 +163,27 @@ type WriteBatchOptions struct {
 	// is true (single-job non-partitioned ROW_NUMBER tables pass nil).
 	PartitionID *int
 }
+
+// PartialWriteError reports that a bulk write to a non-transactional target
+// (e.g. MySQL, which autocommits each sub-batch) failed after Committed rows of
+// the chunk had already been durably written. Callers that retry the chunk MUST
+// resume after the committed prefix — re-writing from row 0 duplicates the
+// committed rows, since drop_recreate has no primary key on the target during
+// transfer to absorb them (#541). Transactional targets roll the whole chunk
+// back on failure and never produce this error.
+type PartialWriteError struct {
+	// Committed is the number of leading rows of the chunk that committed
+	// before the failure (i.e. the offset to resume the retry from).
+	Committed int
+	// Err is the underlying write error.
+	Err error
+}
+
+func (e *PartialWriteError) Error() string {
+	return fmt.Sprintf("write failed after %d committed rows: %v", e.Committed, e.Err)
+}
+
+func (e *PartialWriteError) Unwrap() error { return e.Err }
 
 // UpsertBatchOptions configures an upsert operation.
 type UpsertBatchOptions struct {

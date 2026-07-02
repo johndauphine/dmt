@@ -187,6 +187,18 @@ func (env bulkEnv) runBatches(ctx context.Context, rows [][]any, batchSize int, 
 			end = len(rows)
 		}
 		if err := fn(exec, rows[start:end]); err != nil {
+			if !env.transactional {
+				// Each sub-batch autocommitted independently, so rows
+				// [0,start) are durably written while this batch (and the
+				// rest) are not. Report the committed offset so a retry
+				// resumes after it instead of duplicating from row 0 (#541).
+				// A single sub-batch INSERT is all-or-nothing on the engines
+				// this path serves (MySQL/InnoDB — the only non_transactional
+				// catalog), so nothing in [start,end) committed. A
+				// non-atomic engine (e.g. MyISAM, which dmt does not target)
+				// could commit a partial prefix and would under-count here.
+				return &driver.PartialWriteError{Committed: start, Err: err}
+			}
 			return err
 		}
 	}
