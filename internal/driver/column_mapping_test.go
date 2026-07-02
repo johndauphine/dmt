@@ -38,8 +38,8 @@ func TestMapColumnTypeUsesFullDataType(t *testing.T) {
 		{
 			name:   "mysql enum values come from column type",
 			target: "mysql",
-			col:    Column{Name: "status", DataType: "enum", FullDataType: "enum('active','inactive')"},
-			want:   "ENUM('active', 'inactive')",
+			col:    Column{Name: "status", DataType: "enum", FullDataType: "enum('Active','InActive','PENDING')"},
+			want:   "ENUM('Active', 'InActive', 'PENDING')",
 		},
 		{
 			name:   "mysql tinyint one uses full type",

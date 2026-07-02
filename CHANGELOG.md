@@ -16,6 +16,13 @@ All notable changes to this project will be documented in this file.
   omit unsupported sampling fields, disable adaptive thinking, and use the
   configured Anthropic output token budget for complex SQL/JSON prompts (#535).
 
+### Fixed
+
+- Hardened P1 migration safety paths: resume/upsert handling, delete
+  reconciliation key matching, ROW_NUMBER/keyset retry behavior, MySQL
+  type introspection and DDL execution, secret redaction, file checkpoint
+  task IDs, AI config validation, and TUI password masking (#569).
+
 ## [5.3.0] - 2026-06-11
 
 ### Added

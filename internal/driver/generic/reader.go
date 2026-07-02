@@ -299,7 +299,7 @@ func (r *Reader) loadColumns(ctx context.Context, t *driver.Table) error {
 		col := driver.Column{
 			Name:         name,
 			DataType:     strings.ToLower(strings.TrimSpace(declType.String)),
-			FullDataType: strings.ToLower(strings.TrimSpace(fullDeclType.String)),
+			FullDataType: strings.TrimSpace(fullDeclType.String),
 			MaxLength:    int(maxLen.Int64),
 			Precision:    int(prec.Int64),
 			Scale:        int(scale.Int64),
