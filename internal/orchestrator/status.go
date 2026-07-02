@@ -659,3 +659,31 @@ func (o *Orchestrator) transferredRowsFromState(runID string) (int64, error) {
 	}
 	return total, nil
 }
+
+// summaryRowsTransferred returns the rows transferred in THIS session from
+// checkpoint state: the run's cumulative checkpointed rows_done minus baseline
+// (the same count captured before this session's transfer started). For a fresh
+// Run() baseline is 0 so this is the whole run's rows; for Resume() it excludes
+// tables completed in the original run and counts only the fraction each
+// partially-transferred table moved this resume — so the throughput
+// (rows / this-session duration) fed to notifications, the summary, and
+// ai_tuning_history is measured over the same window (#498 / #565). The
+// source-side RowCount estimate() is a lazily-computed fallback used only when
+// state is unavailable or reports no progress.
+//
+// Caveat: if a resume reshapes partitions (partition-count or ROW_NUMBER
+// boundary change from RowCount drift or a ChunkSize/MaxPartitions change),
+// job_builder clears the affected tables' progress AFTER baseline is captured,
+// so the delta undercounts that table's this-resume work. This is conservative
+// (it understates throughput, never re-inflates it — the defect #565 fixed), so
+// it does not skew tuning the wrong way.
+func (o *Orchestrator) summaryRowsTransferred(runID string, baseline int64, estimate func() int64) int64 {
+	total, err := o.transferredRowsFromState(runID)
+	if err != nil || total == 0 {
+		return estimate()
+	}
+	if delta := total - baseline; delta > 0 {
+		return delta
+	}
+	return estimate()
+}
