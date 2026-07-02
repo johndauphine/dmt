@@ -146,8 +146,8 @@ func (fs *FileState) SaveTransferProgress(taskID int64, tableName string, partit
 
 // GetTransferProgress returns progress for a task.
 func (fs *FileState) GetTransferProgress(taskID int64) (*TransferProgress, error) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 
 	key, ok := fs.taskKeyForIDLocked(taskID)
 	if ok {
