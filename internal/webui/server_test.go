@@ -51,7 +51,7 @@ func TestStaticHandlerServesIndex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "dmt WebUI") {
+	if !strings.Contains(rec.Body.String(), `<div id="app">`) {
 		t.Error("index.html did not render expected content")
 	}
 
@@ -61,7 +61,7 @@ func TestStaticHandlerServesIndex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("SPA fallback status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "dmt WebUI") {
+	if !strings.Contains(rec.Body.String(), `<div id="app">`) {
 		t.Error("SPA fallback did not serve the shell")
 	}
 }

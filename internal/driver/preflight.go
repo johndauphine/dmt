@@ -68,11 +68,11 @@ type PreFlightRequest struct {
 // "privileges.create_table" so operators can map skip flags and metrics
 // to specific checks without parsing free-form messages.
 type PreFlightFinding struct {
-	Severity PreFlightSeverity
-	Check    string // dotted check name, e.g. "privileges.create_table"
-	Side     PreFlightSide
-	Message  string // human-readable: what's wrong
-	Remedy   string // human-readable: what to do about it
+	Severity PreFlightSeverity `json:"severity"`
+	Check    string            `json:"check"` // dotted check name, e.g. "privileges.create_table"
+	Side     PreFlightSide     `json:"side"`
+	Message  string            `json:"message"` // human-readable: what's wrong
+	Remedy   string            `json:"remedy"`  // human-readable: what to do about it
 }
 
 // PreFlightChecker is the driver-side hook for preflight. Each driver

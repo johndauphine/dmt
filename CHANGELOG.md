@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- WebUI frontend: a modern single-page operator console (no-build vanilla
+  JS/CSS embedded in the binary) — login, a live migration dashboard, checks,
+  guided setup, profiles, settings, and a ⌘K command palette. Also gives
+  `driver.PreFlightFinding` snake_case JSON tags so the WebUI and CLI `--json`
+  emit consistent finding keys (#582).
+
 - WebUI interactive flows: a guided setup wizard (driving the shared
   `internal/setup` state machine), profile management, secrets init, cache
   clear, and server-side session defaults honored by subsequent commands.
