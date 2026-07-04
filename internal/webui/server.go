@@ -1,10 +1,13 @@
-// Package webui serves dmt's browser front-end (#578, epic #577). It is the
-// third front-end alongside the CLI and TUI and is launched with the global
-// --webui flag. This foundation package owns the HTTP server lifecycle,
-// embedded-asset serving, and the security baseline (bind-address rules,
-// shared-secret auth, session cookies, security headers). The command
-// surface — status/run/progress/wizards — is layered on in later issues
-// (#579-#582) by registering handlers under /api/.
+// Package webui serves dmt's browser front-end (epic #577). It is the third
+// front-end alongside the CLI and TUI, launched with the global --webui flag.
+// The package owns the HTTP server lifecycle, embedded SPA serving, the
+// security baseline (bind-address rules, shared-secret auth, session cookies,
+// security headers, DNS-rebinding guard), and the authenticated /api surface:
+// read/advisory endpoints (#579), run/resume with SSE live progress (#580),
+// and the interactive setup/profiles/session flows (#581). Handlers call the
+// same internal/orchestrator + internal/command surfaces the TUI does — no
+// forked business logic. Command parity with the registry is machine-checked
+// by parity_surface_test.go (#583).
 //
 // Security posture: the server is loopback-only by default with an
 // auto-generated token printed at startup. Binding a non-loopback address

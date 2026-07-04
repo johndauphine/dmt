@@ -19,6 +19,54 @@ const (
 	TUICLIOnly TUIStatus = "cli-only"
 )
 
+// WebStatus declares how a command is exposed in the WebUI (#583, epic #577).
+type WebStatus string
+
+const (
+	// WebSupported: an authenticated /api route operates the command.
+	WebSupported WebStatus = "web-supported"
+	// WebPlanned: WebUI parity is scheduled; the map comment names why.
+	WebPlanned WebStatus = "web-planned"
+	// WebNA: deliberately not surfaced in the WebUI; comment states why.
+	WebNA WebStatus = "web-na"
+)
+
+// WebSurface is the authoritative WebUI disposition per production command
+// path — the WebUI's analogue of the TUIStatus on CommandSpec. Every path in
+// Registry/Subcommands must appear here and vice versa (enforced by the WebUI
+// parity test in internal/webui), so a command can't ship without declaring
+// its WebUI story, and stale entries can't linger.
+var WebSurface = map[string]WebStatus{
+	"run":          WebSupported, // POST /api/run
+	"resume":       WebSupported, // POST /api/resume
+	"status":       WebSupported, // GET /api/run, /api/status
+	"validate":     WebSupported, // POST /api/validate
+	"diagnose":     WebSupported, // POST /api/diagnose
+	"history":      WebSupported, // GET /api/history
+	"profile":      WebSupported, // GET/POST/DELETE /api/profiles
+	"preflight":    WebSupported, // POST /api/preflight
+	"analyze":      WebSupported, // POST /api/analyze
+	"ai":           WebSupported, // POST /api/ai/config-review
+	"init-secrets": WebSupported, // POST /api/init-secrets
+	"setup":        WebSupported, // POST /api/setup/*
+	"cache":        WebSupported, // POST /api/cache/clear
+	"init":         WebNA,        // guided /api/setup covers interactive init
+
+	"profile save":     WebSupported,
+	"profile list":     WebSupported,
+	"profile delete":   WebSupported,
+	"profile export":   WebSupported,
+	"ai config-review": WebSupported,
+	"ai evals":         WebNA, // developer/eval harness, no operator workflow
+	"cache clear":      WebSupported,
+}
+
+// WebSupportFor returns the WebUI disposition for a command path.
+func WebSupportFor(path string) (WebStatus, bool) {
+	s, ok := WebSurface[path]
+	return s, ok
+}
+
 // FlagSpec declares one flag's TUI disposition. Status/Ref default to
 // the owning command's when empty.
 type FlagSpec struct {
