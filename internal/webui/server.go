@@ -71,6 +71,13 @@ type Server struct {
 	tokenAuto bool // token was auto-generated (loopback convenience)
 	sessions  *sessionStore
 	httpSrv   *http.Server
+
+	// allowedHosts is the DNS-rebinding guard's Host-header allowlist. It is
+	// populated only for a loopback bind (where the rebinding attack applies:
+	// a malicious page resolving its own hostname to 127.0.0.1 to reach the
+	// operator's local server). For a remote bind it is nil — the public
+	// hostname is unknowable and the mandatory token+TLS are the control.
+	allowedHosts map[string]bool
 }
 
 // configErr marks a WebUI startup/configuration failure (bad flag
@@ -97,11 +104,14 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, &configErr{err}
 	}
+	// hostFromAddr already succeeded inside validateBindSecurity.
+	host, _ := hostFromAddr(opts.Addr)
 	s := &Server{
-		opts:      opts,
-		token:     token,
-		tokenAuto: auto,
-		sessions:  newSessionStore(sessionTTL),
+		opts:         opts,
+		token:        token,
+		tokenAuto:    auto,
+		sessions:     newSessionStore(sessionTTL),
+		allowedHosts: buildAllowedHosts(host, isLoopbackHost(host)),
 	}
 	s.httpSrv = &http.Server{
 		Handler:           s.buildHandler(),

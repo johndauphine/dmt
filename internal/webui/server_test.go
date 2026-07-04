@@ -47,7 +47,7 @@ func TestStaticHandlerServesIndex(t *testing.T) {
 
 	// Root serves the placeholder shell.
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost/", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET / status = %d, want 200", rec.Code)
 	}
@@ -57,7 +57,7 @@ func TestStaticHandlerServesIndex(t *testing.T) {
 
 	// SPA fallback: an unknown deep-link path serves the shell, not 404.
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status/some-run-id", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost/status/some-run-id", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("SPA fallback status = %d, want 200", rec.Code)
 	}

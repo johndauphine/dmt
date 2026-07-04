@@ -20,7 +20,9 @@ func (s *Server) buildHandler() http.Handler {
 	root.Handle("/api/", s.originGuard(api))
 	root.Handle("/", s.staticHandler())
 
-	return securityHeaders(root)
+	// hostGuard (DNS-rebinding) wraps everything; securityHeaders is
+	// outermost so even rejected requests carry the hardening headers.
+	return securityHeaders(s.hostGuard(root))
 }
 
 // registerAPI mounts the foundation endpoints. #579+ extend this with the

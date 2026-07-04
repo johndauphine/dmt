@@ -89,23 +89,23 @@ func (s *Server) authenticated(r *http.Request) bool {
 }
 
 // handleLogin exchanges the shared token for a session cookie. The token is
-// read from the JSON body {"token":"..."} or, for the loopback one-click link,
-// a ?token= query parameter.
+// read from the JSON body {"token":"..."}. The loopback one-click link carries
+// the token in the page URL, but the SPA forwards it here in the POST body —
+// the token is never accepted as a query parameter, to keep it out of request
+// logs and the server access path.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
 		return
 	}
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		var body struct {
-			Token string `json:"token"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err == nil {
-			token = body.Token
-		}
+	var body struct {
+		Token string `json:"token"`
 	}
-	if token == "" || !tokenEqual(token, s.token) {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "expected JSON body {\"token\":\"…\"}")
+		return
+	}
+	if body.Token == "" || !tokenEqual(body.Token, s.token) {
 		writeError(w, http.StatusUnauthorized, "invalid_token", "invalid auth token")
 		return
 	}
@@ -119,7 +119,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    sid,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   s.opts.tlsEnabled(),
+		Secure:   requestIsHTTPS(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
@@ -161,8 +161,17 @@ func (s *sessionStore) create() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	now := time.Now()
 	s.mu.Lock()
-	s.m[id] = time.Now().Add(s.ttl)
+	// Opportunistically prune expired sessions so the map can't grow
+	// unbounded across a long-lived server's repeated logins (valid() only
+	// evicts the id it happens to look up).
+	for k, exp := range s.m {
+		if now.After(exp) {
+			delete(s.m, k)
+		}
+	}
+	s.m[id] = now.Add(s.ttl)
 	s.mu.Unlock()
 	return id, nil
 }

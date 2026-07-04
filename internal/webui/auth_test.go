@@ -77,7 +77,7 @@ func TestLoginFlowSetsSessionCookie(t *testing.T) {
 
 	// Wrong token → 401, no cookie.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"token":"nope"}`))
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/login", strings.NewReader(`{"token":"nope"}`))
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -86,7 +86,7 @@ func TestLoginFlowSetsSessionCookie(t *testing.T) {
 
 	// Correct token → 200 + session cookie.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"token":"topsecret"}`))
+	req = httptest.NewRequest(http.MethodPost, "http://localhost/api/login", strings.NewReader(`{"token":"topsecret"}`))
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -102,7 +102,7 @@ func TestLoginFlowSetsSessionCookie(t *testing.T) {
 
 	// Cookie authenticates /api/health.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req = httptest.NewRequest(http.MethodGet, "http://localhost/api/health", nil)
 	req.AddCookie(cookie)
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -122,7 +122,7 @@ func TestHealthRequiresAuth(t *testing.T) {
 	h := s.buildHandler()
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost/api/health", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated health status = %d, want 401", rec.Code)
 	}
@@ -133,7 +133,7 @@ func TestBearerTokenAuth(t *testing.T) {
 	h := s.buildHandler()
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/health", nil)
 	req.Header.Set("Authorization", "Bearer topsecret")
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -141,7 +141,7 @@ func TestBearerTokenAuth(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	req = httptest.NewRequest(http.MethodGet, "http://localhost/api/health", nil)
 	req.Header.Set("Authorization", "Bearer wrong")
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -160,7 +160,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 	}
 	h := s.buildHandler()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/logout", nil)
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

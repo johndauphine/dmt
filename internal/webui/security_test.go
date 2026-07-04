@@ -109,6 +109,62 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestHostGuardLoopback(t *testing.T) {
+	s := newTestServer(t, Options{Addr: "127.0.0.1:8484"})
+	h := s.buildHandler()
+
+	tests := []struct {
+		host string
+		want int
+	}{
+		{host: "127.0.0.1:8484", want: http.StatusOK},
+		{host: "localhost:8484", want: http.StatusOK},
+		{host: "localhost", want: http.StatusOK},
+		{host: "evil.example.com", want: http.StatusForbidden}, // DNS rebinding
+		{host: "evil.example.com:8484", want: http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+		req.Host = tc.host
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("Host %q → %d, want %d", tc.host, rec.Code, tc.want)
+		}
+	}
+}
+
+func TestHostGuardDisabledForRemoteBind(t *testing.T) {
+	// A remote bind can't enumerate its public hostname, so the host guard is
+	// off there (token+TLS are the controls). Any Host must pass.
+	s := newTestServer(t, Options{Addr: "0.0.0.0:8484", AuthToken: "secret", Insecure: true})
+	if s.allowedHosts != nil {
+		t.Fatalf("expected nil allowedHosts for remote bind, got %v", s.allowedHosts)
+	}
+	h := s.buildHandler()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+	req.Host = "anything.example.com"
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("remote bind blocked Host %q with %d", req.Host, rec.Code)
+	}
+}
+
+func TestRequestIsHTTPS(t *testing.T) {
+	// Plaintext, no proxy header.
+	r := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+	if requestIsHTTPS(r) {
+		t.Error("plaintext request should not be HTTPS")
+	}
+	// Reverse proxy terminated TLS.
+	r = httptest.NewRequest(http.MethodGet, "http://x/", nil)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if !requestIsHTTPS(r) {
+		t.Error("X-Forwarded-Proto: https should count as HTTPS")
+	}
+}
+
 func TestOriginGuard(t *testing.T) {
 	s := &Server{}
 	guarded := s.originGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
