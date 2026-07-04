@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- WebUI command-parity registry (`command.WebSurface`) machine-checked against
+  the CLI registry, an HTTP-to-SQLite migration integration test, and
+  `docs/WEBUI.md` with a server-deployment guide (reverse-proxy TLS) —
+  completing the WebUI epic (#583, #577).
+
 - WebUI frontend: a modern single-page operator console (no-build vanilla
   JS/CSS embedded in the binary) — login, a live migration dashboard, checks,
   guided setup, profiles, settings, and a ⌘K command palette. Also gives

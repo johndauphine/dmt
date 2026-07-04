@@ -32,7 +32,9 @@ make setup-hooks
 
 ### Entry Point
 
-`cmd/migrate/main.go` — CLI using urfave/cli/v2. No-args launches TUI (`tui.Start()`). Commands: `run`, `resume`, `status`, `validate`, `diagnose`, `history`, `profile`, `preflight` (alias `health-check`), `analyze`, `ai`, `setup`, `init`, `init-secrets`, `cache`. The TUI mirrors these (parity registry in `internal/command/registry.go`; table in `docs/TUI_COMMANDS.md`).
+`cmd/migrate/main.go` — CLI using urfave/cli/v2. No-args launches TUI (`tui.Start()`), or the WebUI (`webui.Start()`) when `--webui` is set. Commands: `run`, `resume`, `status`, `validate`, `diagnose`, `history`, `profile`, `preflight` (alias `health-check`), `analyze`, `ai`, `setup`, `init`, `init-secrets`, `cache`. The TUI and WebUI both mirror these (parity registry in `internal/command/registry.go` — `TUIStatus` per command plus the `WebSurface` map; table in `docs/TUI_COMMANDS.md`).
+
+**WebUI** (`internal/webui/`, epic #577): the third front-end alongside CLI and TUI, launched with `dmt --webui`. A modern single-page app (vanilla JS/CSS, no build step) embedded via `go:embed`, served over an authenticated JSON `/api` with live migration progress via SSE. It calls the same `internal/orchestrator` + `internal/command` surfaces the TUI does — no forked logic. Loopback-only by default; remote binds require a token + TLS (or `--webui-insecure` behind a proxy). See `docs/WEBUI.md`. Parity is machine-checked by `internal/webui/parity_surface_test.go`.
 
 ### Core Packages
 
