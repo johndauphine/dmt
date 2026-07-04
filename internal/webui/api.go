@@ -25,12 +25,26 @@ func (s *Server) buildHandler() http.Handler {
 	return securityHeaders(s.hostGuard(root))
 }
 
-// registerAPI mounts the foundation endpoints. #579+ extend this with the
-// status/run/wizard surfaces.
+// registerAPI mounts the API endpoints. Method-based patterns (Go 1.22 mux)
+// give automatic 405s. #580+ extend this with the run/progress/wizard
+// surfaces.
 func (s *Server) registerAPI(mux *http.ServeMux) {
-	mux.HandleFunc("/api/login", s.handleLogin)
-	mux.HandleFunc("/api/logout", s.handleLogout)
-	mux.Handle("/api/health", s.requireAuth(http.HandlerFunc(s.handleHealth)))
+	// Public — bootstraps or clears a session.
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", s.handleLogout)
+
+	// Authenticated read/advisory surface (#579).
+	authed := func(h http.HandlerFunc) http.Handler { return s.requireAuth(h) }
+	mux.Handle("GET /api/health", authed(s.handleHealth))
+	mux.Handle("GET /api/status", authed(s.handleStatus))
+	mux.Handle("GET /api/status/{runID}", authed(s.handleStatusByID))
+	mux.Handle("GET /api/history", authed(s.handleHistory))
+	mux.Handle("POST /api/validate", authed(s.handleValidate))
+	mux.Handle("POST /api/diagnose", authed(s.handleDiagnose))
+	mux.Handle("POST /api/preflight", authed(s.handlePreflight))
+	mux.Handle("POST /api/config/check", authed(s.handleConfigCheck))
+	mux.Handle("POST /api/analyze", authed(s.handleAnalyze))
+	mux.Handle("POST /api/ai/config-review", authed(s.handleAIConfigReview))
 }
 
 // handleHealth reports liveness plus build identity. Authenticated so it

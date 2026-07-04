@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- WebUI read/advisory REST API: authenticated JSON endpoints for status,
+  history, validate, diagnose, preflight, config-check (dry run), analyze, and
+  AI config-review. Handlers call the orchestrator in-process and return its
+  structured results; the history response omits the serialized config so DB
+  secrets never reach the browser (#579).
+
 - WebUI foundation: `dmt --webui` launches a browser front-end — the third
   front-end alongside the CLI and TUI (epic #577). Owns the HTTP server
   lifecycle, embedded single-binary assets, and the security baseline:
