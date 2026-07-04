@@ -45,6 +45,13 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.Handle("POST /api/config/check", authed(s.handleConfigCheck))
 	mux.Handle("POST /api/analyze", authed(s.handleAnalyze))
 	mux.Handle("POST /api/ai/config-review", authed(s.handleAIConfigReview))
+
+	// Run/resume with live progress (#580).
+	mux.Handle("GET /api/run", authed(s.handleRunState))
+	mux.Handle("POST /api/run", authed(s.handleRun))
+	mux.Handle("POST /api/run/cancel", authed(s.handleRunCancel))
+	mux.Handle("POST /api/resume", authed(s.handleResume))
+	mux.Handle("GET /api/events", authed(s.handleEvents))
 }
 
 // handleHealth reports liveness plus build identity. Authenticated so it

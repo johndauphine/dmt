@@ -82,6 +82,11 @@ var apiRoutes = []struct{ method, path string }{
 	{http.MethodPost, "/api/config/check"},
 	{http.MethodPost, "/api/analyze"},
 	{http.MethodPost, "/api/ai/config-review"},
+	{http.MethodGet, "/api/run"},
+	{http.MethodPost, "/api/run"},
+	{http.MethodPost, "/api/run/cancel"},
+	{http.MethodPost, "/api/resume"},
+	{http.MethodGet, "/api/events"},
 }
 
 func TestAllAPIRoutesRequireAuth(t *testing.T) {

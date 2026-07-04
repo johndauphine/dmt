@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -78,6 +79,28 @@ type Server struct {
 	// operator's local server). For a remote bind it is nil — the public
 	// hostname is unknowable and the mandatory token+TLS are the control.
 	allowedHosts map[string]bool
+
+	// hub fans migration progress/lifecycle events to SSE clients; runs
+	// enforces single-flight migration execution (#580). runWg tracks the
+	// background migration goroutine so shutdown can wait for it.
+	hub   *eventHub
+	runs  *runManager
+	runWg sync.WaitGroup
+}
+
+// waitForRuns blocks until the background migration goroutine (if any) exits,
+// or ctx expires. Called during shutdown so a cancelled run can flush its
+// checkpoint before the process ends.
+func (s *Server) waitForRuns(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.runWg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // configErr marks a WebUI startup/configuration failure (bad flag
@@ -112,6 +135,8 @@ func New(opts Options) (*Server, error) {
 		tokenAuto:    auto,
 		sessions:     newSessionStore(sessionTTL),
 		allowedHosts: buildAllowedHosts(host, isLoopbackHost(host)),
+		hub:          newEventHub(),
+		runs:         newRunManager(),
 	}
 	s.httpSrv = &http.Server{
 		Handler:           s.buildHandler(),
@@ -139,6 +164,14 @@ func (s *Server) Run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// baseCtx backs every request context. Cancelling it on shutdown unblocks
+	// long-lived handlers (the SSE stream loops until its request context is
+	// done) so httpSrv.Shutdown doesn't wait the full timeout for an open
+	// EventSource connection.
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	defer baseCancel()
+	s.httpSrv.BaseContext = func(net.Listener) context.Context { return baseCtx }
+
 	ln, err := net.Listen("tcp", s.opts.Addr)
 	if err != nil {
 		return fmt.Errorf("webui: cannot bind %s: %w", s.opts.Addr, err)
@@ -164,9 +197,21 @@ func (s *Server) Run() error {
 	select {
 	case <-ctx.Done():
 		logging.Info("webui: shutting down")
+		// Cancel any in-flight migration so its checkpoint is left resumable
+		// and the process can exit cleanly.
+		if s.runs.cancel() {
+			logging.Info("webui: cancelling active migration")
+		}
+		// Cancel request contexts first so open SSE streams return and
+		// Shutdown doesn't block on them for the full timeout.
+		baseCancel()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return s.httpSrv.Shutdown(shutCtx)
+		err := s.httpSrv.Shutdown(shutCtx)
+		// Give the cancelled migration a bounded moment to flush its final
+		// checkpoint state before the process exits.
+		s.waitForRuns(shutCtx)
+		return err
 	case err := <-serveErr:
 		return err
 	}

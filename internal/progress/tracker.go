@@ -33,6 +33,7 @@ type Tracker struct {
 	reporterMu sync.Mutex
 	stopReport chan struct{}
 	reportWg   sync.WaitGroup
+	stopOnce   sync.Once
 }
 
 // New creates a new progress tracker
@@ -47,6 +48,11 @@ func New() *Tracker {
 // SetReporter sets the progress reporter for JSON output.
 // When a reporter is set, the progress bar is disabled.
 func (t *Tracker) SetReporter(reporter Reporter, interval time.Duration) {
+	// Stop any loop a prior SetReporter started so it can't leak, then re-arm
+	// the once-guard for the new loop. stopLoop must run outside reporterMu
+	// (the loop's emitProgress takes it).
+	t.stopLoop()
+
 	t.reporterMu.Lock()
 	defer t.reporterMu.Unlock()
 
@@ -56,6 +62,7 @@ func (t *Tracker) SetReporter(reporter Reporter, interval time.Duration) {
 	// Start background reporting goroutine
 	if t.reporter != nil && interval > 0 {
 		t.stopReport = make(chan struct{})
+		t.stopOnce = sync.Once{}
 		t.reportWg.Add(1)
 		go t.reportLoop(interval)
 	}
@@ -300,13 +307,22 @@ func (t *Tracker) Current() int64 {
 	return t.current.Load()
 }
 
+// stopLoop stops the periodic reporting goroutine exactly once. It is safe to
+// call from both Finish() and Close() and when no loop was ever started. It
+// must not hold reporterMu while waiting: the loop's emitProgress acquires
+// reporterMu, so holding it here would deadlock.
+func (t *Tracker) stopLoop() {
+	t.stopOnce.Do(func() {
+		if t.stopReport != nil {
+			close(t.stopReport)
+			t.reportWg.Wait()
+		}
+	})
+}
+
 // Finish marks the progress as complete
 func (t *Tracker) Finish() {
-	// Stop the reporting goroutine
-	if t.stopReport != nil {
-		close(t.stopReport)
-		t.reportWg.Wait()
-	}
+	t.stopLoop()
 
 	if t.bar != nil {
 		t.bar.Finish()
@@ -332,8 +348,13 @@ func (t *Tracker) Finish() {
 		t.current.Load(), elapsed.Round(time.Second), rowsPerSec)
 }
 
-// Close cleans up the reporter
+// Close stops the reporting goroutine and cleans up the reporter. Safe to call
+// after Finish() (stopLoop is idempotent). This is the teardown a long-lived
+// process (e.g. the WebUI server, which creates one orchestrator per run) must
+// invoke so the periodic goroutine started by SetReporter does not leak.
 func (t *Tracker) Close() {
+	t.stopLoop()
+
 	t.reporterMu.Lock()
 	defer t.reporterMu.Unlock()
 

@@ -180,6 +180,13 @@ func newStateBackend(cfg *config.Config, opts Options, cleanupHistory bool) (che
 
 // Close releases all resources
 func (o *Orchestrator) Close() {
+	// Stop the progress tracker's periodic reporting goroutine. SetProgressReporter
+	// starts it; without this a long-lived caller (the WebUI server, which builds
+	// one orchestrator per run) leaks a goroutine per migration. Idempotent with
+	// the transfer runner's Finish().
+	if o.progress != nil {
+		o.progress.Close()
+	}
 	if o.sourcePool != nil {
 		o.sourcePool.Close()
 	}

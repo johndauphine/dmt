@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- WebUI live migration: run and resume from the browser with progress streamed
+  over Server-Sent Events, a single-flight guard (one migration at a time), and
+  cancel. Also fixes a latent goroutine leak in the progress tracker that a
+  long-lived `SetProgressReporter` user (the WebUI server) was the first to
+  expose — `Tracker.Close()` now stops the periodic report loop (#580).
+
 - WebUI read/advisory REST API: authenticated JSON endpoints for status,
   history, validate, diagnose, preflight, config-check (dry run), analyze, and
   AI config-review. Handlers call the orchestrator in-process and return its
