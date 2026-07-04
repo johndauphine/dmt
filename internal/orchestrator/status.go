@@ -103,6 +103,13 @@ func (o *Orchestrator) GetRunResult(runID string) (*MigrationResult, error) {
 	return o.buildResultFromRun(run)
 }
 
+// GetAllRuns returns every persisted run, most-recent first, straight from
+// the checkpoint backend. It is the structured counterpart to ShowHistory's
+// text output, used by the WebUI history endpoint (#579).
+func (o *Orchestrator) GetAllRuns() ([]checkpoint.Run, error) {
+	return o.state.GetAllRuns()
+}
+
 func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult, error) {
 	tasks, err := o.state.GetTasksWithProgress(run.ID)
 	if err != nil {
