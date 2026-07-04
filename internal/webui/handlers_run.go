@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/johndauphine/dmt/internal/command"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
@@ -130,6 +131,7 @@ func (s *Server) serveDryRun(w http.ResponseWriter, r *http.Request, cfg *config
 // and launches the migration goroutine. The goroutine owns the orchestrator's
 // lifetime (it Closes it), so this function must not defer Close.
 func (s *Server) startMigration(w http.ResponseWriter, cfg *config.Config, configPath string, kind runKind, opts orchestrator.Options) {
+	s.applySessionAudit(cfg)
 	opts.RunID = shortRunID()
 	orch, err := orchestrator.NewWithOptions(cfg, opts)
 	if err != nil {
@@ -138,11 +140,15 @@ func (s *Server) startMigration(w http.ResponseWriter, cfg *config.Config, confi
 	}
 	orch.SetRunContext("", configPath)
 	orch.SetProgressReporter(s.hub, progressInterval)
+	// Session-configured observability (no-op when unset).
+	teardownObs := command.SetupObservability(
+		s.sessionDefaults.get("metrics-addr"), s.sessionDefaults.get("otel-endpoint"), orch)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	st, ok := s.runs.start(kind, opts.RunID, cancel)
 	if !ok {
 		cancel()
+		teardownObs()
 		orch.Close()
 		writeError(w, http.StatusConflict, "run_in_progress", "a migration is already running")
 		return
@@ -150,16 +156,32 @@ func (s *Server) startMigration(w http.ResponseWriter, cfg *config.Config, confi
 	s.hub.setLive(true)
 	s.hub.publish(event{Type: eventStarted, Run: &st})
 	s.runWg.Add(1)
-	go s.execute(ctx, cancel, orch, kind)
+	go s.execute(ctx, cancel, orch, kind, teardownObs)
 	writeJSON(w, http.StatusAccepted, st)
+}
+
+// applySessionAudit layers session audit defaults onto the run config.
+func (s *Server) applySessionAudit(cfg *config.Config) {
+	if v := s.sessionDefaults.get("audit-dir"); v != "" {
+		cfg.Migration.AuditDir = v
+	}
+	if v := s.sessionDefaults.get("audit-tamper-evident"); v != "" {
+		cfg.Migration.AuditTamperEvident = v == "true"
+	}
+	if v := s.sessionDefaults.get("no-audit"); v != "" {
+		cfg.Migration.NoAudit = v == "true"
+	}
 }
 
 // execute runs the migration to completion and emits the terminal event. It is
 // the sole owner of orch after startMigration hands off.
-func (s *Server) execute(ctx context.Context, cancel context.CancelFunc, orch *orchestrator.Orchestrator, kind runKind) {
+func (s *Server) execute(ctx context.Context, cancel context.CancelFunc, orch *orchestrator.Orchestrator, kind runKind, teardownObs func()) {
 	defer s.runWg.Done()
 	defer cancel()
 	defer orch.Close()
+	if teardownObs != nil {
+		defer teardownObs()
+	}
 
 	var runErr error
 	switch kind {

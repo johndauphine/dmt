@@ -43,6 +43,21 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 // before it reaches the browser — this is the API's single error egress, so
 // any DSN/credential that slipped into an upstream error is redacted here.
 func writeAPIError(w http.ResponseWriter, err error) {
+	// A few domain conditions the exit-code classifier lumps into the generic
+	// bucket deserve precise HTTP semantics.
+	low := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(low, "no rows"):
+		writeError(w, http.StatusNotFound, "not_found", logging.Scrub(err.Error()))
+		return
+	case strings.Contains(low, "already exists"):
+		writeError(w, http.StatusConflict, "conflict", logging.Scrub(err.Error()))
+		return
+	case strings.Contains(low, "master key"):
+		writeError(w, http.StatusBadRequest, "master_key_error", logging.Scrub(err.Error()))
+		return
+	}
+
 	status, code := http.StatusInternalServerError, "internal_error"
 	switch exitcodes.FromError(err) {
 	case exitcodes.ConfigError:
