@@ -86,6 +86,12 @@ type Server struct {
 	hub   *eventHub
 	runs  *runManager
 	runWg sync.WaitGroup
+
+	// sessionDefaults holds server-side /session defaults; setup is the
+	// in-progress guided setup flow, if any (#581).
+	sessionDefaults *sessionDefaults
+	setup           *setupSession
+	setupMu         sync.Mutex
 }
 
 // waitForRuns blocks until the background migration goroutine (if any) exits,
@@ -130,13 +136,14 @@ func New(opts Options) (*Server, error) {
 	// hostFromAddr already succeeded inside validateBindSecurity.
 	host, _ := hostFromAddr(opts.Addr)
 	s := &Server{
-		opts:         opts,
-		token:        token,
-		tokenAuto:    auto,
-		sessions:     newSessionStore(sessionTTL),
-		allowedHosts: buildAllowedHosts(host, isLoopbackHost(host)),
-		hub:          newEventHub(),
-		runs:         newRunManager(),
+		opts:            opts,
+		token:           token,
+		tokenAuto:       auto,
+		sessions:        newSessionStore(sessionTTL),
+		allowedHosts:    buildAllowedHosts(host, isLoopbackHost(host)),
+		hub:             newEventHub(),
+		runs:            newRunManager(),
+		sessionDefaults: newSessionDefaults(),
 	}
 	s.httpSrv = &http.Server{
 		Handler:           s.buildHandler(),

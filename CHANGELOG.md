@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- WebUI interactive flows: a guided setup wizard (driving the shared
+  `internal/setup` state machine), profile management, secrets init, cache
+  clear, and server-side session defaults honored by subsequent commands.
+  Profile export is confined to `~/.dmt/exports` with a sanitized file name so
+  a client-supplied path can't write decrypted secrets anywhere (#581).
+
 - WebUI live migration: run and resume from the browser with progress streamed
   over Server-Sent Events, a single-flight guard (one migration at a time), and
   cancel. Also fixes a latent goroutine leak in the progress tracker that a

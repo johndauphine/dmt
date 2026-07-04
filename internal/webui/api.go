@@ -52,6 +52,20 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	mux.Handle("POST /api/run/cancel", authed(s.handleRunCancel))
 	mux.Handle("POST /api/resume", authed(s.handleResume))
 	mux.Handle("GET /api/events", authed(s.handleEvents))
+
+	// Interactive flows: setup, profiles, secrets, cache, session (#581).
+	mux.Handle("POST /api/setup/start", authed(s.handleSetupStart))
+	mux.Handle("GET /api/setup/prompt", authed(s.handleSetupPrompt))
+	mux.Handle("POST /api/setup/input", authed(s.handleSetupInput))
+	mux.Handle("GET /api/profiles", authed(s.handleProfilesList))
+	mux.Handle("POST /api/profiles/save", authed(s.handleProfileSave))
+	mux.Handle("DELETE /api/profiles/{name}", authed(s.handleProfileDelete))
+	mux.Handle("POST /api/profiles/{name}/export", authed(s.handleProfileExport))
+	mux.Handle("POST /api/init-secrets", authed(s.handleInitSecrets))
+	mux.Handle("POST /api/cache/clear", authed(s.handleCacheClear))
+	mux.Handle("GET /api/session", authed(s.handleSessionGet))
+	mux.Handle("POST /api/session", authed(s.handleSessionSet))
+	mux.Handle("DELETE /api/session/{key}", authed(s.handleSessionClear))
 }
 
 // handleHealth reports liveness plus build identity. Authenticated so it

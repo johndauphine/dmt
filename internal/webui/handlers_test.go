@@ -87,6 +87,15 @@ var apiRoutes = []struct{ method, path string }{
 	{http.MethodPost, "/api/run/cancel"},
 	{http.MethodPost, "/api/resume"},
 	{http.MethodGet, "/api/events"},
+	{http.MethodPost, "/api/setup/start"},
+	{http.MethodGet, "/api/setup/prompt"},
+	{http.MethodPost, "/api/setup/input"},
+	{http.MethodGet, "/api/profiles"},
+	{http.MethodPost, "/api/profiles/save"},
+	{http.MethodPost, "/api/init-secrets"},
+	{http.MethodPost, "/api/cache/clear"},
+	{http.MethodGet, "/api/session"},
+	{http.MethodPost, "/api/session"},
 }
 
 func TestAllAPIRoutesRequireAuth(t *testing.T) {
@@ -131,13 +140,16 @@ func TestConfigErrorReturns400(t *testing.T) {
 	}
 }
 
-func TestProfileRequestRejected(t *testing.T) {
+func TestNonexistentProfileErrors(t *testing.T) {
+	// Profile resolution is wired (#581); a request for a profile that doesn't
+	// exist (or with no master key configured) must fail cleanly, not 200.
 	s := newTestServer(t, Options{AuthToken: testToken})
 	h := s.buildHandler()
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, authedReq(http.MethodPost, "http://localhost/api/preflight", `{"profile":"prod"}`))
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("profile request = %d, want 400 (deferred to #581)", rec.Code)
+	h.ServeHTTP(rec, authedReq(http.MethodPost, "http://localhost/api/preflight",
+		`{"profile":"webui-test-nonexistent-profile"}`))
+	if rec.Code < 400 {
+		t.Errorf("nonexistent profile = %d, want an error status", rec.Code)
 	}
 }
 
