@@ -106,6 +106,31 @@ func newApp() *cli.App {
 				Name:  "no-audit",
 				Usage: "Disable the per-run audit log entirely (#235). Only use this if you have another compliance mechanism — the default audit log has zero data-plane impact.",
 			},
+			&cli.BoolFlag{
+				Name:  "webui",
+				Usage: "Launch the browser-based WebUI instead of the TUI (#578). Serves at --webui-addr.",
+			},
+			&cli.StringFlag{
+				Name:  "webui-addr",
+				Value: "127.0.0.1:8484",
+				Usage: "WebUI bind address (#578). Loopback by default; a non-loopback bind (e.g. \"0.0.0.0:8484\") requires --webui-auth-token plus TLS or --webui-insecure.",
+			},
+			&cli.StringFlag{
+				Name:  "webui-auth-token",
+				Usage: "Shared-secret bearer token guarding the WebUI (#578). Supports ${env:VAR}/${file:/path} expansion. Required for a non-loopback bind; auto-generated for loopback.",
+			},
+			&cli.StringFlag{
+				Name:  "webui-tls-cert",
+				Usage: "PEM certificate file to serve the WebUI over HTTPS (#578). Must be paired with --webui-tls-key.",
+			},
+			&cli.StringFlag{
+				Name:  "webui-tls-key",
+				Usage: "PEM private-key file for --webui-tls-cert (#578).",
+			},
+			&cli.BoolFlag{
+				Name:  "webui-insecure",
+				Usage: "Allow a non-loopback WebUI bind over plaintext HTTP (#578). Use only behind a TLS-terminating reverse proxy; the token is still required.",
+			},
 		},
 		Before: func(c *cli.Context) error {
 			// Set log level from flag
@@ -129,7 +154,11 @@ func newApp() *cli.App {
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() == 0 {
-				// No command provided, launch TUI
+				// No command provided, launch an interactive front-end.
+				// --webui selects the browser UI (#578); otherwise the TUI.
+				if c.Bool("webui") {
+					return startWebUI(c)
+				}
 				return startTUI(c)
 			}
 			return cli.ShowAppHelp(c)

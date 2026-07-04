@@ -69,6 +69,16 @@ var GlobalFlags = []FlagSpec{
 	{Name: "audit-dir", Status: TUISupported},            // /session audit-dir
 	{Name: "audit-tamper-evident", Status: TUISupported}, // /session audit-tamper-evident
 	{Name: "no-audit", Status: TUISupported},             // /session no-audit
+	// WebUI launch/config flags (#578). These select and configure a
+	// separate front-end, not a TUI slash command, so they are CLI-only
+	// with respect to the TUI. The WebUI's own command parity is tracked
+	// against the registry separately (#583).
+	{Name: "webui", Status: TUICLIOnly, Ref: "launches the WebUI front-end; not a TUI command (#578)"},
+	{Name: "webui-addr", Status: TUICLIOnly, Ref: "WebUI bind address (#578)"},
+	{Name: "webui-auth-token", Status: TUICLIOnly, Ref: "WebUI auth secret (#578)"},
+	{Name: "webui-tls-cert", Status: TUICLIOnly, Ref: "WebUI TLS certificate (#578)"},
+	{Name: "webui-tls-key", Status: TUICLIOnly, Ref: "WebUI TLS key (#578)"},
+	{Name: "webui-insecure", Status: TUICLIOnly, Ref: "WebUI plaintext remote-bind opt-out (#578)"},
 }
 
 // Registry is the authoritative command/flag parity list.
