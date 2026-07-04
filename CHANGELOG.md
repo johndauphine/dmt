@@ -9,6 +9,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- WebUI foundation: `dmt --webui` launches a browser front-end — the third
+  front-end alongside the CLI and TUI (epic #577). Owns the HTTP server
+  lifecycle, embedded single-binary assets, and the security baseline:
+  loopback-only by default with an auto-generated token; a non-loopback
+  (remote) bind requires `--webui-auth-token` plus TLS
+  (`--webui-tls-cert`/`--webui-tls-key`) or `--webui-insecure` behind a
+  TLS-terminating proxy; token→session-cookie auth with constant-time
+  compare, security headers, and a DNS-rebinding Host-header guard (#578).
+
 ### Changed
 
 - Updated Anthropic defaults, generated templates, and active configuration
