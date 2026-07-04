@@ -72,12 +72,34 @@ func (o *Orchestrator) runPreFlight(ctx context.Context) error {
 
 	result := o.collectPreFlightFindings(ctx)
 	result = applyPreFlightSkips(result, skipSet)
+	result = o.appendDriftGateFindings(ctx, result, skipSet)
 	logPreFlightFindings(result.Findings)
 
 	if result.Aborted {
 		return &PreFlightError{Findings: result.Findings}
 	}
 	return nil
+}
+
+// appendDriftGateFindings runs the configured drift gate (#575) and merges
+// its findings. The gate shells out to `smt drift`, which can take minutes —
+// so unlike the cheap engine checks it is run-only-if-needed: never when the
+// section is absent, never when skipped (skip means don't run, not
+// run-then-downgrade), and never when the cheap checks already aborted the
+// run. Shared by runPreFlight (the Run/Resume/DryRun gate) and HealthCheck
+// (the advisory `dmt preflight` display).
+func (o *Orchestrator) appendDriftGateFindings(ctx context.Context, r preFlightResult, skipSet map[string]bool) preFlightResult {
+	gate := o.config.Migration.DriftGate
+	if gate == nil || r.Aborted {
+		return r
+	}
+	if skipSet[preFlightSkipAll] || shouldSkip(driftGateCheck, skipSet) {
+		logging.Debug("Preflight: drift gate skipped (--skip-preflight)")
+		return r
+	}
+	r.Findings = append(r.Findings, runDriftGate(ctx, gate)...)
+	r.Aborted = containsAbortingFinding(r.Findings)
+	return r
 }
 
 // collectPreFlightFindings runs source + target preflight in sequence

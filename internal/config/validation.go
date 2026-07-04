@@ -144,6 +144,18 @@ func (c *Config) validate() error {
 		}
 	}
 
+	if g := c.Migration.DriftGate; g != nil {
+		if g.SMTConfig == "" && g.SMTProfile == "" {
+			return fmt.Errorf("migration.drift_gate requires exactly one of smt_config or smt_profile (how smt resolves the source/target pair)")
+		}
+		if g.SMTConfig != "" && g.SMTProfile != "" {
+			return fmt.Errorf("migration.drift_gate.smt_config and smt_profile are mutually exclusive; set exactly one")
+		}
+		if g.TimeoutSeconds < 0 {
+			return fmt.Errorf("migration.drift_gate.timeout_seconds must be >= 0; got %d", g.TimeoutSeconds)
+		}
+	}
+
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
 	return nil

@@ -181,6 +181,33 @@ type SchemaContractConfig struct {
 	DataType SchemaContractMode `yaml:"data_type,omitempty" json:"data_type,omitempty"`
 }
 
+// DriftGateConfig configures the external smt-based target drift gate
+// (#575). When the section is present, preflight runs `smt drift` against
+// the SMT config/profile named here and blocks the migration unless it
+// exits 0 (in sync). smt's stable exit contract: 0 = in sync, 8 = drift
+// detected, anything else = execution error (fail closed). Exactly one of
+// SMTConfig / SMTProfile must be set — they are how smt resolves the
+// source/target pair, independent of DMT's own connection config.
+type DriftGateConfig struct {
+	// SMTBinary is the smt executable to run. Empty means "smt" resolved
+	// from PATH.
+	SMTBinary string `yaml:"smt_binary,omitempty"`
+	// SMTConfig is a path to an SMT YAML config describing the same
+	// source/target pair this migration uses.
+	SMTConfig string `yaml:"smt_config,omitempty"`
+	// SMTProfile is an SMT stored-profile name (smt --profile), the
+	// encrypted-profile alternative to SMTConfig.
+	SMTProfile string `yaml:"smt_profile,omitempty"`
+	// FailOnDestructiveOnly passes --fail-on-destructive-only to smt drift:
+	// additive-only drift (missing tables/columns on the target) exits 0
+	// and the gate lets the migration proceed.
+	FailOnDestructiveOnly bool `yaml:"fail_on_destructive_only,omitempty"`
+	// TimeoutSeconds bounds the external check. 0 means the 600s default
+	// (smt drift extracts both schemas, which can take minutes on wide
+	// catalogs).
+	TimeoutSeconds int `yaml:"timeout_seconds,omitempty"`
+}
+
 // NotifyConfig controls migration completion notifications. Nil fields default
 // to true so existing Slack behavior is preserved when a webhook is configured.
 type NotifyConfig struct {
@@ -209,6 +236,13 @@ type MigrationConfig struct {
 	// pre-transfer gate. It is exit policy, not data-plane behavior, so it
 	// must stay out of the resume config hash.
 	FailOnSchemaDrift bool `yaml:"fail_on_schema_drift" json:"-"`
+	// DriftGate shells out to the external `smt drift` binary during
+	// preflight and refuses to transfer when the LIVE TARGET schema has
+	// drifted from the source (#575). Omit the section to disable. Distinct
+	// from FailOnSchemaDrift, which gates on source-vs-last-snapshot using
+	// DMT's internal drift report. Exit policy, not data-plane — stays out
+	// of the resume config hash like FailOnSchemaDrift and Notify.
+	DriftGate *DriftGateConfig `yaml:"drift_gate,omitempty" json:"-"`
 	// SchemaEvolution applies compatible source drift to the target before
 	// transfer. Omit the section to keep drift reporting read-only.
 	SchemaEvolution *SchemaEvolutionConfig `yaml:"schema_evolution,omitempty" json:"schema_evolution,omitempty"`

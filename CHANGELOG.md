@@ -9,6 +9,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Optional `migration.drift_gate` preflight (#575): shells out to the external
+  `smt drift` binary and refuses to transfer when the live target schema has
+  drifted from the source (smt exit 8), failing closed on any execution error.
+  Configure with `smt_config:` or `smt_profile:` (exactly one), optional
+  `smt_binary`, `fail_on_destructive_only`, and `timeout_seconds`; skip a run
+  with `--skip-preflight drift.gate`. Distinct from `fail_on_schema_drift`,
+  which gates on source-vs-snapshot using DMT's internal drift report.
+
 ### Changed
 
 - Updated Anthropic defaults, generated templates, and active configuration

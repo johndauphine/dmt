@@ -79,6 +79,19 @@ migration:
   # report before transfer. Set true to abort when any drift is detected.
   fail_on_schema_drift: false
 
+  # Drift gate via smt (#575). Omit this section to disable. When present,
+  # preflight runs the external `smt drift` binary against the SMT config or
+  # stored profile named here (exactly one of smt_config / smt_profile) and
+  # blocks the migration unless the LIVE TARGET schema is in sync with the
+  # source (smt exit 0). Any other outcome fails closed; skip a run with
+  # --skip-preflight drift.gate. Distinct from fail_on_schema_drift above,
+  # which compares the source against DMT's own last snapshot.
+  # drift_gate:
+  #   smt_config: /path/to/smt-config.yaml   # or: smt_profile: <name>
+  #   smt_binary: smt                        # optional; default resolves from PATH
+  #   fail_on_destructive_only: false        # additive-only drift passes the gate
+  #   timeout_seconds: 600                   # optional; default 600
+
   # Schema contract (#403). Omit this section to keep schema drift reporting
   # read-only. Shorthand such as `schema_contract: report` applies one mode to
   # tables, columns, and data_type. The DMT-specific report mode reports drift

@@ -87,8 +87,12 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 	// would just emit a flurry of "could not read X" findings that
 	// duplicate the connection error the operator already sees.
 	if result.Healthy {
+		skipSet := preFlightSkipSet(o.config.Migration.SkipPreflight)
 		pf := o.collectPreFlightFindings(ctx)
-		pf = applyPreFlightSkips(pf, preFlightSkipSet(o.config.Migration.SkipPreflight))
+		pf = applyPreFlightSkips(pf, skipSet)
+		// Advisory view of the drift gate (#575): show the same verdict the
+		// migration's preflight would enforce.
+		pf = o.appendDriftGateFindings(ctx, pf, skipSet)
 		result.PreFlightFindings = pf.Findings
 		result.PreFlightAborted = pf.Aborted
 		if pf.Aborted {
