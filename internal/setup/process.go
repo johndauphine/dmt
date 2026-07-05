@@ -427,6 +427,17 @@ func (s *State) Process(input string) string {
 			input = s.ConfigPath
 		}
 		s.ConfigPath = input
+		s.CurrentStep = StepSecretStorage
+
+	case StepSecretStorage:
+		v := strings.ToLower(input)
+		if v == "" {
+			v = "y"
+		}
+		if v != "y" && v != "n" {
+			return "Please enter y or n"
+		}
+		s.ExternalizeSecrets = v == "y"
 		s.CurrentStep = StepWriteConfig
 
 	case StepWriteConfig:

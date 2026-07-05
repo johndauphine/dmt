@@ -60,7 +60,8 @@ const (
 
 	// Phase 7: Save
 	StepConfigPath
-	StepWriteConfig // auto: write config file
+	StepSecretStorage // prompt: store DB passwords as ${file:} refs vs plaintext
+	StepWriteConfig   // auto: write config file
 
 	// Phase 8: Optional Smartconfig Analysis
 	StepRunAnalysis // prompt: Run smartconfig analysis? (y/n)
@@ -112,12 +113,17 @@ type State struct {
 	// omitted in an existing config" or "fresh setup"; both fall back to
 	// dmt's documented defaults.
 	EditMode bool
+	// ExternalizeSecrets, when true (the default), writes DB passwords to
+	// 0600 sidecar files referenced by ${file:...} instead of writing them
+	// as plaintext into the config YAML (#597).
+	ExternalizeSecrets bool
 }
 
 // NewState creates a new setup state with sensible defaults.
 func NewState() *State {
 	return &State{
-		CurrentStep: StepCheckSecrets,
-		ConfigPath:  "config.yaml",
+		CurrentStep:        StepCheckSecrets,
+		ConfigPath:         "config.yaml",
+		ExternalizeSecrets: true,
 	}
 }

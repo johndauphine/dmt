@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- Guided setup (`dmt setup`, TUI, and the WebUI setup wizard) now stores DB
+  passwords in `0600` sidecar files referenced by `${file:…}` instead of
+  writing them as plaintext into the config YAML. A new step lets you opt back
+  into plaintext; existing `${env:…}`/`${file:…}` references are left untouched
+  (#597).
+
 - WebUI CSP tightened to `script-src 'self'` (no `'unsafe-inline'`) — the SPA
   has no inline scripts, so inline `<script>`/handler injection is now blocked
   outright; the `handleStatusByID` not-found error is scrubbed, keeping the
