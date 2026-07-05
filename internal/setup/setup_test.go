@@ -1087,17 +1087,44 @@ func TestMSSQLSSLDefaults(t *testing.T) {
 	s.Process("pass")
 	s.Process("dbo")
 
-	// SSL prompt for MSSQL should ask about TrustServerCert
+	// SSL prompt for MSSQL should offer the TLS modes (require/trust/disable).
 	info := s.Prompt()
-	if info.Text != "Trust server certificate? (y/n)" {
-		t.Fatalf("expected trust cert prompt, got %s", info.Text)
+	if !strings.Contains(info.Text, "TLS:") {
+		t.Fatalf("expected TLS-mode prompt, got %s", info.Text)
 	}
 
-	s.Process("y")
-	if !s.Config.Source.TrustServerCert {
-		t.Fatal("expected TrustServerCert true")
+	// "trust" → encrypt on, trust the self-signed cert.
+	s.Process("trust")
+	if s.Config.Source.Encrypt == nil || !*s.Config.Source.Encrypt || !s.Config.Source.TrustServerCert {
+		t.Fatalf("trust: want encrypt=true trust=true, got encrypt=%v trust=%v", s.Config.Source.Encrypt, s.Config.Source.TrustServerCert)
 	}
 }
+
+func TestMSSQLTLSModes(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantEnc   *bool
+		wantTrust bool
+	}{
+		{"disable", boolp(false), false},
+		{"trust", boolp(true), true},
+		{"require", boolp(true), false},
+		{"y", boolp(true), true},  // legacy alias → trust
+		{"n", boolp(true), false}, // legacy "don't trust cert" → require (still encrypted)
+		{"", nil, false},          // empty → keep current
+	}
+	for _, c := range cases {
+		enc, trust := parseMSSQLTLS(c.in)
+		if (enc == nil) != (c.wantEnc == nil) || (enc != nil && *enc != *c.wantEnc) {
+			t.Errorf("parseMSSQLTLS(%q) encrypt = %v, want %v", c.in, enc, c.wantEnc)
+		}
+		if trust != c.wantTrust {
+			t.Errorf("parseMSSQLTLS(%q) trust = %v, want %v", c.in, trust, c.wantTrust)
+		}
+	}
+}
+
+func boolp(b bool) *bool { return &b }
 
 func TestPostgresSSLDefaults(t *testing.T) {
 	s := NewState()

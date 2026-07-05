@@ -65,14 +65,19 @@ func (s *State) sslPrompt(dbType, sslMode string, trustCert bool) PromptInfo {
 			Default: def,
 		}
 	case "mssql":
-		def := "n"
+		// SQL Server TLS: encryption on/off plus cert verification. Some
+		// servers (Azure SQL Edge, dev instances without a trusted cert, or
+		// TLS not configured) require "disable"; the previous trust-only
+		// prompt couldn't express that and left encrypt defaulting to true,
+		// producing a failing TLS handshake (#…).
+		def := "require"
 		if trustCert {
-			def = "y"
+			def = "trust"
 		}
 		return PromptInfo{
-			Text:    "Trust server certificate? (y/n)",
+			Text:    "TLS: require (encrypt + verify cert), trust (encrypt + trust self-signed cert), or disable (no encryption)",
 			Default: def,
-			Choices: []string{"y", "n"},
+			Choices: []string{"require", "trust", "disable"},
 		}
 	case "mysql":
 		// Default is "require" rather than "preferred"; preferred
@@ -107,9 +112,10 @@ func (s *State) processSSL(input string, isSource bool) {
 				s.Config.Source.SSLMode = input
 			}
 		case "mssql":
-			if input != "" {
-				v := strings.ToLower(input)
-				s.Config.Source.TrustServerCert = (v == "y" || v == "yes" || v == "true")
+			enc, trust := parseMSSQLTLS(input)
+			if enc != nil {
+				s.Config.Source.Encrypt = enc
+				s.Config.Source.TrustServerCert = trust
 			}
 		case "mysql":
 			if input == "" {
@@ -131,9 +137,10 @@ func (s *State) processSSL(input string, isSource bool) {
 				s.Config.Target.SSLMode = input
 			}
 		case "mssql":
-			if input != "" {
-				v := strings.ToLower(input)
-				s.Config.Target.TrustServerCert = (v == "y" || v == "yes" || v == "true")
+			enc, trust := parseMSSQLTLS(input)
+			if enc != nil {
+				s.Config.Target.Encrypt = enc
+				s.Config.Target.TrustServerCert = trust
 			}
 		case "mysql":
 			if input == "" {
@@ -144,6 +151,28 @@ func (s *State) processSSL(input string, isSource bool) {
 				s.Config.Target.SSLMode = input
 			}
 		}
+	}
+}
+
+// parseMSSQLTLS maps a setup TLS answer to (encrypt, trustServerCert). A nil
+// encrypt pointer means "leave the current value" (empty input). Accepts the
+// require/trust/disable choices plus legacy y/n aliases (y→trust, n→require)
+// so existing muscle memory keeps working.
+func parseMSSQLTLS(input string) (*bool, bool) {
+	v := strings.ToLower(strings.TrimSpace(input))
+	if v == "" {
+		return nil, false
+	}
+	t, f := true, false
+	switch v {
+	case "disable", "d", "off", "none":
+		return &f, false
+	case "trust", "t", "y", "yes":
+		return &t, true
+	default: // require / r / verify / n / no — encrypt and verify the cert
+		// Legacy: the old prompt was "trust cert? y/n"; "n" meant "don't
+		// trust" (still encrypted, verify), i.e. require — preserved here.
+		return &t, false
 	}
 }
 

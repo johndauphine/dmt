@@ -58,6 +58,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Guided setup (`dmt setup` and the WebUI setup wizard) can now configure a SQL
+  Server source/target that has no usable TLS certificate. The MSSQL step
+  previously only asked "Trust server certificate?", setting `trust_server_cert`
+  but never `encrypt` — which defaulted to `true`, so the connection test did a
+  TLS handshake that fails against servers like Azure SQL Edge or dev instances
+  without TLS. The step now offers `require` / `trust` / `disable`, setting
+  `encrypt` accordingly (legacy `y`/`n` still map to trust/require).
+
 - `sanitizeErrorResponse` no longer panics (or mis-redacts) on API error bodies
   containing runes whose `strings.ToLower` changes byte length (e.g. U+023A
   `Ⱥ`). It searched a lowercased copy but sliced the original with those
