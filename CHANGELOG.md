@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- WebUI CSP tightened to `script-src 'self'` (no `'unsafe-inline'`) — the SPA
+  has no inline scripts, so inline `<script>`/handler injection is now blocked
+  outright; the `handleStatusByID` not-found error is scrubbed, keeping the
+  vetted single error egress (#603). Added soak coverage (event-hub churn, SSE
+  connect/disconnect churn, and repeated-migration goroutine-bound assertions)
+  guarding the long-lived server against leaks (#595).
+
 - WebUI remote-deployment hardening (#594, #601, #602): brute-force throttling
   on failed auth (login and bearer) with per-IP lockout; a 16-character minimum
   for an operator-chosen token on a non-loopback bind; sessions now slide while

@@ -133,14 +133,16 @@ func requestIsHTTPS(r *http.Request) bool {
 
 // securityHeaders sets defensive response headers on every response. The CSP
 // keeps the bundle self-contained (no external fetches), which also lets the
-// WebUI run on air-gapped servers. 'unsafe-inline' covers the placeholder's
-// inline script/style; the #582 SPA build can tighten this to hashed assets.
+// WebUI run on air-gapped servers. script-src is 'self' only — the SPA has no
+// inline scripts or event handlers (all JS is /app.js + addEventListener), so
+// there is no reason to allow inline script (#603). style-src keeps
+// 'unsafe-inline' because the app uses a few inline style="…" attributes.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
-				"script-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self'; "+
+				"script-src 'self'; connect-src 'self'; font-src 'self'; "+
 				"base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
