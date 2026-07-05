@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- WebUI origin picker: a "Browse configs & profiles" dialog lets operators pick
+  a saved profile or a config file discovered on the server (new
+  `GET /api/configs`, scoped to the launch/config directories) instead of
+  typing a path. The History view now scopes to the chosen config/profile,
+  fixing the case where it errored on a missing `config.yaml` or omitted runs
+  launched with a different config (#590).
+
 - WebUI command-parity registry (`command.WebSurface`) machine-checked against
   the CLI registry, an HTTP-to-SQLite migration integration test, and
   `docs/WEBUI.md` with a server-deployment guide (reverse-proxy TLS) —
