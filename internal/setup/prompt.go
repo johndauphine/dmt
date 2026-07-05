@@ -131,7 +131,7 @@ func (s *State) Prompt() PromptInfo {
 		}
 		return PromptInfo{Text: "Schema", Default: def}
 	case StepSourceSSL:
-		return s.sslPrompt(s.Config.Source.Type, s.Config.Source.SSLMode, s.Config.Source.TrustServerCert)
+		return s.sslPrompt(s.Config.Source.Type, s.Config.Source.SSLMode, s.Config.Source.TrustServerCert, s.Config.Source.Encrypt)
 
 	// Phase 3: Source Connection Test
 	case StepSourceConnTest:
@@ -184,7 +184,7 @@ func (s *State) Prompt() PromptInfo {
 		}
 		return PromptInfo{Text: "Schema", Default: def}
 	case StepTargetSSL:
-		return s.sslPrompt(s.Config.Target.Type, s.Config.Target.SSLMode, s.Config.Target.TrustServerCert)
+		return s.sslPrompt(s.Config.Target.Type, s.Config.Target.SSLMode, s.Config.Target.TrustServerCert, s.Config.Target.Encrypt)
 
 	// Phase 5: Target Connection Test
 	case StepTargetConnTest:
