@@ -7,7 +7,8 @@ Technical documentation, planning documents, and implementation notes for dmt.
 | Document | Description |
 |----------|-------------|
 | [RUNBOOK.md](RUNBOOK.md) | Operator runbook: preflight, run, resume, validate, diagnose — CLI and TUI |
-| [TUI_COMMANDS.md](TUI_COMMANDS.md) | TUI / CLI command parity table and intentionally CLI-only surfaces |
+| [TUI_COMMANDS.md](TUI_COMMANDS.md) | TUI / CLI / WebUI command parity table and intentionally CLI-only surfaces |
+| [WEBUI.md](WEBUI.md) | Browser front-end (`dmt --webui`): security model, remote-deployment guide (nginx/Caddy), maturity notes |
 | [BENCHMARKS.md](BENCHMARKS.md) | Performance benchmarks comparing Go and Rust implementations |
 | [FIXTURES.md](FIXTURES.md) | Test/bench datasets: CI-friendly fixtures and manual SO2010/SO2013/WWI restores |
 | [OBSERVABILITY.md](OBSERVABILITY.md) | Prometheus metrics and OTLP tracing setup |

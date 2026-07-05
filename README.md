@@ -5,7 +5,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/johndauphine/dmt)](https://go.dev/)
 [![License](https://img.shields.io/github/license/johndauphine/dmt)](LICENSE)
 
-High-performance CLI tool for database migrations between SQL Server, PostgreSQL, and MySQL.
+High-performance tool for database migrations between SQL Server, PostgreSQL, and MySQL — driven from a **CLI**, an interactive **terminal UI**, or a **browser** (`--webui`), all from a single binary.
 
 ## Quick Start
 
@@ -37,7 +37,7 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 ```
 
 ### Features
-*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/preflight`, `/diagnose`, `/analyze`). The full CLI/TUI parity table lives in [docs/TUI_COMMANDS.md](docs/TUI_COMMANDS.md).
+*   **Slash Commands**: Type `/` to see all available commands (e.g., `/run`, `/preflight`, `/diagnose`, `/analyze`). The full CLI / TUI / WebUI parity table lives in [docs/TUI_COMMANDS.md](docs/TUI_COMMANDS.md).
 *   **CLI parity**: `/run --dry-run` previews the plan, `/preflight --ai-review` checks readiness, `/validate --ai-triage` and `/diagnose` triage failures, `/ai config-review` generates patch recommendations and a runbook — the same renderers the CLI uses.
 *   **Session defaults**: `/session KEY VALUE` keeps sticky per-session defaults (config, profile, state-file, observability and audit settings) so they don't need repeating on every command.
 *   **Resume**: Use `/resume` to continue interrupted migrations (`--force-resume` after config changes).
@@ -47,6 +47,20 @@ Launch the tool without arguments to enter the **Interactive Shell**, a modern T
 *   **Configuration Wizard**: Type `/wizard` to interactively create or edit your `config.yaml`. It guides you through connection details, SSL settings, and performance tuning.
 *   **Live Monitoring**: Watch migration progress with real-time logs and visual status indicators.
 *   **Git Integration**: View your current branch and repository status directly in the status bar.
+
+## Web UI
+
+Launch a browser-based operator console — the same command surface as the TUI, served as an authenticated single-page app straight from the binary (no separate install, no build step):
+
+```bash
+./dmt --webui        # loopback bind; prints a one-click URL with an auto-generated token
+```
+
+It runs the live migration dashboard (progress streamed over Server-Sent Events), readiness checks (preflight/validate/diagnose), the guided setup wizard, profile and session management, and a ⌘K command palette. It calls the same orchestrator the CLI and TUI do — no forked logic.
+
+**Loopback-only by default.** A remote/server bind (`--webui-addr 0.0.0.0:8484`) requires an auth token plus TLS — either native (`--webui-tls-cert`/`--webui-tls-key`) or a TLS-terminating reverse proxy (`--webui-insecure` behind it, optionally with `--webui-trusted-proxy` for per-client rate-limiting). Brute-force throttling, session renewal, and a strict CSP are on by default. The setup wizard stores DB passwords in `${file:}` secret files rather than plaintext.
+
+See **[docs/WEBUI.md](docs/WEBUI.md)** for the security model, remote-deployment guide (nginx/Caddy), and maturity notes (ready for local single-operator use; beta for remote/team).
 
 ## Security
 
@@ -753,22 +767,22 @@ Releases ship raw binaries per platform plus a `checksums.txt`:
 
 ```bash
 # Linux x64
-curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-linux-amd64
-chmod +x dmt-v5.3.0-linux-amd64 && ./dmt-v5.3.0-linux-amd64 --version
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.4.0/dmt-v5.4.0-linux-amd64
+chmod +x dmt-v5.4.0-linux-amd64 && ./dmt-v5.4.0-linux-amd64 --version
 
 # macOS Apple Silicon
-curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-darwin-arm64
-chmod +x dmt-v5.3.0-darwin-arm64 && ./dmt-v5.3.0-darwin-arm64 --version
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.4.0/dmt-v5.4.0-darwin-arm64
+chmod +x dmt-v5.4.0-darwin-arm64 && ./dmt-v5.4.0-darwin-arm64 --version
 
 # macOS Intel
-curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-darwin-amd64
-chmod +x dmt-v5.3.0-darwin-amd64
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.4.0/dmt-v5.4.0-darwin-amd64
+chmod +x dmt-v5.4.0-darwin-amd64
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v5.3.0/dmt-v5.3.0-windows-amd64.exe -OutFile dmt.exe
+Invoke-WebRequest -Uri https://github.com/johndauphine/dmt/releases/download/v5.4.0/dmt-v5.4.0-windows-amd64.exe -OutFile dmt.exe
 
 # Verify a download (any platform)
-curl -LO https://github.com/johndauphine/dmt/releases/download/v5.3.0/checksums.txt
+curl -LO https://github.com/johndauphine/dmt/releases/download/v5.4.0/checksums.txt
 shasum -a 256 -c --ignore-missing checksums.txt
 ```
 
