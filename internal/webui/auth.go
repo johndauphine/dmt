@@ -7,16 +7,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // sessionCookie names the browser session cookie set after a successful login.
 const sessionCookie = "dmt_webui_session"
+
+// Login brute-force controls (#594). Deliberately lenient: a strong token is
+// infeasible to guess within the window regardless, so a shared reverse-proxy
+// IP or a fat-fingering operator isn't locked out for long.
+const (
+	loginMaxFailures = 10
+	loginWindow      = time.Minute
+	// minRemoteTokenLen is the shortest operator-chosen token accepted on a
+	// non-loopback bind. Auto-generated loopback tokens are 64 hex chars and
+	// exempt.
+	minRemoteTokenLen = 16
+)
 
 // resolveAuthToken determines the shared secret. A configured token is
 // expanded (${env:}/${file:}) and used as-is; an empty token is only reached
@@ -65,27 +80,86 @@ func bearerToken(r *http.Request) (string, bool) {
 	return "", false
 }
 
-// requireAuth wraps a handler so only authenticated requests reach it.
+// requireAuth wraps a handler so only authenticated requests reach it. A
+// cookie-authed request also slides the session (server-side in valid(), and
+// the browser cookie here) so an active operator's session doesn't expire
+// mid-migration (#601).
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.authenticated(r) {
+		ok, sid := s.authenticated(r)
+		if ok {
+			if sid != "" {
+				s.setSessionCookie(w, r, sid)
+			}
 			next.ServeHTTP(w, r)
 			return
+		}
+		// Auth failed. Throttle brute-force on the bearer/cookie path with the
+		// same limiter as login (#594) — but only when a credential was
+		// actually presented; a plain unauthenticated request must not let a
+		// third party lock others out, and is the common pre-login case.
+		if credentialPresented(r) {
+			ip := clientIP(r)
+			if allowed, retryAfter := s.logins.allow(ip); !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+				writeError(w, http.StatusTooManyRequests, "rate_limited", "too many failed authentication attempts; try again shortly")
+				return
+			}
+			n := s.logins.fail(ip)
+			logging.WarnEvent("webui: failed auth", "remote", ip, "consecutive_failures", n)
 		}
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 	})
 }
 
-// authenticated accepts a valid browser session cookie or a matching bearer
-// token (for curl/API clients).
-func (s *Server) authenticated(r *http.Request) bool {
-	if c, err := r.Cookie(sessionCookie); err == nil && s.sessions.valid(c.Value) {
+// credentialPresented reports whether the request carried a bearer token or a
+// session cookie (valid or not) — i.e. an authentication attempt, as opposed
+// to an anonymous request.
+func credentialPresented(r *http.Request) bool {
+	if _, ok := bearerToken(r); ok {
 		return true
+	}
+	_, err := r.Cookie(sessionCookie)
+	return err == nil
+}
+
+// authenticated accepts a valid browser session cookie or a matching bearer
+// token (for curl/API clients). The returned sid is non-empty only for the
+// cookie-session path, so the caller can slide the cookie.
+func (s *Server) authenticated(r *http.Request) (bool, string) {
+	if c, err := r.Cookie(sessionCookie); err == nil && s.sessions.valid(c.Value) {
+		return true, c.Value
 	}
 	if tok, ok := bearerToken(r); ok && tokenEqual(tok, s.token) {
-		return true
+		return true, ""
 	}
-	return false
+	return false, ""
+}
+
+// setSessionCookie (re)issues the session cookie with a fresh TTL. Shared by
+// login and the per-request slide in requireAuth.
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, sid string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    sid,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(sessionTTL.Seconds()),
+	})
+}
+
+// clientIP returns the connecting peer's IP (RemoteAddr host). Not the
+// X-Forwarded-For chain — that is client-spoofable, which would let an
+// attacker rotate the value to bypass the login limiter. Behind a reverse
+// proxy this means the whole proxy shares one bucket; the limits are lenient
+// enough that legitimate operators are not affected.
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 // handleLogin exchanges the shared token for a session cookie. The token is
@@ -98,6 +172,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
 		return
 	}
+	ip := clientIP(r)
+	if ok, retryAfter := s.logins.allow(ip); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many failed login attempts; try again shortly")
+		return
+	}
 	var body struct {
 		Token string `json:"token"`
 	}
@@ -106,23 +186,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Token == "" || !tokenEqual(body.Token, s.token) {
+		n := s.logins.fail(ip)
+		logging.WarnEvent("webui: failed login", "remote", ip, "consecutive_failures", n)
 		writeError(w, http.StatusUnauthorized, "invalid_token", "invalid auth token")
 		return
 	}
+	s.logins.reset(ip)
 	sid, err := s.sessions.create()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", "could not create session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    sid,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   requestIsHTTPS(r),
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(sessionTTL.Seconds()),
-	})
+	s.setSessionCookie(w, r, sid)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
@@ -142,18 +217,29 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-// sessionStore is an in-memory set of live session IDs with TTL expiry. A
-// single-operator, single-process store is sufficient for the local/remote
-// operator tool; there is no multi-user or clustered requirement (see epic
-// non-goals).
+// sessionMaxLife caps a session's total lifetime regardless of sliding (#601
+// review): even a continuously-renewed session (or a stolen cookie kept warm
+// by requests) dies after this, forcing a fresh login. Set well above any
+// realistic single-migration watch so it never interrupts legitimate use.
+const sessionMaxLife = 7 * 24 * time.Hour
+
+// sessionStore is an in-memory set of live session IDs with sliding idle
+// expiry and an absolute lifetime cap. A single-operator, single-process store
+// is sufficient for the local/remote operator tool; there is no multi-user or
+// clustered requirement (see epic non-goals).
 type sessionStore struct {
 	mu  sync.Mutex
-	m   map[string]time.Time
+	m   map[string]sessionEntry
 	ttl time.Duration
 }
 
+type sessionEntry struct {
+	exp     time.Time // sliding idle expiry
+	created time.Time // for the absolute lifetime cap
+}
+
 func newSessionStore(ttl time.Duration) *sessionStore {
-	return &sessionStore{m: make(map[string]time.Time), ttl: ttl}
+	return &sessionStore{m: make(map[string]sessionEntry), ttl: ttl}
 }
 
 func (s *sessionStore) create() (string, error) {
@@ -166,30 +252,42 @@ func (s *sessionStore) create() (string, error) {
 	// Opportunistically prune expired sessions so the map can't grow
 	// unbounded across a long-lived server's repeated logins (valid() only
 	// evicts the id it happens to look up).
-	for k, exp := range s.m {
-		if now.After(exp) {
+	for k, e := range s.m {
+		if now.After(e.exp) || now.After(e.created.Add(sessionMaxLife)) {
 			delete(s.m, k)
 		}
 	}
-	s.m[id] = now.Add(s.ttl)
+	s.m[id] = sessionEntry{exp: now.Add(s.ttl), created: now}
 	s.mu.Unlock()
 	return id, nil
 }
 
+// valid reports whether the session id is live, sliding its expiry forward on
+// each successful check so an in-use session doesn't expire out from under an
+// active operator (#601). A passively-watched migration keeps its session warm
+// via the SPA heartbeat, which makes an authenticated request on an interval.
 func (s *sessionStore) valid(id string) bool {
 	if id == "" {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exp, ok := s.m[id]
+	e, ok := s.m[id]
 	if !ok {
 		return false
 	}
-	if time.Now().After(exp) {
+	now := time.Now()
+	// Idle expiry or absolute lifetime cap both terminate the session.
+	if now.After(e.exp) || now.After(e.created.Add(sessionMaxLife)) {
 		delete(s.m, id)
 		return false
 	}
+	// Slide the idle expiry, but never past the absolute cap.
+	e.exp = now.Add(s.ttl)
+	if cap := e.created.Add(sessionMaxLife); e.exp.After(cap) {
+		e.exp = cap
+	}
+	s.m[id] = e
 	return true
 }
 
@@ -197,4 +295,70 @@ func (s *sessionStore) destroy(id string) {
 	s.mu.Lock()
 	delete(s.m, id)
 	s.mu.Unlock()
+}
+
+// loginLimiter throttles brute-force attempts on /api/login, keyed by client
+// IP (#594). After loginMaxFailures failures within loginWindow the IP is
+// locked out for loginWindow; a successful login resets its bucket.
+type loginLimiter struct {
+	mu     sync.Mutex
+	m      map[string]*loginAttempts
+	max    int
+	window time.Duration
+}
+
+type loginAttempts struct {
+	fails       int
+	first       time.Time
+	lockedUntil time.Time
+}
+
+func newLoginLimiter() *loginLimiter {
+	return &loginLimiter{m: make(map[string]*loginAttempts), max: loginMaxFailures, window: loginWindow}
+}
+
+// allow reports whether ip may attempt a login now. When locked, retryAfter is
+// the remaining lockout duration.
+func (l *loginLimiter) allow(ip string) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.m[ip]
+	if a == nil {
+		return true, 0
+	}
+	if d := time.Until(a.lockedUntil); d > 0 {
+		return false, d
+	}
+	return true, 0
+}
+
+// fail records a failed attempt and returns the running failure count. When it
+// reaches the max, the IP is locked for the window.
+func (l *loginLimiter) fail(ip string) int {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Opportunistic prune of stale buckets so the map can't grow unbounded.
+	for k, v := range l.m {
+		if now.Sub(v.first) > l.window && now.After(v.lockedUntil) {
+			delete(l.m, k)
+		}
+	}
+	a := l.m[ip]
+	if a == nil || now.Sub(a.first) > l.window {
+		a = &loginAttempts{first: now}
+		l.m[ip] = a
+	}
+	a.fails++
+	if a.fails >= l.max {
+		a.lockedUntil = now.Add(l.window)
+	}
+	return a.fails
+}
+
+// reset clears an IP's failure bucket after a successful login.
+func (l *loginLimiter) reset(ip string) {
+	l.mu.Lock()
+	delete(l.m, ip)
+	l.mu.Unlock()
 }

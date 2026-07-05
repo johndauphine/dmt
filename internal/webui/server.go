@@ -28,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/version"
@@ -74,6 +75,7 @@ type Server struct {
 	token     string
 	tokenAuto bool // token was auto-generated (loopback convenience)
 	sessions  *sessionStore
+	logins    *loginLimiter // brute-force throttle on /api/login (#594)
 	httpSrv   *http.Server
 
 	// allowedHosts is the DNS-rebinding guard's Host-header allowlist. It is
@@ -138,11 +140,18 @@ func New(opts Options) (*Server, error) {
 	}
 	// hostFromAddr already succeeded inside validateBindSecurity.
 	host, _ := hostFromAddr(opts.Addr)
+	// A non-loopback bind exposes the token to the network; refuse a weak
+	// operator-chosen one (#594). Auto-generated tokens are long by
+	// construction and exempt.
+	if n := utf8.RuneCountInString(token); !isLoopbackHost(host) && !auto && n < minRemoteTokenLen {
+		return nil, &configErr{fmt.Errorf("webui: --webui-auth-token must be at least %d characters for a non-loopback bind (got %d)", minRemoteTokenLen, n)}
+	}
 	s := &Server{
 		opts:            opts,
 		token:           token,
 		tokenAuto:       auto,
 		sessions:        newSessionStore(sessionTTL),
+		logins:          newLoginLimiter(),
 		allowedHosts:    buildAllowedHosts(host, isLoopbackHost(host)),
 		hub:             newEventHub(),
 		runs:            newRunManager(),

@@ -54,7 +54,17 @@ single-use — so treat the printed link as sensitive.)
 - **Auth.** The token is exchanged at login for an `HttpOnly`, `SameSite=Strict`
   session cookie (cookie-based so the `EventSource` progress stream works, since
   it cannot send headers). Token comparison is constant-time. API clients may
-  instead send `Authorization: Bearer <token>`.
+  instead send `Authorization: Bearer <token>`. The session slides while in use
+  (an open tab pings the server so it never expires mid-migration) up to a
+  7-day absolute cap.
+- **Brute-force throttling.** Repeated failed auth attempts (login or bearer)
+  from an IP are rate-limited (lockout after ~10 failures/minute). A
+  non-loopback bind additionally refuses an operator token shorter than 16
+  characters. Note: the limiter keys on the connecting IP and does not trust
+  `X-Forwarded-For`, so **behind a reverse proxy all clients share one bucket**
+  — an attacker could cause a brief (1-minute, self-healing) login lockout for
+  everyone; existing sessions keep working. A per-client trusted-proxy mode is
+  tracked in issue #604.
 - **DNS-rebinding protection.** On a loopback bind the server enforces a
   `Host`-header allowlist, blocking a malicious page from pointing its own
   hostname at `127.0.0.1`.

@@ -32,8 +32,16 @@ func TestSessionDefaultsValidation(t *testing.T) {
 	if err := d.set("metrics-addr", "notaddr"); err == nil {
 		t.Error("invalid metrics-addr should be rejected")
 	}
-	if err := d.set("metrics-addr", ":9090"); err != nil {
-		t.Errorf("valid metrics-addr rejected: %v", err)
+	// A public metrics bind is rejected from a WebUI session (#602)...
+	if err := d.set("metrics-addr", "0.0.0.0:9090"); err == nil {
+		t.Error("non-loopback metrics-addr should be rejected from a session")
+	}
+	if err := d.set("metrics-addr", ":9090"); err == nil {
+		t.Error("wildcard metrics-addr should be rejected from a session")
+	}
+	// ...but a loopback bind is fine.
+	if err := d.set("metrics-addr", "127.0.0.1:9090"); err != nil {
+		t.Errorf("loopback metrics-addr rejected: %v", err)
 	}
 
 	// Values with no validator (config/profile) accepted verbatim.
