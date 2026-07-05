@@ -156,7 +156,7 @@ func (s *Server) startMigration(w http.ResponseWriter, cfg *config.Config, confi
 	s.hub.setLive(true)
 	s.hub.publish(event{Type: eventStarted, Run: &st})
 	s.runWg.Add(1)
-	go s.execute(ctx, cancel, orch, kind, teardownObs)
+	go s.execute(ctx, cancel, orch, kind, opts.RunID, teardownObs)
 	writeJSON(w, http.StatusAccepted, st)
 }
 
@@ -175,7 +175,7 @@ func (s *Server) applySessionAudit(cfg *config.Config) {
 
 // execute runs the migration to completion and emits the terminal event. It is
 // the sole owner of orch after startMigration hands off.
-func (s *Server) execute(ctx context.Context, cancel context.CancelFunc, orch *orchestrator.Orchestrator, kind runKind, teardownObs func()) {
+func (s *Server) execute(ctx context.Context, cancel context.CancelFunc, orch *orchestrator.Orchestrator, kind runKind, runID string, teardownObs func()) {
 	defer s.runWg.Done()
 	defer cancel()
 	defer orch.Close()
@@ -201,11 +201,19 @@ func (s *Server) execute(ctx context.Context, cancel context.CancelFunc, orch *o
 		}
 		errMsg = logging.Scrub(runErr.Error())
 	}
+	// Capture this run's final tally from its structured result (before Close),
+	// keyed by run id so an early failure can't inherit a prior run's counts,
+	// so the terminal runState carries the totals — a client loading /api/run
+	// for a finished run has no progress stream to populate them (#591).
+	var counts runCounts
+	if res, err := orch.GetRunResult(runID); err == nil && res != nil {
+		counts = runCounts{rows: res.RowsTransferred, rps: res.RowsPerSecond, tablesDone: res.TablesSuccess, tablesTotal: res.TablesTotal}
+	}
 	// Record terminal state while still holding the single-flight slot, stop
 	// relaying progress, publish the terminal event, then release the slot.
 	// Ordering matters: releasing the slot first would let a successor run
 	// start and have its progress suppressed by this run's setLive(false).
-	st := s.runs.complete(status, errMsg)
+	st := s.runs.complete(status, errMsg, counts)
 	s.hub.setLive(false)
 	s.hub.publish(event{Type: evType, Run: &st})
 	s.runs.clear()

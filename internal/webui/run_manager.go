@@ -15,14 +15,26 @@ const (
 )
 
 // runState is the serializable status of the current or last migration driven
-// from the WebUI.
+// from the WebUI. The final counts are stamped at completion so a client that
+// loads /api/run for a finished run (no live progress stream) can still show
+// the totals (#591).
 type runState struct {
-	ID        string  `json:"id"`
-	Kind      runKind `json:"kind"`
-	Status    string  `json:"status"` // running | completed | failed | cancelled
-	StartedAt string  `json:"started_at"`
-	EndedAt   string  `json:"ended_at,omitempty"`
-	Error     string  `json:"error,omitempty"`
+	ID              string  `json:"id"`
+	Kind            runKind `json:"kind"`
+	Status          string  `json:"status"` // running | completed | failed | cancelled
+	StartedAt       string  `json:"started_at"`
+	EndedAt         string  `json:"ended_at,omitempty"`
+	Error           string  `json:"error,omitempty"`
+	RowsTransferred int64   `json:"rows_transferred,omitempty"`
+	RowsPerSecond   int64   `json:"rows_per_second,omitempty"`
+	TablesComplete  int     `json:"tables_complete,omitempty"`
+	TablesTotal     int     `json:"tables_total,omitempty"`
+}
+
+// runCounts is the final tally stamped onto a finished run.
+type runCounts struct {
+	rows, rps               int64
+	tablesDone, tablesTotal int
 }
 
 // runManager enforces single-flight: at most one migration runs at a time
@@ -65,7 +77,7 @@ func (m *runManager) start(kind runKind, id string, cancel context.CancelFunc) (
 // the slot with clear(), so a successor run can't interleave and have its
 // progress suppressed by this run's teardown. During the window a new run is
 // correctly rejected with 409.
-func (m *runManager) complete(status, errMsg string) runState {
+func (m *runManager) complete(status, errMsg string, c runCounts) runState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := runState{}
@@ -75,6 +87,10 @@ func (m *runManager) complete(status, errMsg string) runState {
 	st.Status = status
 	st.EndedAt = time.Now().UTC().Format(time.RFC3339)
 	st.Error = errMsg
+	st.RowsTransferred = c.rows
+	st.RowsPerSecond = c.rps
+	st.TablesComplete = c.tablesDone
+	st.TablesTotal = c.tablesTotal
 	m.last = &st
 	if m.active != nil {
 		m.active.state = st
@@ -92,7 +108,7 @@ func (m *runManager) clear() {
 // finish is complete()+clear() in one step, for callers/tests that don't need
 // the intervening window.
 func (m *runManager) finish(status, errMsg string) runState {
-	st := m.complete(status, errMsg)
+	st := m.complete(status, errMsg, runCounts{})
 	m.clear()
 	return st
 }
