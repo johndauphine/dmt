@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator"
 )
 
@@ -63,7 +64,9 @@ func (s *Server) handleStatusByID(w http.ResponseWriter, r *http.Request) {
 	result, err := orch.GetRunResult(runID)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			// Scrub even this benign message so writeAPIError stays the single
+			// vetted egress and no future error string leaks here (#603).
+			writeError(w, http.StatusNotFound, "not_found", logging.Scrub(err.Error()))
 			return
 		}
 		writeAPIError(w, err)
