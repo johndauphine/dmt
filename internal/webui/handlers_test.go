@@ -217,6 +217,49 @@ func TestHistoryEmpty(t *testing.T) {
 	}
 }
 
+// TestHistoryPaginationEnvelope checks the paginated response carries the
+// page metadata and that limit is clamped to the server maximum.
+func TestHistoryPaginationEnvelope(t *testing.T) {
+	cfgPath := writeSQLiteConfig(t)
+	s := newTestServer(t, Options{AuthToken: testToken, ConfigPath: cfgPath})
+	h := s.buildHandler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodGet, "http://localhost/api/history?limit=9999&offset=0", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Runs   []runDTO `json:"runs"`
+		Total  int      `json:"total"`
+		Limit  int      `json:"limit"`
+		Offset int      `json:"offset"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 0 {
+		t.Errorf("total = %d, want 0 on a fresh state", body.Total)
+	}
+	if body.Limit != historyMaxLimit {
+		t.Errorf("limit = %d, want clamped to %d", body.Limit, historyMaxLimit)
+	}
+}
+
+// TestHistoryInvalidStatus rejects an unknown status filter with 400 rather
+// than silently returning an empty page.
+func TestHistoryInvalidStatus(t *testing.T) {
+	cfgPath := writeSQLiteConfig(t)
+	s := newTestServer(t, Options{AuthToken: testToken, ConfigPath: cfgPath})
+	h := s.buildHandler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, authedReq(http.MethodGet, "http://localhost/api/history?status=bogus", ""))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("history?status=bogus = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestHistoryDTOExcludesConfig guards the secret-safety invariant: the raw
 // serialized config (which can hold connection secrets) must never appear in
 // the history JSON.

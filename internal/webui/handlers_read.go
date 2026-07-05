@@ -2,6 +2,7 @@ package webui
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -75,8 +76,33 @@ func (s *Server) handleStatusByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleHistory lists all persisted runs (most recent first).
+// historyStatuses is the set of run statuses the runs table actually persists
+// (CompleteRun writes success/partial/failed; the initial insert is running).
+// The history filter accepts only these; anything else is rejected so a typo
+// can't masquerade as an empty result.
+var historyStatuses = map[string]bool{
+	"running": true, "success": true, "partial": true, "failed": true,
+}
+
+const (
+	historyDefaultLimit = 20
+	historyMaxLimit     = 100
+)
+
+// handleHistory lists persisted runs (most recent first), paginated. Query
+// params: limit (default 20, max 100), offset (default 0), status (optional
+// filter). The response carries the page plus the total match count so the
+// client can render pagination.
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	status := q.Get("status")
+	if status != "" && !historyStatuses[status] {
+		writeError(w, http.StatusBadRequest, "invalid_status", "unknown status filter")
+		return
+	}
+	limit := clampQueryInt(q.Get("limit"), historyDefaultLimit, 1, historyMaxLimit)
+	offset := clampQueryInt(q.Get("offset"), 0, 0, -1)
+
 	cfg, _, stateFile, err := s.resolveConfig(originFromQuery(r))
 	if err != nil {
 		writeAPIError(w, err)
@@ -89,10 +115,34 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	defer orch.Close()
 
-	runs, err := orch.GetAllRuns()
+	runs, total, err := orch.GetRunsPage(status, limit, offset)
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": newRunDTOs(runs)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"runs":   newRunDTOs(runs),
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+// clampQueryInt parses a query int, falling back to def on empty/invalid input,
+// then clamps it to [min, max]. A negative max means no upper bound.
+func clampQueryInt(raw string, def, min, max int) int {
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	if n < min {
+		n = min
+	}
+	if max >= 0 && n > max {
+		n = max
+	}
+	return n
 }

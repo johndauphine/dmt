@@ -145,17 +145,12 @@ func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
 	return count > 0, nil
 }
 
-// GetAllRuns returns all runs for history
-func (s *State) GetAllRuns() ([]Run, error) {
-	rows, err := s.db.Query(`
-		SELECT id, started_at, completed_at, last_heartbeat, status, source_schema, target_schema, config, profile_name, config_path, error
-		FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 20
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// runHistoryColumns is the shared SELECT list for history reads; scanRunRows
+// scans exactly these columns in order.
+const runHistoryColumns = "id, started_at, completed_at, last_heartbeat, status, phase, source_schema, target_schema, config, profile_name, config_path, error"
 
+// scanRunRows materializes runs from a query over runHistoryColumns.
+func scanRunRows(rows *sql.Rows) ([]Run, error) {
 	var runs []Run
 	for rows.Next() {
 		var r Run
@@ -163,8 +158,8 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		var completedAtStr sql.NullString
 		var lastHeartbeat sql.NullString
 		var configStr sql.NullString
-		var profileName, configPath, errorMsg sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
+		var phase, profileName, configPath, errorMsg sql.NullString
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse(sqliteRunTimeLayout, startedAtStr)
@@ -177,6 +172,9 @@ func (s *State) GetAllRuns() ([]Run, error) {
 			if t, err := time.Parse(sqliteRunTimeLayout, lastHeartbeat.String); err == nil {
 				r.LastHeartbeat = t
 			}
+		}
+		if phase.Valid {
+			r.Phase = phase.String
 		}
 		if configStr.Valid {
 			r.Config = configStr.String
@@ -192,7 +190,54 @@ func (s *State) GetAllRuns() ([]Run, error) {
 		}
 		runs = append(runs, r)
 	}
-	return runs, nil
+	return runs, rows.Err()
+}
+
+// GetAllRuns returns the 20 most recent runs for history/AI features.
+func (s *State) GetAllRuns() ([]Run, error) {
+	rows, err := s.db.Query(`
+		SELECT ` + runHistoryColumns + `
+		FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 20
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRunRows(rows)
+}
+
+// GetRunsPage returns one page of runs (most recent first), optionally filtered
+// by status, plus the total count matching the filter so callers can render
+// pagination. An empty status means no filter. limit/offset are applied as-is;
+// the caller is responsible for clamping them.
+func (s *State) GetRunsPage(status string, limit, offset int) ([]Run, int, error) {
+	where := ""
+	var whereArgs []any
+	if status != "" {
+		where = " WHERE status = ?"
+		whereArgs = append(whereArgs, status)
+	}
+
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM runs"+where, whereArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	pageArgs := append(append([]any{}, whereArgs...), limit, offset)
+	rows, err := s.db.Query(`
+		SELECT `+runHistoryColumns+`
+		FROM runs`+where+`
+		ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?
+	`, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	runs, err := scanRunRows(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return runs, total, nil
 }
 
 // GetRunByID returns a specific run by ID
