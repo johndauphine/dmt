@@ -252,6 +252,12 @@ func (s *State) Prompt() PromptInfo {
 			Default:       s.ConfigPath,
 			SectionHeader: "Phase 7: Save Configuration",
 		}
+	case StepSecretStorage:
+		return PromptInfo{
+			Text:    "Store DB passwords in separate 0600 files (referenced by ${file:…}) instead of plaintext in the config? (y/n)",
+			Default: "y",
+			Choices: []string{"y", "n"},
+		}
 	case StepWriteConfig:
 		return PromptInfo{
 			Text:         "Saving configuration...",

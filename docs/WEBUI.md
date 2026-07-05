@@ -73,6 +73,10 @@ single-use — so treat the printed link as sensitive.)
   like are never serialized to API responses; error messages are scrubbed;
   profile export writes to a server-owned `~/.dmt/exports/` directory (never a
   client-supplied path).
+- **Setup keeps passwords out of the config.** The setup wizard defaults to
+  writing DB passwords to `0600` sidecar files referenced by `${file:…}`, so a
+  password you type into the browser lands in a locked-down file, not in the
+  config YAML. A wizard step lets you opt back into plaintext if you prefer.
 
 ## Server deployment
 

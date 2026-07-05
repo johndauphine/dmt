@@ -1,12 +1,126 @@
 package setup
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/config"
 )
+
+// TestExternalizeSecrets: writing with ExternalizeSecrets moves DB passwords to
+// 0600 sidecar files referenced by ${file:…}, leaves no plaintext in the
+// config, resolves back on load, is idempotent, and doesn't mutate the
+// in-memory State (#597).
+func TestExternalizeSecrets(t *testing.T) {
+	dir := t.TempDir()
+	s := NewState()
+	s.ConfigPath = filepath.Join(dir, "mig.yaml")
+	s.Config.Source.Password = "SourceP@ss1"
+	s.Config.Target.Password = "TargetP@ss2"
+
+	if err := s.WriteConfigFile(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	data, err := os.ReadFile(s.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "SourceP@ss1") || strings.Contains(string(data), "TargetP@ss2") {
+		t.Fatal("plaintext password leaked into the config file")
+	}
+	if !strings.Contains(string(data), "${file:") {
+		t.Fatal("expected ${file:…} references in the config")
+	}
+
+	// The secrets dir is 0700.
+	if di, err := os.Stat(filepath.Join(dir, "secrets")); err != nil {
+		t.Fatalf("secrets dir missing: %v", err)
+	} else if di.Mode().Perm() != 0o700 {
+		t.Errorf("secrets dir perms = %v, want 0700", di.Mode().Perm())
+	}
+
+	// Sidecar files (named with the config's full basename) exist at 0600 and
+	// resolve back to the originals via the same expansion the runtime uses.
+	want := map[string]string{"source": "SourceP@ss1", "target": "TargetP@ss2"}
+	for side, pw := range want {
+		p := filepath.Join(dir, "secrets", "mig.yaml."+side+".secret")
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("secret file for %s missing: %v", side, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s secret perms = %v, want 0600", side, info.Mode().Perm())
+		}
+		got, err := config.Expand("${file:" + p + "}")
+		if err != nil {
+			t.Fatalf("expand %s: %v", side, err)
+		}
+		if got != pw {
+			t.Errorf("%s resolved to %q, want %q", side, got, pw)
+		}
+	}
+
+	// State keeps literal passwords (externalization operates on a copy).
+	if s.Config.Source.Password != "SourceP@ss1" || s.Config.Target.Password != "TargetP@ss2" {
+		t.Error("WriteConfigFile mutated the in-memory State passwords")
+	}
+
+	// Idempotent: an already-referenced password is left untouched.
+	s2 := NewState()
+	s2.ConfigPath = filepath.Join(dir, "mig2.yaml")
+	ref := "${file:/run/secrets/db}"
+	s2.Config.Source.Password = ref
+	if err := s2.WriteConfigFile(); err != nil {
+		t.Fatalf("write2: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "mig2.yaml.source.secret")); !os.IsNotExist(err) {
+		t.Error("an existing ${file:} reference should not be re-externalized")
+	}
+	if s2.Config.Source.Password != ref {
+		t.Error("existing reference was rewritten")
+	}
+
+	// A literal password that merely looks like a template (invalid env-var
+	// name) must still be externalized, not left as plaintext (#597 review F1).
+	s3 := NewState()
+	s3.ConfigPath = filepath.Join(dir, "mig3.yaml")
+	s3.Config.Source.Password = "${p@ss}" // '@' isn't a valid template
+	if err := s3.WriteConfigFile(); err != nil {
+		t.Fatalf("write3: %v", err)
+	}
+	out, _ := os.ReadFile(s3.ConfigPath)
+	if strings.Contains(string(out), "${p@ss}") {
+		t.Error("a literal ${p@ss} password should be externalized, not written as-is")
+	}
+	side := filepath.Join(dir, "secrets", "mig3.yaml.source.secret")
+	if got, err := os.ReadFile(side); err != nil || string(got) != "${p@ss}" {
+		t.Errorf("sidecar should hold the literal password verbatim; got %q err %v", string(got), err)
+	}
+}
+
+// TestExternalizeSecretsOptOut: with ExternalizeSecrets=false the password is
+// written as plaintext (the escape hatch), and no sidecar dir is created.
+func TestExternalizeSecretsOptOut(t *testing.T) {
+	dir := t.TempDir()
+	s := NewState()
+	s.ConfigPath = filepath.Join(dir, "mig.yaml")
+	s.Config.Source.Password = "PlainP@ss"
+	s.ExternalizeSecrets = false
+	if err := s.WriteConfigFile(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	data, _ := os.ReadFile(s.ConfigPath)
+	if !strings.Contains(string(data), "PlainP@ss") {
+		t.Error("opt-out should write the plaintext password")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets")); !os.IsNotExist(err) {
+		t.Error("opt-out should not create a secrets dir")
+	}
+}
 
 func TestHappyPath(t *testing.T) {
 	s := NewState()
@@ -91,6 +205,15 @@ func TestHappyPath(t *testing.T) {
 		t.Fatalf("expected StepConfigPath, got %d", s.CurrentStep)
 	}
 	s.Process("test-config.yaml")
+
+	// Secret storage: default to externalizing DB passwords (#597).
+	if s.CurrentStep != StepSecretStorage {
+		t.Fatalf("expected StepSecretStorage, got %d", s.CurrentStep)
+	}
+	s.Process("") // Enter = keep default (externalize)
+	if !s.ExternalizeSecrets {
+		t.Fatal("empty input should default to externalizing secrets")
+	}
 
 	// Write config
 	if s.CurrentStep != StepWriteConfig {
@@ -449,6 +572,7 @@ func TestAIConfiguredShowsAnalysis(t *testing.T) {
 
 	// Config path
 	s.Process("test.yaml")
+	s.Process("") // secret storage (externalize)
 
 	// Write config
 	s.Process("")
@@ -500,6 +624,7 @@ func TestAnalysisYes(t *testing.T) {
 	s.Process("y")
 	s.Process("4")
 	s.Process("out.yaml")
+	s.Process("") // secret storage (externalize)
 	s.Process("") // write success
 
 	if s.CurrentStep != StepRunAnalysis {
@@ -549,6 +674,7 @@ func TestAnalysisOfferedWithoutAI(t *testing.T) {
 	s.Process("y")
 	s.Process("4")
 	s.Process("out.yaml")
+	s.Process("") // secret storage (externalize)
 	s.Process("") // write success
 
 	// No AI still offers the deterministic smartconfig analysis (#443)
@@ -596,6 +722,7 @@ func TestNoAnalysisWhenSourceConnFailed(t *testing.T) {
 	s.Process("y")
 	s.Process("4")
 	s.Process("out.yaml")
+	s.Process("") // secret storage (externalize)
 	s.Process("") // write success
 
 	// AI configured but source failed -> no analysis
@@ -1376,6 +1503,7 @@ func TestWriteConfigFailureGoesBackToConfigPath(t *testing.T) {
 	s.Process("y")
 	s.Process("4")
 	s.Process("config.yaml") // config path
+	s.Process("")            // secret storage (externalize)
 
 	if s.CurrentStep != StepWriteConfig {
 		t.Fatalf("expected StepWriteConfig, got %d", s.CurrentStep)

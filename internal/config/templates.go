@@ -233,6 +233,13 @@ func isTemplateValue(value string) bool {
 	return filePattern.MatchString(value) || envPattern.MatchString(value) || legacyEnvPattern.MatchString(value)
 }
 
+// IsTemplateValue reports whether s is a secret template (${file:…}, ${env:…},
+// or legacy ${VAR}) that Load/Expand would resolve — as opposed to a literal
+// value that merely happens to contain braces. Callers that rewrite secrets
+// (e.g. the setup wizard) use this so a literal password like "${p@ss}" is not
+// mistaken for a reference.
+func IsTemplateValue(s string) bool { return isTemplateValue(s) }
+
 func yamlScalarTag(typ reflect.Type) string {
 	switch typ.Kind() {
 	case reflect.Bool:
