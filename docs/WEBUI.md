@@ -119,6 +119,12 @@ Restrict access to the port with your firewall regardless — the token is the
 only application-level barrier (v1 is single-operator; there are no user
 accounts or RBAC).
 
+On shutdown (Ctrl+C / SIGTERM) the server cancels any in-flight migration and
+waits up to ~10 seconds for its checkpoint to flush before exiting. If the
+flush is cut short it is the same exposure as killing the CLI mid-run: state
+stays consistent (SQLite WAL) and the run is resumable — keyset tables clean up
+partial data on resume; ROW_NUMBER tables may re-transfer their last chunk.
+
 ## Command surface
 
 The WebUI operates the same production commands as the TUI. The authoritative
