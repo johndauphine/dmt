@@ -127,6 +127,7 @@ var GlobalFlags = []FlagSpec{
 	{Name: "webui-tls-cert", Status: TUICLIOnly, Ref: "WebUI TLS certificate (#578)"},
 	{Name: "webui-tls-key", Status: TUICLIOnly, Ref: "WebUI TLS key (#578)"},
 	{Name: "webui-insecure", Status: TUICLIOnly, Ref: "WebUI plaintext remote-bind opt-out (#578)"},
+	{Name: "webui-trusted-proxy", Status: TUICLIOnly, Ref: "WebUI trusted reverse-proxy CIDRs for X-Forwarded-For (#604)"},
 }
 
 // Registry is the authoritative command/flag parity list.

@@ -43,6 +43,7 @@ single-use — so treat the printed link as sensitive.)
 | `--webui-auth-token` | — | Shared-secret bearer token. Supports `${env:VAR}` / `${file:/path}` expansion so the secret stays out of the process list. **Required** for a non-loopback bind; auto-generated for loopback. |
 | `--webui-tls-cert` / `--webui-tls-key` | — | Serve HTTPS directly (PEM cert + key). |
 | `--webui-insecure` | off | Allow a non-loopback bind over plaintext HTTP — only behind a TLS-terminating reverse proxy. |
+| `--webui-trusted-proxy` | — | CIDR (or IP) of a trusted reverse proxy whose `X-Forwarded-For` is honored for rate-limiting and audit logging. Repeatable. Off by default. |
 
 ## Security model
 
@@ -60,11 +61,14 @@ single-use — so treat the printed link as sensitive.)
 - **Brute-force throttling.** Repeated failed auth attempts (login or bearer)
   from an IP are rate-limited (lockout after ~10 failures/minute). A
   non-loopback bind additionally refuses an operator token shorter than 16
-  characters. Note: the limiter keys on the connecting IP and does not trust
-  `X-Forwarded-For`, so **behind a reverse proxy all clients share one bucket**
-  — an attacker could cause a brief (1-minute, self-healing) login lockout for
-  everyone; existing sessions keep working. A per-client trusted-proxy mode is
-  tracked in issue #604.
+  characters. By default the limiter keys on the connecting IP and does not
+  trust `X-Forwarded-For` (it is client-spoofable), so **behind a reverse proxy
+  all clients share one bucket** unless you opt in. Set
+  `--webui-trusted-proxy <cidr>` (repeatable) to name your proxy: when the
+  direct peer is in that set, the real client is taken from `X-Forwarded-For`
+  (walking past further trusted hops), restoring per-client throttling and
+  accurate audit logging without opening spoofing — an attacker connecting
+  directly is still keyed on their real peer IP.
 - **DNS-rebinding protection.** On a loopback bind the server enforces a
   `Host`-header allowlist, blocking a malicious page from pointing its own
   hostname at `127.0.0.1`.
@@ -88,8 +92,15 @@ export DMT_WEBUI_TOKEN=…                 # or store it in a 0600 file
 dmt --webui \
     --webui-addr 127.0.0.1:8484 \
     --webui-auth-token "${env:DMT_WEBUI_TOKEN}" \
-    --webui-insecure          # TLS is terminated by the proxy in front
+    --webui-insecure \             # TLS is terminated by the proxy in front
+    --webui-trusted-proxy 127.0.0.1  # trust the local proxy's X-Forwarded-For
 ```
+
+The `--webui-trusted-proxy` value is the address dmt sees the proxy connecting
+*from* (here the loopback proxy). Without it, the login limiter can only see the
+proxy's IP, so every user shares one rate-limit bucket; with it, throttling and
+audit logs attribute to the real client. Make sure the proxy sets
+`X-Forwarded-For` (nginx's `proxy_add_x_forwarded_for` below does).
 
 ### nginx
 
@@ -103,6 +114,7 @@ server {
     proxy_pass http://127.0.0.1:8484;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto https;   # marks the cookie Secure
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # real client IP
     proxy_http_version 1.1;
     proxy_set_header Connection "";              # keep the SSE stream open
     proxy_buffering off;                         # don't buffer /api/events

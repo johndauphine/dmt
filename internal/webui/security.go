@@ -49,6 +49,51 @@ func hostFromAddr(addr string) (string, error) {
 	return host, nil
 }
 
+// parseTrustedProxies turns --webui-trusted-proxy values (CIDRs, or bare IPs
+// treated as single-host networks) into matchable networks, erroring on the
+// first malformed entry. Empty/whitespace entries are skipped so a
+// comma-joined or repeated flag both work.
+func parseTrustedProxies(cidrs []string) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, raw := range cidrs {
+		for _, c := range strings.Split(raw, ",") {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if !strings.Contains(c, "/") {
+				if ip := net.ParseIP(c); ip != nil {
+					if ip.To4() != nil {
+						c += "/32"
+					} else {
+						c += "/128"
+					}
+				}
+			}
+			_, n, err := net.ParseCIDR(c)
+			if err != nil {
+				return nil, fmt.Errorf("webui: invalid --webui-trusted-proxy %q: %w", c, err)
+			}
+			nets = append(nets, n)
+		}
+	}
+	return nets, nil
+}
+
+// ipInNets reports whether ipStr parses and falls within any of nets.
+func ipInNets(ipStr string, nets []*net.IPNet) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // isLoopbackHost reports whether binding host keeps the server unreachable
 // from other machines. An empty or wildcard host (":8484", "0.0.0.0", "::")
 // is remotely reachable and therefore NOT loopback.

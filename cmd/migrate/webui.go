@@ -12,13 +12,14 @@ import (
 // the CLI and TUI do.
 func startWebUI(c *cli.Context) error {
 	return webui.Start(webui.Options{
-		Addr:       c.String("webui-addr"),
-		AuthToken:  c.String("webui-auth-token"),
-		TLSCert:    c.String("webui-tls-cert"),
-		TLSKey:     c.String("webui-tls-key"),
-		Insecure:   c.Bool("webui-insecure"),
-		ConfigPath: c.String("config"),
-		StateFile:  c.String("state-file"),
-		Profile:    c.String("profile"),
+		Addr:           c.String("webui-addr"),
+		AuthToken:      c.String("webui-auth-token"),
+		TLSCert:        c.String("webui-tls-cert"),
+		TLSKey:         c.String("webui-tls-key"),
+		Insecure:       c.Bool("webui-insecure"),
+		TrustedProxies: c.StringSlice("webui-trusted-proxy"),
+		ConfigPath:     c.String("config"),
+		StateFile:      c.String("state-file"),
+		Profile:        c.String("profile"),
 	})
 }
