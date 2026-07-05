@@ -8,6 +8,19 @@ validation checks, the guided setup wizard, profiles, and session defaults.
 The front end is embedded in the binary (`go:embed`), so there is nothing to
 install or serve separately — `dmt` stays a single self-contained binary.
 
+## Maturity
+
+- **Local, single-operator use — ready.** On a loopback bind (the default) the
+  WebUI is a peer to the TUI, verified end-to-end. Use it freely.
+- **Remote / team-facing server — beta.** The remote path works and is gated by
+  a token + TLS, but v1 is **single-operator with a single shared secret**:
+  there are no user accounts, RBAC, per-user audit, or login rate-limiting yet.
+  For a shared server, run it **behind a TLS-terminating reverse proxy and a
+  firewall**, and treat the token as you would a root password.
+
+Multi-user accounts, RBAC, and SSO are non-goals for v1. Remaining hardening for
+the server case (notably login rate-limiting) is tracked in issue #599.
+
 ## Launch
 
 ```bash
@@ -105,6 +118,12 @@ dmt --webui --webui-addr 0.0.0.0:8484 \
 Restrict access to the port with your firewall regardless — the token is the
 only application-level barrier (v1 is single-operator; there are no user
 accounts or RBAC).
+
+On shutdown (Ctrl+C / SIGTERM) the server cancels any in-flight migration and
+waits up to ~10 seconds for its checkpoint to flush before exiting. If the
+flush is cut short it is the same exposure as killing the CLI mid-run: state
+stays consistent (SQLite WAL) and the run is resumable — keyset tables clean up
+partial data on resume; ROW_NUMBER tables may re-transfer their last chunk.
 
 ## Command surface
 
