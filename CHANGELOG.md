@@ -9,6 +9,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- WebUI run history is now paginated and status-filterable. `GET /api/history`
+  accepts `limit` (default 20, max 100), `offset`, and a `status` filter
+  validated against the persisted set (`running`/`success`/`partial`/`failed`);
+  an unknown status is a 400 rather than a silently-empty page. The response
+  carries `{runs, total, limit, offset}` and the History view gains a status
+  dropdown and a Prev/Next pager with an "X–Y of Z" summary. History rows now
+  populate the Phase column, and the `⌘K` command palette lists every Checks
+  command (Diagnose, Analyze, Config check) instead of just Preflight and
+  Validate (#612, #613).
+
+- WebUI dashboard telemetry surfaces failed-table count (highlighted once
+  non-zero, visible mid-run), tables running now, and total rows alongside rows
+  transferred; the terminal run state stamps the failed-table tally so a
+  reloaded finished run still shows it (#612).
+
+### Fixed
+
+- WebUI one-click token login works on Safari < 16: it falls back to
+  dispatching a cancelable submit event when `form.requestSubmit()` is
+  unavailable, instead of silently leaving the operator at a blank login form
+  (#612).
+
 ## [5.4.0] - 2026-07-05
 
 ### Security
