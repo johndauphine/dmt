@@ -453,22 +453,46 @@ function renderDryRun(r) {
 }
 
 // ---------- History ----------
+const HISTORY_STATUSES = ["running", "success", "partial", "failed"];
+const HISTORY_PAGE = 20;
+// Paging/filter state persists across renders so switching views and back
+// keeps your place.
+let histState = { status: "", offset: 0 };
 function viewHistory(v) {
   v.appendChild(el(`<header><h2>Run history</h2><p>Runs are recorded per config — pick the config or profile whose history you want.</p></header>`));
   const card = el(`<div class="card">${originFields()}
-    <div class="form-row" style="margin-top:12px"><button class="btn primary" id="hist-load">Load history</button></div>
-    <div id="hist-body" style="margin-top:16px"></div></div>`);
+    <div class="form-row" style="margin-top:12px;align-items:flex-end">
+      <div class="field"><label for="hist-status">Status</label>
+        <select id="hist-status" class="mono">
+          <option value="">All statuses</option>
+          ${HISTORY_STATUSES.map((s) => `<option value="${s}">${s}</option>`).join("")}
+        </select></div>
+      <button class="btn primary" id="hist-load">Load history</button>
+    </div>
+    <div id="hist-body" style="margin-top:16px"></div>
+    <div id="hist-pager" class="pager" style="margin-top:14px"></div></div>`);
   v.appendChild(card);
-  $("#hist-load").addEventListener("click", loadHistory);
+  const sel = $("#hist-status"); if (sel) sel.value = histState.status;
+  // Changing the config/profile, or the status filter, resets to page 1.
+  $("#hist-load").addEventListener("click", () => { histState.offset = 0; loadHistory(); });
+  sel.addEventListener("change", () => { histState.status = sel.value; histState.offset = 0; loadHistory(); });
   loadHistory();
 }
 async function loadHistory() {
-  const host = $("#hist-body"); if (!host) return;
+  const host = $("#hist-body"), pager = $("#hist-pager"); if (!host) return;
   host.innerHTML = `<span class="spinner"></span> Loading…`;
-  const q = new URLSearchParams(originBody()).toString();
+  if (pager) pager.innerHTML = "";
+  const params = originBody();
+  if (histState.status) params.status = histState.status;
+  params.limit = HISTORY_PAGE;
+  params.offset = histState.offset;
+  const q = new URLSearchParams(params).toString();
   try {
-    const { runs } = await api.get("/api/history" + (q ? "?" + q : ""));
-    if (!runs.length) { host.innerHTML = `<div class="empty">No runs recorded for this config yet.</div>`; return; }
+    const { runs, total, offset } = await api.get("/api/history?" + q);
+    if (!runs.length) {
+      host.innerHTML = `<div class="empty">${histState.status || histState.offset ? "No runs match this filter." : "No runs recorded for this config yet."}</div>`;
+      return;
+    }
     const rows = runs.map((r) => `<tr>
       <td class="mono">${esc(r.id)}</td>
       <td>${statusBadge(r.status)}</td>
@@ -477,10 +501,25 @@ async function loadHistory() {
       <td>${r.error ? `<span style="color:var(--danger)">${esc(r.error)}</span>` : "—"}</td>
     </tr>`).join("");
     host.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th>Run</th><th>Status</th><th>Phase</th><th>Started</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    renderPager(pager, offset, runs.length, total);
   } catch (e) { host.innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(e.message)}</div></div>`; }
 }
+// renderPager draws the "X–Y of Z" summary and Prev/Next buttons, disabling
+// each end when there is no further page.
+function renderPager(host, offset, count, total) {
+  if (!host || total <= HISTORY_PAGE) return;
+  const from = offset + 1, to = offset + count;
+  const prev = el(`<button class="btn sm" ${offset <= 0 ? "disabled" : ""}>← Prev</button>`);
+  const next = el(`<button class="btn sm" ${to >= total ? "disabled" : ""}>Next →</button>`);
+  prev.addEventListener("click", () => { histState.offset = Math.max(0, offset - HISTORY_PAGE); loadHistory(); });
+  next.addEventListener("click", () => { histState.offset = offset + HISTORY_PAGE; loadHistory(); });
+  host.innerHTML = "";
+  host.appendChild(prev);
+  host.appendChild(el(`<span class="muted mono" style="font-size:12.5px">${from}–${to} of ${fmtNum(total)}</span>`));
+  host.appendChild(next);
+}
 function statusBadge(s) {
-  const k = { success: "ok", completed: "ok", running: "run", failed: "err", cancelled: "warn", interrupted: "warn" }[s] || "idle";
+  const k = { success: "ok", completed: "ok", running: "run", failed: "err", partial: "warn", cancelled: "warn", interrupted: "warn" }[s] || "idle";
   return `<span class="badge ${k}"><span class="dot"></span>${esc(s)}</span>`;
 }
 

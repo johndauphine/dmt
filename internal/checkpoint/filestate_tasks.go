@@ -285,6 +285,33 @@ func (fs *FileState) GetAllRuns() ([]Run, error) {
 	return nil, nil
 }
 
+// GetRunsPage applies the status filter and offset/limit to the single
+// file-backed run (file state has no history). It returns at most one run.
+func (fs *FileState) GetRunsPage(status string, limit, offset int) ([]Run, int, error) {
+	runs, err := fs.GetAllRuns()
+	if err != nil {
+		return nil, 0, err
+	}
+	if status != "" {
+		filtered := runs[:0]
+		for _, r := range runs {
+			if r.Status == status {
+				filtered = append(filtered, r)
+			}
+		}
+		runs = filtered
+	}
+	total := len(runs)
+	if offset >= total {
+		return nil, total, nil
+	}
+	runs = runs[offset:]
+	if limit > 0 && limit < len(runs) {
+		runs = runs[:limit]
+	}
+	return runs, total, nil
+}
+
 // GetTasksWithProgress returns all tasks for a run with transfer progress info.
 func (fs *FileState) GetTasksWithProgress(runID string) ([]TaskWithProgress, error) {
 	fs.mu.RLock()

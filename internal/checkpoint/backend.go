@@ -79,6 +79,8 @@ type StateBackend interface {
 	// History. Check Capabilities().RunHistory before expecting historical
 	// runs beyond the current file-backed run.
 	GetAllRuns() ([]Run, error)
+	// GetRunsPage returns one status-filtered page plus the total match count.
+	GetRunsPage(status string, limit, offset int) ([]Run, int, error)
 	GetRunByID(runID string) (*Run, error)
 
 	// Date-based incremental sync.

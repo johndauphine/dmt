@@ -230,6 +230,8 @@ table.data td { padding: 9px 14px; border-bottom: 1px solid var(--border); verti
 table.data tr:last-child td { border-bottom: 0; }
 table.data tbody tr:hover { background: var(--panel-2); }
 table.data td.mono, table.data td.num { font-family: var(--mono); }
+.pager { display: flex; align-items: center; gap: 12px; }
+.pager:empty { display: none; }
 
 /* ---------- Telemetry (dashboard live panel) ---------- */
 .telemetry { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }

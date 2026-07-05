@@ -110,6 +110,12 @@ func (o *Orchestrator) GetAllRuns() ([]checkpoint.Run, error) {
 	return o.state.GetAllRuns()
 }
 
+// GetRunsPage returns one status-filtered page of runs (most-recent first) plus
+// the total match count, backing the WebUI history endpoint's pagination.
+func (o *Orchestrator) GetRunsPage(status string, limit, offset int) ([]checkpoint.Run, int, error) {
+	return o.state.GetRunsPage(status, limit, offset)
+}
+
 func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult, error) {
 	tasks, err := o.state.GetTasksWithProgress(run.ID)
 	if err != nil {
