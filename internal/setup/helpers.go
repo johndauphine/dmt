@@ -53,7 +53,7 @@ func (s *State) defaultUser(dbType string) string {
 	}
 }
 
-func (s *State) sslPrompt(dbType, sslMode string, trustCert bool) PromptInfo {
+func (s *State) sslPrompt(dbType, sslMode string, trustCert bool, encrypt *bool) PromptInfo {
 	switch dbType {
 	case "postgres":
 		def := "prefer"
@@ -70,8 +70,15 @@ func (s *State) sslPrompt(dbType, sslMode string, trustCert bool) PromptInfo {
 		// TLS not configured) require "disable"; the previous trust-only
 		// prompt couldn't express that and left encrypt defaulting to true,
 		// producing a failing TLS handshake (#…).
+		// Reflect the loaded config in EditMode: an explicit encrypt:false is
+		// "disable"; otherwise trust vs require follows TrustServerCert. Empty
+		// input keeps the current value (processSSL), so the shown default must
+		// match it.
 		def := "require"
-		if trustCert {
+		switch {
+		case encrypt != nil && !*encrypt:
+			def = "disable"
+		case trustCert:
 			def = "trust"
 		}
 		return PromptInfo{

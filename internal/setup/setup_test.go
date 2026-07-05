@@ -1109,9 +1109,13 @@ func TestMSSQLTLSModes(t *testing.T) {
 		{"disable", boolp(false), false},
 		{"trust", boolp(true), true},
 		{"require", boolp(true), false},
-		{"y", boolp(true), true},  // legacy alias → trust
-		{"n", boolp(true), false}, // legacy "don't trust cert" → require (still encrypted)
-		{"", nil, false},          // empty → keep current
+		{"y", boolp(true), true},        // legacy alias → trust
+		{"n", boolp(true), false},       // legacy "don't trust cert" → require (still encrypted)
+		{"", nil, false},                // empty → keep current
+		{"  TRUST ", boolp(true), true}, // case + whitespace tolerant
+		{"off", boolp(false), false},    // alias → disable
+		{"verify", boolp(true), false},  // alias → require
+		{"xyz", boolp(true), false},     // unknown input → safe default (require)
 	}
 	for _, c := range cases {
 		enc, trust := parseMSSQLTLS(c.in)
@@ -1125,6 +1129,27 @@ func TestMSSQLTLSModes(t *testing.T) {
 }
 
 func boolp(b bool) *bool { return &b }
+
+// TestMSSQLSSLPromptDefault: the shown default must reflect the loaded config
+// (EditMode), so pressing Enter — which keeps the current value — matches it.
+func TestMSSQLSSLPromptDefault(t *testing.T) {
+	s := NewState()
+	cases := []struct {
+		trust   bool
+		encrypt *bool
+		want    string
+	}{
+		{false, nil, "require"},          // fresh config
+		{true, nil, "trust"},             // trust the cert
+		{false, boolp(false), "disable"}, // loaded encrypt:false
+		{true, boolp(true), "trust"},     // encrypt on + trust
+	}
+	for _, c := range cases {
+		if got := s.sslPrompt("mssql", "", c.trust, c.encrypt).Default; got != c.want {
+			t.Errorf("sslPrompt(trust=%v encrypt=%v) default = %q, want %q", c.trust, c.encrypt, got, c.want)
+		}
+	}
+}
 
 func TestPostgresSSLDefaults(t *testing.T) {
 	s := NewState()
