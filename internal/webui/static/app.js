@@ -411,12 +411,17 @@ function applyRunState(run) {
     set("#run-id", run.id ? "run " + run.id : "");
     if (st === "completed") set("#s-pct", 100), set("#pbar", null, (i) => (i.style.width = "100%"));
     // Finished runs carry their final tally (#591); a fresh page load has no
-    // progress stream, so populate the telemetry from the runState.
-    if (run.rows_transferred != null && (st === "completed" || st === "failed" || st === "cancelled")) {
-      set("#s-rows", fmtNum(run.rows_transferred));
-      set("#s-rps", fmtNum(run.rows_per_second));
-      set("#s-tdone", fmtNum(run.tables_complete));
-      set("#s-ttot", fmtNum(run.tables_total));
+    // progress stream, so populate the telemetry from the runState. The Go
+    // side omits zero counts (omitempty), so any present count means the tally
+    // was captured — default the rest to 0. When ALL are absent the tally was
+    // never captured (e.g. a failure before transfer); keep whatever the live
+    // stream last showed rather than zeroing it.
+    const hasTally = run.rows_transferred != null || run.tables_total != null;
+    if (hasTally && (st === "completed" || st === "failed" || st === "cancelled")) {
+      set("#s-rows", fmtNum(run.rows_transferred ?? 0));
+      set("#s-rps", fmtNum(run.rows_per_second ?? 0));
+      set("#s-tdone", fmtNum(run.tables_complete ?? 0));
+      set("#s-ttot", fmtNum(run.tables_total ?? 0));
       set("#s-trun", "0");
       setFailedTables(run.tables_failed || 0);
     }
