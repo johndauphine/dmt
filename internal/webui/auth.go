@@ -99,7 +99,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		// actually presented; a plain unauthenticated request must not let a
 		// third party lock others out, and is the common pre-login case.
 		if credentialPresented(r) {
-			ip := clientIP(r)
+			ip := s.clientIP(r)
 			if allowed, retryAfter := s.logins.allow(ip); !allowed {
 				w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 				writeError(w, http.StatusTooManyRequests, "rate_limited", "too many failed authentication attempts; try again shortly")
@@ -150,16 +150,39 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, sid st
 	})
 }
 
-// clientIP returns the connecting peer's IP (RemoteAddr host). Not the
-// X-Forwarded-For chain — that is client-spoofable, which would let an
-// attacker rotate the value to bypass the login limiter. Behind a reverse
-// proxy this means the whole proxy shares one bucket; the limits are lenient
-// enough that legitimate operators are not affected.
-func clientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+// clientIP returns the IP dmt attributes a request to for rate-limiting and
+// audit logging. By default that is the connecting peer (RemoteAddr) —
+// X-Forwarded-For is client-spoofable, and trusting it blindly would let an
+// attacker rotate the header to evade the login limiter. When
+// --webui-trusted-proxy CIDRs are configured AND the peer falls inside one,
+// the real client is recovered from X-Forwarded-For by walking right-to-left
+// past any further trusted hops, so a reverse-proxy deployment gets per-client
+// throttling without opening XFF spoofing (#604).
+func (s *Server) clientIP(r *http.Request) string {
+	peer := hostOnly(r.RemoteAddr)
+	if len(s.trustedProxies) == 0 || !ipInNets(peer, s.trustedProxies) {
+		return peer
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(parts[i])
+		if ip == "" {
+			continue
+		}
+		if ipInNets(ip, s.trustedProxies) {
+			continue // another trusted hop; keep walking toward the client
+		}
+		return ip // first untrusted entry is the real client
+	}
+	return peer // XFF empty or only trusted proxies
+}
+
+// hostOnly strips the port from a host:port (RemoteAddr), tolerating a bare host.
+func hostOnly(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
 		return host
 	}
-	return r.RemoteAddr
+	return addr
 }
 
 // handleLogin exchanges the shared token for a session cookie. The token is
@@ -172,7 +195,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if ok, retryAfter := s.logins.allow(ip); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many failed login attempts; try again shortly")

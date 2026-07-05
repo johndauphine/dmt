@@ -131,6 +131,10 @@ func newApp() *cli.App {
 				Name:  "webui-insecure",
 				Usage: "Allow a non-loopback WebUI bind over plaintext HTTP (#578). Use only behind a TLS-terminating reverse proxy; the token is still required.",
 			},
+			&cli.StringSliceFlag{
+				Name:  "webui-trusted-proxy",
+				Usage: "CIDR (or IP) of a trusted reverse proxy whose X-Forwarded-For is honored for WebUI rate-limiting and audit logging (#604). Repeatable. Off by default; without it the login limiter keys on the direct peer, so all clients behind a proxy share one bucket.",
+			},
 		},
 		Before: func(c *cli.Context) error {
 			// Set log level from flag

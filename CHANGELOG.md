@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- WebUI gained `--webui-trusted-proxy <cidr>` (repeatable): behind a reverse
+  proxy it lets the login/auth limiter and audit logging attribute requests to
+  the real client via `X-Forwarded-For` instead of the shared proxy IP, so a
+  single client can no longer cause a lockout for everyone. Off by default and
+  spoof-safe — `X-Forwarded-For` is honored only when the direct peer is in the
+  trusted set (#604).
+
 - Guided setup (`dmt setup`, TUI, and the WebUI setup wizard) now stores DB
   passwords in `0600` sidecar files referenced by `${file:…}` instead of
   writing them as plaintext into the config YAML. A new step lets you opt back

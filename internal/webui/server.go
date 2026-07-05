@@ -57,6 +57,11 @@ type Options struct {
 	// Insecure permits a non-loopback bind over plaintext HTTP (reverse-proxy
 	// TLS termination). The auth token is still required.
 	Insecure bool
+	// TrustedProxies lists CIDRs (or bare IPs) whose X-Forwarded-For header is
+	// trusted, so the login/auth limiter and audit logging attribute requests
+	// to the real client instead of a shared reverse-proxy IP (#604). Off by
+	// default: XFF is ignored unless the direct peer is in this set.
+	TrustedProxies []string
 
 	// Origin context threaded from the global flags so later WebUI issues
 	// (#579/#580) can resolve configs/profiles the way the CLI and TUI do.
@@ -77,6 +82,10 @@ type Server struct {
 	sessions  *sessionStore
 	logins    *loginLimiter // brute-force throttle on /api/login (#594)
 	httpSrv   *http.Server
+
+	// trustedProxies holds the parsed --webui-trusted-proxy networks whose
+	// X-Forwarded-For is honored for client-IP attribution (#604).
+	trustedProxies []*net.IPNet
 
 	// allowedHosts is the DNS-rebinding guard's Host-header allowlist. It is
 	// populated only for a loopback bind (where the rebinding attack applies:
@@ -146,12 +155,17 @@ func New(opts Options) (*Server, error) {
 	if n := utf8.RuneCountInString(token); !isLoopbackHost(host) && !auto && n < minRemoteTokenLen {
 		return nil, &configErr{fmt.Errorf("webui: --webui-auth-token must be at least %d characters for a non-loopback bind (got %d)", minRemoteTokenLen, n)}
 	}
+	trusted, err := parseTrustedProxies(opts.TrustedProxies)
+	if err != nil {
+		return nil, &configErr{err}
+	}
 	s := &Server{
 		opts:            opts,
 		token:           token,
 		tokenAuto:       auto,
 		sessions:        newSessionStore(sessionTTL),
 		logins:          newLoginLimiter(),
+		trustedProxies:  trusted,
 		allowedHosts:    buildAllowedHosts(host, isLoopbackHost(host)),
 		hub:             newEventHub(),
 		runs:            newRunManager(),
