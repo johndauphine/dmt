@@ -84,6 +84,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- WebUI dashboard now shows the final row/table totals for a finished run after
+  a page reload. `/api/run`'s run state carries the counts (stamped at
+  completion, keyed by run id), so a client with no live progress stream no
+  longer shows zeros (#591).
+
 - Guided setup (`dmt setup` and the WebUI setup wizard) can now configure a SQL
   Server source/target that has no usable TLS certificate. The MSSQL step
   previously only asked "Trust server certificate?", setting `trust_server_cert`

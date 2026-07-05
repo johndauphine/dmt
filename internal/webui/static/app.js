@@ -399,6 +399,14 @@ function applyRunState(run) {
     if (phase) { phase.className = `badge ${kind}`; phase.innerHTML = `<span class="dot"></span>${esc(st)}`; }
     set("#run-id", run.id ? "run " + run.id : "");
     if (st === "completed") set("#s-pct", 100), set("#pbar", null, (i) => (i.style.width = "100%"));
+    // Finished runs carry their final tally (#591); a fresh page load has no
+    // progress stream, so populate the telemetry from the runState.
+    if (run.rows_transferred != null && (st === "completed" || st === "failed" || st === "cancelled")) {
+      set("#s-rows", fmtNum(run.rows_transferred));
+      set("#s-rps", fmtNum(run.rows_per_second));
+      set("#s-tdone", fmtNum(run.tables_complete));
+      set("#s-ttot", fmtNum(run.tables_total));
+    }
     if (run.error) $("#dryrun-out").innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(run.error)}</div></div>`;
   }
   if (st === "completed" || st === "failed") toast(`Migration ${st}`, st === "completed" ? "ok" : "err");
