@@ -205,10 +205,66 @@ function renderView() {
 
 // ---------- shared origin form ----------
 function originFields() {
-  return `<div class="form-grid">
-    <div class="field"><label>Config file</label><input id="origin-config" class="mono" type="text" placeholder="config.yaml (or leave blank)"></div>
-    <div class="field"><label>Profile</label><input id="origin-profile" class="mono" type="text" placeholder="saved profile name"></div>
+  return `<div>
+    <div class="form-grid">
+      <div class="field"><label>Config file</label><input id="origin-config" class="mono" type="text" placeholder="config.yaml (or leave blank)"></div>
+      <div class="field"><label>Profile</label><input id="origin-profile" class="mono" type="text" placeholder="saved profile name"></div>
+    </div>
+    <button type="button" class="btn sm ghost" data-action="origin-browse" style="margin-top:8px">Browse configs & profiles…</button>
   </div>`;
+}
+
+// openOriginPicker shows a dialog to pick a saved profile or a config file
+// found on the server, instead of typing a path. Selecting one fills the
+// origin inputs in the current view.
+async function openOriginPicker() {
+  if ($(".overlay")) return;
+  const ov = el(`<div class="overlay"><div class="dialog">
+    <div class="dialog-head">Choose a config or profile</div>
+    <div class="dialog-body"><div class="empty"><span class="spinner"></span> Loading…</div></div>
+  </div></div>`);
+  document.body.appendChild(ov);
+  // All three close paths (Escape, click-outside, pick) route through close()
+  // so the keydown listener is always removed — no listener/DOM leak.
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const close = () => { ov.remove(); document.removeEventListener("keydown", onKey); };
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+  document.addEventListener("keydown", onKey);
+
+  const [cfgs, profs] = await Promise.all([
+    api.get("/api/configs").catch(() => ({ configs: [] })),
+    api.get("/api/profiles").catch(() => ({ profiles: [] })),
+  ]);
+  const body = $(".dialog-body", ov);
+  body.innerHTML = "";
+  body.appendChild(pickSection("Saved profiles", (profs.profiles || []).map((p) => ({
+    label: p.name, sub: p.description || "", pick: () => { fillOrigin({ profile: p.name }); close(); },
+  })), "No saved profiles yet — create one in Profiles."));
+  body.appendChild(pickSection("Config files", (cfgs.configs || []).map((c) => ({
+    label: c.name, sub: c.path, pick: () => { fillOrigin({ config: c.path }); close(); },
+  })), "No config files found where dmt was launched."));
+}
+
+function pickSection(title, items, emptyMsg) {
+  const wrap = el(`<div class="dialog-section"><div class="eyebrow">${esc(title)}</div></div>`);
+  if (!items.length) { wrap.appendChild(el(`<div class="muted" style="padding:6px 2px;font-size:13px">${esc(emptyMsg)}</div>`)); return wrap; }
+  const ul = el(`<ul class="pick-list"></ul>`);
+  items.forEach((it) => {
+    const li = el(`<li><div class="pick-label mono">${esc(it.label)}</div>${it.sub ? `<div class="pick-sub muted">${esc(it.sub)}</div>` : ""}</li>`);
+    li.addEventListener("click", it.pick);
+    ul.appendChild(li);
+  });
+  wrap.appendChild(ul);
+  return wrap;
+}
+
+// fillOrigin sets the origin inputs (config XOR profile — mutually exclusive).
+// The caller closes the dialog.
+function fillOrigin({ config, profile }) {
+  const c = $("#origin-config"), p = $("#origin-profile");
+  if (c) c.value = config || "";
+  if (p) p.value = profile || "";
+  toast(config ? `Config: ${config.split("/").pop()}` : `Profile: ${profile}`);
 }
 
 // ---------- Dashboard ----------
@@ -352,13 +408,22 @@ function renderDryRun(r) {
 }
 
 // ---------- History ----------
-async function viewHistory(v) {
-  v.appendChild(el(`<header><h2>Run history</h2><p>Every migration recorded in the checkpoint store.</p></header>`));
-  const card = el(`<div class="card"><div id="hist-body"><span class="spinner"></span> Loading…</div></div>`);
+function viewHistory(v) {
+  v.appendChild(el(`<header><h2>Run history</h2><p>Runs are recorded per config — pick the config or profile whose history you want.</p></header>`));
+  const card = el(`<div class="card">${originFields()}
+    <div class="form-row" style="margin-top:12px"><button class="btn primary" id="hist-load">Load history</button></div>
+    <div id="hist-body" style="margin-top:16px"></div></div>`);
   v.appendChild(card);
+  $("#hist-load").addEventListener("click", loadHistory);
+  loadHistory();
+}
+async function loadHistory() {
+  const host = $("#hist-body"); if (!host) return;
+  host.innerHTML = `<span class="spinner"></span> Loading…`;
+  const q = new URLSearchParams(originBody()).toString();
   try {
-    const { runs } = await api.get("/api/history");
-    if (!runs.length) { $("#hist-body").innerHTML = `<div class="empty">No runs yet.</div>`; return; }
+    const { runs } = await api.get("/api/history" + (q ? "?" + q : ""));
+    if (!runs.length) { host.innerHTML = `<div class="empty">No runs recorded for this config yet.</div>`; return; }
     const rows = runs.map((r) => `<tr>
       <td class="mono">${esc(r.id)}</td>
       <td>${statusBadge(r.status)}</td>
@@ -366,8 +431,8 @@ async function viewHistory(v) {
       <td class="mono num">${fmtTime(r.started_at)}</td>
       <td>${r.error ? `<span style="color:var(--danger)">${esc(r.error)}</span>` : "—"}</td>
     </tr>`).join("");
-    $("#hist-body").innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th>Run</th><th>Status</th><th>Phase</th><th>Started</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-  } catch (e) { $("#hist-body").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    host.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th>Run</th><th>Status</th><th>Phase</th><th>Started</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  } catch (e) { host.innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(e.message)}</div></div>`; }
 }
 function statusBadge(s) {
   const k = { success: "ok", completed: "ok", running: "run", failed: "err", cancelled: "warn", interrupted: "warn" }[s] || "idle";
@@ -595,4 +660,9 @@ function closePalette() { $(".overlay")?.remove(); }
 
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
+});
+
+// Delegated: the "Browse configs & profiles…" button appears in several views.
+document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-action='origin-browse']")) openOriginPicker();
 });

@@ -36,6 +36,7 @@ func (s *Server) registerAPI(mux *http.ServeMux) {
 	// Authenticated read/advisory surface (#579).
 	authed := func(h http.HandlerFunc) http.Handler { return s.requireAuth(h) }
 	mux.Handle("GET /api/health", authed(s.handleHealth))
+	mux.Handle("GET /api/configs", authed(s.handleConfigsList)) // origin picker
 	mux.Handle("GET /api/status", authed(s.handleStatus))
 	mux.Handle("GET /api/status/{runID}", authed(s.handleStatusByID))
 	mux.Handle("GET /api/history", authed(s.handleHistory))

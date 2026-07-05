@@ -73,6 +73,7 @@ func authedReq(method, target, body string) *http.Request {
 // answers.
 var apiRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/api/health"},
+	{http.MethodGet, "/api/configs"},
 	{http.MethodGet, "/api/status"},
 	{http.MethodGet, "/api/status/some-id"},
 	{http.MethodGet, "/api/history"},
