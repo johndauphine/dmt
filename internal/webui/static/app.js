@@ -455,10 +455,12 @@ function renderDryRun(r) {
 // ---------- History ----------
 const HISTORY_STATUSES = ["running", "success", "partial", "failed"];
 const HISTORY_PAGE = 20;
-// Paging/filter state persists across renders so switching views and back
-// keeps your place.
+// Paging/filter state for the current History visit. Reset on each render
+// because the origin inputs (config/profile) are also re-entered per render —
+// carrying a stale offset into a fresh origin would show an empty page.
 let histState = { status: "", offset: 0 };
 function viewHistory(v) {
+  histState = { status: "", offset: 0 };
   v.appendChild(el(`<header><h2>Run history</h2><p>Runs are recorded per config — pick the config or profile whose history you want.</p></header>`));
   const card = el(`<div class="card">${originFields()}
     <div class="form-row" style="margin-top:12px;align-items:flex-end">
@@ -472,10 +474,10 @@ function viewHistory(v) {
     <div id="hist-body" style="margin-top:16px"></div>
     <div id="hist-pager" class="pager" style="margin-top:14px"></div></div>`);
   v.appendChild(card);
-  const sel = $("#hist-status"); if (sel) sel.value = histState.status;
-  // Changing the config/profile, or the status filter, resets to page 1.
+  // Reloading (new config/profile) or changing the status filter resets to
+  // page 1; the pager's Prev/Next advance the offset within a result set.
   $("#hist-load").addEventListener("click", () => { histState.offset = 0; loadHistory(); });
-  sel.addEventListener("change", () => { histState.status = sel.value; histState.offset = 0; loadHistory(); });
+  $("#hist-status").addEventListener("change", (e) => { histState.status = e.target.value; histState.offset = 0; loadHistory(); });
   loadHistory();
 }
 async function loadHistory() {
