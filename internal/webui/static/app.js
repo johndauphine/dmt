@@ -182,8 +182,24 @@ function mountApp() {
   $("#logout-btn").addEventListener("click", async () => { try { await api.post("/api/logout"); } catch {} location.reload(); });
 
   connectEvents();
+  startHeartbeat();
   go(location.hash.replace("#", "") || "dashboard");
   refreshRunPill();
+}
+
+// startHeartbeat keeps the session alive while the tab is open — an
+// authenticated ping every few minutes slides the server-side session and the
+// cookie, so passively watching a long migration never expires the session
+// (and Cancel keeps working). Closing the tab stops the pings, so the session
+// still lapses on its TTL when unattended. (#601)
+let heartbeat = null;
+function startHeartbeat() {
+  if (heartbeat) clearInterval(heartbeat);
+  heartbeat = setInterval(() => {
+    // Pinging slides the session; a 401 means it lapsed anyway (e.g. server
+    // restart or the absolute cap) — stop pinging and bounce to login.
+    api.get("/api/health").catch((e) => { if (e.status === 401) { clearInterval(heartbeat); heartbeat = null; mountLogin(); } });
+  }, 4 * 60 * 1000);
 }
 
 function go(view) {

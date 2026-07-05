@@ -9,6 +9,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- WebUI remote-deployment hardening (#594, #601, #602): brute-force throttling
+  on failed auth (login and bearer) with per-IP lockout; a 16-character minimum
+  for an operator-chosen token on a non-loopback bind; sessions now slide while
+  in use (so watching a long migration never expires the session or blocks
+  Cancel) up to a 7-day absolute cap; and the WebUI-session `metrics-addr` is
+  pinned to loopback (the `/metrics` listener is unauthenticated — a public
+  bind is a CLI-launch-only decision). The limiter keys on the connecting IP
+  and does not trust `X-Forwarded-For`; a per-client trusted-proxy mode is
+  tracked in #604.
+
 ### Added
 
 - WebUI origin picker: a "Browse configs & profiles" dialog lets operators pick

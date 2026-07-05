@@ -42,9 +42,18 @@ var webSessionKeys = []sessionKey{
 		logging.SetFormat(v)
 		return nil
 	}},
-	{name: "metrics-addr", desc: "Prometheus /metrics listen address", validate: func(v string) error {
-		if _, _, err := net.SplitHostPort(v); err != nil {
+	{name: "metrics-addr", desc: "Prometheus /metrics listen address (loopback only)", validate: func(v string) error {
+		host, _, err := net.SplitHostPort(v)
+		if err != nil {
 			return fmt.Errorf("metrics-addr must be host:port")
+		}
+		// The /metrics listener is unauthenticated. A WebUI session must not be
+		// able to open it on a public interface (#602); pin it to loopback.
+		// A public metrics address is still available via the CLI --metrics-addr
+		// flag at launch, which is an operator-console decision, not a
+		// token-holder one.
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("metrics-addr must bind a loopback address here (e.g. 127.0.0.1:9090); the /metrics endpoint is unauthenticated, so a public bind is only allowed via the CLI --metrics-addr flag")
 		}
 		return nil
 	}},

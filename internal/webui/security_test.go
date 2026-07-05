@@ -137,7 +137,7 @@ func TestHostGuardLoopback(t *testing.T) {
 func TestHostGuardDisabledForRemoteBind(t *testing.T) {
 	// A remote bind can't enumerate its public hostname, so the host guard is
 	// off there (token+TLS are the controls). Any Host must pass.
-	s := newTestServer(t, Options{Addr: "0.0.0.0:8484", AuthToken: "secret", Insecure: true})
+	s := newTestServer(t, Options{Addr: "0.0.0.0:8484", AuthToken: "a-strong-remote-token", Insecure: true})
 	if s.allowedHosts != nil {
 		t.Fatalf("expected nil allowedHosts for remote bind, got %v", s.allowedHosts)
 	}
