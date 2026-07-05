@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-07-05
+
 ### Security
 
 - WebUI gained `--webui-trusted-proxy <cidr>` (repeatable): behind a reverse
@@ -38,8 +40,8 @@ All notable changes to this project will be documented in this file.
   Cancel) up to a 7-day absolute cap; and the WebUI-session `metrics-addr` is
   pinned to loopback (the `/metrics` listener is unauthenticated — a public
   bind is a CLI-launch-only decision). The limiter keys on the connecting IP
-  and does not trust `X-Forwarded-For`; a per-client trusted-proxy mode is
-  tracked in #604.
+  and, by default, does not trust `X-Forwarded-For`; see the
+  `--webui-trusted-proxy` entry above for the per-client option (#604).
 
 ### Added
 
