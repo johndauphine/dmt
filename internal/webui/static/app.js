@@ -138,8 +138,14 @@ function mountLogin(urlToken) {
   });
 
   // The one-click loopback token (already scrubbed from the URL in boot) is
-  // passed in; auto-submit with it.
-  if (urlToken) { $("#tok").value = urlToken; form.requestSubmit(); }
+  // passed in; auto-submit with it. requestSubmit() is Safari 16+ — fall back
+  // to dispatching a cancelable submit event so the handler above still runs
+  // (form.submit() would bypass it and do a native page-reload POST). (#596)
+  if (urlToken) {
+    $("#tok").value = urlToken;
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.dispatchEvent(new Event("submit", { cancelable: true }));
+  }
 }
 
 // ---------- app shell ----------
@@ -310,9 +316,11 @@ function viewDashboard(v) {
     <div class="progress"><i id="pbar"></i></div>
     <div class="telemetry" style="margin-top:16px">
       <div class="stat"><div class="k">Progress</div><div class="v"><span id="s-pct">0</span><small>%</small></div></div>
-      <div class="stat"><div class="k">Rows transferred</div><div class="v num" id="s-rows">0</div></div>
+      <div class="stat"><div class="k">Rows transferred</div><div class="v num"><span id="s-rows">0</span><small id="s-rtot"></small></div></div>
       <div class="stat"><div class="k">Rows / sec</div><div class="v num" id="s-rps">0</div></div>
       <div class="stat"><div class="k">Tables</div><div class="v num"><span id="s-tdone">0</span><small> / <span id="s-ttot">0</span></small></div></div>
+      <div class="stat"><div class="k">Running now</div><div class="v num" id="s-trun">0</div></div>
+      <div class="stat"><div class="k">Failed tables</div><div class="v num" id="s-errs">0</div></div>
     </div>
     <div class="tablegrid" id="tablegrid"></div>
   </div>`);
@@ -379,8 +387,11 @@ function applyProgress(p) {
   const pct = Math.round(p.progress_pct || 0);
   set("#s-pct", pct); set("#pbar", null, (i) => (i.style.width = pct + "%"));
   set("#s-rows", fmtNum(p.rows_transferred));
+  set("#s-rtot", p.rows_total ? ` / ${fmtNum(p.rows_total)}` : "");
   set("#s-rps", fmtNum(p.rows_per_second));
   set("#s-tdone", fmtNum(p.tables_complete)); set("#s-ttot", fmtNum(p.tables_total));
+  set("#s-trun", fmtNum(p.tables_running || 0));
+  setFailedTables(p.error_count || 0);
   const phase = $("#run-phase"); if (phase) { phase.className = "badge run"; phase.innerHTML = `<span class="dot"></span>${esc(p.phase || "running")}`; }
   if (Array.isArray(p.current_tables)) {
     const g = $("#tablegrid");
@@ -400,12 +411,19 @@ function applyRunState(run) {
     set("#run-id", run.id ? "run " + run.id : "");
     if (st === "completed") set("#s-pct", 100), set("#pbar", null, (i) => (i.style.width = "100%"));
     // Finished runs carry their final tally (#591); a fresh page load has no
-    // progress stream, so populate the telemetry from the runState.
-    if (run.rows_transferred != null && (st === "completed" || st === "failed" || st === "cancelled")) {
-      set("#s-rows", fmtNum(run.rows_transferred));
-      set("#s-rps", fmtNum(run.rows_per_second));
-      set("#s-tdone", fmtNum(run.tables_complete));
-      set("#s-ttot", fmtNum(run.tables_total));
+    // progress stream, so populate the telemetry from the runState. The Go
+    // side omits zero counts (omitempty), so any present count means the tally
+    // was captured — default the rest to 0. When ALL are absent the tally was
+    // never captured (e.g. a failure before transfer); keep whatever the live
+    // stream last showed rather than zeroing it.
+    const hasTally = run.rows_transferred != null || run.tables_total != null;
+    if (hasTally && (st === "completed" || st === "failed" || st === "cancelled")) {
+      set("#s-rows", fmtNum(run.rows_transferred ?? 0));
+      set("#s-rps", fmtNum(run.rows_per_second ?? 0));
+      set("#s-tdone", fmtNum(run.tables_complete ?? 0));
+      set("#s-ttot", fmtNum(run.tables_total ?? 0));
+      set("#s-trun", "0");
+      setFailedTables(run.tables_failed || 0);
     }
     if (run.error) $("#dryrun-out").innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(run.error)}</div></div>`;
   }
@@ -413,6 +431,9 @@ function applyRunState(run) {
 }
 
 function set(sel, text, fn) { const e = $(sel); if (!e) return; if (text != null) e.textContent = text; if (fn) fn(e); }
+// Failed-table count turns red the moment it is non-zero so accumulating
+// failures are visible mid-run, not just at the end.
+function setFailedTables(n) { set("#s-errs", fmtNum(n), (e) => { e.style.color = n > 0 ? "var(--danger)" : ""; }); }
 function setRunPill(kind, label) { const p = $("#run-pill"); if (p) { p.className = `badge ${kind}`; p.innerHTML = `<span class="dot"></span>${esc(label)}`; } }
 function refreshRunPill() { api.get("/api/run").then((s) => { if (s.run) applyRunState(s.run); }).catch(() => {}); }
 
@@ -650,8 +671,9 @@ const COMMANDS = [
   { label: "Run migration", run: () => { go("dashboard"); setTimeout(() => $("#btn-run")?.click(), 60); } },
   { label: "Resume migration", run: () => { go("dashboard"); setTimeout(() => $("#btn-resume")?.click(), 60); } },
   { label: "Cancel migration", run: () => api.post("/api/run/cancel").then(() => toast("Cancelling…")).catch((e) => toast(e.message, "err")) },
-  { label: "Preflight", run: () => { checkTab = "preflight"; go("checks"); } },
-  { label: "Validate", run: () => { checkTab = "validate"; go("checks"); } },
+  // Every check tab is reachable by name — generated from CHECKS so the
+  // palette can't drift from the Checks view.
+  ...CHECKS.map((c) => ({ label: c.label, run: () => { checkTab = c.id; go("checks"); } })),
   { label: "Toggle theme", run: toggleTheme },
   { label: "Sign out", run: () => api.post("/api/logout").finally(() => location.reload()) },
 ];

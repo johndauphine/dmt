@@ -207,7 +207,7 @@ func (s *Server) execute(ctx context.Context, cancel context.CancelFunc, orch *o
 	// for a finished run has no progress stream to populate them (#591).
 	var counts runCounts
 	if res, err := orch.GetRunResult(runID); err == nil && res != nil {
-		counts = runCounts{rows: res.RowsTransferred, rps: res.RowsPerSecond, tablesDone: res.TablesSuccess, tablesTotal: res.TablesTotal}
+		counts = runCounts{rows: res.RowsTransferred, rps: res.RowsPerSecond, tablesDone: res.TablesSuccess, tablesTotal: res.TablesTotal, tablesFailed: res.TablesFailed}
 	}
 	// Record terminal state while still holding the single-flight slot, stop
 	// relaying progress, publish the terminal event, then release the slot.
