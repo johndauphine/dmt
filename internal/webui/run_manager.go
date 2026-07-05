@@ -29,12 +29,13 @@ type runState struct {
 	RowsPerSecond   int64   `json:"rows_per_second,omitempty"`
 	TablesComplete  int     `json:"tables_complete,omitempty"`
 	TablesTotal     int     `json:"tables_total,omitempty"`
+	TablesFailed    int     `json:"tables_failed,omitempty"`
 }
 
 // runCounts is the final tally stamped onto a finished run.
 type runCounts struct {
-	rows, rps               int64
-	tablesDone, tablesTotal int
+	rows, rps                             int64
+	tablesDone, tablesTotal, tablesFailed int
 }
 
 // runManager enforces single-flight: at most one migration runs at a time
@@ -91,6 +92,7 @@ func (m *runManager) complete(status, errMsg string, c runCounts) runState {
 	st.RowsPerSecond = c.rps
 	st.TablesComplete = c.tablesDone
 	st.TablesTotal = c.tablesTotal
+	st.TablesFailed = c.tablesFailed
 	m.last = &st
 	if m.active != nil {
 		m.active.state = st
