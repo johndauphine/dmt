@@ -217,13 +217,14 @@ func (p *keysetRuntimeSourcePool) DBType() string             { return "sqlite" 
 func (p *keysetRuntimeSourcePool) PoolStats() stats.PoolStats { return stats.PoolStats{} }
 
 type keysetRuntimeTargetPool struct {
-	mu         sync.Mutex
-	ids        []int
-	batchSizes []int
-	writes     int
-	updated    bool
-	tuner      RuntimeTuner
-	updateTo   int
+	mu          sync.Mutex
+	ids         []int
+	batchSizes  []int
+	writes      int
+	updated     bool
+	tuner       RuntimeTuner
+	updateTo    int
+	truncateErr error // when set, TruncateTable returns it (#619)
 }
 
 func (p *keysetRuntimeTargetPool) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -295,7 +296,7 @@ func (p *keysetRuntimeTargetPool) AlterColumnType(context.Context, *driver.Table
 }
 func (p *keysetRuntimeTargetPool) DropTable(context.Context, string, string) error { return nil }
 func (p *keysetRuntimeTargetPool) TruncateTable(context.Context, string, string) error {
-	return nil
+	return p.truncateErr
 }
 func (p *keysetRuntimeTargetPool) TableExists(context.Context, string, string) (bool, error) {
 	return true, nil
