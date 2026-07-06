@@ -96,8 +96,7 @@ type readerCheckpointState struct {
 	maxPKInt  int64
 	maxOK     bool
 	complete  bool
-	nextSeq   int64
-	pending   map[int64]writeAck
+	seq       ackSequencer // per-range ordered-ack delivery (#614)
 }
 
 // writeResult holds the result of a parallel write operation
