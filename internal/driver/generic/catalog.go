@@ -142,8 +142,9 @@ type TableHintsSpec struct {
 // is declared exhaustively per variant — the audit calls arg order the
 // highest-risk surface, so nothing is inferred.
 type PaginationSpec struct {
-	Keyset    KeysetSpec    `yaml:"keyset"`
-	RowNumber RowNumberSpec `yaml:"row_number"`
+	Keyset          KeysetSpec          `yaml:"keyset"`
+	CompositeKeyset CompositeKeysetSpec `yaml:"composite_keyset"`
+	RowNumber       RowNumberSpec       `yaml:"row_number"`
 	// DateArgFormat, when set, binds date-filter arguments as
 	// UTC-formatted strings in this Go layout instead of time.Time
 	// (mssql compares via CONVERT(datetime2(7), ..., 126), which
@@ -162,6 +163,23 @@ type KeysetSpec struct {
 	MaxPKClause string         `yaml:"max_pk_clause"`
 	DateClause  string         `yaml:"date_clause"`
 	Args        KeysetArgsSpec `yaml:"args"`
+}
+
+// CompositeKeysetSpec renders single-reader tuple keyset queries for
+// all-integer composite primary keys (#616). The lower-bound comparison is
+// generated in Go from the PK column list because its shape depends on the
+// column count and the engine style; the template supplies the surrounding
+// SELECT. Tokens: {columns}, {table}, {hint}, {composite_clause},
+// {order_by}, {date_clause}, {date_column}, {?}. Style is "rowvalue"
+// (WHERE (a,b) > (?,?) — postgres/mysql/sqlite) or "orchain"
+// (WHERE a > ? OR (a = ? AND b > ?) — mssql, which lacks row-value
+// comparison). LimitFirst places the limit placeholder before the WHERE
+// args (mssql TOP).
+type CompositeKeysetSpec struct {
+	Query      string `yaml:"query"`
+	Style      string `yaml:"style"`
+	DateClause string `yaml:"date_clause"`
+	LimitFirst bool   `yaml:"limit_first"`
 }
 
 // KeysetArgsSpec declares argument order per variant. Symbols:

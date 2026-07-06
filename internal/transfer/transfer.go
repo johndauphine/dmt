@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
@@ -39,6 +40,7 @@ func Execute(
 	var resumeLastPK any
 	var resumeRowsDone int64
 	var resumeRanges []resumeRange
+	var resumeCompositeRangeState string
 	if job.Saver != nil && job.TaskID > 0 {
 		var rangeState string
 		var err error
@@ -57,6 +59,9 @@ func Execute(
 				logging.Debug("Resuming %s with %d per-range watermarks", job.Table.Name, len(resumeRanges))
 			}
 		}
+		// Composite keyset persists its int64-preserving watermark tuple in
+		// the range_state column (#616).
+		resumeCompositeRangeState = rangeState
 	}
 
 	// Handle truncation based on job type (skip if resuming or in upsert mode)
@@ -139,11 +144,35 @@ func Execute(
 		targetTableName = job.Table.Name // Preserve original case for MSSQL
 	}
 
-	// Choose pagination strategy
+	// Choose pagination strategy.
 	if job.Table.SupportsKeysetPagination() {
 		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, resumeRanges, targetTableName, tuner, adjuster)
 	}
 
-	// Fall back to ROW_NUMBER pagination for composite/varchar PKs or no PK
+	// All-integer composite PKs page via tuple keyset instead of the slow
+	// ROW_NUMBER fallback (#616) — but only on engines whose primary keys
+	// are unique (SupportsCompositeKeyset); on non-unique-key engines like
+	// ClickHouse a duplicate tuple split across a chunk boundary could be
+	// skipped, so those keep ROW_NUMBER. The precise int64 watermark tuple
+	// is restored from the range_state column (the legacy last_pk column
+	// round-trips through float64 and would lose BIGINT precision).
+	srcDialect := driver.GetDialect(srcPool.DBType())
+	if job.Table.CompositeIntegerPK() && srcDialect != nil && srcDialect.SupportsCompositeKeyset() {
+		var resumeTuple []any
+		if resumeLastPK != nil {
+			resumeTuple = decodeCompositeTuple(resumeCompositeRangeState)
+			if resumeTuple == nil {
+				// Fall back to the (float64) last_pk tuple if range_state is
+				// absent or malformed.
+				if t, ok := resumeLastPK.([]any); ok {
+					resumeTuple = t
+				}
+			}
+		}
+		return executeCompositeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeTuple, resumeRowsDone, targetTableName, tuner, adjuster)
+	}
+
+	// Fall back to ROW_NUMBER pagination for non-integer composite PKs,
+	// single non-integer PKs, or no PK.
 	return executeRowNumberPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, targetTableName, tuner, adjuster)
 }

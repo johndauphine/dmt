@@ -83,6 +83,40 @@ func (t *Table) SupportsKeysetPagination() bool {
 	return false
 }
 
+// CompositeIntegerPK reports whether the table has a multi-column primary
+// key whose every component is an integer type (#616). Such tables can page
+// via tuple keyset — WHERE (a,b) > (?,?) ORDER BY a,b — instead of the slow
+// single-reader ROW_NUMBER fallback. Restricting to integer components keeps
+// it safe across engines: no text collation to disagree with byte order, and
+// integers always have MIN/MAX/ordering support. Composite keys with any
+// non-integer component stay on ROW_NUMBER.
+func (t *Table) CompositeIntegerPK() bool {
+	if len(t.PKColumns) < 2 {
+		return false
+	}
+	for i := range t.PKColumns {
+		c := &t.PKColumns[i]
+		// Non-null is required: SQLite permits NULL in composite PK columns
+		// unless declared NOT NULL, and a NULL watermark makes the tuple
+		// comparison (a,b) > (NULL,…) evaluate to NULL — matching no rows and
+		// silently truncating the transfer. Such tables stay on ROW_NUMBER.
+		if !c.IsIntegerType() || c.IsNullable {
+			return false
+		}
+		// Only unsigned BIGINT is unsafe: it can hold values above
+		// math.MaxInt64 that scan as uint64, which database/sql rejects as a
+		// bound query parameter — so a tuple watermark there fails the next
+		// page. Narrower unsigned integers (INT/SMALLINT/… UNSIGNED, all
+		// ≤ 2^32) fit in int64 and stay eligible. MySQL reports DATA_TYPE
+		// "bigint" for BIGINT UNSIGNED, with the marker only in FullDataType.
+		dt := strings.ToLower(c.DataType)
+		if (dt == "bigint" || dt == "int8") && strings.Contains(strings.ToLower(c.FullDataType), "unsigned") {
+			return false
+		}
+	}
+	return true
+}
+
 // GetPKColumn returns the PK column metadata if single-column PK.
 func (t *Table) GetPKColumn() *Column {
 	if len(t.PKColumns) == 1 {

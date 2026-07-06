@@ -66,6 +66,17 @@ pagination:
       with_max: [limit, last_pk, max_pk]
       with_max_date: [limit, last_pk, max_pk, date_from]
 
+
+  composite_keyset:
+    style: orchain
+    limit_first: true
+    query: |
+      SELECT TOP ({?}) {columns}
+      FROM {table} {hint}
+      WHERE {composite_clause}{date_clause}
+      ORDER BY {order_by}
+    date_clause: " AND CONVERT(datetime2(7), {date_column}) > CONVERT(datetime2(7), {?}, 126)"
+
   row_number:
     query: |
       WITH numbered AS (

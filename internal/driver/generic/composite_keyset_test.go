@@ -1,0 +1,65 @@
+package generic
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestBuildCompositeKeysetQuery pins the per-engine tuple-keyset SQL shape
+// and argument order for #616: row-value comparison for engines that support
+// it, an expanded OR-chain for SQL Server, and an unbounded ("1=1") first
+// chunk that drops the tuple arguments.
+func TestBuildCompositeKeysetQuery(t *testing.T) {
+	tests := []struct {
+		engine    string
+		wantLower string // substring the bounded query must contain
+		wantArgs  []any  // bounded args for lastPK (10,20), limit 500
+		unbounded []any  // unbounded args (limit only)
+	}{
+		{"sqlite", `("a", "b") > (?, ?)`, []any{int64(10), int64(20), 500}, []any{500}},
+		{"postgres", `("a", "b") > ($1, $2)`, []any{int64(10), int64(20), 500}, []any{500}},
+		{"mysql", "(`a`, `b`) > (?, ?)", []any{int64(10), int64(20), 500}, []any{500}},
+		{"mssql", `[a] > @p2 OR ([a] = @p3 AND [b] > @p4)`, []any{500, int64(10), int64(10), int64(20)}, []any{500}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.engine, func(t *testing.T) {
+			cat, err := LoadCatalog(tc.engine)
+			if err != nil {
+				t.Fatalf("LoadCatalog: %v", err)
+			}
+			d := NewDialect(cat)
+			q := d.BuildCompositeKeysetQuery("a, b", []string{"a", "b"}, "s", "t", "", true, nil)
+			if !strings.Contains(q, tc.wantLower) {
+				t.Fatalf("query missing %q:\n%s", tc.wantLower, q)
+			}
+			if !strings.Contains(q, "ORDER BY") {
+				t.Fatalf("query missing ORDER BY: %s", q)
+			}
+			args := d.BuildCompositeKeysetArgs([]any{int64(10), int64(20)}, 500, true, nil)
+			if !argsEqual(args, tc.wantArgs) {
+				t.Fatalf("bounded args = %v, want %v", args, tc.wantArgs)
+			}
+			// Unbounded first chunk.
+			qu := d.BuildCompositeKeysetQuery("a, b", []string{"a", "b"}, "s", "t", "", false, nil)
+			if !strings.Contains(qu, "1=1") {
+				t.Fatalf("unbounded query missing 1=1: %s", qu)
+			}
+			au := d.BuildCompositeKeysetArgs([]any{int64(10), int64(20)}, 500, false, nil)
+			if !argsEqual(au, tc.unbounded) {
+				t.Fatalf("unbounded args = %v, want %v", au, tc.unbounded)
+			}
+		})
+	}
+}
+
+func argsEqual(a, b []any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
