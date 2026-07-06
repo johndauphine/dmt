@@ -26,6 +26,15 @@ All notable changes to this project will be documented in this file.
   transferred; the terminal run state stamps the failed-table tally so a
   reloaded finished run still shows it (#612).
 
+### Changed
+
+- Internal: the keyset and ROW_NUMBER transfer strategies now share one
+  pipeline runner (consumer loop, buffer sizing, memory guard, reader-cancel
+  discipline, writer-pool wiring, drain, final progress save) instead of
+  duplicating ~180 lines each; ordered-ack sequencing is a single shared
+  implementation. No behavior change — SQL, checkpoint encoding, and resume
+  semantics are preserved verbatim (#614, PR0 of epic #621).
+
 ### Fixed
 
 - WebUI one-click token login works on Safari < 16: it falls back to
