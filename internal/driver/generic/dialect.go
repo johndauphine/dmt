@@ -145,6 +145,98 @@ func (d *Dialect) BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, d
 	return args
 }
 
+// compositeLowerClause builds the tuple "greater than last" comparison for a
+// composite keyset and the ordered PK-component indices that fill its
+// placeholders (#616). Both the query and the args derive from the same
+// (quotedPKs, style) so they can never drift. rowvalue → "(a, b) > ({?},
+// {?})"; orchain → "(a > {?} OR (a = {?} AND b > {?}))".
+func compositeLowerClause(quotedPKs []string, style string) (clause string, argIdx []int) {
+	n := len(quotedPKs)
+	if style == "orchain" {
+		terms := make([]string, n)
+		for k := 0; k < n; k++ {
+			parts := make([]string, 0, k+1)
+			for j := 0; j < k; j++ {
+				parts = append(parts, quotedPKs[j]+" = {?}")
+				argIdx = append(argIdx, j)
+			}
+			parts = append(parts, quotedPKs[k]+" > {?}")
+			argIdx = append(argIdx, k)
+			if len(parts) == 1 {
+				terms[k] = parts[0]
+			} else {
+				terms[k] = "(" + strings.Join(parts, " AND ") + ")"
+			}
+		}
+		return "(" + strings.Join(terms, " OR ") + ")", argIdx
+	}
+	// rowvalue (default)
+	ph := make([]string, n)
+	for i := range quotedPKs {
+		ph[i] = "{?}"
+		argIdx = append(argIdx, i)
+	}
+	return "(" + strings.Join(quotedPKs, ", ") + ") > (" + strings.Join(ph, ", ") + ")", argIdx
+}
+
+// SupportsCompositeKeyset reports whether this engine opted into tuple keyset
+// paging by declaring a composite_keyset catalog section (#616). Engines with
+// non-unique "primary keys" (ClickHouse) omit it and keep ROW_NUMBER.
+func (d *Dialect) SupportsCompositeKeyset() bool {
+	return d.cat.Pagination.CompositeKeyset.Query != ""
+}
+
+// BuildCompositeKeysetQuery builds a single-reader tuple keyset query for an
+// all-integer composite PK (#616). hasLowerBound is false only for the first
+// (unbounded) chunk, where the comparison degrades to "1=1".
+func (d *Dialect) BuildCompositeKeysetQuery(cols string, pkCols []string, schema, table, tableHint string, hasLowerBound bool, dateFilter *driver.DateFilter) string {
+	ck := d.cat.Pagination.CompositeKeyset
+	quoted := make([]string, len(pkCols))
+	for i, c := range pkCols {
+		quoted[i] = d.QuoteIdentifier(c)
+	}
+	clause := "1=1"
+	if hasLowerBound {
+		clause, _ = compositeLowerClause(quoted, ck.Style)
+	}
+	dateClause := ""
+	if dateFilter != nil {
+		dateClause = strings.ReplaceAll(ck.DateClause, "{date_column}", d.QuoteIdentifier(dateFilter.Column))
+	}
+	q := ck.Query
+	q = strings.ReplaceAll(q, "{composite_clause}", clause)
+	q = strings.ReplaceAll(q, "{order_by}", strings.Join(quoted, ", "))
+	q = strings.ReplaceAll(q, "{date_clause}", dateClause)
+	return d.render(q, cols, "", "", schema, table, tableHint)
+}
+
+// BuildCompositeKeysetArgs builds args matching the placeholder order of
+// BuildCompositeKeysetQuery: the tuple-comparison values (from lastPK,
+// omitted when unbounded), the optional date bound, and the limit — with the
+// limit placed first for engines whose template puts it up front (mssql TOP).
+func (d *Dialect) BuildCompositeKeysetArgs(lastPK []any, limit int, hasLowerBound bool, dateFilter *driver.DateFilter) []any {
+	ck := d.cat.Pagination.CompositeKeyset
+	var lowerArgs []any
+	if hasLowerBound {
+		_, argIdx := compositeLowerClause(make([]string, len(lastPK)), ck.Style)
+		for _, i := range argIdx {
+			lowerArgs = append(lowerArgs, lastPK[i])
+		}
+	}
+	args := make([]any, 0, len(lowerArgs)+2)
+	if ck.LimitFirst {
+		args = append(args, limit)
+	}
+	args = append(args, lowerArgs...)
+	if dateFilter != nil {
+		args = append(args, d.dateArg(dateFilter.Timestamp))
+	}
+	if !ck.LimitFirst {
+		args = append(args, limit)
+	}
+	return args
+}
+
 func (d *Dialect) BuildRowNumberQuery(cols, orderBy, schema, table, tableHint string, dateFilter *driver.DateFilter) string {
 	rn := d.cat.Pagination.RowNumber
 	whereDate := ""

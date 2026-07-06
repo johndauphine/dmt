@@ -229,13 +229,32 @@ func (b *JobBuilder) recordSourceHighWatermark(ctx context.Context, t *source.Ta
 	result.TableSyncWatermarks[t.Name] = *highWatermark
 }
 
+// usesCompositeKeyset reports whether table t will be paged by tuple keyset
+// (#616): an all-integer composite PK on a source engine whose primary keys
+// are unique. Mirrors the routing decision in transfer.Execute so job
+// partitioning and pagination stay consistent.
+func (b *JobBuilder) usesCompositeKeyset(t source.Table) bool {
+	if !t.CompositeIntegerPK() {
+		return false
+	}
+	d := driver.GetDialect(b.sourcePool.DBType())
+	return d != nil && d.SupportsCompositeKeyset()
+}
+
 // createJobsForTable creates transfer jobs for a single table.
 func (b *JobBuilder) createJobsForTable(ctx context.Context, runID string, t source.Table, dateFilter *transfer.DateFilter, result *BuildResult) error {
 	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
 		return b.createKeysetPartitionJobs(ctx, runID, t, dateFilter, result)
 	}
 
-	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.HasPK() {
+	// All-integer composite PKs page via a single-reader tuple keyset job
+	// (#616), so they must be excluded from ROW_NUMBER partitioning — a
+	// StartRow/EndRow partition means nothing to the tuple-keyset reader,
+	// which would read the whole table per partition and duplicate rows. The
+	// exclusion only applies when the source engine actually uses tuple
+	// keyset (SupportsCompositeKeyset); on engines that keep ROW_NUMBER
+	// (e.g. ClickHouse), composite tables must retain their partitioning.
+	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.HasPK() && !b.usesCompositeKeyset(t) {
 		return b.createRowNumberPartitionJobs(runID, t, dateFilter, result)
 	}
 

@@ -47,6 +47,16 @@ pagination:
       with_max: [last_pk, max_pk, limit]
       with_max_date: [last_pk, max_pk, date_from, limit]
 
+
+  composite_keyset:
+    style: rowvalue
+    query: |
+      SELECT {columns} FROM {table}
+      WHERE {composite_clause}{date_clause}
+      ORDER BY {order_by}
+      LIMIT {?}
+    date_clause: " AND {date_column} > {?}"
+
   row_number:
     # SQLite 3.25+ window functions; the date filter lives inside the
     # subquery so __rn numbering reflects the filtered set.

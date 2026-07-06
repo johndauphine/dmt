@@ -74,6 +74,23 @@ type Dialect interface {
 	//   - dateFilter: optional date filter for incremental sync
 	BuildKeysetArgs(lastPK, maxPK any, limit int, hasMaxPK bool, dateFilter *DateFilter) []any
 
+	// SupportsCompositeKeyset reports whether this engine's primary keys are
+	// unique, so tuple keyset paging (WHERE (a,b) > last) is safe (#616). It
+	// is false for engines whose "primary key" is a non-unique sorting key
+	// (e.g. ClickHouse), where a duplicate key tuple split across a chunk
+	// boundary would be skipped — those keep the ROW_NUMBER fallback.
+	SupportsCompositeKeyset() bool
+
+	// BuildCompositeKeysetQuery builds a single-reader tuple keyset query for
+	// an all-integer composite primary key (#616): WHERE (a,b) > (?,?)
+	// ORDER BY a,b. hasLowerBound is false only for the first unbounded
+	// chunk. pkCols is the ordered PK column list.
+	BuildCompositeKeysetQuery(cols string, pkCols []string, schema, table, tableHint string, hasLowerBound bool, dateFilter *DateFilter) string
+
+	// BuildCompositeKeysetArgs builds args for BuildCompositeKeysetQuery.
+	// lastPK is the previous chunk's PK tuple (ignored when unbounded).
+	BuildCompositeKeysetArgs(lastPK []any, limit int, hasLowerBound bool, dateFilter *DateFilter) []any
+
 	// BuildRowNumberQuery builds a ROW_NUMBER pagination query.
 	// Parameters:
 	//   - cols: column list for SELECT

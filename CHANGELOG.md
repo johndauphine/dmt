@@ -28,6 +28,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Tables with an **all-integer composite primary key** now page via tuple
+  keyset (`WHERE (a,b) > (?,?) ORDER BY a,b`) instead of the slow ROW_NUMBER
+  window that re-scans deeper prefixes each chunk. Restricted to integer,
+  non-null, non-`BIGINT UNSIGNED` components on engines with unique primary
+  keys (PostgreSQL/MySQL/SQL Server/SQLite via the appropriate row-value or
+  OR-chain form; ClickHouse and non-integer/mixed composite keys keep
+  ROW_NUMBER). Resume preserves the exact int64 watermark tuple (#616, epic
+  #621).
+
 - Transfer memory is now bounded by a shared byte budget that charges each
   in-flight chunk its **actual** measured size, instead of pre-sizing channel
   depths from a static per-row estimate. Tables with rows far larger than the
