@@ -24,9 +24,8 @@ func TestIsTableNotFoundError(t *testing.T) {
 		`Unknown table 'shop.orders'`,
 		// sqlite
 		`no such table: orders`,
-		// mssql
+		// mssql — pure not-found (no permission wording)
 		`mssql: Invalid object name 'dbo.orders'.`,
-		`Cannot find the object "dbo.orders" because it does not exist or you do not have permissions.`,
 		// case-insensitivity
 		`RELATION "ORDERS" DOES NOT EXIST`,
 	}
@@ -40,6 +39,10 @@ func TestIsTableNotFoundError(t *testing.T) {
 		`pq: permission denied for table orders`,
 		`Error 1044: Access denied for user 'app'@'%' to database 'shop'`,
 		`mssql: The TRUNCATE TABLE permission was denied on the object 'orders'`,
+		// mssql's ambiguous message: it fires on permission-denied too, so
+		// the permission mention must win over the not-found wording and
+		// keep it surfaced (codex review on #619).
+		`Cannot find the object "dbo.orders" because it does not exist or you do not have permissions.`,
 		`Lock wait timeout exceeded; try restarting transaction`,
 		`database is locked`,
 		`context deadline exceeded`,

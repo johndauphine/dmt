@@ -203,9 +203,18 @@ func isTableNotFoundError(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
+	// Guard the ambiguous case first (codex review on #619): SQL Server
+	// reports a permission-denied TRUNCATE as `Cannot find the object "x"
+	// because it does not exist or you do not have permissions` — the same
+	// wording it uses for a truly-absent table. Anything mentioning a
+	// permission problem is NOT benign; surface it. Over-warning on a
+	// genuinely-absent table with this exact wording is a harmless cosmetic
+	// cost; swallowing a permission failure is the bug we're fixing.
+	if strings.Contains(s, "permission") || strings.Contains(s, "denied") {
+		return false
+	}
 	// postgres: relation "x" does not exist; mysql: table 'x' doesn't exist;
-	// sqlite: no such table: x; mssql: invalid object name 'x' /
-	// cannot find the object "x" because it does not exist.
+	// sqlite: no such table: x; mssql: invalid object name 'x'.
 	switch {
 	case strings.Contains(s, "does not exist"),
 		strings.Contains(s, "doesn't exist"),
