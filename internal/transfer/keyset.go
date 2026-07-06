@@ -90,15 +90,17 @@ func executeKeysetPagination(
 		numReaders = 1
 	}
 
-	// Split PK range for parallel readers — unless a previous segment
-	// persisted per-range watermarks (#464), in which case those ranges
-	// (and their completion flags) are restored verbatim.
+	// Split PK range into work-stealing sub-ranges (#615) — unless a
+	// previous segment persisted per-range watermarks (#464), in which
+	// case those ranges (and their completion flags) are restored
+	// verbatim, whatever their count.
 	var pkRanges []pkRange
 	var rangeCompleted []bool
 	if len(resumeRanges) > 0 {
 		pkRanges, rangeCompleted = restoredPKRanges(resumeRanges, minPKVal)
 	} else {
-		pkRanges = splitPKRange(minPKVal, maxPKVal, numReaders)
+		numRanges := keysetWorkRangeCount(minPKVal, maxPKVal, numReaders, cfg.Migration.ChunkSize)
+		pkRanges = splitPKRange(minPKVal, maxPKVal, numRanges)
 	}
 
 	producer := &keysetProducer{
@@ -154,8 +156,54 @@ func executeKeysetPagination(
 	})
 }
 
-// keysetProducer runs one reader goroutine per incomplete PK range, each
-// paginating with WHERE pk > last_pk AND pk <= range_max.
+// Work-stealing range sizing (#615). A static one-range-per-reader split
+// finishes at straggler speed when PKs are skewed (bulk-deleted ID spans,
+// snowflake IDs): one reader owns most rows while the rest exit early.
+// Oversubscribing the split and letting readers pull the next unfinished
+// range bounds the imbalance to one sub-range's worth of work.
+const (
+	// rangeOversubscription is the target sub-range count per reader.
+	rangeOversubscription = 8
+	// maxWorkRanges caps the split so the persisted per-range watermark
+	// blob (#464 range_state) stays small (~40 bytes/range).
+	maxWorkRanges = 256
+)
+
+// keysetWorkRangeCount decides how many sub-ranges to split [minPK, maxPK]
+// into. Small or dense-narrow tables stay at numReaders ranges — a
+// sub-range should hold several chunks, or stealing just shreds batching
+// into short final pages. Non-numeric bounds fall back to numReaders
+// (splitPKRange collapses those to a single range anyway).
+func keysetWorkRangeCount(minPK, maxPK any, numReaders, chunkSize int) int {
+	if numReaders <= 1 {
+		return 1
+	}
+	maxRanges := numReaders * rangeOversubscription
+	if maxRanges > maxWorkRanges {
+		maxRanges = maxWorkRanges
+	}
+	minVal, okMin := parseNumericPK(minPK)
+	maxVal, okMax := parseNumericPK(maxPK)
+	if !okMin || !okMax || maxVal <= minVal || chunkSize <= 0 {
+		return numReaders
+	}
+	// Keep each sub-range ≥ ~4 chunk-widths of PK distance. For dense PKs
+	// this approximates 4 chunks of rows; sparse PKs get finer ranges,
+	// which only means quicker steals.
+	const minChunksPerRange = 4
+	est := pkRangeDistance(minVal, maxVal) / (uint64(chunkSize) * minChunksPerRange)
+	if est < uint64(numReaders) {
+		return numReaders
+	}
+	if est < uint64(maxRanges) {
+		return int(est)
+	}
+	return maxRanges
+}
+
+// keysetProducer runs numReaders goroutines that pull PK sub-ranges from a
+// shared work queue (#615), each paginating its current range with
+// WHERE pk > last_pk AND pk <= range_max.
 type keysetProducer struct {
 	db         *sql.DB
 	dialect    driver.Dialect
@@ -171,45 +219,79 @@ type keysetProducer struct {
 	pkRanges       []pkRange
 	rangeCompleted []bool
 	numReaders     int
+
+	// rangesPerWorker[i] / rowsPerWorker[i] account for the sub-ranges and
+	// rows worker i handled (#615 observability). Under a static split one
+	// worker would own ~all rows of a skewed table; work-stealing spreads a
+	// heavy band's sub-ranges across idle workers, so no single worker's
+	// row share approaches the whole. Sized numReaders in produce; each
+	// goroutine owns its own index (no races); read after produce returns.
+	rangesPerWorker []int64
+	rowsPerWorker   []int64
 }
 
 func (p *keysetProducer) readerCount() int { return p.numReaders }
 
-// produce starts the parallel readers and blocks until they all finish.
-// Ranges a previous run segment completed keep their slot (the coordinator
-// indexes states by readerID) but spawn no reader (#464).
+// produce starts numReaders goroutines pulling range IDs from a shared
+// work queue (#615) and blocks until they all finish. Ranges a previous
+// run segment completed keep their slot (the coordinator indexes states
+// by range ID) but are never queued (#464). A reader that hits an error
+// or cancellation stops pulling; the consumer's shutdown cancels the rest.
 func (p *keysetProducer) produce(ctx context.Context, env pipelineEnv, out chan<- chunkResult) {
-	var readerWg sync.WaitGroup
-	for readerID, pkr := range p.pkRanges {
-		if p.rangeCompleted != nil && p.rangeCompleted[readerID] {
+	queue := make(chan int, len(p.pkRanges))
+	for rangeID := range p.pkRanges {
+		if p.rangeCompleted != nil && p.rangeCompleted[rangeID] {
 			continue
 		}
+		queue <- rangeID
+	}
+	close(queue)
+
+	p.rangesPerWorker = make([]int64, p.numReaders)
+	p.rowsPerWorker = make([]int64, p.numReaders)
+	var readerWg sync.WaitGroup
+	for i := 0; i < p.numReaders; i++ {
 		readerWg.Add(1)
-		go func(readerID int, rangeMinPK, rangeMaxPK any) {
+		go func(workerID int) {
 			defer readerWg.Done()
-			p.readRange(ctx, env, out, readerID, rangeMinPK, rangeMaxPK)
-		}(readerID, pkr.minPK, pkr.maxPK)
+			for rangeID := range queue {
+				// Single writer per index — each goroutine owns its slot.
+				p.rangesPerWorker[workerID]++
+				pkr := p.pkRanges[rangeID]
+				rows, ok := p.readRange(ctx, env, out, rangeID, pkr.minPK, pkr.maxPK)
+				p.rowsPerWorker[workerID] += rows
+				if !ok {
+					return
+				}
+			}
+		}(i)
 	}
 	readerWg.Wait()
 }
 
 // readRange pages one PK range from the source, sending each chunk to out.
-func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out chan<- chunkResult, readerID int, rangeMinPK, rangeMaxPK any) {
+// Chunks carry the range ID (in chunkResult.readerID) so the checkpoint
+// coordinator tracks watermarks per range regardless of which reader
+// processed it. Returns false when the reader should stop pulling further
+// ranges (error sent or context cancelled), true when the range is done.
+// The first return is the number of rows read from this range.
+func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out chan<- chunkResult, rangeID int, rangeMinPK, rangeMaxPK any) (int64, bool) {
 	lastPK := rangeMinPK
 	seq := int64(0)
+	var rowsRead int64
 
 	for {
 		select {
 		case <-ctx.Done():
 			sendChunkOrCancel(ctx, out, chunkResult{err: ctx.Err()})
-			return
+			return rowsRead, false
 		default:
 		}
 
 		// Memory pressure check — pause if heap is above threshold
 		if !env.memGuard.waitIfNeeded(ctx) {
 			sendChunkOrCancel(ctx, out, chunkResult{err: ctx.Err()})
-			return
+			return rowsRead, false
 		}
 
 		// Read chunk_size dynamically so guardrail reductions take effect immediately
@@ -225,7 +307,7 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 		queryTime := time.Since(queryStart)
 		if err != nil {
 			sendChunkOrCancel(ctx, out, chunkResult{err: fmt.Errorf("keyset query: %w", err)})
-			return
+			return rowsRead, false
 		}
 
 		// Time the scan
@@ -235,15 +317,16 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 		scanTime := time.Since(scanStart)
 		if err != nil {
 			sendChunkOrCancel(ctx, out, chunkResult{err: fmt.Errorf("scanning rows: %w", err)})
-			return
+			return rowsRead, false
 		}
 
 		if len(chunk) == 0 {
-			return // This reader is done
+			return rowsRead, true // Range exhausted
 		}
+		rowsRead += int64(len(chunk))
 
 		if logging.IsDebug() {
-			logging.Debug("Reader[%d]: chunk #%d read %d rows (query=%v, scan=%v)", readerID, seq, len(chunk), queryTime, scanTime)
+			logging.Debug("Range[%d]: chunk #%d read %d rows (query=%v, scan=%v)", rangeID, seq, len(chunk), queryTime, scanTime)
 		}
 		// Update lastPK for next iteration
 		lastPK = chunk[len(chunk)-1][p.pkIdx]
@@ -255,24 +338,24 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 		if !sendChunkOrCancel(ctx, out, chunkResult{
 			rows:      chunk,
 			lastPK:    lastPK,
-			readerID:  readerID,
+			readerID:  rangeID,
 			seq:       seq,
 			queryTime: queryTime,
 			scanTime:  scanTime,
 			readEnd:   time.Now(),
 		}) {
-			return
+			return rowsRead, false
 		}
 		if logging.IsDebug() {
 			if sendWait := time.Since(sendStart); sendWait > 500*time.Millisecond {
-				logging.Debug("Reader[%d]: blocked %v sending chunk #%d to chunkChan (len=%d, cap=%d)",
-					readerID, sendWait, seq, len(out), cap(out))
+				logging.Debug("Range[%d]: blocked %v sending chunk #%d to chunkChan (len=%d, cap=%d)",
+					rangeID, sendWait, seq, len(out), cap(out))
 			}
 		}
 		seq++
 
 		if len(chunk) < chunkSize {
-			return // This reader is done
+			return rowsRead, true // Range exhausted
 		}
 	}
 }
