@@ -37,7 +37,7 @@ func TestKeysetCheckpointCoordinatorOutOfOrderAcks(t *testing.T) {
 	}
 	var totalWritten int64
 
-	coord := newKeysetCheckpointCoordinator(job, pkRanges, nil, 0, &totalWritten, func() int { return 1 })
+	coord := newKeysetCheckpointCoordinator(job.Saver, job, pkRanges, nil, 0, &totalWritten, func() int { return 1 })
 	if coord == nil {
 		t.Fatal("expected checkpoint coordinator")
 	}
