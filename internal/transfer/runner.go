@@ -3,6 +3,7 @@ package transfer
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -20,10 +21,24 @@ import (
 // are keyed (#614).
 
 // pipelineEnv carries the runner-owned facilities reader goroutines need:
-// the memory guardrail and the dynamic chunk-size callback.
+// the memory guardrail, the dynamic chunk-size callback, and the in-flight
+// byte-budget reservation (#617).
 type pipelineEnv struct {
 	memGuard  *memoryGuard
 	chunkSize func() int
+
+	// acquireMem reserves a scanned chunk's measured bytes against the shared
+	// budget, blocking (backpressuring the reader) until they are available.
+	// It returns the bytes actually reserved (to stamp on the chunk so the
+	// writer releases the same amount) and false if ctx was cancelled while
+	// waiting. With no budget it reserves 0 and returns true immediately.
+	//
+	// A reader that blocks here holds no reservation — only the one chunk it
+	// just scanned — so this is a single, deadlock-free acquire, never a
+	// hold-and-wait top-up. The transient overshoot of at most one chunk per
+	// reader is exactly the per-reader scan-accumulation slack the #465
+	// buffer model already reserves, with the memory guard as the backstop.
+	acquireMem func(ctx context.Context, n int64) (int64, bool)
 }
 
 // chunkProducer is the strategy half of the pipeline: it owns the reader
@@ -170,6 +185,15 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	readerCtx, cancelReaders := context.WithCancel(ctx)
 	defer cancelReaders()
 
+	// budgetCtx wakes a reader blocked reserving in-flight bytes when either
+	// the readers are cancelled OR the writer pool fails (#617 codex review).
+	// Without the writer-failure signal, a reader can wait forever for bytes
+	// that only a now-departed writer could release, while the consumer —
+	// still ranging on chunkChan — never observes the failure to unwind. A
+	// watcher (started once wp exists) links wp's cancellation into this.
+	budgetCtx, cancelBudgetWaits := context.WithCancel(readerCtx)
+	defer cancelBudgetWaits()
+
 	// Memory guardrail: pause readers when heap exceeds 80% of memory limit.
 	// This prevents memory ballooning when actual row sizes exceed static
 	// estimates (e.g., TEXT columns with large content vs. the default
@@ -178,13 +202,36 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < guardMemMB {
 		guardMemMB = cfg.Migration.MaxMemoryMB
 	}
+	// In-flight byte budget (#617). acquiredBytes tracks what this pipeline
+	// has reserved but not yet released, so the drain can return the exact
+	// residual — covering every chunk abandoned in a channel on an error or
+	// cancel path — and guarantee the shared budget always nets back to
+	// zero for this table. Successful chunks are released per-chunk by the
+	// writer (OnComplete) to keep the budget accurate mid-run.
+	budget := job.MemBudget
+	var acquiredBytes int64
 	env := pipelineEnv{
 		memGuard:  newMemoryGuard(guardMemMB),
 		chunkSize: cb.chunkSize,
+		acquireMem: func(_ context.Context, n int64) (int64, bool) {
+			// Wait on budgetCtx (reader-cancel or writer-failure), not the
+			// caller's reader ctx, so a writer failure unblocks the reserve.
+			got, ok := budget.acquire(budgetCtx, n)
+			if ok && got > 0 {
+				atomic.AddInt64(&acquiredBytes, got)
+			}
+			return got, ok
+		},
 	}
 
 	// Run the strategy's readers; close chunkChan when they all finish.
+	// producerDone is closed once every reader has returned, so the drain can
+	// join them before the residual release — without the join, an acquire
+	// that succeeds just before cancellation could add to acquiredBytes after
+	// the residual swap and leak that reservation (#617 codex review).
+	producerDone := make(chan struct{})
 	go func() {
+		defer close(producerDone)
 		pc.producer.produce(readerCtx, env, chunkChan)
 		logging.Debug("All %d parallel readers finished for %s, closing chunkChan (len=%d)", numReaders, tableName, len(chunkChan))
 		close(chunkChan)
@@ -224,6 +271,16 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 		Adjuster:               pc.adjuster,
 		TableName:              tableName,
 		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
+		OnComplete: func(bytes int64) {
+			// Release a chunk's reservation once the writer is done with it,
+			// success or error (#617). Decrement the pipeline's running total
+			// so the final residual release covers only chunks that never
+			// reached a writer.
+			if bytes > 0 {
+				budget.release(bytes)
+				atomic.AddInt64(&acquiredBytes, -bytes)
+			}
+		},
 	})
 
 	// Periodic checkpoints go through an async saver so a slow SaveProgress
@@ -244,6 +301,20 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	}
 
 	wp.start()
+
+	// Link writer-pool failure into budgetCtx so a reader blocked reserving
+	// bytes wakes the moment a writer errors (#617). The watcher exits when
+	// budgetCtx is cancelled (the deferred cancelBudgetWaits on every return
+	// path), so it never outlives the transfer.
+	if budget != nil {
+		go func() {
+			select {
+			case <-wp.Context().Done():
+				cancelBudgetWaits()
+			case <-budgetCtx.Done():
+			}
+		}()
+	}
 
 	// Main consumer loop — reads from chunkChan, dispatches to write pool.
 	totalTransferred := pc.resumeRowsDone
@@ -312,6 +383,7 @@ chunkLoop:
 			rowNum:   result.rowNum,
 			readerID: result.readerID,
 			seq:      result.seq,
+			bytes:    result.bytes,
 		}) {
 			if err := wp.error(); err != nil {
 				loopErr = fmt.Errorf("writing chunk: %w", err)
@@ -377,6 +449,22 @@ chunkLoop:
 	waitStart := time.Now()
 	wp.wait()
 	logging.Debug("wp.wait() completed in %v for %s", time.Since(waitStart), tableName)
+
+	// Return this pipeline's in-flight byte reservation to the shared budget
+	// (#617). Join the producers first so acquiredBytes is final: an acquire
+	// can succeed just before cancellation and add to the counter after this
+	// point, so releasing without the join could leak that reservation and
+	// permanently shrink the shared budget. The join is bounded — cancelReaders
+	// above cancelled budgetCtx (waking any acquire-blocked reader) and
+	// readerCtx (aborting in-flight QueryContext/Rows.Next) — so producers
+	// return promptly rather than hanging the drain. Writers already released
+	// every chunk they finished; the remainder is exactly the chunks abandoned
+	// in a channel on an error/cancel path, released here in one shot so the
+	// shared budget nets back to zero for this table regardless of how it ended.
+	<-producerDone
+	if residual := atomic.SwapInt64(&acquiredBytes, 0); residual > 0 {
+		budget.release(residual)
+	}
 
 	// Flush and join the async checkpoint saver now that the ack processor
 	// has stopped (wp.wait joined it) — no more periodic saves can be

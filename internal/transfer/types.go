@@ -58,6 +58,12 @@ type Job struct {
 	// plain INSERT behavior; retries can opt into ROW_NUMBER duplicate-safe
 	// writes without pretending to be a cross-process resume.
 	ReplayPossible bool
+
+	// MemBudget is the shared in-flight byte budget (#617). The orchestrator
+	// creates one per migration and sets the same pointer on every table
+	// job, so concurrent pipelines divide it by contention. Nil disables
+	// byte-based admission control (channel-depth limiting only).
+	MemBudget *MemBudget
 }
 
 // chunkResult holds a chunk of data for the read-ahead pipeline
@@ -67,6 +73,7 @@ type chunkResult struct {
 	rowNum    int64 // for ROW_NUMBER pagination progress tracking
 	readerID  int
 	seq       int64
+	bytes     int64 // scanned Go heap size, reserved against MemBudget (#617)
 	queryTime time.Duration
 	scanTime  time.Duration
 	readEnd   time.Time // when this chunk finished reading
@@ -80,6 +87,7 @@ type writeJob struct {
 	rowNum   int64
 	readerID int
 	seq      int64
+	bytes    int64 // MemBudget bytes to release once this chunk is written (#617)
 }
 
 type writeAck struct {

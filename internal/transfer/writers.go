@@ -71,6 +71,10 @@ type writerPoolConfig struct {
 	// Pull from driver.Table.GoHeapBytesPerRow at the call site so the metric
 	// reflects realistic row weight; zero disables bytes accounting.
 	BytesPerRow int64
+
+	// OnComplete releases a successfully-written chunk's in-flight memory
+	// reservation (#617); nil disables per-chunk release.
+	OnComplete func(bytes int64)
 }
 
 // newWriterPool creates a new writer pool with the given configuration.
@@ -114,6 +118,7 @@ func newWriterPool(ctx context.Context, cfg writerPoolConfig) *writerPool {
 		WriteFunc:     wp.executeWrite,
 		Prog:          cfg.Prog,
 		EnableAck:     cfg.EnableAck,
+		OnComplete:    cfg.OnComplete,
 	})
 
 	return wp
@@ -318,6 +323,7 @@ func (wp *writerPool) submit(job writeJob) bool {
 		Seq:      job.seq,
 		LastPK:   job.lastPK,
 		RowNum:   job.rowNum,
+		Bytes:    job.bytes,
 	})
 }
 

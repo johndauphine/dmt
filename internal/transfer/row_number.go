@@ -228,7 +228,7 @@ func (p *rowNumberProducer) produce(ctx context.Context, env pipelineEnv, out ch
 
 		// Time the scan
 		scanStart := time.Now()
-		chunk, _, err := scanRows(rows, p.numCols, p.valueConvs, p.convIdx)
+		chunk, chunkBytes, err := scanRows(rows, p.numCols, p.valueConvs, p.convIdx)
 		rows.Close()
 		scanTime := time.Since(scanStart)
 		if err != nil {
@@ -238,6 +238,19 @@ func (p *rowNumberProducer) produce(ctx context.Context, env pipelineEnv, out ch
 
 		if len(chunk) == 0 {
 			sendChunkOrCancel(ctx, out, chunkResult{done: true})
+			return
+		}
+
+		// Reserve this chunk's measured bytes against the shared budget
+		// before it enters the pipeline (#617). Single blocking acquire while
+		// holding no other reservation, so it can never hold-and-wait.
+		reserved, ok := env.acquireMem(ctx, chunkBytes)
+		if !ok {
+			// Propagate a real reader cancellation; on writer-pool failure
+			// (reader ctx still live) stop quietly — wp.error() carries it.
+			if err := ctx.Err(); err != nil {
+				sendChunkOrCancel(ctx, out, chunkResult{err: err})
+			}
 			return
 		}
 
@@ -253,6 +266,7 @@ func (p *rowNumberProducer) produce(ctx context.Context, env pipelineEnv, out ch
 			rowNum:    newRowNum,
 			readerID:  0,
 			seq:       seq,
+			bytes:     reserved,
 			queryTime: queryTime,
 			scanTime:  scanTime,
 			readEnd:   time.Now(),

@@ -141,6 +141,7 @@ type WriteJob struct {
 	Seq      int64
 	LastPK   any
 	RowNum   int64
+	Bytes    int64 // in-flight memory reserved for this chunk, released on completion (#617)
 }
 
 // WriteAck represents an acknowledgment that a write job completed.
@@ -170,6 +171,7 @@ type WriterPool struct {
 	bufferSize int
 	writeFunc  WriteFunc
 	prog       *progress.Tracker
+	onComplete func(bytes int64) // release hook for in-flight memory budget (#617)
 
 	// Channels
 	jobChan chan WriteJob
@@ -201,6 +203,15 @@ type WriterPoolConfig struct {
 	WriteFunc     WriteFunc
 	Prog          *progress.Tracker
 	EnableAck     bool // Whether to enable ack channel for checkpointing
+
+	// OnComplete, if set, releases a job's in-flight memory reservation
+	// (#617). It fires on the write-error path immediately (so a failed
+	// chunk can't wedge a tight budget) and on the success path only after
+	// the ack is delivered (so the reservation covers job.Rows for its whole
+	// live span, including ack backpressure). A worker that exits mid-ack on
+	// cancellation skips it; the transfer runner's residual release frees
+	// those, so each chunk is freed exactly once.
+	OnComplete func(bytes int64)
 }
 
 // NewWriterPool creates a new writer pool with the given configuration.
@@ -221,6 +232,7 @@ func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 		bufferSize: cfg.BufferSize,
 		writeFunc:  cfg.WriteFunc,
 		prog:       cfg.Prog,
+		onComplete: cfg.OnComplete,
 		jobChan:    make(chan WriteJob, jobBufferSize),
 		ctx:        writerCtx,
 		cancel:     cancel,
@@ -278,6 +290,14 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 		err := wp.writeFunc(wp.ctx, writerID, job.Rows)
 
 		if err != nil {
+			// Release the failed chunk's reservation immediately (#617). With
+			// a tight or oversized-clamped budget the failed chunk may hold
+			// the last free bytes; freeing it here lets a reader blocked in
+			// acquireMem proceed far enough for the consumer to observe the
+			// cancel and unwind, instead of wedging the pipeline.
+			if wp.onComplete != nil {
+				wp.onComplete(job.Bytes)
+			}
 			wp.writeErr.CompareAndSwap(nil, &err)
 			wp.cancel()
 			return
@@ -308,8 +328,18 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 			select {
 			case wp.ackChan <- ack:
 			case <-wp.ctx.Done():
+				// Aborting — the runner's residual release frees this chunk's
+				// still-held reservation, so no explicit release here.
 				return
 			}
+		}
+
+		// Release the reservation only after the ack is delivered (#617): the
+		// worker holds job.Rows until this point, so freeing it earlier would
+		// let the budget admit more chunks while these bytes are still live
+		// under ack backpressure, undercounting real in-flight memory.
+		if wp.onComplete != nil {
+			wp.onComplete(job.Bytes)
 		}
 
 		// Check if worker should exit (for scaling down).
