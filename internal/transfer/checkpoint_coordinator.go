@@ -54,9 +54,11 @@ type keysetCheckpointCoordinator struct {
 }
 
 // completed marks ranges already finished by a previous run segment
-// (#464 resume); nil means a fresh transfer with no completed ranges.
-func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, completed []bool, resumeRowsDone int64, totalWritten *int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
-	if job.Saver == nil || job.TaskID <= 0 {
+// (#464 resume); nil means a fresh transfer with no completed ranges. saver
+// is the persistence sink for periodic checkpoints — the runner passes an
+// asyncSaver so these mid-transfer saves don't stall ack processing (#620).
+func newKeysetCheckpointCoordinator(saver ProgressSaver, job Job, pkRanges []pkRange, completed []bool, resumeRowsDone int64, totalWritten *int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
+	if saver == nil || job.TaskID <= 0 {
 		return nil
 	}
 	if checkpointFreq == nil {
@@ -90,7 +92,7 @@ func newKeysetCheckpointCoordinator(job Job, pkRanges []pkRange, completed []boo
 	}
 
 	return &keysetCheckpointCoordinator{
-		saver:          job.Saver,
+		saver:          saver,
 		taskID:         job.TaskID,
 		tableName:      job.Table.Name,
 		partitionID:    partID,
@@ -190,15 +192,15 @@ type rowNumberCheckpointCoordinator struct {
 	lastRowNum      int64
 }
 
-func newRowNumberCheckpointCoordinator(job Job, partitionID *int, rowsTotal, initialRowNum, resumeRowsDone int64, written func() int64, checkpointFreq func() int) *rowNumberCheckpointCoordinator {
-	if job.Saver == nil || job.TaskID <= 0 {
+func newRowNumberCheckpointCoordinator(saver ProgressSaver, job Job, partitionID *int, rowsTotal, initialRowNum, resumeRowsDone int64, written func() int64, checkpointFreq func() int) *rowNumberCheckpointCoordinator {
+	if saver == nil || job.TaskID <= 0 {
 		return nil
 	}
 	if checkpointFreq == nil {
 		checkpointFreq = func() int { return 10 }
 	}
 	return &rowNumberCheckpointCoordinator{
-		saver:          job.Saver,
+		saver:          saver,
 		taskID:         job.TaskID,
 		tableName:      job.Table.Name,
 		partitionID:    partitionID,

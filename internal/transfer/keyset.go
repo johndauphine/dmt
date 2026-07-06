@@ -133,8 +133,8 @@ func executeKeysetPagination(
 		colTypes:        colTypes,
 		colSRIDs:        colSRIDs,
 		resumeRowsDone:  resumeRowsDone,
-		newAckHandler: func(wp *writerPool, cb tunerCallbacks) func(writeAck) {
-			coord = newKeysetCheckpointCoordinator(job, pkRanges, rangeCompleted, resumeRowsDone, wp.TotalWrittenPtr(), cb.checkpointFreq)
+		newAckHandler: func(wp *writerPool, cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+			coord = newKeysetCheckpointCoordinator(saver, job, pkRanges, rangeCompleted, resumeRowsDone, wp.TotalWrittenPtr(), cb.checkpointFreq)
 			if coord == nil {
 				return nil
 			}

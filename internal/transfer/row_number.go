@@ -140,8 +140,8 @@ func executeRowNumberPagination(
 		colSRIDs:        colSRIDs,
 		idempotentOnDup: idempotentOnDup,
 		resumeRowsDone:  resumeRowsDone,
-		newAckHandler: func(wp *writerPool, cb tunerCallbacks) func(writeAck) {
-			coord = newRowNumberCheckpointCoordinator(job, partitionID, partitionRows, initialRowNum, resumeRowsDone, wp.written, cb.checkpointFreq)
+		newAckHandler: func(wp *writerPool, cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+			coord = newRowNumberCheckpointCoordinator(saver, job, partitionID, partitionRows, initialRowNum, resumeRowsDone, wp.written, cb.checkpointFreq)
 			if coord == nil {
 				return nil
 			}

@@ -28,6 +28,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Checkpoint saves during a transfer are now written on a dedicated
+  background goroutine (latest-wins, coalescing) instead of inline on the
+  chunk-acknowledgement path. A slow checkpoint store (SQLite fsync, a
+  YAML-file rewrite) no longer stalls acknowledgement processing or, through
+  it, the writers. The final end-of-table checkpoint is still written
+  synchronously so resume points stay durable, and a persistently failing
+  checkpoint store is now surfaced loudly instead of silently dropping
+  resumability (#620, epic #621).
+
 - Keyset transfers now split a table's PK range into many small sub-ranges
   (≈8 per reader, capped) that reader goroutines pull from a shared work
   queue, instead of one fixed contiguous range per reader. Tables with

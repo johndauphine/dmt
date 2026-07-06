@@ -120,9 +120,11 @@ type pipelineConfig struct {
 	resumeRowsDone int64
 
 	// newAckHandler builds the strategy's checkpoint ack handler once the
-	// writer pool exists (coordinators need wp counters). Returning nil
-	// disables ack processing. Nil field means no checkpointing at all.
-	newAckHandler func(wp *writerPool, cb tunerCallbacks) func(writeAck)
+	// writer pool exists (coordinators need wp counters). saver is the
+	// async persistence sink the runner owns (#620) — the coordinator uses
+	// it for periodic saves. Returning nil disables ack processing. Nil
+	// field means no checkpointing at all.
+	newAckHandler func(wp *writerPool, cb tunerCallbacks, saver ProgressSaver) func(writeAck)
 
 	// saveFinal persists final progress after a successful drain. last is
 	// the last data chunk the consumer received (zero value if none).
@@ -224,8 +226,19 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
 	})
 
+	// Periodic checkpoints go through an async saver so a slow SaveProgress
+	// (SQLite fsync, YAML rewrite) can't stall ack draining and, via the
+	// bounded ackChan, backpressure the writers (#620). It is flushed and
+	// joined during drain, before the final synchronous save.
+	var asyncSv *asyncSaver
 	if pc.newAckHandler != nil {
-		if handler := pc.newAckHandler(wp, cb); handler != nil {
+		var handlerSaver ProgressSaver
+		if enableAck {
+			asyncSv = newAsyncSaver(job.Saver)
+			asyncSv.start()
+			handlerSaver = asyncSv
+		}
+		if handler := pc.newAckHandler(wp, cb, handlerSaver); handler != nil {
 			wp.startAckProcessor(handler)
 		}
 	}
@@ -365,6 +378,16 @@ chunkLoop:
 	wp.wait()
 	logging.Debug("wp.wait() completed in %v for %s", time.Since(waitStart), tableName)
 
+	// Flush and join the async checkpoint saver now that the ack processor
+	// has stopped (wp.wait joined it) — no more periodic saves can be
+	// posted. Joining here guarantees no stale async write lands after the
+	// final synchronous save below. Runs on the error paths too so the
+	// saver goroutine never leaks (#620).
+	var saverErr error
+	if asyncSv != nil {
+		saverErr = asyncSv.close()
+	}
+
 	if loopErr != nil {
 		return stats, loopErr
 	}
@@ -379,9 +402,16 @@ chunkLoop:
 	totalTransferred += wp.written()
 	stats.Rows = totalTransferred
 
-	// Save final progress
+	// Save final progress (synchronous + durable, through the raw saver).
 	if pc.saveFinal != nil {
 		pc.saveFinal(lastResult, totalTransferred)
+	}
+
+	// A persistently broken saver doesn't fail an otherwise-successful data
+	// transfer — the rows landed — but it must be loud, since resume would
+	// silently restart from an earlier point (#620).
+	if saverErr != nil {
+		logging.Warn("Checkpoint saver unhealthy during %s: %v (resume may restart from an earlier checkpoint)", tableName, saverErr)
 	}
 
 	return stats, nil
