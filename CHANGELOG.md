@@ -28,6 +28,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Transfer memory is now bounded by a shared byte budget that charges each
+  in-flight chunk its **actual** measured size, instead of pre-sizing channel
+  depths from a static per-row estimate. Tables with rows far larger than the
+  estimate (big TEXT/blob columns) no longer balloon heap past the configured
+  limit and trip the reader-pausing memory guard, and the budget is shared
+  across concurrently-migrating tables — a table running alone can use all of
+  it — rather than statically split by worker count (#617, epic #621).
+
 - Checkpoint saves during a transfer are now written on a dedicated
   background goroutine (latest-wins, coalescing) instead of inline on the
   chunk-acknowledgement path. A slow checkpoint store (SQLite fsync, a
