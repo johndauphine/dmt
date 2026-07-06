@@ -28,6 +28,11 @@ type TransferRunner struct {
 	progress   *progress.Tracker
 	notifier   notify.Provider
 	targetMode TargetModeStrategy
+
+	// memBudget is the in-flight byte budget shared across every concurrent
+	// table pipeline for this run (#617). Created once in Run; nil disables
+	// byte-based admission control.
+	memBudget *transfer.MemBudget
 }
 
 // NewTransferRunner creates a new TransferRunner.
@@ -86,8 +91,14 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	// their first checkpoint flush (resumeLastPK == nil), which would
 	// otherwise replay already-committed rows on a plain INSERT and fail
 	// with duplicate-PK errors (#227 codex follow-up).
+	// One shared in-flight byte budget for the whole run (#617). Every job
+	// carries the same pointer, so concurrent table pipelines divide it by
+	// contention rather than each claiming a static Workers-split slice.
+	r.memBudget = transfer.NewMemBudget(transfer.PipelineMemBudgetBytes(r.config))
+
 	for i := range jobs {
 		jobs[i].IsResume = resume
+		jobs[i].MemBudget = r.memBudget
 	}
 
 	// Initialize progress

@@ -60,3 +60,33 @@ func calculatePipelineBuffers(cfg *config.Config, job Job, tableName string, tun
 		ReadAheadBuffers: readAheadBuffers,
 	})
 }
+
+// PipelineMemBudgetBytes computes the total in-flight byte budget shared
+// across all concurrent table pipelines (#617). It reuses the same
+// effective-memory-minus-connection-overhead figure as the per-table buffer
+// sizing above, but deliberately does NOT divide by Workers: the shared
+// MemBudget lets whichever tables are actually running split it by
+// contention, so a table running alone gets the whole budget. Returns 0
+// when no positive limit is configured (budget disabled).
+func PipelineMemBudgetBytes(cfg *config.Config) int64 {
+	effectiveMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
+	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < effectiveMemMB {
+		effectiveMemMB = cfg.Migration.MaxMemoryMB
+	}
+	if effectiveMemMB <= 0 {
+		return 0
+	}
+
+	connCount := int64(cfg.Migration.MaxSourceConnections + cfg.Migration.MaxTargetConnections)
+	if connCount <= 0 {
+		// No pool sizing yet — assume a modest default so the budget still
+		// leaves headroom for connection buffers.
+		connCount = 16
+	}
+	connOverheadMB := connCount * 10 // ~10MB per Go database/sql connection
+	pipelineBudgetMB := effectiveMemMB - connOverheadMB
+	if pipelineBudgetMB <= 0 {
+		pipelineBudgetMB = effectiveMemMB / 2 // fallback: half of effective memory
+	}
+	return pipelineBudgetMB * 1024 * 1024
+}

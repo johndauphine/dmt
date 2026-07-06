@@ -312,7 +312,7 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 
 		// Time the scan
 		scanStart := time.Now()
-		chunk, _, err := scanRows(rows, p.numCols, p.valueConvs, p.convIdx)
+		chunk, chunkBytes, err := scanRows(rows, p.numCols, p.valueConvs, p.convIdx)
 		rows.Close()
 		scanTime := time.Since(scanStart)
 		if err != nil {
@@ -324,6 +324,21 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 			return rowsRead, true // Range exhausted
 		}
 		rowsRead += int64(len(chunk))
+
+		// Reserve this chunk's measured bytes against the shared budget
+		// before it enters the pipeline (#617). A single blocking acquire —
+		// the reader holds no other reservation while it waits, so writers
+		// draining and releasing always let it proceed (no hold-and-wait).
+		reserved, ok := env.acquireMem(ctx, chunkBytes)
+		if !ok {
+			// The wait was aborted. Propagate a genuine reader cancellation;
+			// on a writer-pool failure (reader ctx still live) just stop —
+			// wp.error() carries the real error (#617 codex review).
+			if err := ctx.Err(); err != nil {
+				sendChunkOrCancel(ctx, out, chunkResult{err: err})
+			}
+			return rowsRead, false
+		}
 
 		if logging.IsDebug() {
 			logging.Debug("Range[%d]: chunk #%d read %d rows (query=%v, scan=%v)", rangeID, seq, len(chunk), queryTime, scanTime)
@@ -340,6 +355,7 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 			lastPK:    lastPK,
 			readerID:  rangeID,
 			seq:       seq,
+			bytes:     reserved,
 			queryTime: queryTime,
 			scanTime:  scanTime,
 			readEnd:   time.Now(),

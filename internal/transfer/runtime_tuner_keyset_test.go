@@ -225,6 +225,8 @@ type keysetRuntimeTargetPool struct {
 	tuner       RuntimeTuner
 	updateTo    int
 	truncateErr error // when set, TruncateTable returns it (#619)
+	writeErr    error // when set, WriteBatch fails after failAfter writes (#617)
+	failAfter   int   // number of successful writes before writeErr kicks in
 }
 
 func (p *keysetRuntimeTargetPool) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -232,6 +234,15 @@ func (p *keysetRuntimeTargetPool) WriteBatch(ctx context.Context, opts driver.Wr
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
+	}
+
+	if p.writeErr != nil {
+		p.mu.Lock()
+		over := p.writes >= p.failAfter
+		p.mu.Unlock()
+		if over {
+			return p.writeErr
+		}
 	}
 
 	ids := make([]int, 0, len(opts.Rows))
