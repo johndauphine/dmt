@@ -28,6 +28,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Keyset transfers now split a table's PK range into many small sub-ranges
+  (≈8 per reader, capped) that reader goroutines pull from a shared work
+  queue, instead of one fixed contiguous range per reader. Tables with
+  skewed primary keys — large deleted-ID gaps, snowflake-style IDs — no
+  longer finish at the speed of a single straggling reader; the load
+  rebalances across all readers automatically. Resume is unchanged and
+  restores whatever sub-range set was persisted (#615, epic #621).
+
 - Internal: the keyset and ROW_NUMBER transfer strategies now share one
   pipeline runner (consumer loop, buffer sizing, memory guard, reader-cancel
   discipline, writer-pool wiring, drain, final progress save) instead of
