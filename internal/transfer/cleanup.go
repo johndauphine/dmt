@@ -9,6 +9,7 @@ import (
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/target"
 	"strconv"
+	"strings"
 )
 
 // cleanupPartitionData removes any existing data for a partition's PK range (idempotent retry) - PostgreSQL version
@@ -188,4 +189,40 @@ func parseNumericPK(value any) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// isTableNotFoundError reports whether err is a "table/relation does not
+// exist" error from any supported engine. The pre-transfer truncate
+// (transfer.go) treats this as benign — on a fresh drop_recreate run the
+// table is created before transfer, but a defensive not-found must not be
+// confused with a real failure (permission denied, lock timeout), which
+// would otherwise be silently swallowed and resurface later as a confusing
+// duplicate-key error against un-truncated stale rows (#619).
+func isTableNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Guard the ambiguous case first (codex review on #619): SQL Server
+	// reports a permission-denied TRUNCATE as `Cannot find the object "x"
+	// because it does not exist or you do not have permissions` — the same
+	// wording it uses for a truly-absent table. Anything mentioning a
+	// permission problem is NOT benign; surface it. Over-warning on a
+	// genuinely-absent table with this exact wording is a harmless cosmetic
+	// cost; swallowing a permission failure is the bug we're fixing.
+	if strings.Contains(s, "permission") || strings.Contains(s, "denied") {
+		return false
+	}
+	// postgres: relation "x" does not exist; mysql: table 'x' doesn't exist;
+	// sqlite: no such table: x; mssql: invalid object name 'x'.
+	switch {
+	case strings.Contains(s, "does not exist"),
+		strings.Contains(s, "doesn't exist"),
+		strings.Contains(s, "no such table"),
+		strings.Contains(s, "invalid object name"),
+		strings.Contains(s, "cannot find the object"),
+		strings.Contains(s, "unknown table"):
+		return true
+	}
+	return false
 }

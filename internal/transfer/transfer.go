@@ -64,9 +64,17 @@ func Execute(
 	if cfg.Migration.TargetMode != "upsert" {
 		if resumeLastPK == nil {
 			if job.Partition == nil {
-				// Non-partitioned table: truncate here (no race possible)
+				// Non-partitioned table: truncate here (no race possible).
+				// A missing table is benign (defensive — the table is created
+				// before transfer); any other failure (permission denied, lock
+				// timeout) must be surfaced, not swallowed, or stale rows cause
+				// confusing duplicate-key errors mid-transfer (#619).
 				if err := tgtPool.TruncateTable(ctx, cfg.Target.Schema, job.Table.Name); err != nil {
-					// Ignore truncate errors (table might not exist)
+					if isTableNotFoundError(err) {
+						logging.Debug("Truncate skipped for %s: table not found (proceeding)", job.Table.Name)
+					} else {
+						logging.Warn("Truncate failed for %s before transfer: %v (stale rows may surface as duplicate-key errors)", job.Table.Name, err)
+					}
 				}
 			} else {
 				// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry

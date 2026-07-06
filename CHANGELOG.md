@@ -45,6 +45,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A failing pre-transfer table truncate (permission denied, lock timeout) is
+  now logged with a warning that points at the likely consequence, instead of
+  being silently discarded and resurfacing later as a confusing duplicate-key
+  error against un-truncated rows. A genuinely absent table stays quiet as
+  before (#619, epic #621).
+
 - WebUI one-click token login works on Safari < 16: it falls back to
   dispatching a cancelable submit event when `form.requestSubmit()` is
   unavailable, instead of silently leaving the operator at a blank login form
