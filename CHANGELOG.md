@@ -87,6 +87,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `dmt resume` no longer dead-ends on the `drop_recreate` backup-acknowledgment
+  preflight gate. Resuming an interrupted run legitimately finds the run's own
+  partial data in the target, which tripped the gate — and its remedy named
+  `--confirm-backup`, a flag only `run` defines. Now the gate is skipped for a
+  resume that owns the target (verified config hash + the run reached the
+  transfer phase), so the target's contents are provably that run's output; a
+  run killed before transfer, a legacy run without a config hash, or a drifted
+  `--force-resume` still faces the gate so it can't silently `drop_recreate`
+  over pre-existing data. When the gate does fire, its remedy now also names the
+  resume-side hatch (`--skip-preflight backup`) so `resume` is never dead-ended
+  (#623).
+
 - A failing pre-transfer table truncate (permission denied, lock timeout) is
   now logged with a warning that points at the likely consequence, instead of
   being silently discarded and resurfacing later as a confusing duplicate-key

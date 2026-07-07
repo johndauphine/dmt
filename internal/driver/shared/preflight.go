@@ -155,10 +155,19 @@ func CheckConnection(
 
 // BackupAcknowledgmentRequired returns true when drop_recreate must be
 // explicitly acknowledged before a target-side destructive migration.
+//
+// It does not fire when a resume owns the target (ResumeOwnsTarget): the tables
+// were (re)created by the run being resumed, so their contents are that run's
+// own output. Re-gating on it every recovery makes the safety check cry wolf —
+// and worse, points at a --confirm-backup flag that `resume` doesn't define
+// (#623). Resuming is the acknowledgment. The orchestrator scopes
+// ResumeOwnsTarget narrowly so a run that never reached transfer, or a drifted
+// --force-resume, still faces the gate.
 func BackupAcknowledgmentRequired(req driver.PreFlightRequest) bool {
 	return req.Side == driver.PreFlightSideTarget &&
 		strings.ToLower(strings.TrimSpace(req.TargetMode)) == "drop_recreate" &&
-		!req.ConfirmBackup
+		!req.ConfirmBackup &&
+		!req.ResumeOwnsTarget
 }
 
 // TargetModeOrDefault returns a trimmed, lower-case target mode.

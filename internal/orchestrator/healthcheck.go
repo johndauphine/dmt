@@ -87,7 +87,7 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 	// would just emit a flurry of "could not read X" findings that
 	// duplicate the connection error the operator already sees.
 	if result.Healthy {
-		pf := o.collectPreFlightFindings(ctx)
+		pf := o.collectPreFlightFindings(ctx, false)
 		pf = applyPreFlightSkips(pf, preFlightSkipSet(o.config.Migration.SkipPreflight))
 		result.PreFlightFindings = pf.Findings
 		result.PreFlightAborted = pf.Aborted
@@ -102,7 +102,7 @@ func (o *Orchestrator) HealthCheck(ctx context.Context) (*HealthCheckResult, err
 func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	logging.Info("Performing dry run (no data will be transferred)...")
 
-	if err := o.runPreFlight(ctx); err != nil {
+	if err := o.runPreFlight(ctx, false); err != nil {
 		return nil, err
 	}
 

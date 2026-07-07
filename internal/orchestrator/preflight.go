@@ -63,14 +63,21 @@ func (e *PreFlightError) ExitCode() int { return exitcodes.ConfigError }
 // error when any un-skipped finding has severity error. Empty findings
 // means everything's clean; a non-aborted return with warn/info findings
 // is fine — they're logged but don't block.
-func (o *Orchestrator) runPreFlight(ctx context.Context) error {
+//
+// resumeOwnsTarget is true only when the caller is a resume whose run created
+// the target tables (see runReachedTransfer) against a non-drifted config — it
+// flows into the target request so the backup-acknowledgment gate skips that
+// run (#623). Run/DryRun/HealthCheck pass false; passing it explicitly (rather
+// than via orchestrator state) keeps the suppression from leaking across a
+// reused orchestrator's later non-resume calls.
+func (o *Orchestrator) runPreFlight(ctx context.Context, resumeOwnsTarget bool) error {
 	skipSet := preFlightSkipSet(o.config.Migration.SkipPreflight)
 	if skipSet[preFlightSkipAll] {
 		logging.Debug("Preflight: skipped (--skip-preflight=all)")
 		return nil
 	}
 
-	result := o.collectPreFlightFindings(ctx)
+	result := o.collectPreFlightFindings(ctx, resumeOwnsTarget)
 	result = applyPreFlightSkips(result, skipSet)
 	logPreFlightFindings(result.Findings)
 
@@ -85,7 +92,7 @@ func (o *Orchestrator) runPreFlight(ctx context.Context) error {
 // and gathers findings. Pool-level information (max connections etc.)
 // is pulled from the config so checks see the same values the
 // migration will use.
-func (o *Orchestrator) collectPreFlightFindings(ctx context.Context) preFlightResult {
+func (o *Orchestrator) collectPreFlightFindings(ctx context.Context, resumeOwnsTarget bool) preFlightResult {
 	var findings []driver.PreFlightFinding
 
 	if o.sourcePool != nil {
@@ -112,12 +119,13 @@ func (o *Orchestrator) collectPreFlightFindings(ctx context.Context) preFlightRe
 		tgtDrv, err := driver.Get(o.config.Target.Type)
 		if err == nil && tgtDrv != nil {
 			req := driver.PreFlightRequest{
-				Side:           driver.PreFlightSideTarget,
-				Schema:         o.config.Target.Schema,
-				TargetMode:     o.config.Migration.TargetMode,
-				Workers:        o.config.Migration.Workers,
-				EstimatedBytes: o.estimatedTargetBytes(),
-				ConfirmBackup:  o.config.Migration.ConfirmBackup,
+				Side:             driver.PreFlightSideTarget,
+				Schema:           o.config.Target.Schema,
+				TargetMode:       o.config.Migration.TargetMode,
+				Workers:          o.config.Migration.Workers,
+				EstimatedBytes:   o.estimatedTargetBytes(),
+				ConfirmBackup:    o.config.Migration.ConfirmBackup,
+				ResumeOwnsTarget: resumeOwnsTarget,
 			}
 			findings = append(findings, tgtDrv.PreFlight(ctx, o.targetPool.DB(), req)...)
 		} else if err != nil {
@@ -158,6 +166,37 @@ func (o *Orchestrator) estimatedTargetBytes() int64 {
 		total += t.RowCount * t.EstimatedRowSize
 	}
 	return total
+}
+
+// runReachedTransfer reports whether the run identified by runID got as far as
+// building transfer jobs — i.e. it has at least one transfer task. Transfer
+// tasks are created only after schema extraction and table creation, so their
+// presence means this run (re)created the target tables under drop_recreate;
+// whatever those tables now hold is this run's own output. That is the
+// ownership signal the resume-side backup-acknowledgment suppression needs
+// (#623): it is true even before the first checkpoint saves any rows (the task
+// row exists from job-build time), and false for a run killed during preflight
+// or schema/table creation, whose resume must still face the gate rather than
+// drop_recreate over pre-existing, unacknowledged data. On query error it
+// returns false (conservative: keep the gate).
+//
+// A transfer task created by prepareResumeTargetTable (which creates the task
+// before truncating) is not a loophole: reaching that code means a prior
+// run/resume already passed or explicitly skipped the gate (it runs at phase 0,
+// before any prep), so the pre-existing data was already acknowledged. Callers
+// still AND this with a verified config hash, so ownership can't be inferred
+// across a changed table set.
+func (o *Orchestrator) runReachedTransfer(runID string) bool {
+	tasks, err := o.state.GetTasksWithProgress(runID)
+	if err != nil {
+		return false
+	}
+	for _, t := range tasks {
+		if t.TaskType == string(TaskTransfer) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyPreFlightSkips downgrades skipped error-severity findings to info

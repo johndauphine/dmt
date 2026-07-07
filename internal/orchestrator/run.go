@@ -137,7 +137,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	// in the run history; the operator can grep `dmt history` for it later.
 	o.setPhase("preflight")
 	logging.Debug("Running preflight checks...")
-	if err := o.runPreFlight(ctx); err != nil {
+	if err := o.runPreFlight(ctx, false); err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
 		return err

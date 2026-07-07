@@ -114,7 +114,7 @@ func mssqlPFBackupAck(ctx context.Context, db *sql.DB, req driver.PreFlightReque
 		Check:    "backup.acknowledgment",
 		Side:     req.Side,
 		Message:  fmt.Sprintf("target schema [%s] has non-empty table [%s]; drop_recreate will destroy this data", schema, name),
-		Remedy:   "back up the target, then re-run with --confirm-backup (or switch to target_mode: upsert)",
+		Remedy:   "back up the target, then re-run with --confirm-backup (on 'dmt resume' use --skip-preflight backup instead), or switch to target_mode: upsert",
 	}}
 }
 

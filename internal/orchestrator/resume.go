@@ -50,10 +50,19 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		return err
 	}
 
-	// Validate config hash if stored (prevents resuming with different config)
+	// Validate config hash if stored (prevents resuming with different config).
+	// configVerified is true only when a stored hash is present AND matches the
+	// current config — positive proof that the table set / target mode we're
+	// about to run is the one that created the target. It gates the
+	// backup-acknowledgment suppression below (#623): a missing hash (legacy
+	// run) or a --force-resume past a mismatch can't prove ownership of the
+	// current target tables, so those resumes keep the gate.
+	configVerified := false
 	if run.ConfigHash != "" {
 		currentHash := computeConfigHash(o.config)
-		if run.ConfigHash != currentHash {
+		if run.ConfigHash == currentHash {
+			configVerified = true
+		} else {
 			if !o.opts.ForceResume {
 				return fmt.Errorf("config changed since run started (hash %s != %s), use --force-resume to override",
 					run.ConfigHash, currentHash)
@@ -147,7 +156,16 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	// --skip-preflight if they know what they're doing. #228.
 	o.setPhase("preflight")
 	logging.Debug("Running preflight checks...")
-	if err := o.runPreFlight(ctx); err != nil {
+	// Suppress the backup-acknowledgment gate only when the config is verified
+	// AND this run created the target tables (reached transfer) — then the
+	// target's contents are this run's own output and resuming is the
+	// acknowledgment (#623). A run killed before transfer, an unverified/legacy
+	// config, or a drifted --force-resume still faces the gate and can't silently
+	// drop_recreate over pre-existing, unacknowledged target data. And even when
+	// the gate does fire on a resume, its remedy now names --skip-preflight
+	// backup, so the operator is never dead-ended on a flag `resume` lacks.
+	resumeOwnsTarget := configVerified && o.runReachedTransfer(run.ID)
+	if err := o.runPreFlight(ctx, resumeOwnsTarget); err != nil {
 		// A pre-transfer preflight failure is environmental (target
 		// unreachable, privileges revoked, connection headroom held by
 		// another process) — the operator is expected to fix it and retry.
