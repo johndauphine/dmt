@@ -95,6 +95,7 @@ type writeAck struct {
 	seq      int64
 	lastPK   any
 	rowNum   int64
+	rows     int64 // chunk row count, accumulated into rows_done in ack order (#632)
 }
 
 type readerCheckpointState struct {

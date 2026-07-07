@@ -360,6 +360,7 @@ func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
 			seq:      ack.Seq,
 			lastPK:   ack.LastPK,
 			rowNum:   ack.RowNum,
+			rows:     ack.Rows,
 		})
 	})
 }
