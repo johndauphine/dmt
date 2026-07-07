@@ -141,6 +141,29 @@ func TestBackupAcknowledgmentRequired(t *testing.T) {
 				ConfirmBackup: true,
 			},
 		},
+		{
+			// #623: a resume that owns the target (its run created the
+			// tables) must not fire the gate — that data is the run's own
+			// output, and `resume` has no --confirm-backup flag to satisfy it.
+			name: "resume that owns target skipped even without confirmation",
+			req: driver.PreFlightRequest{
+				Side:             driver.PreFlightSideTarget,
+				TargetMode:       "drop_recreate",
+				ResumeOwnsTarget: true,
+			},
+		},
+		{
+			// A resume that doesn't own the target (killed before it created
+			// tables, or a drifted --force-resume) has acknowledged nothing —
+			// the gate must still fire so an unconfirmed drop_recreate can't
+			// destroy pre-existing data.
+			name: "resume that doesn't own target still gated",
+			req: driver.PreFlightRequest{
+				Side:       driver.PreFlightSideTarget,
+				TargetMode: "drop_recreate",
+			},
+			want: true,
+		},
 	}
 
 	for _, tc := range tests {

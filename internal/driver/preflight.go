@@ -60,6 +60,22 @@ type PreFlightRequest struct {
 	// target-side check emits a SeverityError finding if any table in the
 	// target schema is non-empty (#228 backup-acknowledgment).
 	ConfirmBackup bool
+
+	// ResumeOwnsTarget is true when preflight runs for a `dmt resume` whose run
+	// already reached the transfer phase against a matching config. In that case
+	// the target's tables were (re)created by this very run, so its non-empty
+	// tables are the run's own output and the backup-acknowledgment gate must
+	// not fire: resuming is the acknowledgment, and `resume` has no
+	// --confirm-backup flag to satisfy it (#623).
+	//
+	// The orchestrator sets it deliberately narrowly (see runReachedTransfer and
+	// the config-drift guard in Resume): a run killed before it created any
+	// target tables — or a --force-resume against a drifted config whose table
+	// set may not match the target — has NOT acknowledged the current target
+	// contents, so its resume still faces the gate rather than silently
+	// drop_recreate-ing over pre-existing data. Only meaningful when
+	// Side == target.
+	ResumeOwnsTarget bool
 }
 
 // PreFlightFinding is one observation from a preflight check — either OK

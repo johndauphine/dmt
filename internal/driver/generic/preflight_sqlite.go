@@ -144,7 +144,7 @@ func sqliteCheckBackupAck(ctx context.Context, db *sql.DB, req driver.PreFlightR
 				Check:    "backup.acknowledgment",
 				Side:     req.Side,
 				Message:  fmt.Sprintf("target SQLite file has non-empty table %q (%d rows); drop_recreate will destroy this data", name, n),
-				Remedy:   "back up the .db file, then re-run with --confirm-backup (or switch to target_mode: upsert)",
+				Remedy:   "back up the .db file, then re-run with --confirm-backup (on 'dmt resume' use --skip-preflight backup instead), or switch to target_mode: upsert",
 			}}
 		}
 	}
