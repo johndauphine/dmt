@@ -150,6 +150,12 @@ type WriteAck struct {
 	Seq      int64
 	LastPK   any
 	RowNum   int64
+	// Rows is the chunk's row count. Checkpoint coordinators accumulate
+	// rows_done from acks applied in sequence order — not from the pool's
+	// write-attempt counter — so persisted progress never counts rows beyond
+	// the watermark saved alongside it, which a retry would replay and
+	// count again (#632).
+	Rows int64
 }
 
 // WriteFunc is the function signature for executing a write operation.
@@ -324,6 +330,7 @@ func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context)
 				Seq:      job.Seq,
 				LastPK:   job.LastPK,
 				RowNum:   job.RowNum,
+				Rows:     rowCount,
 			}
 			select {
 			case wp.ackChan <- ack:
@@ -415,11 +422,6 @@ func (wp *WriterPool) WriteTime() time.Duration {
 // Written returns the total rows written.
 func (wp *WriterPool) Written() int64 {
 	return atomic.LoadInt64(&wp.totalWritten)
-}
-
-// TotalWrittenPtr returns a pointer to the total written counter for external access.
-func (wp *WriterPool) TotalWrittenPtr() *int64 {
-	return &wp.totalWritten
 }
 
 // Acks returns the ack channel for checkpoint coordination.

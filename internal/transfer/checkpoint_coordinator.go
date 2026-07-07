@@ -1,8 +1,6 @@
 package transfer
 
 import (
-	"sync/atomic"
-
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
@@ -46,18 +44,25 @@ type keysetCheckpointCoordinator struct {
 	partitionID    *int
 	rowsTotal      int64
 	resumeRowsDone int64
-	totalWritten   *int64
 	checkpointFreq func() int
 
 	states          []readerCheckpointState
 	completedChunks int
+
+	// ackedRows counts rows from acks applied in sequence order — exactly
+	// the rows the persisted range watermarks cover. The pool's write
+	// counter must NOT feed rows_done: it runs ahead of the watermark
+	// (writers count a chunk before its ack is sequenced), and rows counted
+	// beyond the watermark are replayed and counted again on retry,
+	// inflating rows_done past the real table count (#632).
+	ackedRows int64
 }
 
 // completed marks ranges already finished by a previous run segment
 // (#464 resume); nil means a fresh transfer with no completed ranges. saver
 // is the persistence sink for periodic checkpoints — the runner passes an
 // asyncSaver so these mid-transfer saves don't stall ack processing (#620).
-func newKeysetCheckpointCoordinator(saver ProgressSaver, job Job, pkRanges []pkRange, completed []bool, resumeRowsDone int64, totalWritten *int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
+func newKeysetCheckpointCoordinator(saver ProgressSaver, job Job, pkRanges []pkRange, completed []bool, resumeRowsDone int64, checkpointFreq func() int) *keysetCheckpointCoordinator {
 	if saver == nil || job.TaskID <= 0 {
 		return nil
 	}
@@ -98,7 +103,6 @@ func newKeysetCheckpointCoordinator(saver ProgressSaver, job Job, pkRanges []pkR
 		partitionID:    partID,
 		rowsTotal:      rowsTotal,
 		resumeRowsDone: resumeRowsDone,
-		totalWritten:   totalWritten,
 		checkpointFreq: checkpointFreq,
 		states:         states,
 	}
@@ -114,6 +118,7 @@ func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 	state := &c.states[ack.readerID]
 	state.seq.feed(ack, func(a writeAck) {
 		c.applyAck(state, a)
+		c.ackedRows += a.rows
 		c.completedChunks++
 		freq := c.checkpointFreq()
 		if freq <= 0 {
@@ -122,7 +127,7 @@ func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 		if c.completedChunks%freq == 0 {
 			safeLastPK := c.safeCheckpoint()
 			if safeLastPK != nil {
-				rowsDone := c.resumeRowsDone + atomic.LoadInt64(c.totalWritten)
+				rowsDone := c.resumeRowsDone + c.ackedRows
 				if err := c.saver.SaveProgress(c.taskID, c.tableName, c.partitionID, safeLastPK, rowsDone, c.rowsTotal, encodeKeysetRangeState(c.states)); err != nil {
 					logging.Warn("Checkpoint save failed for %s: %v", c.tableName, err)
 				}
@@ -184,15 +189,20 @@ type rowNumberCheckpointCoordinator struct {
 	partitionID    *int
 	rowsTotal      int64
 	resumeRowsDone int64
-	written        func() int64
 	checkpointFreq func() int
 
 	seq             ackSequencer
 	completedChunks int
 	lastRowNum      int64
+
+	// ackedRows counts rows from acks applied in sequence order — the rows
+	// the persisted lastRowNum watermark covers. See the keyset
+	// coordinator's field for why the pool's write counter must not feed
+	// rows_done (#632).
+	ackedRows int64
 }
 
-func newRowNumberCheckpointCoordinator(saver ProgressSaver, job Job, partitionID *int, rowsTotal, initialRowNum, resumeRowsDone int64, written func() int64, checkpointFreq func() int) *rowNumberCheckpointCoordinator {
+func newRowNumberCheckpointCoordinator(saver ProgressSaver, job Job, partitionID *int, rowsTotal, initialRowNum, resumeRowsDone int64, checkpointFreq func() int) *rowNumberCheckpointCoordinator {
 	if saver == nil || job.TaskID <= 0 {
 		return nil
 	}
@@ -206,7 +216,6 @@ func newRowNumberCheckpointCoordinator(saver ProgressSaver, job Job, partitionID
 		partitionID:    partitionID,
 		rowsTotal:      rowsTotal,
 		resumeRowsDone: resumeRowsDone,
-		written:        written,
 		checkpointFreq: checkpointFreq,
 		lastRowNum:     initialRowNum,
 	}
@@ -218,13 +227,14 @@ func (c *rowNumberCheckpointCoordinator) onAck(ack writeAck) {
 	}
 	c.seq.feed(ack, func(a writeAck) {
 		c.lastRowNum = a.rowNum
+		c.ackedRows += a.rows
 		c.completedChunks++
 		freq := c.checkpointFreq()
 		if freq <= 0 {
 			freq = 10
 		}
 		if c.completedChunks%freq == 0 {
-			rowsDone := c.resumeRowsDone + c.written()
+			rowsDone := c.resumeRowsDone + c.ackedRows
 			if err := c.saver.SaveProgress(c.taskID, c.tableName, c.partitionID, c.lastRowNum, rowsDone, c.rowsTotal, ""); err != nil {
 				logging.Warn("Checkpoint save failed for %s: %v", c.tableName, err)
 			}

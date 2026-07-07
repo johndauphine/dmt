@@ -87,6 +87,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A successful timeout retry no longer inflates persisted checkpoint
+  `rows_done` — and with it run summaries, `status`/`history` output,
+  notifications, and tuning throughput rows (observed: SO2010 `Posts`
+  over-reported by 67,289 rows after two COPY timeout retries, while the
+  target data itself was correct and validation passed). Checkpoint
+  coordinators previously derived `rows_done` from the writer pool's
+  write-attempt counter, which runs ahead of the persisted watermark; rows
+  counted beyond the watermark were replayed on retry and counted twice.
+  Progress is now accumulated from write acks applied in sequence order, so
+  every checkpoint's `rows_done` exactly matches the watermark/range state
+  saved alongside it. Source row-count estimates are still treated as
+  estimates — nothing is clamped to `rows_total` (#632).
+
 - `dmt resume` no longer dead-ends on the `drop_recreate` backup-acknowledgment
   preflight gate. Resuming an interrupted run legitimately finds the run's own
   partial data in the target, which tripped the gate — and its remedy named

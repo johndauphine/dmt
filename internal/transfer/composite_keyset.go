@@ -116,8 +116,8 @@ func executeCompositeKeysetPagination(
 		colSRIDs:        colSRIDs,
 		idempotentOnDup: idempotentOnDup,
 		resumeRowsDone:  resumeRowsDone,
-		newAckHandler: func(wp *writerPool, cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
-			coord = newCompositeCheckpointCoordinator(saver, job, partitionID, partitionRows, resumeRowsDone, wp.written, cb.checkpointFreq)
+		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+			coord = newCompositeCheckpointCoordinator(saver, job, partitionID, partitionRows, resumeRowsDone, cb.checkpointFreq)
 			if coord == nil {
 				return nil
 			}
@@ -266,15 +266,19 @@ type compositeCheckpointCoordinator struct {
 	partitionID    *int
 	rowsTotal      int64
 	resumeRowsDone int64
-	written        func() int64
 	checkpointFreq func() int
 
 	seq             ackSequencer
 	completedChunks int
 	lastTuple       []any
+
+	// ackedRows counts rows from acks applied in sequence order — the rows
+	// the persisted tuple watermark covers. See the keyset coordinator's
+	// field for why the pool's write counter must not feed rows_done (#632).
+	ackedRows int64
 }
 
-func newCompositeCheckpointCoordinator(saver ProgressSaver, job Job, partitionID *int, rowsTotal, resumeRowsDone int64, written func() int64, checkpointFreq func() int) *compositeCheckpointCoordinator {
+func newCompositeCheckpointCoordinator(saver ProgressSaver, job Job, partitionID *int, rowsTotal, resumeRowsDone int64, checkpointFreq func() int) *compositeCheckpointCoordinator {
 	if saver == nil || job.TaskID <= 0 {
 		return nil
 	}
@@ -288,7 +292,6 @@ func newCompositeCheckpointCoordinator(saver ProgressSaver, job Job, partitionID
 		partitionID:    partitionID,
 		rowsTotal:      rowsTotal,
 		resumeRowsDone: resumeRowsDone,
-		written:        written,
 		checkpointFreq: checkpointFreq,
 	}
 }
@@ -301,13 +304,14 @@ func (c *compositeCheckpointCoordinator) onAck(ack writeAck) {
 		if t, ok := a.lastPK.([]any); ok {
 			c.lastTuple = t
 		}
+		c.ackedRows += a.rows
 		c.completedChunks++
 		freq := c.checkpointFreq()
 		if freq <= 0 {
 			freq = 10
 		}
 		if c.completedChunks%freq == 0 && c.lastTuple != nil {
-			rowsDone := c.resumeRowsDone + c.written()
+			rowsDone := c.resumeRowsDone + c.ackedRows
 			if err := c.saver.SaveProgress(c.taskID, c.tableName, c.partitionID, c.lastTuple, rowsDone, c.rowsTotal, encodeCompositeTuple(c.lastTuple)); err != nil {
 				logging.Warn("Checkpoint save failed for %s: %v", c.tableName, err)
 			}

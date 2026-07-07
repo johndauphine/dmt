@@ -27,9 +27,9 @@ func TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleProgress(t *
 	ctx := context.Background()
 	runID := "run-388"
 
-	src := newRowNumberResumeSQLiteReader(t, "source")
+	src := newSQLiteTestReader(t, "source")
 	defer src.Close()
-	tgt := newRowNumberResumeSQLiteWriter(t, "target")
+	tgt := newSQLiteTestWriter(t, "target")
 	defer tgt.Close()
 
 	table := rowNumberResumeTable()
@@ -137,9 +137,9 @@ func TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleProgress(t *
 func TestRowNumberReadsPastEstimatedRowCount(t *testing.T) {
 	ctx := context.Background()
 
-	src := newRowNumberResumeSQLiteReader(t, "source")
+	src := newSQLiteTestReader(t, "source")
 	defer src.Close()
-	tgt := newRowNumberResumeSQLiteWriter(t, "target")
+	tgt := newSQLiteTestWriter(t, "target")
 	defer tgt.Close()
 
 	table := rowNumberResumeTable()
@@ -172,9 +172,9 @@ func TestRowNumberReadsPastEstimatedRowCount(t *testing.T) {
 func TestRowNumberReplayPossibleEnablesIdempotentWritesWithoutResume(t *testing.T) {
 	ctx := context.Background()
 
-	src := newRowNumberResumeSQLiteReader(t, "source")
+	src := newSQLiteTestReader(t, "source")
 	defer src.Close()
-	tgt := newRowNumberResumeSQLiteWriter(t, "target")
+	tgt := newSQLiteTestWriter(t, "target")
 	defer tgt.Close()
 
 	table := rowNumberResumeTable()
@@ -263,7 +263,7 @@ func rowNumberResumeJob(table source.Table, taskID int64, saver ProgressSaver, p
 	}
 }
 
-func newRowNumberResumeSQLiteReader(t *testing.T, name string) driver.Reader {
+func newSQLiteTestReader(t *testing.T, name string) driver.Reader {
 	t.Helper()
 	reader, err := generic.NewReader(mustCatalog(t),
 		&dbconfig.SourceConfig{
@@ -279,7 +279,7 @@ func newRowNumberResumeSQLiteReader(t *testing.T, name string) driver.Reader {
 	return reader
 }
 
-func newRowNumberResumeSQLiteWriter(t *testing.T, name string) driver.Writer {
+func newSQLiteTestWriter(t *testing.T, name string) driver.Writer {
 	t.Helper()
 	typeMapper, err := driver.GetTypeMapper(driver.UnmappedActionFail, "")
 	if err != nil {
@@ -304,12 +304,12 @@ func newRowNumberResumeSQLiteWriter(t *testing.T, name string) driver.Writer {
 	return writer
 }
 
-type rowNumberResumeSQLDB interface {
+type sqliteTestDB interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-func createRowNumberResumeTable(t *testing.T, ctx context.Context, db rowNumberResumeSQLDB) {
+func createRowNumberResumeTable(t *testing.T, ctx context.Context, db sqliteTestDB) {
 	t.Helper()
 	_, err := db.ExecContext(ctx, `
 		CREATE TABLE customer_orders (
@@ -325,7 +325,7 @@ func createRowNumberResumeTable(t *testing.T, ctx context.Context, db rowNumberR
 	}
 }
 
-func insertRowNumberResumeOrders(t *testing.T, ctx context.Context, db rowNumberResumeSQLDB, orders []rowNumberResumeOrder) {
+func insertRowNumberResumeOrders(t *testing.T, ctx context.Context, db sqliteTestDB, orders []rowNumberResumeOrder) {
 	t.Helper()
 	for _, order := range orders {
 		_, err := db.ExecContext(ctx,
@@ -338,7 +338,7 @@ func insertRowNumberResumeOrders(t *testing.T, ctx context.Context, db rowNumber
 	}
 }
 
-func assertRowNumberResumeTarget(t *testing.T, ctx context.Context, db rowNumberResumeSQLDB, want []rowNumberResumeOrder) {
+func assertRowNumberResumeTarget(t *testing.T, ctx context.Context, db sqliteTestDB, want []rowNumberResumeOrder) {
 	t.Helper()
 	rows, err := db.QueryContext(ctx, `
 		SELECT tenant, order_code, amount, note

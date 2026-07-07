@@ -134,12 +134,11 @@ type pipelineConfig struct {
 
 	resumeRowsDone int64
 
-	// newAckHandler builds the strategy's checkpoint ack handler once the
-	// writer pool exists (coordinators need wp counters). saver is the
-	// async persistence sink the runner owns (#620) — the coordinator uses
-	// it for periodic saves. Returning nil disables ack processing. Nil
-	// field means no checkpointing at all.
-	newAckHandler func(wp *writerPool, cb tunerCallbacks, saver ProgressSaver) func(writeAck)
+	// newAckHandler builds the strategy's checkpoint ack handler. saver is
+	// the async persistence sink the runner owns (#620) — the coordinator
+	// uses it for periodic saves. Returning nil disables ack processing.
+	// Nil field means no checkpointing at all.
+	newAckHandler func(cb tunerCallbacks, saver ProgressSaver) func(writeAck)
 
 	// saveFinal persists final progress after a successful drain. last is
 	// the last data chunk the consumer received (zero value if none).
@@ -295,7 +294,7 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 			asyncSv.start()
 			handlerSaver = asyncSv
 		}
-		if handler := pc.newAckHandler(wp, cb, handlerSaver); handler != nil {
+		if handler := pc.newAckHandler(cb, handlerSaver); handler != nil {
 			wp.startAckProcessor(handler)
 		}
 	}
