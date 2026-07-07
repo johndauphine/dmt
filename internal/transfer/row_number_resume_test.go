@@ -216,8 +216,12 @@ func rowNumberResumeTable() source.Table {
 		Schema: "main",
 		Name:   "customer_orders",
 		Columns: []source.Column{
-			{Name: "tenant", DataType: "varchar", MaxLength: 32, IsNullable: false, OrdinalPos: 1},
-			{Name: "order_code", DataType: "varchar", MaxLength: 32, IsNullable: false, OrdinalPos: 2},
+			// IsNullable true matches real sqlite introspection (pragma_table_info
+			// reports notnull=0 for PK columns not declared NOT NULL) and keeps
+			// this table on the ROW_NUMBER path this test pins — a NOT NULL
+			// text composite would route to tuple keyset instead (#629).
+			{Name: "tenant", DataType: "varchar", MaxLength: 32, IsNullable: true, OrdinalPos: 1},
+			{Name: "order_code", DataType: "varchar", MaxLength: 32, IsNullable: true, OrdinalPos: 2},
 			{Name: "amount", DataType: "integer", IsNullable: false, OrdinalPos: 3},
 			{Name: "note", DataType: "varchar", MaxLength: 64, IsNullable: false, OrdinalPos: 4},
 		},

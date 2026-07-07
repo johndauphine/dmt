@@ -64,7 +64,7 @@ func (t *Table) SupportsKeysetPagination() bool {
 		return false
 	}
 	pkType := strings.ToLower(t.PKColumns[0].DataType)
-	// SQL Server types
+	// SQL Server / MySQL types
 	if pkType == "int" || pkType == "bigint" || pkType == "smallint" || pkType == "tinyint" {
 		return true
 	}
@@ -83,38 +83,111 @@ func (t *Table) SupportsKeysetPagination() bool {
 	return false
 }
 
-// CompositeIntegerPK reports whether the table has a multi-column primary
-// key whose every component is an integer type (#616). Such tables can page
-// via tuple keyset — WHERE (a,b) > (?,?) ORDER BY a,b — instead of the slow
-// single-reader ROW_NUMBER fallback. Restricting to integer components keeps
-// it safe across engines: no text collation to disagree with byte order, and
-// integers always have MIN/MAX/ordering support. Composite keys with any
-// non-integer component stay on ROW_NUMBER.
-func (t *Table) CompositeIntegerPK() bool {
-	if len(t.PKColumns) < 2 {
+// tupleKeysetTextTypes are text-family column types whose keyset comparison
+// is collation-consistent (#629): the pagination query runs entirely on the
+// source, the comparison and ORDER BY both resolve to the column's implicit
+// collation, and PK uniqueness is enforced under that same collation — so
+// two distinct PK values can never compare equal and strict-`>` paging can
+// neither skip nor duplicate rows. Empirically verified on MySQL 8
+// (utf8mb4_0900_ai_ci) and PostgreSQL with dmt's exact driver stack.
+//
+// Deliberately absent: mssql "varchar"/"char"/"text" — Go strings bind as
+// nvarchar there, and under legacy SQL_* collations the column's non-Unicode
+// ORDER BY can disagree with the Unicode comparison rules applied after the
+// implicit varchar→nvarchar conversion, which is silent-row-loss territory.
+// On mssql only the nvarchar/nchar types (Unicode on both sides) qualify;
+// see tupleKeysetSafeComponent.
+var tupleKeysetTextTypes = map[string]bool{
+	"varchar": true, "character varying": true, "char": true, "character": true,
+	"bpchar": true, "nvarchar": true, "nchar": true, "text": true,
+	"tinytext": true, "mediumtext": true, "longtext": true, "clob": true,
+}
+
+// tupleKeysetScalarTypes are non-integer, non-text types that are safe tuple
+// components (#629): they order identically on both sides of the comparison
+// with no collation involvement, scan as JSON-round-trippable Go values with
+// dmt's drivers (uuid/decimal → string or []byte-normalized-to-string), and
+// have no ValueConverter registered. Date/time types stay off this list:
+// cross-engine timezone, affinity, and driver time.Time binding semantics can
+// make ORDER BY and the bound-watermark comparison disagree.
+var tupleKeysetScalarTypes = map[string]bool{
+	"uuid":    true,
+	"decimal": true, "numeric": true, "number": true,
+}
+
+// tupleKeysetSafeComponent reports whether one PK column is a safe tuple
+// keyset component on the given source engine (#616/#629).
+func tupleKeysetSafeComponent(c *Column, srcDBType string) bool {
+	// Non-null is required: SQLite permits NULL in PK columns unless
+	// declared NOT NULL, and a NULL watermark makes the tuple comparison
+	// (a,b) > (NULL,…) evaluate to NULL — matching no rows and silently
+	// truncating the transfer.
+	if c.IsNullable {
 		return false
 	}
-	for i := range t.PKColumns {
-		c := &t.PKColumns[i]
-		// Non-null is required: SQLite permits NULL in composite PK columns
-		// unless declared NOT NULL, and a NULL watermark makes the tuple
-		// comparison (a,b) > (NULL,…) evaluate to NULL — matching no rows and
-		// silently truncating the transfer. Such tables stay on ROW_NUMBER.
-		if !c.IsIntegerType() || c.IsNullable {
+	dt := strings.ToLower(c.DataType)
+
+	if c.IsIntegerType() {
+		// Only unsigned BIGINT is unsafe: it can hold values above
+		// math.MaxInt64 that scan as uint64, which database/sql rejects as
+		// a bound query parameter — so a tuple watermark there fails the
+		// next page. Narrower unsigned integers (INT/SMALLINT/… UNSIGNED,
+		// all ≤ 2^32) fit in int64 and stay eligible. MySQL reports
+		// DATA_TYPE "bigint" for BIGINT UNSIGNED, with the marker only in
+		// FullDataType.
+		if (dt == "bigint" || dt == "int8") && strings.Contains(strings.ToLower(c.FullDataType), "unsigned") {
 			return false
 		}
-		// Only unsigned BIGINT is unsafe: it can hold values above
-		// math.MaxInt64 that scan as uint64, which database/sql rejects as a
-		// bound query parameter — so a tuple watermark there fails the next
-		// page. Narrower unsigned integers (INT/SMALLINT/… UNSIGNED, all
-		// ≤ 2^32) fit in int64 and stay eligible. MySQL reports DATA_TYPE
-		// "bigint" for BIGINT UNSIGNED, with the marker only in FullDataType.
-		dt := strings.ToLower(c.DataType)
-		if (dt == "bigint" || dt == "int8") && strings.Contains(strings.ToLower(c.FullDataType), "unsigned") {
+		return true
+	}
+
+	if tupleKeysetTextTypes[dt] {
+		// mssql: Go strings bind as nvarchar; only Unicode column types
+		// compare under the same (Unicode) rules their ORDER BY uses.
+		// varchar/char under legacy SQL_* collations can sort differently
+		// non-Unicode vs Unicode, so they stay on ROW_NUMBER.
+		if strings.EqualFold(srcDBType, "mssql") {
+			return dt == "nvarchar" || dt == "nchar"
+		}
+		return true
+	}
+
+	return tupleKeysetScalarTypes[dt]
+}
+
+// TupleKeysetEligible reports whether this table's transfer should page via
+// tuple keyset — WHERE (a,…) > (?,…) ORDER BY a,… — instead of the slow
+// single-reader ROW_NUMBER fallback (#616/#629). It covers safe PK components
+// for both multi-column keys and single-column keys that are not already owned
+// by the legacy parallel range-split keyset path (SupportsKeysetPagination).
+func (t *Table) TupleKeysetEligible(srcDBType string) bool {
+	if len(t.PKColumns) == 0 {
+		return false
+	}
+	if t.SupportsKeysetPagination() {
+		return false // parallel integer path owns single-column integer PKs
+	}
+	for i := range t.PKColumns {
+		if !tupleKeysetSafeComponent(&t.PKColumns[i], srcDBType) {
 			return false
 		}
 	}
 	return true
+}
+
+// TupleKeysetRoutable is THE routing predicate for the tuple keyset path,
+// shared by transfer.Execute (strategy selection) and the orchestrator's
+// JobBuilder (partitioning): a table routes to tuple keyset only when it is
+// eligible AND the source engine's primary keys are unique
+// (SupportsCompositeKeyset — ClickHouse sorting keys are not). Using one
+// function in both places guarantees a tuple-paged table is never given
+// StartRow/EndRow ROW_NUMBER partitions the tuple reader cannot interpret.
+func TupleKeysetRoutable(t *Table, srcDBType string) bool {
+	if !t.TupleKeysetEligible(srcDBType) {
+		return false
+	}
+	d := GetDialect(srcDBType)
+	return d != nil && d.SupportsCompositeKeyset()
 }
 
 // GetPKColumn returns the PK column metadata if single-column PK.
@@ -157,8 +230,8 @@ type Column struct {
 
 // IsIntegerType returns true if the column is an integer type.
 func (c *Column) IsIntegerType() bool {
-	switch c.DataType {
-	case "int", "integer", "bigint", "smallint", "tinyint",
+	switch strings.ToLower(c.DataType) {
+	case "int", "integer", "bigint", "smallint", "tinyint", "mediumint",
 		"int2", "int4", "int8", "serial", "bigserial", "smallserial":
 		return true
 	}

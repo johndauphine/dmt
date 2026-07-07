@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
@@ -15,13 +18,20 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 )
 
-// executeCompositeKeysetPagination pages an all-integer composite-PK table
-// with tuple keyset — WHERE (a,b) > (?,?) ORDER BY a,b (#616). It is a single
-// reader (no range split): O(page) per query with an index, unlike the
-// ROW_NUMBER fallback whose window re-scans deepen with each chunk. Integer
-// components keep it collation-free and aggregate-free, so it is safe across
-// engines. Resume replays through duplicate-safe writes rather than a tuple
-// range-DELETE, which keeps target-side comparison out of the picture.
+// executeCompositeKeysetPagination pages a tuple-keyset-eligible table —
+// composite PKs and single-column tuple-safe PKs not owned by the legacy
+// parallel keyset path — with WHERE (a,…) > (?,…) ORDER BY a,… (#616/#629).
+// It is a single reader (no range split): O(page) per query with an index,
+// unlike the ROW_NUMBER
+// fallback whose window re-scans deepen with each chunk. It never issues a
+// MIN()/MAX() boundary query (the first chunk reads unbounded), so types
+// without those aggregates (pg uuid) work. Eligible component types are
+// vetted per engine in driver.tupleKeysetSafeComponent — collation-consistent
+// text, uuid, decimal, and int64-safe integers. Date/time types stay on
+// ROW_NUMBER because their driver and engine-specific binding semantics can
+// make ORDER BY and the bound-watermark comparison disagree. Resume replays
+// through duplicate-safe writes rather than a tuple range-DELETE, which keeps
+// target-side comparison (and target collation) out of the picture entirely.
 func executeCompositeKeysetPagination(
 	ctx context.Context,
 	srcPool pool.SourcePool,
@@ -84,6 +94,7 @@ func executeCompositeKeysetPagination(
 		job:         job,
 		pkCols:      job.Table.PrimaryKey,
 		pkIdxs:      pkIdxs,
+		srcDBType:   srcPool.DBType(),
 		valueConvs:  valueConvs,
 		convIdx:     convIdx,
 		numCols:     len(cols),
@@ -136,6 +147,7 @@ type compositeKeysetProducer struct {
 	job        Job
 	pkCols     []string
 	pkIdxs     []int
+	srcDBType  string
 	valueConvs []func(any) any
 	convIdx    []int
 	numCols    int
@@ -195,11 +207,12 @@ func (p *compositeKeysetProducer) produce(ctx context.Context, env pipelineEnv, 
 			return
 		}
 
-		// Extract the watermark tuple from the last row.
+		// Extract the watermark tuple from the last row, normalizing each
+		// component to a JSON-round-trippable, bind-safe Go value (#629).
 		lastRow := chunk[len(chunk)-1]
 		newTuple := make([]any, len(p.pkIdxs))
 		for i, idx := range p.pkIdxs {
-			newTuple[i] = lastRow[idx]
+			newTuple[i] = normalizeTupleValue(lastRow[idx], p.srcDBType)
 		}
 
 		reserved, ok := env.acquireMem(ctx, chunkBytes)
@@ -309,21 +322,138 @@ func (c *compositeCheckpointCoordinator) finalTuple(fallback []any) []any {
 	return c.lastTuple
 }
 
-// encodeCompositeTuple / decodeCompositeTuple round-trip an integer PK tuple
-// through JSON while preserving int64 precision (json.Number, like the #464
-// per-range watermark decode) — a plain unmarshal into []any yields float64,
-// which rounds BIGINT keys past 2^53 and could shift the resume watermark.
+// normalizeTupleValue converts a scanned PK component into the canonical Go
+// value the tuple path uses for watermarks (#629). Non-SQLite []byte values
+// become strings: MySQL text/decimal scan as []byte, which go-mssqldb would
+// bind back as varbinary and which must compare under the source column type.
+// SQLite keeps []byte as []byte, because a BLOB storage-class value in a
+// text-affinity PK must bind back as BLOB for ORDER BY and strict-`>` to agree.
+func normalizeTupleValue(v any, srcDBType string) any {
+	if b, ok := v.([]byte); ok {
+		if strings.EqualFold(srcDBType, "sqlite") {
+			return b
+		}
+		return string(b)
+	}
+	return v
+}
+
+// convertersTouchPK reports whether the source dialect registers a value
+// converter (#477) for any primary-key column (#629). The watermark tuple is
+// extracted after converters run, so a converter-rewritten PK value (e.g.
+// mssql uniqueidentifier []byte→string, or the datetime family's pre-year-1
+// →nil) may no longer match the source column — such tables must stay on
+// ROW_NUMBER. The static type allowlist already excludes today's converter
+// types; this runtime gate keeps the invariant if catalogs ever grow custom
+// converters.
+func convertersTouchPK(d driver.Dialect, cols, colTypes []string, targetDBType string, pkCols []string) bool {
+	if d == nil {
+		return true // no dialect → cannot verify → be safe
+	}
+	convs := d.ValueConverters(colTypes, targetDBType)
+	for _, pk := range pkCols {
+		for i, c := range cols {
+			if c == pk {
+				if i < len(convs) && convs[i] != nil {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
+}
+
+// Tuple watermark persistence (#616/#629). The range_state column stores the
+// tuple as a JSON array of type-tagged components so every eligible PK type
+// round-trips exactly through a crash-resume:
+//
+//	{"t":"i","v":123}                          int64 (json.Number decode — a
+//	                                           plain unmarshal yields float64,
+//	                                           rounding BIGINT past 2^53)
+//	{"t":"s","v":"abc"}                        UTF-8 string (text/uuid/decimal)
+//	{"t":"rs","v":"..."}                       raw string bytes for invalid
+//	                                           UTF-8 SQLite TEXT values
+//	{"t":"b","v":"..."}                        []byte for SQLite BLOB
+//	                                           storage-class PK values
+//	{"t":"tm","v":"2024-01-15T10:30:00.5Z"}    time.Time (RFC3339Nano —
+//	                                           preserves the instant; decode
+//	                                           yields a time.Time that binds
+//	                                           natively, avoiding string-
+//	                                           format pitfalls per engine)
+//	{"t":"f","v":1.5}                          float64 (sqlite NUMERIC-affinity
+//	                                           scans; float64 IS the stored
+//	                                           value there, so it is exact)
+//
+// decode also accepts the legacy pre-#629 format — a plain array of numbers
+// (integer-composite checkpoints written by PR #628) — so an in-flight
+// migration resumes across the upgrade.
+const (
+	tupleTagInt       = "i"
+	tupleTagString    = "s"
+	tupleTagRawString = "rs"
+	tupleTagBytes     = "b"
+	tupleTagTime      = "tm"
+	tupleTagFloat     = "f"
+)
+
+type tupleComponentJSON struct {
+	T string          `json:"t"`
+	V json.RawMessage `json:"v"`
+}
+
+// encodeCompositeTuple renders a watermark tuple for persistence. Returns ""
+// when the tuple is empty or holds a type the codec cannot round-trip
+// exactly — the checkpoint row then carries only the legacy last_pk column,
+// and resume degrades to its float64/string fallback rather than persisting
+// a value that would decode wrong.
 func encodeCompositeTuple(tuple []any) string {
 	if len(tuple) == 0 {
 		return ""
 	}
-	b, err := json.Marshal(tuple)
+	wire := make([]tupleComponentJSON, len(tuple))
+	for i, v := range tuple {
+		var tag string
+		var val any
+		switch x := v.(type) {
+		case int64:
+			tag, val = tupleTagInt, x
+		case int32:
+			tag, val = tupleTagInt, int64(x)
+		case int:
+			tag, val = tupleTagInt, int64(x)
+		case string:
+			if utf8.ValidString(x) {
+				tag, val = tupleTagString, x
+			} else {
+				tag, val = tupleTagRawString, base64.StdEncoding.EncodeToString([]byte(x))
+			}
+		case []byte:
+			tag, val = tupleTagBytes, base64.StdEncoding.EncodeToString(x)
+		case time.Time:
+			tag, val = tupleTagTime, x.Format(time.RFC3339Nano)
+		case float64:
+			tag, val = tupleTagFloat, x
+		default:
+			return "" // unknown component type — fall back to legacy last_pk
+		}
+		raw, err := json.Marshal(val)
+		if err != nil {
+			return ""
+		}
+		wire[i] = tupleComponentJSON{T: tag, V: raw}
+	}
+	b, err := json.Marshal(wire)
 	if err != nil {
 		return ""
 	}
 	return string(b)
 }
 
+// decodeCompositeTuple parses a persisted watermark tuple; nil for empty,
+// malformed, or foreign input (e.g. the integer-keyset per-range watermark
+// blob, which also lives in range_state but is an array of objects without
+// a "t" tag).
 func decodeCompositeTuple(s string) []any {
 	if s == "" {
 		return nil
@@ -336,13 +466,90 @@ func decodeCompositeTuple(s string) []any {
 	}
 	out := make([]any, len(raw))
 	for i, v := range raw {
-		if n, ok := v.(json.Number); ok {
-			if iv, err := n.Int64(); err == nil {
-				out[i] = iv
-				continue
+		switch x := v.(type) {
+		case map[string]any:
+			comp, ok := decodeTupleComponent(x)
+			if !ok {
+				return nil
 			}
+			out[i] = comp
+		case json.Number:
+			// Legacy #628 integer-composite format: plain number array.
+			iv, err := x.Int64()
+			if err != nil {
+				return nil
+			}
+			out[i] = iv
+		case string:
+			// Legacy defensive path: plain string component.
+			out[i] = x
+		default:
+			return nil
 		}
-		out[i] = v
 	}
 	return out
+}
+
+func decodeTupleComponent(m map[string]any) (any, bool) {
+	tag, _ := m["t"].(string)
+	val, hasVal := m["v"]
+	if !hasVal {
+		return nil, false
+	}
+	switch tag {
+	case tupleTagInt:
+		n, ok := val.(json.Number)
+		if !ok {
+			return nil, false
+		}
+		iv, err := n.Int64()
+		if err != nil {
+			return nil, false
+		}
+		return iv, true
+	case tupleTagString:
+		s, ok := val.(string)
+		return s, ok
+	case tupleTagRawString:
+		s, ok := val.(string)
+		if !ok {
+			return nil, false
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, false
+		}
+		return string(b), true
+	case tupleTagBytes:
+		s, ok := val.(string)
+		if !ok {
+			return nil, false
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	case tupleTagTime:
+		s, ok := val.(string)
+		if !ok {
+			return nil, false
+		}
+		tm, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			return nil, false
+		}
+		return tm, true
+	case tupleTagFloat:
+		n, ok := val.(json.Number)
+		if !ok {
+			return nil, false
+		}
+		fv, err := n.Float64()
+		if err != nil {
+			return nil, false
+		}
+		return fv, true
+	}
+	return nil, false
 }

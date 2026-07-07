@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
@@ -212,16 +213,20 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 
 	// Print pagination strategy summary
 	keysetCount := 0
+	tupleCount := 0
 	rowNumberCount := 0
 	for _, t := range tables {
-		if t.SupportsKeysetPagination() {
+		switch {
+		case t.SupportsKeysetPagination():
 			keysetCount++
-		} else if t.HasPK() {
+		case driver.TupleKeysetRoutable(&t, o.sourcePool.DBType()):
+			tupleCount++
+		case t.HasPK():
 			rowNumberCount++
 		}
 	}
-	logging.Debug("Pagination: %d keyset, %d ROW_NUMBER, %d no PK",
-		keysetCount, rowNumberCount, len(tables)-keysetCount-rowNumberCount)
+	logging.Debug("Pagination: %d keyset, %d tuple keyset, %d ROW_NUMBER, %d no PK",
+		keysetCount, tupleCount, rowNumberCount, len(tables)-keysetCount-tupleCount-rowNumberCount)
 
 	// Send start notification
 	if o.config.Migration.NotifyOnStart() {

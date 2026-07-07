@@ -28,6 +28,22 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Keyset pagination now covers **single-column non-integer** primary keys
+  (varchar/text, uuid, decimal/numeric) and **mixed-type
+  composite** keys, not just integers — these tables previously fell back to
+  the slow ROW_NUMBER window. Per-engine safety is built in: comparisons run
+  under the source column's own collation (PK uniqueness under that same
+  collation makes strict-`>` paging airtight), no MIN()/MAX() aggregate is
+  ever issued (PostgreSQL `uuid` has none), crash-resume watermarks persist
+  type-tagged (BIGINT precision, MySQL's `[]byte` text scans, SQLite BLOB
+  storage-class keys, and invalid-UTF-8 SQLite TEXT keys all round-trip
+  exactly), and unsafe cases are excluded by design — SQL Server
+  `varchar`/`uniqueidentifier`/date-time PKs, ClickHouse non-unique keys,
+  nullable PK components, and `BIGINT UNSIGNED` stay on ROW_NUMBER. Verified
+  against live MySQL 8 (case-insensitive collation) and PostgreSQL
+  (uuid/numeric) including mid-transfer kill and resume (#629, follow-up to
+  #616/epic #621).
+
 - Tables with an **all-integer composite primary key** now page via tuple
   keyset (`WHERE (a,b) > (?,?) ORDER BY a,b`) instead of the slow ROW_NUMBER
   window that re-scans deeper prefixes each chunk. Restricted to integer,

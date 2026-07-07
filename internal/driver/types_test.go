@@ -40,6 +40,13 @@ func TestSupportsKeysetPagination(t *testing.T) {
 			},
 			expected: true,
 		},
+		{
+			name: "MySQL mediumint PK stays off legacy keyset",
+			table: Table{
+				PKColumns: []Column{{Name: "id", DataType: "mediumint", Scale: 0}},
+			},
+			expected: false,
+		},
 
 		// PostgreSQL types
 		{
@@ -390,7 +397,8 @@ func TestIsIntegerType(t *testing.T) {
 		{"double", false},
 		{"uuid", false},
 		{"timestamp", false},
-		{"INT", false}, // Uppercase - function is case-sensitive
+		{"INT", true},       // Case-insensitive (#629): readers lowercase DataType, but a future driver that does not must still classify integers correctly
+		{"mediumint", true}, // MySQL medium integer (#629)
 	}
 
 	for _, tt := range tests {
