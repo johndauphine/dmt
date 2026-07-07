@@ -149,16 +149,21 @@ func Execute(
 		return executeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeLastPK, resumeRowsDone, resumeRanges, targetTableName, tuner, adjuster)
 	}
 
-	// All-integer composite PKs page via tuple keyset instead of the slow
-	// ROW_NUMBER fallback (#616) — but only on engines whose primary keys
-	// are unique (SupportsCompositeKeyset); on non-unique-key engines like
-	// ClickHouse a duplicate tuple split across a chunk boundary could be
-	// skipped, so those keep ROW_NUMBER. The precise int64 watermark tuple
-	// is restored from the range_state column (the legacy last_pk column
+	// Tuple-safe PKs not owned by the legacy parallel keyset path page via
+	// tuple keyset instead of the slow ROW_NUMBER fallback (#616/#629) — but
+	// only on engines whose primary keys are unique (SupportsCompositeKeyset);
+	// on non-unique-key engines like ClickHouse a duplicate tuple split across
+	// a chunk boundary could be skipped, so those keep ROW_NUMBER. A
+	// ValueConverter on any PK column also forces ROW_NUMBER: the watermark is
+	// extracted after converters run, and a rewritten value may no longer
+	// match the source column (#629). The type-exact watermark tuple is
+	// restored from the range_state column (the legacy last_pk column
 	// round-trips through float64 and would lose BIGINT precision).
 	srcDialect := driver.GetDialect(srcPool.DBType())
-	if job.Table.CompositeIntegerPK() && srcDialect != nil && srcDialect.SupportsCompositeKeyset() {
+	if driver.TupleKeysetRoutable(&job.Table, srcPool.DBType()) &&
+		!convertersTouchPK(srcDialect, cols, colTypes, tgtPool.DBType(), job.Table.PrimaryKey) {
 		var resumeTuple []any
+		tupleResumeRowsDone := resumeRowsDone
 		if resumeLastPK != nil {
 			resumeTuple = decodeCompositeTuple(resumeCompositeRangeState)
 			if resumeTuple == nil {
@@ -168,8 +173,15 @@ func Execute(
 					resumeTuple = t
 				}
 			}
+			if resumeTuple == nil {
+				// Foreign checkpoints (for example pre-#629 ROW_NUMBER row
+				// offsets) are replayed from the start. Their rows_done value
+				// is not a tuple watermark position, so carrying it forward
+				// would overcount replay progress.
+				tupleResumeRowsDone = 0
+			}
 		}
-		return executeCompositeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeTuple, resumeRowsDone, targetTableName, tuner, adjuster)
+		return executeCompositeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeTuple, tupleResumeRowsDone, targetTableName, tuner, adjuster)
 	}
 
 	// Fall back to ROW_NUMBER pagination for non-integer composite PKs,

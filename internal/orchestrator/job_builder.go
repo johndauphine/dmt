@@ -229,16 +229,24 @@ func (b *JobBuilder) recordSourceHighWatermark(ctx context.Context, t *source.Ta
 	result.TableSyncWatermarks[t.Name] = *highWatermark
 }
 
-// usesCompositeKeyset reports whether table t will be paged by tuple keyset
-// (#616): an all-integer composite PK on a source engine whose primary keys
-// are unique. Mirrors the routing decision in transfer.Execute so job
-// partitioning and pagination stay consistent.
-func (b *JobBuilder) usesCompositeKeyset(t source.Table) bool {
-	if !t.CompositeIntegerPK() {
+// usesTupleKeyset reports whether table t will be paged by tuple keyset
+// (#616/#629): a composite PK or single-column non-integer PK of safe types
+// on a source engine whose primary keys are unique. It shares
+// driver.TupleKeysetRoutable with transfer.Execute so job partitioning and
+// pagination cannot diverge. (Execute additionally applies a runtime
+// converter-touches-PK gate that can only narrow further — a table the
+// builder left unpartitioned then runs as a single ROW_NUMBER job, which is
+// slower but correct; the reverse divergence, tuple pagination over
+// ROW_NUMBER partitions, is impossible.)
+func (b *JobBuilder) usesTupleKeyset(t source.Table) bool {
+	if b.sourcePool == nil {
+		// Unit tests build a JobBuilder without a source pool; production
+		// always has one. ROW_NUMBER partitioning is the safe answer here —
+		// transfer.Execute (which requires a live pool) can only route to
+		// tuple keyset when this returned true, so no divergence is possible.
 		return false
 	}
-	d := driver.GetDialect(b.sourcePool.DBType())
-	return d != nil && d.SupportsCompositeKeyset()
+	return driver.TupleKeysetRoutable(&t, b.sourcePool.DBType())
 }
 
 // createJobsForTable creates transfer jobs for a single table.
@@ -254,7 +262,7 @@ func (b *JobBuilder) createJobsForTable(ctx context.Context, runID string, t sou
 	// exclusion only applies when the source engine actually uses tuple
 	// keyset (SupportsCompositeKeyset); on engines that keep ROW_NUMBER
 	// (e.g. ClickHouse), composite tables must retain their partitioning.
-	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.HasPK() && !b.usesCompositeKeyset(t) {
+	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.HasPK() && !b.usesTupleKeyset(t) {
 		return b.createRowNumberPartitionJobs(runID, t, dateFilter, result)
 	}
 

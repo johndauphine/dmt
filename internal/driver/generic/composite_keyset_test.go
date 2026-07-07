@@ -63,3 +63,45 @@ func argsEqual(a, b []any) bool {
 	}
 	return true
 }
+
+// TestBuildCompositeKeysetQuerySingleColumn pins the 1-tuple form used by
+// single-column non-integer keyset pagination (#629): a parenthesized single
+// expression for row-value engines and a bare comparison for the OR-chain.
+func TestBuildCompositeKeysetQuerySingleColumn(t *testing.T) {
+	tests := []struct {
+		engine    string
+		wantLower string
+		wantArgs  []any
+	}{
+		{"sqlite", `("code") > (?)`, []any{"abc", 500}},
+		{"postgres", `("code") > ($1)`, []any{"abc", 500}},
+		{"mysql", "(`code`) > (?)", []any{"abc", 500}},
+		{"mssql", `([code] > @p2)`, []any{500, "abc"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.engine, func(t *testing.T) {
+			cat, err := LoadCatalog(tc.engine)
+			if err != nil {
+				t.Fatalf("LoadCatalog: %v", err)
+			}
+			d := NewDialect(cat)
+			q := d.BuildCompositeKeysetQuery("code, payload", []string{"code"}, "s", "t", "", true, nil)
+			if !strings.Contains(q, tc.wantLower) {
+				t.Fatalf("query missing %q:\n%s", tc.wantLower, q)
+			}
+			args := d.BuildCompositeKeysetArgs([]any{"abc"}, 500, true, nil)
+			if !argsEqual(args, tc.wantArgs) {
+				t.Fatalf("args = %v, want %v", args, tc.wantArgs)
+			}
+			// Unbounded first chunk drops the comparison and its arg.
+			qu := d.BuildCompositeKeysetQuery("code, payload", []string{"code"}, "s", "t", "", false, nil)
+			if !strings.Contains(qu, "1=1") {
+				t.Fatalf("unbounded query missing 1=1: %s", qu)
+			}
+			au := d.BuildCompositeKeysetArgs([]any{"abc"}, 500, false, nil)
+			if len(au) != 1 || au[0] != 500 {
+				t.Fatalf("unbounded args = %v, want [500]", au)
+			}
+		})
+	}
+}
