@@ -173,7 +173,7 @@ func runKeysetForTest(t *testing.T, srcPool *keysetRuntimeSourcePool, tgtPool *k
 
 	numReaders := cfg.Migration.ParallelReaders
 	numRanges := keysetWorkRangeCount(minPKVal, maxPKVal, numReaders, chunkSize)
-	pkRanges := splitPKRange(minPKVal, maxPKVal, numRanges)
+	pkRanges := splitPKRange(minPKVal, maxPKVal, numRanges, true)
 
 	producer := &keysetProducer{
 		db:         srcPool.DB(),

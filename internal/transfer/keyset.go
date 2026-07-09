@@ -100,7 +100,7 @@ func executeKeysetPagination(
 		pkRanges, rangeCompleted = restoredPKRanges(resumeRanges, minPKVal)
 	} else {
 		numRanges := keysetWorkRangeCount(minPKVal, maxPKVal, numReaders, cfg.Migration.ChunkSize)
-		pkRanges = splitPKRange(minPKVal, maxPKVal, numRanges)
+		pkRanges = splitPKRange(minPKVal, maxPKVal, numRanges, resumeLastPK == nil)
 	}
 
 	producer := &keysetProducer{
@@ -202,8 +202,8 @@ func keysetWorkRangeCount(minPK, maxPK any, numReaders, chunkSize int) int {
 }
 
 // keysetProducer runs numReaders goroutines that pull PK sub-ranges from a
-// shared work queue (#615), each paginating its current range with
-// WHERE pk > last_pk AND pk <= range_max.
+// shared work queue (#615), each paginating its current range with an
+// explicit first-page lower-bound operator and pk <= range_max.
 type keysetProducer struct {
 	db         *sql.DB
 	dialect    driver.Dialect
@@ -258,7 +258,7 @@ func (p *keysetProducer) produce(ctx context.Context, env pipelineEnv, out chan<
 				// Single writer per index — each goroutine owns its slot.
 				p.rangesPerWorker[workerID]++
 				pkr := p.pkRanges[rangeID]
-				rows, ok := p.readRange(ctx, env, out, rangeID, pkr.minPK, pkr.maxPK)
+				rows, ok := p.readRange(ctx, env, out, rangeID, pkr)
 				p.rowsPerWorker[workerID] += rows
 				if !ok {
 					return
@@ -275,8 +275,9 @@ func (p *keysetProducer) produce(ctx context.Context, env pipelineEnv, out chan<
 // processed it. Returns false when the reader should stop pulling further
 // ranges (error sent or context cancelled), true when the range is done.
 // The first return is the number of rows read from this range.
-func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out chan<- chunkResult, rangeID int, rangeMinPK, rangeMaxPK any) (int64, bool) {
-	lastPK := rangeMinPK
+func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out chan<- chunkResult, rangeID int, pkr pkRange) (int64, bool) {
+	lastPK := pkr.minPK
+	inclusiveLowerBound := pkr.minInclusive
 	seq := int64(0)
 	var rowsRead int64
 
@@ -298,8 +299,8 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 		chunkSize := env.chunkSize()
 
 		// Always use bounded query for parallel readers
-		query := p.dialect.BuildKeysetQuery(p.colList, p.pkCol, p.job.Table.Schema, p.job.Table.Name, p.tableHint, true, p.job.DateFilter)
-		args := p.dialect.BuildKeysetArgs(lastPK, rangeMaxPK, chunkSize, true, p.job.DateFilter)
+		query := p.dialect.BuildKeysetQuery(p.colList, p.pkCol, p.job.Table.Schema, p.job.Table.Name, p.tableHint, true, inclusiveLowerBound, p.job.DateFilter)
+		args := p.dialect.BuildKeysetArgs(lastPK, pkr.maxPK, chunkSize, true, p.job.DateFilter)
 
 		// Time the query
 		queryStart := time.Now()
@@ -345,6 +346,7 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 		}
 		// Update lastPK for next iteration
 		lastPK = chunk[len(chunk)-1][p.pkIdx]
+		inclusiveLowerBound = false
 
 		var sendStart time.Time
 		if logging.IsDebug() {

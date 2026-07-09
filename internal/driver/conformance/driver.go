@@ -245,7 +245,7 @@ func runPaginationConformance(t *testing.T, d driver.Dialect, pc PaginationCase)
 	validatePaginationCase(t, pc)
 
 	t.Run("keyset without max pk", func(t *testing.T) {
-		gotQuery := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, pc.DateFilter)
+		gotQuery := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, false, pc.DateFilter)
 		assertSQL(t, gotQuery, pc.KeysetNoMaxQuery)
 
 		gotArgs := d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, false, pc.DateFilter)
@@ -253,11 +253,23 @@ func runPaginationConformance(t *testing.T, d driver.Dialect, pc PaginationCase)
 	})
 
 	t.Run("keyset with max pk", func(t *testing.T) {
-		gotQuery := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, pc.DateFilter)
+		gotQuery := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, false, pc.DateFilter)
 		assertSQL(t, gotQuery, pc.KeysetWithMaxQuery)
 
 		gotArgs := d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, true, pc.DateFilter)
 		assertArgs(t, gotArgs, pc.KeysetWithMaxArgs)
+	})
+
+	t.Run("keyset lower-bound semantics", func(t *testing.T) {
+		quotedPK := d.QuoteIdentifier(pc.PKColumn)
+		exclusive := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, false, pc.DateFilter)
+		inclusive := d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, true, pc.DateFilter)
+		if !strings.Contains(exclusive, quotedPK+" > ") {
+			t.Fatalf("exclusive query lacks strict lower bound for %s:\n%s", quotedPK, exclusive)
+		}
+		if !strings.Contains(inclusive, quotedPK+" >= ") {
+			t.Fatalf("inclusive query lacks inclusive lower bound for %s:\n%s", quotedPK, inclusive)
+		}
 	})
 
 	t.Run("row number", func(t *testing.T) {
@@ -279,16 +291,16 @@ func runPaginationConformance(t *testing.T, d driver.Dialect, pc PaginationCase)
 			args  []any
 		}{
 			{"keyset no max no date",
-				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, nil),
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, false, nil),
 				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, false, nil)},
 			{"keyset with max no date",
-				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, nil),
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, false, nil),
 				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, true, nil)},
 			{"keyset no max dated",
-				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, pc.DateFilter),
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, false, false, pc.DateFilter),
 				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, false, pc.DateFilter)},
 			{"keyset with max dated",
-				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, pc.DateFilter),
+				d.BuildKeysetQuery(pc.Columns, pc.PKColumn, pc.Schema, pc.Table, pc.TableHint, true, false, pc.DateFilter),
 				d.BuildKeysetArgs(pc.LastPK, pc.MaxPK, pc.Limit, true, pc.DateFilter)},
 			{"row number no date",
 				d.BuildRowNumberQuery(pc.Columns, pc.OrderBy, pc.Schema, pc.Table, pc.TableHint, nil),

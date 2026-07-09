@@ -38,7 +38,7 @@ pagination:
   keyset:
     query: |
       SELECT {columns} FROM {table}
-      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      WHERE {pk} {lower_op} {?}{max_pk_clause}{date_clause}
       ORDER BY {pk}
       LIMIT {?}
     max_pk_clause: " AND {pk} <= {?}"

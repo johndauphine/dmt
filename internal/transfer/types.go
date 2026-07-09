@@ -99,13 +99,14 @@ type writeAck struct {
 }
 
 type readerCheckpointState struct {
-	lastPK    any
-	maxPK     any // original range upper bound, persisted in range_state (#464)
-	lastPKInt int64
-	maxPKInt  int64
-	maxOK     bool
-	complete  bool
-	seq       ackSequencer // per-range ordered-ack delivery (#614)
+	lastPK          any
+	maxPK           any // original range upper bound, persisted in range_state (#464)
+	lastPKInclusive bool
+	lastPKInt       int64
+	maxPKInt        int64
+	maxOK           bool
+	complete        bool
+	seq             ackSequencer // per-range ordered-ack delivery (#614)
 }
 
 // writeResult holds the result of a parallel write operation
@@ -125,16 +126,19 @@ type TransferStats struct {
 
 // pkRange represents a primary key range for parallel reading
 type pkRange struct {
-	minPK any // inclusive (start from > minPK)
-	maxPK any // inclusive (read up to <= maxPK)
+	minPK        any  // lower bound
+	maxPK        any  // inclusive (read up to <= maxPK)
+	minInclusive bool // true only when the lower-bound row has not been acknowledged
 }
 
 // splitPKRange divides a PK range into n sub-ranges for parallel reading
-// Note: minPK should be the actual minimum PK value; this function handles
-// the decrement needed for the > comparison in WHERE clauses
-func splitPKRange(minPK, maxPK any, n int) []pkRange {
+// without inventing a predecessor sentinel for the first lower bound.
+// includeMin is true for fresh work and false for an acknowledged resume
+// watermark. Every later sub-range starts exclusively after the preceding
+// range's inclusive maximum.
+func splitPKRange(minPK, maxPK any, n int, includeMin bool) []pkRange {
 	if n <= 1 {
-		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
+		return []pkRange{{minPK: minPK, maxPK: maxPK, minInclusive: includeMin}}
 	}
 
 	// Convert to int64 for range splitting
@@ -148,7 +152,7 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 		minVal = v
 	default:
 		// Can't split non-integer PKs, use single range
-		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
+		return []pkRange{{minPK: minPK, maxPK: maxPK, minInclusive: includeMin}}
 	}
 
 	switch v := maxPK.(type) {
@@ -159,11 +163,11 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 	case int64:
 		maxVal = v
 	default:
-		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
+		return []pkRange{{minPK: minPK, maxPK: maxPK, minInclusive: includeMin}}
 	}
 
 	if maxVal <= minVal {
-		return []pkRange{{minPK: decrementPK(minPK), maxPK: maxPK}}
+		return []pkRange{{minPK: minPK, maxPK: maxPK, minInclusive: includeMin}}
 	}
 
 	totalRange := pkRangeDistance(minVal, maxVal)
@@ -177,7 +181,7 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 	for i := 0; i < n; i++ {
 		var rangeMin, rangeMax int64
 		if i == 0 {
-			rangeMin = decrementInt64PK(minVal) // First range: start before minVal for > comparison
+			rangeMin = minVal
 		} else {
 			rangeMin = addPKOffset(minVal, uint64(i)*rangeSize) // Subsequent ranges: start at boundary
 		}
@@ -186,8 +190,9 @@ func splitPKRange(minPK, maxPK any, n int) []pkRange {
 			rangeMax = maxVal // Last reader gets remainder
 		}
 		ranges = append(ranges, pkRange{
-			minPK: rangeMin,
-			maxPK: rangeMax,
+			minPK:        rangeMin,
+			maxPK:        rangeMax,
+			minInclusive: i == 0 && includeMin,
 		})
 	}
 
@@ -202,13 +207,6 @@ func addPKOffset(minVal int64, offset uint64) int64 {
 	return int64(uint64(minVal) + offset)
 }
 
-func decrementInt64PK(pk int64) int64 {
-	if pk == minInt64 {
-		return pk
-	}
-	return pk - 1
-}
-
 func (s *TransferStats) String() string {
 	total := s.QueryTime + s.ScanTime + s.WriteTime
 	if total == 0 {
@@ -219,33 +217,4 @@ func (s *TransferStats) String() string {
 		s.ScanTime.Seconds(), float64(s.ScanTime)/float64(total)*100,
 		s.WriteTime.Seconds(), float64(s.WriteTime)/float64(total)*100,
 		s.Rows)
-}
-
-// decrementPK returns a value less than the given PK value when one is representable.
-func decrementPK(pk any) any {
-	switch v := pk.(type) {
-	case int64:
-		return decrementInt64PK(v)
-	case int32:
-		if v == minInt32 {
-			return v
-		}
-		return v - 1
-	case int:
-		if v == minInt() {
-			return v
-		}
-		return v - 1
-	default:
-		return pk
-	}
-}
-
-const (
-	minInt64 = -1 << 63
-	minInt32 = -1 << 31
-)
-
-func minInt() int {
-	return -int(^uint(0)>>1) - 1
 }

@@ -81,13 +81,14 @@ func newKeysetCheckpointCoordinator(saver ProgressSaver, job Job, pkRanges []pkR
 	for i, pkr := range pkRanges {
 		states[i].lastPK = pkr.minPK
 		states[i].maxPK = pkr.maxPK
+		states[i].lastPKInclusive = pkr.minInclusive
 		if lastPKInt, ok := parseNumericPK(pkr.minPK); ok {
 			states[i].lastPKInt = lastPKInt
 		}
 		if maxPKInt, ok := parseNumericPK(pkr.maxPK); ok {
 			states[i].maxPKInt = maxPKInt
 			states[i].maxOK = true
-			if states[i].lastPKInt >= maxPKInt {
+			if !states[i].lastPKInclusive && states[i].lastPKInt >= maxPKInt {
 				states[i].complete = true
 			}
 		}
@@ -137,6 +138,7 @@ func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
 }
 
 func (c *keysetCheckpointCoordinator) applyAck(state *readerCheckpointState, ack writeAck) {
+	state.lastPKInclusive = false
 	if pkInt, ok := parseNumericPK(ack.lastPK); ok {
 		state.lastPK = ack.lastPK
 		state.lastPKInt = pkInt
@@ -155,6 +157,13 @@ func (c *keysetCheckpointCoordinator) safeCheckpoint() any {
 	idx := 0
 	for idx < len(c.states)-1 && c.states[idx].complete {
 		idx++
+	}
+	if c.states[idx].lastPKInclusive {
+		// A legacy last_pk has no inclusivity bit. Do not persist this fresh,
+		// unacknowledged bound as though it were an exclusive watermark: if
+		// range_state were later unavailable, resume would skip the bound row.
+		// This intentionally delays periodic saves until the first range acks.
+		return nil
 	}
 	return c.states[idx].lastPK
 }

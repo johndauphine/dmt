@@ -72,6 +72,7 @@ func (c *Catalog) Validate() error {
 	// mid-migration instead of at review time (#478).
 	k := c.Pagination.Keyset
 	require(k.Query != "", "pagination.keyset.query is required")
+	require(strings.Contains(k.Query, "{lower_op}"), "pagination.keyset.query must contain {lower_op}")
 	require(strings.Contains(k.Query, "{max_pk_clause}"), "pagination.keyset.query must contain {max_pk_clause}")
 	require(strings.Contains(k.Query, "{date_clause}"), "pagination.keyset.query must contain {date_clause}")
 	require(k.MaxPKClause != "", "pagination.keyset.max_pk_clause is required")

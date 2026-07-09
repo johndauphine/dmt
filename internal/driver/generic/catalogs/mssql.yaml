@@ -55,7 +55,7 @@ pagination:
     query: |
       SELECT TOP ({?}) {columns}
       FROM {table} {hint}
-      WHERE {pk} > {?}{max_pk_clause}{date_clause}
+      WHERE {pk} {lower_op} {?}{max_pk_clause}{date_clause}
       ORDER BY {pk}
     max_pk_clause: " AND {pk} <= {?}"
     # Rows with NULL dates are excluded (they haven't been modified).

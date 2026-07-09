@@ -11,7 +11,7 @@ import (
 
 func TestRangeStateRoundTrip(t *testing.T) {
 	states := []readerCheckpointState{
-		{lastPK: int64(500), maxPK: int64(1000), complete: false},
+		{lastPK: int64(500), maxPK: int64(1000), lastPKInclusive: true, complete: false},
 		{lastPK: "pk-abc", maxPK: "pk-zzz", complete: true},
 		{lastPK: int64(7), maxPK: nil, complete: false}, // unbounded final range
 	}
@@ -25,7 +25,7 @@ func TestRangeStateRoundTrip(t *testing.T) {
 	}
 	// Integer PKs round-trip as int64 (precision-preserving, unlike the
 	// legacy last_pk column's float64 convention — codex review).
-	if got[0].lastPK != int64(500) || got[0].maxPK != int64(1000) || got[0].complete {
+	if got[0].lastPK != int64(500) || got[0].maxPK != int64(1000) || !got[0].lastPKInclusive || got[0].complete {
 		t.Errorf("range 0 = %+v", got[0])
 	}
 	if got[1].lastPK != "pk-abc" || got[1].maxPK != "pk-zzz" || !got[1].complete {
@@ -56,7 +56,7 @@ func TestDecodeRangeStateMalformedFallsBackToLegacy(t *testing.T) {
 func TestRestoredPKRanges(t *testing.T) {
 	ranges, completed := restoredPKRanges([]resumeRange{
 		{lastPK: float64(50), maxPK: float64(50), complete: true},
-		{lastPK: nil, maxPK: float64(100)},
+		{lastPK: nil, maxPK: float64(100), lastPKInclusive: true},
 	}, int64(1))
 	if len(ranges) != 2 || len(completed) != 2 {
 		t.Fatalf("got %d ranges / %d flags", len(ranges), len(completed))
@@ -65,7 +65,7 @@ func TestRestoredPKRanges(t *testing.T) {
 		t.Errorf("range 0 = %+v completed=%v", ranges[0], completed[0])
 	}
 	// nil watermark falls back to the table minimum
-	if ranges[1].minPK != int64(1) || completed[1] {
+	if ranges[1].minPK != int64(1) || !ranges[1].minInclusive || completed[1] {
 		t.Errorf("range 1 = %+v completed=%v", ranges[1], completed[1])
 	}
 }

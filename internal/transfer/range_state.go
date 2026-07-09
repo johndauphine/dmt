@@ -14,9 +14,10 @@ import (
 // resumeRange is one PK range's restored progress, decoded from the
 // transfer_progress.range_state column.
 type resumeRange struct {
-	lastPK   any // watermark the range resumes after (the range's min when no chunk acked yet)
-	maxPK    any // original range upper bound (nil = unbounded)
-	complete bool
+	lastPK          any  // watermark or fresh lower bound
+	maxPK           any  // original range upper bound (nil = unbounded)
+	lastPKInclusive bool // true only when lastPK has not been transferred yet
+	complete        bool
 }
 
 // rangeProgressJSON is the wire form persisted in range_state. Values
@@ -24,9 +25,10 @@ type resumeRange struct {
 // so both paths share one type convention (numbers decode as float64 —
 // the same convention ProgressSaver.GetProgress has always used).
 type rangeProgressJSON struct {
-	Last     json.RawMessage `json:"last,omitempty"`
-	Max      json.RawMessage `json:"max,omitempty"`
-	Complete bool            `json:"complete,omitempty"`
+	Last      json.RawMessage `json:"last,omitempty"`
+	Max       json.RawMessage `json:"max,omitempty"`
+	Inclusive bool            `json:"inclusive,omitempty"`
+	Complete  bool            `json:"complete,omitempty"`
 }
 
 // encodeKeysetRangeState renders the coordinator's per-range states for
@@ -39,6 +41,7 @@ func encodeKeysetRangeState(states []readerCheckpointState) string {
 	wire := make([]rangeProgressJSON, len(states))
 	for i := range states {
 		wire[i].Complete = states[i].complete
+		wire[i].Inclusive = states[i].lastPKInclusive
 		if states[i].lastPK != nil {
 			b, err := json.Marshal(states[i].lastPK)
 			if err != nil {
@@ -76,6 +79,7 @@ func decodeKeysetRangeState(s string) []resumeRange {
 	for i, rp := range wire {
 		out[i].lastPK = decodePKValue(rp.Last)
 		out[i].maxPK = decodePKValue(rp.Max)
+		out[i].lastPKInclusive = rp.Inclusive
 		out[i].complete = rp.Complete
 	}
 	return out
@@ -121,7 +125,7 @@ func restoredPKRanges(resumeRanges []resumeRange, fallbackMin any) ([]pkRange, [
 		if start == nil {
 			start = fallbackMin
 		}
-		ranges[i] = pkRange{minPK: start, maxPK: rr.maxPK}
+		ranges[i] = pkRange{minPK: start, maxPK: rr.maxPK, minInclusive: rr.lastPKInclusive}
 		completed[i] = rr.complete
 	}
 	return ranges, completed
