@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 
@@ -56,13 +55,14 @@ func TestCreateRowNumberPartitionJobsClearsProgressWhenBoundariesShift(t *testin
 	}}
 	builder := &JobBuilder{state: state, config: cfg}
 
-	taskPrefix := "transfer:public.votes"
 	for partition := 1; partition <= 2; partition++ {
-		taskID, err := state.CreateTask(runID, "transfer", fmt.Sprintf("%s:p%d", taskPrefix, partition))
+		pid := partition
+		taskID, err := state.CreateTransferTask(runID, checkpoint.TransferTaskIdentity{
+			Schema: table.Schema, Table: table.Name, PartitionID: &pid,
+		})
 		if err != nil {
 			t.Fatalf("CreateTask p%d: %v", partition, err)
 		}
-		pid := partition
 		if err := state.SaveTransferProgress(taskID, table.Name, &pid, int64(partition*50), 50, 50, ""); err != nil {
 			t.Fatalf("SaveTransferProgress p%d: %v", partition, err)
 		}

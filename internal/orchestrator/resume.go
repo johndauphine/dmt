@@ -241,7 +241,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 
 	for _, t := range tables {
 		// Check if table was marked complete AND has correct row count
-		taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
+		taskKey := checkpoint.TransferTaskKeyForBackend(o.state, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
 		if completedTables[taskKey] {
 			// Verify row count matches
 			targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
@@ -458,8 +458,7 @@ func (o *Orchestrator) prepareResumeTargetTable(
 	schemaDriftReport drift.Report,
 	progressSaver *checkpoint.ProgressSaver,
 ) error {
-	taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-	taskID, err := o.state.CreateTask(runID, "transfer", taskKey)
+	taskID, taskKey, err := checkpoint.CreateTransferTask(o.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
 	if err != nil {
 		return fmt.Errorf("creating task for %s: %w", t.Name, err)
 	}
@@ -560,7 +559,13 @@ func validateResumeMissingTargetTable(table source.Table, migration config.Migra
 }
 
 func (o *Orchestrator) clearResumeProgress(runID, taskKey string, taskID int64, tableName string) error {
-	if err := o.state.ClearPartitionTransferProgress(runID, taskKey); err != nil {
+	var err error
+	if identity, ok := checkpoint.ParseTransferTaskKey(taskKey); ok {
+		err = checkpoint.ClearTransferPartitionProgress(o.state, runID, identity.Schema, identity.Table)
+	} else {
+		err = o.state.ClearPartitionTransferProgress(runID, taskKey)
+	}
+	if err != nil {
 		return fmt.Errorf("clearing partition progress for %s: %w", tableName, err)
 	}
 	if err := o.state.ClearTransferProgress(taskID); err != nil {
@@ -582,7 +587,13 @@ func (o *Orchestrator) expectedResumeRows(
 		return expectedRows, hasProgress, nil
 	}
 
-	summary, err := o.state.GetPartitionTransferProgressSummary(runID, taskKey)
+	var summary checkpoint.PartitionProgressSummary
+	var err error
+	if identity, ok := checkpoint.ParseTransferTaskKey(taskKey); ok {
+		summary, err = checkpoint.GetTransferPartitionProgressSummary(o.state, runID, identity.Schema, identity.Table)
+	} else {
+		summary, err = o.state.GetPartitionTransferProgressSummary(runID, taskKey)
+	}
 	if err != nil {
 		return 0, false, fmt.Errorf("getting partition progress for %s: %w", taskKey, err)
 	}

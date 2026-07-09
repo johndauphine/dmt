@@ -27,6 +27,9 @@ func (s *State) migrate() error {
 		run_id TEXT REFERENCES runs(id),
 		task_type TEXT NOT NULL,
 		task_key TEXT NOT NULL,
+		task_schema TEXT,
+		task_table TEXT,
+		task_partition_id INTEGER,
 		status TEXT NOT NULL DEFAULT 'pending',
 		started_at TEXT,
 		completed_at TEXT,
@@ -187,12 +190,53 @@ func (s *State) migrate() error {
 	if err := s.ensureTransferProgressColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureTaskIdentityColumns(); err != nil {
+		return err
+	}
 	if err := s.ensureTuningResultColumns(); err != nil {
 		return err
 	}
 
 	// One-time migration: sanitize any passwords stored in config column
 	return s.sanitizeStoredConfigs()
+}
+
+func (s *State) ensureTaskIdentityColumns() error {
+	columns, err := s.tableColumns("tasks")
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool, len(columns))
+	for _, column := range columns {
+		present[column] = true
+	}
+	for _, column := range []struct {
+		name     string
+		typeName string
+	}{
+		{name: "task_schema", typeName: "TEXT"},
+		{name: "task_table", typeName: "TEXT"},
+		{name: "task_partition_id", typeName: "INTEGER"},
+	} {
+		if present[column.name] {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE tasks ADD COLUMN %s %s", column.name, column.typeName)); err != nil {
+			return fmt.Errorf("adding tasks.%s: %w", column.name, err)
+		}
+	}
+	_, err = s.db.Exec(`
+		DROP INDEX IF EXISTS idx_tasks_structured_identity;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_structured_table_identity
+		ON tasks(run_id, task_type, task_schema, task_table)
+		WHERE task_schema IS NOT NULL AND task_table IS NOT NULL
+		  AND task_partition_id IS NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_structured_partition_identity
+		ON tasks(run_id, task_type, task_schema, task_table, task_partition_id)
+		WHERE task_schema IS NOT NULL AND task_table IS NOT NULL
+		  AND task_partition_id IS NOT NULL;
+	`)
+	return err
 }
 
 func (s *State) ensureRunColumns() error {

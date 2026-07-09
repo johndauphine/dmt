@@ -280,8 +280,7 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 	// Partition boundaries are derived from PK ranges, so changing the count
 	// changes boundaries. If we resume with stale checkpoints from different
 	// boundaries, parallel readers will produce overlapping data.
-	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-	existingPartitions, err := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	existingPartitions, err := checkpoint.CountTransferPartitionTasks(b.state, runID, t.Schema, t.Name)
 	if err != nil {
 		return fmt.Errorf("counting partition tasks for %s: %w", t.FullName(), err)
 	}
@@ -290,8 +289,8 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 			t.Name, existingPartitions, numPartitions)
 		// Clear progress for all old partition tasks so they restart cleanly
 		for i := 1; i <= existingPartitions; i++ {
-			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
-			oldTaskID, taskErr := b.state.CreateTask(runID, "transfer", oldKey)
+			partitionID := i
+			oldTaskID, oldKey, taskErr := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
 			if taskErr != nil {
 				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
 				continue
@@ -323,8 +322,8 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 		// Mark the first partition for coordinated cleanup during retries
 		p.IsFirstPartition = (p.PartitionID == 1)
 
-		taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
-		taskID, _ := b.state.CreateTask(runID, "transfer", taskKey)
+		partitionID := p.PartitionID
+		taskID, _, _ := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
 
 		result.Jobs = append(result.Jobs, transfer.Job{
 			Table:      t,
@@ -349,8 +348,7 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 	}
 
 	// Detect partition count changes (same logic as keyset partitions)
-	tableTaskPrefix := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-	existingPartitions, err := b.state.CountPartitionTasks(runID, tableTaskPrefix)
+	existingPartitions, err := checkpoint.CountTransferPartitionTasks(b.state, runID, t.Schema, t.Name)
 	if err != nil {
 		return fmt.Errorf("counting partition tasks for %s: %w", t.FullName(), err)
 	}
@@ -358,8 +356,8 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 		logging.Warn("Partition count changed for %s (%d -> %d), clearing stale checkpoints",
 			t.Name, existingPartitions, numPartitions)
 		for i := 1; i <= existingPartitions; i++ {
-			oldKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, i)
-			oldTaskID, taskErr := b.state.CreateTask(runID, "transfer", oldKey)
+			partitionID := i
+			oldTaskID, oldKey, taskErr := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
 			if taskErr != nil {
 				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
 				continue
@@ -390,8 +388,8 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 			IsFirstPartition: i == 0, // First partition for coordinated cleanup during retries
 		}
 
-		taskKey := fmt.Sprintf("transfer:%s.%s:p%d", t.Schema, t.Name, p.PartitionID)
-		taskID, _ := b.state.CreateTask(runID, "transfer", taskKey)
+		partitionID := p.PartitionID
+		taskID, taskKey, _ := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
 		if err := b.clearRowNumberProgressOnBoundaryChange(taskID, taskKey, p.RowCount); err != nil {
 			return err
 		}
@@ -427,8 +425,7 @@ func (b *JobBuilder) clearRowNumberProgressOnBoundaryChange(taskID int64, taskKe
 // createSingleJob creates a single job for a table.
 func (b *JobBuilder) createSingleJob(runID string, t source.Table, dateFilter *transfer.DateFilter, result *BuildResult) error {
 	result.TableJobCounts[t.Name] = 1
-	taskKey := fmt.Sprintf("transfer:%s.%s", t.Schema, t.Name)
-	taskID, _ := b.state.CreateTask(runID, "transfer", taskKey)
+	taskID, _, _ := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
 
 	result.Jobs = append(result.Jobs, transfer.Job{
 		Table:      t,

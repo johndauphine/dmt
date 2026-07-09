@@ -148,10 +148,14 @@ func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult
 			continue
 		}
 
-		// Extract table name from task key (transfer:schema.table or transfer:schema.table:pN)
-		tableName := strings.TrimPrefix(t.TaskKey, "transfer:")
-		if idx := strings.LastIndex(tableName, ":p"); idx > 0 {
-			tableName = tableName[:idx] // Remove partition suffix
+		// Structured transfer keys decode without delimiter ambiguity; legacy
+		// keys retain their historical display parsing.
+		tableName := checkpoint.TransferTaskDisplayName(t.TaskKey)
+		if tableName == "" {
+			tableName = strings.TrimPrefix(t.TaskKey, "transfer:")
+			if idx := strings.LastIndex(tableName, ":p"); idx > 0 {
+				tableName = tableName[:idx]
+			}
 		}
 
 		if _, exists := tableMap[tableName]; !exists {
@@ -388,6 +392,9 @@ func (o *Orchestrator) ShowDetailedStatus() error {
 
 		// Truncate task key if too long
 		taskKey := t.TaskKey
+		if label := checkpoint.TransferTaskDisplayLabel(taskKey); label != "" {
+			taskKey = label
+		}
 		if len(taskKey) > 28 {
 			taskKey = taskKey[:25] + "..."
 		}

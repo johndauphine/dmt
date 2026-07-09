@@ -135,16 +135,19 @@ type deleteReconciliationTableState struct {
 
 // tableState tracks per-table progress.
 type tableState struct {
-	Status      string `yaml:"status"` // pending, running, success, failed
-	TaskType    string `yaml:"task_type,omitempty"`
-	TableName   string `yaml:"table_name,omitempty"`
-	PartitionID *int   `yaml:"partition_id,omitempty"`
-	LastPK      any    `yaml:"last_pk,omitempty"`
-	RangeState  string `yaml:"range_state,omitempty"`
-	RowsDone    int64  `yaml:"rows_done,omitempty"`
-	RowsTotal   int64  `yaml:"rows_total,omitempty"`
-	TaskID      int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility
-	Error       string `yaml:"error,omitempty"`
+	Status          string `yaml:"status"` // pending, running, success, failed
+	TaskType        string `yaml:"task_type,omitempty"`
+	TaskSchema      string `yaml:"task_schema,omitempty"`
+	TaskTable       string `yaml:"task_table,omitempty"`
+	TaskPartitionID *int   `yaml:"task_partition_id,omitempty"`
+	TableName       string `yaml:"table_name,omitempty"`
+	PartitionID     *int   `yaml:"partition_id,omitempty"`
+	LastPK          any    `yaml:"last_pk,omitempty"`
+	RangeState      string `yaml:"range_state,omitempty"`
+	RowsDone        int64  `yaml:"rows_done,omitempty"`
+	RowsTotal       int64  `yaml:"rows_total,omitempty"`
+	TaskID          int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility
+	Error           string `yaml:"error,omitempty"`
 }
 
 // NewFileState creates a file-based state manager.

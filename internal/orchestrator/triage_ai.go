@@ -511,6 +511,9 @@ func categorizeDeepValidationDifference(pass, column, detail string) string {
 }
 
 func transferTableName(taskKey string) string {
+	if name := checkpoint.TransferTaskDisplayName(taskKey); name != "" {
+		return name
+	}
 	table := strings.TrimPrefix(taskKey, "transfer:")
 	if table == taskKey {
 		return ""
