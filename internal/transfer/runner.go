@@ -333,7 +333,29 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	}
 
 chunkLoop:
-	for result := range chunkChan {
+	for {
+		var result chunkResult
+		select {
+		case next, ok := <-chunkChan:
+			if !ok {
+				break chunkLoop
+			}
+			result = next
+		case <-wp.Context().Done():
+			// Writer failure must interrupt the reader side immediately. The
+			// producer may be blocked in a source QueryContext and cannot close
+			// chunkChan until its reader context is cancelled (#639).
+			cancelReaders()
+			if err := ctx.Err(); err != nil {
+				loopErr = err
+			} else if err := wp.error(); err != nil {
+				loopErr = fmt.Errorf("writing chunk: %w", err)
+			} else {
+				loopErr = context.Canceled
+			}
+			break chunkLoop
+		}
+
 		if debugEnabled {
 			chunkWait := time.Since(chunkWaitStart)
 			totalChunkWait += chunkWait

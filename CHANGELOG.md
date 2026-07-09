@@ -87,6 +87,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A target-writer failure now immediately cancels in-flight source reads,
+  instead of leaving the transfer blocked until an unrelated slow or locked
+  source query returned. Pipeline shutdown preserves the original writer
+  error and behaves the same with or without the shared memory budget (#639).
+
 - Keyset pagination now includes the minimum representable primary-key value
   instead of simulating an inclusive lower bound by decrementing it. Fresh
   pages use an explicit inclusive comparison, while subsequent pages and
