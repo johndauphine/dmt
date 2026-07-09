@@ -799,8 +799,16 @@ CGO_ENABLED=0 go build -o dmt ./cmd/migrate
 ### Go install
 
 ```bash
-go install github.com/johndauphine/dmt/cmd/migrate@latest
+go install github.com/johndauphine/dmt/cmd/migrate@main
 ```
+
+Use `@main`, not `@latest`. dmt's release tags are `v2.0.0` and above, but the
+module path has no `/vN` major-version suffix, so Go's Semantic Import
+Versioning treats those tags as invalid versions of this module —
+`@latest` resolves to the old `v1.0.0` tag instead. `@main` installs the
+current tip (and reports the right version). This installs a binary named
+`migrate`; the pre-built release binaries above are named `dmt`. For a pinned,
+reproducible install, prefer the release binaries.
 
 ## Quick Start
 
