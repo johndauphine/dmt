@@ -68,13 +68,15 @@ func cleanupPartitionDataGeneric(ctx context.Context, tgtPool pool.TargetPool, s
 			job.Table.Name, pkCol, pkCol,
 		)
 		args = []any{job.Partition.MinPK, job.Partition.MaxPK}
-	default:
+	case "mssql":
 		// SQL Server target - use bracket identifiers and @p parameters
 		query = fmt.Sprintf(
 			`DELETE FROM [%s].[%s] WHERE [%s] >= @p1 AND [%s] <= @p2`,
 			schema, job.Table.Name, pkCol, pkCol,
 		)
 		args = []any{sql.Named("p1", job.Partition.MinPK), sql.Named("p2", job.Partition.MaxPK)}
+	default:
+		return unsupportedKeysetCleanupError(tgtPool.DBType())
 	}
 
 	_, err := tgtPool.ExecRaw(ctx, query, args...)
@@ -124,7 +126,7 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 				tableName, pkCol)
 			args = []any{lastPK}
 		}
-	default:
+	case "mssql":
 		// SQL Server target
 		if maxPK != nil {
 			deleteQuery = fmt.Sprintf(`DELETE FROM [%s].[%s] WHERE [%s] > @p1 AND [%s] <= @p2`,
@@ -135,6 +137,8 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 				schema, tableName, pkCol)
 			args = []any{sql.Named("p1", lastPK)}
 		}
+	default:
+		return unsupportedKeysetCleanupError(tgtPool.DBType())
 	}
 
 	rowsAffected, err := tgtPool.ExecRaw(ctx, deleteQuery, args...)
@@ -145,6 +149,10 @@ func cleanupPartialData(ctx context.Context, tgtPool pool.TargetPool, schema, ta
 		logging.Debug("Removed %d stale rows from %s beyond pk=%v", rowsAffected, tableName, lastPK)
 	}
 	return nil
+}
+
+func unsupportedKeysetCleanupError(dbType string) error {
+	return fmt.Errorf("target %q does not support synchronous keyset cleanup; start a fresh run after truncating or recreating the target table", dbType)
 }
 
 func parseResumeRowNum(lastPK any) (int64, bool) {

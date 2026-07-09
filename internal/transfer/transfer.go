@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -82,10 +83,12 @@ func Execute(
 					}
 				}
 			} else {
-				// Partitioned table: already truncated in orchestrator, just cleanup for idempotent retry
-				if job.Table.SupportsKeysetPagination() {
+				// A fresh partitioned table was already truncated by the
+				// orchestrator. Range cleanup is required only when a retry or
+				// cross-process resume may replay committed rows (#644).
+				if job.Table.SupportsKeysetPagination() && (job.ReplayPossible || job.IsResume) {
 					if err := cleanupPartitionDataGeneric(ctx, tgtPool, cfg.Target.Schema, &job); err != nil {
-						logging.Warn("Partition cleanup failed for %s: %v", job.Table.Name, err)
+						return nil, fmt.Errorf("partition replay cleanup for %s: %w", job.Table.Name, err)
 					}
 				}
 			}
@@ -101,7 +104,7 @@ func Execute(
 						continue
 					}
 					if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], rr.lastPK, rr.maxPK); err != nil {
-						logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+						return nil, fmt.Errorf("resume cleanup for %s: %w", job.Table.Name, err)
 					}
 				}
 			} else {
@@ -110,7 +113,7 @@ func Execute(
 					maxPK = job.Partition.MaxPK
 				}
 				if err := cleanupPartialData(ctx, tgtPool, cfg.Target.Schema, job.Table.Name, job.Table.PrimaryKey[0], resumeLastPK, maxPK); err != nil {
-					logging.Warn("Resume cleanup failed for %s: %v", job.Table.Name, err)
+					return nil, fmt.Errorf("resume cleanup for %s: %w", job.Table.Name, err)
 				}
 			}
 		}

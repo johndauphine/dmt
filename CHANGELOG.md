@@ -87,6 +87,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- ClickHouse keyset retry/resume no longer falls through to SQL Server
+  bracket/`@p` cleanup SQL and then replays rows after the cleanup error.
+  Keyset cleanup is now an explicit target capability: unsupported synchronous
+  cleanup and any cleanup execution failure abort before replay writes, with a
+  fresh truncate/recreate recovery path; fresh partition transfers remain
+  supported because they require no replay cleanup (#644).
+
 - A PostgreSQL COPY sub-batch deadline is now reported as a failed table after
   retries are exhausted, instead of being misclassified as operator/run
   cancellation and leaving the migration falsely interrupted. Only the parent
