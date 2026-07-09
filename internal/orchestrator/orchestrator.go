@@ -514,11 +514,6 @@ func (o *Orchestrator) notifyCompletionWithErrors(
 	)
 }
 
-// markTableComplete marks a table transfer task as complete
-func (o *Orchestrator) markTableComplete(runID, taskKey string) {
-	o.state.MarkTaskComplete(runID, taskKey)
-}
-
 // tableNamesForTuning collects table names from the filtered table set
 // so the smartconfig analyzer can scope its workload-wide derivations
 // (packet cap, avg/max row size, memory budget) to what's actually in

@@ -42,6 +42,28 @@ The file backend is intended for Airflow/headless restartability rather
 than long-lived local history. Use SQLite when operators need `history`,
 encrypted `profile` storage, or AI tuning history across many runs.
 
+### Transfer task identity and upgrades
+
+Transfer tasks use structured identity fields: task type, source schema,
+source table, and an optional partition number. The human-facing `task_key`
+is a collision-free encoded value and is not parsed or prefix-matched for
+checkpoint correctness. This keeps quoted identifiers containing dots,
+colons, percent signs, underscores, or backslashes distinct from partition
+tasks in both SQLite and file state.
+
+SQLite adds the structured columns and unique indexes automatically. Existing
+completed history remains readable. An incomplete run containing the older,
+delimiter-encoded transfer keys cannot be resumed safely because a key such as
+`transfer:dbo.orders:p1` is ambiguous: it may mean partition 1 of `orders` or
+the unpartitioned quoted table `orders:p1`. DMT fails that resume with an
+actionable legacy-identity error; finish or abandon the old checkpoint and
+start a fresh run. File-state YAML follows the same rule.
+
+Before upgrading while a run is incomplete, back up `~/.dmt/migrate.db` or
+the configured YAML state file. Do not roll an active structured-identity run
+back to a pre-upgrade binary; restore the backup for rollback, or start a fresh
+run after applying the target-mode recovery procedure.
+
 ### Key Files
 
 ```

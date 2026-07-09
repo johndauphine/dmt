@@ -39,8 +39,8 @@ func TestRowNumberResumeCleanupClearsStalePartitionProgress(t *testing.T) {
 		t.Fatalf("len(jobs) = %d, want 3 ROW_NUMBER partitions", got)
 	}
 
-	taskKey := "transfer:main.customer_orders"
-	tableTaskID, err := state.CreateTask(runID, "transfer", taskKey)
+	tableIdentity := checkpoint.TransferTaskIdentity{Schema: table.Schema, Table: table.Name}
+	tableTaskID, taskKey, err := checkpoint.CreateTransferTask(state, runID, tableIdentity)
 	if err != nil {
 		t.Fatalf("CreateTask table: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestRowNumberResumeCleanupClearsStalePartitionProgress(t *testing.T) {
 		t.Fatalf("clearResumeProgress: %v", err)
 	}
 
-	summary, err := state.GetPartitionTransferProgressSummary(runID, taskKey)
+	summary, err := checkpoint.GetTransferPartitionProgressSummary(state, runID, table.Schema, table.Name)
 	if err != nil {
 		t.Fatalf("GetPartitionTransferProgressSummary after cleanup: %v", err)
 	}

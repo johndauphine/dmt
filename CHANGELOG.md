@@ -87,6 +87,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Transfer checkpoint identity is now structured by task type, schema, table,
+  and optional partition in both SQLite and file state. Quoted identifiers
+  containing dots, colons, percent signs, underscores, or backslashes can no
+  longer collide with partition tasks or be swept up by prefix cleanup. New
+  task keys are collision-free display values; ambiguous incomplete legacy
+  checkpoints fail with fresh-run recovery guidance instead of guessing (#646).
+
 - ClickHouse keyset retry/resume no longer falls through to SQL Server
   bracket/`@p` cleanup SQL and then replays rows after the cleanup error.
   Keyset cleanup is now an explicit target capability: unsupported synchronous

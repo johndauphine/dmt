@@ -484,8 +484,7 @@ retryLoop:
 
 	// Check if all jobs for this table are complete
 	if ts.jobsComplete == buildResult.TableJobCounts[j.Table.Name] && ts.jobsFailed == 0 {
-		taskKey := fmt.Sprintf("transfer:%s.%s", j.Table.Schema, j.Table.Name)
-		r.state.MarkTaskComplete(runID, taskKey)
+		_ = checkpoint.MarkTransferTaskComplete(r.state, runID, checkpoint.TransferTaskIdentity{Schema: j.Table.Schema, Table: j.Table.Name})
 		r.progress.TableComplete()
 
 		// Update sync timestamp

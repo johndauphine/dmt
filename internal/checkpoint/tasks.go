@@ -33,6 +33,109 @@ func (s *State) CreateTask(runID, taskType, taskKey string) (int64, error) {
 	return taskID, err
 }
 
+func (s *State) CreateTransferTask(runID string, identity TransferTaskIdentity) (int64, error) {
+	if err := s.ensureStructuredTransferRun(runID); err != nil {
+		return 0, err
+	}
+	key := identity.TaskKey()
+	result, err := s.db.Exec(`
+		INSERT INTO tasks (run_id, task_type, task_key, task_schema, task_table, task_partition_id, status)
+		VALUES (?, 'transfer', ?, ?, ?, ?, 'pending')
+		ON CONFLICT DO NOTHING
+	`, runID, key, identity.Schema, identity.Table, identity.PartitionID)
+	if err != nil {
+		return 0, err
+	}
+	if rows, _ := result.RowsAffected(); rows > 0 {
+		return result.LastInsertId()
+	}
+	var taskID int64
+	err = s.db.QueryRow(`
+		SELECT id FROM tasks
+		WHERE run_id = ? AND task_type = 'transfer'
+		  AND task_schema = ? AND task_table = ?
+		  AND task_partition_id IS ?
+	`, runID, identity.Schema, identity.Table, identity.PartitionID).Scan(&taskID)
+	return taskID, err
+}
+
+func (s *State) ensureStructuredTransferRun(runID string) error {
+	var legacyCount int
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE run_id = ? AND task_type = 'transfer'
+		  AND (task_schema IS NULL OR task_table IS NULL)
+	`, runID).Scan(&legacyCount); err != nil {
+		return err
+	}
+	if legacyCount > 0 {
+		return legacyTaskIdentityError(runID)
+	}
+	return nil
+}
+
+func (s *State) CountTransferPartitionTasks(runID, schema, table string) (int, error) {
+	if err := s.ensureStructuredTransferRun(runID); err != nil {
+		return 0, err
+	}
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE run_id = ? AND task_type = 'transfer'
+		  AND task_schema = ? AND task_table = ?
+		  AND task_partition_id IS NOT NULL
+	`, runID, schema, table).Scan(&count)
+	return count, err
+}
+
+func (s *State) ClearTransferPartitionProgress(runID, schema, table string) error {
+	if err := s.ensureStructuredTransferRun(runID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`
+		DELETE FROM transfer_progress
+		WHERE task_id IN (
+			SELECT id FROM tasks
+			WHERE run_id = ? AND task_type = 'transfer'
+			  AND task_schema = ? AND task_table = ?
+			  AND task_partition_id IS NOT NULL
+		)
+	`, runID, schema, table)
+	return err
+}
+
+func (s *State) GetTransferPartitionProgressSummary(runID, schema, table string) (PartitionProgressSummary, error) {
+	var summary PartitionProgressSummary
+	if err := s.ensureStructuredTransferRun(runID); err != nil {
+		return summary, err
+	}
+	err := s.db.QueryRow(`
+		SELECT COALESCE(SUM(tp.rows_done), 0), COUNT(*)
+		FROM transfer_progress tp
+		JOIN tasks t ON t.id = tp.task_id
+		WHERE t.run_id = ? AND t.task_type = 'transfer'
+		  AND t.task_schema = ? AND t.task_table = ?
+		  AND t.task_partition_id IS NOT NULL
+		  AND tp.last_pk IS NOT NULL AND tp.last_pk != 'null'
+	`, runID, schema, table).Scan(&summary.RowsDone, &summary.PartitionsWithProgress)
+	return summary, err
+}
+
+func (s *State) MarkTransferTaskComplete(runID string, identity TransferTaskIdentity) error {
+	if err := s.ensureStructuredTransferRun(runID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO tasks (
+			run_id, task_type, task_key, task_schema, task_table,
+			task_partition_id, status, completed_at
+		) VALUES (?, 'transfer', ?, ?, ?, ?, 'success', datetime('now'))
+		ON CONFLICT DO UPDATE SET
+			status = 'success', completed_at = datetime('now')
+	`, runID, identity.TaskKey(), identity.Schema, identity.Table, identity.PartitionID)
+	return err
+}
+
 // UpdateTaskStatus updates a task's status
 func (s *State) UpdateTaskStatus(taskID int64, status string, errorMsg string) error {
 	if status == "running" {
