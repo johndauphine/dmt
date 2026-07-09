@@ -87,6 +87,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- A PostgreSQL COPY sub-batch deadline is now reported as a failed table after
+  retries are exhausted, instead of being misclassified as operator/run
+  cancellation and leaving the migration falsely interrupted. Only the parent
+  run context can select the interrupted/resumable path; sibling table failures
+  are preserved in the partial-run result (#641).
+
 - A target-writer failure now immediately cancels in-flight source reads,
   instead of leaving the transfer blocked until an unrelated slow or locked
   source query returned. Pipeline shutdown preserves the original writer
