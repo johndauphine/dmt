@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
@@ -334,7 +333,7 @@ func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []t
 	close(errCh)
 
 	// Collect failures
-	return r.collectFailures(errCh)
+	return r.collectFailures(ctx, errCh)
 }
 
 // executeJobBatch runs a batch of jobs with the worker pool.
@@ -550,23 +549,26 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 	}
 }
 
-// collectFailures gathers and deduplicates table failures.
-func (r *TransferRunner) collectFailures(errCh <-chan tableError) ([]TableFailure, error) {
+// collectFailures gathers and deduplicates table failures. A child operation
+// may return context.Canceled or DeadlineExceeded while the parent run remains
+// healthy (for example, a PostgreSQL COPY sub-batch timeout). Only the parent
+// context decides whether the whole run was interrupted (#641).
+func (r *TransferRunner) collectFailures(ctx context.Context, errCh <-chan tableError) ([]TableFailure, error) {
 	failedTables := make(map[string]error)
 
 	for te := range errCh {
-		if errors.Is(te.err, context.Canceled) || errors.Is(te.err, context.DeadlineExceeded) {
-			return nil, context.Canceled
-		}
 		if _, exists := failedTables[te.tableName]; !exists {
 			failedTables[te.tableName] = te.err
-			r.progress.TableFailed()
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	var failures []TableFailure
 	for tableName, err := range failedTables {
 		failures = append(failures, TableFailure{TableName: tableName, Error: err})
+		r.progress.TableFailed()
 	}
 
 	return failures, nil
