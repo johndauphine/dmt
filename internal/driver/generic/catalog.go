@@ -156,8 +156,8 @@ type PaginationSpec struct {
 // MaxPKClause and DateClause are substituted into the {max_pk_clause}
 // and {date_clause} markers when the variant calls for them, otherwise
 // the markers render empty. Recognized tokens: {columns}, {table},
-// {hint}, {pk}, {date_column}, {max_pk_clause}, {date_clause}, and {?}
-// for placeholders (occurrence-numbered for indexed dialects).
+// {hint}, {pk}, {lower_op}, {date_column}, {max_pk_clause}, {date_clause},
+// and {?} for placeholders (occurrence-numbered for indexed dialects).
 type KeysetSpec struct {
 	Query       string         `yaml:"query"`
 	MaxPKClause string         `yaml:"max_pk_clause"`

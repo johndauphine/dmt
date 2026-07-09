@@ -87,6 +87,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Keyset pagination now includes the minimum representable primary-key value
+  instead of simulating an inclusive lower bound by decrementing it. Fresh
+  pages use an explicit inclusive comparison, while subsequent pages and
+  resume checkpoints remain exclusive; this prevents silent loss at
+  `BIGINT`/unsigned boundaries without replaying checkpoint rows (#637).
+
 - A successful timeout retry no longer inflates persisted checkpoint
   `rows_done` — and with it run summaries, `status`/`history` output,
   notifications, and tuning throughput rows (observed: SO2010 `Posts`

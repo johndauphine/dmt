@@ -62,8 +62,10 @@ type Dialect interface {
 	// need to be converted to WKT text format.
 	ColumnListForSelect(cols, colTypes []string, targetDBType string) string
 
-	// BuildKeysetQuery builds a keyset pagination query.
-	BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *DateFilter) string
+	// BuildKeysetQuery builds a keyset pagination query. An inclusive lower
+	// bound is used only for the first page of fresh work; acknowledged
+	// checkpoint watermarks and subsequent pages remain exclusive.
+	BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK, inclusiveLowerBound bool, dateFilter *DateFilter) string
 
 	// BuildKeysetArgs builds arguments for a keyset pagination query.
 	// Parameters:

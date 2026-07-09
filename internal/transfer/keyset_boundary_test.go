@@ -3,7 +3,11 @@ package transfer
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"math"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -91,6 +95,120 @@ func TestKeysetBoundaryEmptyTableStillSucceeds(t *testing.T) {
 	}
 	if stats.Rows != 0 {
 		t.Fatalf("stats.Rows = %d, want 0", stats.Rows)
+	}
+}
+
+func TestKeysetBoundaryIncludesMinimumInt64(t *testing.T) {
+	for _, readers := range []int{1, 4} {
+		t.Run(fmt.Sprintf("readers_%d", readers), func(t *testing.T) {
+			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "min-int.db"))
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Errorf("close sqlite: %v", err)
+				}
+			})
+			db.SetMaxOpenConns(readers)
+			if _, err := db.Exec(`CREATE TABLE items (id INTEGER PRIMARY KEY, payload TEXT)`); err != nil {
+				t.Fatalf("create table: %v", err)
+			}
+			if _, err := db.Exec(`INSERT INTO items (id, payload) VALUES (?, 'minimum'), (?, 'next')`, int64(math.MinInt64), int64(math.MinInt64+1)); err != nil {
+				t.Fatalf("insert rows: %v", err)
+			}
+
+			cfg := keysetBoundaryTestConfig()
+			cfg.Migration.ParallelReaders = readers
+			cfg.Migration.ChunkSize = 1
+			job := keysetBoundaryTestJob()
+			job.Table.RowCount = 2
+			target := &keysetRuntimeTargetPool{updated: true}
+
+			stats, err := executeKeysetPagination(
+				context.Background(),
+				&keysetRuntimeSourcePool{db: db},
+				target,
+				cfg,
+				job,
+				[]string{"id", "payload"},
+				[]string{"id", "payload"},
+				[]string{"integer", "text"},
+				[]int{0, 0},
+				nil,
+				nil,
+				0,
+				nil,
+				"items",
+				nil,
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("executeKeysetPagination: %v", err)
+			}
+			ids, _ := target.snapshot()
+			sort.Ints(ids)
+			want := []int{math.MinInt64, math.MinInt64 + 1}
+			if !reflect.DeepEqual(ids, want) {
+				t.Fatalf("transferred IDs = %v, want %v", ids, want)
+			}
+			if stats.Rows != 2 {
+				t.Fatalf("stats.Rows = %d, want 2", stats.Rows)
+			}
+		})
+	}
+}
+
+func TestKeysetBoundaryResumeRemainsExclusive(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "resume-exclusive.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close sqlite: %v", err)
+		}
+	})
+	if _, err := db.Exec(`CREATE TABLE items (id INTEGER PRIMARY KEY, payload TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO items (id, payload) VALUES (?, 'checkpoint'), (?, 'next')`, int64(math.MinInt64), int64(math.MinInt64+1)); err != nil {
+		t.Fatalf("insert rows: %v", err)
+	}
+
+	cfg := keysetBoundaryTestConfig()
+	cfg.Migration.ChunkSize = 1
+	job := keysetBoundaryTestJob()
+	job.Table.RowCount = 2
+	target := &keysetRuntimeTargetPool{updated: true}
+	stats, err := executeKeysetPagination(
+		context.Background(),
+		&keysetRuntimeSourcePool{db: db},
+		target,
+		cfg,
+		job,
+		[]string{"id", "payload"},
+		[]string{"id", "payload"},
+		[]string{"integer", "text"},
+		[]int{0, 0},
+		nil,
+		int64(math.MinInt64),
+		1,
+		nil,
+		"items",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("executeKeysetPagination: %v", err)
+	}
+	ids, _ := target.snapshot()
+	want := []int{math.MinInt64 + 1}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("transferred IDs = %v, want %v", ids, want)
+	}
+	if stats.Rows != 2 {
+		t.Fatalf("stats.Rows = %d, want 2", stats.Rows)
 	}
 }
 

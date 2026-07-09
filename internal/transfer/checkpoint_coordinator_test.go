@@ -77,6 +77,29 @@ func TestKeysetCheckpointCoordinatorOutOfOrderAcks(t *testing.T) {
 	}
 }
 
+func TestKeysetCheckpointCoordinatorDoesNotPersistUntransferredInclusiveBound(t *testing.T) {
+	saver := &fakeSaver{}
+	job := Job{Table: source.Table{Name: "Things", RowCount: 2}, TaskID: 1, Saver: saver}
+	coord := newKeysetCheckpointCoordinator(job.Saver, job, []pkRange{{
+		minPK:        int64(-10),
+		maxPK:        int64(-9),
+		minInclusive: true,
+	}}, nil, 0, func() int { return 1 })
+
+	if got := coord.safeCheckpoint(); got != nil {
+		t.Fatalf("safe checkpoint before first ack = %v, want nil", got)
+	}
+	coord.onAck(writeAck{readerID: 0, seq: 0, lastPK: int64(-10), rows: 1})
+	saves := saver.recorded()
+	if len(saves) != 1 || saves[0].lastPK != int64(-10) {
+		t.Fatalf("saves after first ack = %+v, want exclusive checkpoint -10", saves)
+	}
+	ranges := decodeKeysetRangeState(saves[0].rangeState)
+	if len(ranges) != 1 || ranges[0].lastPKInclusive {
+		t.Fatalf("saved range state = %+v, want exclusive acknowledged watermark", ranges)
+	}
+}
+
 // Regression test for #632: persisted rows_done must count only rows whose
 // acks were applied in sequence order — exactly what the simultaneously
 // persisted watermarks cover. The old accounting used the pool's write

@@ -91,6 +91,7 @@ func TestBuildKeysetQueryWithDateFilter(t *testing.T) {
 				"Orders",
 				"", // tableHint
 				tt.hasMaxPK,
+				false,
 				tt.dateFilter,
 			)
 

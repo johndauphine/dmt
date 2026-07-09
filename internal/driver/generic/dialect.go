@@ -101,9 +101,13 @@ func (d *Dialect) ColumnListForSelect(cols, colTypes []string, targetDBType stri
 	return strings.Join(quoted, ", ")
 }
 
-func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK bool, dateFilter *driver.DateFilter) string {
+func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string, hasMaxPK, inclusiveLowerBound bool, dateFilter *driver.DateFilter) string {
 	k := d.cat.Pagination.Keyset
 	maxClause, dateClause := "", ""
+	lowerOp := ">"
+	if inclusiveLowerBound {
+		lowerOp = ">="
+	}
 	if hasMaxPK {
 		maxClause = k.MaxPKClause
 	}
@@ -111,6 +115,7 @@ func (d *Dialect) BuildKeysetQuery(cols, pkCol, schema, table, tableHint string,
 		dateClause = strings.ReplaceAll(k.DateClause, "{date_column}", d.QuoteIdentifier(dateFilter.Column))
 	}
 	q := k.Query
+	q = strings.ReplaceAll(q, "{lower_op}", lowerOp)
 	q = strings.ReplaceAll(q, "{max_pk_clause}", maxClause)
 	q = strings.ReplaceAll(q, "{date_clause}", dateClause)
 	return d.render(q, cols, "", pkCol, schema, table, tableHint)
