@@ -64,6 +64,27 @@ the configured YAML state file. Do not roll an active structured-identity run
 back to a pre-upgrade binary; restore the backup for rollback, or start a fresh
 run after applying the target-mode recovery procedure.
 
+### Required checkpoint writes
+
+Checkpoint state is part of the transfer correctness protocol, not optional
+telemetry. DMT creates every durable table/partition task before it creates,
+drops, or truncates target objects. Once rows are moving, an unresolved
+periodic checkpoint error, a final progress-save error, a task-status error,
+or a run-completion error stops the success path. These failures use the state
+error exit code (6); DMT does not silently continue with task ID zero or report
+success beside pending state. SQLite and file state also reject progress or
+status writes for unknown task IDs. Aggregate table completion and an optional
+incremental sync watermark commit together (one SQLite transaction or one
+atomic YAML save), so resume never sees one without the other.
+
+A required-write error can happen after target rows committed, so do not assume
+the target is untouched and do not start a competing run. Repair the state
+storage first (free disk space, restore write permissions, or restore the
+checkpoint path). If the run remains incomplete, use `dmt resume`; its
+target-mode replay/cleanup rules handle already committed chunks. Back up the
+checkpoint and inspect run/task status before choosing a fresh run or manual
+target recovery.
+
 ### Key Files
 
 ```

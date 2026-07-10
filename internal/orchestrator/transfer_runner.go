@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
@@ -251,14 +252,16 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	return result, nil
 }
 
-func (o *Orchestrator) transferAll(ctx context.Context, runID string, tables []source.Table, resume bool) ([]TableFailure, error) {
-	// Build jobs using JobBuilder
+func (o *Orchestrator) buildTransferJobs(ctx context.Context, runID string, tables []source.Table) (*BuildResult, error) {
 	builder := NewJobBuilder(o.sourcePool, o.state, o.config)
 	buildResult, err := builder.Build(ctx, runID, tables)
 	if err != nil {
 		return nil, fmt.Errorf("building jobs: %w", err)
 	}
+	return buildResult, nil
+}
 
+func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResult *BuildResult, tables []source.Table, resume bool) ([]TableFailure, error) {
 	// Execute jobs using TransferRunner. Error diagnosis runs through the
 	// deterministic catalog in internal/driver/errordiag (#173); the
 	// former AI-driven diagnoser was removed to avoid sending error
@@ -378,7 +381,10 @@ func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfe
 	}
 
 	// Mark task as running
-	r.state.UpdateTaskStatus(j.TaskID, "running", "")
+	if err := r.updateTaskStatus(j, "running", ""); err != nil {
+		errCh <- tableError{tableName: j.Table.Name, err: err}
+		return
+	}
 
 	// Execute with retry
 	maxRetries := r.config.Migration.MaxRetries
@@ -443,8 +449,11 @@ retryLoop:
 		if tuner != nil {
 			tuner.ReportError()
 		}
-		r.state.UpdateTaskStatus(j.TaskID, "failed", err.Error())
-		errCh <- tableError{tableName: j.Table.Name, err: err}
+		failureErr := err
+		if stateErr := r.updateTaskStatus(j, "failed", err.Error()); stateErr != nil {
+			failureErr = errors.Join(err, stateErr)
+		}
+		errCh <- tableError{tableName: j.Table.Name, err: failureErr}
 
 		logging.Error("Table %s failed: %v", j.Table.Name, err)
 		r.checkGeographyError(j.Table.Name, err)
@@ -458,7 +467,11 @@ retryLoop:
 		return
 	}
 
-	r.state.UpdateTaskStatus(j.TaskID, "success", "")
+	if stateErr := r.updateTaskStatus(j, "success", ""); stateErr != nil {
+		ts.jobsFailed++
+		errCh <- tableError{tableName: j.Table.Name, err: stateErr}
+		return
+	}
 
 	if stats != nil {
 		ts.stats.QueryTime += stats.QueryTime
@@ -484,20 +497,33 @@ retryLoop:
 
 	// Check if all jobs for this table are complete
 	if ts.jobsComplete == buildResult.TableJobCounts[j.Table.Name] && ts.jobsFailed == 0 {
-		_ = checkpoint.MarkTransferTaskComplete(r.state, runID, checkpoint.TransferTaskIdentity{Schema: j.Table.Schema, Table: j.Table.Name})
+		if stateErr := r.markTransferTaskComplete(runID, j, buildResult); stateErr != nil {
+			ts.jobsFailed++
+			errCh <- tableError{tableName: j.Table.Name, err: stateErr}
+			return
+		}
 		r.progress.TableComplete()
+	}
+}
 
-		// Update sync timestamp
-		if _, hasDateFilter := buildResult.TableDateFilters[j.Table.Name]; hasDateFilter {
-			if watermark, ok := buildResult.TableSyncWatermarks[j.Table.Name]; ok {
-				if err := r.state.UpdateSyncTimestamp(j.Table.Schema, j.Table.Name, r.config.Target.Schema, watermark); err != nil {
-					logging.Warn("Failed to update sync timestamp for %s: %v", j.Table.Name, err)
-				} else {
-					logging.Debug("Updated sync timestamp for %s to %v", j.Table.Name, watermark.Format(time.RFC3339Nano))
-				}
-			}
+func (r *TransferRunner) updateTaskStatus(j transfer.Job, status, errorMessage string) error {
+	err := r.state.UpdateTaskStatus(j.TaskID, status, errorMessage)
+	return checkpoint.RequiredWrite(fmt.Sprintf("marking task %d for table %s.%s %s", j.TaskID, j.Table.Schema, j.Table.Name, status), err)
+}
+
+func (r *TransferRunner) markTransferTaskComplete(runID string, j transfer.Job, buildResult *BuildResult) error {
+	var watermark *time.Time
+	if buildResult != nil {
+		if value, ok := buildResult.TableSyncWatermarks[j.Table.Name]; ok {
+			watermark = &value
 		}
 	}
+	targetSchema := ""
+	if r.config != nil {
+		targetSchema = r.config.Target.Schema
+	}
+	err := checkpoint.CompleteTransferTask(r.state, runID, checkpoint.TransferTaskIdentity{Schema: j.Table.Schema, Table: j.Table.Name}, targetSchema, watermark)
+	return checkpoint.RequiredWrite(fmt.Sprintf("atomically completing transfer task for table %s.%s", j.Table.Schema, j.Table.Name), err)
 }
 
 // checkGeographyError logs a hint for geography/geometry errors.
@@ -554,14 +580,21 @@ func (r *TransferRunner) diagnoseError(ctx context.Context, j transfer.Job, err 
 // context decides whether the whole run was interrupted (#641).
 func (r *TransferRunner) collectFailures(ctx context.Context, errCh <-chan tableError) ([]TableFailure, error) {
 	failedTables := make(map[string]error)
+	var requiredWriteErrors []error
 
 	for te := range errCh {
+		if checkpoint.IsRequiredWriteError(te.err) {
+			requiredWriteErrors = append(requiredWriteErrors, te.err)
+		}
 		if _, exists := failedTables[te.tableName]; !exists {
 			failedTables[te.tableName] = te.err
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if len(requiredWriteErrors) > 0 {
+		return nil, errors.Join(requiredWriteErrors...)
 	}
 
 	var failures []TableFailure

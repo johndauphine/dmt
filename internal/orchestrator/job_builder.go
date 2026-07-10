@@ -38,6 +38,8 @@ type BuildResult struct {
 	TableDateFilters    map[string]*transfer.DateFilter
 	TableSyncWatermarks map[string]time.Time
 	TableJobCounts      map[string]int
+	TableTaskIDs        map[string]int64
+	TableTaskKeys       map[string]string
 	ProgressSaver       *checkpoint.ProgressSaver
 	Summary             JobSummary
 }
@@ -50,6 +52,17 @@ type JobSummary struct {
 	NoDateColumnTables []string
 }
 
+func (r *BuildResult) recordTableTask(table string, taskID int64, taskKey string) {
+	if r.TableTaskIDs == nil {
+		r.TableTaskIDs = make(map[string]int64)
+	}
+	if r.TableTaskKeys == nil {
+		r.TableTaskKeys = make(map[string]string)
+	}
+	r.TableTaskIDs[table] = taskID
+	r.TableTaskKeys[table] = taskKey
+}
+
 // Build creates transfer jobs for the given tables.
 func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Table) (*BuildResult, error) {
 	result := &BuildResult{
@@ -57,6 +70,8 @@ func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Ta
 		TableDateFilters:    make(map[string]*transfer.DateFilter),
 		TableSyncWatermarks: make(map[string]time.Time),
 		TableJobCounts:      make(map[string]int),
+		TableTaskIDs:        make(map[string]int64),
+		TableTaskKeys:       make(map[string]string),
 		ProgressSaver:       checkpoint.NewProgressSaver(b.state),
 	}
 
@@ -290,13 +305,12 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 		// Clear progress for all old partition tasks so they restart cleanly
 		for i := 1; i <= existingPartitions; i++ {
 			partitionID := i
-			oldTaskID, oldKey, taskErr := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
+			oldTaskID, oldKey, taskErr := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
 			if taskErr != nil {
-				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
-				continue
+				return taskErr
 			}
 			if clearErr := b.state.ClearTransferProgress(oldTaskID); clearErr != nil {
-				logging.Warn("Failed to clear progress for %s (task %d): %v", oldKey, oldTaskID, clearErr)
+				return checkpoint.RequiredWrite(fmt.Sprintf("clearing stale progress for %s task %d", oldKey, oldTaskID), clearErr)
 			}
 		}
 	}
@@ -317,13 +331,24 @@ func (b *JobBuilder) createKeysetPartitionJobs(ctx context.Context, runID string
 
 	logging.Debug("  %s: %d partitions (%s)", t.Name, len(partitions), tableElapsed.Round(time.Millisecond))
 
+	// Persist the aggregate table task as well as every partition task before
+	// target preparation. CompleteTransferTask updates this row only after
+	// every partition succeeds.
+	tableTaskID, tableTaskKey, err := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
+	if err != nil {
+		return err
+	}
+	result.recordTableTask(t.Name, tableTaskID, tableTaskKey)
 	result.TableJobCounts[t.Name] = len(partitions)
 	for _, p := range partitions {
 		// Mark the first partition for coordinated cleanup during retries
 		p.IsFirstPartition = (p.PartitionID == 1)
 
 		partitionID := p.PartitionID
-		taskID, _, _ := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
+		taskID, _, err := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
+		if err != nil {
+			return err
+		}
 
 		result.Jobs = append(result.Jobs, transfer.Job{
 			Table:      t,
@@ -357,19 +382,23 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 			t.Name, existingPartitions, numPartitions)
 		for i := 1; i <= existingPartitions; i++ {
 			partitionID := i
-			oldTaskID, oldKey, taskErr := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
+			oldTaskID, oldKey, taskErr := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
 			if taskErr != nil {
-				logging.Warn("Failed to look up partition task %s: %v", oldKey, taskErr)
-				continue
+				return taskErr
 			}
 			if clearErr := b.state.ClearTransferProgress(oldTaskID); clearErr != nil {
-				logging.Warn("Failed to clear progress for %s (task %d): %v", oldKey, oldTaskID, clearErr)
+				return checkpoint.RequiredWrite(fmt.Sprintf("clearing stale progress for %s task %d", oldKey, oldTaskID), clearErr)
 			}
 		}
 	}
 
 	logging.Debug("  Partitioning %s (%d rows, %d partitions, row-number)...", t.Name, t.RowCount, numPartitions)
 	rowsPerPartition := t.RowCount / int64(numPartitions)
+	tableTaskID, tableTaskKey, err := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
+	if err != nil {
+		return err
+	}
+	result.recordTableTask(t.Name, tableTaskID, tableTaskKey)
 	result.TableJobCounts[t.Name] = numPartitions
 
 	for i := 0; i < numPartitions; i++ {
@@ -389,7 +418,10 @@ func (b *JobBuilder) createRowNumberPartitionJobs(runID string, t source.Table, 
 		}
 
 		partitionID := p.PartitionID
-		taskID, taskKey, _ := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
+		taskID, taskKey, err := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name, PartitionID: &partitionID})
+		if err != nil {
+			return err
+		}
 		if err := b.clearRowNumberProgressOnBoundaryChange(taskID, taskKey, p.RowCount); err != nil {
 			return err
 		}
@@ -417,7 +449,7 @@ func (b *JobBuilder) clearRowNumberProgressOnBoundaryChange(taskID int64, taskKe
 	logging.Warn("ROW_NUMBER partition boundary changed for %s (rows_total %d -> %d), clearing stale checkpoint",
 		taskKey, progress.RowsTotal, rowCount)
 	if err := b.state.ClearTransferProgress(taskID); err != nil {
-		return fmt.Errorf("clearing stale ROW_NUMBER progress for %s: %w", taskKey, err)
+		return checkpoint.RequiredWrite(fmt.Sprintf("clearing stale ROW_NUMBER progress for %s task %d", taskKey, taskID), err)
 	}
 	return nil
 }
@@ -425,7 +457,11 @@ func (b *JobBuilder) clearRowNumberProgressOnBoundaryChange(taskID int64, taskKe
 // createSingleJob creates a single job for a table.
 func (b *JobBuilder) createSingleJob(runID string, t source.Table, dateFilter *transfer.DateFilter, result *BuildResult) error {
 	result.TableJobCounts[t.Name] = 1
-	taskID, _, _ := checkpoint.CreateTransferTask(b.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
+	taskID, taskKey, err := b.createTransferTask(runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
+	if err != nil {
+		return err
+	}
+	result.recordTableTask(t.Name, taskID, taskKey)
 
 	result.Jobs = append(result.Jobs, transfer.Job{
 		Table:      t,
@@ -436,6 +472,21 @@ func (b *JobBuilder) createSingleJob(runID string, t source.Table, dateFilter *t
 	})
 
 	return nil
+}
+
+func (b *JobBuilder) createTransferTask(runID string, identity checkpoint.TransferTaskIdentity) (int64, string, error) {
+	taskID, taskKey, err := checkpoint.CreateTransferTask(b.state, runID, identity)
+	operation := fmt.Sprintf("creating transfer task for %s.%s", identity.Schema, identity.Table)
+	if identity.PartitionID != nil {
+		operation += fmt.Sprintf(" partition %d", *identity.PartitionID)
+	}
+	if err != nil {
+		return 0, taskKey, checkpoint.RequiredWrite(operation, err)
+	}
+	if taskID <= 0 {
+		return 0, taskKey, checkpoint.RequiredWrite(operation, fmt.Errorf("backend returned non-positive task ID %d", taskID))
+	}
+	return taskID, taskKey, nil
 }
 
 // logDateTrackingSummary logs summary of date tracking configuration.

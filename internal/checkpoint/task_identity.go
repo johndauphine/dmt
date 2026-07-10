@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const transferTaskKeyPrefix = "transfer:v2:"
@@ -95,6 +96,12 @@ type StructuredTaskBackend interface {
 	MarkTransferTaskComplete(runID string, identity TransferTaskIdentity) error
 }
 
+// AtomicTransferCompletionBackend commits the aggregate table completion and
+// optional incremental watermark as one backend transaction/atomic file save.
+type AtomicTransferCompletionBackend interface {
+	CompleteTransferTask(runID string, identity TransferTaskIdentity, targetSchema string, watermark *time.Time) error
+}
+
 func TransferTaskKeyForBackend(backend StateBackend, identity TransferTaskIdentity) string {
 	if _, ok := backend.(StructuredTaskBackend); ok {
 		return identity.TaskKey()
@@ -138,4 +145,18 @@ func MarkTransferTaskComplete(backend StateBackend, runID string, identity Trans
 		return structured.MarkTransferTaskComplete(runID, identity)
 	}
 	return backend.MarkTaskComplete(runID, identity.LegacyTaskKey())
+}
+
+func CompleteTransferTask(backend StateBackend, runID string, identity TransferTaskIdentity, targetSchema string, watermark *time.Time) error {
+	if atomic, ok := backend.(AtomicTransferCompletionBackend); ok {
+		return atomic.CompleteTransferTask(runID, identity, targetSchema, watermark)
+	}
+	// Compatibility path for narrow test fakes. Production backends implement
+	// AtomicTransferCompletionBackend and never split these writes.
+	if watermark != nil {
+		if err := backend.UpdateSyncTimestamp(identity.Schema, identity.Table, targetSchema, *watermark); err != nil {
+			return err
+		}
+	}
+	return MarkTransferTaskComplete(backend, runID, identity)
 }

@@ -19,12 +19,6 @@ type progressSnapshot struct {
 	rangeState  string
 }
 
-// asyncSaverFailThreshold is the number of consecutive failed saves after
-// which close() surfaces the saver as unhealthy. A slow saver stays silent;
-// a persistently broken one (disk full, permission loss) is reported so the
-// run doesn't quietly lose all resumability.
-const asyncSaverFailThreshold = 5
-
 // asyncSaver decouples periodic checkpoint persistence from the
 // ack-processing goroutine (#620). Checkpoints are monotonic watermarks, so
 // only the newest pending snapshot matters: a single-slot mailbox coalesces
@@ -115,8 +109,8 @@ func (s *asyncSaver) GetProgress(taskID int64) (any, int64, string, error) {
 
 // close flushes the mailbox goroutine and joins it, so no async write can
 // land after the caller's subsequent synchronous final save. It returns an
-// error only when the saver failed on many consecutive attempts. Safe to
-// call once; subsequent calls are no-ops.
+// error when the latest periodic save failure was not followed by a successful
+// save. Safe to call once; subsequent calls are no-ops.
 func (s *asyncSaver) close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -131,7 +125,7 @@ func (s *asyncSaver) close() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.consecFails >= asyncSaverFailThreshold {
+	if s.consecFails > 0 {
 		return fmt.Errorf("checkpoint saver failed %d consecutive times: %w", s.consecFails, s.lastErr)
 	}
 	return nil

@@ -514,6 +514,16 @@ func (o *Orchestrator) notifyCompletionWithErrors(
 	)
 }
 
+func (o *Orchestrator) completeRunRequired(runID, status, errorMessage string) error {
+	err := o.state.CompleteRun(runID, status, errorMessage)
+	return checkpoint.RequiredWrite(fmt.Sprintf("recording run %s terminal status %q", runID, status), err)
+}
+
+func (o *Orchestrator) markRunAsResumedRequired(runID string) error {
+	err := o.state.MarkRunAsResumed(runID)
+	return checkpoint.RequiredWrite(fmt.Sprintf("resetting running tasks for resumed run %s", runID), err)
+}
+
 // tableNamesForTuning collects table names from the filtered table set
 // so the smartconfig analyzer can scope its workload-wide derivations
 // (packet cap, avg/max row size, memory budget) to what's actually in

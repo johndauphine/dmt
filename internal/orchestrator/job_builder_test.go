@@ -78,6 +78,9 @@ func TestCreateRowNumberPartitionJobsClearsProgressWhenBoundariesShift(t *testin
 	if len(result.Jobs) != 2 {
 		t.Fatalf("jobs = %d, want 2", len(result.Jobs))
 	}
+	if result.TableTaskIDs[table.Name] <= 0 || result.TableTaskKeys[table.Name] == "" {
+		t.Fatalf("aggregate table task was not durably planned before transfer: ids=%v keys=%v", result.TableTaskIDs, result.TableTaskKeys)
+	}
 	for _, job := range result.Jobs {
 		progress, err := state.GetTransferProgress(job.TaskID)
 		if err != nil {

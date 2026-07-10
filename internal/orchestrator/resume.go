@@ -175,8 +175,8 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	}
 
 	// Reset any running tasks to pending
-	if err := o.state.MarkRunAsResumed(run.ID); err != nil {
-		return fmt.Errorf("resetting tasks: %w", err)
+	if err := o.markRunAsResumedRequired(run.ID); err != nil {
+		return err
 	}
 
 	// Extract schema (needed to know all tables)
@@ -286,19 +286,40 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 			return err
 		}
 
-		o.state.CompleteRun(run.ID, "success", "")
+		if err := o.completeRunRequired(run.ID, "success", ""); err != nil {
+			o.notifyFailure(run.ID, err, time.Since(startTime))
+			return err
+		}
 		o.captureSchemaSnapshotsForReport(run.ID, schemaDriftReport, tables)
 		logging.Info("Resume complete!")
 		return nil
 	}
 
 	logging.Debug("Resuming transfer of %d tables", len(tablesToTransfer))
+	// Build and durably persist all tasks before target preparation, which may
+	// truncate or create tables. A state failure must leave the target untouched.
+	buildResult, err := o.buildTransferJobs(ctx, run.ID, tablesToTransfer)
+	if err != nil {
+		o.abandonResumeAttempt(run.ID, err, startTime)
+		return err
+	}
+	if err := o.resetResumeTableTasksRequired(buildResult, tablesToTransfer); err != nil {
+		o.abandonResumeAttempt(run.ID, err, startTime)
+		return err
+	}
 
 	// For tables that need transfer, ensure target tables exist
 	// Check for chunk-level progress to avoid unnecessary truncation
 	progressSaver := checkpoint.NewProgressSaver(o.state)
 	for _, t := range tablesToTransfer {
-		if err := o.prepareResumeTargetTable(ctx, run.ID, t, schemaDriftReport, progressSaver); err != nil {
+		taskID, idOK := buildResult.TableTaskIDs[t.Name]
+		taskKey, keyOK := buildResult.TableTaskKeys[t.Name]
+		if !idOK || !keyOK || taskID <= 0 || taskKey == "" {
+			err := fmt.Errorf("missing durable table task for %s", t.FullName())
+			o.abandonResumeAttempt(run.ID, err, startTime)
+			return err
+		}
+		if err := o.prepareResumeTargetTable(ctx, run.ID, t, taskID, taskKey, schemaDriftReport, progressSaver); err != nil {
 			// Target preparation runs before any data is moved this resume and
 			// touches the target (row counts, truncate, create table/PK). A
 			// cancellation (Ctrl+C) or transient failure here must leave the run
@@ -323,13 +344,19 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	o.setPhase("transfer")
 	logging.Debug("Transferring data...")
 	transferStart := time.Now()
-	tableFailures, err := o.transferAll(ctx, run.ID, tablesToTransfer, true)
+	tableFailures, err := o.transferAll(ctx, run.ID, buildResult, tablesToTransfer, true)
 	transferDuration := time.Since(transferStart)
 	if err != nil {
+		if checkpoint.IsRequiredWriteError(err) {
+			o.abandonResumeAttempt(run.ID, err, startTime)
+			return fmt.Errorf("transferring data: %w", err)
+		}
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			o.state.MarkRunAsResumed(run.ID) // Reset running tasks to pending
+			if stateErr := o.markRunAsResumedRequired(run.ID); stateErr != nil {
+				return fmt.Errorf("transferring data: %w", errors.Join(err, stateErr))
+			}
 			logging.Info("Migration interrupted - run 'resume' to continue")
 			return fmt.Errorf("transferring data: %w", err)
 		}
@@ -421,7 +448,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		for i, f := range tableFailures {
 			failureNames[i] = f.TableName
 		}
-		o.state.CompleteRun(run.ID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures)))
+		if err := o.completeRunRequired(run.ID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures))); err != nil {
+			o.notifyFailure(run.ID, err, time.Since(startTime))
+			return err
+		}
 		o.notifyCompletionWithErrors(run.ID, startTime, duration,
 			successCount, len(tableFailures), totalRows, throughput, failureNames)
 		logging.Warn("Resume completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
@@ -429,7 +459,10 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		partialErr = !o.config.Migration.AllowPartial
 	} else {
 		// Full success
-		o.state.CompleteRun(run.ID, "success", "")
+		if err := o.completeRunRequired(run.ID, "success", ""); err != nil {
+			o.notifyFailure(run.ID, err, time.Since(startTime))
+			return err
+		}
 		o.captureSchemaSnapshotsForReport(run.ID, schemaDriftReport, tables)
 		o.notifyCompletion(run.ID, startTime, duration, len(tablesToTransfer), totalRows, throughput)
 		logging.Info("Resume complete: %d tables, %d rows in %s (%.0f rows/sec)",
@@ -451,18 +484,38 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	return nil
 }
 
+func (o *Orchestrator) resetResumeTableTasksRequired(buildResult *BuildResult, tables []source.Table) error {
+	// Validate the complete plan before writing any resets. All resets still
+	// happen before target preparation, so a later failure leaves target state
+	// untouched and every successful reset safely pending.
+	for _, table := range tables {
+		taskID, idOK := buildResult.TableTaskIDs[table.Name]
+		taskKey, keyOK := buildResult.TableTaskKeys[table.Name]
+		if !idOK || !keyOK || taskID <= 0 || taskKey == "" {
+			return checkpoint.RequiredWrite(
+				fmt.Sprintf("validating durable table task for %s", table.FullName()),
+				fmt.Errorf("missing planned aggregate task"),
+			)
+		}
+	}
+	for _, table := range tables {
+		taskID := buildResult.TableTaskIDs[table.Name]
+		if err := o.state.UpdateTaskStatus(taskID, "pending", ""); err != nil {
+			return checkpoint.RequiredWrite(fmt.Sprintf("resetting aggregate task %d for %s to pending", taskID, table.FullName()), err)
+		}
+	}
+	return nil
+}
+
 func (o *Orchestrator) prepareResumeTargetTable(
 	ctx context.Context,
 	runID string,
 	t source.Table,
+	taskID int64,
+	taskKey string,
 	schemaDriftReport drift.Report,
 	progressSaver *checkpoint.ProgressSaver,
 ) error {
-	taskID, taskKey, err := checkpoint.CreateTransferTask(o.state, runID, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
-	if err != nil {
-		return fmt.Errorf("creating task for %s: %w", t.Name, err)
-	}
-
 	exists, err := o.targetPool.TableExists(ctx, o.config.Target.Schema, t.Name)
 	if err != nil {
 		return fmt.Errorf("checking table %s: %w", t.Name, err)
@@ -566,10 +619,10 @@ func (o *Orchestrator) clearResumeProgress(runID, taskKey string, taskID int64, 
 		err = o.state.ClearPartitionTransferProgress(runID, taskKey)
 	}
 	if err != nil {
-		return fmt.Errorf("clearing partition progress for %s: %w", tableName, err)
+		return checkpoint.RequiredWrite(fmt.Sprintf("clearing partition progress for %s", tableName), err)
 	}
 	if err := o.state.ClearTransferProgress(taskID); err != nil {
-		return fmt.Errorf("clearing transfer progress for %s: %w", tableName, err)
+		return checkpoint.RequiredWrite(fmt.Sprintf("clearing transfer progress for %s task %d", tableName, taskID), err)
 	}
 	return nil
 }

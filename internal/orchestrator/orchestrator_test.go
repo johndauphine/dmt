@@ -548,6 +548,9 @@ func TestClearResumeProgressFailsOnStaleCheckpointCleanupErrors(t *testing.T) {
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("clearResumeProgress() error = %q, want substring %q", err.Error(), tt.wantErr)
 				}
+				if !checkpoint.IsRequiredWriteError(err) || exitcodes.FromError(err) != exitcodes.StateError {
+					t.Fatalf("clearResumeProgress() error = %v, want required state-write error", err)
+				}
 			}
 			if state.clearCalls != tt.wantClear {
 				t.Fatalf("ClearTransferProgress calls = %d, want %d", state.clearCalls, tt.wantClear)
@@ -716,6 +719,8 @@ func TestPrepareResumeTargetTableUpsertSkipsDestructiveRestarts(t *testing.T) {
 				context.Background(),
 				"run-536",
 				source.Table{Schema: "dbo", Name: "events", RowCount: 100},
+				42,
+				"transfer:dbo.events",
 				drift.Report{},
 				checkpoint.NewProgressSaver(state),
 			)
