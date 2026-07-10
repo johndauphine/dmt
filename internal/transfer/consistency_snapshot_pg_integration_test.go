@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
@@ -378,6 +380,114 @@ func TestPostgresExportedSnapshotJoinsParallelReaders(t *testing.T) {
 	releaseLead()
 	if got := db.Stats().InUse; got != 0 {
 		t.Fatalf("open strict transactions after lead release = %d, want none", got)
+	}
+}
+
+// TestPostgresStrictParallelReadersMatchNonStrictThroughput is the #662
+// performance acceptance check. A view adds a small fixed delay per keyset
+// page, making the cost of reader concurrency measurable without faking the
+// PostgreSQL snapshot or query paths. Four imported-snapshot readers must
+// stay within 15% of four ordinary readers on the same table.
+func TestPostgresStrictParallelReadersMatchNonStrictThroughput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration benchmark; -short set")
+	}
+	const dsn = "postgres://postgres:TestPass2024@localhost:5432/postgres?sslmode=disable"
+	db, err := sql.Open("pgx", dsn)
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	db.SetMaxOpenConns(5) // strict lead plus four imported snapshot readers
+	t.Cleanup(func() { _ = db.Close() })
+
+	const (
+		dataTable = "dmt662_strict_parallel_bench_data"
+		viewTable = "dmt662_strict_parallel_bench"
+	)
+	for _, q := range []string{
+		`DROP VIEW IF EXISTS public.dmt662_strict_parallel_bench`,
+		`DROP TABLE IF EXISTS public.dmt662_strict_parallel_bench_data`,
+		`CREATE TABLE public.dmt662_strict_parallel_bench_data (id bigint PRIMARY KEY, payload text NOT NULL)`,
+		`INSERT INTO public.dmt662_strict_parallel_bench_data SELECT id, 'v-' || id FROM generate_series(1, 128) id`,
+		// pg_sleep is evaluated once per page query. It keeps the comparison
+		// stable while the real keyset predicates and snapshot joins run.
+		`CREATE VIEW public.dmt662_strict_parallel_bench AS SELECT d.id, d.payload FROM public.dmt662_strict_parallel_bench_data d CROSS JOIN LATERAL pg_sleep(0.008) AS page_delay`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP VIEW IF EXISTS public.dmt662_strict_parallel_bench`)
+		_, _ = db.Exec(`DROP TABLE IF EXISTS public.dmt662_strict_parallel_bench_data`)
+	})
+
+	table := driver.Table{
+		Name:   viewTable,
+		Schema: "public",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "int8", IsNullable: false},
+			{Name: "payload", DataType: "text"},
+		},
+		PrimaryKey:       []string{"id"},
+		RowCount:         128,
+		EstimatedRowSize: 32,
+	}
+	table.PopulatePKColumns()
+	src := &postgresStrictSnapshotSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}
+	cols := []string{"id", "payload"}
+	types := []string{"int8", "text"}
+	run := func(strict bool) time.Duration {
+		cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+			ChunkSize: 2, ParallelReaders: 4, MaxSourceConnections: 5, WriteAheadWriters: 1,
+			TargetMode: "drop_recreate", StrictConsistency: strict,
+		}}
+		ctx := context.Background()
+		release := func() {}
+		if strict {
+			var err error
+			ctx, release, err = beginStrictSourceSnapshot(ctx, src, source.Table{Schema: table.Schema, Name: table.Name})
+			if err != nil {
+				t.Fatalf("begin strict snapshot: %v", err)
+			}
+		}
+		defer release()
+
+		target := &keysetRuntimeTargetPool{updated: true}
+		start := time.Now()
+		stats, err := executeKeysetPagination(ctx, src, target, cfg, Job{Table: table}, cols, cols, types, []int{0, 0}, progress.New(), nil, 0, nil, table.Name, nil, nil)
+		if err != nil || stats.Rows != table.RowCount {
+			t.Fatalf("strict=%t run = (rows=%v, err=%v), want %d rows", strict, stats, err, table.RowCount)
+		}
+		ids, _ := target.snapshot()
+		seen := make(map[int]struct{}, len(ids))
+		for _, id := range ids {
+			seen[id] = struct{}{}
+		}
+		if len(seen) != int(table.RowCount) {
+			t.Fatalf("strict=%t transferred %d unique ids, want %d", strict, len(seen), table.RowCount)
+		}
+		return time.Since(start)
+	}
+	median := func(samples []time.Duration) time.Duration {
+		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+		return samples[len(samples)/2]
+	}
+
+	// Median-of-three absorbs normal CI scheduling noise while preserving a
+	// short live integration test. Each pair uses the identical table and
+	// configured reader count; strict mode is the only variable.
+	nonStrict := median([]time.Duration{run(false), run(false), run(false)})
+	strict := median([]time.Duration{run(true), run(true), run(true)})
+	t.Logf("live PG strict keyset benchmark: non-strict=%v, strict=%v", nonStrict, strict)
+	if strict*100 > nonStrict*115 {
+		t.Fatalf("strict parallel readers took %v vs non-strict %v; want within 15%%", strict, nonStrict)
 	}
 }
 
