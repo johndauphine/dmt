@@ -8,8 +8,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
 	_ "github.com/johndauphine/dmt/internal/driver/generic" // register generic dialects
+	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -376,6 +378,234 @@ func TestPostgresExportedSnapshotJoinsParallelReaders(t *testing.T) {
 	releaseLead()
 	if got := db.Stats().InUse; got != 0 {
 		t.Fatalf("open strict transactions after lead release = %d, want none", got)
+	}
+}
+
+// TestPostgresMigrationSnapshotEpochAllowsPartitionedStrictJobs verifies #663
+// end to end: independently dispatched partitions import the epoch opened
+// before the source mutation, so their combined transfer is the old key set.
+func TestPostgresMigrationSnapshotEpochAllowsPartitionedStrictJobs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test; -short set")
+	}
+	const dsn = "postgres://postgres:TestPass2024@localhost:5432/postgres?sslmode=disable"
+	db, err := sql.Open("pgx", dsn)
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	db.SetMaxOpenConns(3) // epoch lead plus the two partition readers
+	t.Cleanup(func() { _ = db.Close() })
+
+	const schema = "dmt663_partitioned_epoch"
+	const tableName = "events"
+	ctx := context.Background()
+	for _, q := range []string{
+		fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema),
+		fmt.Sprintf(`CREATE SCHEMA %s`, schema),
+		fmt.Sprintf(`CREATE TABLE %s.%s (id int PRIMARY KEY, payload text NOT NULL)`, schema, tableName),
+		fmt.Sprintf(`INSERT INTO %s.%s VALUES (1,'v-1'),(2,'v-2'),(3,'v-3'),(4,'v-4'),(5,'v-5'),(6,'v-6'),(7,'v-7'),(8,'v-8')`, schema, tableName),
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() { _, _ = db.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema)) })
+
+	src := &postgresStrictSnapshotSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}
+	epoch, err := BeginStrictSnapshotEpoch(ctx, src)
+	if err != nil {
+		t.Fatalf("BeginStrictSnapshotEpoch: %v", err)
+	}
+	defer epoch.Close()
+
+	// The epoch predates this replacement. A table-scoped strict transfer
+	// started below would see [2..9], while both partition jobs must retain
+	// [1..8] from the one migration-wide source view.
+	for _, q := range []string{
+		fmt.Sprintf(`DELETE FROM %s.%s WHERE id = 1`, schema, tableName),
+		fmt.Sprintf(`INSERT INTO %s.%s VALUES (9, 'v-9')`, schema, tableName),
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("mutation %q: %v", q, err)
+		}
+	}
+
+	table := source.Table{
+		Schema:     schema,
+		Name:       tableName,
+		PrimaryKey: []string{"id"},
+		Columns: []source.Column{
+			{Name: "id", DataType: "integer"},
+			{Name: "payload", DataType: "text"},
+		},
+		RowCount: 8,
+	}
+	table.PopulatePKColumns()
+	cfg := &config.Config{
+		Target: config.TargetConfig{Schema: ""},
+		Migration: config.MigrationConfig{
+			StrictConsistency:      true,
+			StrictConsistencyScope: "migration",
+			TargetMode:             "drop_recreate",
+			ChunkSize:              1,
+			ParallelReaders:        1,
+			MaxSourceConnections:   3,
+			ReadAheadBuffers:       1,
+			WriteAheadWriters:      1,
+		},
+	}
+	target := &keysetRuntimeTargetPool{updated: true}
+	jobs := []Job{
+		{Table: table, Partition: &source.Partition{TableName: tableName, PartitionID: 1, MinPK: int64(1), MaxPK: int64(4), RowCount: 4, IsFirstPartition: true}, StrictSnapshotEpoch: epoch},
+		{Table: table, Partition: &source.Partition{TableName: tableName, PartitionID: 2, MinPK: int64(5), MaxPK: int64(8), RowCount: 4}, StrictSnapshotEpoch: epoch},
+	}
+	errCh := make(chan error, len(jobs))
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		wg.Add(1)
+		go func(job Job) {
+			defer wg.Done()
+			stats, err := Execute(ctx, src, target, cfg, job, progress.New(), nil)
+			if err == nil && stats.Rows != 4 {
+				err = fmt.Errorf("partition %d transferred %d rows, want 4", job.Partition.PartitionID, stats.Rows)
+			}
+			errCh <- err
+		}(job)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, _ := target.snapshot()
+	if len(ids) != 8 {
+		t.Fatalf("partitioned strict transfer copied %d rows (%v), want 8", len(ids), ids)
+	}
+	seen := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for id := 1; id <= 8; id++ {
+		if !seen[id] {
+			t.Fatalf("partitioned strict transfer missed snapshot key %d; got %v", id, ids)
+		}
+	}
+	if seen[9] {
+		t.Fatalf("partitioned strict transfer included post-epoch key 9: %v", ids)
+	}
+}
+
+// TestPostgresMigrationSnapshotEpochKeepsFKRelatedTablesAligned shows the
+// reason migration scope exists. Per-table snapshots can straddle a live
+// parent/child replacement, while readers joined to one epoch retain the
+// original, FK-consistent relationship.
+func TestPostgresMigrationSnapshotEpochKeepsFKRelatedTablesAligned(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test; -short set")
+	}
+	const dsn = "postgres://postgres:TestPass2024@localhost:5432/postgres?sslmode=disable"
+	db, err := sql.Open("pgx", dsn)
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	const schema = "dmt663_fk_epoch"
+	ctx := context.Background()
+	for _, q := range []string{
+		fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema),
+		fmt.Sprintf(`CREATE SCHEMA %s`, schema),
+		fmt.Sprintf(`CREATE TABLE %s.parents (id int PRIMARY KEY)`, schema),
+		fmt.Sprintf(`CREATE TABLE %s.children (id int PRIMARY KEY, parent_id int NOT NULL REFERENCES %s.parents(id))`, schema, schema),
+		fmt.Sprintf(`INSERT INTO %s.parents VALUES (1)`, schema),
+		fmt.Sprintf(`INSERT INTO %s.children VALUES (1, 1)`, schema),
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() { _, _ = db.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema)) })
+
+	src := &postgresStrictSnapshotSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}
+	epoch, err := BeginStrictSnapshotEpoch(ctx, src)
+	if err != nil {
+		t.Fatalf("BeginStrictSnapshotEpoch: %v", err)
+	}
+	defer epoch.Close()
+
+	replaceRelationship := func(next int) {
+		t.Helper()
+		for _, q := range []string{
+			fmt.Sprintf(`DELETE FROM %s.children`, schema),
+			fmt.Sprintf(`DELETE FROM %s.parents`, schema),
+			fmt.Sprintf(`INSERT INTO %s.parents VALUES (%d)`, schema, next),
+			fmt.Sprintf(`INSERT INTO %s.children VALUES (%d, %d)`, schema, next, next),
+		} {
+			if _, err := db.ExecContext(ctx, q); err != nil {
+				t.Fatalf("replace relationship %q: %v", q, err)
+			}
+		}
+	}
+	readOne := func(q sourceQueryer, query string) int {
+		t.Helper()
+		var value int
+		if err := q.QueryRowContext(ctx, query).Scan(&value); err != nil {
+			t.Fatalf("snapshot query %q: %v", query, err)
+		}
+		return value
+	}
+
+	// Both epoch readers start after the live source has switched to key 2,
+	// but they import the pre-replacement view and retain key 1.
+	replaceRelationship(2)
+	factory := sourceQueryerFactoryForJob(ctx, Job{StrictSnapshotEpoch: epoch})
+	parentReader, releaseParent, err := factory(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := readOne(parentReader, fmt.Sprintf(`SELECT id FROM %s.parents`, schema))
+	releaseParent()
+	childReader, releaseChild, err := factory(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childParentID := readOne(childReader, fmt.Sprintf(`SELECT parent_id FROM %s.children`, schema))
+	releaseChild()
+	if parentID != 1 || childParentID != 1 {
+		t.Fatalf("migration epoch relationship = parent %d / child parent_id %d, want 1 / 1", parentID, childParentID)
+	}
+
+	// Table scope intentionally permits the two snapshots to differ: parent
+	// starts at key 2, then child starts after the next live replacement.
+	parentCtx, releaseTableParent, err := beginStrictSourceSnapshot(ctx, src, source.Table{Schema: schema, Name: "parents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseTableParent()
+	tableParentID := readOne(sourceQueryerFor(parentCtx, db), fmt.Sprintf(`SELECT id FROM %s.parents`, schema))
+	replaceRelationship(3)
+	childCtx, releaseTableChild, err := beginStrictSourceSnapshot(ctx, src, source.Table{Schema: schema, Name: "children"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseTableChild()
+	tableChildParentID := readOne(sourceQueryerFor(childCtx, db), fmt.Sprintf(`SELECT parent_id FROM %s.children`, schema))
+	if tableParentID == tableChildParentID {
+		t.Fatalf("table-scoped snapshots unexpectedly matched at key %d; want reproduction of cross-table skew", tableParentID)
 	}
 }
 

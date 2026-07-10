@@ -33,7 +33,7 @@ func executeRowNumberPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
-	db := sourceQueryerFor(ctx, srcPool.DB())
+	db := sourceQueryerForJob(ctx, srcPool.DB(), job)
 
 	// Use dialect for database-specific SQL syntax
 	srcDialect := driver.GetDialect(srcPool.DBType())

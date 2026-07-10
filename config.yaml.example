@@ -83,6 +83,11 @@ migration:
   # copy. Incremental date-filter jobs keep normal live-count validation. Long
   # snapshots can retain MVCC history or block writers.
   strict_consistency: false
+  # table (default): one stable snapshot per table. migration (PostgreSQL
+  # source only): one exported snapshot for every table and partition in the
+  # transfer phase. A resume in a new process starts a new epoch; long epochs
+  # retain PostgreSQL MVCC history and can delay vacuum.
+  strict_consistency_scope: table
 
   # Schema drift reporting (#305). DMT compares the current source
   # schema to the last successful run's snapshot and logs a structured

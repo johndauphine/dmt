@@ -28,8 +28,9 @@ func (fs *FileState) SaveStrictSnapshotRowCount(taskID, rowCount int64) error {
 	})
 }
 
-// GetStrictSnapshotRowCount mirrors the SQLite latest-run behavior. FileState
-// keeps only one run, so an empty runID means its current run.
+// GetStrictSnapshotRowCount mirrors the SQLite latest-run behavior, including
+// migration-scoped partition tasks that carry one shared full-table count.
+// FileState keeps only one run, so an empty runID means its current run.
 func (fs *FileState) GetStrictSnapshotRowCount(runID, sourceSchema, targetSchema, tableName string) (*int64, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
@@ -40,7 +41,7 @@ func (fs *FileState) GetStrictSnapshotRowCount(runID, sourceSchema, targetSchema
 	}
 	for _, task := range fs.state.Tables {
 		if fileStateTaskType(task) != "transfer" || task.TaskTable != tableName ||
-			task.TaskPartitionID != nil || task.Status != "success" ||
+			task.Status != "success" ||
 			task.SnapshotRowCount == nil {
 			continue
 		}

@@ -39,8 +39,10 @@ func (s *State) SaveStrictSnapshotRowCount(taskID, rowCount int64) error {
 }
 
 // GetStrictSnapshotRowCount returns a completed table task's exact snapshot
-// count. An empty runID selects the latest run for the same source/target
-// schemas without skipping a newer ordinary run for an older strict one.
+// count. Migration-scoped strict copies may persist that shared full-table
+// count on a partition task; every partition observed the same epoch. An empty
+// runID selects the latest run for the same source/target schemas without
+// skipping a newer ordinary run for an older strict one.
 func (s *State) GetStrictSnapshotRowCount(runID, sourceSchema, targetSchema, tableName string) (*int64, error) {
 	var (
 		count sql.NullInt64
@@ -56,7 +58,6 @@ func (s *State) GetStrictSnapshotRowCount(runID, sourceSchema, targetSchema, tab
 			  AND r.strict_consistency = 1
 			  AND t.task_type = 'transfer'
 			  AND t.task_table = ?
-			  AND t.task_partition_id IS NULL
 			  AND t.status = 'success'
 			  AND t.snapshot_row_count IS NOT NULL
 		`, runID, sourceSchema, targetSchema, tableName).Scan(&count)
@@ -74,7 +75,6 @@ func (s *State) GetStrictSnapshotRowCount(runID, sourceSchema, targetSchema, tab
 			  AND r.strict_consistency = 1
 			  AND t.task_type = 'transfer'
 			  AND t.task_table = ?
-			  AND t.task_partition_id IS NULL
 			  AND t.status = 'success'
 			  AND t.snapshot_row_count IS NOT NULL
 		`, sourceSchema, targetSchema, tableName).Scan(&count)

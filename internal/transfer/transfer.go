@@ -33,12 +33,14 @@ func Execute(
 		adjuster = writeErrorAdjuster[0]
 	}
 
-	// A strict snapshot is table-scoped. Partition jobs would each open their
-	// own transaction and therefore could not represent one stable table view.
-	// JobBuilder prevents newly planned strict jobs from being partitioned, and
-	// this runtime guard protects legacy checkpoints and direct callers too.
-	if cfg.Migration.StrictConsistency && job.Partition != nil {
+	// A table-scoped strict snapshot cannot make independently started
+	// partitions one stable view. An explicit migration epoch imports one
+	// PostgreSQL snapshot into all partitions, so it is the sole exception.
+	if cfg.Migration.StrictConsistency && job.Partition != nil && job.StrictSnapshotEpoch == nil {
 		return nil, fmt.Errorf("strict_consistency does not support partitioned jobs for %s; rebuild the run with one unpartitioned job per table", job.Table.FullName())
+	}
+	if job.StrictSnapshotEpoch != nil && !cfg.Migration.StrictConsistency {
+		return nil, fmt.Errorf("strict snapshot epoch for %s requires strict_consistency", job.Table.FullName())
 	}
 
 	// Track table start/end for accurate progress display
@@ -95,18 +97,24 @@ func Execute(
 	// target preparation so an unsupported source fails without truncating data.
 	// The transaction remains open through every page and is released on return.
 	if cfg.Migration.StrictConsistency {
-		strictCtx, releaseSnapshot, err := beginStrictSourceSnapshot(ctx, srcPool, job.Table)
-		if err != nil {
-			return nil, err
+		if job.StrictSnapshotEpoch != nil {
+			if job.StrictSnapshotEpoch.queryer() == nil {
+				return nil, fmt.Errorf("strict snapshot epoch for %s is unavailable", job.Table.FullName())
+			}
+		} else {
+			strictCtx, releaseSnapshot, err := beginStrictSourceSnapshot(ctx, srcPool, job.Table)
+			if err != nil {
+				return nil, err
+			}
+			ctx = strictCtx
+			defer releaseSnapshot()
 		}
-		ctx = strictCtx
-		defer releaseSnapshot()
 
 		// Full-table strict jobs validate against this exact count rather than a
 		// later live source count. Incremental DateFilter jobs intentionally
 		// skip it: their target contains a window, not the whole table (#664).
 		if job.DateFilter == nil && job.Saver != nil && job.TaskID > 0 {
-			snapshotCount, err := strictSnapshotRowCount(ctx, srcPool, job.Table)
+			snapshotCount, err := strictSnapshotRowCountWithQueryer(ctx, srcPool, job.Table, sourceQueryerForJob(ctx, srcPool.DB(), job))
 			if err != nil {
 				return nil, err
 			}

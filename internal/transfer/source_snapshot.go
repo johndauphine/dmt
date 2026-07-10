@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/pool"
@@ -58,6 +59,91 @@ func (s *sharedSnapshot) joinReader(ctx context.Context) (*sql.Tx, func(), error
 	return tx, func() { _ = tx.Rollback() }, nil
 }
 
+// StrictSnapshotEpoch owns PostgreSQL's exported MVCC snapshot for one
+// transfer phase. The orchestrator creates it once and passes the same handle
+// explicitly to every Job; each keyset reader then imports the anchored view.
+// It must be closed only after every transfer job, including retries, exits.
+type StrictSnapshotEpoch struct {
+	snapshot  *sharedSnapshot
+	startedAt time.Time
+}
+
+// BeginStrictSnapshotEpoch opens a PostgreSQL-only migration-wide source view.
+// It fails before target mutation for unsupported sources, rather than falling
+// back to an unrelated per-table snapshot.
+func BeginStrictSnapshotEpoch(ctx context.Context, srcPool pool.SourcePool) (*StrictSnapshotEpoch, error) {
+	if srcPool == nil || srcPool.DB() == nil {
+		return nil, fmt.Errorf("strict_consistency_scope: migration requires an open PostgreSQL source database connection")
+	}
+	if !strictSnapshotExportSupported(srcPool.DBType()) {
+		return nil, fmt.Errorf("strict_consistency_scope: migration requires a PostgreSQL source; got %q", srcPool.DBType())
+	}
+	snapshot, err := beginPostgresExportedSnapshot(ctx, srcPool.DB())
+	if err != nil {
+		return nil, err
+	}
+	return &StrictSnapshotEpoch{snapshot: snapshot, startedAt: time.Now()}, nil
+}
+
+// Close releases the lead transaction that anchors the exported view. sql.Tx
+// rollback is intentionally safe to call after a cancellation or failed job.
+func (e *StrictSnapshotEpoch) Close() {
+	if e != nil && e.snapshot != nil {
+		e.snapshot.release()
+	}
+}
+
+// Age reports how long the migration-wide snapshot has held PostgreSQL's
+// vacuum horizon. It is used only for operational logging.
+func (e *StrictSnapshotEpoch) Age() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return time.Since(e.startedAt)
+}
+
+func (e *StrictSnapshotEpoch) queryer() sourceQueryer {
+	if e == nil || e.snapshot == nil {
+		return nil
+	}
+	return e.snapshot.lead
+}
+
+func (e *StrictSnapshotEpoch) queryerForWorker(ctx context.Context, workerID int) (sourceQueryer, func(), error) {
+	if e == nil || e.snapshot == nil {
+		return nil, nil, fmt.Errorf("strict snapshot epoch is unavailable for reader %d", workerID)
+	}
+	return e.snapshot.joinReader(ctx)
+}
+
+func beginPostgresExportedSnapshot(ctx context.Context, db *sql.DB) (*sharedSnapshot, error) {
+	options, err := strictSnapshotTxOptions("postgres")
+	if err != nil {
+		return nil, err
+	}
+	tx, err := db.BeginTx(ctx, options)
+	if err != nil {
+		return nil, fmt.Errorf("starting PostgreSQL strict_consistency snapshot: %w", err)
+	}
+	var snapshotID string
+	if err := tx.QueryRowContext(ctx, "SELECT pg_export_snapshot()").Scan(&snapshotID); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("exporting PostgreSQL strict_consistency snapshot: %w", err)
+	}
+	if snapshotID == "" {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("exporting PostgreSQL strict_consistency snapshot: received an empty snapshot ID")
+	}
+	return &sharedSnapshot{lead: tx, id: snapshotID, db: db}, nil
+}
+
+func strictSnapshotContext(ctx context.Context, snapshot *sharedSnapshot) context.Context {
+	strictCtx := context.WithValue(ctx, sourceQueryerContextKey{}, sourceQueryer(snapshot.lead))
+	return context.WithValue(strictCtx, sourceQueryerFactoryContextKey{}, sourceQueryerFactory(func(workerCtx context.Context, _ int) (sourceQueryer, func(), error) {
+		return snapshot.joinReader(workerCtx)
+	}))
+}
+
 // beginStrictSourceSnapshot starts the table-scoped source transaction before
 // target preparation changes anything. Ordinary strict pagination receives
 // that transaction through the context; PostgreSQL keyset workers instead
@@ -75,6 +161,13 @@ func beginStrictSourceSnapshot(ctx context.Context, srcPool pool.SourcePool, tab
 	if err := validateStrictSnapshotTable(ctx, srcPool, table); err != nil {
 		return nil, nil, err
 	}
+	if strictSnapshotExportSupported(srcPool.DBType()) {
+		snapshot, err := beginPostgresExportedSnapshot(ctx, srcPool.DB())
+		if err != nil {
+			return nil, nil, err
+		}
+		return strictSnapshotContext(ctx, snapshot), snapshot.release, nil
+	}
 
 	options, err := strictSnapshotTxOptions(srcPool.DBType())
 	if err != nil {
@@ -91,24 +184,7 @@ func beginStrictSourceSnapshot(ctx context.Context, srcPool pool.SourcePool, tab
 		_ = tx.Rollback()
 	}
 	strictCtx := context.WithValue(ctx, sourceQueryerContextKey{}, sourceQueryer(tx))
-	if !strictSnapshotExportSupported(srcPool.DBType()) {
-		return strictCtx, cleanup, nil
-	}
-
-	var snapshotID string
-	if err := tx.QueryRowContext(ctx, "SELECT pg_export_snapshot()").Scan(&snapshotID); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("exporting PostgreSQL strict_consistency snapshot: %w", err)
-	}
-	if snapshotID == "" {
-		cleanup()
-		return nil, nil, fmt.Errorf("exporting PostgreSQL strict_consistency snapshot: received an empty snapshot ID")
-	}
-
-	snapshot := &sharedSnapshot{lead: tx, id: snapshotID, db: srcPool.DB()}
-	return context.WithValue(strictCtx, sourceQueryerFactoryContextKey{}, sourceQueryerFactory(func(workerCtx context.Context, _ int) (sourceQueryer, func(), error) {
-		return snapshot.joinReader(workerCtx)
-	})), snapshot.release, nil
+	return strictCtx, cleanup, nil
 }
 
 // validateStrictSnapshotTable handles engine-specific preconditions that a
@@ -193,18 +269,36 @@ func sourceQueryerFactoryFor(ctx context.Context) sourceQueryerFactory {
 	return factory
 }
 
+func sourceQueryerForJob(ctx context.Context, fallback *sql.DB, job Job) sourceQueryer {
+	if queryer := job.StrictSnapshotEpoch.queryer(); queryer != nil {
+		return queryer
+	}
+	return sourceQueryerFor(ctx, fallback)
+}
+
+func sourceQueryerFactoryForJob(ctx context.Context, job Job) sourceQueryerFactory {
+	if job.StrictSnapshotEpoch != nil {
+		return job.StrictSnapshotEpoch.queryerForWorker
+	}
+	return sourceQueryerFactoryFor(ctx)
+}
+
 // strictSnapshotRowCount reads the full-table count through the same pinned
 // transaction used for pagination. Besides providing strict-validation
 // evidence, this first table read establishes engines' lazy MVCC snapshot
 // before target preparation can take time (#664).
 func strictSnapshotRowCount(ctx context.Context, srcPool pool.SourcePool, table source.Table) (int64, error) {
+	return strictSnapshotRowCountWithQueryer(ctx, srcPool, table, sourceQueryerFor(ctx, srcPool.DB()))
+}
+
+func strictSnapshotRowCountWithQueryer(ctx context.Context, srcPool pool.SourcePool, table source.Table, queryer sourceQueryer) (int64, error) {
 	dialect := driver.GetDialect(srcPool.DBType())
 	if dialect == nil {
 		return 0, fmt.Errorf("strict_consistency row count: no dialect registered for source DB type %q", srcPool.DBType())
 	}
 	var count int64
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", dialect.QualifyTable(table.Schema, table.Name))
-	if err := sourceQueryerFor(ctx, srcPool.DB()).QueryRowContext(ctx, query).Scan(&count); err != nil {
+	if err := queryer.QueryRowContext(ctx, query).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting strict_consistency snapshot for %s: %w", table.FullName(), err)
 	}
 	return count, nil

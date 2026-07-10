@@ -453,6 +453,49 @@ func TestValidate_RejectsKerberosAuth(t *testing.T) {
 	})
 }
 
+func TestValidateStrictConsistencyScope(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Source:    SourceConfig{Type: "postgres", Host: "src", Port: 5432, Database: "source", User: "u", Password: "p"},
+			Target:    TargetConfig{Type: "mssql", Host: "target", Port: 1433, Database: "target", User: "u", Password: "p"},
+			Migration: MigrationConfig{TargetMode: "drop_recreate", StrictConsistency: true},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{name: "default table scope", mutate: func(*Config) {}},
+		{name: "explicit table scope", mutate: func(c *Config) { c.Migration.StrictConsistencyScope = "table" }},
+		{name: "postgres migration scope", mutate: func(c *Config) { c.Migration.StrictConsistencyScope = "migration" }},
+		{name: "invalid scope", mutate: func(c *Config) { c.Migration.StrictConsistencyScope = "run" }, wantErr: "must be 'table' or 'migration'"},
+		{name: "migration requires strict", mutate: func(c *Config) {
+			c.Migration.StrictConsistency = false
+			c.Migration.StrictConsistencyScope = "migration"
+		}, wantErr: "requires migration.strict_consistency: true"},
+		{name: "migration requires postgres", mutate: func(c *Config) { c.Source.Type = "mysql"; c.Migration.StrictConsistencyScope = "migration" }, wantErr: "requires a PostgreSQL source"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			tc.mutate(cfg)
+			err := cfg.validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validate error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestValidate_FileBasedDriverSkipsHost locks in the isFileBasedDriver
 // carve-out added so sqlite configs validate without `host`. Without
 // this test, a future refactor of canonicalDriverName or

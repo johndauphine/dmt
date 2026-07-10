@@ -34,7 +34,7 @@ func executeKeysetPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
-	db := sourceQueryerFor(ctx, srcPool.DB())
+	db := sourceQueryerForJob(ctx, srcPool.DB(), job)
 	pkCol := job.Table.PrimaryKey[0]
 
 	// Use dialect for database-specific SQL syntax
@@ -99,7 +99,7 @@ func executeKeysetPagination(
 
 	var queryerForWorker sourceQueryerFactory
 	if joinSnapshotReaders {
-		queryerForWorker = sourceQueryerFactoryFor(ctx)
+		queryerForWorker = sourceQueryerFactoryForJob(ctx, job)
 		if queryerForWorker == nil {
 			return nil, fmt.Errorf("strict_consistency PostgreSQL snapshot reader factory is unavailable")
 		}

@@ -130,6 +130,55 @@ func TestPostgresSnapshotJoinFailureRollsBackReader(t *testing.T) {
 	}
 }
 
+func TestMigrationSnapshotEpochExportsOnceAndReleasesLead(t *testing.T) {
+	db, tracker := openSnapshotRecordingDB(t)
+	epoch, err := BeginStrictSnapshotEpoch(context.Background(), &postgresSnapshotRecordingSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}})
+	if err != nil {
+		t.Fatalf("BeginStrictSnapshotEpoch: %v", err)
+	}
+	ctx := context.Background()
+	factory := sourceQueryerFactoryForJob(ctx, Job{StrictSnapshotEpoch: epoch})
+	if factory == nil {
+		t.Fatal("epoch did not provide a strict reader factory")
+	}
+	queryer, releaseReader, err := factory(ctx, 0)
+	if err != nil {
+		t.Fatalf("join epoch reader: %v", err)
+	}
+	rows, err := queryer.QueryContext(ctx, "SELECT epoch_page")
+	if err != nil {
+		t.Fatalf("epoch reader query: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	releaseReader()
+	epoch.Close()
+	epoch.Close() // cancellation/teardown paths may both attempt release
+
+	want := []string{
+		"begin",
+		"query SELECT pg_export_snapshot()",
+		"begin",
+		"exec SET TRANSACTION SNAPSHOT '00000001-1'",
+		"query SELECT epoch_page",
+		"rollback",
+		"rollback",
+	}
+	if got := tracker.events(); !strictSnapshotEventPrefix(got, want) {
+		t.Fatalf("epoch events = %v, want prefix %v", got, want)
+	}
+}
+
+func TestMigrationSnapshotEpochRejectsNonPostgres(t *testing.T) {
+	reader, writer := openSnapshotSQLite(t, []string{`CREATE TABLE events (id INTEGER PRIMARY KEY)`})
+	defer reader.Close()
+	defer writer.Close()
+	if _, err := BeginStrictSnapshotEpoch(context.Background(), &keysetRuntimeSourcePool{db: reader}); err == nil || !strings.Contains(err.Error(), "requires a PostgreSQL source") {
+		t.Fatalf("BeginStrictSnapshotEpoch sqlite error = %v, want fail-closed PostgreSQL error", err)
+	}
+}
+
 func TestKeysetProducerReleasesWorkerQueryersOnSuccessAndCancellation(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

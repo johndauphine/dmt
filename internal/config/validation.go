@@ -65,6 +65,9 @@ func (c *Config) validate() error {
 	if c.Migration.TargetMode != "drop_recreate" && c.Migration.TargetMode != "upsert" {
 		return fmt.Errorf("migration.target_mode must be 'drop_recreate' or 'upsert'")
 	}
+	if err := c.validateStrictConsistencyScope(); err != nil {
+		return err
+	}
 
 	switch c.Migration.Tuning {
 	case "", "auto", "manual":
@@ -147,6 +150,25 @@ func (c *Config) validate() error {
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
 	return nil
+}
+
+func (c *Config) validateStrictConsistencyScope() error {
+	switch c.Migration.StrictConsistencyScope {
+	case "", "table":
+		return nil
+	case "migration":
+		if !c.Migration.StrictConsistency {
+			return fmt.Errorf("migration.strict_consistency_scope: migration requires migration.strict_consistency: true")
+		}
+		switch strings.ToLower(strings.TrimSpace(c.Source.Type)) {
+		case "postgres", "postgresql", "pg":
+			return nil
+		default:
+			return fmt.Errorf("migration.strict_consistency_scope: migration requires a PostgreSQL source; got %q", c.Source.Type)
+		}
+	default:
+		return fmt.Errorf("migration.strict_consistency_scope must be 'table' or 'migration'; got %q", c.Migration.StrictConsistencyScope)
+	}
 }
 
 func validateSchemaContractMode(path string, got SchemaContractMode, allowed ...SchemaContractMode) error {
