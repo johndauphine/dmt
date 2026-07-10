@@ -139,7 +139,7 @@ func TestCatalogValidation(t *testing.T) {
 func TestShippedCatalogStrictParallelStrategies(t *testing.T) {
 	tests := map[string]string{
 		"postgres":   "exported_snapshot",
-		"mysql":      "none",
+		"mysql":      "lock_window_sessions",
 		"mssql":      "none",
 		"sqlite":     "none",
 		"clickhouse": "none",

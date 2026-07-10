@@ -1,6 +1,11 @@
 package generic
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/johndauphine/dmt/internal/driver"
+)
 
 // TestParseMySQLVersion covers the SHOW VERSION() string shapes the
 // preflight check has to handle: bare MySQL semver, vendor-suffixed
@@ -148,6 +153,46 @@ func TestGrantsInclude(t *testing.T) {
 			got := mysqlPFGrantsInclude(tc.grants, tc.priv, tc.dbName)
 			if got != tc.want {
 				t.Errorf("mysqlPFGrantsInclude(%v, %q, %q) = %v, want %v", tc.grants, tc.priv, tc.dbName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMySQLLockTablesPreflightGate(t *testing.T) {
+	tests := []struct {
+		name string
+		req  driver.PreFlightRequest
+	}{
+		{name: "target", req: driver.PreFlightRequest{Side: driver.PreFlightSideTarget, StrictConsistency: true, ParallelReaders: 4}},
+		{name: "relaxed", req: driver.PreFlightRequest{Side: driver.PreFlightSideSource, ParallelReaders: 4}},
+		{name: "single reader", req: driver.PreFlightRequest{Side: driver.PreFlightSideSource, StrictConsistency: true, ParallelReaders: 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// A nil DB proves the gate returns before attempting any probe.
+			if got := mysqlPFCheckLockTablesMySQL(context.Background(), nil, tc.req); len(got) != 0 {
+				t.Fatalf("findings = %+v, want none", got)
+			}
+		})
+	}
+}
+
+func TestMySQLLockTablesPreflightTableSelection(t *testing.T) {
+	tests := []struct {
+		name               string
+		includes, excludes []string
+		want               bool
+	}{
+		{name: "all by default", want: true},
+		{name: "include exact case insensitive", includes: []string{"EVENTS"}, want: true},
+		{name: "include glob", includes: []string{"ev*"}, want: true},
+		{name: "not included", includes: []string{"orders"}},
+		{name: "excluded wins", includes: []string{"ev*"}, excludes: []string{"events"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mysqlPFTableSelected("events", tc.includes, tc.excludes); got != tc.want {
+				t.Fatalf("selected = %t, want %t", got, tc.want)
 			}
 		})
 	}

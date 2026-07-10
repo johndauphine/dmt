@@ -100,6 +100,6 @@ func TestMySQLCatalogCapabilities(t *testing.T) {
 		SequenceResetter: true,
 	})
 	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
-		StrictParallelStrategy: "none",
+		StrictParallelStrategy: "lock_window_sessions",
 	})
 }
