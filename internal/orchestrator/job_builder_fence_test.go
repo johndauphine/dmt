@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -62,9 +63,15 @@ func TestIncrementalFenceIsImmutableAcrossResume(t *testing.T) {
 
 	// Fresh run: samples H1, persists it, and advances the watermark to H1.
 	const runID = "run-1"
+	if err := state.CreateRun(runID, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	tblFresh := table
 	res1 := newFenceResult()
-	df1 := b.buildDateFilter(context.Background(), runID, &tblFresh, true, true, res1)
+	df1, err := b.buildDateFilter(context.Background(), runID, &tblFresh, true, true, res1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if df1 == nil || !df1.Timestamp.Equal(t0) {
 		t.Fatalf("fresh build: date filter = %+v, want lower bound T0 %v", df1, t0)
 	}
@@ -82,7 +89,11 @@ func TestIncrementalFenceIsImmutableAcrossResume(t *testing.T) {
 	src.maxDate = &h2
 	tblResume := table
 	res2 := newFenceResult()
-	if b.buildDateFilter(context.Background(), runID, &tblResume, true, true, res2) == nil {
+	df2, err := b.buildDateFilter(context.Background(), runID, &tblResume, true, true, res2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df2 == nil {
 		t.Fatal("resume build returned nil date filter")
 	}
 	if got, ok := res2.TableSyncWatermarks[table.Name]; ok && !got.Equal(h1) {
@@ -93,7 +104,14 @@ func TestIncrementalFenceIsImmutableAcrossResume(t *testing.T) {
 	// the watermark to H2.
 	tblNext := table
 	res3 := newFenceResult()
-	if b.buildDateFilter(context.Background(), "run-2", &tblNext, true, true, res3) == nil {
+	if err := state.CreateRun("run-2", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	df3, err := b.buildDateFilter(context.Background(), "run-2", &tblNext, true, true, res3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if df3 == nil {
 		t.Fatal("next-run build returned nil date filter")
 	}
 	if got := res3.TableSyncWatermarks[table.Name]; !got.Equal(h2) {
@@ -127,12 +145,71 @@ func TestIncrementalFenceLowerBoundIsPriorSync(t *testing.T) {
 
 	res := newFenceResult()
 	tbl := table
-	df := b.buildDateFilter(context.Background(), "run-1", &tbl, true, true, res)
+	if err := state.CreateRun("run-1", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	df, err := b.buildDateFilter(context.Background(), "run-1", &tbl, true, true, res)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if df == nil || !df.Timestamp.Equal(t0) {
 		t.Fatalf("lower bound = %v, want prior sync T0 %v", df, t0)
 	}
 	if got := res.TableSyncWatermarks[table.Name]; !got.Equal(h1) {
 		t.Fatalf("watermark fence = %v, want H1 %v", got, h1)
+	}
+}
+
+type fenceFaultState struct {
+	checkpoint.StateBackend
+	lastSync *time.Time
+	getErr   error
+	setErr   error
+}
+
+func (s *fenceFaultState) GetLastSyncTimestamp(string, string, string) (*time.Time, error) {
+	return s.lastSync, nil
+}
+
+func (s *fenceFaultState) GetIncrementalFence(string, string, string, string) (*time.Time, error) {
+	return nil, s.getErr
+}
+
+func (s *fenceFaultState) SetIncrementalFence(string, string, string, string, time.Time) error {
+	return s.setErr
+}
+
+func TestIncrementalFenceStateFailuresFailClosed(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	h1 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	table := source.Table{Schema: "dbo", Name: "orders", RowCount: 10}
+	cfg := &config.Config{Migration: config.MigrationConfig{
+		TargetMode:         "upsert",
+		DateUpdatedColumns: []string{"updated_at"},
+	}}
+	cfg.Target.Schema = "public"
+
+	for _, tc := range []struct {
+		name   string
+		getErr error
+		setErr error
+	}{
+		{name: "fence read", getErr: errors.New("checkpoint locked")},
+		{name: "fence write", setErr: errors.New("checkpoint disk full")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &fenceFaultState{lastSync: &t0, getErr: tc.getErr, setErr: tc.setErr}
+			builder := NewJobBuilder(&fenceSourcePool{maxDate: &h1}, state, cfg)
+			result := newFenceResult()
+			tbl := table
+			filter, err := builder.buildDateFilter(context.Background(), "run-1", &tbl, true, true, result)
+			if filter != nil || !checkpoint.IsRequiredWriteError(err) {
+				t.Fatalf("buildDateFilter = (%+v, %v), want fail-closed state error", filter, err)
+			}
+			if _, ok := result.TableSyncWatermarks[table.Name]; ok {
+				t.Fatal("state failure exposed an unpersisted sync watermark")
+			}
+		})
 	}
 }
 

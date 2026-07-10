@@ -102,7 +102,9 @@ All notable changes to this project will be documented in this file.
   positional cursor *and* fenced out of future runs. Incremental upsert resume
   additionally replays the changed-row window from the start rather than
   continuing from the saved cursor; upsert idempotency makes this exactly-once
-  logically (#647).
+  logically. Fence persistence is a required, lease-fenced checkpoint write;
+  storage errors and corrupt fence values fail closed before target mutation
+  instead of silently re-sampling on resume (#647).
 
 - Migration run and resume now acquire an exclusive lease for the canonical
   target driver/host/database/schema before any target mutation. Live owners

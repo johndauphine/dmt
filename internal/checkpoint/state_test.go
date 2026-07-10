@@ -25,6 +25,9 @@ func TestCleanupOldRuns(t *testing.T) {
 		if err := state.CreateRun(runID, "dbo", "public", map[string]string{"run": runID}, "", ""); err != nil {
 			t.Fatalf("CreateRun(%s) error: %v", runID, err)
 		}
+		if err := state.SetIncrementalFence(runID, "dbo", "Table", "public", time.Now().UTC()); err != nil {
+			t.Fatalf("SetIncrementalFence(%s) error: %v", runID, err)
+		}
 	}
 
 	if err := state.CompleteRun(oldSuccess, "success", ""); err != nil {
@@ -104,6 +107,29 @@ func TestCleanupOldRuns(t *testing.T) {
 	}
 	if got := countRows(t, state.db, `SELECT COUNT(*) FROM delete_reconciliation_tables`); got != 2 {
 		t.Fatalf("delete_reconciliation_tables remaining = %d, want 2 (one per surviving run)", got)
+	}
+	if got := countRows(t, state.db, `SELECT COUNT(*) FROM incremental_fences`); got != 2 {
+		t.Fatalf("incremental_fences remaining = %d, want 2 (one per surviving run)", got)
+	}
+}
+
+func TestGetIncrementalFenceRejectsCorruptTimestamp(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.CreateRun("fence-corrupt", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetIncrementalFence("fence-corrupt", "dbo", "orders", "public", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.db.Exec(`UPDATE incremental_fences SET upper_fence = 'not-a-timestamp' WHERE run_id = 'fence-corrupt'`); err != nil {
+		t.Fatal(err)
+	}
+	if fence, err := state.GetIncrementalFence("fence-corrupt", "dbo", "orders", "public"); err == nil || fence != nil {
+		t.Fatalf("GetIncrementalFence = (%v, %v), want corruption error", fence, err)
 	}
 }
 

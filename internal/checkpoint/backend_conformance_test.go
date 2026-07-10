@@ -70,6 +70,9 @@ func TestStateBackendConformanceIncrementalFence(t *testing.T) {
 	for _, tc := range conformanceBackends() {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := tc.open(t)
+			if err := backend.CreateRun("run-1", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatalf("CreateRun(): %v", err)
+			}
 
 			const src, tbl, tgt = "dbo", "orders", "public"
 			h1 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
@@ -156,6 +159,7 @@ func TestStateBackendRejectsUnknownRequiredWriteTargets(t *testing.T) {
 				"complete run":           backend.CompleteRun("missing-run", "success", ""),
 				"complete resumable run": backend.CompleteRunResumable("missing-run", "partial", "boom", "retry"),
 				"abandon resumable run":  backend.AbandonRun("missing-run", "operator chose restart"),
+				"set incremental fence":  backend.SetIncrementalFence("missing-run", "dbo", "orders", "public", time.Now()),
 			} {
 				if err == nil {
 					t.Errorf("%s accepted an unknown write target", operation)

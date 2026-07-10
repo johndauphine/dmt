@@ -72,7 +72,7 @@ func Execute(
 		// transfers every changed row exactly once logically.
 		if cfg.Migration.TargetMode == "upsert" && job.DateFilter != nil {
 			if resumeLastPK != nil || len(resumeRanges) > 0 || resumeCompositeRangeState != "" {
-				logging.Debug("Incremental resume for %s: replaying bounded window from start (#647)", job.Table.Name)
+				logging.Debug("Incremental resume for %s: replaying changed-row window from start (#647)", job.Table.Name)
 			}
 			resumeLastPK = nil
 			resumeRowsDone = 0

@@ -222,7 +222,7 @@ func (s *State) GetIncrementalFence(runID, sourceSchema, tableName, targetSchema
 	}
 	ts, err := time.Parse(time.RFC3339Nano, tsStr.String)
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("parsing incremental fence for run %s table %s.%s: %w", runID, sourceSchema, tableName, err)
 	}
 	return &ts, nil
 }
@@ -230,14 +230,16 @@ func (s *State) GetIncrementalFence(runID, sourceSchema, tableName, targetSchema
 // SetIncrementalFence records the immutable upper fence for this run's
 // incremental sync of a table. It is written once when the run first builds the
 // table's job; the ON CONFLICT DO NOTHING keeps a resume of the same run from
-// overwriting the original fence, so the bounded window stays stable (#647).
+// overwriting the original fence, so the watermark cap stays stable (#647).
 func (s *State) SetIncrementalFence(runID, sourceSchema, tableName, targetSchema string, upper time.Time) error {
-	_, err := s.db.Exec(`
-		INSERT INTO incremental_fences (run_id, source_schema, table_name, target_schema, upper_fence, created_at)
-		VALUES (?, ?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(run_id, source_schema, table_name, target_schema) DO NOTHING
-	`, runID, sourceSchema, tableName, targetSchema, upper.UTC().Format(time.RFC3339Nano))
-	return err
+	return s.withRunLeaseTx(runID, "set incremental fence", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO incremental_fences (run_id, source_schema, table_name, target_schema, upper_fence, created_at)
+			VALUES (?, ?, ?, ?, ?, datetime('now'))
+			ON CONFLICT(run_id, source_schema, table_name, target_schema) DO NOTHING
+		`, runID, sourceSchema, tableName, targetSchema, upper.UTC().Format(time.RFC3339Nano))
+		return err
+	})
 }
 
 // SaveSchemaSnapshot records the source schema shape for one table after a

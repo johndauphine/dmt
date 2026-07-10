@@ -227,11 +227,17 @@ func TestMigrationLeaseStaleTakeoverRejectsFormerOwnerTaskAndProgressWrites(t *t
 			if err := pair.first.SaveTransferProgress(taskID, "items", nil, 10, 10, 100, ""); !IsLeaseLostError(err) {
 				t.Fatalf("former owner progress write error = %v, want LeaseLostError", err)
 			}
+			if err := pair.first.SetIncrementalFence("run-fenced", "source", "items", "target", now); !IsLeaseLostError(err) {
+				t.Fatalf("former owner fence write error = %v, want LeaseLostError", err)
+			}
 			if err := pair.second.UpdateTaskStatus(taskID, "running", ""); err != nil {
 				t.Fatalf("new owner task write: %v", err)
 			}
 			if err := pair.second.SaveTransferProgress(taskID, "items", nil, 10, 10, 100, ""); err != nil {
 				t.Fatalf("new owner progress write: %v", err)
+			}
+			if err := pair.second.SetIncrementalFence("run-fenced", "source", "items", "target", now); err != nil {
+				t.Fatalf("new owner fence write: %v", err)
 			}
 		})
 	}
