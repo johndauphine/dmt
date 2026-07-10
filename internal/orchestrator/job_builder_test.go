@@ -7,8 +7,16 @@ import (
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/source"
 )
+
+type dbTypeOnlySourcePool struct {
+	pool.SourcePool
+	dbType string
+}
+
+func (p dbTypeOnlySourcePool) DBType() string { return p.dbType }
 
 func TestDateColumnCandidatesForTableUsesEffectiveColumns(t *testing.T) {
 	table := source.Table{
@@ -176,5 +184,44 @@ func TestMigrationScopedStrictConsistencyBuildsPartitionedJobs(t *testing.T) {
 		if job.Partition == nil {
 			t.Fatalf("migration-scoped strict job %+v is unexpectedly unpartitioned", job)
 		}
+	}
+}
+
+func TestMSSQLMigrationScopedStrictDefersPartitioningToSharedViewCapability(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	const runID = "strict-mssql-single-job"
+	if err := state.CreateRun(runID, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	table := source.Table{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		RowCount:   1_000_000,
+	}
+	builder := &JobBuilder{
+		sourcePool: dbTypeOnlySourcePool{dbType: "mssql"},
+		state:      state,
+		config: &config.Config{Migration: config.MigrationConfig{
+			StrictConsistency:      true,
+			StrictConsistencyScope: "migration",
+			ChunkSize:              1_000,
+			MaxPartitions:          8,
+			LargeTableThreshold:    100,
+		}},
+	}
+	result := &BuildResult{
+		TableJobCounts: make(map[string]int),
+		ProgressSaver:  checkpoint.NewProgressSaver(state),
+	}
+	if err := builder.createJobsForTable(context.Background(), runID, table, nil, result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Jobs) != 1 || result.Jobs[0].Partition != nil {
+		t.Fatalf("MSSQL migration-snapshot jobs = %+v, want one unpartitioned job until #684", result.Jobs)
 	}
 }

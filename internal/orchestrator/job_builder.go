@@ -334,6 +334,15 @@ func (b *JobBuilder) createJobsForTable(ctx context.Context, runID string, t sou
 		logging.Debug("Table %s: table-scoped strict_consistency uses one unpartitioned source snapshot", t.Name)
 		return b.createSingleJob(runID, t, dateFilter, result)
 	}
+	if b.config.Migration.StrictConsistency && b.config.Migration.StrictConsistencyScope == "migration" &&
+		b.sourcePool != nil && driver.Canonicalize(b.sourcePool.DBType()) == "mssql" {
+		// #683 establishes and routes every read through the database snapshot,
+		// but cross-job partition enablement is deliberately owned by #684's
+		// strategy-capability refactor. Until then, do not let the old scope-only
+		// predicate accidentally enable MSSQL partition jobs.
+		logging.Debug("Table %s: SQL Server migration snapshot uses one unpartitioned job until shared-view partition capability is enabled", t.Name)
+		return b.createSingleJob(runID, t, dateFilter, result)
+	}
 
 	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
 		return b.createKeysetPartitionJobs(ctx, runID, t, dateFilter, result)

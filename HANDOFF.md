@@ -23,15 +23,32 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   Independent review found and prompted fixes for the `parallel_readers: 1` lock regression and
   for physically discarding coordinator sessions after failed `UNLOCK TABLES`; post-fix review and
   the final end-to-end coverage re-review are clean.
-- 🚧 **#682 active** — SQL Server `table_shared_lock` implementation on
-  `feat/issue-682-mssql-table-shared-lock`. The coordinator transaction, ordinary pooled-reader
+- ✅ **#682 complete** — SQL Server `table_shared_lock` merged in
+  [PR #689](../../pull/689) at `main` `d52d1246`. The coordinator transaction, ordinary pooled-reader
   factory, connection clamp, acquisition INFO audit, error-1222 audited fallback, and unit tests
   are implemented. Live SQL Server `Execute` tests prove update/delete/insert writers block only
   until the transfer releases its table S lock, the copied key/value set is the lock-instant view,
   timeout fallback completes correctly, and database transaction counts return to baseline. A
   controlled live read proof measures 830ms sequential strict, 221ms four-reader strict, and 209ms
   four-reader relaxed (3.8× speedup; strict within 5.5% of relaxed).
-- ⏳ Remaining after #682: #683, #684, #685.
+- 🚧 **#683 active** — SQL Server migration-scoped `database_snapshot` on
+  `feat/issue-683-mssql-database-snapshot`. The deterministic create/reuse/drop lifecycle,
+  second source pool, snapshot-routed transfer reads, fail-closed capability preflight, orphan
+  warning, config/restartability notes, and error diagnosis are implemented. Live SQL Server
+  tests prove writers remain unblocked, two tables copy the same frozen instant with four readers,
+  a surviving snapshot is reused on resume, drop retries after an active connection, and a missing
+  resume snapshot fails closed without replacement. Initial independent review found four issues:
+  live partition planning before snapshot creation, incomplete least-privilege detection, an
+  unreachable create-failure diagnosis, and silent cleanup failure after pool setup. All four are
+  fixed: epoch acquisition now precedes job planning and every target mutation, job planning uses
+  the snapshot pool, MSSQL partitioning remains explicitly deferred to #684, all documented CREATE
+  DATABASE permission paths are recognized, early failures are diagnosed, and cleanup failures name
+  the orphan. Post-fix review confirmed those fixes and found two lifecycle edges, now also fixed:
+  early acquisition is MSSQL-only so PostgreSQL keeps its established partition semantics, and a
+  completion-only resume reattaches and drops a crash-surviving SQL Server snapshot. Final
+  independent re-review is clean. `make lint`, `make test-short`, `make test`, the live SQL Server
+  snapshot/preflight suite, and transfer/orchestrator race tests all pass; publication/CI remain.
+- ⏳ Remaining after #683: #684, #685.
 
 **Stakes (measured 2026-07-10, SO2010 19.3M rows, mssql→pg, same config, strict toggled):**
 
@@ -63,8 +80,8 @@ live DBs: `make test-dbs-up` (MSSQL :1433 `sa/TestPass2024`, Postgres :5432); fi
 |---|---|---|---|
 | 1 | ✅ [#680](../../issues/680) strategy seam (pure refactor) | — | Merged in [PR #687](../../pull/687): strategy registry, catalog field, conformance pins, and exact worker-budget planning |
 | 2a | ✅ [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | Merged in [PR #688](../../pull/688): lock-window sessions, filtered privilege probe, audited fallback, and live correctness/performance/leak proofs |
-| 2b | 🚧 [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Active on `feat/issue-682-mssql-table-shared-lock`; counterpart of #681 (mssql.yaml, preflight_mssql.go) |
-| 3 | [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Shares `preflight_mssql.go` with #682 and relaxes `internal/config/validation.go` scope gate — sequence after #682 |
+| 2b | ✅ [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Merged in [PR #689](../../pull/689): frozen table view, audited blocking/fallback, pooled readers, and live correctness/performance/leak proofs |
+| 3 | 🚧 [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Active on `feat/issue-683-mssql-database-snapshot`; shares `preflight_mssql.go` with #682 and relaxes `internal/config/validation.go` scope gate |
 | 4 | [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | `composite_parallel.go`, `job_builder.go`, `transfer.go`; PG-composite half can start right after #680 |
 | 5 | [#685](../../issues/685) proofs + docs + diagnosis | #681, #682 (#683 for snapshot variant) | Closes the epic with evidence; mirrors `internal/transfer/consistency_snapshot_pg_integration_test.go` (#678) |
 

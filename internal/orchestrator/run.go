@@ -257,10 +257,27 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
 	}
 
+	// Establish a migration-wide source instant before job planning and before
+	// any target DDL/truncation. SQL Server partition boundaries must be read
+	// from the snapshot database itself; otherwise a live-source write between
+	// planning and CREATE SNAPSHOT can fall outside every persisted range.
+	strictEpoch, err := o.beginMigrationSnapshotEpoch(ctx, runID, false)
+	if err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
+	}
+	if strictEpoch != nil {
+		defer func() {
+			strictEpoch.Close()
+			logging.Info("strict_consistency migration snapshot epoch released after %s", strictEpoch.Age())
+		}()
+	}
+
 	// Durable task creation is part of the transfer protocol. Build every
 	// job before the first target mutation so a checkpoint failure cannot
 	// leave dropped/truncated target tables without resumable tasks (#645).
-	buildResult, err := o.buildTransferJobs(ctx, runID, tables)
+	buildResult, err := o.buildTransferJobs(ctx, runID, tables, snapshotPlanningPool(o.sourcePool, strictEpoch))
 	if err != nil {
 		o.state.CompleteRun(runID, "failed", err.Error())
 		o.notifyFailure(runID, err, time.Since(startTime))
@@ -304,7 +321,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	logging.Debug("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
 	transferStart := time.Now()
-	tableFailures, err := o.transferAll(ctx, runID, buildResult, tables, false)
+	tableFailures, err := o.transferAll(ctx, runID, buildResult, tables, false, strictEpoch)
 	transferDuration := time.Since(transferStart)
 	if err != nil {
 		// A required checkpoint failure is an interrupted durability

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
@@ -61,13 +62,16 @@ func (s *sharedSnapshot) joinReader(ctx context.Context) (*sql.Tx, func(), error
 	return tx, func() { _ = tx.Rollback() }, nil
 }
 
-// StrictSnapshotEpoch owns PostgreSQL's exported MVCC snapshot for one
-// transfer phase. The orchestrator creates it once and passes the same handle
-// explicitly to every Job; each keyset reader then imports the anchored view.
-// It must be closed only after every transfer job, including retries, exits.
+// StrictSnapshotEpoch owns one migration-wide source view. PostgreSQL anchors
+// an exported MVCC snapshot; SQL Server points reads at a database snapshot.
 type StrictSnapshotEpoch struct {
-	snapshot  *sharedSnapshot
-	startedAt time.Time
+	snapshot     *sharedSnapshot
+	sourcePool   pool.SourcePool
+	closeSource  func()
+	dbType       string
+	snapshotName string
+	startedAt    time.Time
+	closeOnce    sync.Once
 }
 
 // BeginStrictSnapshotEpoch opens a PostgreSQL-only migration-wide source view.
@@ -88,15 +92,23 @@ func BeginStrictSnapshotEpoch(ctx context.Context, srcPool pool.SourcePool) (*St
 	if err != nil {
 		return nil, err
 	}
-	return &StrictSnapshotEpoch{snapshot: snapshot, startedAt: time.Now()}, nil
+	return &StrictSnapshotEpoch{snapshot: snapshot, dbType: "postgres", startedAt: time.Now()}, nil
 }
 
 // Close releases the lead transaction that anchors the exported view. sql.Tx
 // rollback is intentionally safe to call after a cancellation or failed job.
 func (e *StrictSnapshotEpoch) Close() {
-	if e != nil && e.snapshot != nil {
-		e.snapshot.release()
+	if e == nil {
+		return
 	}
+	e.closeOnce.Do(func() {
+		if e.snapshot != nil {
+			e.snapshot.release()
+		}
+		if e.closeSource != nil {
+			e.closeSource()
+		}
+	})
 }
 
 // Age reports how long the migration-wide snapshot has held PostgreSQL's
@@ -109,17 +121,55 @@ func (e *StrictSnapshotEpoch) Age() time.Duration {
 }
 
 func (e *StrictSnapshotEpoch) queryer() sourceQueryer {
-	if e == nil || e.snapshot == nil {
+	if e == nil {
 		return nil
 	}
-	return e.snapshot.lead
+	if e.snapshot != nil {
+		return e.snapshot.lead
+	}
+	if e.sourcePool != nil {
+		return e.sourcePool.DB()
+	}
+	return nil
 }
 
 func (e *StrictSnapshotEpoch) queryerForWorker(ctx context.Context, workerID int) (sourceQueryer, func(), error) {
-	if e == nil || e.snapshot == nil {
+	if e == nil {
 		return nil, nil, fmt.Errorf("strict snapshot epoch is unavailable for reader %d", workerID)
 	}
-	return e.snapshot.joinReader(ctx)
+	if e.snapshot != nil {
+		return e.snapshot.joinReader(ctx)
+	}
+	if e.sourcePool != nil && e.sourcePool.DB() != nil {
+		return e.sourcePool.DB(), func() {}, nil
+	}
+	return nil, nil, fmt.Errorf("strict snapshot epoch is unavailable for reader %d", workerID)
+}
+
+// DBType identifies the epoch mechanism for operational logging.
+func (e *StrictSnapshotEpoch) DBType() string {
+	if e == nil {
+		return ""
+	}
+	return e.dbType
+}
+
+// SnapshotName is non-empty for SQL Server database-snapshot epochs.
+func (e *StrictSnapshotEpoch) SnapshotName() string {
+	if e == nil {
+		return ""
+	}
+	return e.snapshotName
+}
+
+// SourcePool returns the dedicated pool that reads an external snapshot
+// database. It is nil for PostgreSQL, whose epoch is imported transaction by
+// transaction instead of exposed as a separate database.
+func (e *StrictSnapshotEpoch) SourcePool() pool.SourcePool {
+	if e == nil {
+		return nil
+	}
+	return e.sourcePool
 }
 
 func beginPostgresExportedSnapshot(ctx context.Context, db *sql.DB) (*sharedSnapshot, error) {

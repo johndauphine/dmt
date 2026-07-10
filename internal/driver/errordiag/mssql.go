@@ -13,6 +13,23 @@ import (
 // patterns before generic ones.
 var mssqlPatterns = []Pattern{
 	{
+		Name:  "mssql_database_snapshot_create",
+		Regex: regexp.MustCompile(`creating SQL Server strict snapshot(?: \[[^\]]+\])?:`),
+		Diagnose: func(_ []string) Diagnosis {
+			return Diagnosis{
+				Cause: "SQL Server could not create the migration-scoped database snapshot, so strict transfer stopped before target mutation.",
+				Suggestions: []string{
+					"Grant CREATE ANY DATABASE or ALTER ANY DATABASE at server scope, grant CREATE DATABASE in master, or add the migration login to dbcreator.",
+					"Confirm the source is not Azure SQL Database and that SQL Server supports database snapshots (2016 SP1+ for non-Enterprise editions).",
+					"Check free disk space and write access beside every source data file; snapshot sparse files are created in those directories.",
+					"Use strict_consistency_scope: table if migration-scoped snapshots are not operationally available.",
+				},
+				Confidence: "high",
+				Category:   "permission",
+			}
+		},
+	},
+	{
 		Name:  "mssql_pk_duplicate",
 		Regex: regexp.MustCompile(`Violation of PRIMARY KEY constraint '([^']+)'\.`),
 		Diagnose: func(m []string) Diagnosis {

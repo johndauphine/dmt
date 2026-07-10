@@ -109,6 +109,17 @@ func TestStrictKeysetReaderPlanHonorsMultiConnectionJoinBudget(t *testing.T) {
 	}
 }
 
+func TestStrictMigrationEpochReaderPlanUsesFullPoolBudget(t *testing.T) {
+	readers, joins, clamped := strictKeysetReaderPlan(true, migrationEpochReaderStrategy{}, 4, 4)
+	if readers != 4 || !joins || clamped {
+		t.Fatalf("migration epoch plan = (%d, %t, %t), want (4, true, false)", readers, joins, clamped)
+	}
+	readers, joins, clamped = strictKeysetReaderPlan(true, migrationEpochReaderStrategy{}, 4, 3)
+	if readers != 3 || !joins || !clamped {
+		t.Fatalf("clamped migration epoch plan = (%d, %t, %t), want (3, true, true)", readers, joins, clamped)
+	}
+}
+
 func TestStrictStrategyWorkerCountForTableUsesClampedPlan(t *testing.T) {
 	table := source.Table{
 		Columns:    []source.Column{{Name: "id", DataType: "bigint"}},

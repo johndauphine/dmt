@@ -51,8 +51,10 @@ type PreFlightRequest struct {
 	// StrictConsistency and ParallelReaders describe the source read shape.
 	// MySQL uses them to probe LOCK TABLES only when the migration will
 	// actually request more than one strict reader.
-	StrictConsistency bool
-	ParallelReaders   int
+	StrictConsistency      bool
+	StrictConsistencyScope string
+	ParallelReaders        int
+	Database               string
 
 	// IncludeTables and ExcludeTables carry the migration's table filters to
 	// source-side checks that must probe a real migrated table. Patterns use

@@ -274,6 +274,22 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		logging.Debug("Skipping %d already-complete tables: %v", len(skippedTables), skippedTables)
 	}
 
+	// A SQL Server snapshot can survive a crash after the last table completed
+	// but before finalization marked the run successful. Reattach it even when
+	// no tables remain so this process owns and drops the surviving snapshot on
+	// every completion/error path. A missing snapshot still fails closed.
+	strictEpoch, err := o.beginMigrationSnapshotEpoch(ctx, run.ID, true)
+	if err != nil {
+		o.abandonResumeAttempt(run.ID, err, startTime)
+		return err
+	}
+	if strictEpoch != nil {
+		defer func() {
+			strictEpoch.Close()
+			logging.Info("strict_consistency migration snapshot epoch released after %s", strictEpoch.Age())
+		}()
+	}
+
 	if len(tablesToTransfer) == 0 {
 		logging.Info("All tables already transferred - completing migration")
 		o.tables = tables // Use all tables for finalize/validate
@@ -315,7 +331,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	logging.Debug("Resuming transfer of %d tables", len(tablesToTransfer))
 	// Build and durably persist all tasks before target preparation, which may
 	// truncate or create tables. A state failure must leave the target untouched.
-	buildResult, err := o.buildTransferJobs(ctx, run.ID, tablesToTransfer)
+	buildResult, err := o.buildTransferJobs(ctx, run.ID, tablesToTransfer, snapshotPlanningPool(o.sourcePool, strictEpoch))
 	if err != nil {
 		o.abandonResumeAttempt(run.ID, err, startTime)
 		return err
@@ -361,7 +377,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	o.setPhase("transfer")
 	logging.Debug("Transferring data...")
 	transferStart := time.Now()
-	tableFailures, err := o.transferAll(ctx, run.ID, buildResult, tablesToTransfer, true)
+	tableFailures, err := o.transferAll(ctx, run.ID, buildResult, tablesToTransfer, true, strictEpoch)
 	transferDuration := time.Since(transferStart)
 	if err != nil {
 		if checkpoint.IsRequiredWriteError(err) {

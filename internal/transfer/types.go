@@ -70,10 +70,9 @@ type Job struct {
 	// GC leader. Nil makes direct callers retain the per-pipeline fallback.
 	MemGuard *MemoryGuard
 
-	// StrictSnapshotEpoch is an orchestrator-owned PostgreSQL snapshot shared
-	// across every job in one transfer phase (#663). Nil retains the table-
-	// scoped strict snapshot behavior. Passing it on the job, rather than the
-	// context, makes the migration-wide consistency contract explicit.
+	// StrictSnapshotEpoch is an orchestrator-owned PostgreSQL or SQL Server
+	// snapshot shared across every job in one transfer phase. Nil retains the
+	// table-scoped strict snapshot behavior.
 	StrictSnapshotEpoch *StrictSnapshotEpoch
 
 	// AuditEvent records an operator-visible transfer event in the owning run's
