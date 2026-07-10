@@ -72,7 +72,12 @@ migration:
   create_check_constraints: true # Create CHECK constraints
 
   # Consistency options
-  strict_consistency: false     # Set true to disable NOLOCK (slower but consistent reads)
+  # strict_consistency drops SQL Server's NOLOCK hint so pages never read
+  # uncommitted (dirty) rows. It is NOT a point-in-time snapshot: dmt reads a
+  # table over many independent, possibly-parallel queries, so concurrent
+  # writes between pages can still diverge the copy (see #640). For a consistent
+  # copy, quiesce the source or migrate from a snapshot/replica.
+  strict_consistency: false     # true = no dirty reads on SQL Server (slightly slower)
 
   # Schema drift reporting (#305). DMT compares the current source
   # schema to the last successful run's snapshot and logs a structured

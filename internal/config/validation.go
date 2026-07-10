@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"strings"
+
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 func (c *Config) validate() error {
@@ -146,7 +148,25 @@ func (c *Config) validate() error {
 
 	// Note: AI configuration is validated in the secrets package when loaded from ~/.secrets/dmt-config.yaml
 
+	c.warnConsistencyScope()
+
 	return nil
+}
+
+// warnConsistencyScope makes the strict_consistency guarantee explicit at load
+// time so the divergence in #640 is never silent. strict_consistency only
+// removes SQL Server dirty-read hints; it is not a point-in-time snapshot, and
+// dmt reads each table over many independent (and, for keyset tables, parallel)
+// queries. A concurrent write between pages can therefore still diverge the
+// copy. The operational requirement is a quiesced source or a snapshot/replica.
+func (c *Config) warnConsistencyScope() {
+	if !c.Migration.StrictConsistency {
+		return
+	}
+	logging.Warn("strict_consistency prevents dirty reads but does NOT take a " +
+		"point-in-time source snapshot (#640): concurrent writes between pages " +
+		"can still diverge the copy. For a consistent copy, quiesce the source " +
+		"or migrate from a snapshot/replica.")
 }
 
 func validateSchemaContractMode(path string, got SchemaContractMode, allowed ...SchemaContractMode) error {

@@ -975,7 +975,17 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `strict_consistency` | No | `false` | Use table locks instead of NOLOCK hints (slower but consistent) |
+| `strict_consistency` | No | `false` | Drop dirty-read hints on SQL Server (removes `WITH (NOLOCK)`), so pages never read uncommitted rows. Other engines are unaffected. |
+
+> **Consistency scope (#640).** `strict_consistency` controls *dirty reads only*
+> — it is **not** a point-in-time snapshot. dmt paginates a table over many
+> independent queries (and, for keyset tables, several parallel readers), so a
+> concurrent insert/delete/update between pages can still make the transferred
+> row set diverge from any single instant of the source — a ROW_NUMBER page can
+> even skip a row while the total count is unchanged, which count validation
+> cannot detect. **For a consistent copy, quiesce the source** (no concurrent
+> writes) for the duration of the transfer, or migrate from a snapshot/replica.
+> A coordinated per-engine source snapshot is tracked in #640.
 
 **Validation Settings:**
 
