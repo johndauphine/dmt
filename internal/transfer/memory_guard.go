@@ -11,18 +11,23 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
-// memoryGuard throttles pipeline readers when heap usage exceeds a threshold.
-// With GOMEMLIMIT set from the same budget (config.ApplyRuntimeMemoryLimit,
-// #462) the Go runtime paces GC against the limit on its own; the guard is
-// the second line of defense for the case GC pacing cannot solve — live
-// data genuinely exceeding the budget because actual row sizes blew past
-// the static estimates used for pipeline buffer sizing (e.g., TEXT columns
-// with large content vs. the default 256-byte estimate).
-type memoryGuard struct {
+// MemoryGuard throttles readers when the process heap crosses its configured
+// threshold. One guard is shared by all jobs in a migration so its GC-leader
+// election covers the whole concurrent transfer set (#666). With GOMEMLIMIT
+// set from the same budget (#462), it is the second line of defense when live
+// data exceeds the static estimates used for pipeline buffer sizing.
+type MemoryGuard struct {
 	limitBytes uint64 // memory limit from config
 	threshold  uint64 // pause readers when HeapAlloc exceeds this (80% of limit)
 	gcActive   atomic.Bool
 }
+
+// freeOSMemory and forceGC are indirections so the leader election can be
+// tested without forcing expensive collections in the test process.
+var (
+	freeOSMemory = debug.FreeOSMemory
+	forceGC      = runtime.GC
+)
 
 // Heap sampling: one process-wide goroutine publishes HeapAlloc so readers
 // can check memory pressure with an atomic load instead of each calling
@@ -57,14 +62,15 @@ func startHeapSampler() {
 	})
 }
 
-// newMemoryGuard creates a guard that pauses readers when heap usage exceeds
-// 80% of the configured memory limit. Returns nil if no limit is configured.
-func newMemoryGuard(effectiveMaxMemoryMB int64) *memoryGuard {
+// NewMemoryGuard creates a guard that pauses readers when heap usage exceeds
+// 80% of the configured memory limit. It returns nil if no limit is
+// configured, allowing callers with no memory cap to skip this backstop.
+func NewMemoryGuard(effectiveMaxMemoryMB int64) *MemoryGuard {
 	if effectiveMaxMemoryMB <= 0 {
 		return nil
 	}
 	limitBytes := uint64(effectiveMaxMemoryMB) * 1024 * 1024
-	return &memoryGuard{
+	return &MemoryGuard{
 		limitBytes: limitBytes,
 		threshold:  limitBytes * 80 / 100, // pause at 80% of limit
 	}
@@ -77,7 +83,7 @@ func newMemoryGuard(effectiveMaxMemoryMB int64) *memoryGuard {
 // The fast path is a single atomic load of the sampled heap value. Only
 // when the sample is above threshold does the reader pay for a fresh
 // ReadMemStats to confirm before pausing.
-func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
+func (mg *MemoryGuard) waitIfNeeded(ctx context.Context) bool {
 	if mg == nil {
 		return true
 	}
@@ -105,7 +111,7 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 	if isGCLeader {
 		logging.Debug("Memory pressure: HeapAlloc=%dMB threshold=%dMB, pausing readers",
 			ms.HeapAlloc/(1024*1024), mg.threshold/(1024*1024))
-		debug.FreeOSMemory()
+		freeOSMemory()
 	}
 
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -130,7 +136,7 @@ func (mg *memoryGuard) waitIfNeeded(ctx context.Context) bool {
 		case <-ticker.C:
 			tickCount++
 			if isGCLeader && tickCount%4 == 0 {
-				runtime.GC()
+				forceGC()
 				var fresh runtime.MemStats
 				runtime.ReadMemStats(&fresh)
 				sampledHeapAlloc.Store(fresh.HeapAlloc)

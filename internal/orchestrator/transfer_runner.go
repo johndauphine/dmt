@@ -39,6 +39,11 @@ type TransferRunner struct {
 	// byte-based admission control.
 	memBudget *transfer.MemBudget
 
+	// memGuard is the heap-pressure backstop shared across every concurrent
+	// table pipeline. Sharing its leader election prevents forced-GC storms
+	// when process-global heap pressure pauses several readers at once (#666).
+	memGuard *transfer.MemoryGuard
+
 	// strictSnapshotEpoch is non-nil only for migration-scoped PostgreSQL
 	// strict consistency. It is opened once before jobs launch and closed when
 	// the transfer phase returns, including cancellation and lease loss (#663).
@@ -117,10 +122,12 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	// carries the same pointer, so concurrent table pipelines divide it by
 	// contention rather than each claiming a static Workers-split slice.
 	r.memBudget = transfer.NewMemBudget(transfer.PipelineMemBudgetBytes(r.config))
+	r.memGuard = transfer.NewMemoryGuard(transfer.MemoryGuardLimitMB(r.config))
 
 	for i := range jobs {
 		jobs[i].IsResume = resume
 		jobs[i].MemBudget = r.memBudget
+		jobs[i].MemGuard = r.memGuard
 		if r.auditEvent != nil {
 			jobs[i].AuditEvent = r.auditEvent
 		}

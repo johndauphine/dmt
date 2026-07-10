@@ -90,3 +90,17 @@ func PipelineMemBudgetBytes(cfg *config.Config) int64 {
 	}
 	return pipelineBudgetMB * 1024 * 1024
 }
+
+// MemoryGuardLimitMB returns the migration-wide heap limit used by the
+// memory-pressure backstop. It deliberately matches pipeline buffer sizing:
+// a user cap wins when it is stricter than the detected effective limit.
+func MemoryGuardLimitMB(cfg *config.Config) int64 {
+	if cfg == nil {
+		return 0
+	}
+	effectiveMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
+	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < effectiveMemMB {
+		effectiveMemMB = cfg.Migration.MaxMemoryMB
+	}
+	return effectiveMemMB
+}
