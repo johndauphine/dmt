@@ -99,7 +99,7 @@ func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Ta
 			t.Name, t.RowCount, t.IsLarge(b.config.Migration.LargeTableThreshold))
 
 		// Determine date filter
-		dateFilter := b.buildDateFilter(ctx, &t, dateTrackingEnabled, applyDateFilter, result)
+		dateFilter := b.buildDateFilter(ctx, runID, &t, dateTrackingEnabled, applyDateFilter, result)
 
 		// Create jobs based on table size and PK type
 		if err := b.createJobsForTable(ctx, runID, t, dateFilter, result); err != nil {
@@ -119,7 +119,7 @@ func (b *JobBuilder) Build(ctx context.Context, runID string, tables []source.Ta
 }
 
 // buildDateFilter determines the date filter for a table.
-func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateTrackingEnabled, applyDateFilter bool, result *BuildResult) *transfer.DateFilter {
+func (b *JobBuilder) buildDateFilter(ctx context.Context, runID string, t *source.Table, dateTrackingEnabled, applyDateFilter bool, result *BuildResult) *transfer.DateFilter {
 	if !dateTrackingEnabled {
 		return nil
 	}
@@ -157,31 +157,42 @@ func (b *JobBuilder) buildDateFilter(ctx context.Context, t *source.Table, dateT
 	result.TableDateFilters[t.Name] = nil // Mark for timestamp recording
 
 	lastSync := b.lastSyncTimestamp(t, applyDateFilter)
-	b.recordSourceHighWatermark(ctx, t, colName, lastSync, result)
 
-	if !applyDateFilter {
-		result.Summary.TablesFirstSync++
-		logging.Debug("Table %s: full load - recording %s timestamp for future incremental syncs",
-			t.Name, colName)
-		return nil
-	}
-
-	if lastSync != nil {
+	if applyDateFilter && lastSync != nil {
+		// Incremental sync: read rows where updated_at > T0. The immutable fence
+		// H1 is sampled once at run start and used only as the watermark this
+		// run may advance to — never a value re-sampled on resume. That, plus
+		// replaying the window on resume (see transfer.Execute), prevents a row
+		// updated behind the positional cursor from being permanently lost
+		// (#647).
 		dateFilter := &transfer.DateFilter{
 			Column:    colName,
 			Timestamp: *lastSync,
 		}
+		if fence := b.incrementalUpperFence(ctx, runID, t, colName); fence != nil && fence.After(*lastSync) {
+			// Advance the watermark only when the fence is genuinely ahead of
+			// the last sync; a non-advancing fence (no new rows, or rows
+			// removed) leaves the baseline untouched.
+			result.TableSyncWatermarks[t.Name] = *fence
+		}
 		result.TableDateFilters[t.Name] = dateFilter
 		result.Summary.TablesIncremental++
-		logging.Debug("Table %s: incremental - syncing rows where %s > %v",
-			t.Name, colName, lastSync.Format(time.RFC3339))
+		logging.Debug("Table %s: incremental - syncing rows where %s > %v (watermark fence %v)",
+			t.Name, colName, lastSync.Format(time.RFC3339), result.TableSyncWatermarks[t.Name].Format(time.RFC3339))
 		return dateFilter
 	}
 
-	// First sync
+	// First sync or full load: record a fresh source high watermark as the
+	// baseline for future incremental runs (no bounded window to fence yet).
+	b.recordSourceHighWatermark(ctx, t, colName, lastSync, result)
 	result.Summary.TablesFirstSync++
-	logging.Debug("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
-		t.Name, t.RowCount, colName)
+	if applyDateFilter {
+		logging.Debug("Table %s: first sync - loading all %d rows, will use %s for future incremental syncs",
+			t.Name, t.RowCount, colName)
+	} else {
+		logging.Debug("Table %s: full load - recording %s timestamp for future incremental syncs",
+			t.Name, colName)
+	}
 	return nil
 }
 
@@ -242,6 +253,41 @@ func (b *JobBuilder) recordSourceHighWatermark(ctx context.Context, t *source.Ta
 	}
 
 	result.TableSyncWatermarks[t.Name] = *highWatermark
+}
+
+// incrementalUpperFence returns the immutable upper fence H1 for this run's
+// incremental sync of t: the persisted fence on resume, or a freshly sampled
+// source high watermark (persisted for future resumes) on the first build. A
+// nil result means the source has no non-NULL date values to fence, in which
+// case the caller keeps the lower-bound-only filter (#647).
+func (b *JobBuilder) incrementalUpperFence(ctx context.Context, runID string, t *source.Table, colName string) *time.Time {
+	if existing, err := b.state.GetIncrementalFence(runID, t.Schema, t.Name, b.config.Target.Schema); err != nil {
+		logging.Warn("Failed to load incremental fence for %s: %v", t.Name, err)
+	} else if existing != nil {
+		logging.Debug("Table %s: reusing persisted incremental fence %s (resume)",
+			t.Name, existing.Format(time.RFC3339Nano))
+		return existing
+	}
+
+	dateReader, ok := b.sourcePool.(driver.IncrementalDateReader)
+	if !ok {
+		return nil
+	}
+	highWatermark, err := dateReader.GetMaxDateColumnValue(ctx, t.Schema, t.Name, colName)
+	if err != nil {
+		logging.Warn("Failed to sample incremental fence for %s.%s.%s: %v", t.Schema, t.Name, colName, err)
+		return nil
+	}
+	if highWatermark == nil {
+		return nil
+	}
+	if err := b.state.SetIncrementalFence(runID, t.Schema, t.Name, b.config.Target.Schema, *highWatermark); err != nil {
+		// A persistence failure only means a resume re-samples the fence
+		// (degrading to the pre-#647 behavior), not a crash — proceed with the
+		// sampled value for this run.
+		logging.Warn("Failed to persist incremental fence for %s: %v", t.Name, err)
+	}
+	return highWatermark
 }
 
 // usesTupleKeyset reports whether table t will be paged by tuple keyset

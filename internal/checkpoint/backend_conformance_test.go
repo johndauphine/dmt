@@ -63,6 +63,53 @@ func conformanceBackends() []conformanceBackend {
 	}
 }
 
+// TestStateBackendConformanceIncrementalFence pins the #647 fence contract for
+// both backends: absent until set, immutable once set for a run, read back
+// exactly, and scoped per run.
+func TestStateBackendConformanceIncrementalFence(t *testing.T) {
+	for _, tc := range conformanceBackends() {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := tc.open(t)
+
+			const src, tbl, tgt = "dbo", "orders", "public"
+			h1 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+			h2 := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+
+			got, err := backend.GetIncrementalFence("run-1", src, tbl, tgt)
+			if err != nil {
+				t.Fatalf("GetIncrementalFence() before set: %v", err)
+			}
+			if got != nil {
+				t.Fatalf("fence before set = %v, want nil", got)
+			}
+
+			if err := backend.SetIncrementalFence("run-1", src, tbl, tgt, h1); err != nil {
+				t.Fatalf("SetIncrementalFence(): %v", err)
+			}
+			// Immutable once set for a run: a resume's re-set must not overwrite.
+			if err := backend.SetIncrementalFence("run-1", src, tbl, tgt, h2); err != nil {
+				t.Fatalf("SetIncrementalFence() second: %v", err)
+			}
+			got, err = backend.GetIncrementalFence("run-1", src, tbl, tgt)
+			if err != nil {
+				t.Fatalf("GetIncrementalFence() after set: %v", err)
+			}
+			if got == nil || !got.Equal(h1) {
+				t.Fatalf("fence = %v, want immutable H1 %v", got, h1)
+			}
+
+			// Scoped per run: a different run has no fence yet.
+			other, err := backend.GetIncrementalFence("run-2", src, tbl, tgt)
+			if err != nil {
+				t.Fatalf("GetIncrementalFence(run-2): %v", err)
+			}
+			if other != nil {
+				t.Fatalf("run-2 fence = %v, want nil (per-run scope)", other)
+			}
+		})
+	}
+}
+
 func TestStateBackendCapabilities(t *testing.T) {
 	for _, tc := range conformanceBackends() {
 		t.Run(tc.name, func(t *testing.T) {

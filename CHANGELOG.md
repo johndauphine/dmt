@@ -94,6 +94,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Incremental sync no longer permanently drops an update made behind the resume
+  cursor. Each run samples an immutable upper fence H1 once at start (persisted
+  per run in SQLite and YAML state, read back unchanged on resume), and the sync
+  watermark advances only to H1 — never to a value re-sampled during the run —
+  so a row updated while the run was down can no longer be skipped by the
+  positional cursor *and* fenced out of future runs. Incremental upsert resume
+  additionally replays the changed-row window from the start rather than
+  continuing from the saved cursor; upsert idempotency makes this exactly-once
+  logically (#647).
+
 - Migration run and resume now acquire an exclusive lease for the canonical
   target driver/host/database/schema before any target mutation. Live owners
   reject competing processes, stale takeover atomically increments a fencing

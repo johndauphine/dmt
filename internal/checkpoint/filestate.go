@@ -88,6 +88,13 @@ type fileStateData struct {
 	//	      public: 2026-05-12T08:00:00Z
 	SyncTimestamps map[string]map[string]map[string]time.Time `yaml:"sync_timestamps,omitempty"`
 
+	// IncrementalFences records the immutable per-run upper fence for
+	// incremental sync (#647), keyed run_id -> sourceSchema -> table ->
+	// targetSchema -> H1. Written once per run and read back on resume so the
+	// bounded window is stable; nested for the same quoted-identifier safety as
+	// SyncTimestamps.
+	IncrementalFences map[string]map[string]map[string]map[string]time.Time `yaml:"incremental_fences,omitempty"`
+
 	// FallbackEvents persists AI fallback occurrences (#176) for
 	// cross-process status visibility - the Airflow polling case where
 	// ``dmt status'' is invoked in a separate process from ``dmt run''
@@ -427,6 +434,50 @@ func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema s
 		fs.state.SyncTimestamps[sourceSchema][tableName] = make(map[string]time.Time)
 	}
 	fs.state.SyncTimestamps[sourceSchema][tableName][targetSchema] = ts
+	return fs.save()
+}
+
+// GetIncrementalFence returns the immutable per-run upper fence for a table's
+// incremental sync, or nil if none was persisted for this run (#647).
+func (fs *FileState) GetIncrementalFence(runID, sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	if fs.state == nil || fs.state.IncrementalFences == nil {
+		return nil, nil
+	}
+	ts, ok := fs.state.IncrementalFences[runID][sourceSchema][tableName][targetSchema]
+	if !ok {
+		return nil, nil
+	}
+	return &ts, nil
+}
+
+// SetIncrementalFence records the immutable upper fence for this run's
+// incremental sync of a table. It is a no-op if a fence already exists for the
+// same run/table, so a resume never overwrites the original bounded window
+// (#647).
+func (fs *FileState) SetIncrementalFence(runID, sourceSchema, tableName, targetSchema string, upper time.Time) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.state == nil {
+		fs.state = &fileStateData{Tables: make(map[string]tableState)}
+	}
+	if fs.state.IncrementalFences == nil {
+		fs.state.IncrementalFences = make(map[string]map[string]map[string]map[string]time.Time)
+	}
+	if _, ok := fs.state.IncrementalFences[runID][sourceSchema][tableName][targetSchema]; ok {
+		return nil // Immutable once set for a run.
+	}
+	if fs.state.IncrementalFences[runID] == nil {
+		fs.state.IncrementalFences[runID] = make(map[string]map[string]map[string]time.Time)
+	}
+	if fs.state.IncrementalFences[runID][sourceSchema] == nil {
+		fs.state.IncrementalFences[runID][sourceSchema] = make(map[string]map[string]time.Time)
+	}
+	if fs.state.IncrementalFences[runID][sourceSchema][tableName] == nil {
+		fs.state.IncrementalFences[runID][sourceSchema][tableName] = make(map[string]time.Time)
+	}
+	fs.state.IncrementalFences[runID][sourceSchema][tableName][targetSchema] = upper.UTC()
 	return fs.save()
 }
 

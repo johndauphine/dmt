@@ -63,6 +63,23 @@ func Execute(
 		// Composite keyset persists its int64-preserving watermark tuple in
 		// the range_state column (#616).
 		resumeCompositeRangeState = rangeState
+
+		// Incremental upsert resume replays the whole changed-row window from
+		// the start instead of continuing from the positional cursor (#647). A
+		// row updated behind the saved PK would otherwise be skipped, and its
+		// update permanently lost once the fenced watermark advanced past it.
+		// Upsert is idempotent, so replaying "updated_at > T0" is safe and
+		// transfers every changed row exactly once logically.
+		if cfg.Migration.TargetMode == "upsert" && job.DateFilter != nil {
+			if resumeLastPK != nil || len(resumeRanges) > 0 || resumeCompositeRangeState != "" {
+				logging.Debug("Incremental resume for %s: replaying bounded window from start (#647)", job.Table.Name)
+			}
+			resumeLastPK = nil
+			resumeRowsDone = 0
+			resumeRanges = nil
+			resumeCompositeRangeState = ""
+			job.ReplayPossible = true
+		}
 	}
 
 	// Handle truncation based on job type (skip if resuming or in upsert mode)
