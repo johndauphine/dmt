@@ -162,6 +162,13 @@ func TestRowNumberPaginationStrictSnapshotPreventsSubstitution(t *testing.T) {
 		t.Fatalf("beginStrictSourceSnapshot: %v", err)
 	}
 	defer releaseSnapshot()
+	strictSource := &postgresStrictSnapshotSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}
+	// #664 captures validation evidence through this same pinned transaction,
+	// before target preparation or concurrent source changes can affect it.
+	snapshotCount, err := strictSnapshotRowCount(snapshotCtx, strictSource, source.Table{Schema: schema, Name: table})
+	if err != nil || snapshotCount != 4 {
+		t.Fatalf("strictSnapshotRowCount = (%d, %v), want (4, nil)", snapshotCount, err)
+	}
 	queryer := sourceQueryerFor(snapshotCtx, db)
 	page := func(rowStart int64, limit int) []int {
 		q := dialect.BuildRowNumberQuery(`"id", "payload"`, `"id"`, schema, table, "", nil)
@@ -194,6 +201,9 @@ func TestRowNumberPaginationStrictSnapshotPreventsSubstitution(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s.%s VALUES (5,'e')`, schema, table)); err != nil {
 		t.Fatalf("insert: %v", err)
+	}
+	if countAfterMutation, err := strictSnapshotRowCount(snapshotCtx, strictSource, source.Table{Schema: schema, Name: table}); err != nil || countAfterMutation != 4 {
+		t.Fatalf("strictSnapshotRowCount after mutation = (%d, %v), want pinned 4", countAfterMutation, err)
 	}
 
 	page2 := page(2, 2)

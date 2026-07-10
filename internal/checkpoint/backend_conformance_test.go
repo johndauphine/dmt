@@ -113,6 +113,72 @@ func TestStateBackendConformanceIncrementalFence(t *testing.T) {
 	}
 }
 
+// TestStateBackendConformanceStrictSnapshotEvidence pins the #664 contract:
+// strict runs store their full-table snapshot count on the unpartitioned
+// transfer task, the latest run cannot fall back to an older strict count, and
+// retries may replace the count with their new snapshot.
+func TestStateBackendConformanceStrictSnapshotEvidence(t *testing.T) {
+	for _, tc := range conformanceBackends() {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := tc.open(t)
+			strict, ok := backend.(StrictSnapshotState)
+			if !ok {
+				t.Fatalf("%T does not implement StrictSnapshotState", backend)
+			}
+			structured, ok := backend.(StructuredTaskBackend)
+			if !ok {
+				t.Fatalf("%T does not implement StructuredTaskBackend", backend)
+			}
+
+			const runID = "strict-run"
+			if err := backend.CreateRun(runID, "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := strict.SetRunStrictConsistency(runID, true); err != nil {
+				t.Fatalf("SetRunStrictConsistency: %v", err)
+			}
+			identity := TransferTaskIdentity{Schema: "dbo", Table: "orders"}
+			taskID, err := structured.CreateTransferTask(runID, identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := strict.SaveStrictSnapshotRowCount(taskID, 41); err != nil {
+				t.Fatalf("SaveStrictSnapshotRowCount: %v", err)
+			}
+			if err := structured.MarkTransferTaskComplete(runID, identity); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, lookupRun := range []string{runID, ""} {
+				got, err := strict.GetStrictSnapshotRowCount(lookupRun, "dbo", "public", "orders")
+				if err != nil || got == nil || *got != 41 {
+					t.Fatalf("GetStrictSnapshotRowCount(%q) = (%v, %v), want (41, nil)", lookupRun, got, err)
+				}
+			}
+
+			// A retry replaces the target with its new source snapshot, so it
+			// must replace—not retain—the earlier validation expectation.
+			if err := strict.SaveStrictSnapshotRowCount(taskID, 43); err != nil {
+				t.Fatalf("SaveStrictSnapshotRowCount retry: %v", err)
+			}
+			got, err := strict.GetStrictSnapshotRowCount(runID, "dbo", "public", "orders")
+			if err != nil || got == nil || *got != 43 {
+				t.Fatalf("retry snapshot count = (%v, %v), want (43, nil)", got, err)
+			}
+
+			// `dmt validate` with no run ID must not select an older strict
+			// count when a newer ordinary run is the relevant migration.
+			if err := backend.CreateRun("ordinary-run", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			latest, err := strict.GetStrictSnapshotRowCount("", "dbo", "public", "orders")
+			if err != nil || latest != nil {
+				t.Fatalf("latest ordinary run returned strict count (%v, %v), want nil", latest, err)
+			}
+		})
+	}
+}
+
 func TestStateBackendCapabilities(t *testing.T) {
 	for _, tc := range conformanceBackends() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,6 +230,13 @@ func TestStateBackendRejectsUnknownRequiredWriteTargets(t *testing.T) {
 				if err == nil {
 					t.Errorf("%s accepted an unknown write target", operation)
 				}
+			}
+			strict := backend.(StrictSnapshotState)
+			if err := strict.SetRunStrictConsistency("missing-run", true); err == nil {
+				t.Error("set strict consistency accepted an unknown run")
+			}
+			if err := strict.SaveStrictSnapshotRowCount(unknownTaskID, 1); err == nil {
+				t.Error("save strict snapshot count accepted an unknown task")
 			}
 		})
 	}

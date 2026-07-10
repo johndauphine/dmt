@@ -101,6 +101,25 @@ func Execute(
 		}
 		ctx = strictCtx
 		defer releaseSnapshot()
+
+		// Full-table strict jobs validate against this exact count rather than a
+		// later live source count. Incremental DateFilter jobs intentionally
+		// skip it: their target contains a window, not the whole table (#664).
+		if job.DateFilter == nil && job.Saver != nil && job.TaskID > 0 {
+			snapshotCount, err := strictSnapshotRowCount(ctx, srcPool, job.Table)
+			if err != nil {
+				return nil, err
+			}
+			saver, ok := job.Saver.(interface {
+				SaveStrictSnapshotRowCount(taskID, rowCount int64) error
+			})
+			if !ok {
+				return nil, fmt.Errorf("strict_consistency task %d cannot persist its snapshot row count", job.TaskID)
+			}
+			if err := saver.SaveStrictSnapshotRowCount(job.TaskID, snapshotCount); err != nil {
+				return nil, fmt.Errorf("persisting strict_consistency snapshot row count for %s: %w", job.Table.FullName(), err)
+			}
+		}
 	}
 
 	// Handle truncation based on job type (skip if resuming or in upsert mode)

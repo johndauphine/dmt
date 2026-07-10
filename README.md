@@ -990,6 +990,16 @@ The `migration` section controls how data is transferred.
 > appropriate. ClickHouse and unsupported source engines are rejected before
 > target mutation. The guarantee is **per table**, not a single snapshot shared
 > across independently transferred tables.
+>
+> **Strict validation (#664).** For a full-table strict transfer, dmt captures
+> `COUNT(*)` through that same pinned source transaction before it prepares the
+> target. Validation compares the target with this persisted snapshot count,
+> not with a later live source count. If the live source has changed since the
+> snapshot, dmt reports the signed drift as informational and still passes when
+> the target matches the snapshot. `dmt validate` uses the latest matching
+> run's stored strict evidence. Incremental jobs with a date filter transfer a
+> window rather than a whole table, so they retain the normal live-count
+> validation behavior.
 
 **Validation Settings:**
 

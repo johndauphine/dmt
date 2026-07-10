@@ -143,6 +143,27 @@ type StateBackend interface {
 	GetFallbackEventsByRun(runID string) ([]FallbackEventRecord, error)
 }
 
+// StrictSnapshotState persists the evidence needed to validate a strict
+// transfer against the source snapshot it actually copied. It remains a
+// narrow extension rather than expanding StateBackend so focused test fakes
+// and third-party adapters do not silently claim this correctness capability.
+// Production SQLite and FileState implementations both provide it (#664).
+type StrictSnapshotState interface {
+	// SetRunStrictConsistency records that the run's transfer jobs use strict
+	// source snapshots. It is set once when a new run owns its migration lease.
+	SetRunStrictConsistency(runID string, strict bool) error
+
+	// SaveStrictSnapshotRowCount records the exact source count observed in the
+	// pinned table snapshot. A retry may replace it with the retry's snapshot.
+	SaveStrictSnapshotRowCount(taskID, rowCount int64) error
+
+	// GetStrictSnapshotRowCount returns the table count from one strict run. An
+	// empty runID means the most recent matching run, used by `dmt validate`
+	// after the original process has exited. Nil means no usable strict
+	// full-table snapshot exists (for example an incremental DateFilter job).
+	GetStrictSnapshotRowCount(runID, sourceSchema, targetSchema, tableName string) (*int64, error)
+}
+
 // FallbackEventRecord is one (run, surface, fingerprint) row from
 // fallback_events. Surface is one of observability.Surface* values
 // (typemap | ddl | errordiag). Count is the number of times that

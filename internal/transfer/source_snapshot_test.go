@@ -237,6 +237,71 @@ func TestStrictSnapshotRejectsPartitionedJobs(t *testing.T) {
 	}
 }
 
+func TestStrictSnapshotCapturesAndPersistsFullTableCount(t *testing.T) {
+	reader, writer := openSnapshotSQLite(t, []string{
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)`,
+		`INSERT INTO events VALUES (1, 'a'), (2, 'b'), (3, 'c')`,
+	})
+	defer reader.Close()
+	defer writer.Close()
+
+	table := source.Table{
+		Name:     "events",
+		RowCount: 3,
+		Columns: []source.Column{
+			{Name: "id", DataType: "integer"},
+			{Name: "payload", DataType: "text"},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	table.PopulatePKColumns()
+	saver := &strictSnapshotCountSaver{}
+	target := &strictSnapshotGuardTarget{
+		keysetRuntimeTargetPool: keysetRuntimeTargetPool{updated: true},
+	}
+	stats, err := Execute(
+		context.Background(),
+		&keysetRuntimeSourcePool{db: reader},
+		target,
+		&config.Config{
+			Target: config.TargetConfig{Schema: ""},
+			Migration: config.MigrationConfig{
+				StrictConsistency:   true,
+				TargetMode:          "drop_recreate",
+				ChunkSize:           2,
+				ReadAheadBuffers:    1,
+				WriteAheadWriters:   1,
+				CheckpointFrequency: 1,
+			},
+		},
+		Job{Table: table, TaskID: 664, Saver: saver},
+		progress.New(),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stats.Rows != 3 {
+		t.Fatalf("transferred rows = %d, want 3", stats.Rows)
+	}
+	if saver.snapshotCount == nil || *saver.snapshotCount != 3 {
+		t.Fatalf("persisted snapshot count = %v, want 3", saver.snapshotCount)
+	}
+}
+
+// strictSnapshotCountSaver is a transfer-level stand-in for
+// checkpoint.ProgressSaver. It proves Execute captures the count through the
+// strict transaction before the normal pipeline begins.
+type strictSnapshotCountSaver struct {
+	keysetRuntimeProgressSaver
+	snapshotCount *int64
+}
+
+func (s *strictSnapshotCountSaver) SaveStrictSnapshotRowCount(_ int64, count int64) error {
+	s.snapshotCount = &count
+	return nil
+}
+
 type unsupportedStrictSnapshotSource struct {
 	*keysetRuntimeSourcePool
 }

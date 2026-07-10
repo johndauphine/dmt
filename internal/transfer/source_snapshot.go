@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/source"
 )
@@ -121,4 +122,21 @@ func sourceQueryerFor(ctx context.Context, fallback *sql.DB) sourceQueryer {
 		return queryer
 	}
 	return fallback
+}
+
+// strictSnapshotRowCount reads the full-table count through the same pinned
+// transaction used for pagination. Besides providing strict-validation
+// evidence, this first table read establishes engines' lazy MVCC snapshot
+// before target preparation can take time (#664).
+func strictSnapshotRowCount(ctx context.Context, srcPool pool.SourcePool, table source.Table) (int64, error) {
+	dialect := driver.GetDialect(srcPool.DBType())
+	if dialect == nil {
+		return 0, fmt.Errorf("strict_consistency row count: no dialect registered for source DB type %q", srcPool.DBType())
+	}
+	var count int64
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", dialect.QualifyTable(table.Schema, table.Name))
+	if err := sourceQueryerFor(ctx, srcPool.DB()).QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting strict_consistency snapshot for %s: %w", table.FullName(), err)
+	}
+	return count, nil
 }
