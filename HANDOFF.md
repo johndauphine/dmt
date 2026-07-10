@@ -13,8 +13,8 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   registry merged in [PR #687](../../pull/687) at `main` `627e319b`. Independent AI review found
   and verified a fix ensuring future strategies receive the post-clamp worker-session count;
   all six required CI checks passed.
-- 🚧 **#681 active** — MySQL/MariaDB `lock_window_sessions` implementation on
-  `feat/issue-681-mysql-lock-window`. The implementation, preflight probe, audited fallback, and
+- 🚧 **#681 in review** — MySQL/MariaDB `lock_window_sessions` implementation in
+  [PR #688](../../pull/688). The implementation, preflight probe, audited fallback, and
   live MySQL proofs are complete. Live read timings are 2.17s single-reader, 0.60s strict-parallel,
   and 0.64s relaxed-parallel (3.6× speedup; strict within 7.1% of relaxed). Shared-view mutation,
   bounded writer blocking, timeout fallback, privilege probing, and success/failure/cancel session
@@ -54,7 +54,7 @@ live DBs: `make test-dbs-up` (MSSQL :1433 `sa/TestPass2024`, Postgres :5432); fi
 | Order | Issue | Depends on | Shared-surface cautions |
 |---|---|---|---|
 | 1 | ✅ [#680](../../issues/680) strategy seam (pure refactor) | — | Merged in [PR #687](../../pull/687): strategy registry, catalog field, conformance pins, and exact worker-budget planning |
-| 2a | 🚧 [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | Active; parallelizable with #682; both register in the same strategy map and touch keyset-plan messaging — trivial rebase, otherwise disjoint (mysql.yaml, preflight_mysql.go) |
+| 2a | 🚧 [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | In review as [PR #688](../../pull/688); parallelizable with #682; both register in the same strategy map and touch keyset-plan messaging — trivial rebase, otherwise disjoint (mysql.yaml, preflight_mysql.go) |
 | 2b | [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Counterpart of #681 (mssql.yaml, preflight_mssql.go) |
 | 3 | [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Shares `preflight_mssql.go` with #682 and relaxes `internal/config/validation.go` scope gate — sequence after #682 |
 | 4 | [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | `composite_parallel.go`, `job_builder.go`, `transfer.go`; PG-composite half can start right after #680 |
