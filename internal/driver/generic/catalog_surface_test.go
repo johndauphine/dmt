@@ -105,6 +105,14 @@ func TestCatalogValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed composite range query is rejected", func(t *testing.T) {
+		data := strings.Replace(string(valid), "AND {range_clause}{date_clause}", "AND {date_clause}", 1)
+		_, err := ParseCatalog([]byte(data))
+		if err == nil || !strings.Contains(err.Error(), "range_query must contain {range_clause}") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
 	t.Run("unknown dsn strategy is rejected", func(t *testing.T) {
 		data := strings.Replace(string(valid), "dsn_strategy: sqlite_file", "dsn_strategy: nope", 1)
 		_, err := ParseCatalog([]byte(data))

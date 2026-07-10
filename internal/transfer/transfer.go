@@ -52,6 +52,7 @@ func Execute(
 	var resumeRowsDone int64
 	var resumeRanges []resumeRange
 	var resumeCompositeRangeState string
+	var resumeCompositeRanges []compositeResumeRange
 	if job.Saver != nil && job.TaskID > 0 {
 		var rangeState string
 		var err error
@@ -73,6 +74,16 @@ func Execute(
 		// Composite keyset persists its int64-preserving watermark tuple in
 		// the range_state column (#616).
 		resumeCompositeRangeState = rangeState
+		// #667 adds a distinct versioned envelope for per-range tuple
+		// watermarks. Legacy tuple arrays and integer-keyset range arrays
+		// decode as nil here and retain their established resume paths.
+		resumeCompositeRanges = decodeCompositeRangeState(rangeState)
+		if len(resumeCompositeRanges) > 0 {
+			// The envelope itself proves a prior range may have committed rows,
+			// even if a foreign saver did not retain legacy last_pk. Keep replay
+			// duplicate-safe rather than relying on that older side channel.
+			job.ReplayPossible = true
+		}
 
 		// Incremental upsert resume replays the whole changed-row window from
 		// the start instead of continuing from the positional cursor (#647). A
@@ -88,6 +99,7 @@ func Execute(
 			resumeRowsDone = 0
 			resumeRanges = nil
 			resumeCompositeRangeState = ""
+			resumeCompositeRanges = nil
 			job.ReplayPossible = true
 		}
 	}
@@ -133,7 +145,11 @@ func Execute(
 	// Handle truncation based on job type (skip if resuming or in upsert mode)
 	// Upsert mode: no truncation needed, upserts are idempotent
 	if cfg.Migration.TargetMode != "upsert" {
-		if resumeLastPK == nil {
+		// A #667 range envelope is independently durable resume evidence. A
+		// foreign/older saver can retain it while dropping legacy last_pk, so
+		// treating nil last_pk as a fresh table would truncate completed ranges
+		// immediately before the tuple producer correctly skips them.
+		if resumeLastPK == nil && len(resumeCompositeRanges) == 0 {
 			if job.Partition == nil {
 				// Non-partitioned table: truncate here (no race possible).
 				// A missing table is benign (defensive — the table is created
@@ -230,6 +246,19 @@ func Execute(
 	srcDialect := driver.GetDialect(srcPool.DBType())
 	if driver.TupleKeysetRoutable(&job.Table, srcPool.DBType()) &&
 		!convertersTouchPK(srcDialect, cols, colTypes, tgtPool.DBType(), job.Table.PrimaryKey) {
+		// Parallel tuple ranges are intentionally disabled for strict snapshots
+		// until tuple readers have the same imported-snapshot plumbing as the
+		// legacy keyset producer. Ineligible leading values fall through to the
+		// current single-reader tuple path without changing its behavior.
+		// A pre-#667 checkpoint has one tuple watermark but no range envelope.
+		// Preserve its exact single-reader resume rather than splitting from the
+		// table minimum and replaying the already-copied prefix. Fresh work and
+		// #667 envelopes use the parallel range path.
+		if resumeLastPK == nil || len(resumeCompositeRanges) > 0 {
+			if stats, used, err := executeParallelCompositeKeysetPagination(ctx, srcPool, tgtPool, cfg, job, cols, targetCols, colTypes, colSRIDs, prog, resumeCompositeRanges, resumeRowsDone, targetTableName, tuner, adjuster); used {
+				return stats, err
+			}
+		}
 		var resumeTuple []any
 		tupleResumeRowsDone := resumeRowsDone
 		if resumeLastPK != nil {

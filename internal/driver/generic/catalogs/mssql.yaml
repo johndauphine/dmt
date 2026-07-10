@@ -75,6 +75,11 @@ pagination:
       FROM {table} {hint}
       WHERE {composite_clause}{date_clause}
       ORDER BY {order_by}
+    range_query: |
+      SELECT TOP ({?}) {columns}
+      FROM {table} {hint}
+      WHERE {composite_clause} AND {range_clause}{date_clause}
+      ORDER BY {order_by}
     date_clause: " AND CONVERT(datetime2(7), {date_column}) > CONVERT(datetime2(7), {?}, 126)"
 
   row_number:

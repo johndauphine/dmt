@@ -8,6 +8,7 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/target"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -189,9 +190,21 @@ func parseNumericPK(value any) (int64, bool) {
 	case int64:
 		return v, true
 	case float64:
+		// A range boundary is only valid when it represents an int64 exactly.
+		// Truncating a fractional value could make #667 skip or duplicate rows.
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Trunc(v) != v || v < -math.Exp2(63) || v >= math.Exp2(63) {
+			return 0, false
+		}
 		return int64(v), true
 	case string:
 		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return parsed, true
+		}
+	case []byte:
+		// go-sql-driver/mysql can scan aggregate numeric expressions as bytes.
+		// Parse their textual form under the same int64 rule as legacy strings.
+		parsed, err := strconv.ParseInt(string(v), 10, 64)
 		if err == nil {
 			return parsed, true
 		}

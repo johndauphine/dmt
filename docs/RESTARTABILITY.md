@@ -329,9 +329,44 @@ Used when table has a single-column integer primary key.
 
 **Location**: `internal/transfer/transfer.go` `executeKeysetPagination()` lines 496-802
 
+### Tuple Keyset Pagination
+
+Tuple keyset is used for composite and otherwise tuple-safe primary keys. It
+keeps the source engine's tuple ordering semantics, including text collation:
+
+- **Query**: `WHERE (a,b,...) > (last_a,last_b,...) ORDER BY a,b,...`
+- **Parallel eligibility**: when the leading component is int64-safe,
+  `parallel_readers > 1`, and `strict_consistency` is off, DMT splits that
+  leading component into work-stealing ranges. Each reader still advances with
+  the complete tuple inside its own `min <= a <= max` range.
+- **Progress tracking**: parallel tuple readers save a versioned
+  `range_state` envelope containing each range's bounds, completion bit, and
+  typed tuple watermark. A periodic checkpoint's legacy `last_pk` is a
+  range-ordered safe frontier, never an arbitrary faster reader's watermark.
+- **Resume**: current binaries restore every range verbatim and use
+  duplicate-safe target writes. No target-side tuple range deletion is used,
+  because it could apply target collation semantics to a source-order
+  watermark.
+
+Checkpoint compatibility:
+
+- An older, single-tuple checkpoint resumes on a new binary through the
+  established single-reader tuple path; it is not range-split from the table
+  beginning.
+- Do **not** downgrade an interrupted task that has a #667 range envelope.
+  Pre-#667 binaries ignore the envelope and decode legacy JSON `last_pk`
+  numbers through `float64`; that can round BIGINT tuple values above `2^53`
+  and skip or replay the wrong suffix. Resume it with this or a newer binary,
+  or begin a fresh migration after the normal target recovery procedure.
+
+Nonnumeric leading keys, strict-consistency jobs, PK value converters, and
+engines without a vetted range template keep the prior single-reader tuple
+path.
+
 ### ROW_NUMBER Pagination (Fallback)
 
-Used for composite PKs, varchar PKs, or tables without PKs (rejected).
+Used for tables without a tuple-safe primary key or with a converter-touched
+primary key (tables without primary keys are rejected).
 
 - **Query**: `WITH numbered AS (SELECT ..., ROW_NUMBER() OVER (ORDER BY pk) as __rn) SELECT ... WHERE __rn > @rowNum AND __rn <= @rowNumEnd`
 - **Progress tracking**: Stores row number as `last_pk`

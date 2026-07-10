@@ -55,6 +55,11 @@ pagination:
       WHERE {composite_clause}{date_clause}
       ORDER BY {order_by}
       LIMIT {?}
+    range_query: |
+      SELECT {columns} FROM {table}
+      WHERE {composite_clause} AND {range_clause}{date_clause}
+      ORDER BY {order_by}
+      LIMIT {?}
     date_clause: " AND {date_column} > {?}"
 
   row_number:

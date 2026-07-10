@@ -93,6 +93,20 @@ type Dialect interface {
 	// lastPK is the previous chunk's PK tuple (ignored when unbounded).
 	BuildCompositeKeysetArgs(lastPK []any, limit int, hasLowerBound bool, dateFilter *DateFilter) []any
 
+	// SupportsCompositeRangeKeyset reports whether the dialect has an explicit
+	// range-scoped tuple-keyset template. It is separate from tuple eligibility
+	// so catalogs can conservatively keep the single-reader path.
+	SupportsCompositeRangeKeyset() bool
+
+	// BuildCompositeKeysetRangeQuery adds inclusive bounds on the numeric
+	// leading PK component around the normal tuple watermark comparison.
+	BuildCompositeKeysetRangeQuery(cols string, pkCols []string, schema, table, tableHint string, hasLowerBound, rangeMinInclusive bool, dateFilter *DateFilter) string
+
+	// BuildCompositeKeysetRangeArgs matches BuildCompositeKeysetRangeQuery.
+	// rangeMin and rangeMax are always present; tuple values are present only
+	// after the first page of a range.
+	BuildCompositeKeysetRangeArgs(lastPK []any, rangeMin, rangeMax int64, limit int, hasLowerBound bool, dateFilter *DateFilter) []any
+
 	// BuildRowNumberQuery builds a ROW_NUMBER pagination query.
 	// Parameters:
 	//   - cols: column list for SELECT

@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"math"
 	"reflect"
 	"sync"
 	"testing"
@@ -19,6 +20,28 @@ type savedProgress struct {
 type fakeSaver struct {
 	mu    sync.Mutex
 	saves []savedProgress
+}
+
+func TestParseNumericPKRequiresExactInt64(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  int64
+		ok    bool
+	}{
+		{name: "mysql aggregate bytes", value: []byte("9223372036854775807"), want: 9223372036854775807, ok: true},
+		{name: "integer float", value: float64(42), want: 42, ok: true},
+		{name: "fractional float", value: 42.5},
+		{name: "out of range float", value: math.Exp2(63)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseNumericPK(tt.value)
+			if ok != tt.ok || ok && got != tt.want {
+				t.Fatalf("parseNumericPK(%#v) = (%d, %v), want (%d, %v)", tt.value, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
 }
 
 func (f *fakeSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
@@ -210,5 +233,57 @@ func TestCompositeCheckpointRowsDoneExcludesUnsequencedAcks(t *testing.T) {
 	}
 	if saves[1].rowsDone != 7 {
 		t.Fatalf("second save rowsDone = %d, want 7", saves[1].rowsDone)
+	}
+}
+
+// Parallel tuple ranges are acknowledged out of source order. The legacy
+// last_pk fallback must therefore stay at the first incomplete range, while
+// the richer envelope can mark lower ranges complete as their final marker and
+// last write ack meet. This lets an older binary replay safely instead of
+// skipping an unfinished lower range (#667).
+func TestCompositeRangeCheckpointCoordinatorAdvancesSafeLegacyTuple(t *testing.T) {
+	saver := &fakeSaver{}
+	job := Job{Table: source.Table{Name: "Ledger", RowCount: 30}, TaskID: 667, Saver: saver}
+	ranges := []compositeResumeRange{
+		{min: 1, max: 10, minInclusive: true},
+		{min: 10, max: 20},
+		{min: 20, max: 30},
+	}
+	coord := newCompositeRangeCheckpointCoordinator(saver, job, ranges, nil, 30, 0, func() int { return 1 })
+	if coord == nil {
+		t.Fatal("expected checkpoint coordinator")
+	}
+
+	// The highest range has an acknowledged watermark, but it remains
+	// unfinished. Its marker never arrives in this simulated crash window.
+	coord.onAck(writeAck{readerID: 2, seq: 0, lastPK: []any{int64(25), int64(1)}, rows: 1})
+
+	// The middle range's marker reaches the consumer before its asynchronous
+	// write ack. It must not be marked complete until that ack is sequenced.
+	coord.markRangeDone(1, 1)
+	if coord.states[1].complete {
+		t.Fatal("range completed before its final write ack")
+	}
+	coord.onAck(writeAck{readerID: 1, seq: 0, lastPK: []any{int64(15), int64(1)}, rows: 1})
+	if !coord.states[1].complete {
+		t.Fatal("range did not complete after final marker and ack")
+	}
+
+	// The lower range becomes the safe legacy frontier first.
+	coord.onAck(writeAck{readerID: 0, seq: 0, lastPK: []any{int64(5), int64(1)}, rows: 1})
+	coord.markRangeDone(0, 1)
+
+	saves := saver.recorded()
+	if len(saves) == 0 {
+		t.Fatal("expected periodic checkpoint")
+	}
+	last := saves[len(saves)-1]
+	legacy, ok := last.lastPK.([]any)
+	if !ok || len(legacy) != 2 || legacy[0] != int64(25) {
+		t.Fatalf("legacy last_pk = %#v, want lower-complete safe frontier [25 1]", last.lastPK)
+	}
+	state := decodeCompositeRangeState(last.rangeState)
+	if len(state) != 3 || !state[0].complete || !state[1].complete || state[2].complete {
+		t.Fatalf("range state = %#v, want first two complete only", state)
 	}
 }

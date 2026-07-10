@@ -93,6 +93,18 @@ func (c *Catalog) Validate() error {
 		}
 	}
 
+	// RangeQuery is optional because only vetted engines opt into #667 tuple
+	// range readers. Once present, every generated predicate token is required:
+	// omitting one would silently widen a parallel reader or desynchronize its
+	// rendered SQL from the shared tuple-argument builder.
+	ck := c.Pagination.CompositeKeyset
+	if ck.RangeQuery != "" {
+		require(strings.Contains(ck.RangeQuery, "{composite_clause}"), "pagination.composite_keyset.range_query must contain {composite_clause}")
+		require(strings.Contains(ck.RangeQuery, "{range_clause}"), "pagination.composite_keyset.range_query must contain {range_clause}")
+		require(strings.Contains(ck.RangeQuery, "{order_by}"), "pagination.composite_keyset.range_query must contain {order_by}")
+		require(strings.Contains(ck.RangeQuery, "{date_clause}"), "pagination.composite_keyset.range_query must contain {date_clause}")
+	}
+
 	rn := c.Pagination.RowNumber
 	require(rn.Query != "", "pagination.row_number.query is required")
 	require(strings.Contains(rn.Query, "{where_date}"), "pagination.row_number.query must contain {where_date}")

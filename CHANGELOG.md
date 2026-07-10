@@ -24,6 +24,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Tuple-keyset tables with an int64-safe leading primary-key component now
+  split that component into work-stealing reader ranges while retaining tuple
+  ordering inside each range. Per-range typed watermarks make crash/resume
+  duplicate-safe without target-side tuple cleanup; nonnumeric leading keys,
+  converter-touched PKs, strict-consistency transfers, and legacy tuple
+  checkpoints retain their established single-reader paths (#667).
+
 - `strict_consistency_scope: migration` now gives PostgreSQL migrations one
   exported MVCC snapshot across every table, retry, and partition in the
   transfer phase. It restores strict table partitioning while preserving one

@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
@@ -141,4 +143,235 @@ func TestTupleKeysetPostgresUUIDNumeric(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParallelTupleKeysetPostgres executes the #667 range-split path against
+// PostgreSQL for both common composite shapes: integer/integer and an
+// int64-safe leading component followed by text. The second shape protects
+// the tuple comparison inside each numeric range from regressing back to a
+// numeric-only assumption.
+func TestParallelTupleKeysetPostgres(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test; -short set")
+	}
+	db, err := sql.Open("pgx", "postgres://postgres:TestPass2024@localhost:5432/postgres?sslmode=disable")
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	defer db.Close()
+
+	setup := []string{
+		`DROP TABLE IF EXISTS dmt_tuple_parallel_pg_int`,
+		`CREATE TABLE dmt_tuple_parallel_pg_int (tenant_id bigint NOT NULL, seq bigint NOT NULL, val text NOT NULL, PRIMARY KEY (tenant_id, seq))`,
+		`INSERT INTO dmt_tuple_parallel_pg_int SELECT tenant, seq, 'v-' || tenant || '-' || seq FROM generate_series(1, 48) tenant, generate_series(1, 9) seq`,
+		`DROP TABLE IF EXISTS dmt_tuple_parallel_pg_text`,
+		`CREATE TABLE dmt_tuple_parallel_pg_text (tenant_id bigint NOT NULL, name text COLLATE "C" NOT NULL, val int NOT NULL, PRIMARY KEY (tenant_id, name))`,
+		`INSERT INTO dmt_tuple_parallel_pg_text SELECT tenant, 'name-' || lpad(seq::text, 2, '0'), seq FROM generate_series(1, 48) tenant, generate_series(1, 9) seq`,
+	}
+	for _, q := range setup {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP TABLE IF EXISTS dmt_tuple_parallel_pg_int`)
+		_, _ = db.Exec(`DROP TABLE IF EXISTS dmt_tuple_parallel_pg_text`)
+	})
+
+	cases := []struct {
+		table string
+		name  string
+		cols  []string
+		types []string
+	}{
+		{table: "dmt_tuple_parallel_pg_int", name: "integer_second_component", cols: []string{"tenant_id", "seq", "val"}, types: []string{"int8", "int8", "text"}},
+		{table: "dmt_tuple_parallel_pg_text", name: "text_second_component", cols: []string{"tenant_id", "name", "val"}, types: []string{"int8", "text", "int4"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			table := driver.Table{
+				Name:   tc.table,
+				Schema: "public",
+				Columns: []driver.Column{
+					{Name: "tenant_id", DataType: "int8", IsNullable: false},
+					{Name: tc.cols[1], DataType: tc.types[1], IsNullable: false},
+					{Name: "val", DataType: tc.types[2]},
+				},
+				PrimaryKey:       []string{"tenant_id", tc.cols[1]},
+				RowCount:         48 * 9,
+				EstimatedRowSize: 64,
+			}
+			table.PopulatePKColumns()
+			if !driver.TupleKeysetRoutable(&table, "postgres") {
+				t.Fatal("precondition: PostgreSQL composite table must be tuple-routable")
+			}
+			cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+				ChunkSize: 5, ParallelReaders: 4, WriteAheadWriters: 1, TargetMode: "drop_recreate",
+			}}
+			tgt := newCompositeAnyTargetPool()
+			stats, used, err := executeParallelCompositeKeysetPagination(
+				context.Background(), &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}, tgt, cfg, Job{Table: table},
+				tc.cols, tc.cols, tc.types, []int{0, 0, 0}, progress.New(), nil, 0, table.Name, nil, nil,
+			)
+			if err != nil || !used {
+				t.Fatalf("parallel PostgreSQL tuple path = (used=%v, err=%v), want success", used, err)
+			}
+			if stats.Rows != table.RowCount {
+				t.Fatalf("rows = %d, want %d", stats.Rows, table.RowCount)
+			}
+			tgt.assertExact(t, int(table.RowCount))
+		})
+	}
+}
+
+// TestParallelTupleKeysetPostgresReaderSpeedup is a controlled live-PG
+// benchmark regression. The view injects a small source-page latency so the
+// reader ceiling is observable independently of a local bulk-writer's speed:
+// one tuple reader pays it for every page serially, while four range readers
+// overlap those page waits. This proves the configured N-reader path gives a
+// measurable throughput win on a composite-PK table, not just multiple empty
+// goroutines (#667).
+func TestParallelTupleKeysetPostgresReaderSpeedup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration benchmark; -short set")
+	}
+	db, err := sql.Open("pgx", "postgres://postgres:TestPass2024@localhost:5432/postgres?sslmode=disable")
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	defer db.Close()
+
+	setup := []string{
+		`DROP VIEW IF EXISTS public.dmt_tuple_parallel_pg_bench`,
+		`DROP TABLE IF EXISTS public.dmt_tuple_parallel_pg_bench_data`,
+		`CREATE TABLE public.dmt_tuple_parallel_pg_bench_data (tenant_id bigint NOT NULL, seq bigint NOT NULL, val text NOT NULL, PRIMARY KEY (tenant_id, seq))`,
+		`INSERT INTO public.dmt_tuple_parallel_pg_bench_data SELECT tenant, seq, 'v-' || tenant || '-' || seq FROM generate_series(1, 64) tenant, generate_series(1, 2) seq`,
+		// pg_sleep is evaluated once per page query. Its small fixed cost makes
+		// the reader-concurrency benefit deterministic enough for CI while all
+		// tuple predicates and scans remain PostgreSQL's real implementation.
+		`CREATE VIEW public.dmt_tuple_parallel_pg_bench AS SELECT d.tenant_id, d.seq, d.val FROM public.dmt_tuple_parallel_pg_bench_data d CROSS JOIN LATERAL pg_sleep(0.008) AS page_delay`,
+	}
+	for _, q := range setup {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DROP VIEW IF EXISTS public.dmt_tuple_parallel_pg_bench`)
+		_, _ = db.Exec(`DROP TABLE IF EXISTS public.dmt_tuple_parallel_pg_bench_data`)
+	})
+
+	table := driver.Table{
+		Name:   "dmt_tuple_parallel_pg_bench",
+		Schema: "public",
+		Columns: []driver.Column{
+			{Name: "tenant_id", DataType: "int8", IsNullable: false},
+			{Name: "seq", DataType: "int8", IsNullable: false},
+			{Name: "val", DataType: "text"},
+		},
+		PrimaryKey:       []string{"tenant_id", "seq"},
+		RowCount:         128,
+		EstimatedRowSize: 64,
+	}
+	table.PopulatePKColumns()
+	cols := []string{"tenant_id", "seq", "val"}
+	types := []string{"int8", "int8", "text"}
+	runSingle := func() time.Duration {
+		cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+			ChunkSize: 2, ParallelReaders: 1, WriteAheadWriters: 1, TargetMode: "drop_recreate",
+		}}
+		start := time.Now()
+		stats, err := executeCompositeKeysetPagination(
+			context.Background(), &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}, newCompositeAnyTargetPool(), cfg, Job{Table: table},
+			cols, cols, types, []int{0, 0, 0}, progress.New(), nil, 0, table.Name, nil, nil,
+		)
+		if err != nil || stats.Rows != table.RowCount {
+			t.Fatalf("single-reader run = (rows=%v, err=%v), want %d rows", stats, err, table.RowCount)
+		}
+		return time.Since(start)
+	}
+	runParallel := func() time.Duration {
+		cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+			ChunkSize: 2, ParallelReaders: 4, WriteAheadWriters: 1, TargetMode: "drop_recreate",
+		}}
+		start := time.Now()
+		stats, used, err := executeParallelCompositeKeysetPagination(
+			context.Background(), &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}, newCompositeAnyTargetPool(), cfg, Job{Table: table},
+			cols, cols, types, []int{0, 0, 0}, progress.New(), nil, 0, table.Name, nil, nil,
+		)
+		if err != nil || !used || stats.Rows != table.RowCount {
+			t.Fatalf("parallel-reader run = (used=%v, rows=%v, err=%v), want success/%d rows", used, stats, err, table.RowCount)
+		}
+		return time.Since(start)
+	}
+
+	single := runSingle()
+	parallel := runParallel()
+	t.Logf("live PG composite tuple benchmark: one reader=%v, four readers=%v", single, parallel)
+	if parallel >= single*80/100 {
+		t.Fatalf("four tuple readers took %v vs one reader %v; want at least 20%% speedup", parallel, single)
+	}
+}
+
+// compositeAnyTargetPool captures the two composite key components without
+// assuming their Go scan types. It is shared by live PG/MySQL tuple tests.
+type compositeAnyTargetPool struct {
+	keysetRuntimeTargetPool
+	mu         sync.Mutex
+	keys       map[string]struct{}
+	duplicates int
+}
+
+func newCompositeAnyTargetPool() *compositeAnyTargetPool {
+	return &compositeAnyTargetPool{keys: make(map[string]struct{})}
+}
+
+func (p *compositeAnyTargetPool) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, row := range opts.Rows {
+		if len(row) < 2 {
+			return fmt.Errorf("composite row has %d values, want at least 2", len(row))
+		}
+		key := tupleTestComponent(row[0]) + "\x00" + tupleTestComponent(row[1])
+		if _, exists := p.keys[key]; exists {
+			p.duplicates++
+			continue
+		}
+		p.keys[key] = struct{}{}
+	}
+	return nil
+}
+
+func (p *compositeAnyTargetPool) assertExact(t *testing.T, want int) {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.keys) != want || p.duplicates != 0 {
+		t.Fatalf("unique/duplicate keys = %d/%d, want %d/0", len(p.keys), p.duplicates, want)
+	}
+}
+
+func tupleTestComponent(v any) string {
+	if b, ok := v.([]byte); ok {
+		return string(b)
+	}
+	return fmt.Sprint(v)
 }

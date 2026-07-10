@@ -379,16 +379,18 @@ type keysetRuntimeProgressSaver struct {
 }
 
 type keysetRuntimeProgressSave struct {
-	lastPK   any
-	rowsDone int64
+	lastPK     any
+	rowsDone   int64
+	rangeState string
 }
 
-func (s *keysetRuntimeProgressSaver) SaveProgress(_ int64, _ string, _ *int, lastPK any, rowsDone, _ int64, _ string) error {
+func (s *keysetRuntimeProgressSaver) SaveProgress(_ int64, _ string, _ *int, lastPK any, rowsDone, _ int64, rangeState string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.saves = append(s.saves, keysetRuntimeProgressSave{
-		lastPK:   lastPK,
-		rowsDone: rowsDone,
+		lastPK:     lastPK,
+		rowsDone:   rowsDone,
+		rangeState: rangeState,
 	})
 	return nil
 }
