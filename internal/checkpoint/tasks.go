@@ -10,59 +10,67 @@ import (
 
 // CreateTask creates a new task or returns existing task ID
 func (s *State) CreateTask(runID, taskType, taskKey string) (int64, error) {
-	// Try to insert new task
-	result, err := s.db.Exec(`
-		INSERT INTO tasks (run_id, task_type, task_key, status)
-		VALUES (?, ?, ?, 'pending')
-		ON CONFLICT(run_id, task_key) DO NOTHING
-	`, runID, taskType, taskKey)
-	if err != nil {
-		return 0, err
-	}
-
-	// Check if we inserted a new row
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected > 0 {
-		return result.LastInsertId()
-	}
-
-	// Task already exists - get its ID
 	var taskID int64
-	err = s.db.QueryRow(`
-		SELECT id FROM tasks WHERE run_id = ? AND task_key = ?
-	`, runID, taskKey).Scan(&taskID)
+	err := s.withRunLeaseTx(runID, "create task", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`
+			INSERT INTO tasks (run_id, task_type, task_key, status)
+			VALUES (?, ?, ?, 'pending')
+			ON CONFLICT(run_id, task_key) DO NOTHING
+		`, runID, taskType, taskKey)
+		if err != nil {
+			return err
+		}
+		if rowsAffected, _ := result.RowsAffected(); rowsAffected > 0 {
+			taskID, err = result.LastInsertId()
+			return err
+		}
+		return tx.QueryRow(`
+			SELECT id FROM tasks WHERE run_id = ? AND task_key = ?
+		`, runID, taskKey).Scan(&taskID)
+	})
 	return taskID, err
 }
 
 func (s *State) CreateTransferTask(runID string, identity TransferTaskIdentity) (int64, error) {
-	if err := s.ensureStructuredTransferRun(runID); err != nil {
-		return 0, err
-	}
 	key := identity.TaskKey()
-	result, err := s.db.Exec(`
-		INSERT INTO tasks (run_id, task_type, task_key, task_schema, task_table, task_partition_id, status)
-		VALUES (?, 'transfer', ?, ?, ?, ?, 'pending')
-		ON CONFLICT DO NOTHING
-	`, runID, key, identity.Schema, identity.Table, identity.PartitionID)
-	if err != nil {
-		return 0, err
-	}
-	if rows, _ := result.RowsAffected(); rows > 0 {
-		return result.LastInsertId()
-	}
 	var taskID int64
-	err = s.db.QueryRow(`
-		SELECT id FROM tasks
-		WHERE run_id = ? AND task_type = 'transfer'
-		  AND task_schema = ? AND task_table = ?
-		  AND task_partition_id IS ?
-	`, runID, identity.Schema, identity.Table, identity.PartitionID).Scan(&taskID)
+	err := s.withRunLeaseTx(runID, "create transfer task", func(tx *sql.Tx) error {
+		if err := ensureStructuredTransferRun(tx, runID); err != nil {
+			return err
+		}
+		result, err := tx.Exec(`
+			INSERT INTO tasks (run_id, task_type, task_key, task_schema, task_table, task_partition_id, status)
+			VALUES (?, 'transfer', ?, ?, ?, ?, 'pending')
+			ON CONFLICT DO NOTHING
+		`, runID, key, identity.Schema, identity.Table, identity.PartitionID)
+		if err != nil {
+			return err
+		}
+		if rows, _ := result.RowsAffected(); rows > 0 {
+			taskID, err = result.LastInsertId()
+			return err
+		}
+		return tx.QueryRow(`
+			SELECT id FROM tasks
+			WHERE run_id = ? AND task_type = 'transfer'
+			  AND task_schema = ? AND task_table = ?
+			  AND task_partition_id IS ?
+		`, runID, identity.Schema, identity.Table, identity.PartitionID).Scan(&taskID)
+	})
 	return taskID, err
 }
 
 func (s *State) ensureStructuredTransferRun(runID string) error {
+	return ensureStructuredTransferRun(s.db, runID)
+}
+
+type rowQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func ensureStructuredTransferRun(q rowQueryer, runID string) error {
 	var legacyCount int
-	if err := s.db.QueryRow(`
+	if err := q.QueryRow(`
 		SELECT COUNT(*) FROM tasks
 		WHERE run_id = ? AND task_type = 'transfer'
 		  AND (task_schema IS NULL OR task_table IS NULL)
@@ -90,19 +98,21 @@ func (s *State) CountTransferPartitionTasks(runID, schema, table string) (int, e
 }
 
 func (s *State) ClearTransferPartitionProgress(runID, schema, table string) error {
-	if err := s.ensureStructuredTransferRun(runID); err != nil {
+	return s.withRunLeaseTx(runID, "clear transfer partition progress", func(tx *sql.Tx) error {
+		if err := ensureStructuredTransferRun(tx, runID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`
+			DELETE FROM transfer_progress
+			WHERE task_id IN (
+				SELECT id FROM tasks
+				WHERE run_id = ? AND task_type = 'transfer'
+				  AND task_schema = ? AND task_table = ?
+				  AND task_partition_id IS NOT NULL
+			)
+		`, runID, schema, table)
 		return err
-	}
-	_, err := s.db.Exec(`
-		DELETE FROM transfer_progress
-		WHERE task_id IN (
-			SELECT id FROM tasks
-			WHERE run_id = ? AND task_type = 'transfer'
-			  AND task_schema = ? AND task_table = ?
-			  AND task_partition_id IS NOT NULL
-		)
-	`, runID, schema, table)
-	return err
+	})
 }
 
 func (s *State) GetTransferPartitionProgressSummary(runID, schema, table string) (PartitionProgressSummary, error) {
@@ -123,83 +133,84 @@ func (s *State) GetTransferPartitionProgressSummary(runID, schema, table string)
 }
 
 func (s *State) MarkTransferTaskComplete(runID string, identity TransferTaskIdentity) error {
-	if err := s.ensureStructuredTransferRun(runID); err != nil {
-		return err
-	}
-	result, err := s.db.Exec(`
-		UPDATE tasks SET status = 'success', completed_at = datetime('now')
-		WHERE run_id = ? AND task_type = 'transfer'
-		  AND task_schema = ? AND task_table = ?
-		  AND task_partition_id IS ?
-	`, runID, identity.Schema, identity.Table, identity.PartitionID)
-	if err != nil {
-		return err
-	}
-	return requireOneTask(result, 0, fmt.Sprintf("mark transfer task %s complete", identity.TaskKey()))
+	return s.withRunLeaseTx(runID, "mark transfer task complete", func(tx *sql.Tx) error {
+		if err := ensureStructuredTransferRun(tx, runID); err != nil {
+			return err
+		}
+		result, err := tx.Exec(`
+			UPDATE tasks SET status = 'success', completed_at = datetime('now')
+			WHERE run_id = ? AND task_type = 'transfer'
+			  AND task_schema = ? AND task_table = ?
+			  AND task_partition_id IS ?
+		`, runID, identity.Schema, identity.Table, identity.PartitionID)
+		if err != nil {
+			return err
+		}
+		return requireOneTask(result, 0, fmt.Sprintf("mark transfer task %s complete", identity.TaskKey()))
+	})
 }
 
 func (s *State) CompleteTransferTask(runID string, identity TransferTaskIdentity, targetSchema string, watermark *time.Time) error {
-	if err := s.ensureStructuredTransferRun(runID); err != nil {
-		return err
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	result, err := tx.Exec(`
-		UPDATE tasks SET status = 'success', completed_at = datetime('now')
-		WHERE run_id = ? AND task_type = 'transfer'
-		  AND task_schema = ? AND task_table = ?
-		  AND task_partition_id IS ?
-	`, runID, identity.Schema, identity.Table, identity.PartitionID)
-	if err != nil {
-		return err
-	}
-	if err := requireOneTask(result, 0, fmt.Sprintf("complete transfer task %s", identity.TaskKey())); err != nil {
-		return err
-	}
-	if watermark != nil {
-		if _, err := tx.Exec(`
-			INSERT INTO table_sync_timestamps (source_schema, table_name, target_schema, last_sync_timestamp, updated_at)
-			VALUES (?, ?, ?, ?, datetime('now'))
-			ON CONFLICT(source_schema, table_name, target_schema) DO UPDATE SET
-				last_sync_timestamp = excluded.last_sync_timestamp,
-				updated_at = excluded.updated_at
-		`, identity.Schema, identity.Table, targetSchema, watermark.UTC().Format(time.RFC3339Nano)); err != nil {
+	return s.withRunLeaseTx(runID, "complete transfer task", func(tx *sql.Tx) error {
+		if err := ensureStructuredTransferRun(tx, runID); err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		result, err := tx.Exec(`
+			UPDATE tasks SET status = 'success', completed_at = datetime('now')
+			WHERE run_id = ? AND task_type = 'transfer'
+			  AND task_schema = ? AND task_table = ?
+			  AND task_partition_id IS ?
+		`, runID, identity.Schema, identity.Table, identity.PartitionID)
+		if err != nil {
+			return err
+		}
+		if err := requireOneTask(result, 0, fmt.Sprintf("complete transfer task %s", identity.TaskKey())); err != nil {
+			return err
+		}
+		if watermark != nil {
+			if _, err := tx.Exec(`
+				INSERT INTO table_sync_timestamps (source_schema, table_name, target_schema, last_sync_timestamp, updated_at)
+				VALUES (?, ?, ?, ?, datetime('now'))
+				ON CONFLICT(source_schema, table_name, target_schema) DO UPDATE SET
+					last_sync_timestamp = excluded.last_sync_timestamp,
+					updated_at = excluded.updated_at
+			`, identity.Schema, identity.Table, targetSchema, watermark.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // UpdateTaskStatus updates a task's status
 func (s *State) UpdateTaskStatus(taskID int64, status string, errorMsg string) error {
-	var (
-		result sql.Result
-		err    error
-	)
-	switch status {
-	case "running":
-		result, err = s.db.Exec(`
-			UPDATE tasks SET status = ?, started_at = datetime('now')
-			WHERE id = ?
-		`, status, taskID)
-	case "pending":
-		result, err = s.db.Exec(`
-			UPDATE tasks SET status = ?, started_at = NULL, completed_at = NULL, error_message = ?
-			WHERE id = ?
-		`, status, errorMsg, taskID)
-	default:
-		result, err = s.db.Exec(`
-			UPDATE tasks SET status = ?, completed_at = datetime('now'), error_message = ?
-			WHERE id = ?
-		`, status, errorMsg, taskID)
-	}
-	if err != nil {
-		return err
-	}
-	return requireOneTask(result, taskID, "update status")
+	return s.withTaskLeaseTx(taskID, "update task status", func(tx *sql.Tx) error {
+		var (
+			result sql.Result
+			err    error
+		)
+		switch status {
+		case "running":
+			result, err = tx.Exec(`
+				UPDATE tasks SET status = ?, started_at = datetime('now')
+				WHERE id = ?
+			`, status, taskID)
+		case "pending":
+			result, err = tx.Exec(`
+				UPDATE tasks SET status = ?, started_at = NULL, completed_at = NULL, error_message = ?
+				WHERE id = ?
+			`, status, errorMsg, taskID)
+		default:
+			result, err = tx.Exec(`
+				UPDATE tasks SET status = ?, completed_at = datetime('now'), error_message = ?
+				WHERE id = ?
+			`, status, errorMsg, taskID)
+		}
+		if err != nil {
+			return err
+		}
+		return requireOneTask(result, taskID, "update status")
+	})
 }
 
 func requireOneTask(result sql.Result, taskID int64, operation string) error {
@@ -218,11 +229,16 @@ func requireOneTask(result sql.Result, taskID int64, operation string) error {
 
 // IncrementRetry increments retry count and resets to pending
 func (s *State) IncrementRetry(taskID int64, errorMsg string) error {
-	_, err := s.db.Exec(`
-		UPDATE tasks SET status = 'pending', retry_count = retry_count + 1, error_message = ?
-		WHERE id = ?
-	`, errorMsg, taskID)
-	return err
+	return s.withTaskLeaseTx(taskID, "increment task retry", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`
+			UPDATE tasks SET status = 'pending', retry_count = retry_count + 1, error_message = ?
+			WHERE id = ?
+		`, errorMsg, taskID)
+		if err != nil {
+			return err
+		}
+		return requireOneTask(result, taskID, "increment retry")
+	})
 }
 
 // GetPendingTasks returns all pending tasks for a run
@@ -259,23 +275,22 @@ func (s *State) AllTasksComplete(runID, taskType string) (bool, error) {
 
 // SaveTransferProgress saves chunk-level progress for resume
 func (s *State) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
-	if err := s.requireTask(taskID); err != nil {
-		return err
-	}
 	lastPKJSON, err := json.Marshal(lastPK)
 	if err != nil {
 		return fmt.Errorf("marshal progress watermark for task %d: %w", taskID, err)
 	}
-	_, err = s.db.Exec(`
-		INSERT INTO transfer_progress (task_id, table_name, partition_id, last_pk, rows_done, rows_total, range_state, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), datetime('now'))
-		ON CONFLICT(task_id) DO UPDATE SET
-			last_pk = excluded.last_pk,
-			rows_done = excluded.rows_done,
-			range_state = excluded.range_state,
-			updated_at = excluded.updated_at
-	`, taskID, tableName, partitionID, string(lastPKJSON), rowsDone, rowsTotal, rangeState)
-	return err
+	return s.withTaskLeaseTx(taskID, "save transfer progress", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO transfer_progress (task_id, table_name, partition_id, last_pk, rows_done, rows_total, range_state, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), datetime('now'))
+			ON CONFLICT(task_id) DO UPDATE SET
+				last_pk = excluded.last_pk,
+				rows_done = excluded.rows_done,
+				range_state = excluded.range_state,
+				updated_at = excluded.updated_at
+		`, taskID, tableName, partitionID, string(lastPKJSON), rowsDone, rowsTotal, rangeState)
+		return err
+	})
 }
 
 // GetTransferProgress returns progress for a task
@@ -295,20 +310,10 @@ func (s *State) GetTransferProgress(taskID int64) (*TransferProgress, error) {
 
 // ClearTransferProgress removes saved progress for a task (for fresh re-transfer)
 func (s *State) ClearTransferProgress(taskID int64) error {
-	if err := s.requireTask(taskID); err != nil {
+	return s.withTaskLeaseTx(taskID, "clear transfer progress", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM transfer_progress WHERE task_id = ?`, taskID)
 		return err
-	}
-	_, err := s.db.Exec(`DELETE FROM transfer_progress WHERE task_id = ?`, taskID)
-	return err
-}
-
-func (s *State) requireTask(taskID int64) error {
-	var exists int
-	err := s.db.QueryRow(`SELECT 1 FROM tasks WHERE id = ?`, taskID).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("task not found: %d", taskID)
-	}
-	return err
+	})
 }
 
 // GetPartitionTransferProgressSummary returns aggregate saved progress across
@@ -333,14 +338,16 @@ func (s *State) GetPartitionTransferProgressSummary(runID, tableTaskKey string) 
 // a stale rowNum/PK against a freshly-truncated target — which would silently
 // skip rows 0..lastRowNum.
 func (s *State) ClearPartitionTransferProgress(runID, tableTaskKey string) error {
-	_, err := s.db.Exec(`
-		DELETE FROM transfer_progress
-		WHERE task_id IN (
-			SELECT id FROM tasks
-			WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
-		)
-	`, runID, partitionTaskLikePattern(tableTaskKey))
-	return err
+	return s.withRunLeaseTx(runID, "clear partition transfer progress", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			DELETE FROM transfer_progress
+			WHERE task_id IN (
+				SELECT id FROM tasks
+				WHERE run_id = ? AND task_key LIKE ? ESCAPE '\'
+			)
+		`, runID, partitionTaskLikePattern(tableTaskKey))
+		return err
+	})
 }
 
 // CountPartitionTasks returns the number of existing partition tasks for a table in a run.
@@ -401,23 +408,27 @@ func (s *State) GetCompletedTables(runID string) (map[string]bool, error) {
 
 // MarkRunAsResumed resets running tasks to pending for resume
 func (s *State) MarkRunAsResumed(runID string) error {
-	_, err := s.db.Exec(`
-		UPDATE tasks SET status = 'pending', started_at = NULL
-		WHERE run_id = ? AND status = 'running'
-	`, runID)
-	return err
+	return s.withRunLeaseTx(runID, "mark run as resumed", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			UPDATE tasks SET status = 'pending', started_at = NULL
+			WHERE run_id = ? AND status = 'running'
+		`, runID)
+		return err
+	})
 }
 
 // MarkTaskComplete marks a task as complete by run_id and task_key
 func (s *State) MarkTaskComplete(runID, taskKey string) error {
-	_, err := s.db.Exec(`
-		INSERT INTO tasks (run_id, task_type, task_key, status, completed_at)
-		VALUES (?, 'transfer', ?, 'success', datetime('now'))
-		ON CONFLICT(run_id, task_key) DO UPDATE SET
-			status = 'success',
-			completed_at = datetime('now')
-	`, runID, taskKey)
-	return err
+	return s.withRunLeaseTx(runID, "mark task complete", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO tasks (run_id, task_type, task_key, status, completed_at)
+			VALUES (?, 'transfer', ?, 'success', datetime('now'))
+			ON CONFLICT(run_id, task_key) DO UPDATE SET
+				status = 'success',
+				completed_at = datetime('now')
+		`, runID, taskKey)
+		return err
+	})
 }
 
 // GetAllTasks returns all tasks for a run with their progress

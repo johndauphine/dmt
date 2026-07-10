@@ -62,6 +62,9 @@ func TestRowNumberResumeReplaysPartialTargetWithoutDuplicatesOrStaleProgress(t *
 	}
 	defer state.Close()
 	saver := checkpoint.NewProgressSaver(state)
+	if err := state.CreateRun(runID, "main", "main", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
 
 	taskPrefix := "transfer:main.customer_orders"
 	p1TaskID, err := state.CreateTask(runID, "transfer", taskPrefix+":p1")

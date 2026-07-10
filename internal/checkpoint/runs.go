@@ -35,56 +35,76 @@ func (s *State) UpdateRunConfig(id string, config any) error {
 	if err != nil {
 		return fmt.Errorf("marshal run config: %w", err)
 	}
-	result, err := s.db.Exec(`UPDATE runs SET config = ? WHERE id = ?`, string(configJSON), id)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return fmt.Errorf("update run config: no run with id %q", id)
-	}
-	return nil
+	return s.withRunLeaseTx(id, "update run config", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`UPDATE runs SET config = ? WHERE id = ?`, string(configJSON), id)
+		if err != nil {
+			return err
+		}
+		return requireOneRun(result, id, "update run config")
+	})
 }
 
 // CompleteRun marks a run as complete
 func (s *State) CompleteRun(id string, status string, errorMsg string) error {
-	result, err := s.db.Exec(`
-		UPDATE runs SET status = ?, completed_at = datetime('now'), error = ?
-		WHERE id = ?
-	`, status, errorMsg, id)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows != 1 {
-		return fmt.Errorf("complete run: expected one run with id %q, updated %d", id, rows)
-	}
-	return nil
+	return s.withRunLeaseTx(id, "complete run", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`
+			UPDATE runs SET status = ?, completed_at = datetime('now'), error = ?
+			WHERE id = ?
+		`, status, errorMsg, id)
+		if err != nil {
+			return err
+		}
+		return requireOneRun(result, id, "complete run")
+	})
 }
 
 // UpdateRunHeartbeat records that a running process still owns a run.
 func (s *State) UpdateRunHeartbeat(runID string, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE runs SET last_heartbeat = ? WHERE id = ?`,
-		at.UTC().Format(sqliteRunTimeLayout), runID)
-	return err
+	return s.withRunLeaseTx(runID, "update run heartbeat", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`UPDATE runs SET last_heartbeat = ? WHERE id = ?`,
+			at.UTC().Format(sqliteRunTimeLayout), runID)
+		if err != nil {
+			return err
+		}
+		return requireOneRun(result, runID, "update run heartbeat")
+	})
 }
 
 // GetLastIncompleteRun returns the most recent incomplete run
 func (s *State) GetLastIncompleteRun() (*Run, error) {
+	return s.getLastIncompleteRun("", nil)
+}
+
+// GetLastIncompleteRunForTarget returns the newest resumable run bound to the
+// canonical target. Legacy runs predate target keys and fall back to the target
+// schema so operators can still recover them under the heartbeat safeguards.
+func (s *State) GetLastIncompleteRunForTarget(target MigrationTarget) (*Run, error) {
+	target = target.Canonical()
+	return s.getLastIncompleteRun(`
+		AND (
+			lease_target_key = ?
+			OR (
+				COALESCE(lease_generation, 0) = 0
+				AND (target_schema = ? OR (? = 'sqlite' AND target_schema = ''))
+			)
+		)
+	`, []any{target.Key(), target.Schema, target.Driver})
+}
+
+func (s *State) getLastIncompleteRun(targetPredicate string, args []any) (*Run, error) {
 	var r Run
 	var startedAtStr string
 	var profileName, configPath, phase, configHash, lastHeartbeat, configStr sql.NullString
-	err := s.db.QueryRow(`
-		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema, profile_name, config_path, config_hash, last_heartbeat, config
+	query := `
+		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema,
+		       profile_name, config_path, config_hash, last_heartbeat, config,
+		       COALESCE(lease_target_key, ''), COALESCE(lease_owner_token, ''), COALESCE(lease_generation, 0)
 		FROM runs WHERE status = 'running'
+	` + targetPredicate + `
 		ORDER BY started_at DESC, rowid DESC LIMIT 1
-	`).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat, &configStr)
+	`
+	err := s.db.QueryRow(query, args...).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat, &configStr,
+		&r.LeaseTargetKey, &r.LeaseOwnerToken, &r.LeaseGeneration)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -119,8 +139,13 @@ func (s *State) GetLastIncompleteRun() (*Run, error) {
 
 // UpdatePhase updates the current phase of a migration run
 func (s *State) UpdatePhase(runID, phase string) error {
-	_, err := s.db.Exec(`UPDATE runs SET phase = ? WHERE id = ?`, phase, runID)
-	return err
+	return s.withRunLeaseTx(runID, "update run phase", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`UPDATE runs SET phase = ? WHERE id = ?`, phase, runID)
+		if err != nil {
+			return err
+		}
+		return requireOneRun(result, runID, "update run phase")
+	})
 }
 
 // SetRunConfigHash sets the config hash for a run (used for resume validation)
@@ -143,7 +168,16 @@ func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
 		JOIN runs AS current ON current.id = ?
 		WHERE later.status = 'success'
 		AND later.source_schema = ?
-		AND later.target_schema = ?
+		AND (
+			(
+				COALESCE(current.lease_target_key, '') != ''
+				AND later.lease_target_key = current.lease_target_key
+			)
+			OR (
+				COALESCE(current.lease_target_key, '') = ''
+				AND later.target_schema = ?
+			)
+		)
 		AND (
 			later.started_at > current.started_at
 			OR (later.started_at = current.started_at AND later.rowid > current.rowid)
@@ -260,9 +294,12 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 
 	var profileName, configPath, errorMsg sql.NullString
 	err := s.db.QueryRow(`
-		SELECT id, started_at, completed_at, last_heartbeat, status, source_schema, target_schema, config, profile_name, config_path, error
+		SELECT id, started_at, completed_at, last_heartbeat, status, source_schema, target_schema,
+		       config, profile_name, config_path, error,
+		       COALESCE(lease_target_key, ''), COALESCE(lease_owner_token, ''), COALESCE(lease_generation, 0)
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg)
+	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg,
+		&r.LeaseTargetKey, &r.LeaseOwnerToken, &r.LeaseGeneration)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

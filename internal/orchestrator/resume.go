@@ -27,13 +27,35 @@ func (o *Orchestrator) abandonResumeAttempt(runID string, err error, startTime t
 
 // Resume continues an interrupted migration
 func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
-	run, err := o.state.GetLastIncompleteRun()
+	leaseState, err := o.migrationLeaseBackend()
+	if err != nil {
+		return err
+	}
+	run, err := leaseState.GetLastIncompleteRunForTarget(o.migrationTarget())
 	if err != nil {
 		return fmt.Errorf("finding incomplete run: %w", err)
 	}
 	if run == nil {
 		return fmt.Errorf("no incomplete run found - use 'run' to start a new migration")
 	}
+	if err := o.validateResumeHeartbeat(run, time.Now()); err != nil {
+		return err
+	}
+	leaseBackend, lease, err := o.acquireMigrationLease(run)
+	if err != nil {
+		return fmt.Errorf("acquiring migration lease for run %s: %w", run.ID, err)
+	}
+	if err := bindMigrationLease(leaseBackend, run.ID, lease); err != nil {
+		return releaseUnboundMigrationLease(leaseBackend, lease, err)
+	}
+	ownedCtx, leaseSession, err := o.startMigrationLease(ctx, leaseBackend, lease, run.ID)
+	if err != nil {
+		return releaseUnboundMigrationLease(leaseBackend, lease, err)
+	}
+	ctx = ownedCtx
+	defer func() {
+		resumeErr = mergeLeaseSessionError(resumeErr, leaseSession)
+	}()
 
 	// Check if this incomplete run has been superseded by a later successful run
 	superseded, err := o.state.HasSuccessfulRunAfter(run)
@@ -44,10 +66,6 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		// Mark the old incomplete run as failed since it's obsolete
 		o.state.CompleteRun(run.ID, "failed", "superseded by later successful migration")
 		return fmt.Errorf("incomplete run %s is obsolete - a later migration with the same schemas completed successfully. Use 'run' to start a new migration", run.ID)
-	}
-
-	if err := o.validateResumeHeartbeat(run, time.Now()); err != nil {
-		return err
 	}
 
 	// Validate config hash if stored (prevents resuming with different config).
@@ -147,8 +165,6 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 	})
 
 	logging.Info("Resuming run: %s (started %s)", run.ID, run.StartedAt.Format(time.RFC3339))
-	stopHeartbeat := o.startRunHeartbeat(ctx, run.ID)
-	defer stopHeartbeat()
 
 	// Preflight (phase 0) — same gate as Run(). A resume can fail if the
 	// environment changed between runs (privileges revoked, version

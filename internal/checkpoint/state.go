@@ -8,12 +8,15 @@ import (
 	_ "modernc.org/sqlite"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
 // State manages migration state in SQLite
 type State struct {
-	db *sql.DB
+	db      *sql.DB
+	leaseMu sync.RWMutex
+	lease   *MigrationLease
 }
 
 // Capabilities reports the SQLite backend's supported behavior.
@@ -67,6 +70,11 @@ type Run struct {
 	ProfileName string
 	ConfigPath  string
 	Error       string // Error message if status is "failed"
+	// LeaseTargetKey and LeaseGeneration identify the fencing token that owns
+	// this run. Zero generation denotes a pre-lease/legacy run.
+	LeaseTargetKey  string
+	LeaseOwnerToken string
+	LeaseGeneration int64
 }
 
 // TransferProgress tracks chunk-level progress

@@ -164,6 +164,9 @@ func TestKeysetPartitionReplayDoesNotInflateRowsDonePostgres(t *testing.T) {
 	}
 	defer state.Close()
 	saver := &recordingSaver{inner: checkpoint.NewProgressSaver(state)}
+	if err := state.CreateRun("run-632-pg", srcSchema, tgtSchema, nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
 
 	taskID, err := state.CreateTask("run-632-pg", "transfer", fmt.Sprintf("transfer:%s.%s:p%d", srcSchema, table, partID))
 	if err != nil {

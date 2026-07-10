@@ -43,6 +43,9 @@ func TestCreateRowNumberPartitionJobsClearsProgressWhenBoundariesShift(t *testin
 	defer state.Close()
 
 	const runID = "run-row-number-boundary"
+	if err := state.CreateRun(runID, "public", "public", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
 	table := source.Table{
 		Schema:     "public",
 		Name:       "votes",

@@ -66,6 +66,9 @@ func TestKeysetPartitionReplayDoesNotInflateRowsDone(t *testing.T) {
 	}
 	defer state.Close()
 	saver := &recordingSaver{inner: checkpoint.NewProgressSaver(state)}
+	if err := state.CreateRun("run-632", "main", "main", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
 
 	taskID, err := state.CreateTask("run-632", "transfer", "transfer:main.events:p2")
 	if err != nil {

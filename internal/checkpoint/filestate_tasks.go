@@ -9,61 +9,56 @@ import (
 
 // CreateTask creates or returns an existing task.
 func (fs *FileState) CreateTask(runID, taskType, taskKey string) (int64, error) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	// Check if task exists
-	if ts, ok := fs.state.Tables[taskKey]; ok {
-		if ts.TaskID <= 0 {
-			ts.TaskID = fs.nextTaskIDLocked()
-			fs.state.Tables[taskKey] = ts
-			fs.rememberTaskIDLocked(ts.TaskID, taskKey)
-			if err := fs.save(); err != nil {
-				return 0, err
-			}
+	var taskID int64
+	err := fs.withRunLeaseMutation("create task", func() error {
+		if fs.state.RunID != runID {
+			return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, runID)
 		}
-		return ts.TaskID, nil
-	}
-
-	// Create new task
-	taskID := fs.nextTaskIDLocked()
-	fs.state.Tables[taskKey] = tableState{
-		Status:   "pending",
-		TaskType: taskType,
-		TaskID:   taskID,
-	}
-	fs.rememberTaskIDLocked(taskID, taskKey)
-
-	if err := fs.save(); err != nil {
-		return 0, err
-	}
-	return taskID, nil
+		if ts, ok := fs.state.Tables[taskKey]; ok {
+			if ts.TaskID <= 0 {
+				ts.TaskID = fs.nextTaskIDLocked()
+				fs.state.Tables[taskKey] = ts
+				fs.rememberTaskIDLocked(ts.TaskID, taskKey)
+			}
+			taskID = ts.TaskID
+			return nil
+		}
+		taskID = fs.nextTaskIDLocked()
+		fs.state.Tables[taskKey] = tableState{
+			Status:   "pending",
+			TaskType: taskType,
+			TaskID:   taskID,
+		}
+		fs.rememberTaskIDLocked(taskID, taskKey)
+		return nil
+	})
+	return taskID, err
 }
 
 func (fs *FileState) CreateTransferTask(runID string, identity TransferTaskIdentity) (int64, error) {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
-		return 0, err
-	}
 	key := identity.TaskKey()
-	if ts, ok := fs.state.Tables[key]; ok {
-		return ts.TaskID, nil
-	}
-	taskID := fs.nextTaskIDLocked()
-	fs.state.Tables[key] = tableState{
-		Status:          "pending",
-		TaskType:        "transfer",
-		TaskSchema:      identity.Schema,
-		TaskTable:       identity.Table,
-		TaskPartitionID: clonePartitionID(identity.PartitionID),
-		TaskID:          taskID,
-	}
-	fs.rememberTaskIDLocked(taskID, key)
-	if err := fs.save(); err != nil {
-		return 0, err
-	}
-	return taskID, nil
+	var taskID int64
+	err := fs.withRunLeaseMutation("create transfer task", func() error {
+		if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
+			return err
+		}
+		if ts, ok := fs.state.Tables[key]; ok {
+			taskID = ts.TaskID
+			return nil
+		}
+		taskID = fs.nextTaskIDLocked()
+		fs.state.Tables[key] = tableState{
+			Status:          "pending",
+			TaskType:        "transfer",
+			TaskSchema:      identity.Schema,
+			TaskTable:       identity.Table,
+			TaskPartitionID: clonePartitionID(identity.PartitionID),
+			TaskID:          taskID,
+		}
+		fs.rememberTaskIDLocked(taskID, key)
+		return nil
+	})
+	return taskID, err
 }
 
 func (fs *FileState) ensureStructuredTransferTasksLocked(runID string) error {
@@ -132,28 +127,23 @@ func (fs *FileState) CountTransferPartitionTasks(runID string, schema, table str
 }
 
 func (fs *FileState) ClearTransferPartitionProgress(runID string, schema, table string) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
-		return err
-	}
-	changed := false
-	for key, ts := range fs.state.Tables {
-		if ts.TaskType != "transfer" || ts.TaskSchema != schema || ts.TaskTable != table || ts.TaskPartitionID == nil {
-			continue
+	return fs.withRunLeaseMutation("clear transfer partition progress", func() error {
+		if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
+			return err
 		}
-		ts.LastPK = nil
-		ts.PartitionID = nil
-		ts.RowsDone = 0
-		ts.RowsTotal = 0
-		ts.Status = "pending"
-		fs.state.Tables[key] = ts
-		changed = true
-	}
-	if !changed {
+		for key, ts := range fs.state.Tables {
+			if ts.TaskType != "transfer" || ts.TaskSchema != schema || ts.TaskTable != table || ts.TaskPartitionID == nil {
+				continue
+			}
+			ts.LastPK = nil
+			ts.PartitionID = nil
+			ts.RowsDone = 0
+			ts.RowsTotal = 0
+			ts.Status = "pending"
+			fs.state.Tables[key] = ts
+		}
 		return nil
-	}
-	return fs.save()
+	})
 }
 
 func (fs *FileState) GetTransferPartitionProgressSummary(runID string, schema, table string) (PartitionProgressSummary, error) {
@@ -173,90 +163,88 @@ func (fs *FileState) GetTransferPartitionProgressSummary(runID string, schema, t
 }
 
 func (fs *FileState) MarkTransferTaskComplete(runID string, identity TransferTaskIdentity) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
-		return err
-	}
-	key := identity.TaskKey()
-	ts, ok := fs.state.Tables[key]
-	if !ok {
-		return fmt.Errorf("transfer task not found: %s", key)
-	}
-	ts.Status = "success"
-	fs.state.Tables[key] = ts
-	return fs.save()
+	return fs.withRunLeaseMutation("mark transfer task complete", func() error {
+		if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
+			return err
+		}
+		key := identity.TaskKey()
+		ts, ok := fs.state.Tables[key]
+		if !ok {
+			return fmt.Errorf("transfer task not found: %s", key)
+		}
+		ts.Status = "success"
+		fs.state.Tables[key] = ts
+		return nil
+	})
 }
 
 func (fs *FileState) CompleteTransferTask(runID string, identity TransferTaskIdentity, targetSchema string, watermark *time.Time) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
-		return err
-	}
-	key := identity.TaskKey()
-	ts, ok := fs.state.Tables[key]
-	if !ok {
-		return fmt.Errorf("transfer task not found: %s", key)
-	}
-	ts.Status = "success"
-	fs.state.Tables[key] = ts
-	if watermark != nil {
-		if fs.state.SyncTimestamps == nil {
-			fs.state.SyncTimestamps = make(map[string]map[string]map[string]time.Time)
+	return fs.withRunLeaseMutation("complete transfer task", func() error {
+		if err := fs.ensureStructuredTransferTasksLocked(runID); err != nil {
+			return err
 		}
-		if fs.state.SyncTimestamps[identity.Schema] == nil {
-			fs.state.SyncTimestamps[identity.Schema] = make(map[string]map[string]time.Time)
+		key := identity.TaskKey()
+		ts, ok := fs.state.Tables[key]
+		if !ok {
+			return fmt.Errorf("transfer task not found: %s", key)
 		}
-		if fs.state.SyncTimestamps[identity.Schema][identity.Table] == nil {
-			fs.state.SyncTimestamps[identity.Schema][identity.Table] = make(map[string]time.Time)
+		ts.Status = "success"
+		fs.state.Tables[key] = ts
+		if watermark != nil {
+			if fs.state.SyncTimestamps == nil {
+				fs.state.SyncTimestamps = make(map[string]map[string]map[string]time.Time)
+			}
+			if fs.state.SyncTimestamps[identity.Schema] == nil {
+				fs.state.SyncTimestamps[identity.Schema] = make(map[string]map[string]time.Time)
+			}
+			if fs.state.SyncTimestamps[identity.Schema][identity.Table] == nil {
+				fs.state.SyncTimestamps[identity.Schema][identity.Table] = make(map[string]time.Time)
+			}
+			fs.state.SyncTimestamps[identity.Schema][identity.Table][targetSchema] = *watermark
 		}
-		fs.state.SyncTimestamps[identity.Schema][identity.Table][targetSchema] = *watermark
-	}
-	return fs.save()
+		return nil
+	})
 }
 
 // UpdateTaskStatus updates a task's status.
 func (fs *FileState) UpdateTaskStatus(taskID int64, status string, errorMsg string) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	key, ok := fs.taskKeyForIDLocked(taskID)
-	if ok {
+	return fs.withRunLeaseMutation("update task status", func() error {
+		key, ok := fs.taskKeyForIDLocked(taskID)
+		if !ok {
+			return fmt.Errorf("task not found: %d", taskID)
+		}
 		ts := fs.state.Tables[key]
 		ts.Status = status
 		ts.Error = errorMsg
 		fs.state.Tables[key] = ts
-		return fs.save()
-	}
-
-	return fmt.Errorf("task not found: %d", taskID)
+		return nil
+	})
 }
 
 // MarkTaskComplete marks a task as complete by run_id and task_key.
 func (fs *FileState) MarkTaskComplete(runID, taskKey string) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	if ts, ok := fs.state.Tables[taskKey]; ok {
-		if ts.TaskID <= 0 {
-			ts.TaskID = fs.nextTaskIDLocked()
-			fs.rememberTaskIDLocked(ts.TaskID, taskKey)
+	return fs.withRunLeaseMutation("mark task complete", func() error {
+		if fs.state.RunID != runID {
+			return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, runID)
 		}
-		ts.Status = "success"
-		fs.state.Tables[taskKey] = ts
-	} else {
-		// Create if not exists
-		taskID := fs.nextTaskIDLocked()
-		fs.state.Tables[taskKey] = tableState{
-			Status:   "success",
-			TaskType: "transfer",
-			TaskID:   taskID,
+		if ts, ok := fs.state.Tables[taskKey]; ok {
+			if ts.TaskID <= 0 {
+				ts.TaskID = fs.nextTaskIDLocked()
+				fs.rememberTaskIDLocked(ts.TaskID, taskKey)
+			}
+			ts.Status = "success"
+			fs.state.Tables[taskKey] = ts
+		} else {
+			taskID := fs.nextTaskIDLocked()
+			fs.state.Tables[taskKey] = tableState{
+				Status:   "success",
+				TaskType: "transfer",
+				TaskID:   taskID,
+			}
+			fs.rememberTaskIDLocked(taskID, taskKey)
 		}
-		fs.rememberTaskIDLocked(taskID, taskKey)
-	}
-
-	return fs.save()
+		return nil
+	})
 }
 
 // GetCompletedTables returns table names that completed successfully.
@@ -296,28 +284,27 @@ func (fs *FileState) GetRunStats(runID string) (total, pending, running, success
 
 // SaveTransferProgress saves chunk-level progress.
 func (fs *FileState) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	key, ok := fs.taskKeyForIDLocked(taskID)
-	if !ok {
-		return fmt.Errorf("task not found: %d", taskID)
-	}
-	ts := fs.state.Tables[key]
-	var pid *int
-	if partitionID != nil {
-		v := *partitionID
-		pid = &v
-	}
-	ts.TableName = tableName
-	ts.PartitionID = pid
-	ts.LastPK = lastPK
-	ts.RangeState = rangeState
-	ts.RowsDone = rowsDone
-	ts.RowsTotal = rowsTotal
-	ts.Status = "running"
-	fs.state.Tables[key] = ts
-	return fs.save()
+	return fs.withRunLeaseMutation("save transfer progress", func() error {
+		key, ok := fs.taskKeyForIDLocked(taskID)
+		if !ok {
+			return fmt.Errorf("task not found: %d", taskID)
+		}
+		ts := fs.state.Tables[key]
+		var pid *int
+		if partitionID != nil {
+			v := *partitionID
+			pid = &v
+		}
+		ts.TableName = tableName
+		ts.PartitionID = pid
+		ts.LastPK = lastPK
+		ts.RangeState = rangeState
+		ts.RowsDone = rowsDone
+		ts.RowsTotal = rowsTotal
+		ts.Status = "running"
+		fs.state.Tables[key] = ts
+		return nil
+	})
 }
 
 // GetTransferProgress returns progress for a task.
@@ -360,21 +347,20 @@ func (fs *FileState) GetTransferProgress(taskID int64) (*TransferProgress, error
 
 // ClearTransferProgress removes saved progress for a task (for fresh re-transfer).
 func (fs *FileState) ClearTransferProgress(taskID int64) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	key, ok := fs.taskKeyForIDLocked(taskID)
-	if !ok {
-		return fmt.Errorf("task not found: %d", taskID)
-	}
-	ts := fs.state.Tables[key]
-	ts.LastPK = nil
-	ts.PartitionID = nil
-	ts.RowsDone = 0
-	ts.RowsTotal = 0
-	ts.Status = "pending"
-	fs.state.Tables[key] = ts
-	return fs.save()
+	return fs.withRunLeaseMutation("clear transfer progress", func() error {
+		key, ok := fs.taskKeyForIDLocked(taskID)
+		if !ok {
+			return fmt.Errorf("task not found: %d", taskID)
+		}
+		ts := fs.state.Tables[key]
+		ts.LastPK = nil
+		ts.PartitionID = nil
+		ts.RowsDone = 0
+		ts.RowsTotal = 0
+		ts.Status = "pending"
+		fs.state.Tables[key] = ts
+		return nil
+	})
 }
 
 // GetPartitionTransferProgressSummary returns aggregate saved progress across
@@ -398,27 +384,24 @@ func (fs *FileState) GetPartitionTransferProgressSummary(_ string, tableTaskKey 
 // table (#227). Task keys for partitions have the form "<tableTaskKey>:p<N>".
 // runID is unused for the file backend because each FileState instance is
 // scoped to a single run.
-func (fs *FileState) ClearPartitionTransferProgress(_ string, tableTaskKey string) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	prefix := tableTaskKey + ":p"
-	changed := false
-	for key, ts := range fs.state.Tables {
-		if strings.HasPrefix(key, prefix) {
-			ts.LastPK = nil
-			ts.PartitionID = nil
-			ts.RowsDone = 0
-			ts.RowsTotal = 0
-			ts.Status = "pending"
-			fs.state.Tables[key] = ts
-			changed = true
+func (fs *FileState) ClearPartitionTransferProgress(runID string, tableTaskKey string) error {
+	return fs.withRunLeaseMutation("clear partition transfer progress", func() error {
+		if fs.state.RunID != runID {
+			return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, runID)
 		}
-	}
-	if !changed {
+		prefix := tableTaskKey + ":p"
+		for key, ts := range fs.state.Tables {
+			if strings.HasPrefix(key, prefix) {
+				ts.LastPK = nil
+				ts.PartitionID = nil
+				ts.RowsDone = 0
+				ts.RowsTotal = 0
+				ts.Status = "pending"
+				fs.state.Tables[key] = ts
+			}
+		}
 		return nil
-	}
-	return fs.save()
+	})
 }
 
 // CountPartitionTasks counts partition tasks for a table by scanning stored task keys.
