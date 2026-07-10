@@ -28,6 +28,16 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Transfer scheduling now models partition dependencies **per table** instead of
+  through two global phases. Previously every non-partitioned job and every
+  table's first partition had to finish before *any* table's remaining
+  partitions could start, so one slow unrelated table stalled partition
+  parallelism across the whole migration. Now a table's later partitions run as
+  soon as that table's own first partition completes — even while an unrelated
+  table is still transferring — and they are suppressed entirely if that first
+  partition fails, so a table already known to have failed no longer writes more
+  partial data. Global worker/connection concurrency stays bounded (#648).
+
 - Keyset pagination now covers **single-column non-integer** primary keys
   (varchar/text, uuid, decimal/numeric) and **mixed-type
   composite** keys, not just integers — these tables previously fell back to
