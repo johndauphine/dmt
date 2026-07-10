@@ -235,6 +235,253 @@ func TestCompositeKeysetTransfersAllRows(t *testing.T) {
 	}
 }
 
+func TestCompositeParallelKeysetKeepsIneligiblePathsSingleReader(t *testing.T) {
+	db := seedCompositeKeysetDB(t, 2, 2)
+	if _, err := db.Exec(`CREATE TABLE text_lines (order_id TEXT NOT NULL, line_no INTEGER NOT NULL, PRIMARY KEY(order_id, line_no))`); err != nil {
+		t.Fatalf("create text_lines: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO text_lines VALUES ('a', 1), ('b', 1)`); err != nil {
+		t.Fatalf("insert text_lines: %v", err)
+	}
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	table := driver.Table{
+		Name: "text_lines",
+		Columns: []driver.Column{
+			{Name: "order_id", DataType: "text", IsNullable: false},
+			{Name: "line_no", DataType: "integer", IsNullable: false},
+		},
+		PrimaryKey: []string{"order_id", "line_no"},
+	}
+	table.PopulatePKColumns()
+	cfg := &config.Config{Migration: config.MigrationConfig{ChunkSize: 2, ParallelReaders: 4}}
+	_, used, err := executeParallelCompositeKeysetPagination(context.Background(), srcPool, &compositeTargetPool{}, cfg, Job{Table: table}, []string{"order_id", "line_no"}, []string{"order_id", "line_no"}, []string{"text", "integer"}, []int{0, 0}, progress.New(), nil, 0, "lines", nil, nil)
+	if err != nil {
+		t.Fatalf("ineligible leading component returned error: %v", err)
+	}
+	if used {
+		t.Fatal("text leading component must keep the single-reader tuple path")
+	}
+	// Digit-only text values must be just as ineligible: their source
+	// collation order is not the numeric order used for range splitting.
+	if _, err := db.Exec(`CREATE TABLE numeric_text_lines (order_id TEXT NOT NULL, line_no INTEGER NOT NULL, PRIMARY KEY(order_id, line_no))`); err != nil {
+		t.Fatalf("create numeric_text_lines: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO numeric_text_lines VALUES ('2', 1), ('10', 1)`); err != nil {
+		t.Fatalf("insert numeric_text_lines: %v", err)
+	}
+	table.Name = "numeric_text_lines"
+	_, used, err = executeParallelCompositeKeysetPagination(context.Background(), srcPool, &compositeTargetPool{}, cfg, Job{Table: table}, []string{"order_id", "line_no"}, []string{"order_id", "line_no"}, []string{"text", "integer"}, []int{0, 0}, progress.New(), nil, 0, "lines", nil, nil)
+	if err != nil || used {
+		t.Fatalf("numeric-text leading component = (used=%v, err=%v), want single-reader fallback", used, err)
+	}
+	// Strict mode remains explicitly on today's snapshot-safe path even when
+	// the leading component itself is numeric and otherwise eligible.
+	strictTable := driver.Table{
+		Name: "lines",
+		Columns: []driver.Column{
+			{Name: "order_id", DataType: "integer", IsNullable: false},
+			{Name: "line_no", DataType: "integer", IsNullable: false},
+			{Name: "qty", DataType: "integer"},
+		},
+		PrimaryKey: []string{"order_id", "line_no"},
+	}
+	strictTable.PopulatePKColumns()
+	cfg.Migration.StrictConsistency = true
+	_, used, err = executeParallelCompositeKeysetPagination(context.Background(), srcPool, &compositeTargetPool{}, cfg, Job{Table: strictTable}, []string{"order_id", "line_no", "qty"}, []string{"order_id", "line_no", "qty"}, []string{"integer", "integer", "integer"}, []int{0, 0, 0}, progress.New(), nil, 0, "lines", nil, nil)
+	if err != nil || used {
+		t.Fatalf("strict tuple path = (used=%v, err=%v), want single-reader fallback", used, err)
+	}
+}
+
+func TestCompositeParallelRangeResumeRestoresTupleWatermarks(t *testing.T) {
+	const (
+		orders   = 8
+		perOrder = 3
+	)
+	db := seedCompositeKeysetDB(t, orders, perOrder)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	tgtPool := &compositeTargetPool{}
+	// These are exactly the tuples covered by the two range checkpoints. The
+	// resumed ranges must fill only the suffixes and produce the full key set.
+	for order := int64(1); order <= 2; order++ {
+		for line := int64(1); line <= perOrder; line++ {
+			tgtPool.gotKeys = append(tgtPool.gotKeys, [2]int64{order, line})
+		}
+	}
+	for order := int64(5); order <= 6; order++ {
+		for line := int64(1); line <= perOrder; line++ {
+			tgtPool.gotKeys = append(tgtPool.gotKeys, [2]int64{order, line})
+		}
+	}
+
+	rangeState := encodeCompositeRangeState([]compositeResumeRange{
+		{min: 1, max: 4, minInclusive: true, tuple: []any{int64(2), int64(3)}},
+		{min: 4, max: 8, minInclusive: false, tuple: []any{int64(6), int64(3)}},
+	})
+	saver := &foreignTupleProgressSaver{
+		resumeLastPK:   []any{int64(2), int64(3)},
+		resumeRowsDone: 12,
+		rangeState:     rangeState,
+	}
+	table := driver.Table{
+		Name: "lines",
+		Columns: []driver.Column{
+			{Name: "order_id", DataType: "integer", IsNullable: false},
+			{Name: "line_no", DataType: "integer", IsNullable: false},
+			{Name: "qty", DataType: "integer"},
+		},
+		PrimaryKey:       []string{"order_id", "line_no"},
+		RowCount:         orders * perOrder,
+		EstimatedRowSize: 32,
+	}
+	table.PopulatePKColumns()
+	cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+		ChunkSize: 2, ParallelReaders: 2, WriteAheadWriters: 1, TargetMode: "drop_recreate", CheckpointFrequency: 1,
+	}}
+
+	stats, err := Execute(context.Background(), srcPool, tgtPool, cfg, Job{Table: table, TaskID: 667, Saver: saver}, progress.New(), nil)
+	if err != nil {
+		t.Fatalf("Execute resume: %v", err)
+	}
+	if stats.Rows != orders*perOrder {
+		t.Fatalf("stats.Rows = %d, want %d", stats.Rows, orders*perOrder)
+	}
+	keys := tgtPool.keys()
+	if len(keys) != orders*perOrder {
+		t.Fatalf("final key count = %d, want %d", len(keys), orders*perOrder)
+	}
+	seen := make(map[[2]int64]struct{}, len(keys))
+	for _, key := range keys {
+		if _, duplicate := seen[key]; duplicate {
+			t.Fatalf("resume wrote duplicate tuple %v", key)
+		}
+		seen[key] = struct{}{}
+	}
+	last, ok := saver.last()
+	if !ok {
+		t.Fatal("expected final range checkpoint")
+	}
+	finalRanges := decodeCompositeRangeState(last.rangeState)
+	if len(finalRanges) != 2 || !finalRanges[0].complete || !finalRanges[1].complete {
+		t.Fatalf("final range state = %q, want two completed ranges", last.rangeState)
+	}
+}
+
+// A #667 range envelope is sufficient resume evidence even when a foreign
+// saver did not retain legacy last_pk. Execute must preserve target rows in
+// completed ranges before the producer skips them; truncating first would
+// silently lose their keys.
+func TestCompositeParallelRangeResumeWithoutLegacyLastPKPreservesCompletedRanges(t *testing.T) {
+	const (
+		orders   = 8
+		perOrder = 3
+	)
+	db := seedCompositeKeysetDB(t, orders, perOrder)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	tgtPool := &compositeTargetPool{}
+	for order := int64(1); order <= 4; order++ {
+		for line := int64(1); line <= perOrder; line++ {
+			tgtPool.gotKeys = append(tgtPool.gotKeys, [2]int64{order, line})
+		}
+	}
+	saver := &foreignTupleProgressSaver{
+		resumeRowsDone: 4 * perOrder,
+		rangeState: encodeCompositeRangeState([]compositeResumeRange{
+			{min: 1, max: 4, minInclusive: true, tuple: []any{int64(4), int64(3)}, complete: true},
+			{min: 4, max: 8, minInclusive: false},
+		}),
+	}
+	table := driver.Table{
+		Name: "lines",
+		Columns: []driver.Column{
+			{Name: "order_id", DataType: "integer", IsNullable: false},
+			{Name: "line_no", DataType: "integer", IsNullable: false},
+			{Name: "qty", DataType: "integer"},
+		},
+		PrimaryKey:       []string{"order_id", "line_no"},
+		RowCount:         orders * perOrder,
+		EstimatedRowSize: 32,
+	}
+	table.PopulatePKColumns()
+	cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+		ChunkSize: 2, ParallelReaders: 2, WriteAheadWriters: 1, TargetMode: "drop_recreate", CheckpointFrequency: 1,
+	}}
+
+	stats, err := Execute(context.Background(), srcPool, tgtPool, cfg, Job{Table: table, TaskID: 667, Saver: saver}, progress.New(), nil)
+	if err != nil {
+		t.Fatalf("Execute range-only resume: %v", err)
+	}
+	if stats.Rows != orders*perOrder {
+		t.Fatalf("rows = %d, want %d", stats.Rows, orders*perOrder)
+	}
+	if tgtPool.truncates != 0 {
+		t.Fatalf("range-only resume truncated target %d time(s)", tgtPool.truncates)
+	}
+	keys := tgtPool.keys()
+	if len(keys) != orders*perOrder {
+		t.Fatalf("final key count = %d, want %d", len(keys), orders*perOrder)
+	}
+	seen := make(map[[2]int64]struct{}, len(keys))
+	for _, key := range keys {
+		if _, duplicate := seen[key]; duplicate {
+			t.Fatalf("duplicate tuple %v", key)
+		}
+		seen[key] = struct{}{}
+	}
+}
+
+// An old tuple checkpoint carries one watermark, not #667's range envelope.
+// The new binary deliberately retains the single-reader resume in that case:
+// it continues at the old tuple instead of range-splitting from the table
+// minimum and replaying the prefix.
+func TestCompositeParallelKeysetRetainsLegacyTupleResume(t *testing.T) {
+	db := seedCompositeKeysetDB(t, 6, 2)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	tgtPool := &compositeTargetPool{}
+	for order := int64(1); order <= 2; order++ {
+		for line := int64(1); line <= 2; line++ {
+			tgtPool.gotKeys = append(tgtPool.gotKeys, [2]int64{order, line})
+		}
+	}
+	legacyTuple := []any{int64(2), int64(2)}
+	saver := &foreignTupleProgressSaver{
+		resumeLastPK:   legacyTuple,
+		resumeRowsDone: 4,
+		rangeState:     encodeCompositeTuple(legacyTuple),
+	}
+	table := driver.Table{
+		Name: "lines",
+		Columns: []driver.Column{
+			{Name: "order_id", DataType: "integer", IsNullable: false},
+			{Name: "line_no", DataType: "integer", IsNullable: false},
+			{Name: "qty", DataType: "integer"},
+		},
+		PrimaryKey:       []string{"order_id", "line_no"},
+		RowCount:         12,
+		EstimatedRowSize: 32,
+	}
+	table.PopulatePKColumns()
+	cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+		ChunkSize: 2, ParallelReaders: 4, WriteAheadWriters: 1, TargetMode: "drop_recreate", CheckpointFrequency: 1,
+	}}
+
+	stats, err := Execute(context.Background(), srcPool, tgtPool, cfg, Job{Table: table, TaskID: 667, Saver: saver}, progress.New(), nil)
+	if err != nil {
+		t.Fatalf("Execute legacy tuple resume: %v", err)
+	}
+	if stats.Rows != 12 {
+		t.Fatalf("rows = %d, want 12", stats.Rows)
+	}
+	keys := tgtPool.keys()
+	if len(keys) != 12 {
+		t.Fatalf("key count = %d, want 12; a range split replayed the legacy prefix", len(keys))
+	}
+	last, ok := saver.last()
+	if !ok || decodeCompositeRangeState(last.rangeState) != nil {
+		t.Fatalf("legacy resume persisted #667 range state: %#v", last)
+	}
+}
+
 func seedCompositeKeysetDB(t *testing.T, orders, linesPer int) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ck.db"))
@@ -264,8 +511,17 @@ func seedCompositeKeysetDB(t *testing.T, orders, linesPer int) *sql.DB {
 
 type compositeTargetPool struct {
 	keysetRuntimeTargetPool
-	mu3     sync.Mutex
-	gotKeys [][2]int64
+	mu3       sync.Mutex
+	gotKeys   [][2]int64
+	truncates int
+}
+
+func (p *compositeTargetPool) TruncateTable(context.Context, string, string) error {
+	p.mu3.Lock()
+	p.gotKeys = nil
+	p.truncates++
+	p.mu3.Unlock()
+	return nil
 }
 
 func (p *compositeTargetPool) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {

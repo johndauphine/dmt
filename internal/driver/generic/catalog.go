@@ -169,14 +169,17 @@ type KeysetSpec struct {
 // all-integer composite primary keys (#616). The lower-bound comparison is
 // generated in Go from the PK column list because its shape depends on the
 // column count and the engine style; the template supplies the surrounding
-// SELECT. Tokens: {columns}, {table}, {hint}, {composite_clause},
-// {order_by}, {date_clause}, {date_column}, {?}. Style is "rowvalue"
+// SELECT. RangeQuery is the parallel-reader counterpart with a generated
+// {range_clause} for the leading component. Tokens: {columns}, {table},
+// {hint}, {composite_clause}, {range_clause}, {order_by}, {date_clause},
+// {date_column}, {?}. Style is "rowvalue"
 // (WHERE (a,b) > (?,?) — postgres/mysql/sqlite) or "orchain"
 // (WHERE a > ? OR (a = ? AND b > ?) — mssql, which lacks row-value
 // comparison). LimitFirst places the limit placeholder before the WHERE
 // args (mssql TOP).
 type CompositeKeysetSpec struct {
 	Query      string `yaml:"query"`
+	RangeQuery string `yaml:"range_query"`
 	Style      string `yaml:"style"`
 	DateClause string `yaml:"date_clause"`
 	LimitFirst bool   `yaml:"limit_first"`

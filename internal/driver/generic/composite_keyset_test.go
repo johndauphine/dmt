@@ -105,3 +105,53 @@ func TestBuildCompositeKeysetQuerySingleColumn(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildCompositeKeysetRangeQuery(t *testing.T) {
+	tests := []struct {
+		engine        string
+		wantLower     string
+		wantRange     string
+		boundedArgs   []any
+		unboundedArgs []any
+	}{
+		{"sqlite", `("a", "b") > (?, ?)`, `"a" >= ? AND "a" <= ?`, []any{int64(10), int64(20), int64(1), int64(9), 500}, []any{int64(1), int64(9), 500}},
+		{"postgres", `("a", "b") > ($1, $2)`, `"a" >= $3 AND "a" <= $4`, []any{int64(10), int64(20), int64(1), int64(9), 500}, []any{int64(1), int64(9), 500}},
+		{"mysql", "(`a`, `b`) > (?, ?)", "`a` >= ? AND `a` <= ?", []any{int64(10), int64(20), int64(1), int64(9), 500}, []any{int64(1), int64(9), 500}},
+		{"mssql", "[a] > @p2 OR ([a] = @p3 AND [b] > @p4)", "[a] >= @p5 AND [a] <= @p6", []any{500, int64(10), int64(10), int64(20), int64(1), int64(9)}, []any{500, int64(1), int64(9)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.engine, func(t *testing.T) {
+			cat, err := LoadCatalog(tc.engine)
+			if err != nil {
+				t.Fatalf("LoadCatalog: %v", err)
+			}
+			d := NewDialect(cat)
+			if !d.SupportsCompositeRangeKeyset() {
+				t.Fatal("range template not declared")
+			}
+			q := d.BuildCompositeKeysetRangeQuery("a, b", []string{"a", "b"}, "s", "t", "", true, true, nil)
+			if !strings.Contains(q, tc.wantLower) || !strings.Contains(q, tc.wantRange) {
+				t.Fatalf("range query missing tuple or range clause:\n%s", q)
+			}
+			if got := d.BuildCompositeKeysetRangeArgs([]any{int64(10), int64(20)}, 1, 9, 500, true, nil); !argsEqual(got, tc.boundedArgs) {
+				t.Fatalf("bounded range args = %v, want %v", got, tc.boundedArgs)
+			}
+			qu := d.BuildCompositeKeysetRangeQuery("a, b", []string{"a", "b"}, "s", "t", "", false, true, nil)
+			if !strings.Contains(qu, "1=1") {
+				t.Fatalf("unbounded range query missing 1=1:\n%s", qu)
+			}
+			if got := d.BuildCompositeKeysetRangeArgs([]any{int64(10), int64(20)}, 1, 9, 500, false, nil); !argsEqual(got, tc.unboundedArgs) {
+				t.Fatalf("unbounded range args = %v, want %v", got, tc.unboundedArgs)
+			}
+		})
+	}
+
+	cat, err := LoadCatalog("sqlite")
+	if err != nil {
+		t.Fatalf("LoadCatalog(sqlite): %v", err)
+	}
+	q := NewDialect(cat).BuildCompositeKeysetRangeQuery("a, b", []string{"a", "b"}, "", "t", "", false, false, nil)
+	if !strings.Contains(q, `"a" > ? AND "a" <= ?`) {
+		t.Fatalf("later split range must exclude the shared lower boundary:\n%s", q)
+	}
+}

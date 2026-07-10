@@ -142,6 +142,11 @@ type pipelineConfig struct {
 	// Nil field means no checkpointing at all.
 	newAckHandler func(cb tunerCallbacks, saver ProgressSaver) func(writeAck)
 
+	// onRangeDone receives a parallel producer's end-of-range marker. It is
+	// deliberately separate from a write ack: a range is checkpoint-complete
+	// only after this marker and every earlier write ack have arrived.
+	onRangeDone func(readerID int, nextSeq int64)
+
 	// saveFinal persists final progress after a successful drain. It reports
 	// whether it wrote the authoritative durable watermark, so a trailing
 	// periodic-save failure can be downgraded only when final state superseded
@@ -392,6 +397,12 @@ chunkLoop:
 		}
 		if result.done {
 			break
+		}
+		if result.rangeDone {
+			if pc.onRangeDone != nil {
+				pc.onRangeDone(result.readerID, result.seq)
+			}
+			continue
 		}
 
 		// Report read-ahead queue depth to tuner (delta-based for aggregation)

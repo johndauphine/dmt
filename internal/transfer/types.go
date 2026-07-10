@@ -95,6 +95,11 @@ type chunkResult struct {
 	readEnd   time.Time // when this chunk finished reading
 	err       error
 	done      bool // signals end of data
+	// rangeDone is a producer-only control record for a parallel range. seq is
+	// the next sequence number after its final data chunk; it never reaches a
+	// writer. The checkpoint coordinator waits for every smaller sequence ack
+	// before treating the range as durably complete.
+	rangeDone bool
 }
 
 type writeJob struct {
