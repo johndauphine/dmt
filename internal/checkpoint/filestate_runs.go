@@ -148,7 +148,7 @@ func (fs *FileState) GetLastIncompleteRunForTarget(target MigrationTarget) (*Run
 		if run.LeaseTargetKey != target.Key() {
 			return nil, nil
 		}
-	} else if run.TargetSchema != target.Schema && !(target.Driver == "sqlite" && run.TargetSchema == "") {
+	} else if run.TargetSchema != target.Schema && (target.Driver != "sqlite" || run.TargetSchema != "") {
 		return nil, nil
 	}
 	return run, nil
