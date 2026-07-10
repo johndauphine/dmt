@@ -99,16 +99,19 @@ func executeKeysetPagination(
 		cfg.Migration.MaxSourceConnections,
 	)
 	if readerCountClamped && strictStrategy != nil {
-		if strictStrategyName == strictParallelLockWindow {
-			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lock-window coordinator reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
+		if strictStrategyName == strictParallelLockWindow || strictStrategyName == strictParallelTableSharedLock {
+			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the %s coordinator reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, strictStrategyName, cfg.Migration.MaxSourceConnections)
 		} else {
 			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lead snapshot transaction reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
 		}
 	}
 	if cfg.Migration.StrictConsistency && strictStrategy != nil && !joinSnapshotReaders && cfg.Migration.MaxSourceConnections > 0 {
-		if strictStrategyName == strictParallelLockWindow {
+		switch strictStrategyName {
+		case strictParallelLockWindow:
 			logging.Warn("Table %s: strict_consistency uses one pinned source session because max_source_connections=%d leaves no connection for both the lock-window coordinator and a reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
-		} else {
+		case strictParallelTableSharedLock:
+			logging.Warn("Table %s: strict_consistency uses one serializable reader because max_source_connections=%d leaves no connection for both the shared-lock coordinator and a reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
+		default:
 			logging.Warn("Table %s: strict_consistency uses its lead snapshot transaction as the sole reader because max_source_connections=%d leaves no connection for an imported snapshot reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
 		}
 	}

@@ -144,6 +144,20 @@ func TestStrictStrategyWorkerCountForTableUsesClampedPlan(t *testing.T) {
 	if workers != 0 {
 		t.Fatalf("single-reader MySQL worker sessions = %d, want zero", workers)
 	}
+	workers, err = strictStrategyWorkerCountForTable("mssql", table, 4, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 3 {
+		t.Fatalf("SQL Server worker sessions = %d, want three after reserving the lock coordinator", workers)
+	}
+	workers, err = strictStrategyWorkerCountForTable("mssql", table, 4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 0 {
+		t.Fatalf("SQL Server workers with coordinator-only budget = %d, want zero", workers)
+	}
 }
 
 func TestStrictReaderStrategyResolution(t *testing.T) {
@@ -157,7 +171,7 @@ func TestStrictReaderStrategyResolution(t *testing.T) {
 		{dbType: "mysql", wantName: strictParallelLockWindow, wantStrategy: true},
 		{dbType: "mariadb", wantName: strictParallelLockWindow, wantStrategy: true},
 		{dbType: "maria", wantName: strictParallelLockWindow, wantStrategy: true},
-		{dbType: "mssql", wantName: strictParallelNone},
+		{dbType: "mssql", wantName: strictParallelTableSharedLock, wantStrategy: true},
 		{dbType: "sqlite", wantName: strictParallelNone},
 		{dbType: "clickhouse", wantName: strictParallelNone},
 	}
@@ -362,9 +376,10 @@ var snapshotRecordingRegistry = struct {
 
 type snapshotRecordingTracker struct {
 	sync.Mutex
-	eventLog   []string
-	importErr  error
-	execErrors map[string]error
+	eventLog    []string
+	importErr   error
+	execErrors  map[string]error
+	queryErrors map[string]error
 }
 
 func (t *snapshotRecordingTracker) record(event string) {
@@ -398,6 +413,15 @@ func (t *snapshotRecordingTracker) failExec(query string, err error) {
 		t.execErrors = make(map[string]error)
 	}
 	t.execErrors[query] = err
+}
+
+func (t *snapshotRecordingTracker) failQuery(query string, err error) {
+	t.Lock()
+	defer t.Unlock()
+	if t.queryErrors == nil {
+		t.queryErrors = make(map[string]error)
+	}
+	t.queryErrors[query] = err
 }
 
 func openSnapshotRecordingDB(t *testing.T) (*sql.DB, *snapshotRecordingTracker) {
@@ -459,6 +483,12 @@ func (c *snapshotRecordingConn) begin() (driver.Tx, error) {
 
 func (c *snapshotRecordingConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.tracker.record("query " + query)
+	c.tracker.Lock()
+	err := c.tracker.queryErrors[query]
+	c.tracker.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	if query == "SELECT pg_export_snapshot()" {
 		return &snapshotRecordingRows{values: []driver.Value{"00000001-1"}}, nil
 	}

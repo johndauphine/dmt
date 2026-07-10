@@ -140,7 +140,7 @@ func TestShippedCatalogStrictParallelStrategies(t *testing.T) {
 	tests := map[string]string{
 		"postgres":   "exported_snapshot",
 		"mysql":      "lock_window_sessions",
-		"mssql":      "none",
+		"mssql":      "table_shared_lock",
 		"sqlite":     "none",
 		"clickhouse": "none",
 	}
