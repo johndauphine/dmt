@@ -180,7 +180,7 @@ func beginStrictSourceSnapshotWithOptions(ctx context.Context, srcPool pool.Sour
 	if err != nil {
 		return nil, nil, err
 	}
-	if strategyName == strictParallelLockWindow && opts.workerSessions < 1 {
+	if (strategyName == strictParallelLockWindow || strategyName == strictParallelTableSharedLock) && opts.workerSessions < 1 {
 		return beginSingleReaderStrictSnapshot(ctx, srcPool)
 	}
 	if strategy != nil {
@@ -212,6 +212,21 @@ func beginStrictSourceSnapshotWithOptions(ctx context.Context, srcPool pool.Sour
 				view.release()
 			}
 			return nil, nil, fmt.Errorf("strict parallel strategy returned an incomplete source view")
+		}
+		if strategyName == strictParallelTableSharedLock {
+			fields := map[string]any{
+				"table":    table.FullName(),
+				"strategy": strategyName,
+				"blocking": "concurrent_writes_wait_until_table_complete",
+			}
+			logging.InfoEvent("strict_shared_table_lock_acquired",
+				"table", table.FullName(),
+				"strategy", strategyName,
+				"blocking", fields["blocking"],
+			)
+			if opts.auditEvent != nil {
+				opts.auditEvent("strict_shared_table_lock_acquired", fields)
+			}
 		}
 		return strictReaderContext(ctx, view), view.release, nil
 	}

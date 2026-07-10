@@ -24,6 +24,11 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- SQL Server table-scoped `strict_consistency` now holds one audited shared
+  table lock while ordinary pooled readers scan in parallel. This replaces
+  progressive serializable range locking with a true point-in-time table view;
+  error 1222 loudly falls back to the prior single-reader path (#682).
+
 - MySQL/MariaDB `strict_consistency` keyset transfers can now use parallel
   readers by establishing pinned consistent snapshots inside a brief table
   read-lock window. Writers resume immediately after session setup; lock

@@ -13,8 +13,8 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   registry merged in [PR #687](../../pull/687) at `main` `627e319b`. Independent AI review found
   and verified a fix ensuring future strategies receive the post-clamp worker-session count;
   all six required CI checks passed.
-- 🚧 **#681 in review** — MySQL/MariaDB `lock_window_sessions` implementation in
-  [PR #688](../../pull/688). The implementation, preflight probe, audited fallback, and
+- ✅ **#681 complete** — MySQL/MariaDB `lock_window_sessions` merged in
+  [PR #688](../../pull/688) at `main` `1c4b3b16`. The implementation, preflight probe, audited fallback, and
   live MySQL proofs are complete. Live read timings are 2.17s single-reader, 0.60s strict-parallel,
   and 0.64s relaxed-parallel (3.6× speedup; strict within 7.1% of relaxed). Shared-view mutation,
   bounded writer blocking, timeout fallback, privilege probing, and success/failure/cancel session
@@ -23,7 +23,15 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   Independent review found and prompted fixes for the `parallel_readers: 1` lock regression and
   for physically discarding coordinator sessions after failed `UNLOCK TABLES`; post-fix review and
   the final end-to-end coverage re-review are clean.
-- ⏳ Remaining after #681: #682, #683, #684, #685.
+- 🚧 **#682 active** — SQL Server `table_shared_lock` implementation on
+  `feat/issue-682-mssql-table-shared-lock`. The coordinator transaction, ordinary pooled-reader
+  factory, connection clamp, acquisition INFO audit, error-1222 audited fallback, and unit tests
+  are implemented. Live SQL Server `Execute` tests prove update/delete/insert writers block only
+  until the transfer releases its table S lock, the copied key/value set is the lock-instant view,
+  timeout fallback completes correctly, and database transaction counts return to baseline. A
+  controlled live read proof measures 830ms sequential strict, 221ms four-reader strict, and 209ms
+  four-reader relaxed (3.8× speedup; strict within 5.5% of relaxed).
+- ⏳ Remaining after #682: #683, #684, #685.
 
 **Stakes (measured 2026-07-10, SO2010 19.3M rows, mssql→pg, same config, strict toggled):**
 
@@ -54,8 +62,8 @@ live DBs: `make test-dbs-up` (MSSQL :1433 `sa/TestPass2024`, Postgres :5432); fi
 | Order | Issue | Depends on | Shared-surface cautions |
 |---|---|---|---|
 | 1 | ✅ [#680](../../issues/680) strategy seam (pure refactor) | — | Merged in [PR #687](../../pull/687): strategy registry, catalog field, conformance pins, and exact worker-budget planning |
-| 2a | 🚧 [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | In review as [PR #688](../../pull/688); parallelizable with #682; both register in the same strategy map and touch keyset-plan messaging — trivial rebase, otherwise disjoint (mysql.yaml, preflight_mysql.go) |
-| 2b | [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Counterpart of #681 (mssql.yaml, preflight_mssql.go) |
+| 2a | ✅ [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | Merged in [PR #688](../../pull/688): lock-window sessions, filtered privilege probe, audited fallback, and live correctness/performance/leak proofs |
+| 2b | 🚧 [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Active on `feat/issue-682-mssql-table-shared-lock`; counterpart of #681 (mssql.yaml, preflight_mssql.go) |
 | 3 | [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Shares `preflight_mssql.go` with #682 and relaxes `internal/config/validation.go` scope gate — sequence after #682 |
 | 4 | [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | `composite_parallel.go`, `job_builder.go`, `transfer.go`; PG-composite half can start right after #680 |
 | 5 | [#685](../../issues/685) proofs + docs + diagnosis | #681, #682 (#683 for snapshot variant) | Closes the epic with evidence; mirrors `internal/transfer/consistency_snapshot_pg_integration_test.go` (#678) |

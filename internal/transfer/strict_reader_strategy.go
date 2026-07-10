@@ -13,6 +13,7 @@ const (
 	strictParallelNone             = "none"
 	strictParallelExportedSnapshot = "exported_snapshot"
 	strictParallelLockWindow       = "lock_window_sessions"
+	strictParallelTableSharedLock  = "table_shared_lock"
 )
 
 // strictReaderView is the source view acquired by a strict reader strategy.
@@ -55,6 +56,7 @@ func (exportedSnapshotStrategy) joinBudget() int { return 1 }
 var strictReaderStrategies = map[string]strictReaderStrategy{
 	strictParallelExportedSnapshot: exportedSnapshotStrategy{},
 	strictParallelLockWindow:       mysqlLockWindowStrategy{},
+	strictParallelTableSharedLock:  mssqlTableSharedLockStrategy{},
 }
 
 func resolveStrictReaderStrategy(dialect driver.Dialect) (string, strictReaderStrategy, error) {

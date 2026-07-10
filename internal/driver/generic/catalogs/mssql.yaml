@@ -39,7 +39,7 @@ capabilities:
   constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
   incremental_date_reader: true
 
-strict_parallel_strategy: none
+strict_parallel_strategy: table_shared_lock
 
 quoting:
   identifier_format: "[%s]"

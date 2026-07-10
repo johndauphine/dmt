@@ -104,7 +104,7 @@ func TestMssqlCatalogCapabilities(t *testing.T) {
 		SequenceResetter: true,
 	})
 	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
-		StrictParallelStrategy: "none",
+		StrictParallelStrategy: "table_shared_lock",
 	})
 }
 
