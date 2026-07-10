@@ -9,6 +9,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/driver"
 	_ "github.com/johndauphine/dmt/internal/driver/generic" // register generic dialects
+	"github.com/johndauphine/dmt/internal/source"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -115,6 +116,97 @@ func TestRowNumberPaginationSubstitutesRowsUnderConcurrentMutation(t *testing.T)
 	}
 	t.Logf("reproduced #640: transferred keys %v vs source [2 3 4 5] — count %d matches but key 3 lost", transferred, srcCount)
 }
+
+// TestRowNumberPaginationStrictSnapshotPreventsSubstitution verifies the
+// PostgreSQL side of #640's contract. The writer commits the same delete/insert
+// mutation between pages, but both reads execute through one repeatable-read
+// transaction and therefore return the original keys [1,2,3,4].
+func TestRowNumberPaginationStrictSnapshotPreventsSubstitution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test; -short set")
+	}
+	const dsn = "postgres://postgres:TestPass2024@localhost:5432/postgres?sslmode=disable"
+	db, err := sql.Open("pgx", dsn)
+	if err == nil {
+		err = db.Ping()
+	}
+	if err != nil {
+		if os.Getenv("PG_REQUIRED") == "1" {
+			t.Fatalf("postgres required but not reachable: %v", err)
+		}
+		t.Skipf("postgres not reachable: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	const schema = "dmt640_strict_snapshot"
+	const table = "events"
+	ctx := context.Background()
+	for _, q := range []string{
+		fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema),
+		fmt.Sprintf(`CREATE SCHEMA %s`, schema),
+		fmt.Sprintf(`CREATE TABLE %s.%s (id int PRIMARY KEY, payload text NOT NULL)`, schema, table),
+		fmt.Sprintf(`INSERT INTO %s.%s VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d')`, schema, table),
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() { _, _ = db.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schema)) })
+
+	dialect := driver.GetDialect("postgres")
+	if dialect == nil {
+		t.Fatal("no postgres dialect registered")
+	}
+	snapshotCtx, releaseSnapshot, err := beginStrictSourceSnapshot(ctx, &postgresStrictSnapshotSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}, source.Table{Schema: schema, Name: table})
+	if err != nil {
+		t.Fatalf("beginStrictSourceSnapshot: %v", err)
+	}
+	defer releaseSnapshot()
+	queryer := sourceQueryerFor(snapshotCtx, db)
+	page := func(rowStart int64, limit int) []int {
+		q := dialect.BuildRowNumberQuery(`"id", "payload"`, `"id"`, schema, table, "", nil)
+		args := dialect.BuildRowNumberArgs(rowStart, limit, nil)
+		rows, err := queryer.QueryContext(snapshotCtx, q, args...)
+		if err != nil {
+			t.Fatalf("page query [%d,+%d): %v\n%s", rowStart, limit, err, q)
+		}
+		defer rows.Close()
+		var ids []int
+		for rows.Next() {
+			var id int
+			var payload string
+			if err := rows.Scan(&id, &payload); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("page rows: %v", err)
+		}
+		return ids
+	}
+
+	if got := page(0, 2); !snapshotEqualInts(got, []int{1, 2}) {
+		t.Fatalf("page 1 = %v, want [1 2]", got)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s.%s WHERE id=1`, schema, table)); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s.%s VALUES (5,'e')`, schema, table)); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	page2 := page(2, 2)
+	if !snapshotEqualInts(page2, []int{3, 4}) {
+		t.Fatalf("snapshot page 2 = %v, want original [3 4]", page2)
+	}
+}
+
+type postgresStrictSnapshotSource struct {
+	*keysetRuntimeSourcePool
+}
+
+func (p *postgresStrictSnapshotSource) DBType() string { return "postgres" }
 
 func snapshotEqualInts(a, b []int) bool {
 	if len(a) != len(b) {

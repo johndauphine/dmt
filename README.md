@@ -975,17 +975,21 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `strict_consistency` | No | `false` | Drop dirty-read hints on SQL Server (removes `WITH (NOLOCK)`), so pages never read uncommitted rows. Other engines are unaffected. |
+| `strict_consistency` | No | `false` | Read each source table from one stable transaction snapshot. It serializes readers and disables table partitioning for that table. |
 
-> **Consistency scope (#640).** `strict_consistency` controls *dirty reads only*
-> — it is **not** a point-in-time snapshot. dmt paginates a table over many
-> independent queries (and, for keyset tables, several parallel readers), so a
-> concurrent insert/delete/update between pages can still make the transferred
-> row set diverge from any single instant of the source — a ROW_NUMBER page can
-> even skip a row while the total count is unchanged, which count validation
-> cannot detect. **For a consistent copy, quiesce the source** (no concurrent
-> writes) for the duration of the transfer, or migrate from a snapshot/replica.
-> A coordinated per-engine source snapshot is tracked in #640.
+> **Consistency scope (#640).** `strict_consistency` starts a source
+> transaction before target preparation, then routes every page of that table
+> through the same pinned transaction. To make that one view meaningful, dmt
+> uses one source reader and one unpartitioned job per table in this mode.
+> PostgreSQL and InnoDB-backed MySQL use repeatable-read snapshots (non-InnoDB
+> MySQL tables are rejected); SQL Server uses
+> serializable range locks; SQLite uses a serializable read transaction.
+> Concurrent source writes either remain outside the snapshot, block, or cause
+> a transaction error — dmt fails rather than merging source versions. Long
+> snapshots can retain MVCC history or block writers, so use a replica when
+> appropriate. ClickHouse and unsupported source engines are rejected before
+> target mutation. The guarantee is **per table**, not a single snapshot shared
+> across independently transferred tables.
 
 **Validation Settings:**
 
@@ -1192,7 +1196,7 @@ migration:
   create_check_constraints: true
 
   # Consistency
-  strict_consistency: true           # Use locks for consistent reads
+  strict_consistency: true           # Pin each table to one stable source transaction
 
   # Validation
   sample_validation: true            # Verify random samples

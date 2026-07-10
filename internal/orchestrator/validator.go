@@ -391,10 +391,11 @@ func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableV
 	timeoutCtx, cancel := context.WithTimeout(ctx, ValidationTimeout)
 	defer cancel()
 
-	// Query source count (exact). strict_consistency=true drops the
-	// `WITH (NOLOCK)` hint on the MSSQL side so the count is
-	// read-committed rather than dirty (#253). Other drivers ignore
-	// the flag.
+	// Query source count (exact). The strict source snapshot protects the
+	// transfer itself; validation runs afterward as a new observation, so a
+	// concurrent source change can make this count fail rather than silently
+	// claiming the transferred snapshot matches the current source (#640).
+	// The flag still suppresses MSSQL's NOLOCK hint for this exact count.
 	strict := o.config.Migration.StrictConsistency
 	sourceCount, srcErr := o.sourcePool.GetRowCountExact(timeoutCtx, o.config.Source.Schema, t.Name, strict)
 	srcTimedOut := timeoutCtx.Err() == context.DeadlineExceeded

@@ -40,7 +40,7 @@ type MigrationDefaults struct {
 	CreateCheckConstraints *bool `yaml:"create_check_constraints,omitempty"` // Create CHECK constraints (default: false)
 
 	// Consistency and validation
-	StrictConsistency *bool `yaml:"strict_consistency,omitempty"` // Use table locks instead of NOLOCK
+	StrictConsistency *bool `yaml:"strict_consistency,omitempty"` // Pin each table to one stable source transaction (#640)
 	SampleValidation  *bool `yaml:"sample_validation,omitempty"`  // Enable sample data validation
 	SampleSize        int   `yaml:"sample_size,omitempty"`        // Rows to sample for validation
 

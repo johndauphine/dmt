@@ -201,7 +201,7 @@ type MigrationConfig struct {
 	DataDir                string        `yaml:"data_dir"`
 	TargetMode             string        `yaml:"target_mode"` // "drop_recreate" (default) or "upsert"
 	Deletes                *DeleteConfig `yaml:"deletes,omitempty" json:"deletes,omitempty"`
-	StrictConsistency      bool          `yaml:"strict_consistency"`            // Drop SQL Server NOLOCK (no dirty reads); NOT a point-in-time snapshot (#640)
+	StrictConsistency      bool          `yaml:"strict_consistency"`            // Pin each table to one stable source transaction; one reader/job per table (#640)
 	CreateIndexes          *bool         `yaml:"create_indexes,omitempty"`      // Create non-PK indexes (default: true)
 	CreateForeignKeys      *bool         `yaml:"create_foreign_keys,omitempty"` // Create foreign key constraints (default: true)
 	CreateCheckConstraints bool          `yaml:"create_check_constraints"`      // Create CHECK constraints

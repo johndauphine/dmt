@@ -11,15 +11,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Documented the exact guarantee of `strict_consistency` (#640): it drops SQL
-  Server's `NOLOCK` dirty-read hint but is **not** a point-in-time snapshot —
-  dmt paginates each table over many independent (and, for keyset tables,
-  parallel) queries, so a concurrent write between pages can still diverge the
-  copy (a ROW_NUMBER page can skip a row while the total count is unchanged).
-  README and `config.yaml.example` now state this, enabling `strict_consistency`
-  logs a one-line clarification, and a deterministic mutation-between-pages test
-  (SQLite + live Postgres) pins the behavior. A coordinated per-engine source
-  snapshot remains tracked in #640.
+- `strict_consistency` now gives each source table one stable view across all
+  keyset, tuple-keyset, and ROW_NUMBER pages. It starts the source transaction
+  before target preparation, pins every query to it, forces one reader and one
+  unpartitioned job per table, and fails closed for unsupported sources. The
+  modes are PostgreSQL/InnoDB MySQL repeatable-read snapshots, SQL Server serializable
+  range locks, and SQLite serializable reads; non-InnoDB MySQL tables fail
+  before target mutation. Mutation-between-pages tests cover
+  SQLite and live PostgreSQL; docs now state the per-table guarantee and its
+  blocking/MVCC operational cost (#640).
 
 ### Added
 

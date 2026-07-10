@@ -82,6 +82,19 @@ func Execute(
 		}
 	}
 
+	// A strict-consistency transfer is one stable table view, not merely a
+	// different table hint. Start and pin the source transaction before any
+	// target preparation so an unsupported source fails without truncating data.
+	// The transaction remains open through every page and is released on return.
+	if cfg.Migration.StrictConsistency {
+		strictCtx, releaseSnapshot, err := beginStrictSourceSnapshot(ctx, srcPool, job.Table)
+		if err != nil {
+			return nil, err
+		}
+		ctx = strictCtx
+		defer releaseSnapshot()
+	}
+
 	// Handle truncation based on job type (skip if resuming or in upsert mode)
 	// Upsert mode: no truncation needed, upserts are idempotent
 	if cfg.Migration.TargetMode != "upsert" {
