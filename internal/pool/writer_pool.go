@@ -186,6 +186,7 @@ type WriterPool struct {
 	// State
 	totalWriteTime int64 // atomic, nanoseconds
 	totalWritten   int64 // atomic, rows written
+	liveWorkers    int64 // atomic, worker goroutines currently alive (incl. draining)
 	writeErr       atomic.Pointer[error]
 
 	// Synchronization
@@ -195,7 +196,7 @@ type WriterPool struct {
 	cancel   context.CancelFunc
 
 	// Dynamic worker management
-	workersMu    sync.RWMutex
+	workersMu    sync.RWMutex   // Guards workers, numWriters, nextWorkerID, started
 	workers      []*workerState // Track individual worker states for scaling
 	nextWorkerID int            // Monotonic ID source; IDs may outlive worker slice entries while draining
 	started      bool           // Whether Start() has been called
@@ -269,95 +270,134 @@ func (wp *WriterPool) Start() {
 	}
 
 	for i := 0; i < wp.numWriters; i++ {
-		writerID := wp.nextWorkerID
-		wp.nextWorkerID++
-		wp.writerWg.Add(1)
-
-		// Create worker state with individual context
-		workerCtx, cancel := context.WithCancel(wp.ctx)
-		ws := &workerState{
-			id:     writerID,
-			active: true,
-			cancel: cancel,
-		}
-		wp.workers = append(wp.workers, ws)
-
-		go wp.workerWithContext(writerID, workerCtx)
+		wp.startWorkerLocked()
 	}
 	wp.started = true
 }
 
+// startWorkerLocked spawns one worker goroutine and records its state. Callers
+// must hold workersMu.
+func (wp *WriterPool) startWorkerLocked() {
+	writerID := wp.nextWorkerID
+	wp.nextWorkerID++
+
+	// Each worker has an individual context so a scale-down can retire it
+	// without touching the shared pool context.
+	workerCtx, cancel := context.WithCancel(wp.ctx)
+	ws := &workerState{
+		id:     writerID,
+		active: true,
+		cancel: cancel,
+	}
+	wp.workers = append(wp.workers, ws)
+
+	wp.writerWg.Add(1)
+	go wp.workerWithContext(ws, workerCtx)
+}
+
 // workerWithContext is the main write worker goroutine with context support.
-func (wp *WriterPool) workerWithContext(writerID int, workerCtx context.Context) {
-	defer wp.writerWg.Done()
+//
+// The receive is guarded by workerCtx so a retired (scaled-down) worker exits
+// *before* dequeuing another job rather than only after finishing the next one
+// (#642). A job already pulled from jobChan is always processed to completion
+// exactly once — the retirement check happens between jobs, never mid-chunk —
+// so a downscale never drops or double-writes an in-flight chunk.
+func (wp *WriterPool) workerWithContext(ws *workerState, workerCtx context.Context) {
+	atomic.AddInt64(&wp.liveWorkers, 1)
+	defer func() {
+		atomic.AddInt64(&wp.liveWorkers, -1)
+		wp.writerWg.Done()
+	}()
 
-	for job := range wp.jobChan {
-		writeStart := time.Now()
-		err := wp.writeFunc(wp.ctx, writerID, job.Rows)
-
-		if err != nil {
-			// Release the failed chunk's reservation immediately (#617). With
-			// a tight or oversized-clamped budget the failed chunk may hold
-			// the last free bytes; freeing it here lets a reader blocked in
-			// acquireMem proceed far enough for the consumer to observe the
-			// cancel and unwind, instead of wedging the pipeline.
-			if wp.onComplete != nil {
-				wp.onComplete(job.Bytes)
-			}
-			wp.writeErr.CompareAndSwap(nil, &err)
-			wp.cancel()
-			return
-		}
-
-		writeDuration := time.Since(writeStart)
-		atomic.AddInt64(&wp.totalWriteTime, int64(writeDuration))
-
-		if logging.IsDebug() && writeDuration > 0 {
-			logging.Debug("Writer[%d]: wrote %d rows in %v (%.0f rows/sec)",
-				writerID, len(job.Rows), writeDuration,
-				float64(len(job.Rows))/writeDuration.Seconds())
-		}
-
-		rowCount := int64(len(job.Rows))
-		atomic.AddInt64(&wp.totalWritten, rowCount)
-		if wp.prog != nil {
-			wp.prog.Add(rowCount)
-		}
-
-		if wp.ackChan != nil {
-			ack := WriteAck{
-				ReaderID: job.ReaderID,
-				Seq:      job.Seq,
-				LastPK:   job.LastPK,
-				RowNum:   job.RowNum,
-				Rows:     rowCount,
-			}
-			select {
-			case wp.ackChan <- ack:
-			case <-wp.ctx.Done():
-				// Aborting — the runner's residual release frees this chunk's
-				// still-held reservation, so no explicit release here.
-				return
-			}
-		}
-
-		// Release the reservation only after the ack is delivered (#617): the
-		// worker holds job.Rows until this point, so freeing it earlier would
-		// let the budget admit more chunks while these bytes are still live
-		// under ack backpressure, undercounting real in-flight memory.
-		if wp.onComplete != nil {
-			wp.onComplete(job.Bytes)
-		}
-
-		// Check if worker should exit (for scaling down).
-		// This check is AFTER processing to ensure a job already pulled from
-		// the channel is never dropped — the worker finishes it before exiting.
+	for {
+		// Retire before taking new work. This bounds post-downscale concurrency
+		// to the requested writer count: a canceled worker cannot consume a job
+		// a surviving worker should handle.
 		select {
 		case <-workerCtx.Done():
 			return
 		default:
 		}
+
+		var job WriteJob
+		var ok bool
+		select {
+		case <-workerCtx.Done():
+			return
+		case job, ok = <-wp.jobChan:
+			if !ok {
+				return // jobChan closed by Wait(): graceful shutdown.
+			}
+		}
+
+		if !wp.processJob(ws.id, job) {
+			return
+		}
 	}
+}
+
+// processJob executes one write job. It returns false when the worker must
+// exit: either the write failed (the pool is canceled) or the pool is aborting
+// while the ack is still pending. It returns true when the job completed and
+// the worker may take another.
+func (wp *WriterPool) processJob(writerID int, job WriteJob) bool {
+	writeStart := time.Now()
+	err := wp.writeFunc(wp.ctx, writerID, job.Rows)
+
+	if err != nil {
+		// Release the failed chunk's reservation immediately (#617). With
+		// a tight or oversized-clamped budget the failed chunk may hold
+		// the last free bytes; freeing it here lets a reader blocked in
+		// acquireMem proceed far enough for the consumer to observe the
+		// cancel and unwind, instead of wedging the pipeline.
+		if wp.onComplete != nil {
+			wp.onComplete(job.Bytes)
+		}
+		wp.writeErr.CompareAndSwap(nil, &err)
+		wp.cancel()
+		return false
+	}
+
+	writeDuration := time.Since(writeStart)
+	atomic.AddInt64(&wp.totalWriteTime, int64(writeDuration))
+
+	if logging.IsDebug() && writeDuration > 0 {
+		logging.Debug("Writer[%d]: wrote %d rows in %v (%.0f rows/sec)",
+			writerID, len(job.Rows), writeDuration,
+			float64(len(job.Rows))/writeDuration.Seconds())
+	}
+
+	rowCount := int64(len(job.Rows))
+	atomic.AddInt64(&wp.totalWritten, rowCount)
+	if wp.prog != nil {
+		wp.prog.Add(rowCount)
+	}
+
+	if wp.ackChan != nil {
+		ack := WriteAck{
+			ReaderID: job.ReaderID,
+			Seq:      job.Seq,
+			LastPK:   job.LastPK,
+			RowNum:   job.RowNum,
+			Rows:     rowCount,
+		}
+		select {
+		case wp.ackChan <- ack:
+		case <-wp.ctx.Done():
+			// Aborting — the runner's residual release frees this chunk's
+			// still-held reservation, so no explicit release here.
+			return false
+		}
+	}
+
+	// Release the reservation only after the ack is delivered (#617): the
+	// worker holds job.Rows until this point, so freeing it earlier would
+	// let the budget admit more chunks while these bytes are still live
+	// under ack backpressure, undercounting real in-flight memory.
+	if wp.onComplete != nil {
+		wp.onComplete(job.Bytes)
+	}
+	return true
 }
 
 // Submit sends a write job to the pool. Returns false if context is cancelled.
@@ -453,16 +493,27 @@ func (wp *WriterPool) Cancel() {
 	wp.cancel()
 }
 
-// NumWriters returns the configured number of workers.
+// NumWriters returns the desired writer count — the target set by the most
+// recent ScaleWorkers (or the initial config). It equals GetWorkerCount at all
+// times; it also equals GetLiveWorkerCount once any workers retired by a
+// downscale have finished draining.
 func (wp *WriterPool) NumWriters() int {
 	wp.workersMu.RLock()
 	defer wp.workersMu.RUnlock()
 	return wp.numWriters
 }
 
-// ScaleWorkers adjusts the number of active workers at runtime.
-// Can increase or decrease the number of workers.
-// Workers are scaled between chunks, not mid-chunk.
+// ScaleWorkers adjusts the number of active workers at runtime. Workers are
+// scaled between chunks, never mid-chunk.
+//
+// A downscale cancels the retired workers and returns immediately; each retired
+// worker exits *before* dequeuing another job (see workerWithContext), so an
+// idle retired worker can no longer steal a job a surviving worker should
+// handle (#642). A worker that is mid-write when retired finishes that one
+// committed chunk and then exits — it never starts a new one — so a rapid
+// downscale/upscale can transiently keep those draining goroutines alive
+// alongside fresh workers, but they only complete already-admitted work and
+// take no new jobs. Use GetLiveWorkerCount to observe drain progress.
 func (wp *WriterPool) ScaleWorkers(newCount int) error {
 	if newCount < 1 {
 		return fmt.Errorf("worker count must be at least 1, got %d", newCount)
@@ -472,6 +523,8 @@ func (wp *WriterPool) ScaleWorkers(newCount int) error {
 		return fmt.Errorf("worker count too high: %d (max 128)", newCount)
 	}
 
+	// workersMu serializes the whole operation, so concurrent callers can't
+	// corrupt the workers slice.
 	wp.workersMu.Lock()
 	defer wp.workersMu.Unlock()
 
@@ -482,41 +535,41 @@ func (wp *WriterPool) ScaleWorkers(newCount int) error {
 	}
 
 	if newCount > currentCount {
-		// Add new workers
 		for i := currentCount; i < newCount; i++ {
-			writerID := wp.nextWorkerID
-			wp.nextWorkerID++
-			workerCtx, cancel := context.WithCancel(wp.ctx)
-			ws := &workerState{
-				id:     writerID,
-				active: true,
-				cancel: cancel,
-			}
-			wp.workers = append(wp.workers, ws)
-
-			wp.writerWg.Add(1)
-			go wp.workerWithContext(writerID, workerCtx)
+			wp.startWorkerLocked()
 		}
-	} else {
-		// Remove workers: mark them as inactive and cancel their contexts
-		// They will exit gracefully when they finish current job
-		for i := newCount; i < currentCount; i++ {
-			if i < len(wp.workers) {
-				wp.workers[i].active = false
-				wp.workers[i].cancel()
-			}
-		}
-		// Trim the workers slice
-		wp.workers = wp.workers[:newCount]
+		wp.numWriters = newCount
+		return nil
 	}
 
+	// Downscale: cancel the retired workers. They exit at the next retirement
+	// check without taking a new job; a mid-write worker drains its current
+	// chunk first. Their writer IDs stay reserved (not reused) until they exit.
+	for i := newCount; i < currentCount; i++ {
+		wp.workers[i].active = false
+		wp.workers[i].cancel()
+	}
+	// Trim with a fixed cap so a later append allocates a fresh array rather
+	// than aliasing the retired worker entries.
+	wp.workers = wp.workers[:newCount:newCount]
 	wp.numWriters = newCount
 	return nil
 }
 
-// GetWorkerCount returns the current number of active workers.
+// GetWorkerCount returns the number of active (non-retired) worker slots. At
+// rest this equals NumWriters; it never counts workers already retired by a
+// downscale, even if one is still draining a final in-flight write.
 func (wp *WriterPool) GetWorkerCount() int {
 	wp.workersMu.RLock()
 	defer wp.workersMu.RUnlock()
 	return len(wp.workers)
+}
+
+// GetLiveWorkerCount returns the number of worker goroutines currently alive,
+// including any retired by a downscale that are still draining a final
+// in-flight write. It equals GetWorkerCount at rest and transiently exceeds it
+// while retired workers finish committed chunks. Exposed for metrics and
+// concurrency assertions (#642).
+func (wp *WriterPool) GetLiveWorkerCount() int {
+	return int(atomic.LoadInt64(&wp.liveWorkers))
 }
