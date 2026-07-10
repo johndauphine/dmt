@@ -88,6 +88,10 @@ func sqlitePaginationCase() *conformance.PaginationCase {
 // implement driver.ConstraintWriter — finalization skips FK/CHECK with
 // one audited message instead of per-constraint stub warnings.
 func TestWriterCapabilities(t *testing.T) {
+	cat, err := LoadCatalog("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
 	conformance.CheckWriterCapabilities(t, (*writerUpsertSeq)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: false,
 		Upserter:         true, // INSERT ... ON CONFLICT
@@ -95,5 +99,8 @@ func TestWriterCapabilities(t *testing.T) {
 	})
 	conformance.CheckReaderCapabilities(t, (*readerWithDates)(nil), conformance.ReaderCapabilities{
 		IncrementalDateReader: true,
+	})
+	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
+		StrictParallelStrategy: "none",
 	})
 }

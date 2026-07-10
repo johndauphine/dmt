@@ -89,10 +89,17 @@ func postgresCatalogPaginationCase() *conformance.PaginationCase {
 }
 
 func TestPostgresCatalogCapabilities(t *testing.T) {
+	cat, err := LoadCatalog("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
 	conformance.CheckWriterCapabilities(t, (*writerFull)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: true,
 		Upserter:         true,
 		SequenceResetter: true,
+	})
+	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
+		StrictParallelStrategy: "exported_snapshot",
 	})
 }
 

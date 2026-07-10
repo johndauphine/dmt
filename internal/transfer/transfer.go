@@ -114,7 +114,13 @@ func Execute(
 				return nil, fmt.Errorf("strict snapshot epoch for %s is unavailable", job.Table.FullName())
 			}
 		} else {
-			strictCtx, releaseSnapshot, err := beginStrictSourceSnapshot(ctx, srcPool, job.Table)
+			workerSessions, err := strictStrategyWorkerCountForTable(
+				srcPool.DBType(), job.Table, cfg.Migration.ParallelReaders, cfg.Migration.MaxSourceConnections,
+			)
+			if err != nil {
+				return nil, err
+			}
+			strictCtx, releaseSnapshot, err := beginStrictSourceSnapshotForReaders(ctx, srcPool, job.Table, workerSessions)
 			if err != nil {
 				return nil, err
 			}

@@ -23,8 +23,8 @@ type sourceQueryer interface {
 type sourceQueryerContextKey struct{}
 
 // sourceQueryerFactory gives every concurrent keyset worker a queryer of its
-// own. It is populated only for PostgreSQL strict snapshots: sharing a sql.Tx
-// between reader goroutines would serialize them back onto one connection.
+// own. Strict reader strategies populate it when sharing the coordinator's
+// queryer would serialize workers back onto one connection.
 type sourceQueryerFactory func(context.Context, int) (sourceQueryer, func(), error)
 
 type sourceQueryerFactoryContextKey struct{}
@@ -75,7 +75,11 @@ func BeginStrictSnapshotEpoch(ctx context.Context, srcPool pool.SourcePool) (*St
 	if srcPool == nil || srcPool.DB() == nil {
 		return nil, fmt.Errorf("strict_consistency_scope: migration requires an open PostgreSQL source database connection")
 	}
-	if !strictSnapshotExportSupported(srcPool.DBType()) {
+	strategyName, _, err := resolveStrictReaderStrategyForDBType(srcPool.DBType())
+	if err != nil {
+		return nil, err
+	}
+	if strategyName != strictParallelExportedSnapshot {
 		return nil, fmt.Errorf("strict_consistency_scope: migration requires a PostgreSQL source; got %q", srcPool.DBType())
 	}
 	snapshot, err := beginPostgresExportedSnapshot(ctx, srcPool.DB())
@@ -137,13 +141,6 @@ func beginPostgresExportedSnapshot(ctx context.Context, db *sql.DB) (*sharedSnap
 	return &sharedSnapshot{lead: tx, id: snapshotID, db: db}, nil
 }
 
-func strictSnapshotContext(ctx context.Context, snapshot *sharedSnapshot) context.Context {
-	strictCtx := context.WithValue(ctx, sourceQueryerContextKey{}, sourceQueryer(snapshot.lead))
-	return context.WithValue(strictCtx, sourceQueryerFactoryContextKey{}, sourceQueryerFactory(func(workerCtx context.Context, _ int) (sourceQueryer, func(), error) {
-		return snapshot.joinReader(workerCtx)
-	}))
-}
-
 // beginStrictSourceSnapshot starts the table-scoped source transaction before
 // target preparation changes anything. Ordinary strict pagination receives
 // that transaction through the context; PostgreSQL keyset workers instead
@@ -155,18 +152,32 @@ func strictSnapshotContext(ctx context.Context, snapshot *sharedSnapshot) contex
 // uses a serializable read transaction. Engines without a suitable transaction
 // contract fail before the transfer can truncate or write a target table.
 func beginStrictSourceSnapshot(ctx context.Context, srcPool pool.SourcePool, table source.Table) (context.Context, func(), error) {
+	return beginStrictSourceSnapshotForReaders(ctx, srcPool, table, 1)
+}
+
+func beginStrictSourceSnapshotForReaders(ctx context.Context, srcPool pool.SourcePool, table source.Table, workerSessions int) (context.Context, func(), error) {
 	if srcPool == nil || srcPool.DB() == nil {
 		return nil, nil, fmt.Errorf("strict_consistency requires an open source database connection")
 	}
 	if err := validateStrictSnapshotTable(ctx, srcPool, table); err != nil {
 		return nil, nil, err
 	}
-	if strictSnapshotExportSupported(srcPool.DBType()) {
-		snapshot, err := beginPostgresExportedSnapshot(ctx, srcPool.DB())
+	_, strategy, err := resolveStrictReaderStrategyForDBType(srcPool.DBType())
+	if err != nil {
+		return nil, nil, err
+	}
+	if strategy != nil {
+		view, err := strategy.begin(ctx, srcPool, table, workerSessions)
 		if err != nil {
 			return nil, nil, err
 		}
-		return strictSnapshotContext(ctx, snapshot), snapshot.release, nil
+		if view.queryer == nil || view.workerFactory == nil || view.release == nil {
+			if view.release != nil {
+				view.release()
+			}
+			return nil, nil, fmt.Errorf("strict parallel strategy returned an incomplete source view")
+		}
+		return strictReaderContext(ctx, view), view.release, nil
 	}
 
 	options, err := strictSnapshotTxOptions(srcPool.DBType())
@@ -223,15 +234,6 @@ func validateStrictSnapshotTable(ctx context.Context, srcPool pool.SourcePool, t
 func isMySQLSource(dbType string) bool {
 	switch strings.ToLower(strings.TrimSpace(dbType)) {
 	case "mysql", "mariadb", "maria":
-		return true
-	default:
-		return false
-	}
-}
-
-func strictSnapshotExportSupported(dbType string) bool {
-	switch strings.ToLower(strings.TrimSpace(dbType)) {
-	case "postgres", "postgresql", "pg":
 		return true
 	default:
 		return false

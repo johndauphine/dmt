@@ -96,6 +96,10 @@ func clickhousePaginationCase() *conformance.PaginationCase {
 // sequences, and no post-transfer FK/CHECK DDL. Incremental date
 // reads work fine.
 func TestClickHouseCapabilities(t *testing.T) {
+	cat, err := LoadCatalog("clickhouse")
+	if err != nil {
+		t.Fatal(err)
+	}
 	conformance.CheckWriterCapabilities(t, (*Writer)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: false,
 		Upserter:         false,
@@ -103,5 +107,8 @@ func TestClickHouseCapabilities(t *testing.T) {
 	})
 	conformance.CheckReaderCapabilities(t, (*readerWithDates)(nil), conformance.ReaderCapabilities{
 		IncrementalDateReader: true,
+	})
+	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
+		StrictParallelStrategy: "none",
 	})
 }

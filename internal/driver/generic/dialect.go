@@ -18,9 +18,16 @@ type Dialect struct {
 func NewDialect(cat *Catalog) *Dialect { return &Dialect{cat: cat} }
 
 // The generic dialect must satisfy the full driver contract.
-var _ driver.Dialect = (*Dialect)(nil)
+var (
+	_ driver.Dialect                  = (*Dialect)(nil)
+	_ driver.StrictParallelCapability = (*Dialect)(nil)
+)
 
 func (d *Dialect) DBType() string { return d.cat.Name }
+
+func (d *Dialect) StrictParallelStrategy() string {
+	return d.cat.StrictParallelStrategy
+}
 
 func (d *Dialect) QuoteIdentifier(name string) string {
 	esc := d.cat.Quoting.EscapedChar

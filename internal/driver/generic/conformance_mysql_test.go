@@ -90,9 +90,16 @@ func mysqlCatalogPaginationCase() *conformance.PaginationCase {
 
 // Full capability matrix (#460): the writerFull combo.
 func TestMySQLCatalogCapabilities(t *testing.T) {
+	cat, err := LoadCatalog("mysql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	conformance.CheckWriterCapabilities(t, (*writerFull)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: true,
 		Upserter:         true,
 		SequenceResetter: true,
+	})
+	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
+		StrictParallelStrategy: "none",
 	})
 }

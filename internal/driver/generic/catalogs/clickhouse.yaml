@@ -23,6 +23,8 @@ capabilities:
   constraint_writer: false       # no post-transfer FK/CHECK DDL
   incremental_date_reader: true
 
+strict_parallel_strategy: none
+
 quoting:
   identifier_format: "`%s`"
   escaped_char: "`"
