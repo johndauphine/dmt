@@ -206,6 +206,37 @@ func TestStrictSnapshotFailsBeforeTargetPreparation(t *testing.T) {
 	}
 }
 
+func TestStrictSnapshotRejectsPartitionedJobs(t *testing.T) {
+	reader, writer := openSnapshotSQLite(t, []string{
+		`CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)`,
+		`INSERT INTO events VALUES (1, 'a')`,
+	})
+	defer reader.Close()
+	defer writer.Close()
+
+	_, err := Execute(
+		context.Background(),
+		&keysetRuntimeSourcePool{db: reader},
+		&strictSnapshotGuardTarget{},
+		&config.Config{Migration: config.MigrationConfig{
+			StrictConsistency: true,
+			TargetMode:        "drop_recreate",
+			ChunkSize:         1,
+		}, Target: config.TargetConfig{Schema: "public"}},
+		Job{
+			Table: source.Table{Name: "events"},
+			Partition: &source.Partition{
+				PartitionID: 1,
+			},
+		},
+		progress.New(),
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not support partitioned jobs") {
+		t.Fatalf("Execute partitioned strict job error = %v, want unsupported-partitions error", err)
+	}
+}
+
 type unsupportedStrictSnapshotSource struct {
 	*keysetRuntimeSourcePool
 }

@@ -33,6 +33,14 @@ func Execute(
 		adjuster = writeErrorAdjuster[0]
 	}
 
+	// A strict snapshot is table-scoped. Partition jobs would each open their
+	// own transaction and therefore could not represent one stable table view.
+	// JobBuilder prevents newly planned strict jobs from being partitioned, and
+	// this runtime guard protects legacy checkpoints and direct callers too.
+	if cfg.Migration.StrictConsistency && job.Partition != nil {
+		return nil, fmt.Errorf("strict_consistency does not support partitioned jobs for %s; rebuild the run with one unpartitioned job per table", job.Table.FullName())
+	}
+
 	// Track table start/end for accurate progress display
 	prog.StartTable(job.Table.Name)
 	defer prog.EndTable(job.Table.Name)
