@@ -3,9 +3,12 @@ package generic
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/shared"
@@ -29,8 +32,138 @@ func mysqlPreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest
 		},
 		mysqlPFCheckPoolHeadroomMySQL,
 		mysqlPFCheckPrivilegesMySQL,
+		mysqlPFCheckLockTablesMySQL,
 		mysqlPFCheckBackupAcknowledgmentMySQL,
 	)
+}
+
+// mysqlPFCheckLockTablesMySQL proves the lock-window strategy can briefly
+// freeze a table selected by this migration. It is deliberately warning-only:
+// runtime classifies the same failure and loudly falls back to the existing
+// correct single-reader strict transaction.
+func mysqlPFCheckLockTablesMySQL(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+	if req.Side != driver.PreFlightSideSource || !req.StrictConsistency || req.ParallelReaders <= 1 {
+		return nil
+	}
+
+	dbName := strings.TrimSpace(req.Schema)
+	if dbName == "" {
+		if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName); err != nil || dbName == "" {
+			cause := "DATABASE() returned an empty name"
+			if err != nil {
+				cause = err.Error()
+			}
+			return []driver.PreFlightFinding{{
+				Severity: driver.SeverityWarn,
+				Check:    "privileges.lock_tables",
+				Side:     req.Side,
+				Message:  "could not resolve the source database for the strict parallel LOCK TABLES probe: " + cause,
+				Remedy:   "set source.schema explicitly; the migration will otherwise fall back to one strict reader if LOCK TABLES is unavailable",
+			}}
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT TABLE_NAME
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
+		ORDER BY TABLE_NAME`, dbName)
+	if err != nil {
+		return mysqlPFLockTablesFinding(req, "could not list source tables for the strict parallel LOCK TABLES probe", err)
+	}
+	var tableName string
+	for rows.Next() {
+		var candidate string
+		if scanErr := rows.Scan(&candidate); scanErr != nil {
+			err = scanErr
+			break
+		}
+		if mysqlPFTableSelected(candidate, req.IncludeTables, req.ExcludeTables) {
+			tableName = candidate
+			break
+		}
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	_ = rows.Close()
+	if err != nil {
+		return mysqlPFLockTablesFinding(req, "could not inspect source tables for the strict parallel LOCK TABLES probe", err)
+	}
+	if tableName == "" {
+		return nil
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return mysqlPFLockTablesFinding(req, "could not open a coordinator session for the strict parallel LOCK TABLES probe", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET SESSION lock_wait_timeout = 1"); err != nil {
+		return mysqlPFLockTablesFinding(req, "could not bound the strict parallel LOCK TABLES probe", err)
+	}
+	qualified := mysqlPFQuoteIdentifier(dbName) + "." + mysqlPFQuoteIdentifier(tableName)
+	if _, err := conn.ExecContext(ctx, "LOCK TABLES "+qualified+" READ"); err != nil {
+		return mysqlPFLockTablesFinding(req, fmt.Sprintf("strict parallel LOCK TABLES probe failed for %s", qualified), err)
+	}
+
+	unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := conn.ExecContext(unlockCtx, "UNLOCK TABLES"); err != nil {
+		mysqlPFDiscardConn(conn)
+		return mysqlPFLockTablesFinding(req, fmt.Sprintf("strict parallel UNLOCK TABLES probe failed for %s", qualified), err)
+	}
+	return nil
+}
+
+// mysqlPFDiscardConn physically closes a session whose UNLOCK failed. Returning
+// it to database/sql's idle pool could retain the table lock because the MySQL
+// driver's ResetSession hook does not clear LOCK TABLES state.
+func mysqlPFDiscardConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(raw any) error {
+		if closer, ok := raw.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return sqldriver.ErrBadConn
+	})
+	_ = conn.Close()
+}
+
+func mysqlPFLockTablesFinding(req driver.PreFlightRequest, message string, err error) []driver.PreFlightFinding {
+	return []driver.PreFlightFinding{{
+		Severity: driver.SeverityWarn,
+		Check:    "privileges.lock_tables",
+		Side:     req.Side,
+		Message:  fmt.Sprintf("%s: %v", message, err),
+		Remedy:   "GRANT LOCK TABLES on the migrated source database, or accept single-reader strict fallback",
+	}}
+}
+
+func mysqlPFQuoteIdentifier(name string) string {
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+}
+
+func mysqlPFTableSelected(name string, includes, excludes []string) bool {
+	name = strings.ToLower(name)
+	selected := len(includes) == 0
+	for _, pattern := range includes {
+		if match, _ := filepath.Match(strings.ToLower(pattern), name); match {
+			selected = true
+			break
+		}
+	}
+	if !selected {
+		return false
+	}
+	for _, pattern := range excludes {
+		if match, _ := filepath.Match(strings.ToLower(pattern), name); match {
+			return false
+		}
+	}
+	return true
 }
 
 // mysqlPFCheckBackupAcknowledgmentMySQL fires when target_mode is drop_recreate

@@ -120,7 +120,7 @@ func Execute(
 			if err != nil {
 				return nil, err
 			}
-			strictCtx, releaseSnapshot, err := beginStrictSourceSnapshotForReaders(ctx, srcPool, job.Table, workerSessions)
+			strictCtx, releaseSnapshot, err := beginStrictSourceSnapshotForJob(ctx, srcPool, job, workerSessions)
 			if err != nil {
 				return nil, err
 			}

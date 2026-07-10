@@ -50,6 +50,16 @@ func TestStrictKeysetReaderPlan(t *testing.T) {
 			wantJoinSnapshot: true,
 		},
 		{
+			name:             "mysql reserves lock coordinator connection",
+			strict:           true,
+			strategy:         strictParallelLockWindow,
+			requested:        4,
+			maxSource:        4,
+			wantReaders:      3,
+			wantJoinSnapshot: true,
+			wantClamped:      true,
+		},
+		{
 			name:        "postgres uses lead when pool has one connection",
 			strict:      true,
 			strategy:    strictParallelExportedSnapshot,
@@ -120,6 +130,20 @@ func TestStrictStrategyWorkerCountForTableUsesClampedPlan(t *testing.T) {
 	if workers != 0 {
 		t.Fatalf("worker sessions with lead-only budget = %d, want zero", workers)
 	}
+	workers, err = strictStrategyWorkerCountForTable("mysql", table, 4, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 3 {
+		t.Fatalf("MySQL worker sessions = %d, want three after reserving the lock coordinator", workers)
+	}
+	workers, err = strictStrategyWorkerCountForTable("mysql", table, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 0 {
+		t.Fatalf("single-reader MySQL worker sessions = %d, want zero", workers)
+	}
 }
 
 func TestStrictReaderStrategyResolution(t *testing.T) {
@@ -130,7 +154,9 @@ func TestStrictReaderStrategyResolution(t *testing.T) {
 	}{
 		{dbType: "postgres", wantName: strictParallelExportedSnapshot, wantStrategy: true},
 		{dbType: "postgresql", wantName: strictParallelExportedSnapshot, wantStrategy: true},
-		{dbType: "mysql", wantName: strictParallelNone},
+		{dbType: "mysql", wantName: strictParallelLockWindow, wantStrategy: true},
+		{dbType: "mariadb", wantName: strictParallelLockWindow, wantStrategy: true},
+		{dbType: "maria", wantName: strictParallelLockWindow, wantStrategy: true},
 		{dbType: "mssql", wantName: strictParallelNone},
 		{dbType: "sqlite", wantName: strictParallelNone},
 		{dbType: "clickhouse", wantName: strictParallelNone},
@@ -336,8 +362,9 @@ var snapshotRecordingRegistry = struct {
 
 type snapshotRecordingTracker struct {
 	sync.Mutex
-	eventLog  []string
-	importErr error
+	eventLog   []string
+	importErr  error
+	execErrors map[string]error
 }
 
 func (t *snapshotRecordingTracker) record(event string) {
@@ -362,6 +389,15 @@ func (t *snapshotRecordingTracker) count(event string) int {
 		}
 	}
 	return count
+}
+
+func (t *snapshotRecordingTracker) failExec(query string, err error) {
+	t.Lock()
+	defer t.Unlock()
+	if t.execErrors == nil {
+		t.execErrors = make(map[string]error)
+	}
+	t.execErrors[query] = err
 }
 
 func openSnapshotRecordingDB(t *testing.T) (*sql.DB, *snapshotRecordingTracker) {
@@ -405,7 +441,10 @@ func (c *snapshotRecordingConn) Prepare(string) (driver.Stmt, error) {
 	return nil, errors.New("prepared statements are not expected")
 }
 
-func (c *snapshotRecordingConn) Close() error { return nil }
+func (c *snapshotRecordingConn) Close() error {
+	c.tracker.record("close")
+	return nil
+}
 
 func (c *snapshotRecordingConn) Begin() (driver.Tx, error) { return c.begin() }
 
@@ -423,6 +462,9 @@ func (c *snapshotRecordingConn) QueryContext(_ context.Context, query string, _ 
 	if query == "SELECT pg_export_snapshot()" {
 		return &snapshotRecordingRows{values: []driver.Value{"00000001-1"}}, nil
 	}
+	if strings.Contains(query, "information_schema.TABLES") {
+		return &snapshotRecordingRows{values: []driver.Value{"InnoDB"}}, nil
+	}
 	return &snapshotRecordingRows{}, nil
 }
 
@@ -430,6 +472,9 @@ func (c *snapshotRecordingConn) ExecContext(_ context.Context, query string, _ [
 	c.tracker.record("exec " + query)
 	c.tracker.Lock()
 	err := c.tracker.importErr
+	if queryErr := c.tracker.execErrors[query]; queryErr != nil {
+		err = queryErr
+	}
 	c.tracker.Unlock()
 	if err != nil {
 		return nil, err

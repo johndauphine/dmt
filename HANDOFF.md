@@ -3,9 +3,27 @@
 Epic [#679](../../issues/679) extends the PG-only strict-parallel work (#662/#672, #663/#673) to
 MySQL/MariaDB and SQL Server via engine-native mechanisms, and re-enables partitioning/composite
 parallelism where a strategy's stable view spans jobs. SQLite is explicitly out of scope. Each
-child issue carries a full spec (evidence at `main` 83e7f64f file:line, design steps, tests,
+child issue carries a full spec (original evidence at `main` 83e7f64f file:line, design steps, tests,
 acceptance criteria); this file is the coordination index plus the environment/measurement
 knowledge that doesn't fit in an issue. Remove this file when the epic closes (precedent: #670).
+
+## Current progress
+
+- ✅ **#680 complete** — catalog-declared strict-parallel capability and the transfer strategy
+  registry merged in [PR #687](../../pull/687) at `main` `627e319b`. Independent AI review found
+  and verified a fix ensuring future strategies receive the post-clamp worker-session count;
+  all six required CI checks passed.
+- 🚧 **#681 in review** — MySQL/MariaDB `lock_window_sessions` implementation in
+  [PR #688](../../pull/688). The implementation, preflight probe, audited fallback, and
+  live MySQL proofs are complete. Live read timings are 2.17s single-reader, 0.60s strict-parallel,
+  and 0.64s relaxed-parallel (3.6× speedup; strict within 7.1% of relaxed). Shared-view mutation,
+  bounded writer blocking, timeout fallback, privilege probing, and success/failure/cancel session
+  cleanup all pass. A full `Execute`/keyset test also commits update/delete/insert mutations while
+  target batches stream and proves the copied keys and values are exactly the lock-instant set.
+  Independent review found and prompted fixes for the `parallel_readers: 1` lock regression and
+  for physically discarding coordinator sessions after failed `UNLOCK TABLES`; post-fix review and
+  the final end-to-end coverage re-review are clean.
+- ⏳ Remaining after #681: #682, #683, #684, #685.
 
 **Stakes (measured 2026-07-10, SO2010 19.3M rows, mssql→pg, same config, strict toggled):**
 
@@ -35,8 +53,8 @@ live DBs: `make test-dbs-up` (MSSQL :1433 `sa/TestPass2024`, Postgres :5432); fi
 
 | Order | Issue | Depends on | Shared-surface cautions |
 |---|---|---|---|
-| 1 | [#680](../../issues/680) strategy seam (pure refactor) | — | Blocks everything: creates the `internal/transfer` strategy registry + `strict_parallel_strategy` catalog field + conformance pins |
-| 2a | [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | Parallelizable with #682; both register in the same strategy map and touch keyset-plan messaging — trivial rebase, otherwise disjoint (mysql.yaml, preflight_mysql.go) |
+| 1 | ✅ [#680](../../issues/680) strategy seam (pure refactor) | — | Merged in [PR #687](../../pull/687): strategy registry, catalog field, conformance pins, and exact worker-budget planning |
+| 2a | 🚧 [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | In review as [PR #688](../../pull/688); parallelizable with #682; both register in the same strategy map and touch keyset-plan messaging — trivial rebase, otherwise disjoint (mysql.yaml, preflight_mysql.go) |
 | 2b | [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Counterpart of #681 (mssql.yaml, preflight_mssql.go) |
 | 3 | [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Shares `preflight_mssql.go` with #682 and relaxes `internal/config/validation.go` scope gate — sequence after #682 |
 | 4 | [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | `composite_parallel.go`, `job_builder.go`, `transfer.go`; PG-composite half can start right after #680 |

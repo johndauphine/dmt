@@ -12,6 +12,7 @@ import (
 const (
 	strictParallelNone             = "none"
 	strictParallelExportedSnapshot = "exported_snapshot"
+	strictParallelLockWindow       = "lock_window_sessions"
 )
 
 // strictReaderView is the source view acquired by a strict reader strategy.
@@ -53,6 +54,7 @@ func (exportedSnapshotStrategy) joinBudget() int { return 1 }
 
 var strictReaderStrategies = map[string]strictReaderStrategy{
 	strictParallelExportedSnapshot: exportedSnapshotStrategy{},
+	strictParallelLockWindow:       mysqlLockWindowStrategy{},
 }
 
 func resolveStrictReaderStrategy(dialect driver.Dialect) (string, strictReaderStrategy, error) {
@@ -83,9 +85,16 @@ func strictStrategyWorkerCountForTable(dbType string, table source.Table, reques
 	if !table.SupportsKeysetPagination() {
 		return 0, nil
 	}
-	_, strategy, err := resolveStrictReaderStrategyForDBType(dbType)
+	strategyName, strategy, err := resolveStrictReaderStrategyForDBType(dbType)
 	if err != nil {
 		return 0, err
+	}
+	// MySQL's lock window is solely a parallelism upgrade. Preserve the
+	// established single-reader strict transaction when there is nothing to
+	// parallelize, matching the preflight gate and avoiding needless write
+	// blocking / LOCK TABLES privilege requirements.
+	if strategyName == strictParallelLockWindow && requested <= 1 {
+		return 0, nil
 	}
 	readers, joins, _ := strictKeysetReaderPlan(true, strategy, requested, maxSourceConnections)
 	if !joins {

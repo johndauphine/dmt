@@ -48,6 +48,18 @@ type PreFlightRequest struct {
 	// (max_connections - current_connections) against Workers + N margin.
 	Workers int
 
+	// StrictConsistency and ParallelReaders describe the source read shape.
+	// MySQL uses them to probe LOCK TABLES only when the migration will
+	// actually request more than one strict reader.
+	StrictConsistency bool
+	ParallelReaders   int
+
+	// IncludeTables and ExcludeTables carry the migration's table filters to
+	// source-side checks that must probe a real migrated table. Patterns use
+	// the same filepath.Match semantics as orchestrator table filtering.
+	IncludeTables []string
+	ExcludeTables []string
+
 	// EstimatedBytes is the estimated size of all data the migration will
 	// transfer (sum of source tables' row_count * estimated_row_size).
 	// Disk-space checks compare this × overhead factor against target free

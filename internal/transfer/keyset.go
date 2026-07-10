@@ -46,6 +46,10 @@ func executeKeysetPagination(
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Migration.StrictConsistency && strictStrategy != nil && sourceQueryerFactoryForJob(ctx, job) == nil {
+		strictStrategyName = strictParallelNone
+		strictStrategy = nil
+	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	// Source-dialect value normalization, resolved once per transfer (#477).
 	valueConvs := srcDialect.ValueConverters(colTypes, tgtPool.DBType())
@@ -95,10 +99,18 @@ func executeKeysetPagination(
 		cfg.Migration.MaxSourceConnections,
 	)
 	if readerCountClamped && strictStrategy != nil {
-		logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lead snapshot transaction reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
+		if strictStrategyName == strictParallelLockWindow {
+			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lock-window coordinator reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
+		} else {
+			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lead snapshot transaction reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
+		}
 	}
 	if cfg.Migration.StrictConsistency && strictStrategy != nil && !joinSnapshotReaders && cfg.Migration.MaxSourceConnections > 0 {
-		logging.Warn("Table %s: strict_consistency uses its lead snapshot transaction as the sole reader because max_source_connections=%d leaves no connection for an imported snapshot reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
+		if strictStrategyName == strictParallelLockWindow {
+			logging.Warn("Table %s: strict_consistency uses one pinned source session because max_source_connections=%d leaves no connection for both the lock-window coordinator and a reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
+		} else {
+			logging.Warn("Table %s: strict_consistency uses its lead snapshot transaction as the sole reader because max_source_connections=%d leaves no connection for an imported snapshot reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
+		}
 	}
 
 	var queryerForWorker sourceQueryerFactory

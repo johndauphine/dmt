@@ -24,6 +24,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- MySQL/MariaDB `strict_consistency` keyset transfers can now use parallel
+  readers by establishing pinned consistent snapshots inside a brief table
+  read-lock window. Writers resume immediately after session setup; lock
+  timeout or privilege failures emit an audited warning and retain the
+  correct single-reader strict fallback (#681).
+
 - Tuple-keyset tables with an int64-safe leading primary-key component now
   split that component into work-stealing reader ranges while retaining tuple
   ordering inside each range. Per-range typed watermarks make crash/resume

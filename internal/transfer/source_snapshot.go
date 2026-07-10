@@ -3,11 +3,13 @@ package transfer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/source"
 )
@@ -152,24 +154,58 @@ func beginPostgresExportedSnapshot(ctx context.Context, db *sql.DB) (*sharedSnap
 // uses a serializable read transaction. Engines without a suitable transaction
 // contract fail before the transfer can truncate or write a target table.
 func beginStrictSourceSnapshot(ctx context.Context, srcPool pool.SourcePool, table source.Table) (context.Context, func(), error) {
-	return beginStrictSourceSnapshotForReaders(ctx, srcPool, table, 1)
+	return beginStrictSourceSnapshotWithOptions(ctx, srcPool, table, strictSnapshotBeginOptions{workerSessions: 1})
 }
 
-func beginStrictSourceSnapshotForReaders(ctx context.Context, srcPool pool.SourcePool, table source.Table, workerSessions int) (context.Context, func(), error) {
+type strictSnapshotBeginOptions struct {
+	workerSessions int
+	auditEvent     func(string, map[string]any)
+}
+
+func beginStrictSourceSnapshotForJob(ctx context.Context, srcPool pool.SourcePool, job Job, workerSessions int) (context.Context, func(), error) {
+	return beginStrictSourceSnapshotWithOptions(ctx, srcPool, job.Table, strictSnapshotBeginOptions{
+		workerSessions: workerSessions,
+		auditEvent:     job.AuditEvent,
+	})
+}
+
+func beginStrictSourceSnapshotWithOptions(ctx context.Context, srcPool pool.SourcePool, table source.Table, opts strictSnapshotBeginOptions) (context.Context, func(), error) {
 	if srcPool == nil || srcPool.DB() == nil {
 		return nil, nil, fmt.Errorf("strict_consistency requires an open source database connection")
 	}
 	if err := validateStrictSnapshotTable(ctx, srcPool, table); err != nil {
 		return nil, nil, err
 	}
-	_, strategy, err := resolveStrictReaderStrategyForDBType(srcPool.DBType())
+	strategyName, strategy, err := resolveStrictReaderStrategyForDBType(srcPool.DBType())
 	if err != nil {
 		return nil, nil, err
 	}
+	if strategyName == strictParallelLockWindow && opts.workerSessions < 1 {
+		return beginSingleReaderStrictSnapshot(ctx, srcPool)
+	}
 	if strategy != nil {
-		view, err := strategy.begin(ctx, srcPool, table, workerSessions)
+		view, err := strategy.begin(ctx, srcPool, table, opts.workerSessions)
 		if err != nil {
-			return nil, nil, err
+			var degrade *strictParallelDegradeError
+			if !errors.As(err, &degrade) {
+				return nil, nil, err
+			}
+			fields := map[string]any{
+				"table":      table.FullName(),
+				"strategy":   degrade.strategy,
+				"reason":     degrade.reason,
+				"error_code": degrade.code,
+			}
+			logging.WarnEvent("strict_parallel_degraded",
+				"table", table.FullName(),
+				"strategy", degrade.strategy,
+				"reason", degrade.reason,
+				"error_code", degrade.code,
+			)
+			if opts.auditEvent != nil {
+				opts.auditEvent("strict_parallel_degraded", fields)
+			}
+			return beginSingleReaderStrictSnapshot(ctx, srcPool)
 		}
 		if view.queryer == nil || view.workerFactory == nil || view.release == nil {
 			if view.release != nil {
@@ -180,6 +216,10 @@ func beginStrictSourceSnapshotForReaders(ctx context.Context, srcPool pool.Sourc
 		return strictReaderContext(ctx, view), view.release, nil
 	}
 
+	return beginSingleReaderStrictSnapshot(ctx, srcPool)
+}
+
+func beginSingleReaderStrictSnapshot(ctx context.Context, srcPool pool.SourcePool) (context.Context, func(), error) {
 	options, err := strictSnapshotTxOptions(srcPool.DBType())
 	if err != nil {
 		return nil, nil, err
