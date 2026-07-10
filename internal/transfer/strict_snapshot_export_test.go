@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/source"
 )
 
@@ -18,14 +19,14 @@ func TestStrictKeysetReaderPlan(t *testing.T) {
 	tests := []struct {
 		name                          string
 		strict                        bool
-		dbType                        string
+		strategy                      string
 		requested, maxSource          int
 		wantReaders                   int
 		wantJoinSnapshot, wantClamped bool
 	}{
 		{
 			name:        "non strict preserves configured readers",
-			dbType:      "postgres",
+			strategy:    strictParallelExportedSnapshot,
 			requested:   4,
 			maxSource:   2,
 			wantReaders: 4,
@@ -33,7 +34,7 @@ func TestStrictKeysetReaderPlan(t *testing.T) {
 		{
 			name:             "postgres reserves lead connection",
 			strict:           true,
-			dbType:           "postgres",
+			strategy:         strictParallelExportedSnapshot,
 			requested:        4,
 			maxSource:        3,
 			wantReaders:      2,
@@ -41,9 +42,17 @@ func TestStrictKeysetReaderPlan(t *testing.T) {
 			wantClamped:      true,
 		},
 		{
+			name:             "postgres unlimited pool preserves requested readers",
+			strict:           true,
+			strategy:         strictParallelExportedSnapshot,
+			requested:        4,
+			wantReaders:      4,
+			wantJoinSnapshot: true,
+		},
+		{
 			name:        "postgres uses lead when pool has one connection",
 			strict:      true,
-			dbType:      "postgresql",
+			strategy:    strictParallelExportedSnapshot,
 			requested:   4,
 			maxSource:   1,
 			wantReaders: 1,
@@ -52,7 +61,6 @@ func TestStrictKeysetReaderPlan(t *testing.T) {
 		{
 			name:        "non postgres remains one reader",
 			strict:      true,
-			dbType:      "mysql",
 			requested:   4,
 			maxSource:   12,
 			wantReaders: 1,
@@ -62,9 +70,79 @@ func TestStrictKeysetReaderPlan(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			readers, joins, clamped := strictKeysetReaderPlan(tc.strict, tc.dbType, tc.requested, tc.maxSource)
+			strategy := strictReaderStrategies[tc.strategy]
+			readers, joins, clamped := strictKeysetReaderPlan(tc.strict, strategy, tc.requested, tc.maxSource)
 			if readers != tc.wantReaders || joins != tc.wantJoinSnapshot || clamped != tc.wantClamped {
-				t.Fatalf("strictKeysetReaderPlan(%t, %q, %d, %d) = (%d, %t, %t), want (%d, %t, %t)", tc.strict, tc.dbType, tc.requested, tc.maxSource, readers, joins, clamped, tc.wantReaders, tc.wantJoinSnapshot, tc.wantClamped)
+				t.Fatalf("strictKeysetReaderPlan(%t, %q, %d, %d) = (%d, %t, %t), want (%d, %t, %t)", tc.strict, tc.strategy, tc.requested, tc.maxSource, readers, joins, clamped, tc.wantReaders, tc.wantJoinSnapshot, tc.wantClamped)
+			}
+		})
+	}
+}
+
+type multiConnectionStrictStrategy struct{ budget int }
+
+func (s multiConnectionStrictStrategy) begin(context.Context, pool.SourcePool, source.Table, int) (strictReaderView, error) {
+	return strictReaderView{}, nil
+}
+
+func (s multiConnectionStrictStrategy) joinBudget() int { return s.budget }
+
+func TestStrictKeysetReaderPlanHonorsMultiConnectionJoinBudget(t *testing.T) {
+	strategy := multiConnectionStrictStrategy{budget: 2}
+	readers, joins, clamped := strictKeysetReaderPlan(true, strategy, 4, 5)
+	if readers != 3 || !joins || !clamped {
+		t.Fatalf("five-connection plan = (%d, %t, %t), want (3, true, true)", readers, joins, clamped)
+	}
+	readers, joins, clamped = strictKeysetReaderPlan(true, strategy, 4, 2)
+	if readers != 1 || joins || !clamped {
+		t.Fatalf("reservation-only plan = (%d, %t, %t), want (1, false, true)", readers, joins, clamped)
+	}
+}
+
+func TestStrictStrategyWorkerCountForTableUsesClampedPlan(t *testing.T) {
+	table := source.Table{
+		Columns:    []source.Column{{Name: "id", DataType: "bigint"}},
+		PrimaryKey: []string{"id"},
+	}
+	table.PopulatePKColumns()
+
+	workers, err := strictStrategyWorkerCountForTable("postgres", table, 4, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 2 {
+		t.Fatalf("worker sessions = %d, want two after reserving the lead connection", workers)
+	}
+	workers, err = strictStrategyWorkerCountForTable("postgres", table, 4, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workers != 0 {
+		t.Fatalf("worker sessions with lead-only budget = %d, want zero", workers)
+	}
+}
+
+func TestStrictReaderStrategyResolution(t *testing.T) {
+	tests := []struct {
+		dbType       string
+		wantName     string
+		wantStrategy bool
+	}{
+		{dbType: "postgres", wantName: strictParallelExportedSnapshot, wantStrategy: true},
+		{dbType: "postgresql", wantName: strictParallelExportedSnapshot, wantStrategy: true},
+		{dbType: "mysql", wantName: strictParallelNone},
+		{dbType: "mssql", wantName: strictParallelNone},
+		{dbType: "sqlite", wantName: strictParallelNone},
+		{dbType: "clickhouse", wantName: strictParallelNone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dbType, func(t *testing.T) {
+			name, strategy, err := resolveStrictReaderStrategyForDBType(tc.dbType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name != tc.wantName || (strategy != nil) != tc.wantStrategy {
+				t.Fatalf("resolveStrictReaderStrategyForDBType(%q) = (%q, strategy=%t), want (%q, strategy=%t)", tc.dbType, name, strategy != nil, tc.wantName, tc.wantStrategy)
 			}
 		})
 	}

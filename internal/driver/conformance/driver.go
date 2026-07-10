@@ -466,11 +466,32 @@ type ReaderCapabilities struct {
 	IncrementalDateReader bool
 }
 
+// DialectCapabilities declares optional source-dialect behavior selected by
+// catalog data rather than required by the base driver.Dialect interface.
+type DialectCapabilities struct {
+	StrictParallelStrategy string
+}
+
 // CheckReaderCapabilities asserts the reader's optional capabilities
 // match the declaration; pass a typed nil reader pointer.
 func CheckReaderCapabilities(t *testing.T, r driver.Reader, want ReaderCapabilities) {
 	t.Helper()
 	if _, got := r.(driver.IncrementalDateReader); got != want.IncrementalDateReader {
 		t.Errorf("IncrementalDateReader capability = %v, want %v — update the capability matrix or the reader's method set deliberately", got, want.IncrementalDateReader)
+	}
+}
+
+// CheckDialectCapabilities pins optional dialect declarations. A missing
+// interface is distinct from an explicit "none" strategy: shipped engines
+// must declare the capability so future additions cannot silently degrade.
+func CheckDialectCapabilities(t *testing.T, d driver.Dialect, want DialectCapabilities) {
+	t.Helper()
+	capability, ok := d.(driver.StrictParallelCapability)
+	if !ok {
+		t.Errorf("StrictParallelCapability = absent, want strategy %q", want.StrictParallelStrategy)
+		return
+	}
+	if got := capability.StrictParallelStrategy(); got != want.StrictParallelStrategy {
+		t.Errorf("StrictParallelStrategy = %q, want %q", got, want.StrictParallelStrategy)
 	}
 }

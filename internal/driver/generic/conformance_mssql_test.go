@@ -94,10 +94,17 @@ func mssqlCatalogPaginationCase() *conformance.PaginationCase {
 // Capability matrix + defaults: the catalog must not relax the
 // hand-written driver's secure encrypt default or the 32KB packet size.
 func TestMssqlCatalogCapabilities(t *testing.T) {
+	cat, err := LoadCatalog("mssql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	conformance.CheckWriterCapabilities(t, (*writerFull)(nil), conformance.WriterCapabilities{
 		ConstraintWriter: true,
 		Upserter:         true,
 		SequenceResetter: true,
+	})
+	conformance.CheckDialectCapabilities(t, NewDialect(cat), conformance.DialectCapabilities{
+		StrictParallelStrategy: "none",
 	})
 }
 

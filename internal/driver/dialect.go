@@ -15,6 +15,14 @@ type DateFilter struct {
 	Timestamp time.Time
 }
 
+// StrictParallelCapability declares the named mechanism a source dialect can
+// use to keep parallel strict-consistency readers on one stable view. Callers
+// use a type assertion so engines without the optional capability retain the
+// conservative single-reader path.
+type StrictParallelCapability interface {
+	StrictParallelStrategy() string
+}
+
 // Dialect abstracts database-specific SQL syntax differences.
 // Each database driver provides its own Dialect implementation.
 type Dialect interface {

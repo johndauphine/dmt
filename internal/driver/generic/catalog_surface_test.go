@@ -121,9 +121,38 @@ func TestCatalogValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown strict parallel strategy is rejected", func(t *testing.T) {
+		data := strings.Replace(string(valid), "strict_parallel_strategy: none", "strict_parallel_strategy: time_machine", 1)
+		_, err := ParseCatalog([]byte(data))
+		if err == nil || !strings.Contains(err.Error(), `strict_parallel_strategy "time_machine"`) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+
 	t.Run("unknown catalog name errors", func(t *testing.T) {
 		if _, err := LoadCatalog("teradata"); err == nil {
 			t.Fatal("expected error for missing catalog")
 		}
 	})
+}
+
+func TestShippedCatalogStrictParallelStrategies(t *testing.T) {
+	tests := map[string]string{
+		"postgres":   "exported_snapshot",
+		"mysql":      "none",
+		"mssql":      "none",
+		"sqlite":     "none",
+		"clickhouse": "none",
+	}
+	for name, want := range tests {
+		t.Run(name, func(t *testing.T) {
+			cat, err := LoadCatalog(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cat.StrictParallelStrategy; got != want {
+				t.Fatalf("StrictParallelStrategy = %q, want %q", got, want)
+			}
+		})
+	}
 }

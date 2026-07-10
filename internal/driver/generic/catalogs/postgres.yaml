@@ -31,6 +31,8 @@ capabilities:
   constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
   incremental_date_reader: true
 
+strict_parallel_strategy: exported_snapshot
+
 quoting:
   identifier_format: '"%s"'
   escaped_char: '"'

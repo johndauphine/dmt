@@ -59,6 +59,11 @@ type Catalog struct {
 	// strategy-selected). Empty selects the shared minimal battery.
 	Preflight string `yaml:"preflight_strategy"`
 
+	// StrictParallelStrategy names the engine-native mechanism that lets
+	// concurrent strict-consistency readers share one stable source view.
+	// "none" retains the pinned single-reader transaction path.
+	StrictParallelStrategy string `yaml:"strict_parallel_strategy"`
+
 	AI AISpec `yaml:"ai"`
 }
 

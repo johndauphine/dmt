@@ -42,6 +42,10 @@ func executeKeysetPagination(
 	if srcDialect == nil {
 		return nil, fmt.Errorf("no dialect registered for source DB type %s", srcPool.DBType())
 	}
+	strictStrategyName, strictStrategy, err := resolveStrictReaderStrategy(srcDialect)
+	if err != nil {
+		return nil, err
+	}
 	colList := srcDialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	// Source-dialect value normalization, resolved once per transfer (#477).
 	valueConvs := srcDialect.ValueConverters(colTypes, tgtPool.DBType())
@@ -86,14 +90,14 @@ func executeKeysetPagination(
 
 	numReaders, joinSnapshotReaders, readerCountClamped := strictKeysetReaderPlan(
 		cfg.Migration.StrictConsistency,
-		srcPool.DBType(),
+		strictStrategy,
 		cfg.Migration.ParallelReaders,
 		cfg.Migration.MaxSourceConnections,
 	)
-	if readerCountClamped && strictSnapshotExportSupported(srcPool.DBType()) {
+	if readerCountClamped && strictStrategy != nil {
 		logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lead snapshot transaction reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
 	}
-	if cfg.Migration.StrictConsistency && strictSnapshotExportSupported(srcPool.DBType()) && !joinSnapshotReaders && cfg.Migration.MaxSourceConnections > 0 {
+	if cfg.Migration.StrictConsistency && strictStrategy != nil && !joinSnapshotReaders && cfg.Migration.MaxSourceConnections > 0 {
 		logging.Warn("Table %s: strict_consistency uses its lead snapshot transaction as the sole reader because max_source_connections=%d leaves no connection for an imported snapshot reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
 	}
 
@@ -101,7 +105,10 @@ func executeKeysetPagination(
 	if joinSnapshotReaders {
 		queryerForWorker = sourceQueryerFactoryForJob(ctx, job)
 		if queryerForWorker == nil {
-			return nil, fmt.Errorf("strict_consistency PostgreSQL snapshot reader factory is unavailable")
+			if strictStrategyName == strictParallelExportedSnapshot {
+				return nil, fmt.Errorf("strict_consistency PostgreSQL snapshot reader factory is unavailable")
+			}
+			return nil, fmt.Errorf("strict_consistency %s reader factory is unavailable", strictStrategyName)
 		}
 	}
 
@@ -174,25 +181,26 @@ func executeKeysetPagination(
 }
 
 // strictKeysetReaderPlan returns the keyset worker count and whether each
-// worker must join the lead PostgreSQL snapshot. Other strict engines retain
-// their existing one-transaction, one-reader path. A configured limit of one
-// source connection leaves no room for a joined transaction, so the lead
-// itself remains the sole reader and the connection budget is still honored.
-func strictKeysetReaderPlan(strict bool, dbType string, requested, maxSourceConnections int) (readers int, joinSnapshotReaders, clamped bool) {
+// worker must join the resolved shared-view strategy. Strict engines without
+// a strategy retain their existing one-transaction, one-reader path. When the
+// connection budget cannot fit both the strategy reservation and one worker,
+// the coordinator queryer remains the sole reader.
+func strictKeysetReaderPlan(strict bool, strategy strictReaderStrategy, requested, maxSourceConnections int) (readers int, joinSnapshotReaders, clamped bool) {
 	if requested < 1 {
 		requested = 1
 	}
-	if !strict || !strictSnapshotExportSupported(dbType) {
+	if !strict || strategy == nil {
 		if strict {
 			return 1, false, requested > 1
 		}
 		return requested, false, false
 	}
-	if maxSourceConnections == 1 {
+	reserved := strategy.joinBudget()
+	if maxSourceConnections > 0 && maxSourceConnections <= reserved {
 		return 1, false, requested > 1
 	}
-	if maxSourceConnections > 1 && requested > maxSourceConnections-1 {
-		return maxSourceConnections - 1, true, true
+	if maxSourceConnections > reserved && requested > maxSourceConnections-reserved {
+		return maxSourceConnections - reserved, true, true
 	}
 	return requested, true, false
 }

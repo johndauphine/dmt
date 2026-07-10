@@ -56,6 +56,9 @@ func (c *Catalog) Validate() error {
 	require(c.Quoting.EscapedChar != "", "quoting.escaped_char is required")
 	require(c.Placeholder != "", "placeholder is required")
 	require(c.Defaults.WriteAheadWriters > 0, "defaults.write_ahead_writers must be > 0")
+	if _, ok := validStrictParallelStrategies[c.StrictParallelStrategy]; !ok {
+		errs = append(errs, fmt.Sprintf("strict_parallel_strategy %q is not a known strategy", c.StrictParallelStrategy))
+	}
 
 	hasURL := c.Connection.URLTemplate != ""
 	hasStrategy := c.Connection.DSNStrategy != ""
@@ -217,4 +220,12 @@ func (c *Catalog) Validate() error {
 		return fmt.Errorf("invalid catalog:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+var validStrictParallelStrategies = map[string]struct{}{
+	"none":                 {},
+	"exported_snapshot":    {},
+	"lock_window_sessions": {},
+	"table_shared_lock":    {},
+	"database_snapshot":    {},
 }
