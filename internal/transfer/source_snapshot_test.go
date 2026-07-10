@@ -155,6 +155,20 @@ func TestStrictSnapshotMSSQLOptionsUseSerializableWithoutReadOnly(t *testing.T) 
 	}
 }
 
+func TestStrictSnapshotMariaDBUsesMySQLRepeatableRead(t *testing.T) {
+	for _, dbType := range []string{"mysql", "mariadb", "maria"} {
+		t.Run(dbType, func(t *testing.T) {
+			opts, err := strictSnapshotTxOptions(dbType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.Isolation != sql.LevelRepeatableRead || !opts.ReadOnly {
+				t.Fatalf("%s tx options = %+v, want repeatable-read and ReadOnly=true", dbType, opts)
+			}
+		})
+	}
+}
+
 func TestStrictSnapshotFailsBeforeTargetPreparation(t *testing.T) {
 	reader, writer := openSnapshotSQLite(t, []string{
 		`CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)`,

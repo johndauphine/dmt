@@ -99,7 +99,7 @@ func isMySQLSource(dbType string) bool {
 
 func strictSnapshotTxOptions(dbType string) (*sql.TxOptions, error) {
 	switch strings.ToLower(strings.TrimSpace(dbType)) {
-	case "postgres", "postgresql", "mysql":
+	case "postgres", "postgresql", "mysql", "mariadb", "maria":
 		return &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, nil
 	case "mssql", "sqlserver":
 		// go-mssqldb rejects TxOptions.ReadOnly. The transfer only performs
