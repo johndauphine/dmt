@@ -60,6 +60,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Runtime diagnostics now expose cumulative shared-memory-budget wait time and
+  count to the controller, plus Prometheus `dmt_budget_wait_seconds_total` and
+  per-table `dmt_live_writers` metrics. Live-writer samples include workers
+  draining after a scale-down, making memory backpressure and writer
+  convergence visible without a profiler (#668).
+
 - Partial transfer outcomes now remain durably resumable: SQLite and YAML
   state store outcome separately from resume eligibility, `resume` retries
   failed tables while skipping successful peers, status/history expose the

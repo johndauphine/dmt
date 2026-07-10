@@ -51,6 +51,7 @@ type Metrics interface {
 	IncRetries(table string)
 	IncTuningAdjustment(rule, direction string)
 	IncAIFallback(surface string)
+	AddBudgetWait(table string, seconds float64)
 
 	// Histograms
 	ObserveChunkDuration(table string, seconds float64)
@@ -59,6 +60,7 @@ type Metrics interface {
 	// Gauges (per-run labels — cleared on RunComplete)
 	SetWriterQueueDepth(depth int)
 	SetWritersActive(active int)
+	SetLiveWriters(table string, count int)
 
 	// Lifecycle
 	RunStarted(runID, sourceDB, targetDB string)
@@ -76,19 +78,22 @@ type Registry struct {
 	bytesTotal      *prometheus.CounterVec
 	errorsTotal     *prometheus.CounterVec
 	retriesTotal    *prometheus.CounterVec
+	budgetWait      *prometheus.CounterVec
 	chunkDuration   *prometheus.HistogramVec
 	phaseDuration   *prometheus.HistogramVec
 	queueDepth      *prometheus.GaugeVec
 	writersActive   *prometheus.GaugeVec
+	liveWriters     *prometheus.GaugeVec
 	tuningAdjust    *prometheus.CounterVec
 	aiFallbackTotal *prometheus.CounterVec
 	migrationInfo   *prometheus.GaugeVec // info-style gauge carrying source_db/target_db
 
-	mu              sync.Mutex
-	currentRunID    string
-	currentSourceDB string
-	currentTargetDB string
-	server          *http.Server
+	mu               sync.Mutex
+	currentRunID     string
+	currentSourceDB  string
+	currentTargetDB  string
+	liveWriterTables map[string]map[string]struct{}
+	server           *http.Server
 }
 
 // New constructs a Registry with all metric instruments pre-registered.
@@ -121,6 +126,10 @@ func New() *Registry {
 			Namespace: ns, Name: "retries_total",
 			Help: "Chunk-level retries. Labels: run_id, table.",
 		}, []string{"run_id", "table"}),
+		budgetWait: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns, Name: "budget_wait_seconds_total",
+			Help: "Time readers wait for the shared in-flight memory budget. Labels: run_id, table.",
+		}, []string{"run_id", "table"}),
 		chunkDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: ns, Name: "chunk_duration_seconds",
 			Help:    "Wall-clock time to WRITE one chunk to the target (does not include the source read; reads are pipelined separately). Labels: run_id, table.",
@@ -139,6 +148,10 @@ func New() *Registry {
 			Namespace: ns, Name: "writers_active",
 			Help: "Active writer goroutines. Labels: run_id.",
 		}, []string{"run_id"}),
+		liveWriters: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: ns, Name: "live_writers",
+			Help: "Live writer goroutines, including downscaled workers draining a final write. Labels: run_id, table.",
+		}, []string{"run_id", "table"}),
 		tuningAdjust: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns, Name: "runtime_tuning_adjustments_total",
 			Help: "Runtime parameter adjustments emitted by the rule-based controller. Labels: rule_name, direction.",
@@ -151,10 +164,11 @@ func New() *Registry {
 			Namespace: ns, Name: "migration_info",
 			Help: "Info-style gauge always 1; carries source_db/target_db labels keyed by run_id so dashboards can join other metrics by run_id and pivot on driver. Labels: run_id, source_db, target_db.",
 		}, []string{"run_id", "source_db", "target_db"}),
+		liveWriterTables: make(map[string]map[string]struct{}),
 	}
 	r.MustRegister(
-		reg.rowsTotal, reg.bytesTotal, reg.errorsTotal, reg.retriesTotal,
-		reg.chunkDuration, reg.phaseDuration, reg.queueDepth, reg.writersActive,
+		reg.rowsTotal, reg.bytesTotal, reg.errorsTotal, reg.retriesTotal, reg.budgetWait,
+		reg.chunkDuration, reg.phaseDuration, reg.queueDepth, reg.writersActive, reg.liveWriters,
 		reg.tuningAdjust, reg.aiFallbackTotal, reg.migrationInfo,
 	)
 	return reg
@@ -215,6 +229,9 @@ func (r *Registry) RunStarted(runID, sourceDB, targetDB string) {
 	r.currentRunID = runID
 	r.currentSourceDB = sourceDB
 	r.currentTargetDB = targetDB
+	if _, ok := r.liveWriterTables[runID]; !ok {
+		r.liveWriterTables[runID] = make(map[string]struct{})
+	}
 	// Initialize per-run gauges so /metrics shows the run even before
 	// the first writer dispatches.
 	r.queueDepth.WithLabelValues(runID).Set(0)
@@ -234,6 +251,10 @@ func (r *Registry) RunComplete(runID string) {
 	defer r.mu.Unlock()
 	r.queueDepth.DeleteLabelValues(runID)
 	r.writersActive.DeleteLabelValues(runID)
+	for table := range r.liveWriterTables[runID] {
+		r.liveWriters.DeleteLabelValues(runID, table)
+	}
+	delete(r.liveWriterTables, runID)
 	// migration_info uses the captured source/target labels because
 	// DeleteLabelValues requires the exact label tuple a series was
 	// registered with. We track them on the Registry for this reason.
@@ -279,6 +300,16 @@ func (r *Registry) IncRetries(table string) {
 	r.retriesTotal.WithLabelValues(r.runID(), table).Inc()
 }
 
+// AddBudgetWait increments the cumulative time readers spent blocked on the
+// shared in-flight memory budget. It mirrors the runtime-tuner signal so
+// Prometheus and controller diagnostics describe the same contention.
+func (r *Registry) AddBudgetWait(table string, seconds float64) {
+	if seconds <= 0 {
+		return
+	}
+	r.budgetWait.WithLabelValues(r.runID(), table).Add(seconds)
+}
+
 // IncTuningAdjustment records a parameter change emitted by the runtime
 // controller. rule_name identifies the rule that fired (queue_growth,
 // throughput_stable, etc.); direction is "up" or "down".
@@ -313,6 +344,23 @@ func (r *Registry) SetWriterQueueDepth(depth int) {
 // SetWritersActive sets the count of active writer goroutines.
 func (r *Registry) SetWritersActive(active int) {
 	r.writersActive.WithLabelValues(r.runID()).Set(float64(active))
+}
+
+// SetLiveWriters records the writer goroutines actually alive for one table.
+// Unlike writers_active, it includes downscaled workers that are still
+// draining their final write, so it can temporarily exceed the desired count.
+func (r *Registry) SetLiveWriters(table string, count int) {
+	if count < 0 {
+		count = 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	runID := r.currentRunID
+	if _, ok := r.liveWriterTables[runID]; !ok {
+		r.liveWriterTables[runID] = make(map[string]struct{})
+	}
+	r.liveWriterTables[runID][table] = struct{}{}
+	r.liveWriters.WithLabelValues(runID, table).Set(float64(count))
 }
 
 // runID returns the current run_id under lock. Hot-path code calls this
@@ -378,9 +426,11 @@ func (noopMetrics) IncErrors(string, string, string)     {}
 func (noopMetrics) IncRetries(string)                    {}
 func (noopMetrics) IncTuningAdjustment(string, string)   {}
 func (noopMetrics) IncAIFallback(string)                 {}
+func (noopMetrics) AddBudgetWait(string, float64)        {}
 func (noopMetrics) ObserveChunkDuration(string, float64) {}
 func (noopMetrics) ObservePhaseDuration(string, float64) {}
 func (noopMetrics) SetWriterQueueDepth(int)              {}
 func (noopMetrics) SetWritersActive(int)                 {}
+func (noopMetrics) SetLiveWriters(string, int)           {}
 func (noopMetrics) RunStarted(string, string, string)    {}
 func (noopMetrics) RunComplete(string)                   {}

@@ -217,16 +217,18 @@ func (p *keysetRuntimeSourcePool) DBType() string             { return "sqlite" 
 func (p *keysetRuntimeSourcePool) PoolStats() stats.PoolStats { return stats.PoolStats{} }
 
 type keysetRuntimeTargetPool struct {
-	mu          sync.Mutex
-	ids         []int
-	batchSizes  []int
-	writes      int
-	updated     bool
-	tuner       RuntimeTuner
-	updateTo    int
-	truncateErr error // when set, TruncateTable returns it (#619)
-	writeErr    error // when set, WriteBatch fails after failAfter writes (#617)
-	failAfter   int   // number of successful writes before writeErr kicks in
+	mu           sync.Mutex
+	ids          []int
+	batchSizes   []int
+	writes       int
+	updated      bool
+	tuner        RuntimeTuner
+	updateTo     int
+	truncateErr  error // when set, TruncateTable returns it (#619)
+	writeErr     error // when set, WriteBatch fails after failAfter writes (#617)
+	failAfter    int   // number of successful writes before writeErr kicks in
+	writeStarted chan<- struct{}
+	writeGate    <-chan struct{}
 }
 
 func (p *keysetRuntimeTargetPool) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
@@ -234,6 +236,19 @@ func (p *keysetRuntimeTargetPool) WriteBatch(ctx context.Context, opts driver.Wr
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
+	}
+	if p.writeStarted != nil {
+		select {
+		case p.writeStarted <- struct{}{}:
+		default:
+		}
+	}
+	if p.writeGate != nil {
+		select {
+		case <-p.writeGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	if p.writeErr != nil {
