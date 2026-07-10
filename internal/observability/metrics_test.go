@@ -14,7 +14,7 @@ import (
 
 // TestRegistry_RunLifecycleClearsGauges pins the cardinality-bound
 // invariant for #229: per-run-labeled gauges (queue_depth, writers_active,
-// migration_info) must be deleted when RunComplete fires so a long-running
+// live_writers, migration_info) must be deleted when RunComplete fires so a long-running
 // dmt process doesn't accumulate one label-value family per run.
 func TestRegistry_RunLifecycleClearsGauges(t *testing.T) {
 	reg := New()
@@ -22,6 +22,7 @@ func TestRegistry_RunLifecycleClearsGauges(t *testing.T) {
 	reg.RunStarted("run-1", "mssql", "postgres")
 	reg.SetWriterQueueDepth(7)
 	reg.SetWritersActive(2)
+	reg.SetLiveWriters("Users", 3)
 
 	got := testutil.ToFloat64(reg.queueDepth.WithLabelValues("run-1"))
 	if got != 7 {
@@ -34,8 +35,8 @@ func TestRegistry_RunLifecycleClearsGauges(t *testing.T) {
 	}
 
 	reg.RunComplete("run-1")
-	// Verify all three per-run gauge families no longer carry run-1.
-	for _, want := range []string{"dmt_writer_queue_depth", "dmt_writers_active", "dmt_migration_info"} {
+	// Verify all four per-run gauge families no longer carry run-1.
+	for _, want := range []string{"dmt_writer_queue_depth", "dmt_writers_active", "dmt_live_writers", "dmt_migration_info"} {
 		if hasRunLabel(t, reg, want, "run-1") {
 			t.Errorf("%s still has run_id=run-1 after RunComplete", want)
 		}
@@ -95,6 +96,29 @@ func TestRegistry_RowsBytesCounters(t *testing.T) {
 	retries := testutil.ToFloat64(reg.retriesTotal.WithLabelValues("run-2", "Users"))
 	if retries != 1 {
 		t.Errorf("retries = %v, want 1", retries)
+	}
+}
+
+func TestRegistry_BudgetWaitAndLiveWriterMetrics(t *testing.T) {
+	reg := New()
+	reg.RunStarted("run-budget", "mssql", "postgres")
+
+	reg.AddBudgetWait("Users", 0.25)
+	reg.AddBudgetWait("Users", 0.75)
+	reg.AddBudgetWait("Users", 0) // non-positive observations are ignored
+	reg.SetLiveWriters("Users", 4)
+
+	if got := testutil.ToFloat64(reg.budgetWait.WithLabelValues("run-budget", "Users")); got != 1 {
+		t.Errorf("budget_wait_seconds_total = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(reg.liveWriters.WithLabelValues("run-budget", "Users")); got != 4 {
+		t.Errorf("live_writers = %v, want 4", got)
+	}
+
+	// A negative defensive input must not report an impossible live count.
+	reg.SetLiveWriters("Users", -1)
+	if got := testutil.ToFloat64(reg.liveWriters.WithLabelValues("run-budget", "Users")); got != 0 {
+		t.Errorf("live_writers after negative input = %v, want 0", got)
 	}
 }
 
@@ -178,6 +202,8 @@ func TestSetGlobal_Noop(t *testing.T) {
 	m.IncRows("x", "y", 1)
 	m.IncBytes("x", "y", 1)
 	m.IncRetries("x")
+	m.AddBudgetWait("x", 1)
+	m.SetLiveWriters("x", 1)
 	m.RunStarted("a", "b", "c")
 	m.RunComplete("a")
 }

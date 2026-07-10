@@ -36,6 +36,11 @@ type PerformanceSnapshot struct {
 	QueueDepth      int // Buffered chunks waiting
 	ErrorCount      int // Transfer jobs (per-table or per-partition) that exhausted all retries
 	ChunkRetryCount int // Chunk retry attempts triggered by transient failures (most succeed on the next attempt)
+	// Budget waits are input-only signals for a future controller rule. They
+	// let that rule distinguish reader slowness from shared-memory contention
+	// without changing the current rule set (#668).
+	BudgetWaitNs    int64
+	BudgetWaitCount int64
 
 	// Current configuration
 	CurrentConfig ConfigSnapshot
@@ -153,6 +158,8 @@ func (mc *MetricsCollector) collectSnapshot() {
 	snapshot.QueueDepth = metrics.QueueDepth
 	snapshot.ErrorCount = metrics.ErrorCount
 	snapshot.ChunkRetryCount = metrics.ChunkRetryCount
+	snapshot.BudgetWaitNs = metrics.BudgetWaitNs
+	snapshot.BudgetWaitCount = metrics.BudgetWaitCount
 
 	// Hold lock for windowed throughput/time calculation, trend, and append
 	mc.metricsMu.Lock()

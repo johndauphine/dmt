@@ -9,6 +9,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/observability"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 )
@@ -209,6 +210,7 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	// zero for this table. Successful chunks are released per-chunk by the
 	// writer (OnComplete) to keep the budget accurate mid-run.
 	budget := job.MemBudget
+	metrics := observability.Global()
 	var acquiredBytes int64
 	env := pipelineEnv{
 		memGuard:  memGuard,
@@ -216,7 +218,24 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 		acquireMem: func(_ context.Context, n int64) (int64, bool) {
 			// Wait on budgetCtx (reader-cancel or writer-failure), not the
 			// caller's reader ctx, so a writer failure unblocks the reserve.
+			// A disabled budget is a true no-op: do not take clocks or emit
+			// misleading zero-value metrics for an admission control that is
+			// not configured (#668).
+			if budget == nil {
+				return 0, true
+			}
+			waitStart := time.Now()
 			got, ok := budget.acquire(budgetCtx, n)
+			wait := time.Since(waitStart)
+			if wait > 0 {
+				if pc.tuner != nil {
+					pc.tuner.ReportBudgetWait(wait.Nanoseconds())
+				}
+				metrics.AddBudgetWait(tableName, wait.Seconds())
+				if wait > time.Second {
+					logging.Debug("Pipeline %s: reader waited %v for in-flight memory budget", tableName, wait)
+				}
+			}
 			if ok && got > 0 {
 				atomic.AddInt64(&acquiredBytes, got)
 			}
@@ -429,6 +448,11 @@ chunkLoop:
 				}
 			}
 		}
+		// Actual live workers include downscaled goroutines draining their
+		// last write, which can briefly exceed the desired tuner value. This
+		// is a cheap atomic sample at the existing scaling boundary; it gives
+		// dashboards and future controller rules the real writer population.
+		metrics.SetLiveWriters(tableName, wp.GetLiveWorkerCount())
 
 		// Log pipeline stats periodically
 		if debugEnabled && chunkCount > 0 && chunkCount%50 == 0 {
@@ -470,6 +494,7 @@ chunkLoop:
 	// Wait for writers to finish
 	waitStart := time.Now()
 	wp.wait()
+	metrics.SetLiveWriters(tableName, wp.GetLiveWorkerCount())
 	logging.Debug("wp.wait() completed in %v for %s", time.Since(waitStart), tableName)
 
 	// Return this pipeline's in-flight byte reservation to the shared budget

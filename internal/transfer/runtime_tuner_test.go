@@ -178,6 +178,25 @@ func TestRuntimeTunerReportChunkRetry(t *testing.T) {
 	}
 }
 
+func TestRuntimeTunerReportBudgetWait(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+
+	// Non-positive measurements are no-ops; callers can report an elapsed
+	// duration directly without filtering timer resolution artifacts.
+	tuner.ReportBudgetWait(0)
+	tuner.ReportBudgetWait(-1)
+	tuner.ReportBudgetWait(100)
+	tuner.ReportBudgetWait(250)
+
+	m := tuner.Metrics()
+	if m.BudgetWaitNs != 350 {
+		t.Errorf("BudgetWaitNs = %d, want 350", m.BudgetWaitNs)
+	}
+	if m.BudgetWaitCount != 2 {
+		t.Errorf("BudgetWaitCount = %d, want 2", m.BudgetWaitCount)
+	}
+}
+
 func TestRuntimeTunerReportTransferTime(t *testing.T) {
 	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
 
@@ -210,6 +229,7 @@ func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
 			tuner.ReportActiveJobs(1)
 			tuner.ReportQueueDepth(5)
 			tuner.ReportError()
+			tuner.ReportBudgetWait(40)
 			tuner.ReportTransferTime(10, 20, 30, 100)
 		}()
 	}
@@ -224,6 +244,9 @@ func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
 	}
 	if m.ErrorCount != 100 {
 		t.Errorf("ErrorCount = %d, want 100", m.ErrorCount)
+	}
+	if m.BudgetWaitNs != 4000 || m.BudgetWaitCount != 100 {
+		t.Errorf("budget waits = (%d ns, %d count), want (4000, 100)", m.BudgetWaitNs, m.BudgetWaitCount)
 	}
 	if m.TotalQueryNs != 1000 {
 		t.Errorf("TotalQueryNs = %d, want 1000", m.TotalQueryNs)

@@ -33,6 +33,12 @@ type RuntimeMetrics struct {
 	QueueDepth      int // Aggregate read-ahead queue depth across all active jobs
 	ErrorCount      int // Cumulative count of transfer jobs (per-table or per-partition) that exhausted all retries
 	ChunkRetryCount int // Cumulative count of chunk retry attempts triggered by transient failures (most succeed on the next attempt; the few that fail terminally are also counted in ErrorCount)
+	// BudgetWaitNs and BudgetWaitCount describe time readers spent waiting for
+	// the shared in-flight byte budget. They are controller inputs only: a
+	// future monitor rule can use them to distinguish memory-budget starvation
+	// from a slow source without changing any tuning behavior here (#668).
+	BudgetWaitNs    int64
+	BudgetWaitCount int64
 
 	// Cumulative transfer time breakdown (nanoseconds)
 	TotalQueryNs      int64
@@ -68,6 +74,7 @@ type RuntimeTuner interface {
 	ReportQueueDepth(delta int)                              // Atomically adjust aggregate queue depth (use deltas per job)
 	ReportError()                                            // Atomically increment terminal error count (job exhausted all retries)
 	ReportChunkRetry()                                       // Atomically increment chunk retry count (transient failure about to be retried)
+	ReportBudgetWait(waitNs int64)                           // Atomically add a positive reader wait for shared in-flight memory budget
 	ReportTransferTime(queryNs, scanNs, writeNs, rows int64) // Atomically add cumulative transfer time breakdown
 	Metrics() RuntimeMetrics                                 // Read current operational metrics
 }
@@ -82,6 +89,8 @@ type runtimeTuner struct {
 	queueDepth      atomic.Int32
 	errorCount      atomic.Int32
 	chunkRetryCount atomic.Int32
+	budgetWaitNs    atomic.Int64
+	budgetWaitCount atomic.Int64
 
 	// Cumulative transfer time breakdown
 	totalQueryNs      atomic.Int64
@@ -172,6 +181,17 @@ func (rt *runtimeTuner) ReportChunkRetry() {
 	rt.chunkRetryCount.Add(1)
 }
 
+// ReportBudgetWait records reader time spent blocked on the migration-wide
+// in-flight memory budget. Non-positive durations carry no useful signal and
+// are ignored so callers can report a measured duration without extra guards.
+func (rt *runtimeTuner) ReportBudgetWait(waitNs int64) {
+	if waitNs <= 0 {
+		return
+	}
+	rt.budgetWaitNs.Add(waitNs)
+	rt.budgetWaitCount.Add(1)
+}
+
 // ReportTransferTime atomically adds to cumulative transfer time breakdown.
 func (rt *runtimeTuner) ReportTransferTime(queryNs, scanNs, writeNs, rows int64) {
 	rt.totalQueryNs.Add(queryNs)
@@ -191,6 +211,8 @@ func (rt *runtimeTuner) Metrics() RuntimeMetrics {
 		QueueDepth:        qd,
 		ErrorCount:        int(rt.errorCount.Load()),
 		ChunkRetryCount:   int(rt.chunkRetryCount.Load()),
+		BudgetWaitNs:      rt.budgetWaitNs.Load(),
+		BudgetWaitCount:   rt.budgetWaitCount.Load(),
 		TotalQueryNs:      rt.totalQueryNs.Load(),
 		TotalScanNs:       rt.totalScanNs.Load(),
 		TotalWriteNs:      rt.totalWriteNs.Load(),

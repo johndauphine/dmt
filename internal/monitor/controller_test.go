@@ -982,6 +982,7 @@ func (failingTuner) ReportActiveJobs(int)                          {}
 func (failingTuner) ReportQueueDepth(int)                          {}
 func (failingTuner) ReportError()                                  {}
 func (failingTuner) ReportChunkRetry()                             {}
+func (failingTuner) ReportBudgetWait(int64)                        {}
 func (failingTuner) ReportTransferTime(int64, int64, int64, int64) {}
 func (failingTuner) Metrics() transfer.RuntimeMetrics              { return transfer.RuntimeMetrics{} }
 

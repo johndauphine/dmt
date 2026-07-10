@@ -3,11 +3,17 @@ package transfer
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/observability"
+	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 )
 
@@ -69,6 +75,238 @@ func TestMemBudgetFullyReleasedOnSuccess(t *testing.T) {
 	if !budget.fullyReleased() {
 		t.Fatal("budget not fully released after a successful transfer — reservation leaked")
 	}
+}
+
+// TestMemBudgetContentionReportsTunerAndPrometheus drives a real transfer
+// through a one-byte shared budget. A blocked writer keeps later readers in
+// acquire long enough to distinguish genuine budget starvation from timer
+// noise, while the live-writer gauge is sampled before the drain completes.
+func TestMemBudgetContentionReportsTunerAndPrometheus(t *testing.T) {
+	const totalRows = 400
+	db := seedKeysetRuntimeTunerDB(t, totalRows)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	writeStarted := make(chan struct{}, 1)
+	releaseWrites := make(chan struct{})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(releaseWrites)
+		}
+	})
+	tgtPool := &keysetRuntimeTargetPool{
+		updated:      true,
+		writeStarted: writeStarted,
+		writeGate:    releaseWrites,
+	}
+
+	table := memBudgetTestTable()
+	table.RowCount = totalRows
+	cfg := memBudgetTestConfig()
+	budget := NewMemBudget(1)
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: cfg.Migration.ChunkSize, WriteAheadWriters: cfg.Migration.WriteAheadWriters})
+
+	reg := observability.New()
+	reg.RunStarted("budget-contention", "sqlite", "sqlite")
+	observability.SetGlobal(reg)
+	t.Cleanup(func() {
+		observability.SetGlobal(nil)
+		reg.RunComplete("budget-contention")
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Execute(context.Background(), srcPool, tgtPool, cfg, Job{Table: table, MemBudget: budget}, progress.New(), tuner)
+		done <- err
+	}()
+
+	select {
+	case <-writeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("writer did not start")
+	}
+
+	// The first write is held, so the sample must show the configured writers
+	// alive before the pool's final drain changes the gauge to zero. The writer
+	// can begin just before the consumer reaches its post-submit sample, so
+	// wait for that chunk-boundary publication rather than racing it.
+	waitForLiveWriterGauge(t, reg, "budget-contention", 2)
+
+	// Keep the writer blocked long enough for another reader to be waiting in
+	// acquire. Its elapsed wait is reported only after the reservation frees.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseWrites)
+	released = true
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("transfer did not finish after writers were released")
+	}
+
+	m := tuner.Metrics()
+	if m.BudgetWaitCount == 0 || m.BudgetWaitNs < int64(25*time.Millisecond) {
+		t.Fatalf("budget waits = (%d ns, %d count), want contention of at least 25ms", m.BudgetWaitNs, m.BudgetWaitCount)
+	}
+	if !budget.fullyReleased() {
+		t.Fatal("budget not fully released after contention transfer")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	reg.Handler().ServeHTTP(rec, req)
+	metricsText := rec.Body.String()
+	if !strings.Contains(metricsText, `dmt_budget_wait_seconds_total{run_id="budget-contention",table="items"}`) {
+		t.Fatalf("budget wait metric missing after contention transfer:\n%s", metricsText)
+	}
+}
+
+// TestMemBudgetNilTunerStillAcquires ensures the timed-acquire path remains
+// safe for direct callers that deliberately do not install runtime tuning.
+func TestMemBudgetNilTunerStillAcquires(t *testing.T) {
+	const totalRows = 100
+	db := seedKeysetRuntimeTunerDB(t, totalRows)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	tgtPool := &keysetRuntimeTargetPool{updated: true}
+	table := memBudgetTestTable()
+	table.RowCount = totalRows
+	budget := NewMemBudget(1)
+
+	stats, err := Execute(context.Background(), srcPool, tgtPool, memBudgetTestConfig(), Job{Table: table, MemBudget: budget}, progress.New(), nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stats.Rows != totalRows {
+		t.Fatalf("stats.Rows = %d, want %d", stats.Rows, totalRows)
+	}
+	if !budget.fullyReleased() {
+		t.Fatal("budget not fully released with a nil tuner")
+	}
+}
+
+// TestMemBudgetNilBudgetDoesNotReportWait ensures a tuner alone does not
+// fabricate contention when in-flight byte accounting is disabled.
+func TestMemBudgetNilBudgetDoesNotReportWait(t *testing.T) {
+	const totalRows = 100
+	db := seedKeysetRuntimeTunerDB(t, totalRows)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	tgtPool := &keysetRuntimeTargetPool{updated: true}
+	table := memBudgetTestTable()
+	table.RowCount = totalRows
+
+	reg := observability.New()
+	reg.RunStarted("no-budget", "sqlite", "sqlite")
+	observability.SetGlobal(reg)
+	t.Cleanup(func() {
+		observability.SetGlobal(nil)
+		reg.RunComplete("no-budget")
+	})
+
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 50, WriteAheadWriters: 2})
+	stats, err := Execute(context.Background(), srcPool, tgtPool, memBudgetTestConfig(), Job{Table: table}, progress.New(), tuner)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if stats.Rows != totalRows {
+		t.Fatalf("stats.Rows = %d, want %d", stats.Rows, totalRows)
+	}
+	if m := tuner.Metrics(); m.BudgetWaitNs != 0 || m.BudgetWaitCount != 0 {
+		t.Fatalf("nil budget reported waits = (%d ns, %d count)", m.BudgetWaitNs, m.BudgetWaitCount)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	reg.Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "dmt_budget_wait_seconds_total") {
+		t.Fatalf("disabled budget unexpectedly emitted wait metric:\n%s", rec.Body.String())
+	}
+}
+
+// TestLiveWriterMetricTracksScaleDownDrain verifies the value sampled by the
+// pipeline has the intended semantics: a retired writer remains visible while
+// its target write drains, then converges to the desired worker count.
+func TestLiveWriterMetricTracksScaleDownDrain(t *testing.T) {
+	reg := observability.New()
+	reg.RunStarted("writer-drain", "sqlite", "sqlite")
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	started := make(chan struct{}, 2)
+	wp := pool.NewWriterPool(context.Background(), pool.WriterPoolConfig{
+		NumWriters:    2,
+		BufferSize:    1,
+		JobBufferSize: 3,
+		WriteFunc: func(context.Context, int, [][]any) error {
+			started <- struct{}{}
+			<-release // model a target write that must drain before it can retire
+			return nil
+		},
+	})
+	wp.Start()
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		wp.Wait()
+		reg.RunComplete("writer-drain")
+	})
+
+	for i := 0; i < 2; i++ {
+		if ok := wp.Submit(pool.WriteJob{Rows: [][]any{{i}}}); !ok {
+			t.Fatal("Submit returned false")
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("writers did not begin their blocked writes")
+		}
+	}
+
+	if err := wp.ScaleWorkers(1); err != nil {
+		t.Fatalf("ScaleWorkers(1): %v", err)
+	}
+	reg.SetLiveWriters("items", wp.GetLiveWorkerCount())
+	assertLiveWriterGauge(t, reg, "writer-drain", 2)
+
+	releaseOnce.Do(func() { close(release) })
+	deadline := time.Now().Add(2 * time.Second)
+	for wp.GetLiveWorkerCount() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := wp.GetLiveWorkerCount(); got != 1 {
+		t.Fatalf("live workers after retired write drained = %d, want 1", got)
+	}
+	reg.SetLiveWriters("items", wp.GetLiveWorkerCount())
+	assertLiveWriterGauge(t, reg, "writer-drain", 1)
+}
+
+func assertLiveWriterGauge(t *testing.T, reg *observability.Registry, runID string, want int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	reg.Handler().ServeHTTP(rec, req)
+	wantLine := `dmt_live_writers{run_id="` + runID + `",table="items"} ` + fmt.Sprint(want)
+	if !strings.Contains(rec.Body.String(), wantLine) {
+		t.Fatalf("live writer gauge = not %d:\n%s", want, rec.Body.String())
+	}
+}
+
+func waitForLiveWriterGauge(t *testing.T, reg *observability.Registry, runID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		reg.Handler().ServeHTTP(rec, req)
+		wantLine := `dmt_live_writers{run_id="` + runID + `",table="items"} ` + fmt.Sprint(want)
+		if strings.Contains(rec.Body.String(), wantLine) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("live writer gauge did not reach %d", want)
 }
 
 // TestMemBudgetFullyReleasedOnWriteError asserts the residual-release

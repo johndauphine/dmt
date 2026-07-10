@@ -158,6 +158,7 @@ func TestWindowedTimePercentages(t *testing.T) {
 
 	// First snapshot: report some transfer time
 	tuner.ReportTransferTime(400, 100, 500, 1000) // query=400, scan=100, write=500 → source=50%, write=50%
+	tuner.ReportBudgetWait(250)
 	mc.collectSnapshot()
 
 	metrics := mc.GetRecentMetrics(1)
@@ -171,6 +172,9 @@ func TestWindowedTimePercentages(t *testing.T) {
 	}
 	if metrics[0].WriteTimePercent < 49 || metrics[0].WriteTimePercent > 51 {
 		t.Errorf("WriteTimePercent = %.1f%%, want ~50%%", metrics[0].WriteTimePercent)
+	}
+	if metrics[0].BudgetWaitNs != 250 || metrics[0].BudgetWaitCount != 1 {
+		t.Errorf("budget waits = (%d ns, %d count), want (250, 1)", metrics[0].BudgetWaitNs, metrics[0].BudgetWaitCount)
 	}
 
 	// Second snapshot: report more time, heavily write-bound
