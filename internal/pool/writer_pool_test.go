@@ -258,6 +258,22 @@ func TestScaleDownThenUpDoesNotReuseDrainingWorkerIDs(t *testing.T) {
 		wp.Cancel()
 		t.Fatalf("ScaleWorkers(%d): %v", restoredWorkers, err)
 	}
+	if got := wp.NumWriters(); got != restoredWorkers {
+		wp.Cancel()
+		t.Fatalf("desired writers after rapid upscale = %d, want %d", got, restoredWorkers)
+	}
+	if got := wp.GetWorkerCount(); got != survivorWorkers {
+		wp.Cancel()
+		t.Fatalf("active workers while retirees drain = %d, want %d", got, survivorWorkers)
+	}
+	if got := wp.GetDrainingWorkerCount(); got != initialWorkers-survivorWorkers {
+		wp.Cancel()
+		t.Fatalf("draining workers after rapid upscale = %d, want %d", got, initialWorkers-survivorWorkers)
+	}
+	if got := wp.GetLiveWorkerCount(); got > restoredWorkers {
+		wp.Cancel()
+		t.Fatalf("live workers after rapid 4->1->4 = %d, want <= %d", got, restoredWorkers)
+	}
 
 	for i := initialWorkers; i < initialWorkers+restoredWorkers-survivorWorkers; i++ {
 		if ok := wp.Submit(WriteJob{Rows: [][]any{{i}}, Seq: int64(i)}); !ok {
@@ -265,6 +281,11 @@ func TestScaleDownThenUpDoesNotReuseDrainingWorkerIDs(t *testing.T) {
 			t.Fatalf("new Submit(%d) returned false", i)
 		}
 	}
+
+	// Let the old in-flight writes finish. Retired IDs 1..3 must exit before
+	// replacements are spawned, keeping the live ceiling at four throughout.
+	close(releaseInitial)
+	waitForLiveWorkers(t, wp, restoredWorkers)
 
 	select {
 	case <-newJobsDone:
@@ -285,16 +306,15 @@ func TestScaleDownThenUpDoesNotReuseDrainingWorkerIDs(t *testing.T) {
 		t.Fatalf("new writer IDs = %v, want %d unique IDs", newIDs, restoredWorkers-survivorWorkers)
 	}
 	for writerID := range newIDs {
-		if initialIDs[writerID] {
+		if writerID >= survivorWorkers && writerID < initialWorkers {
 			idsMu.Unlock()
 			wp.Cancel()
-			t.Fatalf("writer ID %d was reused while an old worker with that ID was still draining", writerID)
+			t.Fatalf("retired writer ID %d accepted new work after rapid upscale", writerID)
 		}
 	}
 	idsMu.Unlock()
 
 	close(releaseNew)
-	close(releaseInitial)
 
 	waitDone := make(chan struct{})
 	go func() {

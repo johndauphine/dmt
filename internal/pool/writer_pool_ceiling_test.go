@@ -9,8 +9,8 @@ import (
 )
 
 // waitForLiveWorkers blocks until the pool reports the expected live goroutine
-// count or the deadline elapses. Retired idle workers exit asynchronously, so
-// tests synchronize on the observable live count instead of sleeping.
+// count or the deadline elapses. Busy retirees drain asynchronously; idle
+// retirees are already joined before ScaleWorkers returns.
 func waitForLiveWorkers(t *testing.T, wp *WriterPool, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -118,13 +118,18 @@ func TestScaleDownIdleWorkersDoNotConsumeNewJobs(t *testing.T) {
 	atomic.StoreInt64(&entered, 0)
 	meter.reset()
 
-	// Retire three of the four idle workers. With the fix they wake on their
-	// canceled context and exit; the buggy version leaves them parked on the
-	// receive, so live never falls to one and this wait fails.
+	// Retire three of the four idle workers. ScaleWorkers must not return until
+	// they have acknowledged cancellation; otherwise a cancel-vs-ready-job
+	// select can still let one steal work submitted immediately after return.
 	if err := wp.ScaleWorkers(survivorWorkers); err != nil {
 		t.Fatalf("ScaleWorkers(%d): %v", survivorWorkers, err)
 	}
-	waitForLiveWorkers(t, wp, survivorWorkers)
+	if live := wp.GetLiveWorkerCount(); live != survivorWorkers {
+		t.Fatalf("live workers when ScaleWorkers returned = %d, want %d", live, survivorWorkers)
+	}
+	if draining := wp.GetDrainingWorkerCount(); draining != 0 {
+		t.Fatalf("draining workers when idle downscale returned = %d, want 0", draining)
+	}
 
 	for i := 0; i < newJobs; i++ {
 		if ok := wp.Submit(WriteJob{Rows: [][]any{{i}}, Seq: int64(i)}); !ok {
@@ -175,7 +180,9 @@ func TestRapidIdleScaleDownUpRespectsLiveCeiling(t *testing.T) {
 	if err := wp.ScaleWorkers(1); err != nil {
 		t.Fatalf("ScaleWorkers(1): %v", err)
 	}
-	waitForLiveWorkers(t, wp, 1)
+	if live := wp.GetLiveWorkerCount(); live != 1 {
+		t.Fatalf("live workers when idle downscale returned = %d, want 1", live)
+	}
 	if err := wp.ScaleWorkers(peakWorkers); err != nil {
 		t.Fatalf("ScaleWorkers(%d): %v", peakWorkers, err)
 	}
@@ -231,12 +238,17 @@ func TestGetLiveWorkerCountTracksStartAndScale(t *testing.T) {
 	if err := wp.ScaleWorkers(1); err != nil {
 		t.Fatalf("ScaleWorkers(1): %v", err)
 	}
-	waitForLiveWorkers(t, wp, 1)
+	if live := wp.GetLiveWorkerCount(); live != 1 {
+		t.Fatalf("live workers when ScaleWorkers returned = %d, want 1", live)
+	}
 	if got := wp.NumWriters(); got != 1 {
 		t.Fatalf("NumWriters() after downscale = %d, want 1", got)
 	}
 	if got := wp.GetWorkerCount(); got != 1 {
 		t.Fatalf("GetWorkerCount() after downscale = %d, want 1", got)
+	}
+	if got := wp.GetDrainingWorkerCount(); got != 0 {
+		t.Fatalf("GetDrainingWorkerCount() after idle downscale = %d, want 0", got)
 	}
 
 	wp.Wait()

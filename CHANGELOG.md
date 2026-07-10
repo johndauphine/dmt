@@ -107,12 +107,12 @@ All notable changes to this project will be documented in this file.
   instead of silently re-sampling on resume (#647).
 
 - Writer downscale no longer lets retired idle workers consume new jobs. A
-  scaled-down worker now exits at the receive before dequeuing another chunk
-  instead of pulling one more job and only then noticing its canceled context,
-  so a 4→1 downscale bounds new work to the single survivor. Workers that are
-  mid-write when retired still finish that one committed chunk exactly once.
-  `GetLiveWorkerCount` exposes the actual live goroutine count for metrics, and
-  `NumWriters`/`GetWorkerCount` semantics are documented (#642).
+  downscale now waits for idle retirees to acknowledge cancellation before it
+  returns, closing the cancel-vs-ready-job select race, while workers already
+  mid-write finish that one committed chunk exactly once. Busy retirees are
+  tracked as draining; a rapid 4→1→4 defers replacement goroutines until they
+  exit, so the live ceiling never reaches seven. Desired, active, draining, and
+  live worker-count semantics are documented and observable (#642).
 
 - Migration run and resume now acquire an exclusive lease for the canonical
   target driver/host/database/schema before any target mutation. Live owners
