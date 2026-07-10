@@ -89,6 +89,20 @@ func (s *State) migrate() error {
 		PRIMARY KEY (source_schema, table_name, target_schema)
 	);
 
+	-- Immutable incremental watermark fence H1, sampled once when a run starts
+	-- and read back unchanged on resume. Reads replay updated_at > T0 without a
+	-- fragile engine-specific SQL upper bound, while the persisted sync watermark
+	-- never advances past H1 or unfinished work (#647).
+	CREATE TABLE IF NOT EXISTS incremental_fences (
+		run_id TEXT NOT NULL,
+		source_schema TEXT NOT NULL,
+		table_name TEXT NOT NULL,
+		target_schema TEXT NOT NULL,
+		upper_fence TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (run_id, source_schema, table_name, target_schema)
+	);
+
 	CREATE TABLE IF NOT EXISTS delete_reconciliations (
 		source_schema TEXT NOT NULL,
 		target_schema TEXT NOT NULL,

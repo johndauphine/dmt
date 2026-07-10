@@ -492,6 +492,17 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 		return 0, fmt.Errorf("deleting old fallback events: %w", err)
 	}
 
+	// Incremental fences are run-scoped and have no foreign-key cascade.
+	_, err = s.db.Exec(`
+		DELETE FROM incremental_fences WHERE run_id IN (
+			SELECT id FROM runs
+			WHERE completed_at < ? AND resumable = 0
+		)
+	`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("deleting old incremental fences: %w", err)
+	}
+
 	// Delete old delete-reconciliation table summaries.
 	_, err = s.db.Exec(`
 		DELETE FROM delete_reconciliation_tables WHERE run_id IN (

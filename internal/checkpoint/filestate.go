@@ -88,6 +88,13 @@ type fileStateData struct {
 	//	      public: 2026-05-12T08:00:00Z
 	SyncTimestamps map[string]map[string]map[string]time.Time `yaml:"sync_timestamps,omitempty"`
 
+	// IncrementalFences records the immutable per-run upper fence for
+	// incremental sync (#647), keyed run_id -> sourceSchema -> table ->
+	// targetSchema -> H1. Written once per run and read back on resume so the
+	// watermark cap is stable; nested for the same quoted-identifier safety as
+	// SyncTimestamps.
+	IncrementalFences map[string]map[string]map[string]map[string]time.Time `yaml:"incremental_fences,omitempty"`
+
 	// FallbackEvents persists AI fallback occurrences (#176) for
 	// cross-process status visibility - the Airflow polling case where
 	// ``dmt status'' is invoked in a separate process from ``dmt run''
@@ -428,6 +435,57 @@ func (fs *FileState) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema s
 	}
 	fs.state.SyncTimestamps[sourceSchema][tableName][targetSchema] = ts
 	return fs.save()
+}
+
+// GetIncrementalFence returns the immutable per-run upper fence for a table's
+// incremental sync, or nil if none was persisted for this run (#647).
+func (fs *FileState) GetIncrementalFence(runID, sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	var fence *time.Time
+	err := fs.withProcessLock(func() error {
+		if err := fs.reloadLocked(); err != nil {
+			return err
+		}
+		if fs.state == nil || fs.state.IncrementalFences == nil {
+			return nil
+		}
+		ts, ok := fs.state.IncrementalFences[runID][sourceSchema][tableName][targetSchema]
+		if ok {
+			fence = &ts
+		}
+		return nil
+	})
+	return fence, err
+}
+
+// SetIncrementalFence records the immutable upper fence for this run's
+// incremental sync of a table. It is a no-op if a fence already exists for the
+// same run/table, so a resume never overwrites the original watermark cap
+// (#647).
+func (fs *FileState) SetIncrementalFence(runID, sourceSchema, tableName, targetSchema string, upper time.Time) error {
+	return fs.withRunLeaseMutation("set incremental fence", func() error {
+		if fs.state.RunID != runID {
+			return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, runID)
+		}
+		if fs.state.IncrementalFences == nil {
+			fs.state.IncrementalFences = make(map[string]map[string]map[string]map[string]time.Time)
+		}
+		if _, ok := fs.state.IncrementalFences[runID][sourceSchema][tableName][targetSchema]; ok {
+			return nil // Immutable once set for a run.
+		}
+		if fs.state.IncrementalFences[runID] == nil {
+			fs.state.IncrementalFences[runID] = make(map[string]map[string]map[string]time.Time)
+		}
+		if fs.state.IncrementalFences[runID][sourceSchema] == nil {
+			fs.state.IncrementalFences[runID][sourceSchema] = make(map[string]map[string]time.Time)
+		}
+		if fs.state.IncrementalFences[runID][sourceSchema][tableName] == nil {
+			fs.state.IncrementalFences[runID][sourceSchema][tableName] = make(map[string]time.Time)
+		}
+		fs.state.IncrementalFences[runID][sourceSchema][tableName][targetSchema] = upper.UTC()
+		return nil
+	})
 }
 
 func (fs *FileState) SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentRecord) error {

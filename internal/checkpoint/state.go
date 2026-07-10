@@ -202,6 +202,46 @@ func (s *State) UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string
 	return err
 }
 
+// GetIncrementalFence returns the immutable upper fence recorded for this run's
+// incremental sync of a table, or nil if none was persisted (fresh run). See
+// SetIncrementalFence (#647).
+func (s *State) GetIncrementalFence(runID, sourceSchema, tableName, targetSchema string) (*time.Time, error) {
+	var tsStr sql.NullString
+	err := s.db.QueryRow(`
+		SELECT upper_fence FROM incremental_fences
+		WHERE run_id = ? AND source_schema = ? AND table_name = ? AND target_schema = ?
+	`, runID, sourceSchema, tableName, targetSchema).Scan(&tsStr)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !tsStr.Valid {
+		return nil, nil
+	}
+	ts, err := time.Parse(time.RFC3339Nano, tsStr.String)
+	if err != nil {
+		return nil, fmt.Errorf("parsing incremental fence for run %s table %s.%s: %w", runID, sourceSchema, tableName, err)
+	}
+	return &ts, nil
+}
+
+// SetIncrementalFence records the immutable upper fence for this run's
+// incremental sync of a table. It is written once when the run first builds the
+// table's job; the ON CONFLICT DO NOTHING keeps a resume of the same run from
+// overwriting the original fence, so the watermark cap stays stable (#647).
+func (s *State) SetIncrementalFence(runID, sourceSchema, tableName, targetSchema string, upper time.Time) error {
+	return s.withRunLeaseTx(runID, "set incremental fence", func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO incremental_fences (run_id, source_schema, table_name, target_schema, upper_fence, created_at)
+			VALUES (?, ?, ?, ?, ?, datetime('now'))
+			ON CONFLICT(run_id, source_schema, table_name, target_schema) DO NOTHING
+		`, runID, sourceSchema, tableName, targetSchema, upper.UTC().Format(time.RFC3339Nano))
+		return err
+	})
+}
+
 // SaveSchemaSnapshot records the source schema shape for one table after a
 // successful migration run. Snapshots are append-only; GetLatestSchemaSnapshots
 // chooses the newest row for each table so history cleanup does not erase the

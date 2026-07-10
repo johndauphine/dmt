@@ -89,6 +89,11 @@ type StateBackend interface {
 	GetLastSyncTimestamp(sourceSchema, tableName, targetSchema string) (*time.Time, error)
 	UpdateSyncTimestamp(sourceSchema, tableName, targetSchema string, ts time.Time) error
 
+	// Immutable incremental upper fence, per run (#647). Set once when a run
+	// first builds a table's incremental job; read back unchanged on resume.
+	GetIncrementalFence(runID, sourceSchema, tableName, targetSchema string) (*time.Time, error)
+	SetIncrementalFence(runID, sourceSchema, tableName, targetSchema string, upper time.Time) error
+
 	// Delete reconciliation state (#351). Stores the last successful
 	// reconciliation per source/target schema pair so interval scheduling is
 	// stable across retries, resumes, and separate CLI invocations.
