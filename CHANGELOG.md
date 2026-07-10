@@ -87,6 +87,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Migration run and resume now acquire an exclusive lease for the canonical
+  target driver/host/database/schema before any target mutation. Live owners
+  reject competing processes, stale takeover atomically increments a fencing
+  generation, and former owners can no longer update run, task, or transfer
+  progress state. SQLite and YAML file state provide equivalent cross-process
+  ownership semantics, with lease-loss cancellation and recovery guidance
+  (#638).
+
 - Required checkpoint writes now fail closed. Transfer tasks are persisted
   before target DDL/truncation, task creation and status failures cannot fall
   through with task ID zero, unresolved periodic/final progress failures stop
