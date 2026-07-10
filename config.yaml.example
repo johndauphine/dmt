@@ -72,7 +72,12 @@ migration:
   create_check_constraints: true # Create CHECK constraints
 
   # Consistency options
-  strict_consistency: false     # Set true to disable NOLOCK (slower but consistent reads)
+  # strict_consistency pins every page of one table to a stable read transaction
+  # (#640). It forces one reader and disables table partitioning; PostgreSQL /
+  # InnoDB MySQL use repeatable-read snapshots (other MySQL engines are rejected), SQL Server uses serializable locks, and
+  # SQLite uses a serializable read transaction. Unsupported sources fail before
+  # target mutation. Long snapshots can retain MVCC history or block writers.
+  strict_consistency: false
 
   # Schema drift reporting (#305). DMT compares the current source
   # schema to the last successful run's snapshot and logs a structured

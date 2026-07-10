@@ -33,6 +33,14 @@ func Execute(
 		adjuster = writeErrorAdjuster[0]
 	}
 
+	// A strict snapshot is table-scoped. Partition jobs would each open their
+	// own transaction and therefore could not represent one stable table view.
+	// JobBuilder prevents newly planned strict jobs from being partitioned, and
+	// this runtime guard protects legacy checkpoints and direct callers too.
+	if cfg.Migration.StrictConsistency && job.Partition != nil {
+		return nil, fmt.Errorf("strict_consistency does not support partitioned jobs for %s; rebuild the run with one unpartitioned job per table", job.Table.FullName())
+	}
+
 	// Track table start/end for accurate progress display
 	prog.StartTable(job.Table.Name)
 	defer prog.EndTable(job.Table.Name)
@@ -80,6 +88,19 @@ func Execute(
 			resumeCompositeRangeState = ""
 			job.ReplayPossible = true
 		}
+	}
+
+	// A strict-consistency transfer is one stable table view, not merely a
+	// different table hint. Start and pin the source transaction before any
+	// target preparation so an unsupported source fails without truncating data.
+	// The transaction remains open through every page and is released on return.
+	if cfg.Migration.StrictConsistency {
+		strictCtx, releaseSnapshot, err := beginStrictSourceSnapshot(ctx, srcPool, job.Table)
+		if err != nil {
+			return nil, err
+		}
+		ctx = strictCtx
+		defer releaseSnapshot()
 	}
 
 	// Handle truncation based on job type (skip if resuming or in upsert mode)

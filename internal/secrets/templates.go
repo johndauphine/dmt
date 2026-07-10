@@ -145,7 +145,7 @@ migration_defaults:
   create_check_constraints: false # Create CHECK constraints
 
   # Consistency and validation
-  strict_consistency: false       # Use table locks instead of NOLOCK/MVCC
+  strict_consistency: false       # Pin each table to one stable source transaction (#640)
   sample_validation: false        # Validate sample data after migration
   sample_size: 100                # Rows to sample for validation
 

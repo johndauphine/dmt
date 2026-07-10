@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -92,5 +93,45 @@ func TestCreateRowNumberPartitionJobsClearsProgressWhenBoundariesShift(t *testin
 		if progress != nil {
 			t.Fatalf("partition %d progress survived boundary shift: %+v", job.Partition.PartitionID, progress)
 		}
+	}
+}
+
+func TestStrictConsistencyBuildsOneUnpartitionedJobPerTable(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	const runID = "strict-single-job"
+	if err := state.CreateRun(runID, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	table := source.Table{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		RowCount:   1_000_000,
+	}
+	builder := &JobBuilder{
+		state: state,
+		config: &config.Config{Migration: config.MigrationConfig{
+			StrictConsistency:   true,
+			ChunkSize:           1_000,
+			MaxPartitions:       8,
+			LargeTableThreshold: 100,
+		}},
+	}
+	result := &BuildResult{
+		TableJobCounts: make(map[string]int),
+		ProgressSaver:  checkpoint.NewProgressSaver(state),
+	}
+	if err := builder.createJobsForTable(context.Background(), runID, table, nil, result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Jobs) != 1 || result.Jobs[0].Partition != nil {
+		t.Fatalf("strict_consistency jobs = %+v, want exactly one unpartitioned job", result.Jobs)
+	}
+	if result.TableJobCounts[table.Name] != 1 {
+		t.Fatalf("table job count = %d, want 1", result.TableJobCounts[table.Name])
 	}
 }

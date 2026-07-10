@@ -2,7 +2,6 @@ package transfer
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -34,7 +33,7 @@ func executeRowNumberPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
-	db := srcPool.DB()
+	db := sourceQueryerFor(ctx, srcPool.DB())
 
 	// Use dialect for database-specific SQL syntax
 	srcDialect := driver.GetDialect(srcPool.DBType())
@@ -161,7 +160,7 @@ func executeRowNumberPagination(
 // via the dialect's ROW_NUMBER query. Composite/varchar PKs give no range
 // to split, so there is exactly one reader.
 type rowNumberProducer struct {
-	db         *sql.DB
+	db         sourceQueryer
 	dialect    driver.Dialect
 	colList    string
 	orderBy    string

@@ -9,6 +9,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `strict_consistency` now gives each source table one stable view across all
+  keyset, tuple-keyset, and ROW_NUMBER pages. It starts the source transaction
+  before target preparation, pins every query to it, forces one reader and one
+  unpartitioned job per table, and fails closed for unsupported sources. The
+  modes are PostgreSQL/InnoDB MySQL repeatable-read snapshots, SQL Server serializable
+  range locks, and SQLite serializable reads; non-InnoDB MySQL tables fail
+  before target mutation. Mutation-between-pages tests cover
+  SQLite and live PostgreSQL; docs now state the per-table guarantee and its
+  blocking/MVCC operational cost (#640).
+
 ### Added
 
 - Partial transfer outcomes now remain durably resumable: SQLite and YAML

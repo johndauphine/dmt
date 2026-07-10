@@ -2,7 +2,6 @@ package transfer
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -35,7 +34,7 @@ func executeKeysetPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
-	db := srcPool.DB()
+	db := sourceQueryerFor(ctx, srcPool.DB())
 	pkCol := job.Table.PrimaryKey[0]
 
 	// Use dialect for database-specific SQL syntax
@@ -87,6 +86,11 @@ func executeKeysetPagination(
 
 	numReaders := cfg.Migration.ParallelReaders
 	if numReaders < 1 {
+		numReaders = 1
+	}
+	if cfg.Migration.StrictConsistency {
+		// One sql.Tx pins one physical source connection. Serializing range
+		// reads through it is what makes every page share one table snapshot.
 		numReaders = 1
 	}
 
@@ -203,7 +207,7 @@ func keysetWorkRangeCount(minPK, maxPK any, numReaders, chunkSize int) int {
 // shared work queue (#615), each paginating its current range with an
 // explicit first-page lower-bound operator and pk <= range_max.
 type keysetProducer struct {
-	db         *sql.DB
+	db         sourceQueryer
 	dialect    driver.Dialect
 	colList    string
 	tableHint  string

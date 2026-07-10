@@ -3,7 +3,6 @@ package transfer
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -47,7 +46,7 @@ func executeCompositeKeysetPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
-	db := srcPool.DB()
+	db := sourceQueryerFor(ctx, srcPool.DB())
 
 	srcDialect := driver.GetDialect(srcPool.DBType())
 	if srcDialect == nil {
@@ -138,7 +137,7 @@ func executeCompositeKeysetPagination(
 
 // compositeKeysetProducer is the single reader for tuple keyset pagination.
 type compositeKeysetProducer struct {
-	db         *sql.DB
+	db         sourceQueryer
 	dialect    driver.Dialect
 	colList    string
 	tableHint  string

@@ -327,6 +327,14 @@ func (b *JobBuilder) usesTupleKeyset(t source.Table) bool {
 
 // createJobsForTable creates transfer jobs for a single table.
 func (b *JobBuilder) createJobsForTable(ctx context.Context, runID string, t source.Table, dateFilter *transfer.DateFilter, result *BuildResult) error {
+	if b.config.Migration.StrictConsistency {
+		// A strict snapshot is one source transaction per table. Partition jobs
+		// would open independent snapshots, so disable both table partitioning
+		// and the resulting cross-partition concurrency for this mode (#640).
+		logging.Debug("Table %s: strict_consistency uses one unpartitioned source snapshot", t.Name)
+		return b.createSingleJob(runID, t, dateFilter, result)
+	}
+
 	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {
 		return b.createKeysetPartitionJobs(ctx, runID, t, dateFilter, result)
 	}
