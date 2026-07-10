@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- PostgreSQL `strict_consistency` keyset transfers can now use multiple source
+  readers without giving up their stable table view. DMT exports the lead
+  transaction's MVCC snapshot and imports it as the first statement of every
+  reader transaction, while reserving one source connection for the lead and
+  clamping readers to the remaining pool capacity. Other engines retain the
+  existing single-reader strict path, and strict table partitioning remains
+  disabled pending a migration-scoped snapshot epoch (#662).
+
 - Strict full-table transfers now persist the exact `COUNT(*)` observed inside
   their pinned source transaction. Validation compares the target with that
   snapshot count, so a faithful copy of a busy source no longer fails solely

@@ -84,14 +84,25 @@ func executeKeysetPagination(
 		}
 	}
 
-	numReaders := cfg.Migration.ParallelReaders
-	if numReaders < 1 {
-		numReaders = 1
+	numReaders, joinSnapshotReaders, readerCountClamped := strictKeysetReaderPlan(
+		cfg.Migration.StrictConsistency,
+		srcPool.DBType(),
+		cfg.Migration.ParallelReaders,
+		cfg.Migration.MaxSourceConnections,
+	)
+	if readerCountClamped && strictSnapshotExportSupported(srcPool.DBType()) {
+		logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lead snapshot transaction reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
 	}
-	if cfg.Migration.StrictConsistency {
-		// One sql.Tx pins one physical source connection. Serializing range
-		// reads through it is what makes every page share one table snapshot.
-		numReaders = 1
+	if cfg.Migration.StrictConsistency && strictSnapshotExportSupported(srcPool.DBType()) && !joinSnapshotReaders && cfg.Migration.MaxSourceConnections > 0 {
+		logging.Warn("Table %s: strict_consistency uses its lead snapshot transaction as the sole reader because max_source_connections=%d leaves no connection for an imported snapshot reader", job.Table.Name, cfg.Migration.MaxSourceConnections)
+	}
+
+	var queryerForWorker sourceQueryerFactory
+	if joinSnapshotReaders {
+		queryerForWorker = sourceQueryerFactoryFor(ctx)
+		if queryerForWorker == nil {
+			return nil, fmt.Errorf("strict_consistency PostgreSQL snapshot reader factory is unavailable")
+		}
 	}
 
 	// Split PK range into work-stealing sub-ranges (#615) — unless a
@@ -108,19 +119,20 @@ func executeKeysetPagination(
 	}
 
 	producer := &keysetProducer{
-		db:             db,
-		dialect:        srcDialect,
-		colList:        colList,
-		tableHint:      tableHint,
-		job:            job,
-		pkCol:          pkCol,
-		pkIdx:          pkIdx,
-		valueConvs:     valueConvs,
-		convIdx:        convIdx,
-		numCols:        len(cols),
-		pkRanges:       pkRanges,
-		rangeCompleted: rangeCompleted,
-		numReaders:     numReaders,
+		db:               db,
+		queryerForWorker: queryerForWorker,
+		dialect:          srcDialect,
+		colList:          colList,
+		tableHint:        tableHint,
+		job:              job,
+		pkCol:            pkCol,
+		pkIdx:            pkIdx,
+		valueConvs:       valueConvs,
+		convIdx:          convIdx,
+		numCols:          len(cols),
+		pkRanges:         pkRanges,
+		rangeCompleted:   rangeCompleted,
+		numReaders:       numReaders,
 	}
 
 	var coord *keysetCheckpointCoordinator
@@ -156,6 +168,30 @@ func executeKeysetPagination(
 			return job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount, coord.rangeState())
 		},
 	})
+}
+
+// strictKeysetReaderPlan returns the keyset worker count and whether each
+// worker must join the lead PostgreSQL snapshot. Other strict engines retain
+// their existing one-transaction, one-reader path. A configured limit of one
+// source connection leaves no room for a joined transaction, so the lead
+// itself remains the sole reader and the connection budget is still honored.
+func strictKeysetReaderPlan(strict bool, dbType string, requested, maxSourceConnections int) (readers int, joinSnapshotReaders, clamped bool) {
+	if requested < 1 {
+		requested = 1
+	}
+	if !strict || !strictSnapshotExportSupported(dbType) {
+		if strict {
+			return 1, false, requested > 1
+		}
+		return requested, false, false
+	}
+	if maxSourceConnections == 1 {
+		return 1, false, requested > 1
+	}
+	if maxSourceConnections > 1 && requested > maxSourceConnections-1 {
+		return maxSourceConnections - 1, true, true
+	}
+	return requested, true, false
 }
 
 // Work-stealing range sizing (#615). A static one-range-per-reader split
@@ -207,16 +243,17 @@ func keysetWorkRangeCount(minPK, maxPK any, numReaders, chunkSize int) int {
 // shared work queue (#615), each paginating its current range with an
 // explicit first-page lower-bound operator and pk <= range_max.
 type keysetProducer struct {
-	db         sourceQueryer
-	dialect    driver.Dialect
-	colList    string
-	tableHint  string
-	job        Job
-	pkCol      string
-	pkIdx      int
-	valueConvs []func(any) any
-	convIdx    []int
-	numCols    int
+	db               sourceQueryer
+	queryerForWorker sourceQueryerFactory
+	dialect          driver.Dialect
+	colList          string
+	tableHint        string
+	job              Job
+	pkCol            string
+	pkIdx            int
+	valueConvs       []func(any) any
+	convIdx          []int
+	numCols          int
 
 	pkRanges       []pkRange
 	rangeCompleted []bool
@@ -256,11 +293,22 @@ func (p *keysetProducer) produce(ctx context.Context, env pipelineEnv, out chan<
 		readerWg.Add(1)
 		go func(workerID int) {
 			defer readerWg.Done()
+			queryer := p.db
+			if p.queryerForWorker != nil {
+				var release func()
+				var err error
+				queryer, release, err = p.queryerForWorker(ctx, workerID)
+				if err != nil {
+					sendChunkOrCancel(ctx, out, chunkResult{err: fmt.Errorf("starting keyset reader %d: %w", workerID, err)})
+					return
+				}
+				defer release()
+			}
 			for rangeID := range queue {
 				// Single writer per index — each goroutine owns its slot.
 				p.rangesPerWorker[workerID]++
 				pkr := p.pkRanges[rangeID]
-				rows, ok := p.readRange(ctx, env, out, rangeID, pkr)
+				rows, ok := p.readRange(ctx, queryer, env, out, rangeID, pkr)
 				p.rowsPerWorker[workerID] += rows
 				if !ok {
 					return
@@ -277,7 +325,7 @@ func (p *keysetProducer) produce(ctx context.Context, env pipelineEnv, out chan<
 // processed it. Returns false when the reader should stop pulling further
 // ranges (error sent or context cancelled), true when the range is done.
 // The first return is the number of rows read from this range.
-func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out chan<- chunkResult, rangeID int, pkr pkRange) (int64, bool) {
+func (p *keysetProducer) readRange(ctx context.Context, queryer sourceQueryer, env pipelineEnv, out chan<- chunkResult, rangeID int, pkr pkRange) (int64, bool) {
 	lastPK := pkr.minPK
 	inclusiveLowerBound := pkr.minInclusive
 	seq := int64(0)
@@ -306,7 +354,7 @@ func (p *keysetProducer) readRange(ctx context.Context, env pipelineEnv, out cha
 
 		// Time the query
 		queryStart := time.Now()
-		rows, err := p.db.QueryContext(ctx, query, args...)
+		rows, err := queryer.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
 		if err != nil {
 			sendChunkOrCancel(ctx, out, chunkResult{err: fmt.Errorf("keyset query: %w", err)})

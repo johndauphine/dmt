@@ -975,13 +975,16 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `strict_consistency` | No | `false` | Read each source table from one stable transaction snapshot. It serializes readers and disables table partitioning for that table. |
+| `strict_consistency` | No | `false` | Read each source table from one stable transaction snapshot. PostgreSQL keyset readers may run in parallel from an exported snapshot; table partitioning remains disabled. |
 
 > **Consistency scope (#640).** `strict_consistency` starts a source
 > transaction before target preparation, then routes every page of that table
-> through the same pinned transaction. To make that one view meaningful, dmt
-> uses one source reader and one unpartitioned job per table in this mode.
-> PostgreSQL and InnoDB-backed MySQL use repeatable-read snapshots (non-InnoDB
+> through one stable view. PostgreSQL keyset transfers export that lead
+> transaction's snapshot and import it into each reader transaction, preserving
+> configured reader parallelism up to `max_source_connections - 1`; the lead
+> occupies the reserved connection. Other engines use one source reader. DMT
+> still uses one unpartitioned job per table in this mode. PostgreSQL and
+> InnoDB-backed MySQL use repeatable-read snapshots (non-InnoDB
 > MySQL tables are rejected); SQL Server uses
 > serializable range locks; SQLite uses a serializable read transaction.
 > Concurrent source writes either remain outside the snapshot, block, or cause
