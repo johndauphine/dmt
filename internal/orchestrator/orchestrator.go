@@ -258,7 +258,7 @@ func (o *Orchestrator) endPhaseSpan() {
 //
 // Status taxonomy — these are the values the audit log's `status` field
 // can carry on `run_complete` / `resume_complete`. Documented in
-// docs/AUDIT-LOG.md; downstream consumers should accept all four:
+// docs/AUDIT-LOG.md; downstream consumers should accept all five:
 //   - "success"   — runErr is nil
 //   - "failed"    — runErr is non-nil and not a context cancellation;
 //     covers preflight, schema, transfer, validation errors
@@ -266,12 +266,12 @@ func (o *Orchestrator) endPhaseSpan() {
 //     (or wraps one of those). Operationally distinct from
 //     "failed" because the operator can `dmt resume`.
 //   - "panic"     — go runtime panic during the run; rec is non-nil
+//   - "partial"   — one or more tables failed and the durable outcome
+//     remains eligible for `dmt resume`
 //
 // Resumable taxonomy:
-//   - resumable=true  for "cancelled" (operator interrupted the run
-//     intentionally; `dmt resume` is the right next
-//     step — leave the audit file 0600 so resume can
-//     reopen it)
+//   - resumable=true  for "cancelled" and "partial" (`dmt resume` is the
+//     right next step — leave the audit file 0600 so resume can reopen it)
 //   - resumable=false otherwise (chmod 0444 locks the file as the
 //     terminal record of what happened)
 func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable bool) {
@@ -282,6 +282,10 @@ func classifyRunOutcome(runErr error, rec any) (status, errStr string, resumable
 		return "success", "", false
 	}
 	errStr = runErr.Error()
+	var partialErr *PartialMigrationError
+	if errors.As(runErr, &partialErr) {
+		return "partial", errStr, true
+	}
 	// Treat context cancellation / deadline as resumable so an
 	// interrupted run's audit file stays writable for the eventual
 	// `dmt resume`. The exitcodes package recognizes "context
@@ -517,6 +521,23 @@ func (o *Orchestrator) notifyCompletionWithErrors(
 func (o *Orchestrator) completeRunRequired(runID, status, errorMessage string) error {
 	err := o.state.CompleteRun(runID, status, errorMessage)
 	return checkpoint.RequiredWrite(fmt.Sprintf("recording run %s terminal status %q", runID, status), err)
+}
+
+func (o *Orchestrator) completeRunResumableRequired(runID, status, errorMessage, reason string) error {
+	err := o.state.CompleteRunResumable(runID, status, errorMessage, reason)
+	return checkpoint.RequiredWrite(fmt.Sprintf("recording run %s resumable outcome %q", runID, status), err)
+}
+
+func (o *Orchestrator) completePartialRunRequired(runID, errorMessage string) error {
+	if o.config.Migration.AllowPartial {
+		return o.completeRunRequired(runID, "partial", errorMessage)
+	}
+	return o.completeRunResumableRequired(
+		runID,
+		"partial",
+		errorMessage,
+		checkpoint.RunResumabilityPartialFailure,
+	)
 }
 
 func (o *Orchestrator) markRunAsResumedRequired(runID string) error {

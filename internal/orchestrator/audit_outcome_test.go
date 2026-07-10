@@ -68,6 +68,15 @@ func TestClassifyRunOutcome(t *testing.T) {
 			wantErr:  "transfer: context canceled",
 			wantRes:  true,
 		},
+		{
+			name: "partial table failure — resumable",
+			runErr: &PartialMigrationError{Failed: []TableFailure{
+				{TableName: "orders", Error: errors.New("target rejected row")},
+			}},
+			wantStat: "partial",
+			wantErr:  "migration completed with 1 failed table(s): orders",
+			wantRes:  true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -467,7 +467,8 @@ pre-#248 silent partial-as-success behavior is gone.
 
 **What it means**: One or more tables failed but others succeeded.
 Pre-#248, Airflow / k8s jobs would treat this as green. They don't
-anymore.
+anymore. The run records a terminal attempt outcome of `partial` while
+remaining `resumable: true`; outcome and recovery eligibility are separate.
 
 **Recover by**:
 
@@ -483,7 +484,20 @@ anymore.
 If you genuinely want partial migrations to exit 0 (e.g., you
 explicitly tolerate per-table failures), set `migration.allow_partial:
 true` in the config. This is an explicit opt-in, not a default. Most
-operators should never need it.
+operators should never need it. This also accepts the partial outcome by
+recording `resumable: false`, so it will not be selected automatically later.
+
+If the correct decision is to stop retrying this run and start over, abandon
+it explicitly without deleting checkpoint history:
+
+```bash
+dmt --config production.yaml resume --abandon \
+  --abandon-reason "restoring target backup and starting over"
+```
+
+Abandonment is target-scoped and fenced by the same live-owner lease as
+`run`/`resume`. It preserves a partial outcome, records `resumable: false`, and
+keeps the reason visible in `history --run`.
 
 **Verify the fix**: `dmt resume` exits 0; `dmt status --json` reports
 `"status":"success"` with `tables_failed: 0`.
@@ -814,12 +828,14 @@ partial state can't even be queried:
 2. Drop the target schema's tables (or restore from the backup —
    restoring is cleaner because it gets the pre-migration indexes,
    constraints, and sequences back).
-3. Clear the dmt state for the failed run so resume doesn't latch
-   onto it:
+3. Explicitly abandon the resumable run so resume does not select it again:
    ```bash
-   sqlite3 ~/.dmt/migrate.db "UPDATE runs SET status='failed' WHERE status='running'"
+   dmt --config production.yaml resume --abandon \
+     --abandon-reason "target restored from backup; starting fresh"
    ```
-   (For file-state deployments: `rm <state-file>`.)
+   Add the same global `--state-file <path>` used by the migration for a
+   file-state deployment. Do not delete the YAML file: it also carries sync
+   timestamps, schema snapshots, and lease generations.
 4. Re-run from scratch:
    ```bash
    dmt run --config production.yaml --confirm-backup

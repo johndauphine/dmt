@@ -143,6 +143,8 @@ var Registry = []CommandSpec{
 	{Path: "resume", Status: TUISupported, Flags: []FlagSpec{
 		{Name: "force-resume", Status: TUISupported},   // /resume --force-resume
 		{Name: "skip-preflight", Status: TUISupported}, // /resume --skip-preflight
+		{Name: "abandon", Status: TUICLIOnly, Ref: "destructive checkpoint administration remains explicit CLI-only"},
+		{Name: "abandon-reason", Status: TUICLIOnly, Ref: "metadata for CLI-only --abandon"},
 	}},
 	{Path: "status", Status: TUISupported, Flags: flags("json")},
 	{Path: "validate", Status: TUISupported, Flags: []FlagSpec{

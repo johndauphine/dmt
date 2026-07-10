@@ -51,6 +51,8 @@ func (o *Orchestrator) ShowStatus() error {
 	if phase == "transferring" && running == 0 && (pending > 0 || failed > 0) {
 		fmt.Printf("Run: %s\n", run.ID)
 		fmt.Printf("Status: interrupted (%d/%d tasks completed)\n", success, total)
+		fmt.Printf("Outcome: %s\n", run.Status)
+		fmt.Printf("Resumable: %t (%s)\n", run.Resumable, run.ResumabilityReason)
 		fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
 		fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
 			total, pending, running, success, failed)
@@ -61,6 +63,7 @@ func (o *Orchestrator) ShowStatus() error {
 
 	fmt.Printf("Run: %s\n", run.ID)
 	fmt.Printf("Status: %s (%s)\n", run.Status, phase)
+	fmt.Printf("Resumable: %t (%s)\n", run.Resumable, run.ResumabilityReason)
 	fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
 	if total > 0 {
 		fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
@@ -123,10 +126,12 @@ func (o *Orchestrator) buildResultFromRun(run *checkpoint.Run) (*MigrationResult
 	}
 
 	result := &MigrationResult{
-		RunID:      run.ID,
-		Status:     run.Status,
-		StartedAt:  run.StartedAt,
-		TableStats: make([]TableResult, 0),
+		RunID:              run.ID,
+		Status:             run.Status,
+		Resumable:          run.Resumable,
+		ResumabilityReason: run.ResumabilityReason,
+		StartedAt:          run.StartedAt,
+		TableStats:         make([]TableResult, 0),
 	}
 
 	if run.CompletedAt != nil && !run.CompletedAt.IsZero() {
@@ -303,6 +308,8 @@ func (o *Orchestrator) GetStatusResult() (*StatusResult, error) {
 	return &StatusResult{
 		RunID:                   run.ID,
 		Status:                  run.Status,
+		Resumable:               run.Resumable,
+		ResumabilityReason:      run.ResumabilityReason,
 		Phase:                   phase,
 		StartedAt:               run.StartedAt,
 		TablesTotal:             total,
@@ -350,6 +357,7 @@ func (o *Orchestrator) ShowDetailedStatus() error {
 
 	fmt.Printf("Run: %s\n", run.ID)
 	fmt.Printf("Status: %s (%s)\n", run.Status, phase)
+	fmt.Printf("Resumable: %t (%s)\n", run.Resumable, run.ResumabilityReason)
 	fmt.Printf("Started: %s\n", run.StartedAt.Format(time.RFC3339))
 	fmt.Printf("Tasks: %d total, %d pending, %d running, %d success, %d failed\n",
 		total, pending, running, success, failed)
@@ -437,16 +445,19 @@ func (o *Orchestrator) ShowHistory() error {
 		return nil
 	}
 
-	fmt.Printf("%-10s %-20s %-20s %-10s %-30s\n", "ID", "Started", "Completed", "Status", "Origin")
-	fmt.Println("--------------------------------------------------------------------------------------")
+	fmt.Printf("%-10s %-20s %-20s %-10s %-10s %-30s\n", "ID", "Started", "Completed", "Status", "Resumable", "Origin")
+	fmt.Println("-------------------------------------------------------------------------------------------------")
 
 	for _, r := range runs {
 		completed := "-"
 		if r.CompletedAt != nil {
 			completed = r.CompletedAt.Format("2006-01-02 15:04:05")
 		}
-		fmt.Printf("%-10s %-20s %-20s %-10s %-30s\n",
-			r.ID, r.StartedAt.Format("2006-01-02 15:04:05"), completed, r.Status, runOrigin(&r))
+		fmt.Printf("%-10s %-20s %-20s %-10s %-10t %-30s\n",
+			r.ID, r.StartedAt.Format("2006-01-02 15:04:05"), completed, r.Status, r.Resumable, runOrigin(&r))
+		if r.ResumabilityReason != "" {
+			fmt.Printf("           Resume: %s\n", r.ResumabilityReason)
+		}
 		if r.Error != "" {
 			fmt.Printf("           Error: %s\n", r.Error)
 		}
@@ -468,6 +479,10 @@ func (o *Orchestrator) ShowRunDetails(runID string) error {
 
 	fmt.Printf("Run ID:        %s\n", run.ID)
 	fmt.Printf("Status:        %s\n", run.Status)
+	fmt.Printf("Resumable:     %t\n", run.Resumable)
+	if run.ResumabilityReason != "" {
+		fmt.Printf("Resume reason: %s\n", run.ResumabilityReason)
+	}
 	if run.Error != "" {
 		fmt.Printf("Error:         %s\n", run.Error)
 	}

@@ -11,6 +11,13 @@ import (
 
 const sqliteRunTimeLayout = "2006-01-02 15:04:05"
 
+const (
+	RunResumabilityInProgress     = "run is in progress or was interrupted"
+	RunResumabilityPartialFailure = "one or more tables failed and can be retried"
+	RunResumabilityAllowedPartial = "partial outcome accepted by migration.allow_partial"
+	RunResumabilityAbandoned      = "run was explicitly abandoned by the operator"
+)
+
 // CreateRun creates a new migration run
 func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error {
 	configJSON, _ := json.Marshal(config)
@@ -20,9 +27,12 @@ func (s *State) CreateRun(id, sourceSchema, targetSchema string, config any, pro
 	configHash := hex.EncodeToString(hash[:8])
 
 	_, err := s.db.Exec(`
-		INSERT INTO runs (id, started_at, last_heartbeat, status, source_schema, target_schema, config, profile_name, config_path, config_hash)
-		VALUES (?, datetime('now'), datetime('now'), 'running', ?, ?, ?, ?, ?, ?)
-	`, id, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
+		INSERT INTO runs (
+			id, started_at, last_heartbeat, status, resumable, resumability_reason,
+			source_schema, target_schema, config, profile_name, config_path, config_hash
+		)
+		VALUES (?, datetime('now'), datetime('now'), 'running', 1, ?, ?, ?, ?, ?, ?, ?)
+	`, id, RunResumabilityInProgress, sourceSchema, targetSchema, string(configJSON), profileName, configPath, configHash)
 	return err
 }
 
@@ -46,16 +56,75 @@ func (s *State) UpdateRunConfig(id string, config any) error {
 
 // CompleteRun marks a run as complete
 func (s *State) CompleteRun(id string, status string, errorMsg string) error {
+	return s.completeRun(id, status, errorMsg, false, terminalResumabilityReason(status))
+}
+
+// CompleteRunResumable records an outcome while preserving the run's durable
+// checkpoints as eligible for a later resume. Partial transfer outcomes use
+// this path; accepted partials use CompleteRun and are terminal.
+func (s *State) CompleteRunResumable(id string, status string, errorMsg string, reason string) error {
+	if reason == "" {
+		reason = RunResumabilityPartialFailure
+	}
+	return s.completeRun(id, status, errorMsg, true, reason)
+}
+
+func (s *State) completeRun(id, status, errorMsg string, resumable bool, reason string) error {
 	return s.withRunLeaseTx(id, "complete run", func(tx *sql.Tx) error {
 		result, err := tx.Exec(`
-			UPDATE runs SET status = ?, completed_at = datetime('now'), error = ?
+			UPDATE runs
+			SET status = ?, completed_at = datetime('now'), error = ?,
+			    resumable = ?, resumability_reason = ?
 			WHERE id = ?
-		`, status, errorMsg, id)
+		`, status, errorMsg, resumable, reason, id)
 		if err != nil {
 			return err
 		}
 		return requireOneRun(result, id, "complete run")
 	})
+}
+
+// AbandonRun removes a recoverable run from automatic resume selection. A
+// running/interrupted run becomes a failed terminal outcome; a partial run
+// keeps its truthful partial outcome and completion timestamp.
+func (s *State) AbandonRun(id string, reason string) error {
+	reason = abandonResumabilityReason(reason)
+	return s.withRunLeaseTx(id, "abandon run", func(tx *sql.Tx) error {
+		result, err := tx.Exec(`
+			UPDATE runs
+			SET status = CASE WHEN status = 'running' THEN 'failed' ELSE status END,
+			    completed_at = COALESCE(completed_at, datetime('now')),
+			    error = CASE WHEN status = 'running' THEN ? ELSE error END,
+			    resumable = 0,
+			    resumability_reason = ?
+			WHERE id = ? AND resumable = 1
+		`, reason, reason, id)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return fmt.Errorf("run %s is not resumable or does not exist", id)
+		}
+		return nil
+	})
+}
+
+func terminalResumabilityReason(status string) string {
+	if status == "partial" {
+		return RunResumabilityAllowedPartial
+	}
+	return fmt.Sprintf("run completed with terminal outcome %s", status)
+}
+
+func abandonResumabilityReason(reason string) string {
+	if reason == "" {
+		return RunResumabilityAbandoned
+	}
+	return RunResumabilityAbandoned + ": " + reason
 }
 
 // UpdateRunHeartbeat records that a running process still owns a run.
@@ -94,16 +163,19 @@ func (s *State) GetLastIncompleteRunForTarget(target MigrationTarget) (*Run, err
 func (s *State) getLastIncompleteRun(targetPredicate string, args []any) (*Run, error) {
 	var r Run
 	var startedAtStr string
-	var profileName, configPath, phase, configHash, lastHeartbeat, configStr sql.NullString
+	var completedAt, profileName, configPath, phase, configHash, lastHeartbeat, configStr, resumabilityReason, errorMsg sql.NullString
+	var resumable int
 	query := `
-		SELECT id, started_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema,
+		SELECT id, started_at, completed_at, status, COALESCE(phase, 'initializing'), source_schema, target_schema,
 		       profile_name, config_path, config_hash, last_heartbeat, config,
+		       COALESCE(resumable, 0), resumability_reason, error,
 		       COALESCE(lease_target_key, ''), COALESCE(lease_owner_token, ''), COALESCE(lease_generation, 0)
-		FROM runs WHERE status = 'running'
+		FROM runs WHERE resumable = 1
 	` + targetPredicate + `
 		ORDER BY started_at DESC, rowid DESC LIMIT 1
 	`
-	err := s.db.QueryRow(query, args...).Scan(&r.ID, &startedAtStr, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat, &configStr,
+	err := s.db.QueryRow(query, args...).Scan(&r.ID, &startedAtStr, &completedAt, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &profileName, &configPath, &configHash, &lastHeartbeat, &configStr,
+		&resumable, &resumabilityReason, &errorMsg,
 		&r.LeaseTargetKey, &r.LeaseOwnerToken, &r.LeaseGeneration)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -113,6 +185,10 @@ func (s *State) getLastIncompleteRun(targetPredicate string, args []any) (*Run, 
 	}
 	// Parse SQLite datetime string
 	r.StartedAt, _ = time.Parse(sqliteRunTimeLayout, startedAtStr)
+	if completedAt.Valid {
+		completed, _ := time.Parse(sqliteRunTimeLayout, completedAt.String)
+		r.CompletedAt = &completed
+	}
 	r.LastHeartbeat = r.StartedAt
 	if lastHeartbeat.Valid && lastHeartbeat.String != "" {
 		if t, err := time.Parse(sqliteRunTimeLayout, lastHeartbeat.String); err == nil {
@@ -133,6 +209,13 @@ func (s *State) getLastIncompleteRun(targetPredicate string, args []any) (*Run, 
 	}
 	if configStr.Valid {
 		r.Config = configStr.String
+	}
+	r.Resumable = resumable != 0
+	if resumabilityReason.Valid {
+		r.ResumabilityReason = resumabilityReason.String
+	}
+	if errorMsg.Valid {
+		r.Error = errorMsg.String
 	}
 	return &r, nil
 }
@@ -191,7 +274,7 @@ func (s *State) HasSuccessfulRunAfter(run *Run) (bool, error) {
 
 // runHistoryColumns is the shared SELECT list for history reads; scanRunRows
 // scans exactly these columns in order.
-const runHistoryColumns = "id, started_at, completed_at, last_heartbeat, status, phase, source_schema, target_schema, config, profile_name, config_path, error"
+const runHistoryColumns = "id, started_at, completed_at, last_heartbeat, status, COALESCE(resumable, 0), resumability_reason, phase, source_schema, target_schema, config, profile_name, config_path, error"
 
 // scanRunRows materializes runs from a query over runHistoryColumns.
 func scanRunRows(rows *sql.Rows) ([]Run, error) {
@@ -202,8 +285,9 @@ func scanRunRows(rows *sql.Rows) ([]Run, error) {
 		var completedAtStr sql.NullString
 		var lastHeartbeat sql.NullString
 		var configStr sql.NullString
-		var phase, profileName, configPath, errorMsg sql.NullString
-		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
+		var phase, profileName, configPath, errorMsg, resumabilityReason sql.NullString
+		var resumable int
+		if err := rows.Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &resumable, &resumabilityReason, &phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse(sqliteRunTimeLayout, startedAtStr)
@@ -231,6 +315,10 @@ func scanRunRows(rows *sql.Rows) ([]Run, error) {
 		}
 		if errorMsg.Valid {
 			r.Error = errorMsg.String
+		}
+		r.Resumable = resumable != 0
+		if resumabilityReason.Valid {
+			r.ResumabilityReason = resumabilityReason.String
 		}
 		runs = append(runs, r)
 	}
@@ -292,13 +380,15 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	var lastHeartbeat sql.NullString
 	var configStr sql.NullString
 
-	var profileName, configPath, errorMsg sql.NullString
+	var profileName, configPath, errorMsg, phase, resumabilityReason sql.NullString
+	var resumable int
 	err := s.db.QueryRow(`
-		SELECT id, started_at, completed_at, last_heartbeat, status, source_schema, target_schema,
-		       config, profile_name, config_path, error,
+		SELECT id, started_at, completed_at, last_heartbeat, status,
+		       COALESCE(resumable, 0), resumability_reason, phase,
+		       source_schema, target_schema, config, profile_name, config_path, error,
 		       COALESCE(lease_target_key, ''), COALESCE(lease_owner_token, ''), COALESCE(lease_generation, 0)
 		FROM runs WHERE id = ?
-	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg,
+	`, runID).Scan(&r.ID, &startedAtStr, &completedAtStr, &lastHeartbeat, &r.Status, &resumable, &resumabilityReason, &phase, &r.SourceSchema, &r.TargetSchema, &configStr, &profileName, &configPath, &errorMsg,
 		&r.LeaseTargetKey, &r.LeaseOwnerToken, &r.LeaseGeneration)
 
 	if err == sql.ErrNoRows {
@@ -331,6 +421,13 @@ func (s *State) GetRunByID(runID string) (*Run, error) {
 	if errorMsg.Valid {
 		r.Error = errorMsg.String
 	}
+	r.Resumable = resumable != 0
+	if resumabilityReason.Valid {
+		r.ResumabilityReason = resumabilityReason.String
+	}
+	if phase.Valid {
+		r.Phase = phase.String
+	}
 	return &r, nil
 }
 
@@ -348,7 +445,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 		DELETE FROM transfer_progress WHERE task_id IN (
 			SELECT id FROM tasks WHERE run_id IN (
 				SELECT id FROM runs
-				WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 			)
 		)
 	`, cutoff)
@@ -361,7 +458,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 		DELETE FROM task_outputs WHERE task_id IN (
 			SELECT id FROM tasks WHERE run_id IN (
 				SELECT id FROM runs
-				WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 			)
 		)
 	`, cutoff)
@@ -373,7 +470,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 	_, err = s.db.Exec(`
 		DELETE FROM ai_adjustments WHERE run_id IN (
 			SELECT id FROM runs
-			WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 		)
 	`, cutoff)
 	if err != nil {
@@ -388,7 +485,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 	_, err = s.db.Exec(`
 		DELETE FROM fallback_events WHERE run_id IN (
 			SELECT id FROM runs
-			WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 		)
 	`, cutoff)
 	if err != nil {
@@ -399,7 +496,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 	_, err = s.db.Exec(`
 		DELETE FROM delete_reconciliation_tables WHERE run_id IN (
 			SELECT id FROM runs
-			WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 		)
 	`, cutoff)
 	if err != nil {
@@ -410,7 +507,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 	_, err = s.db.Exec(`
 		DELETE FROM tasks WHERE run_id IN (
 			SELECT id FROM runs
-			WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 		)
 	`, cutoff)
 	if err != nil {
@@ -420,7 +517,7 @@ func (s *State) CleanupOldRuns(retainDays int) (int64, error) {
 	// Delete old runs
 	result, err := s.db.Exec(`
 		DELETE FROM runs
-		WHERE completed_at < ? AND status IN ('success', 'failed')
+				WHERE completed_at < ? AND resumable = 0
 	`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("deleting old runs: %w", err)

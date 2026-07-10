@@ -103,10 +103,12 @@ func TestStateBackendRejectsUnknownRequiredWriteTargets(t *testing.T) {
 			}
 			const unknownTaskID = int64(987654321)
 			for operation, err := range map[string]error{
-				"save progress":  backend.SaveTransferProgress(unknownTaskID, "orders", nil, int64(1), 1, 1, ""),
-				"update status":  backend.UpdateTaskStatus(unknownTaskID, "success", ""),
-				"clear progress": backend.ClearTransferProgress(unknownTaskID),
-				"complete run":   backend.CompleteRun("missing-run", "success", ""),
+				"save progress":          backend.SaveTransferProgress(unknownTaskID, "orders", nil, int64(1), 1, 1, ""),
+				"update status":          backend.UpdateTaskStatus(unknownTaskID, "success", ""),
+				"clear progress":         backend.ClearTransferProgress(unknownTaskID),
+				"complete run":           backend.CompleteRun("missing-run", "success", ""),
+				"complete resumable run": backend.CompleteRunResumable("missing-run", "partial", "boom", "retry"),
+				"abandon resumable run":  backend.AbandonRun("missing-run", "operator chose restart"),
 			} {
 				if err == nil {
 					t.Errorf("%s accepted an unknown write target", operation)
@@ -135,6 +137,9 @@ func TestStateBackendConformanceRunLifecycle(t *testing.T) {
 			}
 			if run.ID != runID || run.Status != "running" {
 				t.Fatalf("incomplete run = (%q, %q), want (%q, running)", run.ID, run.Status, runID)
+			}
+			if !run.Resumable || run.ResumabilityReason == "" {
+				t.Fatalf("new run resumability = (%v, %q), want true with reason", run.Resumable, run.ResumabilityReason)
 			}
 			if run.Phase != "initializing" {
 				t.Fatalf("initial phase = %q, want initializing", run.Phase)
@@ -205,6 +210,89 @@ func TestStateBackendConformanceRunLifecycle(t *testing.T) {
 			}
 			if gotRun == nil || gotRun.Status != "failed" || gotRun.Error != "boom" || gotRun.CompletedAt == nil {
 				t.Fatalf("completed run = %#v, want failed run with error and completed_at", gotRun)
+			}
+			if gotRun.Resumable || gotRun.ResumabilityReason == "" {
+				t.Fatalf("completed run resumability = (%v, %q), want false with reason", gotRun.Resumable, gotRun.ResumabilityReason)
+			}
+		})
+	}
+}
+
+func TestStateBackendConformancePartialRunResumability(t *testing.T) {
+	for _, tc := range conformanceBackends() {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := tc.open(t)
+
+			if err := backend.CreateRun("retry-partial", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.CompleteRunResumable(
+				"retry-partial",
+				"partial",
+				"one table failed",
+				RunResumabilityPartialFailure,
+			); err != nil {
+				t.Fatalf("CompleteRunResumable: %v", err)
+			}
+			run, err := backend.GetLastIncompleteRun()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run == nil || run.ID != "retry-partial" || run.Status != "partial" || !run.Resumable || run.CompletedAt == nil {
+				t.Fatalf("resumable partial = %#v, want selectable completed partial", run)
+			}
+
+			if err := backend.MarkRunAsResumed(run.ID); err != nil {
+				t.Fatalf("MarkRunAsResumed: %v", err)
+			}
+			run, err = backend.GetLastIncompleteRun()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run == nil || run.Status != "running" || run.CompletedAt != nil || !run.Resumable {
+				t.Fatalf("resumed transition = %#v, want active resumable run", run)
+			}
+
+			if err := backend.CompleteRunResumable(run.ID, "partial", "still failing", RunResumabilityPartialFailure); err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.AbandonRun(run.ID, "starting over from backup"); err != nil {
+				t.Fatalf("AbandonRun: %v", err)
+			}
+			selected, err := backend.GetLastIncompleteRun()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selected != nil {
+				t.Fatalf("abandoned partial selected automatically: %#v", selected)
+			}
+			abandoned, err := backend.GetRunByID(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if abandoned == nil || abandoned.Status != "partial" || abandoned.Resumable || !strings.Contains(abandoned.ResumabilityReason, "starting over") {
+				t.Fatalf("abandoned partial = %#v, want truthful partial/non-resumable outcome", abandoned)
+			}
+
+			if err := backend.CreateRun("accepted-partial", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.CompleteRun("accepted-partial", "partial", "allowed table failure"); err != nil {
+				t.Fatal(err)
+			}
+			selected, err = backend.GetLastIncompleteRun()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selected != nil {
+				t.Fatalf("accepted partial selected automatically: %#v", selected)
+			}
+			accepted, err := backend.GetRunByID("accepted-partial")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if accepted == nil || accepted.Resumable || accepted.ResumabilityReason != RunResumabilityAllowedPartial {
+				t.Fatalf("accepted partial = %#v, want explicit non-resumable reason", accepted)
 			}
 		})
 	}

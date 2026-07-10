@@ -44,22 +44,26 @@ func (fs *FileState) Capabilities() BackendCapabilities {
 
 // fileStateData is the YAML structure for the state file.
 type fileStateData struct {
-	RunID           string                `yaml:"run_id"`
-	StartedAt       time.Time             `yaml:"started_at"`
-	CompletedAt     *time.Time            `yaml:"completed_at,omitempty"`
-	LastHeartbeat   time.Time             `yaml:"last_heartbeat,omitempty"`
-	Status          string                `yaml:"status"` // running, success, failed
-	Phase           string                `yaml:"phase"`  // initializing, transferring, finalizing, validating, complete
-	Error           string                `yaml:"error,omitempty"`
-	SourceSchema    string                `yaml:"source_schema"`
-	TargetSchema    string                `yaml:"target_schema"`
-	ConfigHash      string                `yaml:"config_hash,omitempty"`
-	ProfileName     string                `yaml:"profile_name,omitempty"`
-	ConfigPath      string                `yaml:"config_path,omitempty"`
-	LeaseTargetKey  string                `yaml:"lease_target_key,omitempty"`
-	LeaseOwnerToken string                `yaml:"lease_owner_token,omitempty"`
-	LeaseGeneration int64                 `yaml:"lease_generation,omitempty"`
-	Tables          map[string]tableState `yaml:"tables"`
+	RunID         string     `yaml:"run_id"`
+	StartedAt     time.Time  `yaml:"started_at"`
+	CompletedAt   *time.Time `yaml:"completed_at,omitempty"`
+	LastHeartbeat time.Time  `yaml:"last_heartbeat,omitempty"`
+	Status        string     `yaml:"status"` // running, success, partial, failed
+	// Pointer distinguishes legacy YAML (field absent) from an explicit false
+	// value for an accepted or abandoned outcome.
+	Resumable          *bool                 `yaml:"resumable,omitempty"`
+	ResumabilityReason string                `yaml:"resumability_reason,omitempty"`
+	Phase              string                `yaml:"phase"` // initializing, transferring, finalizing, validating, complete
+	Error              string                `yaml:"error,omitempty"`
+	SourceSchema       string                `yaml:"source_schema"`
+	TargetSchema       string                `yaml:"target_schema"`
+	ConfigHash         string                `yaml:"config_hash,omitempty"`
+	ProfileName        string                `yaml:"profile_name,omitempty"`
+	ConfigPath         string                `yaml:"config_path,omitempty"`
+	LeaseTargetKey     string                `yaml:"lease_target_key,omitempty"`
+	LeaseOwnerToken    string                `yaml:"lease_owner_token,omitempty"`
+	LeaseGeneration    int64                 `yaml:"lease_generation,omitempty"`
+	Tables             map[string]tableState `yaml:"tables"`
 	// MigrationLeases retains the last generation for every target even after
 	// release, so a future owner always receives a strictly larger fence token.
 	MigrationLeases map[string]MigrationLease `yaml:"migration_leases,omitempty"`
@@ -185,6 +189,7 @@ func NewFileState(path string) (*FileState, error) {
 		if fs.state.MigrationLeases == nil {
 			fs.state.MigrationLeases = make(map[string]MigrationLease)
 		}
+		normalizeFileRunResumability(fs.state)
 	}
 
 	if err := fs.rebuildTaskIndexLocked(); err != nil {
@@ -192,6 +197,41 @@ func NewFileState(path string) (*FileState, error) {
 	}
 
 	return fs, nil
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+// normalizeFileRunResumability upgrades legacy YAML in memory. Running and
+// partial outcomes remain recoverable; terminal outcomes remain terminal.
+func normalizeFileRunResumability(state *fileStateData) {
+	if state == nil || state.RunID == "" || state.Resumable != nil {
+		return
+	}
+	resumable := state.Status == "running" || state.Status == "partial"
+	state.Resumable = boolPointer(resumable)
+	if state.ResumabilityReason != "" {
+		return
+	}
+	switch state.Status {
+	case "partial":
+		state.ResumabilityReason = "legacy partial outcome is available to resume"
+	case "running":
+		state.ResumabilityReason = RunResumabilityInProgress
+	default:
+		state.ResumabilityReason = "run has a terminal outcome"
+	}
+}
+
+func fileRunResumable(state *fileStateData) bool {
+	if state == nil || state.RunID == "" {
+		return false
+	}
+	if state.Resumable != nil {
+		return *state.Resumable
+	}
+	return state.Status == "running" || state.Status == "partial"
 }
 
 func (fs *FileState) rebuildTaskIndexLocked() error {

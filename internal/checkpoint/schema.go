@@ -14,6 +14,8 @@ func (s *State) migrate() error {
 		completed_at TEXT,
 		last_heartbeat TEXT,
 		status TEXT NOT NULL DEFAULT 'running',
+		resumable INTEGER NOT NULL DEFAULT 0,
+		resumability_reason TEXT,
 		phase TEXT NOT NULL DEFAULT 'initializing',
 		source_schema TEXT NOT NULL,
 		target_schema TEXT NOT NULL,
@@ -265,6 +267,8 @@ func (s *State) ensureRunColumns() error {
 	needsPhase := true
 	needsConfigHash := true
 	needsLastHeartbeat := true
+	needsResumable := true
+	needsResumabilityReason := true
 	needsLeaseTargetKey := true
 	needsLeaseOwnerToken := true
 	needsLeaseGeneration := true
@@ -282,6 +286,10 @@ func (s *State) ensureRunColumns() error {
 			needsConfigHash = false
 		case "last_heartbeat":
 			needsLastHeartbeat = false
+		case "resumable":
+			needsResumable = false
+		case "resumability_reason":
+			needsResumabilityReason = false
 		case "lease_target_key":
 			needsLeaseTargetKey = false
 		case "lease_owner_token":
@@ -321,6 +329,16 @@ func (s *State) ensureRunColumns() error {
 			return err
 		}
 	}
+	if needsResumable {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if needsResumabilityReason {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN resumability_reason TEXT`); err != nil {
+			return err
+		}
+	}
 	if needsLeaseTargetKey {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN lease_target_key TEXT`); err != nil {
 			return err
@@ -335,6 +353,30 @@ func (s *State) ensureRunColumns() error {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
+	}
+
+	// Legacy state had no independent recoverability marker. Preserve every
+	// running or partial run as recoverable so an upgrade cannot orphan its
+	// checkpoints. The NULL reason is also a crash-safe migration marker: if a
+	// prior process added one column and stopped, the next startup finishes the
+	// backfill deterministically.
+	if _, err := s.db.Exec(`
+		UPDATE runs
+		SET resumable = CASE WHEN status IN ('running', 'partial') THEN 1 ELSE 0 END,
+		    resumability_reason = CASE
+		        WHEN status = 'partial' THEN 'legacy partial outcome is available to resume'
+		        WHEN status = 'running' THEN 'run is in progress or was interrupted'
+		        ELSE 'run has a terminal outcome'
+		    END
+		WHERE resumability_reason IS NULL
+	`); err != nil {
+		return fmt.Errorf("backfilling run resumability: %w", err)
+	}
+	if _, err := s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_runs_resumable_started
+		ON runs(resumable, started_at)
+	`); err != nil {
+		return fmt.Errorf("creating resumable-run index: %w", err)
 	}
 
 	return nil

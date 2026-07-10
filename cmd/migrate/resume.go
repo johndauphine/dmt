@@ -47,6 +47,32 @@ func resumeMigration(c *cli.Context) error {
 	}
 	defer orch.Close()
 
+	if c.Bool("abandon") {
+		abandoned, err := orch.AbandonResume(c.String("abandon-reason"))
+		if err != nil {
+			return fmt.Errorf("failed to abandon resumable run: %w", err)
+		}
+		result := struct {
+			RunID              string `json:"run_id"`
+			Status             string `json:"status"`
+			Resumable          bool   `json:"resumable"`
+			ResumabilityReason string `json:"resumability_reason"`
+		}{
+			RunID:              abandoned.ID,
+			Status:             abandoned.Status,
+			Resumable:          abandoned.Resumable,
+			ResumabilityReason: abandoned.ResumabilityReason,
+		}
+		if c.Bool("output-json") || c.String("output-file") != "" {
+			return outputJSONValue(c, result)
+		}
+		fmt.Printf("Abandoned run %s (outcome: %s, resumable: false)\n", abandoned.ID, abandoned.Status)
+		return nil
+	}
+	if c.IsSet("abandon-reason") {
+		return fmt.Errorf("--abandon-reason requires --abandon")
+	}
+
 	// Observability: identical setup to runMigration (#229).
 	stopObs := setupObservability(c, orch)
 	defer stopObs()

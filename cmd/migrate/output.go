@@ -11,6 +11,10 @@ import (
 )
 
 func outputJSON(c *cli.Context, result *orchestrator.MigrationResult) error {
+	return outputJSONValue(c, result)
+}
+
+func outputJSONValue(c *cli.Context, result any) error {
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal result: %w", err)
