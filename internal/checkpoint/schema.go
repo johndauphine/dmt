@@ -22,6 +22,7 @@ func (s *State) migrate() error {
 		config TEXT,
 		profile_name TEXT,
 		config_path TEXT,
+		strict_consistency INTEGER NOT NULL DEFAULT 0,
 		lease_target_key TEXT,
 		lease_owner_token TEXT,
 		lease_generation INTEGER NOT NULL DEFAULT 0
@@ -52,6 +53,7 @@ func (s *State) migrate() error {
 		retry_count INTEGER DEFAULT 0,
 		max_retries INTEGER DEFAULT 3,
 		error_message TEXT,
+		snapshot_row_count INTEGER,
 		UNIQUE(run_id, task_key)
 	);
 
@@ -218,6 +220,9 @@ func (s *State) migrate() error {
 		return err
 	}
 	if err := s.ensureTransferProgressColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureStrictSnapshotColumns(); err != nil {
 		return err
 	}
 	if err := s.ensureTaskIdentityColumns(); err != nil {
@@ -434,6 +439,47 @@ func (s *State) ensureTransferProgressColumns() error {
 	if !have["range_state"] {
 		if _, err := s.db.Exec("ALTER TABLE transfer_progress ADD COLUMN range_state TEXT"); err != nil {
 			return fmt.Errorf("migrating transfer_progress.range_state: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureStrictSnapshotColumns adds the evidence captured for strict source
+// snapshots (#664). The count is stored on the unpartitioned transfer task,
+// while the run-level marker prevents `dmt validate` from mistaking a stale
+// count from an older strict run for a newer ordinary migration.
+func (s *State) ensureStrictSnapshotColumns() error {
+	runColumns, err := s.tableColumns("runs")
+	if err != nil {
+		return err
+	}
+	hasStrictRun := false
+	for _, column := range runColumns {
+		if column == "strict_consistency" {
+			hasStrictRun = true
+			break
+		}
+	}
+	if !hasStrictRun {
+		if _, err := s.db.Exec("ALTER TABLE runs ADD COLUMN strict_consistency INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("migrating runs.strict_consistency: %w", err)
+		}
+	}
+
+	taskColumns, err := s.tableColumns("tasks")
+	if err != nil {
+		return err
+	}
+	hasSnapshotCount := false
+	for _, column := range taskColumns {
+		if column == "snapshot_row_count" {
+			hasSnapshotCount = true
+			break
+		}
+	}
+	if !hasSnapshotCount {
+		if _, err := s.db.Exec("ALTER TABLE tasks ADD COLUMN snapshot_row_count INTEGER"); err != nil {
+			return fmt.Errorf("migrating tasks.snapshot_row_count: %w", err)
 		}
 	}
 	return nil

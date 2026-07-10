@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/orchestrator/validation"
@@ -67,10 +68,25 @@ func (p validationPolicy) evaluate(r tableValidationResult) bool {
 		// estimates happened to match; the operator asked to be
 		// notified when real validation didn't complete. (Codex
 		// review on #253 PR.)
+		if r.snapshotRowCount != nil {
+			logging.Error("%-30s EXACT TARGET TIMEOUT (snapshot=%d target=~%d; exact validation incomplete after %v)",
+				r.tableName, r.sourceCount, r.targetCount, ValidationTimeout)
+			return true
+		}
 		logging.Error("%-30s EXACT TIMEOUT (estimated source=~%d target=~%d; exact validation incomplete after %v)",
 			r.tableName, r.sourceCount, r.targetCount, ValidationTimeout)
 		return true
 	case r.targetCount == r.sourceCount:
+		if r.snapshotRowCount != nil {
+			if r.usedEstimate {
+				logging.Warn("%-30s OK snapshot=%d target=~%d (estimated; fail_on_timeout disabled%s)",
+					r.tableName, r.sourceCount, r.targetCount, r.snapshotDriftDetail())
+				return false
+			}
+			logging.Info("%-30s OK %d rows (strict snapshot%s)",
+				r.tableName, r.targetCount, r.snapshotDriftDetail())
+			return false
+		}
 		if r.usedEstimate {
 			logging.Warn("%-30s OK ~%d rows (estimated; fail_on_timeout disabled)", r.tableName, r.targetCount)
 		} else {
@@ -79,6 +95,16 @@ func (p validationPolicy) evaluate(r tableValidationResult) bool {
 		return false
 	case p.AllowTargetSuperset && r.targetCount > r.sourceCount:
 		extraRows := r.targetCount - r.sourceCount
+		if r.snapshotRowCount != nil {
+			if r.usedEstimate {
+				logging.Warn("%-30s OK snapshot=%d target=~%d (%d extra target %s allowed in upsert mode; estimated%s)",
+					r.tableName, r.sourceCount, r.targetCount, extraRows, rowNoun(extraRows), r.snapshotDriftDetail())
+			} else {
+				logging.Info("%-30s OK snapshot=%d target=%d (%d extra target %s allowed in upsert mode%s)",
+					r.tableName, r.sourceCount, r.targetCount, extraRows, rowNoun(extraRows), r.snapshotDriftDetail())
+			}
+			return false
+		}
 		if r.usedEstimate {
 			logging.Warn("%-30s OK source=~%d target=~%d (%d extra target %s allowed in upsert mode; estimated)",
 				r.tableName, r.sourceCount, r.targetCount, extraRows, rowNoun(extraRows))
@@ -89,14 +115,29 @@ func (p validationPolicy) evaluate(r tableValidationResult) bool {
 		return false
 	case r.usedEstimate:
 		if p.FailOnEstimateMismatch {
+			if r.snapshotRowCount != nil {
+				logging.Error("%-30s FAIL snapshot=%d target=~%d (estimated counts disagree, diff=%d%s)",
+					r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount, r.snapshotDriftDetail())
+				return true
+			}
 			logging.Error("%-30s FAIL source=~%d target=~%d (estimated counts disagree, diff=%d)",
 				r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
 			return true
+		}
+		if r.snapshotRowCount != nil {
+			logging.Warn("%-30s DIFF snapshot=%d target=~%d (estimated, diff=%d; fail_on_estimate_mismatch disabled%s)",
+				r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount, r.snapshotDriftDetail())
+			return false
 		}
 		logging.Warn("%-30s DIFF source=~%d target=~%d (estimated, diff=%d; fail_on_estimate_mismatch disabled)",
 			r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
 		return false
 	default:
+		if r.snapshotRowCount != nil {
+			logging.Error("%-30s FAIL snapshot=%d target=%d (diff=%d%s)",
+				r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount, r.snapshotDriftDetail())
+			return true
+		}
 		logging.Error("%-30s FAIL source=%d target=%d (diff=%d)",
 			r.tableName, r.sourceCount, r.targetCount, r.sourceCount-r.targetCount)
 		return true
@@ -129,6 +170,12 @@ type tableValidationResult struct {
 	// estimate-fallback success path that previously slipped
 	// through as a green result (Codex review on #253 PR).
 	exactTimedOut bool
+	// snapshotRowCount is the exact full-table count captured by the strict
+	// transfer's pinned transaction. sourceCount becomes this expectation when
+	// present, while liveSourceCount is informational drift only (#664).
+	snapshotRowCount *int64
+	liveSourceCount  *int64
+	liveSourceError  string
 }
 
 // ValidationRunResult is the structured deterministic validation outcome used
@@ -146,16 +193,19 @@ type ValidationRunResult struct {
 
 // ValidationRowCountResult describes one table's count validation outcome.
 type ValidationRowCountResult struct {
-	TableName     string
-	SourceCount   int64
-	TargetCount   int64
-	Difference    int64
-	CountsKnown   bool
-	UsedEstimate  bool
-	ExactTimedOut bool
-	TimedOut      bool
-	Error         string
-	Failed        bool
+	TableName        string
+	SourceCount      int64
+	TargetCount      int64
+	Difference       int64
+	CountsKnown      bool
+	UsedEstimate     bool
+	ExactTimedOut    bool
+	TimedOut         bool
+	Error            string
+	Failed           bool
+	SnapshotRowCount *int64 `json:"snapshot_row_count,omitempty"`
+	LiveSourceCount  *int64 `json:"live_source_count,omitempty"`
+	LiveSourceDrift  *int64 `json:"live_source_drift,omitempty"`
 }
 
 // Validate checks row counts between source and target in parallel.
@@ -344,15 +394,21 @@ func (o *Orchestrator) runDeepValidationResult(ctx context.Context) (validation.
 
 func validationRowCountResult(r tableValidationResult, failed bool) ValidationRowCountResult {
 	out := ValidationRowCountResult{
-		TableName:     r.tableName,
-		SourceCount:   r.sourceCount,
-		TargetCount:   r.targetCount,
-		Difference:    r.sourceCount - r.targetCount,
-		CountsKnown:   r.err == nil && !r.timedOut,
-		UsedEstimate:  r.usedEstimate,
-		ExactTimedOut: r.exactTimedOut,
-		TimedOut:      r.timedOut,
-		Failed:        failed,
+		TableName:        r.tableName,
+		SourceCount:      r.sourceCount,
+		TargetCount:      r.targetCount,
+		Difference:       r.sourceCount - r.targetCount,
+		CountsKnown:      r.err == nil && !r.timedOut,
+		UsedEstimate:     r.usedEstimate,
+		ExactTimedOut:    r.exactTimedOut,
+		TimedOut:         r.timedOut,
+		Failed:           failed,
+		SnapshotRowCount: r.snapshotRowCount,
+		LiveSourceCount:  r.liveSourceCount,
+	}
+	if r.snapshotRowCount != nil && r.liveSourceCount != nil {
+		drift := *r.liveSourceCount - *r.snapshotRowCount
+		out.LiveSourceDrift = &drift
 	}
 	if r.err != nil {
 		out.Error = r.err.Error()
@@ -386,6 +442,15 @@ func targetIdentifierTransform(targetDriver string) func(string) string {
 // It first tries exact COUNT(*) with a timeout, then falls back to estimated counts.
 func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableValidationResult {
 	result := tableValidationResult{tableName: t.Name}
+
+	snapshotCount, err := o.strictSnapshotRowCount(t)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	if snapshotCount != nil {
+		return o.validateStrictSnapshotTable(ctx, t, *snapshotCount)
+	}
 
 	// First, try exact COUNT(*) with timeout
 	timeoutCtx, cancel := context.WithTimeout(ctx, ValidationTimeout)
@@ -443,6 +508,89 @@ func (o *Orchestrator) validateTable(ctx context.Context, t source.Table) tableV
 		result.err = fmt.Errorf("target count: %w", tgtErr)
 	}
 	return result
+}
+
+// strictSnapshotRowCount returns the exact count captured by the transfer for
+// this run/table. A standalone `dmt validate` passes an empty validationRunID,
+// which asks the backend for the latest matching run's evidence.
+func (o *Orchestrator) strictSnapshotRowCount(t source.Table) (*int64, error) {
+	strictState, ok := o.state.(checkpoint.StrictSnapshotState)
+	if !ok {
+		return nil, nil
+	}
+	return strictState.GetStrictSnapshotRowCount(
+		o.validationRunID,
+		o.config.Source.Schema,
+		o.config.Target.Schema,
+		t.Name,
+	)
+}
+
+// validateStrictSnapshotTable compares the target with the count captured in
+// the source transaction that supplied its rows. A later live-source count is
+// deliberately observational only: a busy source changing after its snapshot
+// must not invalidate a faithful copy (#664).
+func (o *Orchestrator) validateStrictSnapshotTable(ctx context.Context, t source.Table, snapshotCount int64) tableValidationResult {
+	result := tableValidationResult{
+		tableName:        t.Name,
+		sourceCount:      snapshotCount,
+		snapshotRowCount: int64Pointer(snapshotCount),
+	}
+
+	targetCtx, cancelTarget := context.WithTimeout(ctx, ValidationTimeout)
+	targetCount, targetErr := o.targetPool.GetRowCountExact(targetCtx, o.config.Target.Schema, t.Name, true)
+	targetTimedOut := targetCtx.Err() == context.DeadlineExceeded
+	cancelTarget()
+	if targetErr != nil {
+		if !targetTimedOut {
+			result.err = fmt.Errorf("target count: %w", targetErr)
+			return result
+		}
+		result.exactTimedOut = true
+		targetEstimate, estimateErr := o.targetPool.GetRowCountFast(ctx, o.config.Target.Schema, t.Name)
+		if estimateErr == nil && targetEstimate > 0 {
+			result.targetCount = targetEstimate
+			result.usedEstimate = true
+			return result
+		}
+		result.timedOut = true
+		return result
+	}
+	result.targetCount = targetCount
+
+	liveCtx, cancelLive := context.WithTimeout(ctx, ValidationTimeout)
+	liveCount, liveErr := o.sourcePool.GetRowCountExact(liveCtx, o.config.Source.Schema, t.Name, true)
+	liveTimedOut := liveCtx.Err() == context.DeadlineExceeded
+	cancelLive()
+	if liveErr != nil {
+		if liveTimedOut {
+			result.liveSourceError = fmt.Sprintf("exact live count timed out after %v", ValidationTimeout)
+		} else {
+			result.liveSourceError = liveErr.Error()
+		}
+		return result
+	}
+	result.liveSourceCount = int64Pointer(liveCount)
+	return result
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func (r tableValidationResult) snapshotDriftDetail() string {
+	if r.snapshotRowCount == nil {
+		return ""
+	}
+	if r.liveSourceCount == nil {
+		if r.liveSourceError != "" {
+			return fmt.Sprintf("; live source drift unavailable: %s", r.liveSourceError)
+		}
+		return "; live source drift unavailable"
+	}
+	drift := *r.liveSourceCount - *r.snapshotRowCount
+	if drift == 0 {
+		return "; live source is unchanged since the snapshot"
+	}
+	return fmt.Sprintf("; live source has drifted %+d %s since the snapshot", drift, rowNoun(drift))
 }
 
 // validateSamples performs sample data validation by comparing random rows

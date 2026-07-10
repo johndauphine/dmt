@@ -53,6 +53,8 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		return releaseUnboundMigrationLease(leaseBackend, lease, err)
 	}
 	ctx = ownedCtx
+	o.validationRunID = run.ID
+	defer func() { o.validationRunID = "" }()
 	defer func() {
 		resumeErr = mergeLeaseSessionError(resumeErr, leaseSession)
 	}()

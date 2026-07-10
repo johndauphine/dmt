@@ -546,6 +546,22 @@ func (p *ProgressSaver) SaveProgress(taskID int64, tableName string, partitionID
 	return RequiredWrite(fmt.Sprintf("saving progress for table %q task %d", tableName, taskID), err)
 }
 
+// SaveStrictSnapshotRowCount records the exact count observed from a strict
+// transfer's pinned source transaction. A backend that cannot retain this
+// evidence must fail closed rather than let validation claim a live count is a
+// snapshot count (#664).
+func (p *ProgressSaver) SaveStrictSnapshotRowCount(taskID, rowCount int64) error {
+	strictState, ok := p.state.(StrictSnapshotState)
+	if !ok {
+		return RequiredWrite(
+			fmt.Sprintf("saving strict snapshot row count for task %d", taskID),
+			fmt.Errorf("state backend %T does not support strict snapshot evidence", p.state),
+		)
+	}
+	err := strictState.SaveStrictSnapshotRowCount(taskID, rowCount)
+	return RequiredWrite(fmt.Sprintf("saving strict snapshot row count for task %d", taskID), err)
+}
+
 // GetProgress retrieves saved progress for a task
 func (p *ProgressSaver) GetProgress(taskID int64) (lastPK any, rowsDone int64, rangeState string, err error) {
 	prog, err := p.state.GetTransferProgress(taskID)

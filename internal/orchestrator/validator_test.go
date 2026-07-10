@@ -1,7 +1,9 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/config"
@@ -25,6 +27,20 @@ func TestValidationPolicy_Defaults(t *testing.T) {
 	}
 	if p.AllowTargetSuperset {
 		t.Error("drop_recreate must keep strict source/target count parity")
+	}
+}
+
+func TestValidationRowCountResultOmitsSnapshotEvidenceWhenUnused(t *testing.T) {
+	data, err := json.Marshal(validationRowCountResult(tableValidationResult{
+		tableName: "orders", sourceCount: 10, targetCount: 10,
+	}, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"snapshot_row_count", "live_source_count", "live_source_drift"} {
+		if strings.Contains(string(data), field) {
+			t.Fatalf("non-strict validation JSON unexpectedly contains %q: %s", field, data)
+		}
 	}
 }
 

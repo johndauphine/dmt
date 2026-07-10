@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Strict full-table transfers now persist the exact `COUNT(*)` observed inside
+  their pinned source transaction. Validation compares the target with that
+  snapshot count, so a faithful copy of a busy source no longer fails solely
+  because the source changed afterward; the signed live-source drift is logged
+  as informational. SQLite and YAML checkpoint state preserve the evidence
+  across process boundaries; incremental date-filter jobs retain their
+  live-count behavior (#664).
+
 - `strict_consistency` now gives each source table one stable view across all
   keyset, tuple-keyset, and ROW_NUMBER pages. It starts the source transaction
   before target preparation, pins every query to it, forces one reader and one

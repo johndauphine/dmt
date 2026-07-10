@@ -60,6 +60,7 @@ type fileStateData struct {
 	ConfigHash         string                `yaml:"config_hash,omitempty"`
 	ProfileName        string                `yaml:"profile_name,omitempty"`
 	ConfigPath         string                `yaml:"config_path,omitempty"`
+	StrictConsistency  bool                  `yaml:"strict_consistency,omitempty"`
 	LeaseTargetKey     string                `yaml:"lease_target_key,omitempty"`
 	LeaseOwnerToken    string                `yaml:"lease_owner_token,omitempty"`
 	LeaseGeneration    int64                 `yaml:"lease_generation,omitempty"`
@@ -153,19 +154,20 @@ type deleteReconciliationTableState struct {
 
 // tableState tracks per-table progress.
 type tableState struct {
-	Status          string `yaml:"status"` // pending, running, success, failed
-	TaskType        string `yaml:"task_type,omitempty"`
-	TaskSchema      string `yaml:"task_schema,omitempty"`
-	TaskTable       string `yaml:"task_table,omitempty"`
-	TaskPartitionID *int   `yaml:"task_partition_id,omitempty"`
-	TableName       string `yaml:"table_name,omitempty"`
-	PartitionID     *int   `yaml:"partition_id,omitempty"`
-	LastPK          any    `yaml:"last_pk,omitempty"`
-	RangeState      string `yaml:"range_state,omitempty"`
-	RowsDone        int64  `yaml:"rows_done,omitempty"`
-	RowsTotal       int64  `yaml:"rows_total,omitempty"`
-	TaskID          int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility
-	Error           string `yaml:"error,omitempty"`
+	Status           string `yaml:"status"` // pending, running, success, failed
+	TaskType         string `yaml:"task_type,omitempty"`
+	TaskSchema       string `yaml:"task_schema,omitempty"`
+	TaskTable        string `yaml:"task_table,omitempty"`
+	TaskPartitionID  *int   `yaml:"task_partition_id,omitempty"`
+	TableName        string `yaml:"table_name,omitempty"`
+	PartitionID      *int   `yaml:"partition_id,omitempty"`
+	LastPK           any    `yaml:"last_pk,omitempty"`
+	RangeState       string `yaml:"range_state,omitempty"`
+	RowsDone         int64  `yaml:"rows_done,omitempty"`
+	RowsTotal        int64  `yaml:"rows_total,omitempty"`
+	SnapshotRowCount *int64 `yaml:"snapshot_row_count,omitempty"`
+	TaskID           int64  `yaml:"task_id,omitempty"` // Synthetic task ID for compatibility
+	Error            string `yaml:"error,omitempty"`
 }
 
 // NewFileState creates a file-based state manager.

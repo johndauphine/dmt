@@ -121,6 +121,11 @@ type Orchestrator struct {
 	// target rows that reconciliation should have removed.
 	deleteReconciliationStrictValidation bool
 
+	// validationRunID pins in-run validation to the exact run that produced
+	// its transfer tasks. Standalone `dmt validate` leaves it empty and asks
+	// checkpoint state for the latest matching run's strict evidence (#664).
+	validationRunID string
+
 	// auditor writes the immutable per-run NDJSON record (#235). Always
 	// non-nil — audit.Disabled() satisfies the interface when --no-audit
 	// is set so call sites stay unconditional. Initialized in Run/Resume

@@ -134,11 +134,22 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	if err := bindMigrationLease(leaseBackend, runID, lease); err != nil {
 		return releaseUnboundMigrationLease(leaseBackend, lease, err)
 	}
+	if o.config.Migration.StrictConsistency {
+		strictState, ok := o.state.(checkpoint.StrictSnapshotState)
+		if !ok {
+			return releaseUnboundMigrationLease(leaseBackend, lease, fmt.Errorf("state backend %T cannot persist strict_consistency snapshot evidence", o.state))
+		}
+		if err := strictState.SetRunStrictConsistency(runID, true); err != nil {
+			return releaseUnboundMigrationLease(leaseBackend, lease, checkpoint.RequiredWrite("persisting strict_consistency run contract", err))
+		}
+	}
 	ownedCtx, leaseSession, err := o.startMigrationLease(ctx, leaseBackend, lease, runID)
 	if err != nil {
 		return releaseUnboundMigrationLease(leaseBackend, lease, err)
 	}
 	ctx = ownedCtx
+	o.validationRunID = runID
+	defer func() { o.validationRunID = "" }()
 	defer func() {
 		runErr = mergeLeaseSessionError(runErr, leaseSession)
 	}()
