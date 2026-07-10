@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/driver"
@@ -35,9 +36,79 @@ func mssqlPreFlight(ctx context.Context, db *sql.DB, req driver.PreFlightRequest
 		},
 		mssqlPFPoolHeadroom,
 		mssqlPFPrivileges,
+		mssqlPFDatabaseSnapshot,
 		mssqlPFParallelBCPIndexRisk,
 		mssqlPFBackupAck,
 	)
+}
+
+func mssqlPFDatabaseSnapshot(ctx context.Context, db *sql.DB, req driver.PreFlightRequest) []driver.PreFlightFinding {
+	if req.Side != driver.PreFlightSideSource || !req.StrictConsistency || req.StrictConsistencyScope != "migration" {
+		return nil
+	}
+	var edition, createAny, createDatabase, alterAnyDatabase, dbCreator int
+	var version string
+	if err := db.QueryRowContext(ctx, `SELECT CAST(SERVERPROPERTY('EngineEdition') AS int), CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), COALESCE(HAS_PERMS_BY_NAME(NULL, NULL, 'CREATE ANY DATABASE'), 0), COALESCE(HAS_PERMS_BY_NAME('master', 'DATABASE', 'CREATE DATABASE'), 0), COALESCE(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY DATABASE'), 0), COALESCE(IS_SRVROLEMEMBER('dbcreator'), 0)`).Scan(&edition, &version, &createAny, &createDatabase, &alterAnyDatabase, &dbCreator); err != nil {
+		return []driver.PreFlightFinding{{Severity: driver.SeverityError, Check: "compat.database_snapshot", Side: req.Side, Message: fmt.Sprintf("could not verify SQL Server database-snapshot support: %v", err), Remedy: "grant permission to read SERVERPROPERTY and server permissions, or use strict_consistency_scope: table"}}
+	}
+	findings := mssqlPFSnapshotCapabilityFindings(req, edition, version, createAny, createDatabase, alterAnyDatabase, dbCreator)
+	database := strings.TrimSpace(req.Database)
+	if database == "" {
+		_ = db.QueryRowContext(ctx, "SELECT DB_NAME()").Scan(&database)
+	}
+	rows, err := db.QueryContext(ctx, `SELECT name FROM sys.databases WHERE source_database_id = DB_ID(@p1) AND name LIKE 'dmt_strict[_]%' ORDER BY name`, database)
+	if err != nil {
+		return append(findings, driver.PreFlightFinding{Severity: driver.SeverityWarn, Check: "strict.snapshot_orphans", Side: req.Side, Message: fmt.Sprintf("could not inspect SQL Server snapshot orphans: %v", err), Remedy: "inspect sys.databases for dmt_strict_* snapshots before starting"})
+	}
+	defer rows.Close()
+	var orphans []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return append(findings, driver.PreFlightFinding{Severity: driver.SeverityWarn, Check: "strict.snapshot_orphans", Side: req.Side, Message: fmt.Sprintf("could not read SQL Server snapshot orphan: %v", err)})
+		}
+		orphans = append(orphans, name)
+	}
+	if err := rows.Err(); err != nil {
+		return append(findings, driver.PreFlightFinding{Severity: driver.SeverityWarn, Check: "strict.snapshot_orphans", Side: req.Side, Message: fmt.Sprintf("could not finish reading SQL Server snapshot orphans: %v", err)})
+	}
+	if len(orphans) > 0 {
+		quoted := make([]string, len(orphans))
+		for i, name := range orphans {
+			quoted[i] = "[" + strings.ReplaceAll(name, "]", "]]") + "]"
+		}
+		findings = append(findings, driver.PreFlightFinding{Severity: driver.SeverityWarn, Check: "strict.snapshot_orphans", Side: req.Side, Message: "leftover dmt SQL Server database snapshots: " + strings.Join(quoted, ", "), Remedy: "after confirming no matching run will resume, drop each orphan with DROP DATABASE <snapshot_name>"})
+	}
+	return findings
+}
+
+func mssqlPFSnapshotCapabilityFindings(req driver.PreFlightRequest, edition int, version string, createAny, createDatabase, alterAnyDatabase, dbCreator int) []driver.PreFlightFinding {
+	var findings []driver.PreFlightFinding
+	if edition == 5 {
+		findings = append(findings, driver.PreFlightFinding{Severity: driver.SeverityError, Check: "compat.database_snapshot", Side: req.Side, Message: "Azure SQL Database does not support CREATE DATABASE AS SNAPSHOT OF", Remedy: "use migration.strict_consistency_scope: table on Azure SQL Database"})
+	} else if !mssqlSnapshotVersionSupported(version, edition) {
+		findings = append(findings, driver.PreFlightFinding{Severity: driver.SeverityError, Check: "compat.database_snapshot", Side: req.Side, Message: fmt.Sprintf("SQL Server %s does not support database snapshots on this edition; 2016 SP1 (13.0.4001) or newer is required", version), Remedy: "upgrade SQL Server or use migration.strict_consistency_scope: table"})
+	}
+	if createAny != 1 && createDatabase != 1 && alterAnyDatabase != 1 && dbCreator != 1 {
+		findings = append(findings, driver.PreFlightFinding{Severity: driver.SeverityError, Check: "privileges.database_snapshot", Side: req.Side, Message: "connected login cannot create the requested SQL Server database snapshot", Remedy: "grant CREATE ANY DATABASE or ALTER ANY DATABASE at server scope, grant CREATE DATABASE in master, add the login to dbcreator, or use migration.strict_consistency_scope: table"})
+	}
+	return findings
+}
+
+func mssqlSnapshotVersionSupported(version string, engineEdition int) bool {
+	if engineEdition == 3 {
+		return true
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) < 3 {
+		return false
+	}
+	major, errMajor := strconv.Atoi(parts[0])
+	build, errBuild := strconv.Atoi(parts[2])
+	if errMajor != nil || errBuild != nil {
+		return false
+	}
+	return major > 13 || (major == 13 && build >= 4001)
 }
 
 // mssqlPFCompatLevel mirrors the connection gate

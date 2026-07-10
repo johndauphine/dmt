@@ -38,15 +38,18 @@ the durable YAML lease record remains authoritative after a process exits.
 
 ### Migration-scoped strict snapshots
 
-With PostgreSQL `migration.strict_consistency: true` and
-`migration.strict_consistency_scope: migration`, dmt opens one exported MVCC
-snapshot for the transfer phase and imports it into every table and partition
-reader. A retry in that same process re-joins the original epoch. If the epoch
-connection is lost, the phase fails rather than moving to a newer source view.
+With PostgreSQL or SQL Server `migration.strict_consistency: true` and
+`migration.strict_consistency_scope: migration`, dmt opens one source epoch
+for every table and partition reader. PostgreSQL imports one exported MVCC
+snapshot. SQL Server creates a `dmt_strict_<runid>` database snapshot and
+routes reads through a second pool, leaving live-source writers unblocked.
 
-A resumed run executes in a new process and therefore opens a new snapshot
-epoch. Resume and replay remain correct per table, but a cross-table
-point-in-time guarantee applies only to the lifetime of the original process.
+A resumed PostgreSQL run opens a new snapshot epoch. Resume and replay remain
+correct per table, but its cross-table point-in-time guarantee applies only to
+the original process. A SQL Server snapshot survives a crash: resume reuses it
+and fails closed if it was removed, because a replacement would change the
+promised source instant. In-process success, failure, and cancellation close
+the snapshot pool and drop the snapshot database.
 Schema extraction also occurs before the epoch opens, so DDL changes in that
 small interval are intentionally outside the data-snapshot guarantee.
 

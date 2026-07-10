@@ -14,6 +14,7 @@ const (
 	strictParallelExportedSnapshot = "exported_snapshot"
 	strictParallelLockWindow       = "lock_window_sessions"
 	strictParallelTableSharedLock  = "table_shared_lock"
+	strictParallelMigrationEpoch   = "migration_epoch"
 )
 
 // strictReaderView is the source view acquired by a strict reader strategy.
@@ -36,6 +37,17 @@ type strictReaderStrategy interface {
 }
 
 type exportedSnapshotStrategy struct{}
+
+// migrationEpochReaderStrategy describes an already-frozen external source
+// view (currently a SQL Server database snapshot). It reserves no additional
+// connection beyond the worker reads themselves and is never acquired here.
+type migrationEpochReaderStrategy struct{}
+
+func (migrationEpochReaderStrategy) begin(context.Context, pool.SourcePool, source.Table, int) (strictReaderView, error) {
+	return strictReaderView{}, fmt.Errorf("migration epoch is acquired by the orchestrator")
+}
+
+func (migrationEpochReaderStrategy) joinBudget() int { return 0 }
 
 func (exportedSnapshotStrategy) begin(ctx context.Context, srcPool pool.SourcePool, _ source.Table, _ int) (strictReaderView, error) {
 	snapshot, err := beginPostgresExportedSnapshot(ctx, srcPool.DB())

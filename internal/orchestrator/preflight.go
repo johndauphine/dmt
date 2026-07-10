@@ -99,13 +99,15 @@ func (o *Orchestrator) collectPreFlightFindings(ctx context.Context, resumeOwnsT
 		srcDrv, err := driver.Get(o.config.Source.Type)
 		if err == nil && srcDrv != nil {
 			req := driver.PreFlightRequest{
-				Side:              driver.PreFlightSideSource,
-				Schema:            o.config.Source.Schema,
-				Workers:           o.config.Migration.Workers,
-				StrictConsistency: o.config.Migration.StrictConsistency,
-				ParallelReaders:   o.config.Migration.ParallelReaders,
-				IncludeTables:     o.config.Migration.IncludeTables,
-				ExcludeTables:     o.config.Migration.ExcludeTables,
+				Side:                   driver.PreFlightSideSource,
+				Schema:                 o.config.Source.Schema,
+				Workers:                o.config.Migration.Workers,
+				StrictConsistency:      o.config.Migration.StrictConsistency,
+				StrictConsistencyScope: o.config.Migration.StrictConsistencyScope,
+				ParallelReaders:        o.config.Migration.ParallelReaders,
+				Database:               o.config.Source.Database,
+				IncludeTables:          o.config.Migration.IncludeTables,
+				ExcludeTables:          o.config.Migration.ExcludeTables,
 			}
 			findings = append(findings, srcDrv.PreFlight(ctx, o.sourcePool.DB(), req)...)
 		} else if err != nil {

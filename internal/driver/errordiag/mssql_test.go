@@ -12,6 +12,12 @@ var mssqlCases = []struct {
 	mustCateg string
 }{
 	{
+		pattern:   "mssql_database_snapshot_create",
+		errMsg:    `creating SQL Server strict snapshot [dmt_strict_abc12345]: mssql: CREATE DATABASE permission denied in database 'master'.`,
+		mustMatch: "CREATE ANY DATABASE",
+		mustCateg: "permission",
+	},
+	{
 		pattern:   "mssql_pk_duplicate",
 		errMsg:    `mssql: Violation of PRIMARY KEY constraint 'PK_users'. Cannot insert duplicate key in object 'dbo.users'.`,
 		mustMatch: "PK_users",

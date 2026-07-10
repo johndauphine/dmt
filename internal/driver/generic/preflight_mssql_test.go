@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -42,6 +43,69 @@ func TestMssqlPFParallelBCPIndexRiskWarnsForTargetNonclusteredIndexes(t *testing
 	}
 	if !strings.Contains(got.Remedy, "migration.write_ahead_writers: 1") {
 		t.Fatalf("finding remedy = %q, want write_ahead_writers mitigation", got.Remedy)
+	}
+}
+
+func TestMSSQLSnapshotVersionSupport(t *testing.T) {
+	tests := []struct {
+		version string
+		edition int
+		want    bool
+	}{
+		{version: "13.0.3999.0", edition: 2},
+		{version: "13.0.4001.0", edition: 2, want: true},
+		{version: "12.0.1000.0", edition: 3, want: true},
+		{version: "16.0.1000.0", edition: 2, want: true},
+		{version: "invalid", edition: 2},
+	}
+	for _, tc := range tests {
+		if got := mssqlSnapshotVersionSupported(tc.version, tc.edition); got != tc.want {
+			t.Errorf("version=%q edition=%d supported=%t, want %t", tc.version, tc.edition, got, tc.want)
+		}
+	}
+}
+
+func TestMSSQLSnapshotPreflightGate(t *testing.T) {
+	for _, req := range []driver.PreFlightRequest{
+		{Side: driver.PreFlightSideTarget, StrictConsistency: true, StrictConsistencyScope: "migration"},
+		{Side: driver.PreFlightSideSource, StrictConsistencyScope: "migration"},
+		{Side: driver.PreFlightSideSource, StrictConsistency: true, StrictConsistencyScope: "table"},
+	} {
+		if got := mssqlPFDatabaseSnapshot(context.Background(), nil, req); len(got) != 0 {
+			t.Fatalf("gated request %+v produced findings %+v", req, got)
+		}
+	}
+}
+
+func TestMSSQLSnapshotCapabilityFindings(t *testing.T) {
+	req := driver.PreFlightRequest{Side: driver.PreFlightSideSource}
+	tests := []struct {
+		name               string
+		edition, createAny int
+		createDatabase     int
+		alterAnyDatabase   int
+		dbCreator          int
+		version            string
+		wantChecks         []string
+	}{
+		{name: "supported", edition: 2, version: "13.0.4001.0", createAny: 1},
+		{name: "master create database supported", edition: 2, version: "16.0.1000.0", createDatabase: 1},
+		{name: "alter any database supported", edition: 2, version: "16.0.1000.0", alterAnyDatabase: 1},
+		{name: "dbcreator supported", edition: 2, version: "16.0.1000.0", dbCreator: 1},
+		{name: "azure", edition: 5, version: "16.0.1000.0", createAny: 1, wantChecks: []string{"compat.database_snapshot"}},
+		{name: "pre SP1 and missing permission", edition: 2, version: "13.0.3999.0", wantChecks: []string{"compat.database_snapshot", "privileges.database_snapshot"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := mssqlPFSnapshotCapabilityFindings(req, tc.edition, tc.version, tc.createAny, tc.createDatabase, tc.alterAnyDatabase, tc.dbCreator)
+			var checks []string
+			for _, finding := range findings {
+				checks = append(checks, finding.Check)
+			}
+			if fmt.Sprint(checks) != fmt.Sprint(tc.wantChecks) {
+				t.Fatalf("checks = %v, want %v", checks, tc.wantChecks)
+			}
+		})
 	}
 }
 

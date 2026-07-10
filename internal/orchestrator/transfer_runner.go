@@ -44,9 +44,8 @@ type TransferRunner struct {
 	// when process-global heap pressure pauses several readers at once (#666).
 	memGuard *transfer.MemoryGuard
 
-	// strictSnapshotEpoch is non-nil only for migration-scoped PostgreSQL
-	// strict consistency. It is opened once before jobs launch and closed when
-	// the transfer phase returns, including cancellation and lease loss (#663).
+	// strictSnapshotEpoch is non-nil for migration-scoped PostgreSQL or SQL
+	// Server strict consistency. It is opened once before jobs launch.
 	strictSnapshotEpoch *transfer.StrictSnapshotEpoch
 
 	// execJob runs one job. It defaults to (*TransferRunner).executeJob and is
@@ -58,6 +57,32 @@ type TransferRunner struct {
 // strictSnapshotEpochWarningInterval keeps a migration-long PostgreSQL
 // snapshot visible before it silently becomes a vacuum-horizon incident.
 const strictSnapshotEpochWarningInterval = 30 * time.Second
+
+func logStrictSnapshotEpochStarted(epoch *transfer.StrictSnapshotEpoch) {
+	if epoch.DBType() == "postgres" {
+		logging.Info("strict_consistency migration snapshot epoch started; PostgreSQL vacuum may retain history until transfer completes")
+		return
+	}
+	logging.Info("strict_consistency migration snapshot epoch started on SQL Server database [%s]; source writers remain unblocked", epoch.SnapshotName())
+}
+
+func diagnoseSnapshotEpochError(ctx context.Context, cfg *config.Config, err error) {
+	if cfg == nil || err == nil {
+		return
+	}
+	errCtx := &driver.ErrorContext{
+		ErrorMessage: err.Error(),
+		SourceDBType: cfg.Source.Type,
+		// DiagnoseError selects its deterministic catalog by TargetDBType.
+		// Epoch creation is a source-side operation, so intentionally route it
+		// through the source engine's catalog while leaving table context empty.
+		TargetDBType: cfg.Source.Type,
+		TargetMode:   cfg.Migration.TargetMode,
+	}
+	if diag := driver.DiagnoseError(ctx, errCtx); diag != nil {
+		driver.EmitDiagnosis(diag)
+	}
+}
 
 // jobExecutor runs a single transfer job, returning its terminal error.
 type jobExecutor func(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) error
@@ -137,21 +162,37 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		if !r.config.Migration.StrictConsistency {
 			return nil, fmt.Errorf("migration.strict_consistency_scope: migration requires migration.strict_consistency: true")
 		}
-		epoch, err := transfer.BeginStrictSnapshotEpoch(ctx, r.sourcePool)
-		if err != nil {
-			return nil, err
+		epoch := r.strictSnapshotEpoch
+		ownsEpoch := false
+		if epoch == nil {
+			var err error
+			epoch, err = transfer.BeginStrictSnapshotEpochForRun(ctx, r.sourcePool, transfer.StrictSnapshotEpochOptions{
+				RunID:          runID,
+				SourceConfig:   r.config.Source,
+				MaxConnections: r.config.Migration.MaxSourceConnections,
+				Resume:         resume,
+			})
+			if err != nil {
+				r.diagnoseSnapshotEpochError(ctx, err)
+				return nil, err
+			}
+			ownsEpoch = true
+			logStrictSnapshotEpochStarted(epoch)
 		}
 		r.strictSnapshotEpoch = epoch
 		for i := range jobs {
 			jobs[i].StrictSnapshotEpoch = epoch
 		}
-		logging.Info("strict_consistency migration snapshot epoch started; PostgreSQL vacuum may retain history until transfer completes")
 		epochLogCtx, stopEpochLog := context.WithCancel(ctx)
-		go r.logStrictSnapshotEpochAge(epochLogCtx, epoch)
+		if epoch.DBType() == "postgres" {
+			go r.logStrictSnapshotEpochAge(epochLogCtx, epoch)
+		}
 		defer func() {
 			stopEpochLog()
-			epoch.Close()
-			logging.Info("strict_consistency migration snapshot epoch released after %s", epoch.Age())
+			if ownsEpoch {
+				epoch.Close()
+				logging.Info("strict_consistency migration snapshot epoch released after %s", epoch.Age())
+			}
 			r.strictSnapshotEpoch = nil
 		}()
 	}
@@ -320,8 +361,44 @@ func (r *TransferRunner) logStrictSnapshotEpochAge(ctx context.Context, epoch *t
 	}
 }
 
-func (o *Orchestrator) buildTransferJobs(ctx context.Context, runID string, tables []source.Table) (*BuildResult, error) {
-	builder := NewJobBuilder(o.sourcePool, o.state, o.config)
+func (r *TransferRunner) diagnoseSnapshotEpochError(ctx context.Context, err error) {
+	diagnoseSnapshotEpochError(ctx, r.config, err)
+}
+
+func (o *Orchestrator) beginMigrationSnapshotEpoch(ctx context.Context, runID string, resume bool) (*transfer.StrictSnapshotEpoch, error) {
+	// SQL Server must establish its external snapshot before job planning and
+	// target mutation. PostgreSQL keeps the established #663 timing inside the
+	// TransferRunner because its exported transaction is not a SourcePool that
+	// the JobBuilder can use for partition-boundary queries.
+	if o.config.Migration.StrictConsistencyScope != "migration" || driver.Canonicalize(o.config.Source.Type) != "mssql" {
+		return nil, nil
+	}
+	epoch, err := transfer.BeginStrictSnapshotEpochForRun(ctx, o.sourcePool, transfer.StrictSnapshotEpochOptions{
+		RunID:          runID,
+		SourceConfig:   o.config.Source,
+		MaxConnections: o.config.Migration.MaxSourceConnections,
+		Resume:         resume,
+	})
+	if err != nil {
+		diagnoseSnapshotEpochError(ctx, o.config, err)
+		return nil, err
+	}
+	logStrictSnapshotEpochStarted(epoch)
+	return epoch, nil
+}
+
+func snapshotPlanningPool(live pool.SourcePool, epoch *transfer.StrictSnapshotEpoch) pool.SourcePool {
+	if epoch != nil && epoch.SourcePool() != nil {
+		return epoch.SourcePool()
+	}
+	return live
+}
+
+func (o *Orchestrator) buildTransferJobs(ctx context.Context, runID string, tables []source.Table, planningPool pool.SourcePool) (*BuildResult, error) {
+	if planningPool == nil {
+		planningPool = o.sourcePool
+	}
+	builder := NewJobBuilder(planningPool, o.state, o.config)
 	buildResult, err := builder.Build(ctx, runID, tables)
 	if err != nil {
 		return nil, fmt.Errorf("building jobs: %w", err)
@@ -329,7 +406,7 @@ func (o *Orchestrator) buildTransferJobs(ctx context.Context, runID string, tabl
 	return buildResult, nil
 }
 
-func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResult *BuildResult, tables []source.Table, resume bool) ([]TableFailure, error) {
+func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResult *BuildResult, tables []source.Table, resume bool, epoch *transfer.StrictSnapshotEpoch) ([]TableFailure, error) {
 	// Execute jobs using TransferRunner. Error diagnosis runs through the
 	// deterministic catalog in internal/driver/errordiag (#173); the
 	// former AI-driven diagnoser was removed to avoid sending error
@@ -344,6 +421,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResul
 		o.targetMode,
 	)
 	runner.auditEvent = o.auditEvent
+	runner.strictSnapshotEpoch = epoch
 
 	result, err := runner.Run(ctx, runID, buildResult, tables, resume)
 	if err != nil {

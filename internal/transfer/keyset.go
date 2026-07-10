@@ -46,6 +46,10 @@ func executeKeysetPagination(
 	if err != nil {
 		return nil, err
 	}
+	if job.StrictSnapshotEpoch != nil && job.StrictSnapshotEpoch.DBType() == "mssql" {
+		strictStrategyName = strictParallelMigrationEpoch
+		strictStrategy = migrationEpochReaderStrategy{}
+	}
 	if cfg.Migration.StrictConsistency && strictStrategy != nil && sourceQueryerFactoryForJob(ctx, job) == nil {
 		strictStrategyName = strictParallelNone
 		strictStrategy = nil
@@ -99,9 +103,12 @@ func executeKeysetPagination(
 		cfg.Migration.MaxSourceConnections,
 	)
 	if readerCountClamped && strictStrategy != nil {
-		if strictStrategyName == strictParallelLockWindow || strictStrategyName == strictParallelTableSharedLock {
+		switch strictStrategyName {
+		case strictParallelMigrationEpoch:
+			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d to honor max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
+		case strictParallelLockWindow, strictParallelTableSharedLock:
 			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the %s coordinator reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, strictStrategyName, cfg.Migration.MaxSourceConnections)
-		} else {
+		default:
 			logging.Warn("Table %s: strict_consistency clamped parallel_readers from %d to %d because the lead snapshot transaction reserves one of max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, cfg.Migration.MaxSourceConnections)
 		}
 	}

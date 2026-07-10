@@ -204,8 +204,8 @@ type MigrationConfig struct {
 	StrictConsistency    bool          `yaml:"strict_consistency"` // Pin source reads to stable snapshots; scope controls table vs migration lifetime (#640, #663)
 	// StrictConsistencyScope controls whether strict snapshots are created per
 	// table (the backwards-compatible default) or once for the transfer phase.
-	// The migration scope is PostgreSQL-only because it imports one exported
-	// snapshot into every table and partition reader (#663).
+	// PostgreSQL imports one exported snapshot; SQL Server reads from a
+	// server-side database snapshot shared by every table/reader.
 	StrictConsistencyScope string `yaml:"strict_consistency_scope" json:"strict_consistency_scope,omitempty"`
 	CreateIndexes          *bool  `yaml:"create_indexes,omitempty"`      // Create non-PK indexes (default: true)
 	CreateForeignKeys      *bool  `yaml:"create_foreign_keys,omitempty"` // Create foreign key constraints (default: true)

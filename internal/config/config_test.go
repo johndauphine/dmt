@@ -470,12 +470,17 @@ func TestValidateStrictConsistencyScope(t *testing.T) {
 		{name: "default table scope", mutate: func(*Config) {}},
 		{name: "explicit table scope", mutate: func(c *Config) { c.Migration.StrictConsistencyScope = "table" }},
 		{name: "postgres migration scope", mutate: func(c *Config) { c.Migration.StrictConsistencyScope = "migration" }},
+		{name: "mssql migration scope", mutate: func(c *Config) {
+			c.Source.Type = "mssql"
+			c.Source.Port = 1433
+			c.Migration.StrictConsistencyScope = "migration"
+		}},
 		{name: "invalid scope", mutate: func(c *Config) { c.Migration.StrictConsistencyScope = "run" }, wantErr: "must be 'table' or 'migration'"},
 		{name: "migration requires strict", mutate: func(c *Config) {
 			c.Migration.StrictConsistency = false
 			c.Migration.StrictConsistencyScope = "migration"
 		}, wantErr: "requires migration.strict_consistency: true"},
-		{name: "migration requires postgres", mutate: func(c *Config) { c.Source.Type = "mysql"; c.Migration.StrictConsistencyScope = "migration" }, wantErr: "requires a PostgreSQL source"},
+		{name: "migration requires supported source", mutate: func(c *Config) { c.Source.Type = "mysql"; c.Migration.StrictConsistencyScope = "migration" }, wantErr: "requires a PostgreSQL or SQL Server source"},
 	}
 
 	for _, tc := range tests {

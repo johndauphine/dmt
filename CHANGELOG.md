@@ -24,6 +24,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- SQL Server migrations using `strict_consistency_scope: migration` now read
+  every table through one engine-native database snapshot while source writers
+  continue normally. Snapshots have deterministic run-scoped names, survive a
+  process crash for resume, are retried on cleanup, and fail closed when
+  permissions, edition, version, or the original resume snapshot are unsuitable
+  (#683).
+
 - SQL Server table-scoped `strict_consistency` now holds one audited shared
   table lock while ordinary pooled readers scan in parallel. This replaces
   progressive serializable range locking with a true point-in-time table view;
