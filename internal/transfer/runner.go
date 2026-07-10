@@ -25,7 +25,7 @@ import (
 // the memory guardrail, the dynamic chunk-size callback, and the in-flight
 // byte-budget reservation (#617).
 type pipelineEnv struct {
-	memGuard  *memoryGuard
+	memGuard  *MemoryGuard
 	chunkSize func() int
 
 	// acquireMem reserves a scanned chunk's measured bytes against the shared
@@ -197,14 +197,11 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	budgetCtx, cancelBudgetWaits := context.WithCancel(readerCtx)
 	defer cancelBudgetWaits()
 
-	// Memory guardrail: pause readers when heap exceeds 80% of memory limit.
-	// This prevents memory ballooning when actual row sizes exceed static
-	// estimates (e.g., TEXT columns with large content vs. the default
-	// 256-byte estimate). Apply the same user cap as pipeline buffer sizing.
-	guardMemMB := cfg.AutoConfig().EffectiveMaxMemoryMB
-	if cfg.Migration.MaxMemoryMB > 0 && cfg.Migration.MaxMemoryMB < guardMemMB {
-		guardMemMB = cfg.Migration.MaxMemoryMB
-	}
+	// Memory guardrail: use the migration-wide guard when the orchestrator
+	// provided one; direct callers retain a private guard as a compatibility
+	// fallback. The shared path keeps one GC leader across concurrent tables
+	// under process-global heap pressure (#666).
+	memGuard := memoryGuardForJob(cfg, job)
 	// In-flight byte budget (#617). acquiredBytes tracks what this pipeline
 	// has reserved but not yet released, so the drain can return the exact
 	// residual — covering every chunk abandoned in a channel on an error or
@@ -214,7 +211,7 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	budget := job.MemBudget
 	var acquiredBytes int64
 	env := pipelineEnv{
-		memGuard:  newMemoryGuard(guardMemMB),
+		memGuard:  memGuard,
 		chunkSize: cb.chunkSize,
 		acquireMem: func(_ context.Context, n int64) (int64, bool) {
 			// Wait on budgetCtx (reader-cancel or writer-failure), not the
@@ -549,6 +546,13 @@ chunkLoop:
 	}
 
 	return stats, nil
+}
+
+func memoryGuardForJob(cfg *config.Config, job Job) *MemoryGuard {
+	if job.MemGuard != nil {
+		return job.MemGuard
+	}
+	return NewMemoryGuard(MemoryGuardLimitMB(cfg))
 }
 
 // periodicSaveFailureDetails exposes asyncSaver's terminal state to the

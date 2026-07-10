@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Concurrent table pipelines now share one migration-scoped memory-pressure
+  guard, preventing a heap-threshold crossing from electing multiple
+  simultaneous `FreeOSMemory` / forced-GC leaders. Direct transfer callers
+  retain the prior per-pipeline fallback (#666).
+
 - A successful final checkpoint save now supersedes an earlier trailing
   periodic-checkpoint failure, so a fully copied table is not falsely reported
   as failed. The degradation remains visible through a warning and a
