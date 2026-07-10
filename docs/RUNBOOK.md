@@ -507,25 +507,31 @@ across those changes can silently corrupt the target.
   affect resume): revert the change, then `dmt resume`.
 - **Intentional** (you tightened `exclude_tables` to skip a table that
   failed, or bumped `chunk_size` for the remaining work): re-run with
-  `--force-resume`. Understand that any change to source/target
-  identity will resume with the new identity. You own the consequences.
+  `--force-resume`. A leased run still cannot be redirected to a different
+  target driver, host, port, database, or schema; start a fresh run for a
+  different target identity.
 
 **Verify the fix**: `dmt resume` proceeds.
 
-### Resume blocked: stale incomplete run
+### Run or resume blocked: target lease or stale incomplete run
 
 **Exit code / log signature**: Exit code **6 (`StateError`)**. Logs:
 `incomplete run is obsolete: a successful run completed after it
 (<run-id> finished <ts>)`, `incomplete run <id> has a stale heartbeat`,
-or `run not found` if state is missing.
+`migration target <target> is owned for run <id> by lease generation
+<n> until <ts>`, or `run not found` if state is missing.
 
 **What it means**: The state DB still has a running-status row from a
 prior crashed migration, but a subsequent migration completed
 successfully, or the incomplete run has not refreshed its heartbeat
-within the resume safety window. dmt won't resume an obsolete run
+within the resume safety window. A live migration lease means another
+CLI, scheduler, pod, or host process owns that canonical target. dmt
+won't start or resume a competing writer, and `--force-resume` cannot
+override a live lease. dmt won't resume an obsolete run
 because resuming would move stale data into a target that's already
-current. dmt also won't automatically attach to a stale heartbeat
-because the original process may still be alive and slow.
+current. An expired lease can be taken over atomically, but the separate
+stale-heartbeat guard still requires operator confirmation because the
+original process may be alive but unable to renew.
 
 **Recover by**: If you really want to resume the older run (you
 shouldn't — you have a more-recent success), use the SQLite CLI to
@@ -545,9 +551,14 @@ start fresh.
 **Verify the fix**: `dmt run` (not `resume`) starts a new run.
 
 While a run is active, both SQLite and YAML file-state backends persist
-`last_heartbeat`. Fresh runs and resumed runs refresh it every ~30s.
+`last_heartbeat` plus an owner token, expiry, and fencing generation.
+Fresh runs and resumed runs renew ownership every ~30s. The YAML backend
+uses `<state-file>.lock` to serialize lease and checkpoint updates across
+processes; do not delete that lock path while a command is running.
 By default, `dmt resume` treats a running-status row older than ~15m as
-stale unless `--force-resume` is supplied.
+stale unless `--force-resume` is supplied. A pre-lease run with a fresh
+heartbeat is never force-resumed because the older process cannot be
+fenced safely.
 
 ### Resume blocked: torn state file (file backend)
 

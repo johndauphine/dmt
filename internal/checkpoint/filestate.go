@@ -19,6 +19,7 @@ type FileState struct {
 	state         *fileStateData
 	taskIDCounter int64
 	taskKeysByID  map[int64]string
+	lease         *MigrationLease
 }
 
 // Capabilities reports the file backend's supported behavior.
@@ -43,19 +44,25 @@ func (fs *FileState) Capabilities() BackendCapabilities {
 
 // fileStateData is the YAML structure for the state file.
 type fileStateData struct {
-	RunID         string                `yaml:"run_id"`
-	StartedAt     time.Time             `yaml:"started_at"`
-	CompletedAt   *time.Time            `yaml:"completed_at,omitempty"`
-	LastHeartbeat time.Time             `yaml:"last_heartbeat,omitempty"`
-	Status        string                `yaml:"status"` // running, success, failed
-	Phase         string                `yaml:"phase"`  // initializing, transferring, finalizing, validating, complete
-	Error         string                `yaml:"error,omitempty"`
-	SourceSchema  string                `yaml:"source_schema"`
-	TargetSchema  string                `yaml:"target_schema"`
-	ConfigHash    string                `yaml:"config_hash,omitempty"`
-	ProfileName   string                `yaml:"profile_name,omitempty"`
-	ConfigPath    string                `yaml:"config_path,omitempty"`
-	Tables        map[string]tableState `yaml:"tables"`
+	RunID           string                `yaml:"run_id"`
+	StartedAt       time.Time             `yaml:"started_at"`
+	CompletedAt     *time.Time            `yaml:"completed_at,omitempty"`
+	LastHeartbeat   time.Time             `yaml:"last_heartbeat,omitempty"`
+	Status          string                `yaml:"status"` // running, success, failed
+	Phase           string                `yaml:"phase"`  // initializing, transferring, finalizing, validating, complete
+	Error           string                `yaml:"error,omitempty"`
+	SourceSchema    string                `yaml:"source_schema"`
+	TargetSchema    string                `yaml:"target_schema"`
+	ConfigHash      string                `yaml:"config_hash,omitempty"`
+	ProfileName     string                `yaml:"profile_name,omitempty"`
+	ConfigPath      string                `yaml:"config_path,omitempty"`
+	LeaseTargetKey  string                `yaml:"lease_target_key,omitempty"`
+	LeaseOwnerToken string                `yaml:"lease_owner_token,omitempty"`
+	LeaseGeneration int64                 `yaml:"lease_generation,omitempty"`
+	Tables          map[string]tableState `yaml:"tables"`
+	// MigrationLeases retains the last generation for every target even after
+	// release, so a future owner always receives a strictly larger fence token.
+	MigrationLeases map[string]MigrationLease `yaml:"migration_leases,omitempty"`
 	// SyncTimestamps records the last successful sync time per
 	// (source schema, table, target schema) triple, used by
 	// date-based incremental sync. Pre-#255 the file backend
@@ -158,7 +165,8 @@ func NewFileState(path string) (*FileState, error) {
 		taskIDCounter: 1000,
 		taskKeysByID:  make(map[int64]string),
 		state: &fileStateData{
-			Tables: make(map[string]tableState),
+			Tables:          make(map[string]tableState),
+			MigrationLeases: make(map[string]MigrationLease),
 		},
 	}
 
@@ -173,6 +181,9 @@ func NewFileState(path string) (*FileState, error) {
 		}
 		if fs.state.Tables == nil {
 			fs.state.Tables = make(map[string]tableState)
+		}
+		if fs.state.MigrationLeases == nil {
+			fs.state.MigrationLeases = make(map[string]MigrationLease)
 		}
 	}
 

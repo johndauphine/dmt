@@ -19,7 +19,21 @@ func (s *State) migrate() error {
 		target_schema TEXT NOT NULL,
 		config TEXT,
 		profile_name TEXT,
-		config_path TEXT
+		config_path TEXT,
+		lease_target_key TEXT,
+		lease_owner_token TEXT,
+		lease_generation INTEGER NOT NULL DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS migration_leases (
+		target_key TEXT PRIMARY KEY,
+		target_identity TEXT NOT NULL,
+		owner_token TEXT NOT NULL,
+		generation INTEGER NOT NULL,
+		run_id TEXT,
+		acquired_at TEXT NOT NULL,
+		renewed_at TEXT NOT NULL,
+		expires_at TEXT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS tasks (
@@ -251,6 +265,9 @@ func (s *State) ensureRunColumns() error {
 	needsPhase := true
 	needsConfigHash := true
 	needsLastHeartbeat := true
+	needsLeaseTargetKey := true
+	needsLeaseOwnerToken := true
+	needsLeaseGeneration := true
 	for _, col := range columns {
 		switch col {
 		case "profile_name":
@@ -265,6 +282,12 @@ func (s *State) ensureRunColumns() error {
 			needsConfigHash = false
 		case "last_heartbeat":
 			needsLastHeartbeat = false
+		case "lease_target_key":
+			needsLeaseTargetKey = false
+		case "lease_owner_token":
+			needsLeaseOwnerToken = false
+		case "lease_generation":
+			needsLeaseGeneration = false
 		}
 	}
 
@@ -295,6 +318,21 @@ func (s *State) ensureRunColumns() error {
 	}
 	if needsLastHeartbeat {
 		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN last_heartbeat TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsLeaseTargetKey {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN lease_target_key TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsLeaseOwnerToken {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN lease_owner_token TEXT`); err != nil {
+			return err
+		}
+	}
+	if needsLeaseGeneration {
+		if _, err := s.db.Exec(`ALTER TABLE runs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}

@@ -784,9 +784,10 @@ func TestValidateResumeHeartbeat(t *testing.T) {
 		{
 			name: "fresh heartbeat",
 			run: &checkpoint.Run{
-				ID:            "fresh-run",
-				StartedAt:     now.Add(-10 * time.Minute),
-				LastHeartbeat: now.Add(-30 * time.Second),
+				ID:              "fresh-run",
+				StartedAt:       now.Add(-10 * time.Minute),
+				LastHeartbeat:   now.Add(-30 * time.Second),
+				LeaseGeneration: 1,
 			},
 		},
 		{
@@ -839,6 +840,20 @@ func TestValidateResumeHeartbeat(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateResumeHeartbeatRejectsFreshLegacyOwnerEvenWithForce(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	o := &Orchestrator{opts: Options{ForceResume: true, RunHeartbeatTTL: time.Minute}}
+	run := &checkpoint.Run{
+		ID:            "legacy-live",
+		StartedAt:     now.Add(-10 * time.Minute),
+		LastHeartbeat: now.Add(-30 * time.Second),
+	}
+	err := o.validateResumeHeartbeat(run, now)
+	if err == nil || !strings.Contains(err.Error(), "fresh heartbeat") {
+		t.Fatalf("validateResumeHeartbeat() error = %v, want fresh legacy owner rejection", err)
 	}
 }
 

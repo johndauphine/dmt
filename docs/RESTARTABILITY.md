@@ -28,6 +28,13 @@ event counters. This contract is exposed in code through
 `StateBackend.Capabilities()` and covered by the checkpoint conformance
 tests.
 
+Both backends also enforce an exclusive migration lease keyed by the canonical
+target driver, host, port, database, and schema. SQLite acquires and takes over
+the lease with one compare-and-swap statement. File state holds an advisory
+`<state-file>.lock` across each YAML read/compare/write cycle, so separate
+processes cannot both win acquisition. The lock is only the atomicity mechanism;
+the durable YAML lease record remains authoritative after a process exits.
+
 Optional history features are explicit capabilities:
 
 | Capability | SQLite | File-based |
@@ -84,6 +91,32 @@ checkpoint path). If the run remains incomplete, use `dmt resume`; its
 target-mode replay/cleanup rules handle already committed chunks. Back up the
 checkpoint and inspect run/task status before choosing a fresh run or manual
 target recovery.
+
+### Exclusive target ownership and fencing
+
+`dmt run` and `dmt resume` acquire the target lease before preflight or any
+target mutation. Every owner has a random token and a monotonically increasing
+generation. The owner renews the lease with the run heartbeat and releases it
+on normal teardown. A second process targeting the same canonical database and
+schema receives state exit code 6 while the lease is live; `--force-resume`
+does not override a live owner. Different canonical targets use independent
+lease rows.
+
+After expiry, acquisition is an atomic stale takeover and increments the
+generation. The new generation is bound to the run. Run, task, completion, and
+progress mutations verify that binding in the same SQLite transaction or YAML
+lock/save cycle, so a former owner receives `LeaseLostError` instead of
+changing checkpoint state. Losing renewal also cancels the migration context;
+the command cannot report success after losing ownership.
+
+Do not delete or hand-edit `migration_leases`, the run's `lease_*` columns, or
+the YAML `migration_leases` map to bypass a conflict. First identify and stop
+the owning process. For a crashed process, wait for the configured heartbeat
+TTL (15 minutes by default), verify the process is gone, and resume with
+`--force-resume` when the stale-heartbeat guard requests it. Back up checkpoint
+storage before manual recovery. A run created by a pre-lease binary with a
+fresh heartbeat is rejected even with `--force-resume`, because that old
+process cannot honor a fencing generation.
 
 ### Key Files
 
@@ -215,9 +248,10 @@ Checkpoint saves occur after a chunk write completes. With parallel readers, the
 On resume (`/resume` command or `--resume` flag):
 
 1. **Find incomplete run**: `GetLastIncompleteRun()` returns the most recent run with status='running'
-2. **Validate config hash**: Compare stored hash with current config hash (skip if `--force-resume`)
-3. **Get completed tables**: `GetCompletedTables()` returns tables marked as 'success'
-4. **Load progress**: For incomplete tables, `GetTransferProgress()` returns saved checkpoint
+2. **Acquire and bind target lease**: reject a live owner or atomically take over an expired generation
+3. **Validate config hash**: Compare stored hash with current config hash (skip if `--force-resume`)
+4. **Get completed tables**: `GetCompletedTables()` returns tables marked as 'success'
+5. **Load progress**: For incomplete tables, `GetTransferProgress()` returns saved checkpoint
 5. **Cleanup partial data**: Delete rows beyond saved lastPK (handles partially written chunks)
 6. **Resume transfer**: Start from saved lastPK/rowNum
 

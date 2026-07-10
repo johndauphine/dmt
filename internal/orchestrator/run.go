@@ -124,11 +124,24 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	// Log comprehensive configuration dump
 	logging.Debug("%s", o.config.DebugDump())
 
-	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
-		return fmt.Errorf("creating run: %w", err)
+	leaseBackend, lease, err := o.acquireMigrationLease(nil)
+	if err != nil {
+		return fmt.Errorf("acquiring migration lease: %w", err)
 	}
-	stopHeartbeat := o.startRunHeartbeat(ctx, runID)
-	defer stopHeartbeat()
+	if err := o.state.CreateRun(runID, o.config.Source.Schema, o.config.Target.Schema, o.config.Sanitized(), o.runProfile, o.runConfig); err != nil {
+		return releaseUnboundMigrationLease(leaseBackend, lease, fmt.Errorf("creating run: %w", err))
+	}
+	if err := bindMigrationLease(leaseBackend, runID, lease); err != nil {
+		return releaseUnboundMigrationLease(leaseBackend, lease, err)
+	}
+	ownedCtx, leaseSession, err := o.startMigrationLease(ctx, leaseBackend, lease, runID)
+	if err != nil {
+		return releaseUnboundMigrationLease(leaseBackend, lease, err)
+	}
+	ctx = ownedCtx
+	defer func() {
+		runErr = mergeLeaseSessionError(runErr, leaseSession)
+	}()
 
 	// Preflight (phase 0): verify the environment satisfies the assumptions
 	// downstream phases make — privileges, version floor, encoding, connection
@@ -440,38 +453,8 @@ func (o *Orchestrator) runHeartbeatTTL() time.Duration {
 	return defaultRunHeartbeatTTL
 }
 
-func (o *Orchestrator) startRunHeartbeat(ctx context.Context, runID string) func() {
-	if o.state == nil {
-		return func() {}
-	}
-
-	heartbeatCtx, cancel := context.WithCancel(ctx)
-	interval := o.runHeartbeatInterval()
-	update := func() {
-		if err := o.state.UpdateRunHeartbeat(runID, time.Now().UTC()); err != nil {
-			logging.Warn("failed to update run heartbeat for %s: %v", runID, err)
-		}
-	}
-
-	update()
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				update()
-			case <-heartbeatCtx.Done():
-				return
-			}
-		}
-	}()
-
-	return cancel
-}
-
 func (o *Orchestrator) validateResumeHeartbeat(run *checkpoint.Run, now time.Time) error {
-	if run == nil || o.opts.ForceResume {
+	if run == nil {
 		return nil
 	}
 
@@ -481,6 +464,19 @@ func (o *Orchestrator) validateResumeHeartbeat(run *checkpoint.Run, now time.Tim
 	}
 	ttl := o.runHeartbeatTTL()
 	age := now.Sub(lastHeartbeat)
+	// A pre-lease process cannot be fenced by a new generation because it does
+	// not know how to verify one. Never attach to a legacy run whose heartbeat
+	// still indicates a live writer, even with --force-resume.
+	if run.LeaseGeneration == 0 && age <= ttl {
+		return fmt.Errorf("incomplete legacy run %s still has a fresh heartbeat: last heartbeat %s (%s ago, TTL %s); wait for the heartbeat to become stale and verify the original process has stopped before resuming",
+			run.ID,
+			lastHeartbeat.UTC().Format(time.RFC3339),
+			age.Round(time.Second),
+			ttl.Round(time.Second))
+	}
+	if o.opts.ForceResume {
+		return nil
+	}
 	if age <= ttl {
 		return nil
 	}

@@ -18,6 +18,9 @@ func TestRowNumberResumeCleanupClearsStalePartitionProgress(t *testing.T) {
 		t.Fatalf("checkpoint.New: %v", err)
 	}
 	defer state.Close()
+	if err := state.CreateRun(runID, "main", "main", nil, "", ""); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
 
 	table := rowNumberCleanupTable()
 	if table.SupportsKeysetPagination() {
