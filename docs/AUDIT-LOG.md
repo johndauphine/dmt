@@ -107,6 +107,18 @@ Emitted after `dmt run`'s validation phase finishes on the success path.
 | `tables` | int | Tables validated |
 | `rows_total` | int | Total rows the migration moved |
 
+#### `checkpoint_periodic_save_degraded`
+
+Emitted when an asynchronous periodic checkpoint save ends in failure but the
+table's later synchronous final checkpoint succeeds. The final watermark is
+durable, so the transfer succeeds; this event preserves the operational signal.
+
+| Field | Type | Notes |
+|---|---|---|
+| `table` | string | Table whose periodic checkpoint save degraded |
+| `consecutive_failures` | int | Trailing failed periodic save attempts before the final save |
+| `last_error` | string | Scrubbed error from the latest failed periodic save |
+
 #### `run_complete` / `resume_complete`
 
 Final event for the run. Emitted via deferred handler, so even panics produce one of these.

@@ -29,6 +29,10 @@ type TransferRunner struct {
 	progress   *progress.Tracker
 	notifier   notify.Provider
 	targetMode TargetModeStrategy
+	// auditEvent records transfer degradation in the run's immutable audit log.
+	// It is copied into each Job because the transfer package owns the point at
+	// which it knows a final checkpoint superseded a periodic failure (#665).
+	auditEvent func(typeName string, fields map[string]any)
 
 	// memBudget is the in-flight byte budget shared across every concurrent
 	// table pipeline for this run (#617). Created once in Run; nil disables
@@ -117,6 +121,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	for i := range jobs {
 		jobs[i].IsResume = resume
 		jobs[i].MemBudget = r.memBudget
+		if r.auditEvent != nil {
+			jobs[i].AuditEvent = r.auditEvent
+		}
 	}
 
 	if r.config.Migration.StrictConsistencyScope == "migration" {
@@ -329,6 +336,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResul
 		o.notifier,
 		o.targetMode,
 	)
+	runner.auditEvent = o.auditEvent
 
 	result, err := runner.Run(ctx, runID, buildResult, tables, resume)
 	if err != nil {

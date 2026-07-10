@@ -122,15 +122,18 @@ func executeCompositeKeysetPagination(
 			}
 			return coord.onAck
 		},
-		saveFinal: func(last chunkResult, totalTransferred int64) error {
+		saveFinal: func(last chunkResult, totalTransferred int64) (bool, error) {
 			if job.Saver == nil || job.TaskID <= 0 {
-				return nil
+				return false, nil
 			}
 			finalTuple := coord.finalTuple(last.tuple())
 			if finalTuple == nil {
-				return nil
+				return false, nil
 			}
-			return job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalTuple, totalTransferred, partitionRows, encodeCompositeTuple(finalTuple))
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalTuple, totalTransferred, partitionRows, encodeCompositeTuple(finalTuple)); err != nil {
+				return false, err
+			}
+			return true, nil
 		},
 	})
 }

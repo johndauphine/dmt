@@ -146,12 +146,15 @@ func executeRowNumberPagination(
 			}
 			return coord.onAck
 		},
-		saveFinal: func(last chunkResult, totalTransferred int64) error {
+		saveFinal: func(last chunkResult, totalTransferred int64) (bool, error) {
 			if job.Saver == nil || job.TaskID <= 0 {
-				return nil
+				return false, nil
 			}
 			finalRowNum := coord.finalRowNum(last.rowNum)
-			return job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows, "")
+			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalRowNum, totalTransferred, partitionRows, ""); err != nil {
+				return false, err
+			}
+			return true, nil
 		},
 	})
 }
