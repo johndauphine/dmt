@@ -64,6 +64,12 @@ type Job struct {
 	// job, so concurrent pipelines divide it by contention. Nil disables
 	// byte-based admission control (channel-depth limiting only).
 	MemBudget *MemBudget
+
+	// StrictSnapshotEpoch is an orchestrator-owned PostgreSQL snapshot shared
+	// across every job in one transfer phase (#663). Nil retains the table-
+	// scoped strict snapshot behavior. Passing it on the job, rather than the
+	// context, makes the migration-wide consistency contract explicit.
+	StrictSnapshotEpoch *StrictSnapshotEpoch
 }
 
 // chunkResult holds a chunk of data for the read-ahead pipeline

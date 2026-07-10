@@ -35,11 +35,20 @@ type TransferRunner struct {
 	// byte-based admission control.
 	memBudget *transfer.MemBudget
 
+	// strictSnapshotEpoch is non-nil only for migration-scoped PostgreSQL
+	// strict consistency. It is opened once before jobs launch and closed when
+	// the transfer phase returns, including cancellation and lease loss (#663).
+	strictSnapshotEpoch *transfer.StrictSnapshotEpoch
+
 	// execJob runs one job. It defaults to (*TransferRunner).executeJob and is
 	// overridable in tests so executeJobs' partition-dependency scheduling can
 	// be exercised without a live database (#648).
 	execJob jobExecutor
 }
+
+// strictSnapshotEpochWarningInterval keeps a migration-long PostgreSQL
+// snapshot visible before it silently becomes a vacuum-horizon incident.
+const strictSnapshotEpochWarningInterval = 30 * time.Second
 
 // jobExecutor runs a single transfer job, returning its terminal error.
 type jobExecutor func(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) error
@@ -108,6 +117,29 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	for i := range jobs {
 		jobs[i].IsResume = resume
 		jobs[i].MemBudget = r.memBudget
+	}
+
+	if r.config.Migration.StrictConsistencyScope == "migration" {
+		if !r.config.Migration.StrictConsistency {
+			return nil, fmt.Errorf("migration.strict_consistency_scope: migration requires migration.strict_consistency: true")
+		}
+		epoch, err := transfer.BeginStrictSnapshotEpoch(ctx, r.sourcePool)
+		if err != nil {
+			return nil, err
+		}
+		r.strictSnapshotEpoch = epoch
+		for i := range jobs {
+			jobs[i].StrictSnapshotEpoch = epoch
+		}
+		logging.Info("strict_consistency migration snapshot epoch started; PostgreSQL vacuum may retain history until transfer completes")
+		epochLogCtx, stopEpochLog := context.WithCancel(ctx)
+		go r.logStrictSnapshotEpochAge(epochLogCtx, epoch)
+		defer func() {
+			stopEpochLog()
+			epoch.Close()
+			logging.Info("strict_consistency migration snapshot epoch released after %s", epoch.Age())
+			r.strictSnapshotEpoch = nil
+		}()
 	}
 
 	// Initialize progress
@@ -259,6 +291,19 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	result.RuntimeAdjusted = runtimeAdjustments.applied()
 
 	return result, nil
+}
+
+func (r *TransferRunner) logStrictSnapshotEpochAge(ctx context.Context, epoch *transfer.StrictSnapshotEpoch) {
+	ticker := time.NewTicker(strictSnapshotEpochWarningInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			logging.Warn("strict_consistency migration snapshot epoch is %s old; PostgreSQL vacuum may retain dead tuples until transfer completes", epoch.Age().Round(time.Second))
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (o *Orchestrator) buildTransferJobs(ctx context.Context, runID string, tables []source.Table) (*BuildResult, error) {

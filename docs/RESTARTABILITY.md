@@ -36,6 +36,20 @@ the lease with one compare-and-swap statement. File state holds an advisory
 processes cannot both win acquisition. The lock is only the atomicity mechanism;
 the durable YAML lease record remains authoritative after a process exits.
 
+### Migration-scoped strict snapshots
+
+With PostgreSQL `migration.strict_consistency: true` and
+`migration.strict_consistency_scope: migration`, dmt opens one exported MVCC
+snapshot for the transfer phase and imports it into every table and partition
+reader. A retry in that same process re-joins the original epoch. If the epoch
+connection is lost, the phase fails rather than moving to a newer source view.
+
+A resumed run executes in a new process and therefore opens a new snapshot
+epoch. Resume and replay remain correct per table, but a cross-table
+point-in-time guarantee applies only to the lifetime of the original process.
+Schema extraction also occurs before the epoch opens, so DDL changes in that
+small interval are intentionally outside the data-snapshot guarantee.
+
 Optional history features are explicit capabilities:
 
 | Capability | SQLite | File-based |

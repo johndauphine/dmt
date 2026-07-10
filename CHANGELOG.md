@@ -11,6 +11,14 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `strict_consistency_scope: migration` now gives PostgreSQL migrations one
+  exported MVCC snapshot across every table, retry, and partition in the
+  transfer phase. It restores strict table partitioning while preserving one
+  source instant, fails closed for non-PostgreSQL sources, and records shared
+  snapshot counts on partition tasks for later validation. The default
+  `table` scope remains unchanged; a resumed process intentionally starts a
+  new epoch (#663).
+
 - PostgreSQL `strict_consistency` keyset transfers can now use multiple source
   readers without giving up their stable table view. DMT exports the lead
   transaction's MVCC snapshot and imports it as the first statement of every

@@ -975,7 +975,8 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `strict_consistency` | No | `false` | Read each source table from one stable transaction snapshot. PostgreSQL keyset readers may run in parallel from an exported snapshot; table partitioning remains disabled. |
+| `strict_consistency` | No | `false` | Read each source table from one stable transaction snapshot. PostgreSQL keyset readers may run in parallel from an exported snapshot; table partitioning is available with migration scope. |
+| `strict_consistency_scope` | No | `table` | `table` snapshots each table independently. PostgreSQL-only `migration` shares one snapshot across every table and partition during the transfer phase. Requires `strict_consistency: true`. |
 
 > **Consistency scope (#640).** `strict_consistency` starts a source
 > transaction before target preparation, then routes every page of that table
@@ -993,6 +994,18 @@ The `migration` section controls how data is transferred.
 > appropriate. ClickHouse and unsupported source engines are rejected before
 > target mutation. The guarantee is **per table**, not a single snapshot shared
 > across independently transferred tables.
+>
+> **Migration scope (#663).** Set `strict_consistency_scope: migration` with a
+> PostgreSQL source to export one MVCC snapshot before the transfer phase and
+> import it into every table reader and partition. This produces one
+> cross-table point-in-time view and safely re-enables strict table
+> partitioning. The epoch closes when the transfer phase ends, including errors
+> and lease-loss cancellation. A resume in a new process intentionally opens a
+> new epoch, so cross-table simultaneity is guaranteed only within one process
+> lifetime. Schema extraction happens before the epoch begins; DDL drift in
+> that interval is outside this guarantee. A migration-long PostgreSQL snapshot
+> can retain dead tuples and delay vacuum, so use it with a source that has
+> enough MVCC-history headroom.
 >
 > **Strict validation (#664).** For a full-table strict transfer, dmt captures
 > `COUNT(*)` through that same pinned source transaction before it prepares the

@@ -166,6 +166,26 @@ func TestStateBackendConformanceStrictSnapshotEvidence(t *testing.T) {
 				t.Fatalf("retry snapshot count = (%v, %v), want (43, nil)", got, err)
 			}
 
+			// Migration-scoped strict snapshots may partition one table into
+			// several transfer tasks (#663). Any completed partition can carry
+			// the one shared full-table count used by validation.
+			partitionID := 1
+			partitionIdentity := TransferTaskIdentity{Schema: "dbo", Table: "line_items", PartitionID: &partitionID}
+			partitionTaskID, err := structured.CreateTransferTask(runID, partitionIdentity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := strict.SaveStrictSnapshotRowCount(partitionTaskID, 99); err != nil {
+				t.Fatal(err)
+			}
+			if err := structured.MarkTransferTaskComplete(runID, partitionIdentity); err != nil {
+				t.Fatal(err)
+			}
+			partitionCount, err := strict.GetStrictSnapshotRowCount(runID, "dbo", "public", "line_items")
+			if err != nil || partitionCount == nil || *partitionCount != 99 {
+				t.Fatalf("partition strict snapshot count = (%v, %v), want (99, nil)", partitionCount, err)
+			}
+
 			// `dmt validate` with no run ID must not select an older strict
 			// count when a newer ordinary run is the relevant migration.
 			if err := backend.CreateRun("ordinary-run", "dbo", "public", nil, "", ""); err != nil {

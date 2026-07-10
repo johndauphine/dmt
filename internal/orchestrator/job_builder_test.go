@@ -135,3 +135,46 @@ func TestStrictConsistencyBuildsOneUnpartitionedJobPerTable(t *testing.T) {
 		t.Fatalf("table job count = %d, want 1", result.TableJobCounts[table.Name])
 	}
 }
+
+func TestMigrationScopedStrictConsistencyBuildsPartitionedJobs(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	const runID = "strict-migration-partitions"
+	if err := state.CreateRun(runID, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	table := source.Table{
+		Schema:     "dbo",
+		Name:       "orders",
+		PrimaryKey: []string{"id"},
+		RowCount:   1_000_000,
+	}
+	builder := &JobBuilder{
+		state: state,
+		config: &config.Config{Migration: config.MigrationConfig{
+			StrictConsistency:      true,
+			StrictConsistencyScope: "migration",
+			ChunkSize:              1_000,
+			MaxPartitions:          8,
+			LargeTableThreshold:    100,
+		}},
+	}
+	result := &BuildResult{
+		TableJobCounts: make(map[string]int),
+		ProgressSaver:  checkpoint.NewProgressSaver(state),
+	}
+	if err := builder.createJobsForTable(context.Background(), runID, table, nil, result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Jobs) < 2 {
+		t.Fatalf("migration-scoped strict jobs = %d, want partitioned jobs", len(result.Jobs))
+	}
+	for _, job := range result.Jobs {
+		if job.Partition == nil {
+			t.Fatalf("migration-scoped strict job %+v is unexpectedly unpartitioned", job)
+		}
+	}
+}

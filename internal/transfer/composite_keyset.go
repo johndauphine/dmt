@@ -46,7 +46,7 @@ func executeCompositeKeysetPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, error) {
-	db := sourceQueryerFor(ctx, srcPool.DB())
+	db := sourceQueryerForJob(ctx, srcPool.DB(), job)
 
 	srcDialect := driver.GetDialect(srcPool.DBType())
 	if srcDialect == nil {
