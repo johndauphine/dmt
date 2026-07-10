@@ -70,6 +70,11 @@ type Job struct {
 	// scoped strict snapshot behavior. Passing it on the job, rather than the
 	// context, makes the migration-wide consistency contract explicit.
 	StrictSnapshotEpoch *StrictSnapshotEpoch
+
+	// AuditEvent records an operator-visible transfer event in the owning run's
+	// audit log. It is optional so direct transfer callers do not need to own an
+	// auditor; the orchestrator installs it on scheduled jobs (#665).
+	AuditEvent func(typeName string, fields map[string]any)
 }
 
 // chunkResult holds a chunk of data for the read-ahead pipeline

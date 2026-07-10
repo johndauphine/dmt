@@ -141,9 +141,12 @@ type pipelineConfig struct {
 	// Nil field means no checkpointing at all.
 	newAckHandler func(cb tunerCallbacks, saver ProgressSaver) func(writeAck)
 
-	// saveFinal persists final progress after a successful drain. last is
-	// the last data chunk the consumer received (zero value if none).
-	saveFinal func(last chunkResult, totalTransferred int64) error
+	// saveFinal persists final progress after a successful drain. It reports
+	// whether it wrote the authoritative durable watermark, so a trailing
+	// periodic-save failure can be downgraded only when final state superseded
+	// it. last is the last data chunk the consumer received (zero value if
+	// none).
+	saveFinal func(last chunkResult, totalTransferred int64) (saved bool, err error)
 }
 
 // runPipeline executes the shared read→buffer→write→ack pipeline for one
@@ -513,15 +516,53 @@ chunkLoop:
 	stats.Rows = totalTransferred
 
 	// Save final progress (synchronous + durable, through the raw saver).
+	// A successful final write supersedes every periodic checkpoint: those are
+	// only crash insurance until this terminal watermark is durable (#665).
+	finalSaved := false
 	if pc.saveFinal != nil {
-		if err := pc.saveFinal(lastResult, totalTransferred); err != nil {
-			return stats, fmt.Errorf("saving final checkpoint for %s: %w", tableName, err)
+		var err error
+		finalSaved, err = pc.saveFinal(lastResult, totalTransferred)
+		if err != nil {
+			return stats, errors.Join(fmt.Errorf("saving final checkpoint for %s: %w", tableName, err), saverErr)
 		}
 	}
 
 	if saverErr != nil {
+		if finalSaved {
+			consecutiveFailures, lastErr := periodicSaveFailureDetails(asyncSv, saverErr)
+			lastError := logging.Scrub(lastErr.Error())
+			logging.WarnEvent("checkpoint_periodic_save_degraded",
+				"table", tableName,
+				"consecutive_failures", consecutiveFailures,
+				"last_error", lastError,
+			)
+			if job.AuditEvent != nil {
+				job.AuditEvent("checkpoint_periodic_save_degraded", map[string]any{
+					"table":                tableName,
+					"consecutive_failures": consecutiveFailures,
+					"last_error":           lastError,
+				})
+			}
+			return stats, nil
+		}
 		return stats, fmt.Errorf("saving periodic checkpoints for %s: %w", tableName, saverErr)
 	}
 
 	return stats, nil
+}
+
+// periodicSaveFailureDetails exposes asyncSaver's terminal state to the
+// runner, which alone knows whether a synchronous final save superseded it.
+// asyncSaver is fully joined before this helper is called, but retain its lock
+// so this stays correct if that lifecycle ever changes.
+func periodicSaveFailureDetails(saver *asyncSaver, fallback error) (int, error) {
+	if saver == nil {
+		return 0, fallback
+	}
+	saver.mu.Lock()
+	defer saver.mu.Unlock()
+	if saver.lastErr == nil {
+		return saver.consecFails, fallback
+	}
+	return saver.consecFails, saver.lastErr
 }

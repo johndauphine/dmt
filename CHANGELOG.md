@@ -9,6 +9,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- A successful final checkpoint save now supersedes an earlier trailing
+  periodic-checkpoint failure, so a fully copied table is not falsely reported
+  as failed. The degradation remains visible through a warning and a
+  `checkpoint_periodic_save_degraded` audit event; skipped or failed final
+  saves continue to fail closed (#665).
+
 ### Changed
 
 - `strict_consistency_scope: migration` now gives PostgreSQL migrations one
