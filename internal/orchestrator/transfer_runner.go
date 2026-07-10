@@ -16,6 +16,7 @@ import (
 	"github.com/johndauphine/dmt/internal/transfer"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,7 +34,15 @@ type TransferRunner struct {
 	// table pipeline for this run (#617). Created once in Run; nil disables
 	// byte-based admission control.
 	memBudget *transfer.MemBudget
+
+	// execJob runs one job. It defaults to (*TransferRunner).executeJob and is
+	// overridable in tests so executeJobs' partition-dependency scheduling can
+	// be exercised without a live database (#648).
+	execJob jobExecutor
 }
+
+// jobExecutor runs a single transfer job, returning its terminal error.
+type jobExecutor func(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) error
 
 // NewTransferRunner creates a new TransferRunner.
 func NewTransferRunner(
@@ -289,89 +298,111 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResul
 	return result.TableFailures, nil
 }
 
-// executeJobs runs jobs with a worker pool.
-// For partitioned tables, first partitions are processed before remaining partitions
-// to prevent race conditions in partition cleanup logic during idempotent retries.
-// Note: Table truncation is handled upfront by preTruncateIfNeeded, not by partitions.
-func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) ([]TableFailure, error) {
-	// Separate jobs into two phases:
-	// - Phase 1: Non-partitioned jobs + first partitions (no dependencies)
-	// - Phase 2: Remaining partitions (wait for first partitions to establish cleanup boundaries)
-	var firstPhaseJobs []transfer.Job
-	var remainingJobs []transfer.Job
+// firstPartitionGate coordinates one table's partitions (#648). done is closed
+// when the table's first partition finishes; failed records whether it
+// established the pre-transfer cleanup boundary that later partitions depend on.
+type firstPartitionGate struct {
+	done   chan struct{}
+	failed atomic.Bool
+}
 
+// executeJobs schedules every transfer job with per-table partition
+// dependencies (#648). Non-partitioned jobs and each table's first partition
+// start immediately, bounded only by the global worker semaphore. A table's
+// dependent partitions (p2+) wait for that same table's first partition, then
+// either run or — if the first partition failed — are suppressed so a table
+// already known to have failed does not keep writing more partial data.
+//
+// This replaces the former two global phases, where every non-partitioned job
+// and every table's first partition had to finish before ANY table's remaining
+// partitions could start: one slow unrelated table stalled partition
+// parallelism across the whole migration. The cleanup dependency is
+// table-local, so it is now expressed table-locally.
+//
+// Note: table truncation is handled upfront by preTruncateIfNeeded, not here.
+func (r *TransferRunner) executeJobs(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) ([]TableFailure, error) {
+	// One gate per table that actually has a first partition. Non-partitioned
+	// tables never gate anything, so they get no entry.
+	gates := make(map[string]*firstPartitionGate)
 	for _, job := range jobs {
-		if job.Partition == nil {
-			// Non-partitioned jobs have no race condition concerns
-			firstPhaseJobs = append(firstPhaseJobs, job)
-		} else if job.Partition.IsFirstPartition {
-			firstPhaseJobs = append(firstPhaseJobs, job)
-		} else {
-			remainingJobs = append(remainingJobs, job)
+		if job.Partition != nil && job.Partition.IsFirstPartition {
+			gates[job.Table.Name] = &firstPartitionGate{done: make(chan struct{})}
 		}
 	}
 
-	logging.Debug("Starting worker pool with %d workers, %d jobs (%d first-phase, %d remaining)",
-		r.config.Migration.Workers, len(jobs), len(firstPhaseJobs), len(remainingJobs))
+	logging.Debug("Scheduling %d jobs with %d workers (%d partition-gated tables)",
+		len(jobs), r.config.Migration.Workers, len(gates))
+
+	execJob := r.execJob
+	if execJob == nil {
+		execJob = r.executeJob
+	}
 
 	errCh := make(chan tableError, len(jobs))
+	sem := make(chan struct{}, r.config.Migration.Workers)
+	var wg sync.WaitGroup
 
-	// Phase 1: Process non-partitioned jobs and first partitions
-	// These can run in parallel since they're for different tables or establish cleanup boundaries
-	if len(firstPhaseJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, firstPhaseJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments); err != nil {
-			close(errCh)
-			return nil, err
-		}
+	for _, job := range jobs {
+		job := job
+		gate := gates[job.Table.Name]
+		dependent := job.Partition != nil && !job.Partition.IsFirstPartition
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// A dependent partition waits on its own table's first partition
+			// BEFORE taking a worker slot, so a blocked dependent never occupies
+			// bounded write concurrency, and it is suppressed if that first
+			// partition failed.
+			if dependent && gate != nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-gate.done:
+				}
+				if gate.failed.Load() {
+					logging.Warn("Skipping %s partition %d: its first partition failed",
+						job.Table.Name, job.Partition.PartitionID)
+					return
+				}
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+			}
+			defer func() { <-sem }()
+
+			err := execJob(ctx, runID, job, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments)
+
+			// Release (or suppress) this table's dependent partitions once its
+			// first partition has resolved the cleanup boundary.
+			if gate != nil && job.Partition != nil && job.Partition.IsFirstPartition {
+				if err != nil {
+					gate.failed.Store(true)
+				}
+				close(gate.done)
+			}
+		}()
 	}
 
-	// Phase 2: Process remaining partitions (after first partitions complete)
-	if len(remainingJobs) > 0 {
-		if err := r.executeJobBatch(ctx, runID, remainingJobs, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments); err != nil {
-			close(errCh)
-			return nil, err
-		}
-	}
-
+	// Always wait for in-flight goroutines before closing errCh: an early close
+	// would let a still-running job send on a closed channel.
+	wg.Wait()
 	close(errCh)
 
-	// Collect failures
+	// Collect failures; collectFailures maps a canceled parent context to an
+	// aborted run (#641).
 	return r.collectFailures(ctx, errCh)
 }
 
-// executeJobBatch runs a batch of jobs with the worker pool.
-func (r *TransferRunner) executeJobBatch(ctx context.Context, runID string, jobs []transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) error {
-	sem := make(chan struct{}, r.config.Migration.Workers)
-	var wg sync.WaitGroup
-	var ctxErr error
-
-loop:
-	for _, job := range jobs {
-		select {
-		case <-ctx.Done():
-			ctxErr = ctx.Err()
-			break loop
-		case sem <- struct{}{}:
-		}
-
-		wg.Add(1)
-		go func(j transfer.Job) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			r.executeJob(ctx, runID, j, buildResult, statsMap, errCh, runtimeMonitor, tuner, runtimeAdjustments)
-		}(job)
-	}
-
-	// Always wait for in-flight goroutines to finish before returning.
-	// Returning early would let the caller close errCh while goroutines
-	// still send to it, causing "send on closed channel" panic.
-	wg.Wait()
-	return ctxErr
-}
-
-// executeJob runs a single job with retry logic.
-func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) {
+// executeJob runs a single job with retry logic. It returns the job's terminal
+// error (nil on success) in addition to reporting failures on errCh, so the
+// scheduler can release or suppress a table's dependent partitions based on its
+// first partition's outcome (#648).
+func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfer.Job, buildResult *BuildResult, statsMap map[string]*tableStats, errCh chan<- tableError, runtimeMonitor *monitor.Controller, tuner transfer.RuntimeTuner, runtimeAdjustments *runtimeAdjustmentRecorder) error {
 	// Report active job metrics for runtime monitoring (the rule-based
 	// controller's queue-growth and throughput-stable rules read these
 	// via the MetricsCollector + tuner.Metrics()).
@@ -383,7 +414,7 @@ func (r *TransferRunner) executeJob(ctx context.Context, runID string, j transfe
 	// Mark task as running
 	if err := r.updateTaskStatus(j, "running", ""); err != nil {
 		errCh <- tableError{tableName: j.Table.Name, err: err}
-		return
+		return err
 	}
 
 	// Execute with retry
@@ -464,13 +495,13 @@ retryLoop:
 		if r.config.Migration.NotifyOnFailure() {
 			r.notifier.TableTransferFailed(runID, j.Table.Name, err)
 		}
-		return
+		return failureErr
 	}
 
 	if stateErr := r.updateTaskStatus(j, "success", ""); stateErr != nil {
 		ts.jobsFailed++
 		errCh <- tableError{tableName: j.Table.Name, err: stateErr}
-		return
+		return stateErr
 	}
 
 	if stats != nil {
@@ -500,10 +531,11 @@ retryLoop:
 		if stateErr := r.markTransferTaskComplete(runID, j, buildResult); stateErr != nil {
 			ts.jobsFailed++
 			errCh <- tableError{tableName: j.Table.Name, err: stateErr}
-			return
+			return stateErr
 		}
 		r.progress.TableComplete()
 	}
+	return nil
 }
 
 func (r *TransferRunner) updateTaskStatus(j transfer.Job, status, errorMessage string) error {
