@@ -233,6 +233,16 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		o.notifier.MigrationStarted(runID, o.config.Source.Database, o.config.Target.Database, len(tables))
 	}
 
+	// Durable task creation is part of the transfer protocol. Build every
+	// job before the first target mutation so a checkpoint failure cannot
+	// leave dropped/truncated target tables without resumable tasks (#645).
+	buildResult, err := o.buildTransferJobs(ctx, runID, tables)
+	if err != nil {
+		o.state.CompleteRun(runID, "failed", err.Error())
+		o.notifyFailure(runID, err, time.Since(startTime))
+		return err
+	}
+
 	// Create target schema and tables
 	o.setPhase("creating_tables")
 	if err := o.targetPool.CreateSchema(ctx, o.config.Target.Schema); err != nil {
@@ -270,13 +280,22 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 	logging.Debug("Transferring data...")
 	o.state.UpdatePhase(runID, "transferring")
 	transferStart := time.Now()
-	tableFailures, err := o.transferAll(ctx, runID, tables, false)
+	tableFailures, err := o.transferAll(ctx, runID, buildResult, tables, false)
 	transferDuration := time.Since(transferStart)
 	if err != nil {
+		// A required checkpoint failure is an interrupted durability
+		// transition, not a terminal data failure. Leave the run incomplete so
+		// the operator can repair state storage and resume safely (#645).
+		if checkpoint.IsRequiredWriteError(err) {
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return fmt.Errorf("transferring data: %w", err)
+		}
 		// If context was canceled (Ctrl+C), leave run as "running" so resume works
 		// but reset any "running" tasks to "pending" so status shows correctly
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			o.state.MarkRunAsResumed(runID) // Reset running tasks to pending
+			if stateErr := o.markRunAsResumedRequired(runID); stateErr != nil {
+				return fmt.Errorf("transferring data: %w", errors.Join(err, stateErr))
+			}
 			logging.Info("Migration interrupted - run 'resume' to continue")
 			return fmt.Errorf("transferring data: %w", err)
 		}
@@ -362,7 +381,10 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		for i, f := range tableFailures {
 			failureNames[i] = f.TableName
 		}
-		o.state.CompleteRun(runID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures)))
+		if err := o.completeRunRequired(runID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures))); err != nil {
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
+		}
 		o.notifyCompletionWithErrors(runID, startTime, duration,
 			len(successTables), len(tableFailures), totalRows, throughput, failureNames)
 		logging.Warn("Migration completed with errors: %d tables succeeded, %d tables failed, %d rows in %s (%.0f rows/sec)",
@@ -370,7 +392,10 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		partialErr = !o.config.Migration.AllowPartial
 	} else {
 		// Full success
-		o.state.CompleteRun(runID, "success", "")
+		if err := o.completeRunRequired(runID, "success", ""); err != nil {
+			o.notifyFailure(runID, err, time.Since(startTime))
+			return err
+		}
 		o.captureSchemaSnapshotsForReport(runID, schemaDriftReport, tables)
 		o.notifyCompletion(runID, startTime, duration, len(tables), totalRows, throughput)
 		logging.Info("Migration complete: %d tables, %d rows in %s (%.0f rows/sec)",

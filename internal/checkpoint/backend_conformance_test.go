@@ -94,6 +94,28 @@ func TestStateBackendCapabilities(t *testing.T) {
 	}
 }
 
+func TestStateBackendRejectsUnknownRequiredWriteTargets(t *testing.T) {
+	for _, tc := range conformanceBackends() {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := tc.open(t)
+			if err := backend.CreateRun("known-run", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			const unknownTaskID = int64(987654321)
+			for operation, err := range map[string]error{
+				"save progress":  backend.SaveTransferProgress(unknownTaskID, "orders", nil, int64(1), 1, 1, ""),
+				"update status":  backend.UpdateTaskStatus(unknownTaskID, "success", ""),
+				"clear progress": backend.ClearTransferProgress(unknownTaskID),
+				"complete run":   backend.CompleteRun("missing-run", "success", ""),
+			} {
+				if err == nil {
+					t.Errorf("%s accepted an unknown write target", operation)
+				}
+			}
+		})
+	}
+}
+
 func TestStateBackendConformanceRunLifecycle(t *testing.T) {
 	for _, tc := range conformanceBackends() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,6 +262,17 @@ func TestStateBackendConformanceTaskLifecycle(t *testing.T) {
 			}
 			if !completed[transferKey] {
 				t.Fatalf("completed tables = %#v, want %q", completed, transferKey)
+			}
+			if err := backend.UpdateTaskStatus(taskID, "pending", ""); err != nil {
+				t.Fatalf("UpdateTaskStatus(pending) after success error: %v", err)
+			}
+			assertRunStats(t, backend, runID, runStats{total: 1, pending: 1})
+			completed, err = backend.GetCompletedTables(runID)
+			if err != nil {
+				t.Fatalf("GetCompletedTables() after pending reset error: %v", err)
+			}
+			if completed[transferKey] {
+				t.Fatalf("completed tables retained reset task: %#v", completed)
 			}
 
 			ddlID, err := backend.CreateTask(runID, "ddl", "ddl:indexes")

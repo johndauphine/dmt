@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -125,32 +126,94 @@ func (s *State) MarkTransferTaskComplete(runID string, identity TransferTaskIden
 	if err := s.ensureStructuredTransferRun(runID); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`
-		INSERT INTO tasks (
-			run_id, task_type, task_key, task_schema, task_table,
-			task_partition_id, status, completed_at
-		) VALUES (?, 'transfer', ?, ?, ?, ?, 'success', datetime('now'))
-		ON CONFLICT DO UPDATE SET
-			status = 'success', completed_at = datetime('now')
-	`, runID, identity.TaskKey(), identity.Schema, identity.Table, identity.PartitionID)
-	return err
+	result, err := s.db.Exec(`
+		UPDATE tasks SET status = 'success', completed_at = datetime('now')
+		WHERE run_id = ? AND task_type = 'transfer'
+		  AND task_schema = ? AND task_table = ?
+		  AND task_partition_id IS ?
+	`, runID, identity.Schema, identity.Table, identity.PartitionID)
+	if err != nil {
+		return err
+	}
+	return requireOneTask(result, 0, fmt.Sprintf("mark transfer task %s complete", identity.TaskKey()))
+}
+
+func (s *State) CompleteTransferTask(runID string, identity TransferTaskIdentity, targetSchema string, watermark *time.Time) error {
+	if err := s.ensureStructuredTransferRun(runID); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`
+		UPDATE tasks SET status = 'success', completed_at = datetime('now')
+		WHERE run_id = ? AND task_type = 'transfer'
+		  AND task_schema = ? AND task_table = ?
+		  AND task_partition_id IS ?
+	`, runID, identity.Schema, identity.Table, identity.PartitionID)
+	if err != nil {
+		return err
+	}
+	if err := requireOneTask(result, 0, fmt.Sprintf("complete transfer task %s", identity.TaskKey())); err != nil {
+		return err
+	}
+	if watermark != nil {
+		if _, err := tx.Exec(`
+			INSERT INTO table_sync_timestamps (source_schema, table_name, target_schema, last_sync_timestamp, updated_at)
+			VALUES (?, ?, ?, ?, datetime('now'))
+			ON CONFLICT(source_schema, table_name, target_schema) DO UPDATE SET
+				last_sync_timestamp = excluded.last_sync_timestamp,
+				updated_at = excluded.updated_at
+		`, identity.Schema, identity.Table, targetSchema, watermark.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // UpdateTaskStatus updates a task's status
 func (s *State) UpdateTaskStatus(taskID int64, status string, errorMsg string) error {
-	if status == "running" {
-		_, err := s.db.Exec(`
+	var (
+		result sql.Result
+		err    error
+	)
+	switch status {
+	case "running":
+		result, err = s.db.Exec(`
 			UPDATE tasks SET status = ?, started_at = datetime('now')
 			WHERE id = ?
 		`, status, taskID)
+	case "pending":
+		result, err = s.db.Exec(`
+			UPDATE tasks SET status = ?, started_at = NULL, completed_at = NULL, error_message = ?
+			WHERE id = ?
+		`, status, errorMsg, taskID)
+	default:
+		result, err = s.db.Exec(`
+			UPDATE tasks SET status = ?, completed_at = datetime('now'), error_message = ?
+			WHERE id = ?
+		`, status, errorMsg, taskID)
+	}
+	if err != nil {
 		return err
 	}
+	return requireOneTask(result, taskID, "update status")
+}
 
-	_, err := s.db.Exec(`
-		UPDATE tasks SET status = ?, completed_at = datetime('now'), error_message = ?
-		WHERE id = ?
-	`, status, errorMsg, taskID)
-	return err
+func requireOneTask(result sql.Result, taskID int64, operation string) error {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		if taskID > 0 {
+			return fmt.Errorf("%s: task not found: %d", operation, taskID)
+		}
+		return fmt.Errorf("%s: expected one task, updated %d", operation, rows)
+	}
+	return nil
 }
 
 // IncrementRetry increments retry count and resets to pending
@@ -196,8 +259,14 @@ func (s *State) AllTasksComplete(runID, taskType string) (bool, error) {
 
 // SaveTransferProgress saves chunk-level progress for resume
 func (s *State) SaveTransferProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
-	lastPKJSON, _ := json.Marshal(lastPK)
-	_, err := s.db.Exec(`
+	if err := s.requireTask(taskID); err != nil {
+		return err
+	}
+	lastPKJSON, err := json.Marshal(lastPK)
+	if err != nil {
+		return fmt.Errorf("marshal progress watermark for task %d: %w", taskID, err)
+	}
+	_, err = s.db.Exec(`
 		INSERT INTO transfer_progress (task_id, table_name, partition_id, last_pk, rows_done, rows_total, range_state, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), datetime('now'))
 		ON CONFLICT(task_id) DO UPDATE SET
@@ -226,7 +295,19 @@ func (s *State) GetTransferProgress(taskID int64) (*TransferProgress, error) {
 
 // ClearTransferProgress removes saved progress for a task (for fresh re-transfer)
 func (s *State) ClearTransferProgress(taskID int64) error {
+	if err := s.requireTask(taskID); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM transfer_progress WHERE task_id = ?`, taskID)
+	return err
+}
+
+func (s *State) requireTask(taskID int64) error {
+	var exists int
+	err := s.db.QueryRow(`SELECT 1 FROM tasks WHERE id = ?`, taskID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("task not found: %d", taskID)
+	}
 	return err
 }
 
@@ -437,7 +518,8 @@ func NewProgressSaver(s StateBackend) *ProgressSaver {
 
 // SaveProgress saves chunk-level progress for resume
 func (p *ProgressSaver) SaveProgress(taskID int64, tableName string, partitionID *int, lastPK any, rowsDone, rowsTotal int64, rangeState string) error {
-	return p.state.SaveTransferProgress(taskID, tableName, partitionID, lastPK, rowsDone, rowsTotal, rangeState)
+	err := p.state.SaveTransferProgress(taskID, tableName, partitionID, lastPK, rowsDone, rowsTotal, rangeState)
+	return RequiredWrite(fmt.Sprintf("saving progress for table %q task %d", tableName, taskID), err)
 }
 
 // GetProgress retrieves saved progress for a task

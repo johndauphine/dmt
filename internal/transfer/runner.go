@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -142,7 +143,7 @@ type pipelineConfig struct {
 
 	// saveFinal persists final progress after a successful drain. last is
 	// the last data chunk the consumer received (zero value if none).
-	saveFinal func(last chunkResult, totalTransferred int64)
+	saveFinal func(last chunkResult, totalTransferred int64) error
 }
 
 // runPipeline executes the shared read→buffer→write→ack pipeline for one
@@ -498,12 +499,12 @@ chunkLoop:
 	}
 
 	if loopErr != nil {
-		return stats, loopErr
+		return stats, errors.Join(loopErr, saverErr)
 	}
 
 	// Check for write errors
 	if err := wp.error(); err != nil {
-		return stats, fmt.Errorf("writing chunk: %w", err)
+		return stats, errors.Join(fmt.Errorf("writing chunk: %w", err), saverErr)
 	}
 
 	// Aggregate stats
@@ -513,14 +514,13 @@ chunkLoop:
 
 	// Save final progress (synchronous + durable, through the raw saver).
 	if pc.saveFinal != nil {
-		pc.saveFinal(lastResult, totalTransferred)
+		if err := pc.saveFinal(lastResult, totalTransferred); err != nil {
+			return stats, fmt.Errorf("saving final checkpoint for %s: %w", tableName, err)
+		}
 	}
 
-	// A persistently broken saver doesn't fail an otherwise-successful data
-	// transfer — the rows landed — but it must be loud, since resume would
-	// silently restart from an earlier point (#620).
 	if saverErr != nil {
-		logging.Warn("Checkpoint saver unhealthy during %s: %v (resume may restart from an earlier checkpoint)", tableName, saverErr)
+		return stats, fmt.Errorf("saving periodic checkpoints for %s: %w", tableName, saverErr)
 	}
 
 	return stats, nil

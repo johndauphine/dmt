@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStructuredTransferTaskIdentityBackendParity(t *testing.T) {
@@ -170,6 +172,121 @@ func TestStructuredTransferTaskIdentityRejectsAmbiguousLegacyRun(t *testing.T) {
 				t.Fatalf("CreateTransferTask error = %v, want ErrLegacyTaskIdentity", err)
 			}
 		})
+	}
+}
+
+func TestStructuredTransferCompletionRequiresPlannedTask(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		open func(*testing.T) StateBackend
+	}{
+		{name: "sqlite", open: func(t *testing.T) StateBackend {
+			state, err := New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = state.Close() })
+			return state
+		}},
+		{name: "file", open: func(t *testing.T) StateBackend {
+			state, err := NewFileState(filepath.Join(t.TempDir(), "state.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return state
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := tt.open(t)
+			if err := backend.CreateRun("completion-run", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			identity := TransferTaskIdentity{Schema: "dbo", Table: "orders"}
+			if err := backend.(StructuredTaskBackend).MarkTransferTaskComplete("completion-run", identity); err == nil {
+				t.Fatal("MarkTransferTaskComplete created a missing aggregate task")
+			}
+			if err := backend.(AtomicTransferCompletionBackend).CompleteTransferTask("completion-run", identity, "public", nil); err == nil {
+				t.Fatal("CompleteTransferTask created a missing aggregate task")
+			}
+		})
+	}
+}
+
+func TestSQLiteAtomicTransferCompletionRollsBackTaskWhenWatermarkFails(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.CreateRun("atomic-run", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	identity := TransferTaskIdentity{Schema: "dbo", Table: "orders"}
+	if _, err := state.CreateTransferTask("atomic-run", identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.db.Exec(`
+		CREATE TRIGGER fail_sync_watermark
+		BEFORE INSERT ON table_sync_timestamps
+		BEGIN SELECT RAISE(ABORT, 'injected watermark failure'); END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	watermark := time.Now().UTC()
+	if err := state.CompleteTransferTask("atomic-run", identity, "public", &watermark); err == nil {
+		t.Fatal("CompleteTransferTask error = nil, want injected watermark failure")
+	}
+	completed, err := state.GetCompletedTables("atomic-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed[identity.TaskKey()] {
+		t.Fatal("aggregate task completion survived rolled-back watermark transaction")
+	}
+	got, err := state.GetLastSyncTimestamp(identity.Schema, identity.Table, "public")
+	if err != nil || got != nil {
+		t.Fatalf("sync watermark = (%v, %v), want nil after rollback", got, err)
+	}
+}
+
+func TestFileStateAtomicTransferCompletionLeavesPersistedTaskPendingOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.yaml")
+	state, err := NewFileState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CreateRun("atomic-run", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	identity := TransferTaskIdentity{Schema: "dbo", Table: "orders"}
+	if _, err := state.CreateTransferTask("atomic-run", identity); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state.path = filepath.Join(blocker, "state.yaml")
+	watermark := time.Now().UTC()
+	if err := state.CompleteTransferTask("atomic-run", identity, "public", &watermark); err == nil {
+		t.Fatal("CompleteTransferTask error = nil, want atomic file-save failure")
+	}
+
+	reloaded, err := NewFileState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := reloaded.GetCompletedTables("atomic-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed[identity.TaskKey()] {
+		t.Fatal("failed atomic file save persisted aggregate success")
+	}
+	got, err := reloaded.GetLastSyncTimestamp(identity.Schema, identity.Table, "public")
+	if err != nil || got != nil {
+		t.Fatalf("sync watermark = (%v, %v), want nil after failed atomic save", got, err)
 	}
 }
 

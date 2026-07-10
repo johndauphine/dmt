@@ -187,6 +187,9 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if checkpoint.IsRequiredWriteError(err) {
+		return false
+	}
 	errStr := strings.ToLower(err.Error())
 	retryablePatterns := []string{
 		"connection reset",

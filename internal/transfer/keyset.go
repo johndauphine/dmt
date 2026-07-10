@@ -140,18 +140,16 @@ func executeKeysetPagination(
 			}
 			return coord.onAck
 		},
-		saveFinal: func(last chunkResult, totalTransferred int64) {
+		saveFinal: func(last chunkResult, totalTransferred int64) error {
 			if job.Saver == nil || job.TaskID <= 0 || last.lastPK == nil {
-				return
+				return nil
 			}
 			var partitionID *int
 			if job.Partition != nil {
 				partitionID = &job.Partition.PartitionID
 			}
 			finalLastPK := coord.finalCheckpoint(last.lastPK)
-			if err := job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount, coord.rangeState()); err != nil {
-				logging.Warn("Checkpoint save failed for %s: %v", job.Table.Name, err)
-			}
+			return job.Saver.SaveProgress(job.TaskID, job.Table.Name, partitionID, finalLastPK, totalTransferred, job.Table.RowCount, coord.rangeState())
 		},
 	})
 }

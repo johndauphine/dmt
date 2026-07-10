@@ -51,11 +51,21 @@ func (s *State) UpdateRunConfig(id string, config any) error {
 
 // CompleteRun marks a run as complete
 func (s *State) CompleteRun(id string, status string, errorMsg string) error {
-	_, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 		UPDATE runs SET status = ?, completed_at = datetime('now'), error = ?
 		WHERE id = ?
 	`, status, errorMsg, id)
-	return err
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return fmt.Errorf("complete run: expected one run with id %q, updated %d", id, rows)
+	}
+	return nil
 }
 
 // UpdateRunHeartbeat records that a running process still owns a run.

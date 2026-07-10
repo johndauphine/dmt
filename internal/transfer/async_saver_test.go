@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/progress"
@@ -92,24 +93,21 @@ func TestAsyncSaverLatestWins(t *testing.T) {
 	}
 }
 
-// TestAsyncSaverSurfacesRepeatedFailures verifies close() reports the saver
-// as unhealthy after enough consecutive failures, so a run never silently
-// loses all checkpointing (#620). Snapshots are fed one at a time (waiting
-// for each to be consumed) so none coalesce away.
-func TestAsyncSaverSurfacesRepeatedFailures(t *testing.T) {
+// TestAsyncSaverSurfacesUnrecoveredFailure verifies close() reports even one
+// unresolved periodic write failure. A later successful checkpoint may recover
+// it, but terminal success cannot rely on a watermark that never persisted.
+func TestAsyncSaverSurfacesUnrecoveredFailure(t *testing.T) {
 	each := make(chan struct{})
 	inner := &gateSaver{err: errors.New("disk full"), each: each}
 	s := newAsyncSaver(inner)
 	s.start()
 
-	for i := 0; i < asyncSaverFailThreshold; i++ {
-		post(s, int64(i+1))
-		<-each // wait for this snapshot to be persisted before posting the next
-	}
+	post(s, 1)
+	<-each
 
 	err := s.close()
 	if err == nil {
-		t.Fatal("close() = nil, want an unhealthy-saver error after repeated failures")
+		t.Fatal("close() = nil, want an unhealthy-saver error after an unrecovered failure")
 	}
 }
 
@@ -131,7 +129,7 @@ func TestAsyncSaverRecoversFromTransientFailure(t *testing.T) {
 	inner.mu.Lock()
 	inner.err = nil
 	inner.mu.Unlock()
-	for i := 0; i < asyncSaverFailThreshold; i++ {
+	for i := 0; i < 3; i++ {
 		post(s, int64(i+2))
 		<-each
 	}
@@ -231,5 +229,59 @@ func TestSlowSaverKeepsFinalCheckpointDurable(t *testing.T) {
 	}
 	if last.rowsDone != totalRows {
 		t.Fatalf("final checkpoint rowsDone = %d, want %d", last.rowsDone, totalRows)
+	}
+}
+
+type requiredFailSaver struct{ err error }
+
+func (s *requiredFailSaver) SaveProgress(int64, string, *int, any, int64, int64, string) error {
+	return checkpoint.RequiredWrite("saving injected transfer progress", s.err)
+}
+
+func (s *requiredFailSaver) GetProgress(int64) (any, int64, string, error) {
+	return nil, 0, "", nil
+}
+
+func TestFinalCheckpointFailurePreventsTransferSuccess(t *testing.T) {
+	const totalRows = 20
+	db := seedKeysetRuntimeTunerDB(t, totalRows)
+	srcPool := &keysetRuntimeSourcePool{db: db}
+	tgtPool := &keysetRuntimeTargetPool{updated: true}
+	table := driver.Table{
+		Name: "items",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "integer"},
+			{Name: "payload", DataType: "text"},
+		},
+		PrimaryKey:       []string{"id"},
+		RowCount:         totalRows,
+		EstimatedRowSize: 32,
+	}
+	table.PopulatePKColumns()
+	cfg := &config.Config{
+		Migration: config.MigrationConfig{
+			ChunkSize:           5,
+			ParallelReaders:     1,
+			WriteAheadWriters:   1,
+			TargetMode:          "drop_recreate",
+			CheckpointFrequency: 1,
+		},
+	}
+	job := Job{
+		Table:  table,
+		TaskID: 645,
+		Saver:  &requiredFailSaver{err: errors.New("disk full")},
+	}
+
+	stats, err := Execute(context.Background(), srcPool, tgtPool, cfg, job, progress.New(), nil)
+	if !checkpoint.IsRequiredWriteError(err) {
+		t.Fatalf("Execute error = %v, want required-write failure", err)
+	}
+	if stats == nil || stats.Rows != totalRows {
+		t.Fatalf("stats = %+v, want %d target rows written before final checkpoint failed", stats, totalRows)
+	}
+	ids, _ := tgtPool.snapshot()
+	if len(ids) != totalRows {
+		t.Fatalf("target rows = %d, want %d", len(ids), totalRows)
 	}
 }

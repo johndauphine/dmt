@@ -87,6 +87,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Required checkpoint writes now fail closed. Transfer tasks are persisted
+  before target DDL/truncation, task creation and status failures cannot fall
+  through with task ID zero, unresolved periodic/final progress failures stop
+  table success, and failed table/run terminal writes prevent a success
+  result. SQLite and file state reject unknown task IDs, terminal SQLite run
+  updates verify the run exists, and durability failures carry state exit code
+  6 with repair-and-resume guidance. Aggregate table success and incremental
+  watermarks are committed atomically so resume cannot skip a watermark retry
+  after a partial state write (#645).
+
 - Transfer checkpoint identity is now structured by task type, schema, table,
   and optional partition in both SQLite and file state. Quoted identifiers
   containing dots, colons, percent signs, underscores, or backslashes can no
