@@ -50,6 +50,8 @@ func (fs *FileState) CreateRun(id, sourceSchema, targetSchema string, config any
 			StartedAt:             now,
 			LastHeartbeat:         now,
 			Status:                "running",
+			Resumable:             boolPointer(true),
+			ResumabilityReason:    RunResumabilityInProgress,
 			SourceSchema:          sourceSchema,
 			TargetSchema:          targetSchema,
 			ConfigHash:            hex.EncodeToString(hash[:8]), // First 8 bytes
@@ -73,6 +75,18 @@ func (fs *FileState) UpdateRunConfig(id string, config any) error {
 
 // CompleteRun marks the run as complete.
 func (fs *FileState) CompleteRun(id string, status string, errorMsg string) error {
+	return fs.completeRun(id, status, errorMsg, false, terminalResumabilityReason(status))
+}
+
+// CompleteRunResumable records an outcome that remains eligible for resume.
+func (fs *FileState) CompleteRunResumable(id string, status string, errorMsg string, reason string) error {
+	if reason == "" {
+		reason = RunResumabilityPartialFailure
+	}
+	return fs.completeRun(id, status, errorMsg, true, reason)
+}
+
+func (fs *FileState) completeRun(id, status, errorMsg string, resumable bool, reason string) error {
 	return fs.withRunLeaseMutation("complete run", func() error {
 		if fs.state.RunID != id {
 			return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, id)
@@ -81,6 +95,32 @@ func (fs *FileState) CompleteRun(id string, status string, errorMsg string) erro
 		fs.state.Status = status
 		fs.state.CompletedAt = &now
 		fs.state.Error = errorMsg
+		fs.state.Resumable = boolPointer(resumable)
+		fs.state.ResumabilityReason = reason
+		return nil
+	})
+}
+
+// AbandonRun removes the current run from automatic resume selection.
+func (fs *FileState) AbandonRun(id string, reason string) error {
+	reason = abandonResumabilityReason(reason)
+	return fs.withRunLeaseMutation("abandon run", func() error {
+		if fs.state.RunID != id {
+			return fmt.Errorf("run ID mismatch: expected %s, got %s", fs.state.RunID, id)
+		}
+		if !fileRunResumable(fs.state) {
+			return fmt.Errorf("run %s is not resumable", id)
+		}
+		if fs.state.Status == "running" {
+			fs.state.Status = "failed"
+			fs.state.Error = reason
+		}
+		if fs.state.CompletedAt == nil {
+			now := time.Now()
+			fs.state.CompletedAt = &now
+		}
+		fs.state.Resumable = boolPointer(false)
+		fs.state.ResumabilityReason = reason
 		return nil
 	})
 }
@@ -105,32 +145,11 @@ func (fs *FileState) GetLastIncompleteRun() (*Run, error) {
 		if err := fs.reloadLocked(); err != nil {
 			return err
 		}
-		if fs.state.RunID == "" || fs.state.Status != "running" {
+		if fs.state.RunID == "" || !fileRunResumable(fs.state) {
 			return nil
 		}
-		phase := fs.state.Phase
-		if phase == "" {
-			phase = "initializing"
-		}
-		lastHeartbeat := fs.state.LastHeartbeat
-		if lastHeartbeat.IsZero() {
-			lastHeartbeat = fs.state.StartedAt
-		}
-		run = &Run{
-			ID:              fs.state.RunID,
-			StartedAt:       fs.state.StartedAt,
-			LastHeartbeat:   lastHeartbeat,
-			Status:          fs.state.Status,
-			Phase:           phase,
-			SourceSchema:    fs.state.SourceSchema,
-			TargetSchema:    fs.state.TargetSchema,
-			ConfigHash:      fs.state.ConfigHash,
-			ProfileName:     fs.state.ProfileName,
-			ConfigPath:      fs.state.ConfigPath,
-			LeaseTargetKey:  fs.state.LeaseTargetKey,
-			LeaseOwnerToken: fs.state.LeaseOwnerToken,
-			LeaseGeneration: fs.state.LeaseGeneration,
-		}
+		value := runFromFileState(fs.state)
+		run = &value
 		return nil
 	})
 	return run, err
@@ -174,8 +193,43 @@ func (fs *FileState) MarkRunAsResumed(runID string) error {
 				fs.state.Tables[key] = ts
 			}
 		}
+		fs.state.Status = "running"
+		fs.state.CompletedAt = nil
+		fs.state.Error = ""
+		fs.state.Resumable = boolPointer(true)
+		fs.state.ResumabilityReason = RunResumabilityInProgress
 		return nil
 	})
+}
+
+func runFromFileState(state *fileStateData) Run {
+	phase := state.Phase
+	if phase == "" {
+		phase = "initializing"
+	}
+	lastHeartbeat := state.LastHeartbeat
+	if lastHeartbeat.IsZero() {
+		lastHeartbeat = state.StartedAt
+	}
+	return Run{
+		ID:                 state.RunID,
+		StartedAt:          state.StartedAt,
+		CompletedAt:        state.CompletedAt,
+		LastHeartbeat:      lastHeartbeat,
+		Status:             state.Status,
+		Resumable:          fileRunResumable(state),
+		ResumabilityReason: state.ResumabilityReason,
+		Phase:              phase,
+		Error:              state.Error,
+		SourceSchema:       state.SourceSchema,
+		TargetSchema:       state.TargetSchema,
+		ConfigHash:         state.ConfigHash,
+		ProfileName:        state.ProfileName,
+		ConfigPath:         state.ConfigPath,
+		LeaseTargetKey:     state.LeaseTargetKey,
+		LeaseOwnerToken:    state.LeaseOwnerToken,
+		LeaseGeneration:    state.LeaseGeneration,
+	}
 }
 
 // UpdatePhase updates the current phase of a migration run.

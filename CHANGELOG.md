@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Partial transfer outcomes now remain durably resumable: SQLite and YAML
+  state store outcome separately from resume eligibility, `resume` retries
+  failed tables while skipping successful peers, status/history expose the
+  policy, and `resume --abandon` provides a target-leased operator workflow
+  for accepting a recoverable run as terminal. `migration.allow_partial: true`
+  is treated as explicit acceptance and is not auto-selected (#643).
+
 - WebUI run history is now paginated and status-filterable. `GET /api/history`
   accepts `limit` (default 20, max 100), `offset`, and a `status` filter
   validated against the persisted set (`running`/`success`/`partial`/`failed`);

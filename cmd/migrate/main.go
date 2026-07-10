@@ -223,6 +223,14 @@ func newApp() *cli.App {
 						Name:  "skip-preflight",
 						Usage: "Comma-separated list of preflight checks to skip, or 'all' to disable preflight (#228)",
 					},
+					&cli.BoolFlag{
+						Name:  "abandon",
+						Usage: "Explicitly abandon the resumable run for this target instead of resuming it",
+					},
+					&cli.StringFlag{
+						Name:  "abandon-reason",
+						Usage: "Operator reason recorded with --abandon",
+					},
 				},
 			},
 			{

@@ -50,6 +50,8 @@ type StateBackend interface {
 	CreateRun(id, sourceSchema, targetSchema string, config any, profileName, configPath string) error
 	UpdateRunConfig(id string, config any) error // Persist post-AI-tuning config snapshot
 	CompleteRun(id string, status string, errorMsg string) error
+	CompleteRunResumable(id string, status string, errorMsg string, reason string) error
+	AbandonRun(id string, reason string) error
 	GetLastIncompleteRun() (*Run, error)
 	UpdateRunHeartbeat(runID string, at time.Time) error
 	HasSuccessfulRunAfter(run *Run) (bool, error) // Check if a successful run supersedes this incomplete run

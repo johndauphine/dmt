@@ -217,6 +217,8 @@ func isRetryableError(err error) bool {
 type MigrationResult struct {
 	RunID                   string                       `json:"run_id"`
 	Status                  string                       `json:"status"`
+	Resumable               bool                         `json:"resumable"`
+	ResumabilityReason      string                       `json:"resumability_reason,omitempty"`
 	StartedAt               time.Time                    `json:"started_at"`
 	CompletedAt             time.Time                    `json:"completed_at"`
 	DurationSeconds         float64                      `json:"duration_seconds"`
@@ -259,17 +261,19 @@ type DeleteReconciliationTableSummary struct {
 
 // StatusResult contains the current status of a migration.
 type StatusResult struct {
-	RunID           string    `json:"run_id"`
-	Status          string    `json:"status"`
-	Phase           string    `json:"phase"`
-	StartedAt       time.Time `json:"started_at"`
-	TablesTotal     int       `json:"tables_total"`
-	TablesComplete  int       `json:"tables_complete"`
-	TablesRunning   int       `json:"tables_running"`
-	TablesPending   int       `json:"tables_pending"`
-	TablesFailed    int       `json:"tables_failed"`
-	RowsTransferred int64     `json:"rows_transferred"`
-	ProgressPercent float64   `json:"progress_percent"`
+	RunID              string    `json:"run_id"`
+	Status             string    `json:"status"`
+	Resumable          bool      `json:"resumable"`
+	ResumabilityReason string    `json:"resumability_reason,omitempty"`
+	Phase              string    `json:"phase"`
+	StartedAt          time.Time `json:"started_at"`
+	TablesTotal        int       `json:"tables_total"`
+	TablesComplete     int       `json:"tables_complete"`
+	TablesRunning      int       `json:"tables_running"`
+	TablesPending      int       `json:"tables_pending"`
+	TablesFailed       int       `json:"tables_failed"`
+	RowsTransferred    int64     `json:"rows_transferred"`
+	ProgressPercent    float64   `json:"progress_percent"`
 
 	// AIFallbacks reports per-surface AI fallback counts for the run
 	// referenced by RunID (#176). Keys are observability.Surface* values

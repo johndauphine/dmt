@@ -19,8 +19,8 @@ import (
 // abandonResumeAttempt records a pre-transfer resume failure but leaves the run
 // resumable — it does NOT mark the run 'failed'. Reserved for environmental or
 // transient failures (preflight, schema extraction) the operator is expected to
-// fix and retry; marking the run failed would orphan all checkpointed progress,
-// because GetLastIncompleteRun only returns 'running' runs (#566).
+// fix and retry; marking the run terminal/non-resumable would orphan all
+// checkpointed progress (#566, #643).
 func (o *Orchestrator) abandonResumeAttempt(runID string, err error, startTime time.Time) {
 	o.notifyFailure(runID, err, time.Since(startTime))
 }
@@ -251,23 +251,22 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		return fmt.Errorf("getting completed tables: %w", err)
 	}
 
-	// Check target row counts to determine which tables need re-transfer
-	var tablesToTransfer []source.Table
-	var skippedTables []string
-
-	for _, t := range tables {
-		// Check if table was marked complete AND has correct row count
-		taskKey := checkpoint.TransferTaskKeyForBackend(o.state, checkpoint.TransferTaskIdentity{Schema: t.Schema, Table: t.Name})
-		if completedTables[taskKey] {
-			// Verify row count matches
-			targetCount, err := o.targetPool.GetRowCount(ctx, o.config.Target.Schema, t.Name)
-			if err == nil && targetCount == t.RowCount {
-				skippedTables = append(skippedTables, t.Name)
-				continue
-			}
-		}
-		tablesToTransfer = append(tablesToTransfer, t)
-	}
+	// Check target row counts to determine which tables need re-transfer.
+	// The selection helper is deliberately isolated so the partial-run contract
+	// can prove a successful table is skipped while a failed peer is scheduled.
+	tablesToTransfer, skippedTables := selectResumeTables(
+		tables,
+		completedTables,
+		func(table source.Table) string {
+			return checkpoint.TransferTaskKeyForBackend(o.state, checkpoint.TransferTaskIdentity{
+				Schema: table.Schema,
+				Table:  table.Name,
+			})
+		},
+		func(table source.Table) (int64, error) {
+			return o.targetPool.GetRowCount(ctx, o.config.Target.Schema, table.Name)
+		},
+	)
 
 	if len(skippedTables) > 0 {
 		logging.Debug("Skipping %d already-complete tables: %v", len(skippedTables), skippedTables)
@@ -464,7 +463,7 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		for i, f := range tableFailures {
 			failureNames[i] = f.TableName
 		}
-		if err := o.completeRunRequired(run.ID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures))); err != nil {
+		if err := o.completePartialRunRequired(run.ID, fmt.Sprintf("%d tables failed", len(tableFailures))); err != nil {
 			o.notifyFailure(run.ID, err, time.Since(startTime))
 			return err
 		}
@@ -498,6 +497,65 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 		return &PartialMigrationError{Failed: tableFailures}
 	}
 	return nil
+}
+
+func selectResumeTables(
+	tables []source.Table,
+	completedTables map[string]bool,
+	taskKey func(source.Table) string,
+	targetRowCount func(source.Table) (int64, error),
+) (toTransfer []source.Table, skipped []string) {
+	for _, table := range tables {
+		if completedTables[taskKey(table)] {
+			count, err := targetRowCount(table)
+			if err == nil && count == table.RowCount {
+				skipped = append(skipped, table.Name)
+				continue
+			}
+		}
+		toTransfer = append(toTransfer, table)
+	}
+	return toTransfer, skipped
+}
+
+// AbandonResume explicitly removes the newest recoverable run for the
+// configured target from automatic resume selection. It acquires and binds the
+// same target lease as Run/Resume, so a live owner cannot be abandoned out from
+// underneath its data-path writes.
+func (o *Orchestrator) AbandonResume(reason string) (*checkpoint.Run, error) {
+	leaseState, err := o.migrationLeaseBackend()
+	if err != nil {
+		return nil, err
+	}
+	run, err := leaseState.GetLastIncompleteRunForTarget(o.migrationTarget())
+	if err != nil {
+		return nil, fmt.Errorf("finding resumable run: %w", err)
+	}
+	if run == nil {
+		return nil, fmt.Errorf("no resumable run found for the configured target")
+	}
+	leaseBackend, lease, err := o.acquireMigrationLease(run)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring migration lease for run %s: %w", run.ID, err)
+	}
+	if err := bindMigrationLease(leaseBackend, run.ID, lease); err != nil {
+		return nil, releaseUnboundMigrationLease(leaseBackend, lease, err)
+	}
+	if err := o.state.AbandonRun(run.ID, reason); err != nil {
+		return nil, releaseUnboundMigrationLease(
+			leaseBackend,
+			lease,
+			checkpoint.RequiredWrite(fmt.Sprintf("abandoning run %s", run.ID), err),
+		)
+	}
+	if err := leaseBackend.ReleaseMigrationLease(lease); err != nil {
+		return nil, checkpoint.RequiredWrite("releasing migration lease", err)
+	}
+	abandoned, err := o.state.GetRunByID(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("reading abandoned run %s: %w", run.ID, err)
+	}
+	return abandoned, nil
 }
 
 func (o *Orchestrator) resetResumeTableTasksRequired(buildResult *BuildResult, tables []source.Table) error {

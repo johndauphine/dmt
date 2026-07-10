@@ -60,10 +60,14 @@ type Run struct {
 	CompletedAt   *time.Time
 	LastHeartbeat time.Time
 	Status        string
-	Phase         string // Current phase: initializing, transferring, finalizing, validating, complete
-	SourceSchema  string
-	TargetSchema  string
-	Config        string
+	// Resumable is independent of Status: a partial outcome may remain
+	// recoverable, while an explicitly accepted or abandoned partial does not.
+	Resumable          bool
+	ResumabilityReason string
+	Phase              string // Current phase: initializing, transferring, finalizing, validating, complete
+	SourceSchema       string
+	TargetSchema       string
+	Config             string
 	// ConfigHash is the hash of the migration config, used for change detection on resume.
 	// Both SQLite and file-based backends persist this field for config validation.
 	ConfigHash  string

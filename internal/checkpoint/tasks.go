@@ -406,10 +406,23 @@ func (s *State) GetCompletedTables(runID string) (map[string]bool, error) {
 	return completed, nil
 }
 
-// MarkRunAsResumed resets running tasks to pending for resume
+// MarkRunAsResumed transitions a selected recoverable outcome back to an
+// active run and resets any interrupted tasks to pending.
 func (s *State) MarkRunAsResumed(runID string) error {
 	return s.withRunLeaseTx(runID, "mark run as resumed", func(tx *sql.Tx) error {
-		_, err := tx.Exec(`
+		result, err := tx.Exec(`
+			UPDATE runs
+			SET status = 'running', completed_at = NULL, error = NULL,
+			    resumable = 1, resumability_reason = ?
+			WHERE id = ? AND resumable = 1
+		`, RunResumabilityInProgress, runID)
+		if err != nil {
+			return err
+		}
+		if err := requireOneRun(result, runID, "mark run as resumed"); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`
 			UPDATE tasks SET status = 'pending', started_at = NULL
 			WHERE run_id = ? AND status = 'running'
 		`, runID)

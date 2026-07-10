@@ -18,32 +18,36 @@ import (
 // ConfigHash: Config holds the serialized migration config, which can include
 // connection secrets, and must never be serialized to the browser.
 type runDTO struct {
-	ID            string     `json:"id"`
-	Status        string     `json:"status"`
-	Phase         string     `json:"phase"`
-	StartedAt     time.Time  `json:"started_at"`
-	CompletedAt   *time.Time `json:"completed_at,omitempty"`
-	LastHeartbeat time.Time  `json:"last_heartbeat"`
-	SourceSchema  string     `json:"source_schema"`
-	TargetSchema  string     `json:"target_schema"`
-	ProfileName   string     `json:"profile_name,omitempty"`
-	ConfigPath    string     `json:"config_path,omitempty"`
-	Error         string     `json:"error,omitempty"`
+	ID                 string     `json:"id"`
+	Status             string     `json:"status"`
+	Resumable          bool       `json:"resumable"`
+	ResumabilityReason string     `json:"resumability_reason,omitempty"`
+	Phase              string     `json:"phase"`
+	StartedAt          time.Time  `json:"started_at"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	LastHeartbeat      time.Time  `json:"last_heartbeat"`
+	SourceSchema       string     `json:"source_schema"`
+	TargetSchema       string     `json:"target_schema"`
+	ProfileName        string     `json:"profile_name,omitempty"`
+	ConfigPath         string     `json:"config_path,omitempty"`
+	Error              string     `json:"error,omitempty"`
 }
 
 func newRunDTO(r checkpoint.Run) runDTO {
 	return runDTO{
-		ID:            r.ID,
-		Status:        r.Status,
-		Phase:         r.Phase,
-		StartedAt:     r.StartedAt,
-		CompletedAt:   r.CompletedAt,
-		LastHeartbeat: r.LastHeartbeat,
-		SourceSchema:  r.SourceSchema,
-		TargetSchema:  r.TargetSchema,
-		ProfileName:   r.ProfileName,
-		ConfigPath:    r.ConfigPath,
-		Error:         r.Error,
+		ID:                 r.ID,
+		Status:             r.Status,
+		Resumable:          r.Resumable,
+		ResumabilityReason: r.ResumabilityReason,
+		Phase:              r.Phase,
+		StartedAt:          r.StartedAt,
+		CompletedAt:        r.CompletedAt,
+		LastHeartbeat:      r.LastHeartbeat,
+		SourceSchema:       r.SourceSchema,
+		TargetSchema:       r.TargetSchema,
+		ProfileName:        r.ProfileName,
+		ConfigPath:         r.ConfigPath,
+		Error:              r.Error,
 	}
 }
 

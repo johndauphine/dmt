@@ -394,7 +394,7 @@ func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
 		for i, f := range tableFailures {
 			failureNames[i] = f.TableName
 		}
-		if err := o.completeRunRequired(runID, "partial", fmt.Sprintf("%d tables failed", len(tableFailures))); err != nil {
+		if err := o.completePartialRunRequired(runID, fmt.Sprintf("%d tables failed", len(tableFailures))); err != nil {
 			o.notifyFailure(runID, err, time.Since(startTime))
 			return err
 		}
@@ -455,6 +455,13 @@ func (o *Orchestrator) runHeartbeatTTL() time.Duration {
 
 func (o *Orchestrator) validateResumeHeartbeat(run *checkpoint.Run, now time.Time) error {
 	if run == nil {
+		return nil
+	}
+	// A partial status is a completed attempt with a durable, recoverable
+	// outcome. Its heartbeat is historical, not evidence of a live writer; the
+	// target lease remains the authoritative ownership check. The stale/fresh
+	// heartbeat guard exists for interrupted status=running rows only.
+	if run.Status != "" && run.Status != "running" {
 		return nil
 	}
 

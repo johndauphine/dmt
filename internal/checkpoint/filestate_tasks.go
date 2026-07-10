@@ -426,19 +426,7 @@ func (fs *FileState) GetAllRuns() ([]Run, error) {
 
 	// Return current run only if it exists
 	if fs.state.RunID != "" {
-		return []Run{
-			{
-				ID:           fs.state.RunID,
-				StartedAt:    fs.state.StartedAt,
-				CompletedAt:  fs.state.CompletedAt,
-				Status:       fs.state.Status,
-				Error:        fs.state.Error,
-				SourceSchema: fs.state.SourceSchema,
-				TargetSchema: fs.state.TargetSchema,
-				ProfileName:  fs.state.ProfileName,
-				ConfigPath:   fs.state.ConfigPath,
-			},
-		}, nil
+		return []Run{runFromFileState(fs.state)}, nil
 	}
 	return nil, nil
 }
@@ -508,17 +496,8 @@ func (fs *FileState) GetRunByID(runID string) (*Run, error) {
 	defer fs.mu.RUnlock()
 
 	if fs.state.RunID == runID {
-		return &Run{
-			ID:           fs.state.RunID,
-			StartedAt:    fs.state.StartedAt,
-			CompletedAt:  fs.state.CompletedAt,
-			Status:       fs.state.Status,
-			Error:        fs.state.Error,
-			SourceSchema: fs.state.SourceSchema,
-			TargetSchema: fs.state.TargetSchema,
-			ProfileName:  fs.state.ProfileName,
-			ConfigPath:   fs.state.ConfigPath,
-		}, nil
+		run := runFromFileState(fs.state)
+		return &run, nil
 	}
 
 	return nil, nil

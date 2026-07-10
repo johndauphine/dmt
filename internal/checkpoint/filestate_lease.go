@@ -48,6 +48,7 @@ func (fs *FileState) reloadLocked() error {
 	if state.MigrationLeases == nil {
 		state.MigrationLeases = make(map[string]MigrationLease)
 	}
+	normalizeFileRunResumability(state)
 	fs.state = state
 	return fs.rebuildTaskIndexLocked()
 }

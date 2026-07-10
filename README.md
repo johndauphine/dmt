@@ -495,6 +495,8 @@ The CLI provides first-class support for Airflow with machine-readable outputs a
 | `--log-format=json` | Structured JSONL logging (one JSON object per line) |
 | `status --json` | Output current status as JSON (for Airflow sensors) |
 | `--force-resume` | Bypass config hash validation on resume |
+| `resume --abandon` | Fenced, explicit abandonment of the resumable run for the configured target |
+| `resume --abandon-reason <text>` | Persist the operator reason with `--abandon` |
 
 ### BashOperator Example
 
@@ -1302,6 +1304,11 @@ The tool saves progress to enable efficient resume after failures. By default, s
 ### Table-level resume
 - Completed tables are skipped entirely on resume
 - Verified by comparing row counts between source and target
+- Partial outcomes remain resumable by default; outcome and resumability are
+  exposed separately in status/history JSON
+- `migration.allow_partial: true` accepts a partial as non-resumable; use
+  `resume --abandon --abandon-reason <text>` to explicitly stop retrying any
+  other recoverable run without deleting its checkpoint history
 
 ### Chunk-level resume
 - Progress saved every 10 chunks during transfer

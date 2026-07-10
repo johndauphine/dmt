@@ -22,7 +22,7 @@ disposition (`WebSupported` / `WebNA`).
 | CLI | TUI | WebUI | Notes |
 |-----|-----|-------|-------|
 | `dmt run` | `/run [@config]` | Dashboard | `--dry-run`, `--ai-schema-advisor`, `--source-schema`, `--target-schema`, `--workers`, `--skip-preflight`; backup confirmation is interactive in the TUI |
-| `dmt resume` | `/resume [@config]` | Dashboard | `--force-resume`, `--skip-preflight` |
+| `dmt resume` | `/resume [@config]` | Dashboard | `--force-resume`, `--skip-preflight`; destructive `--abandon`/`--abandon-reason` remain explicit CLI-only administration |
 | `dmt preflight` / `health-check` | `/preflight`, `/health-check` | Checks | `--skip-preflight`, `--ai-review` |
 | `dmt validate` | `/validate` | Checks | `--ai-triage`, `--timeout` |
 | `dmt diagnose` | `/diagnose` | Checks | `--run ID`, `--ai-triage`, `--timeout` |

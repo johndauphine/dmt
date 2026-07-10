@@ -7,6 +7,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/source"
 )
 
 // TestSummaryRowsTransferredCountsOnlyThisResume pins #565 (incl. the review's
@@ -109,5 +110,225 @@ func TestAbandonResumeAttemptKeepsRunResumable(t *testing.T) {
 	}
 	if got.Status != "running" {
 		t.Fatalf("run status = %q, want running", got.Status)
+	}
+}
+
+func TestResumablePartialSchedulesOnlyFailedTable(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	const runID = "partial-two-tables"
+	if err := state.CreateRun(runID, "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	succeeded := checkpoint.TransferTaskIdentity{Schema: "dbo", Table: "accounts"}
+	failed := checkpoint.TransferTaskIdentity{Schema: "dbo", Table: "orders"}
+	if _, err := state.CreateTransferTask(runID, succeeded); err != nil {
+		t.Fatal(err)
+	}
+	failedTaskID, err := state.CreateTransferTask(runID, failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkTransferTaskComplete(runID, succeeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.UpdateTaskStatus(failedTaskID, "failed", "target rejected row"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteRunResumable(
+		runID,
+		"partial",
+		"one table failed",
+		checkpoint.RunResumabilityPartialFailure,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	selected, err := state.GetLastIncompleteRun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected == nil || selected.ID != runID || selected.Status != "partial" || !selected.Resumable {
+		t.Fatalf("selected run = %#v, want resumable partial", selected)
+	}
+	completed, err := state.GetCompletedTables(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := []source.Table{
+		{Schema: "dbo", Name: "accounts", RowCount: 10},
+		{Schema: "dbo", Name: "orders", RowCount: 20},
+	}
+	counted := make([]string, 0, 1)
+	scheduled, skipped := selectResumeTables(
+		tables,
+		completed,
+		func(table source.Table) string {
+			return checkpoint.TransferTaskKeyForBackend(state, checkpoint.TransferTaskIdentity{
+				Schema: table.Schema,
+				Table:  table.Name,
+			})
+		},
+		func(table source.Table) (int64, error) {
+			counted = append(counted, table.Name)
+			return table.RowCount, nil
+		},
+	)
+	if len(scheduled) != 1 || scheduled[0].Name != "orders" {
+		t.Fatalf("scheduled = %+v, want only failed orders table", scheduled)
+	}
+	if len(skipped) != 1 || skipped[0] != "accounts" {
+		t.Fatalf("skipped = %v, want successful accounts table", skipped)
+	}
+	if len(counted) != 1 || counted[0] != "accounts" {
+		t.Fatalf("target row-count checks = %v, want successful table only", counted)
+	}
+}
+
+func TestPartialAllowPolicyControlsResumability(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		allowPartial bool
+		resumable    bool
+	}{
+		{name: "default partial is resumable", resumable: true},
+		{name: "allowed partial is accepted", allowPartial: true, resumable: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := checkpoint.New(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer state.Close()
+			if err := state.CreateRun("partial-policy", "dbo", "public", nil, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			o := &Orchestrator{
+				state: state,
+				config: &config.Config{Migration: config.MigrationConfig{
+					AllowPartial: tc.allowPartial,
+				}},
+			}
+			if err := o.completePartialRunRequired("partial-policy", "one table failed"); err != nil {
+				t.Fatal(err)
+			}
+			run, err := state.GetRunByID("partial-policy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run == nil || run.Status != "partial" || run.Resumable != tc.resumable {
+				t.Fatalf("partial policy run = %#v, want resumable=%v", run, tc.resumable)
+			}
+		})
+	}
+}
+
+func TestStatusAndHistoryExposeOutcomeAndResumability(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.CreateRun("status-partial", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteRunResumable(
+		"status-partial",
+		"partial",
+		"one table failed",
+		checkpoint.RunResumabilityPartialFailure,
+	); err != nil {
+		t.Fatal(err)
+	}
+	o := &Orchestrator{state: state}
+	status, err := o.GetStatusResult()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "partial" || !status.Resumable || status.ResumabilityReason != checkpoint.RunResumabilityPartialFailure {
+		t.Fatalf("status result = %#v, want partial + resumable reason", status)
+	}
+	history, err := o.GetAllRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].Status != "partial" || !history[0].Resumable || history[0].ResumabilityReason == "" {
+		t.Fatalf("history = %#v, want partial + resumability", history)
+	}
+}
+
+func TestPartialOutcomeDoesNotUseRunningHeartbeatGuard(t *testing.T) {
+	o := &Orchestrator{}
+	run := &checkpoint.Run{
+		ID:              "legacy-partial",
+		Status:          "partial",
+		Resumable:       true,
+		LastHeartbeat:   time.Now().UTC(),
+		LeaseGeneration: 0,
+	}
+	if err := o.validateResumeHeartbeat(run, time.Now().UTC()); err != nil {
+		t.Fatalf("validateResumeHeartbeat(partial) = %v, want lease-only ownership check", err)
+	}
+}
+
+func TestAbandonResumeIsFencedAndPreservesPartialOutcome(t *testing.T) {
+	state, err := checkpoint.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if err := state.CreateRun("abandon-partial", "dbo", "public", nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteRunResumable(
+		"abandon-partial",
+		"partial",
+		"one table failed",
+		checkpoint.RunResumabilityPartialFailure,
+	); err != nil {
+		t.Fatal(err)
+	}
+	target := checkpoint.MigrationTarget{
+		Driver:   "postgres",
+		Host:     "db.example",
+		Port:     5432,
+		Database: "warehouse",
+		Schema:   "public",
+	}.Canonical()
+	live, err := state.AcquireMigrationLease(target, "live-owner", time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.BindRunLease("abandon-partial", live); err != nil {
+		t.Fatal(err)
+	}
+	o := &Orchestrator{
+		state: state,
+		config: &config.Config{Target: config.TargetConfig{
+			Type: "postgres", Host: "db.example", Port: 5432, Database: "warehouse", Schema: "public",
+		}},
+	}
+	if _, err := o.AbandonResume("operator chose restart"); err == nil {
+		t.Fatal("AbandonResume while live owner holds lease = nil, want rejection")
+	}
+	if err := state.ReleaseMigrationLease(live); err != nil {
+		t.Fatal(err)
+	}
+	abandoned, err := o.AbandonResume("operator chose restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abandoned == nil || abandoned.Status != "partial" || abandoned.Resumable || abandoned.CompletedAt == nil {
+		t.Fatalf("abandoned = %#v, want preserved partial terminal outcome", abandoned)
+	}
+	selected, err := state.GetLastIncompleteRunForTarget(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected != nil {
+		t.Fatalf("abandoned run remained selectable: %#v", selected)
 	}
 }

@@ -6,7 +6,8 @@ This document describes the checkpoint and resume functionality in dmt, includin
 
 dmt supports resumable migrations through a checkpoint system that tracks progress at multiple levels:
 
-1. **Run level**: Tracks overall migration status (running, success, failed)
+1. **Run level**: Tracks outcome (`running`, `success`, `partial`, `failed`)
+   separately from whether its checkpoints remain resumable
 2. **Table level**: Tracks which tables have been successfully transferred
 3. **Chunk level**: Tracks progress within a table transfer (lastPK or rowNum)
 
@@ -91,6 +92,41 @@ checkpoint path). If the run remains incomplete, use `dmt resume`; its
 target-mode replay/cleanup rules handle already committed chunks. Back up the
 checkpoint and inspect run/task status before choosing a fresh run or manual
 target recovery.
+
+### Run outcome and resumability
+
+Run outcome and recoverability are separate durable fields in both backends.
+A transfer attempt that finishes with failed tables records
+`status: partial`, `resumable: true`, and a resumability reason. `dmt resume`
+selects the newest `resumable: true` run for the configured canonical target,
+then schedules only tables whose successful aggregate checkpoint and target
+row count do not already agree. The resumed attempt transitions back to
+`status: running`; its next outcome replaces the prior partial outcome.
+
+`migration.allow_partial: true` explicitly accepts the partial outcome: the
+command exits zero and records `resumable: false`, so a later `dmt resume`
+does not silently retry work the operator chose to tolerate. To stop retrying
+an ordinary partial or interrupted run without deleting checkpoint history,
+use:
+
+```bash
+dmt --config production.yaml resume --abandon \
+  --abandon-reason "restoring target backup and starting a fresh run"
+```
+
+Abandonment acquires the target lease. It cannot race a live owner. A partial
+run keeps its truthful `partial` outcome; an interrupted `running` run becomes
+`failed`. Both retain `resumable: false` and the operator reason in status
+history. `dmt status --json`, migration result JSON, `dmt history`, and the
+WebUI history API expose `status`, `resumable`, and `resumability_reason`.
+
+SQLite upgrades add the two run columns automatically and conservatively mark
+legacy `running` and `partial` rows resumable. Legacy `success`/`failed` rows
+remain terminal. File-state YAML applies the same inference when the field is
+absent and persists it on the next mutation. Back up checkpoint storage before
+upgrading. A pre-upgrade binary does not understand this split; for rollback,
+restore the pre-upgrade checkpoint backup rather than opening upgraded state
+with the old binary.
 
 ### Exclusive target ownership and fencing
 
@@ -245,15 +281,16 @@ Checkpoint saves occur after a chunk write completes. With parallel readers, the
 
 ### 4. Resume Flow
 
-On resume (`/resume` command or `--resume` flag):
+On resume (`/resume` or `dmt resume`):
 
-1. **Find incomplete run**: `GetLastIncompleteRun()` returns the most recent run with status='running'
+1. **Find resumable run**: select the most recent target-scoped run with `resumable=true` (including `partial` outcomes)
 2. **Acquire and bind target lease**: reject a live owner or atomically take over an expired generation
 3. **Validate config hash**: Compare stored hash with current config hash (skip if `--force-resume`)
-4. **Get completed tables**: `GetCompletedTables()` returns tables marked as 'success'
-5. **Load progress**: For incomplete tables, `GetTransferProgress()` returns saved checkpoint
-5. **Cleanup partial data**: Delete rows beyond saved lastPK (handles partially written chunks)
-6. **Resume transfer**: Start from saved lastPK/rowNum
+4. **Reactivate outcome**: transition the selected run to `status=running` while preserving resume eligibility
+5. **Get completed tables**: `GetCompletedTables()` returns tables marked as `success`
+6. **Load progress**: For incomplete tables, `GetTransferProgress()` returns saved checkpoint
+7. **Cleanup partial data**: Delete rows beyond saved lastPK (handles partially written chunks)
+8. **Resume transfer**: Start from saved lastPK/rowNum
 
 ```go
 // internal/transfer/transfer.go Execute()
@@ -437,7 +474,7 @@ go test ./internal/checkpoint/... -v
 5. **Check SQLite state**:
    ```bash
    sqlite3 ~/.dmt/migrate.db "SELECT * FROM transfer_progress"
-   sqlite3 ~/.dmt/migrate.db "SELECT * FROM runs WHERE status='running'"
+   sqlite3 ~/.dmt/migrate.db "SELECT id,status,resumable,resumability_reason FROM runs WHERE resumable=1"
    ```
 
 6. **Resume**:
