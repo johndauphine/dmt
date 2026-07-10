@@ -21,10 +21,47 @@ type sourceQueryer interface {
 
 type sourceQueryerContextKey struct{}
 
+// sourceQueryerFactory gives every concurrent keyset worker a queryer of its
+// own. It is populated only for PostgreSQL strict snapshots: sharing a sql.Tx
+// between reader goroutines would serialize them back onto one connection.
+type sourceQueryerFactory func(context.Context, int) (sourceQueryer, func(), error)
+
+type sourceQueryerFactoryContextKey struct{}
+
+// sharedSnapshot keeps PostgreSQL's exporting transaction open while reader
+// transactions import its MVCC snapshot. PostgreSQL invalidates an exported
+// snapshot as soon as the exporting transaction ends, so the lead must outlive
+// every joined reader.
+type sharedSnapshot struct {
+	lead *sql.Tx
+	id   string
+	db   *sql.DB
+}
+
+func (s *sharedSnapshot) release() { _ = s.lead.Rollback() }
+
+func (s *sharedSnapshot) joinReader(ctx context.Context) (*sql.Tx, func(), error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("starting PostgreSQL strict_consistency reader transaction: %w", err)
+	}
+
+	// PostgreSQL requires SET TRANSACTION SNAPSHOT to be the first statement
+	// after BEGIN. The snapshot ID comes from pg_export_snapshot(), but quote it
+	// as a SQL literal nevertheless so this helper keeps that invariant local.
+	statement := "SET TRANSACTION SNAPSHOT '" + strings.ReplaceAll(s.id, "'", "''") + "'"
+	if _, err := tx.ExecContext(ctx, statement); err != nil {
+		_ = tx.Rollback()
+		return nil, nil, fmt.Errorf("importing PostgreSQL strict_consistency snapshot: %w", err)
+	}
+
+	return tx, func() { _ = tx.Rollback() }, nil
+}
+
 // beginStrictSourceSnapshot starts the table-scoped source transaction before
-// target preparation changes anything. Every pagination query receives this
-// transaction through the context, which prevents a pooled connection from
-// observing a newer source state between pages (#640).
+// target preparation changes anything. Ordinary strict pagination receives
+// that transaction through the context; PostgreSQL keyset workers instead
+// import its exported snapshot into their own transactions (#640, #662).
 //
 // PostgreSQL and MySQL use repeatable-read MVCC snapshots. SQL Server uses
 // serializable range locking, which is a stable (but potentially blocking)
@@ -53,7 +90,25 @@ func beginStrictSourceSnapshot(ctx context.Context, srcPool pool.SourcePool, tab
 		// lifecycle and is not needed for a stable read view.
 		_ = tx.Rollback()
 	}
-	return context.WithValue(ctx, sourceQueryerContextKey{}, sourceQueryer(tx)), cleanup, nil
+	strictCtx := context.WithValue(ctx, sourceQueryerContextKey{}, sourceQueryer(tx))
+	if !strictSnapshotExportSupported(srcPool.DBType()) {
+		return strictCtx, cleanup, nil
+	}
+
+	var snapshotID string
+	if err := tx.QueryRowContext(ctx, "SELECT pg_export_snapshot()").Scan(&snapshotID); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("exporting PostgreSQL strict_consistency snapshot: %w", err)
+	}
+	if snapshotID == "" {
+		cleanup()
+		return nil, nil, fmt.Errorf("exporting PostgreSQL strict_consistency snapshot: received an empty snapshot ID")
+	}
+
+	snapshot := &sharedSnapshot{lead: tx, id: snapshotID, db: srcPool.DB()}
+	return context.WithValue(strictCtx, sourceQueryerFactoryContextKey{}, sourceQueryerFactory(func(workerCtx context.Context, _ int) (sourceQueryer, func(), error) {
+		return snapshot.joinReader(workerCtx)
+	})), snapshot.release, nil
 }
 
 // validateStrictSnapshotTable handles engine-specific preconditions that a
@@ -98,9 +153,18 @@ func isMySQLSource(dbType string) bool {
 	}
 }
 
+func strictSnapshotExportSupported(dbType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dbType)) {
+	case "postgres", "postgresql", "pg":
+		return true
+	default:
+		return false
+	}
+}
+
 func strictSnapshotTxOptions(dbType string) (*sql.TxOptions, error) {
 	switch strings.ToLower(strings.TrimSpace(dbType)) {
-	case "postgres", "postgresql", "mysql", "mariadb", "maria":
+	case "postgres", "postgresql", "pg", "mysql", "mariadb", "maria":
 		return &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, nil
 	case "mssql", "sqlserver":
 		// go-mssqldb rejects TxOptions.ReadOnly. The transfer only performs
@@ -122,6 +186,11 @@ func sourceQueryerFor(ctx context.Context, fallback *sql.DB) sourceQueryer {
 		return queryer
 	}
 	return fallback
+}
+
+func sourceQueryerFactoryFor(ctx context.Context) sourceQueryerFactory {
+	factory, _ := ctx.Value(sourceQueryerFactoryContextKey{}).(sourceQueryerFactory)
+	return factory
 }
 
 // strictSnapshotRowCount reads the full-table count through the same pinned

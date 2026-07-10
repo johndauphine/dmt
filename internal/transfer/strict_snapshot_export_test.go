@@ -1,0 +1,341 @@
+package transfer
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/johndauphine/dmt/internal/source"
+)
+
+func TestStrictKeysetReaderPlan(t *testing.T) {
+	tests := []struct {
+		name                          string
+		strict                        bool
+		dbType                        string
+		requested, maxSource          int
+		wantReaders                   int
+		wantJoinSnapshot, wantClamped bool
+	}{
+		{
+			name:        "non strict preserves configured readers",
+			dbType:      "postgres",
+			requested:   4,
+			maxSource:   2,
+			wantReaders: 4,
+		},
+		{
+			name:             "postgres reserves lead connection",
+			strict:           true,
+			dbType:           "postgres",
+			requested:        4,
+			maxSource:        3,
+			wantReaders:      2,
+			wantJoinSnapshot: true,
+			wantClamped:      true,
+		},
+		{
+			name:        "postgres uses lead when pool has one connection",
+			strict:      true,
+			dbType:      "postgresql",
+			requested:   4,
+			maxSource:   1,
+			wantReaders: 1,
+			wantClamped: true,
+		},
+		{
+			name:        "non postgres remains one reader",
+			strict:      true,
+			dbType:      "mysql",
+			requested:   4,
+			maxSource:   12,
+			wantReaders: 1,
+			wantClamped: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			readers, joins, clamped := strictKeysetReaderPlan(tc.strict, tc.dbType, tc.requested, tc.maxSource)
+			if readers != tc.wantReaders || joins != tc.wantJoinSnapshot || clamped != tc.wantClamped {
+				t.Fatalf("strictKeysetReaderPlan(%t, %q, %d, %d) = (%d, %t, %t), want (%d, %t, %t)", tc.strict, tc.dbType, tc.requested, tc.maxSource, readers, joins, clamped, tc.wantReaders, tc.wantJoinSnapshot, tc.wantClamped)
+			}
+		})
+	}
+}
+
+func TestPostgresSnapshotReaderImportsBeforeFirstQuery(t *testing.T) {
+	db, tracker := openSnapshotRecordingDB(t)
+	ctx, releaseLead, err := beginStrictSourceSnapshot(context.Background(), &postgresSnapshotRecordingSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}, source.Table{Name: "events"})
+	if err != nil {
+		t.Fatalf("beginStrictSourceSnapshot: %v", err)
+	}
+	defer releaseLead()
+
+	factory := sourceQueryerFactoryFor(ctx)
+	if factory == nil {
+		t.Fatal("PostgreSQL strict snapshot did not install a worker queryer factory")
+	}
+	queryer, releaseReader, err := factory(ctx, 0)
+	if err != nil {
+		t.Fatalf("join strict snapshot reader: %v", err)
+	}
+	defer releaseReader()
+	rows, err := queryer.QueryContext(ctx, "SELECT worker_page")
+	if err != nil {
+		t.Fatalf("reader query: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close reader rows: %v", err)
+	}
+
+	want := []string{
+		"begin",
+		"query SELECT pg_export_snapshot()",
+		"begin",
+		"exec SET TRANSACTION SNAPSHOT '00000001-1'",
+		"query SELECT worker_page",
+	}
+	if got := tracker.events(); !strictSnapshotEventPrefix(got, want) {
+		t.Fatalf("snapshot events = %v, want prefix %v", got, want)
+	}
+}
+
+func TestPostgresSnapshotJoinFailureRollsBackReader(t *testing.T) {
+	db, tracker := openSnapshotRecordingDB(t)
+	tracker.importErr = errors.New("snapshot import rejected")
+	ctx, releaseLead, err := beginStrictSourceSnapshot(context.Background(), &postgresSnapshotRecordingSource{keysetRuntimeSourcePool: &keysetRuntimeSourcePool{db: db}}, source.Table{Name: "events"})
+	if err != nil {
+		t.Fatalf("beginStrictSourceSnapshot: %v", err)
+	}
+	factory := sourceQueryerFactoryFor(ctx)
+	if factory == nil {
+		t.Fatal("PostgreSQL strict snapshot did not install a worker queryer factory")
+	}
+	if _, _, err := factory(ctx, 0); err == nil || !strings.Contains(err.Error(), "snapshot import rejected") {
+		t.Fatalf("join strict snapshot reader error = %v, want import failure", err)
+	}
+	if got := tracker.count("rollback"); got != 1 {
+		t.Fatalf("rollbacks after failed join = %d, want reader rollback", got)
+	}
+	releaseLead()
+	if got := tracker.count("rollback"); got != 2 {
+		t.Fatalf("rollbacks after lead release = %d, want reader and lead rollback", got)
+	}
+}
+
+func TestKeysetProducerReleasesWorkerQueryersOnSuccessAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		queryer  sourceQueryer
+		ranges   []pkRange
+		canceled bool
+	}{
+		{name: "success with no ranges", queryer: noopSnapshotQueryer{}},
+		{name: "canceled reader", queryer: noopSnapshotQueryer{}, ranges: []pkRange{{minPK: int64(1), maxPK: int64(2), minInclusive: true}}, canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			acquired, released := 0, 0
+			producer := &keysetProducer{
+				db:         tc.queryer,
+				numReaders: 4,
+				pkRanges:   tc.ranges,
+				queryerForWorker: func(context.Context, int) (sourceQueryer, func(), error) {
+					mu.Lock()
+					acquired++
+					mu.Unlock()
+					return tc.queryer, func() {
+						mu.Lock()
+						released++
+						mu.Unlock()
+					}, nil
+				},
+			}
+			ctx := context.Background()
+			if tc.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			producer.produce(ctx, pipelineEnv{}, make(chan chunkResult, producer.numReaders))
+			mu.Lock()
+			defer mu.Unlock()
+			if acquired != producer.numReaders || released != producer.numReaders {
+				t.Fatalf("worker queryers acquired/released = %d/%d, want %d/%d", acquired, released, producer.numReaders, producer.numReaders)
+			}
+		})
+	}
+}
+
+type noopSnapshotQueryer struct{}
+
+func (noopSnapshotQueryer) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	return nil, errors.New("query should not run")
+}
+
+func (noopSnapshotQueryer) QueryRowContext(context.Context, string, ...any) *sql.Row { return nil }
+
+type postgresSnapshotRecordingSource struct{ *keysetRuntimeSourcePool }
+
+func (p *postgresSnapshotRecordingSource) DBType() string { return "postgres" }
+
+func strictSnapshotEventPrefix(got, want []string) bool {
+	if len(got) < len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+const snapshotRecordingDriverName = "dmt-strict-snapshot-recording"
+
+var snapshotRecordingRegistry = struct {
+	sync.Mutex
+	next     int
+	trackers map[string]*snapshotRecordingTracker
+	once     sync.Once
+}{trackers: make(map[string]*snapshotRecordingTracker)}
+
+type snapshotRecordingTracker struct {
+	sync.Mutex
+	eventLog  []string
+	importErr error
+}
+
+func (t *snapshotRecordingTracker) record(event string) {
+	t.Lock()
+	defer t.Unlock()
+	t.eventLog = append(t.eventLog, event)
+}
+
+func (t *snapshotRecordingTracker) events() []string {
+	t.Lock()
+	defer t.Unlock()
+	return append([]string(nil), t.eventLog...)
+}
+
+func (t *snapshotRecordingTracker) count(event string) int {
+	t.Lock()
+	defer t.Unlock()
+	count := 0
+	for _, recorded := range t.eventLog {
+		if recorded == event {
+			count++
+		}
+	}
+	return count
+}
+
+func openSnapshotRecordingDB(t *testing.T) (*sql.DB, *snapshotRecordingTracker) {
+	t.Helper()
+	snapshotRecordingRegistry.once.Do(func() { sql.Register(snapshotRecordingDriverName, snapshotRecordingDriver{}) })
+	snapshotRecordingRegistry.Lock()
+	snapshotRecordingRegistry.next++
+	dsn := fmt.Sprintf("snapshot-%d", snapshotRecordingRegistry.next)
+	tracker := &snapshotRecordingTracker{}
+	snapshotRecordingRegistry.trackers[dsn] = tracker
+	snapshotRecordingRegistry.Unlock()
+
+	db, err := sql.Open(snapshotRecordingDriverName, dsn)
+	if err != nil {
+		t.Fatalf("open recording DB: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+		snapshotRecordingRegistry.Lock()
+		delete(snapshotRecordingRegistry.trackers, dsn)
+		snapshotRecordingRegistry.Unlock()
+	})
+	return db, tracker
+}
+
+type snapshotRecordingDriver struct{}
+
+func (snapshotRecordingDriver) Open(dsn string) (driver.Conn, error) {
+	snapshotRecordingRegistry.Lock()
+	tracker := snapshotRecordingRegistry.trackers[dsn]
+	snapshotRecordingRegistry.Unlock()
+	if tracker == nil {
+		return nil, fmt.Errorf("unknown snapshot recording DSN %q", dsn)
+	}
+	return &snapshotRecordingConn{tracker: tracker}, nil
+}
+
+type snapshotRecordingConn struct{ tracker *snapshotRecordingTracker }
+
+func (c *snapshotRecordingConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("prepared statements are not expected")
+}
+
+func (c *snapshotRecordingConn) Close() error { return nil }
+
+func (c *snapshotRecordingConn) Begin() (driver.Tx, error) { return c.begin() }
+
+func (c *snapshotRecordingConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return c.begin()
+}
+
+func (c *snapshotRecordingConn) begin() (driver.Tx, error) {
+	c.tracker.record("begin")
+	return snapshotRecordingTx{tracker: c.tracker}, nil
+}
+
+func (c *snapshotRecordingConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.tracker.record("query " + query)
+	if query == "SELECT pg_export_snapshot()" {
+		return &snapshotRecordingRows{values: []driver.Value{"00000001-1"}}, nil
+	}
+	return &snapshotRecordingRows{}, nil
+}
+
+func (c *snapshotRecordingConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	c.tracker.record("exec " + query)
+	c.tracker.Lock()
+	err := c.tracker.importErr
+	c.tracker.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return driver.RowsAffected(0), nil
+}
+
+type snapshotRecordingTx struct{ tracker *snapshotRecordingTracker }
+
+func (tx snapshotRecordingTx) Commit() error {
+	tx.tracker.record("commit")
+	return nil
+}
+
+func (tx snapshotRecordingTx) Rollback() error {
+	tx.tracker.record("rollback")
+	return nil
+}
+
+type snapshotRecordingRows struct {
+	values []driver.Value
+	sent   bool
+}
+
+func (r *snapshotRecordingRows) Columns() []string { return []string{"value"} }
+
+func (r *snapshotRecordingRows) Close() error { return nil }
+
+func (r *snapshotRecordingRows) Next(dest []driver.Value) error {
+	if r.sent || len(r.values) == 0 {
+		return io.EOF
+	}
+	copy(dest, r.values)
+	r.sent = true
+	return nil
+}

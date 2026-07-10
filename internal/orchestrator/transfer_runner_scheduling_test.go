@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,17 +66,14 @@ func itoa(n int) string {
 func TestSchedulerRunsDependentPartitionWhileUnrelatedTableRuns(t *testing.T) {
 	releaseA := make(chan struct{})
 	bP2Ran := make(chan struct{})
+	var bP2RanOnce sync.Once
 
 	exec := func(ctx context.Context, runID string, j transfer.Job, _ *BuildResult, _ map[string]*tableStats, _ chan<- tableError, _ *monitor.Controller, _ transfer.RuntimeTuner, _ *runtimeAdjustmentRecorder) error {
 		switch jobLabel(j) {
 		case "A":
 			<-releaseA // A is the slow unrelated table
 		case "B.p2", "B.p3":
-			select {
-			case <-bP2Ran:
-			default:
-				close(bP2Ran)
-			}
+			bP2RanOnce.Do(func() { close(bP2Ran) })
 		}
 		return nil
 	}
