@@ -122,12 +122,23 @@ After strict parallel-reader support, the same in-VM method was repeated on
 `write_ahead_writers: 4`, `chunk_size: 50000`, `parallel_readers: 4`,
 `read_ahead_buffers: 4`, and `max_partitions: 8`, with runtime tuning disabled.
 Connection caps requested as 20 source / 30 target were normalized to the
-runtime minimum of 36 for both runs. Transfer-only results were:
+runtime minimum of 36 for both runs. An initial two-bracketing-run sample
+put the delta at +1% to +4%, but that sample size was too small to be
+reliable; a follow-up of 10 alternating relaxed/strict pairs (fresh target
+database each run, wall-clock timing to sub-second precision) on the same
+in-VM setup showed:
 
-| Mode | Throughput | Transfer time | Delta vs relaxed |
-|---|---|---|---|
-| Relaxed (two bracketing runs) | 886–910K rows/s | 21–22s | baseline |
-| Strict, SQL Server table scope | **919K rows/s** | **21s** | +1% to +4% (benchmark noise) |
+| Mode | Transfer time (10 runs) | Penalty vs relaxed |
+|---|---|---|
+| Relaxed | 15.7–19.9s | baseline |
+| Strict, SQL Server table scope | 18.0–23.1s | **4–20%, median 6.4%, mean 9.3%** |
+
+The wider sample confirms the qualitative result — strict mode is no longer
+the flat ~13% tax it was pre-epic, and most runs land in the single digits —
+but the penalty is noisier than a single bracketed pair suggests. Treat "+1%
+to +4%" as an optimistic point estimate from a small sample, not the steady
+state; **4–20%, centered mid-single-digits, is the more defensible range**
+pending a larger sample or averaged repeated runs.
 
 The engine-specific live proofs isolate reader scaling from whole-migration
 noise by scanning one million rows with per-query server parallelism disabled.
@@ -138,11 +149,16 @@ versus 207ms (5.9×). The companion mutation tests prove every reader sees the
 same frozen source view.
 
 Environment attribution matters: a host-side run can saturate Docker's proxy
-with one reader and hide both the old penalty and the new speedup. A schema
-with one dominant table magnifies reader parallelism; on a multi-table schema,
+with one reader and hide both the old penalty and the new speedup. Host-side
+re-testing of the full StackOverflow2010 migration (not the isolated reader
+proofs above) measured a consistent ~9–11% penalty across 4 alternating runs,
+higher than the in-VM figures in this section — host-side numbers are not
+comparable to in-VM ones and should be reported separately. A schema with one
+dominant table magnifies reader parallelism; on a multi-table schema,
 concurrent table jobs already overlap some of the single-reader cost. Use the
-in-VM method above for headline comparisons and interpret differences of a few
-percent as normal run-to-run variance.
+in-VM method above for headline comparisons, run at least 8-10 alternating
+pairs before quoting a delta, and interpret single-digit-to-low-teens
+differences as normal run-to-run variance rather than a fixed number.
 
 ## M5 Pro vs M3 Max Comparison (StackOverflow2010, drop_recreate)
 
