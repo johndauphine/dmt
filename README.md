@@ -975,37 +975,34 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `strict_consistency` | No | `false` | Read each source table from one stable transaction snapshot. PostgreSQL keyset readers may run in parallel from an exported snapshot; table partitioning is available with migration scope. |
-| `strict_consistency_scope` | No | `table` | `table` snapshots each table independently. PostgreSQL-only `migration` shares one snapshot across every table and partition during the transfer phase. Requires `strict_consistency: true`. |
+| `strict_consistency` | No | `false` | Read source data from an engine-native stable view. PostgreSQL, MySQL/MariaDB, and SQL Server support parallel readers; SQLite intentionally uses one reader. |
+| `strict_consistency_scope` | No | `table` | `table` creates an independent view per table. `migration` shares one PostgreSQL exported snapshot or SQL Server database snapshot across every table and partition. Requires `strict_consistency: true`. |
 
 > **Consistency scope (#640).** `strict_consistency` starts a source
 > transaction before target preparation, then routes every page of that table
-> through one stable view. PostgreSQL keyset transfers export that lead
-> transaction's snapshot and import it into each reader transaction, preserving
-> configured reader parallelism up to `max_source_connections - 1`; the lead
-> occupies the reserved connection. Other engines use one source reader. DMT
-> still uses one unpartitioned job per table in this mode. PostgreSQL and
-> InnoDB-backed MySQL use repeatable-read snapshots (non-InnoDB
-> MySQL tables are rejected); SQL Server uses
-> serializable range locks; SQLite uses a serializable read transaction.
-> Concurrent source writes either remain outside the snapshot, block, or cause
-> a transaction error — dmt fails rather than merging source versions. Long
-> snapshots can retain MVCC history or block writers, so use a replica when
-> appropriate. ClickHouse and unsupported source engines are rejected before
-> target mutation. The guarantee is **per table**, not a single snapshot shared
-> across independently transferred tables.
+> through one stable view. PostgreSQL imports an exported MVCC snapshot into
+> parallel reader transactions without blocking writers. InnoDB MySQL/MariaDB
+> starts parallel repeatable-read sessions inside a brief `LOCK TABLES` window,
+> which requires `LOCK TABLES` privilege and pauses table writes only while the
+> sessions start. SQL Server holds one shared table lock while parallel readers
+> copy the table, so writes to that table wait for its transfer to finish.
+> SQLite uses one serializable reader by design. Table scope keeps one
+> unpartitioned job per table because these views do not span independent jobs;
+> eligible integer and composite keysets can still use parallel readers inside
+> that job. Unsupported sources fail before target mutation. The guarantee is
+> **per table**, not one snapshot shared across independently transferred tables.
 >
-> **Migration scope (#663).** Set `strict_consistency_scope: migration` with a
-> PostgreSQL source to export one MVCC snapshot before the transfer phase and
-> import it into every table reader and partition. This produces one
-> cross-table point-in-time view and safely re-enables strict table
-> partitioning. The epoch closes when the transfer phase ends, including errors
-> and lease-loss cancellation. A resume in a new process intentionally opens a
-> new epoch, so cross-table simultaneity is guaranteed only within one process
-> lifetime. Schema extraction happens before the epoch begins; DDL drift in
-> that interval is outside this guarantee. A migration-long PostgreSQL snapshot
-> can retain dead tuples and delay vacuum, so use it with a source that has
-> enough MVCC-history headroom.
+> **Migration scope (#663, #683).** PostgreSQL exports one MVCC snapshot before
+> the transfer phase and imports it into every table reader and partition. SQL
+> Server creates one run-scoped database snapshot and routes table reads and
+> partition planning through it; live writers remain unblocked while changed
+> pages consume copy-on-write disk. Both mechanisms provide one cross-table
+> source instant and safely enable strict partition jobs. PostgreSQL resume in a
+> new process opens a new epoch; a SQL Server snapshot survives a crash and is
+> reused on resume, which fails closed if that snapshot is missing. MySQL and
+> SQLite do not support migration scope. See
+> [Restartability](docs/RESTARTABILITY.md#migration-scoped-strict-snapshots) for
+> lifecycle, prerequisite, and blocking details.
 >
 > **Strict validation (#664).** For a full-table strict transfer, dmt captures
 > `COUNT(*)` through that same pinned source transaction before it prepares the
