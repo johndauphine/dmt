@@ -95,7 +95,9 @@ func (s multiConnectionStrictStrategy) begin(context.Context, pool.SourcePool, s
 	return strictReaderView{}, nil
 }
 
-func (s multiConnectionStrictStrategy) joinBudget() int { return s.budget }
+func (s multiConnectionStrictStrategy) joinBudget() int                  { return s.budget }
+func (s multiConnectionStrictStrategy) perJobParallel() bool             { return true }
+func (s multiConnectionStrictStrategy) sharedViewAcrossJobs(string) bool { return false }
 
 func TestStrictKeysetReaderPlanHonorsMultiConnectionJoinBudget(t *testing.T) {
 	strategy := multiConnectionStrictStrategy{budget: 2}
@@ -117,6 +119,28 @@ func TestStrictMigrationEpochReaderPlanUsesFullPoolBudget(t *testing.T) {
 	readers, joins, clamped = strictKeysetReaderPlan(true, migrationEpochReaderStrategy{}, 4, 3)
 	if readers != 3 || !joins || !clamped {
 		t.Fatalf("clamped migration epoch plan = (%d, %t, %t), want (3, true, true)", readers, joins, clamped)
+	}
+}
+
+func TestStrictStrategyViewCapabilities(t *testing.T) {
+	tests := []struct {
+		dbType, scope, strategy string
+		wantPartitions          bool
+	}{
+		{dbType: "postgres", scope: "table", strategy: strictParallelExportedSnapshot},
+		{dbType: "postgres", scope: "migration", strategy: strictParallelExportedSnapshot, wantPartitions: true},
+		{dbType: "mysql", scope: "table", strategy: strictParallelLockWindow},
+		{dbType: "mssql", scope: "table", strategy: strictParallelTableSharedLock},
+		{dbType: "mssql", scope: "migration", strategy: strictParallelMigrationEpoch, wantPartitions: true},
+		{dbType: "sqlite", scope: "migration", strategy: strictParallelNone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dbType+"_"+tc.scope, func(t *testing.T) {
+			got, strategy, err := StrictStrategyAllowsPartitioning(tc.dbType, tc.scope)
+			if err != nil || got != tc.wantPartitions || strategy != tc.strategy {
+				t.Fatalf("capability = (allowed=%t, strategy=%q, err=%v), want (%t, %q, nil)", got, strategy, err, tc.wantPartitions, tc.strategy)
+			}
+		})
 	}
 }
 
@@ -168,6 +192,34 @@ func TestStrictStrategyWorkerCountForTableUsesClampedPlan(t *testing.T) {
 	}
 	if workers != 0 {
 		t.Fatalf("SQL Server workers with coordinator-only budget = %d, want zero", workers)
+	}
+}
+
+func TestStrictStrategyWorkerCountForCompositeTableEligibility(t *testing.T) {
+	eligible := source.Table{
+		Columns: []source.Column{
+			{Name: "tenant_id", DataType: "bigint"},
+			{Name: "seq", DataType: "bigint"},
+		},
+		PrimaryKey: []string{"tenant_id", "seq"},
+	}
+	eligible.PopulatePKColumns()
+	readers, err := strictStrategyWorkerCountForTable("mssql", eligible, 4, 5)
+	if err != nil || readers != 4 {
+		t.Fatalf("eligible composite worker count = %d, err=%v, want 4", readers, err)
+	}
+
+	unsafe := source.Table{
+		Columns: []source.Column{
+			{Name: "tenant_id", DataType: "bigint"},
+			{Name: "event_at", DataType: "datetime"},
+		},
+		PrimaryKey: []string{"tenant_id", "event_at"},
+	}
+	unsafe.PopulatePKColumns()
+	readers, err = strictStrategyWorkerCountForTable("mssql", unsafe, 4, 5)
+	if err != nil || readers != 0 {
+		t.Fatalf("unsafe composite worker count = %d, err=%v, want 0 without strict shared-view acquisition", readers, err)
 	}
 }
 
@@ -349,6 +401,29 @@ func TestKeysetProducerReleasesWorkerQueryersOnSuccessAndCancellation(t *testing
 				t.Fatalf("worker queryers acquired/released = %d/%d, want %d/%d", acquired, released, producer.numReaders, producer.numReaders)
 			}
 		})
+	}
+}
+
+func TestCompositeProducerReleasesWorkerQueryers(t *testing.T) {
+	var mu sync.Mutex
+	acquired, released := 0, 0
+	producer := &compositeParallelProducer{
+		db:         noopSnapshotQueryer{},
+		numReaders: 4,
+		queryerForWorker: func(context.Context, int) (sourceQueryer, func(), error) {
+			mu.Lock()
+			acquired++
+			mu.Unlock()
+			return noopSnapshotQueryer{}, func() {
+				mu.Lock()
+				released++
+				mu.Unlock()
+			}, nil
+		},
+	}
+	producer.produce(context.Background(), pipelineEnv{}, make(chan chunkResult, producer.numReaders))
+	if acquired != producer.numReaders || released != producer.numReaders {
+		t.Fatalf("composite worker queryers acquired/released = %d/%d, want %d/%d", acquired, released, producer.numReaders, producer.numReaders)
 	}
 }
 

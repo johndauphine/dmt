@@ -193,6 +193,46 @@ func TestMSSQLMigrationSnapshotResumeAndDropRetryIntegration(t *testing.T) {
 	}
 }
 
+func TestMSSQLMigrationSnapshotPartitionedIntegration(t *testing.T) {
+	_, db, writer, _, dbName := openMSSQLStrictIntegration(t)
+	runID := fmt.Sprintf("%08x-partition", uint32(time.Now().UnixNano()))
+	epoch, err := BeginStrictSnapshotEpochForRun(context.Background(), &mssqlIntegrationSource{keysetRuntimeSourcePool{db: db}}, StrictSnapshotEpochOptions{
+		RunID: runID,
+		SourceConfig: config.SourceConfig{
+			Type: "mssql", Host: "localhost", Port: 1433, Database: dbName,
+			User: "sa", Password: "TestPass2024", Schema: "dbo", SSLMode: "disable",
+		},
+		MaxConnections: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer epoch.Close()
+	if _, err := writer.Exec(`UPDATE dbo.events SET val = 7500 WHERE id = 75; INSERT INTO dbo.events VALUES (101, 101)`); err != nil {
+		t.Fatalf("live mutation after database snapshot: %v", err)
+	}
+	table := source.Table{Schema: "dbo", Name: "events", Columns: []source.Column{{Name: "id", DataType: "int"}, {Name: "val", DataType: "int"}}, PrimaryKey: []string{"id"}, RowCount: 100}
+	table.PopulatePKColumns()
+	cfg := &config.Config{Migration: config.MigrationConfig{
+		StrictConsistency: true, StrictConsistencyScope: "migration", TargetMode: "drop_recreate",
+		ChunkSize: 5, ParallelReaders: 4, MaxSourceConnections: 4, ReadAheadBuffers: 1, WriteAheadWriters: 1,
+	}}
+	target := &mssqlEpochCaptureTarget{rows: make(map[string]map[int]int)}
+	partitions := []source.Partition{
+		{TableName: table.Name, PartitionID: 1, MinPK: int64(1), MaxPK: int64(50), RowCount: 50, IsFirstPartition: true},
+		{TableName: table.Name, PartitionID: 2, MinPK: int64(51), MaxPK: int64(100), RowCount: 50},
+	}
+	for i := range partitions {
+		if _, err := Execute(context.Background(), &mssqlIntegrationSource{keysetRuntimeSourcePool{db: db}}, target, cfg, Job{Table: table, Partition: &partitions[i], StrictSnapshotEpoch: epoch}, progress.New(), nil); err != nil {
+			t.Fatalf("snapshot partition %d: %v", partitions[i].PartitionID, err)
+		}
+	}
+	copied := target.snapshot()[table.Name]
+	if len(copied) != 100 || copied[75] != 75 {
+		t.Fatalf("partitioned snapshot copied %d rows with id75=%d, want 100 rows at original instant", len(copied), copied[75])
+	}
+}
+
 func TestMSSQLMigrationSnapshotResumeMissingFailsIntegration(t *testing.T) {
 	admin, db, _, _, dbName := openMSSQLStrictIntegration(t)
 	runID := fmt.Sprintf("%08x-missing", uint32(time.Now().UnixNano()))

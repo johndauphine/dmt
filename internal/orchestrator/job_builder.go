@@ -327,21 +327,19 @@ func (b *JobBuilder) usesTupleKeyset(t source.Table) bool {
 
 // createJobsForTable creates transfer jobs for a single table.
 func (b *JobBuilder) createJobsForTable(ctx context.Context, runID string, t source.Table, dateFilter *transfer.DateFilter, result *BuildResult) error {
-	if b.config.Migration.StrictConsistency && b.config.Migration.StrictConsistencyScope != "migration" {
-		// Table-scoped strict snapshots are one source transaction per table.
-		// Partition jobs would open independent snapshots, so disable both table
-		// partitioning and cross-partition concurrency for this mode (#640).
-		logging.Debug("Table %s: table-scoped strict_consistency uses one unpartitioned source snapshot", t.Name)
-		return b.createSingleJob(runID, t, dateFilter, result)
-	}
-	if b.config.Migration.StrictConsistency && b.config.Migration.StrictConsistencyScope == "migration" &&
-		b.sourcePool != nil && driver.Canonicalize(b.sourcePool.DBType()) == "mssql" {
-		// #683 establishes and routes every read through the database snapshot,
-		// but cross-job partition enablement is deliberately owned by #684's
-		// strategy-capability refactor. Until then, do not let the old scope-only
-		// predicate accidentally enable MSSQL partition jobs.
-		logging.Debug("Table %s: SQL Server migration snapshot uses one unpartitioned job until shared-view partition capability is enabled", t.Name)
-		return b.createSingleJob(runID, t, dateFilter, result)
+	if b.config.Migration.StrictConsistency {
+		dbType := b.config.Source.Type
+		if b.sourcePool != nil {
+			dbType = b.sourcePool.DBType()
+		}
+		allowed, strategy, err := transfer.StrictStrategyAllowsPartitioning(dbType, b.config.Migration.StrictConsistencyScope)
+		if err != nil {
+			return fmt.Errorf("resolving strict partition strategy for %s: %w", t.FullName(), err)
+		}
+		if !allowed {
+			logging.Debug("Table %s: strict_consistency strategy %s does not share one view across partition jobs; using one unpartitioned job", t.Name, strategy)
+			return b.createSingleJob(runID, t, dateFilter, result)
+		}
 	}
 
 	if t.IsLarge(b.config.Migration.LargeTableThreshold) && t.SupportsKeysetPagination() {

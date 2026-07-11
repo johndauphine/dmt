@@ -31,8 +31,8 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   timeout fallback completes correctly, and database transaction counts return to baseline. A
   controlled live read proof measures 830ms sequential strict, 221ms four-reader strict, and 209ms
   four-reader relaxed (3.8× speedup; strict within 5.5% of relaxed).
-- 🚧 **#683 active** — SQL Server migration-scoped `database_snapshot` on
-  `feat/issue-683-mssql-database-snapshot`. The deterministic create/reuse/drop lifecycle,
+- ✅ **#683 complete** — SQL Server migration-scoped `database_snapshot` merged in
+  [PR #690](../../pull/690) at `main` `0eee6d64`. The deterministic create/reuse/drop lifecycle,
   second source pool, snapshot-routed transfer reads, fail-closed capability preflight, orphan
   warning, config/restartability notes, and error diagnosis are implemented. Live SQL Server
   tests prove writers remain unblocked, two tables copy the same frozen instant with four readers,
@@ -46,9 +46,23 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   the orphan. Post-fix review confirmed those fixes and found two lifecycle edges, now also fixed:
   early acquisition is MSSQL-only so PostgreSQL keeps its established partition semantics, and a
   completion-only resume reattaches and drops a crash-surviving SQL Server snapshot. Final
-  independent re-review is clean. `make lint`, `make test-short`, `make test`, the live SQL Server
-  snapshot/preflight suite, and transfer/orchestrator race tests all pass; publication/CI remain.
-- ⏳ Remaining after #683: #684, #685.
+  independent pre-push and post-CI reviews are clean. `make lint`, `make test-short`, `make test`,
+  the live SQL Server snapshot/preflight suite, transfer/orchestrator race tests, and all six CI
+  checks passed. Copilot's first response was quota-exhausted and contained no actionable comments.
+- 🚧 **#684 active** — shared-view partitioning and composite tuple-keyset parallelism on
+  `feat/issue-684-shared-view-partitioning`. Strategy capabilities now distinguish parallelism
+  within one table job from a view shared across independent partition jobs. Composite workers
+  acquire/release per-reader snapshot queryers; PostgreSQL migration epochs and SQL Server database
+  snapshots enable partitions, while table-scoped lock-window/shared-lock strategies remain
+  unpartitioned. Unit coverage passes. Live PostgreSQL migration-epoch, MySQL lock-window, SQL Server
+  shared-lock composite proofs, and SQL Server database-snapshot partition mutation proof pass.
+  `make lint`, `make test-short`, `make test`, and the combined live-DB transfer/orchestrator race
+  suite pass. Independent review found and verified fixes for two gaps: the live tests now prove
+  automatic production `Execute` routing with a measured PostgreSQL strict speedup (727ms one
+  reader vs 217ms four readers), and worker-session acquisition now rejects tuple-unsafe fallback
+  tables instead of taking an unused MySQL lock window or SQL Server table lock. Final review is clean;
+  publication/CI remain.
+- ⏳ Remaining after #684: #685.
 
 **Stakes (measured 2026-07-10, SO2010 19.3M rows, mssql→pg, same config, strict toggled):**
 
@@ -81,8 +95,8 @@ live DBs: `make test-dbs-up` (MSSQL :1433 `sa/TestPass2024`, Postgres :5432); fi
 | 1 | ✅ [#680](../../issues/680) strategy seam (pure refactor) | — | Merged in [PR #687](../../pull/687): strategy registry, catalog field, conformance pins, and exact worker-budget planning |
 | 2a | ✅ [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | Merged in [PR #688](../../pull/688): lock-window sessions, filtered privilege probe, audited fallback, and live correctness/performance/leak proofs |
 | 2b | ✅ [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Merged in [PR #689](../../pull/689): frozen table view, audited blocking/fallback, pooled readers, and live correctness/performance/leak proofs |
-| 3 | 🚧 [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Active on `feat/issue-683-mssql-database-snapshot`; shares `preflight_mssql.go` with #682 and relaxes `internal/config/validation.go` scope gate |
-| 4 | [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | `composite_parallel.go`, `job_builder.go`, `transfer.go`; PG-composite half can start right after #680 |
+| 3 | ✅ [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Merged in [PR #690](../../pull/690): deterministic lifecycle/resume, snapshot-routed reads, fail-closed preflight/diagnosis, live frozen-view and cleanup proofs |
+| 4 | 🚧 [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | Active on `feat/issue-684-shared-view-partitioning`; `composite_parallel.go`, `job_builder.go`, `transfer.go` |
 | 5 | [#685](../../issues/685) proofs + docs + diagnosis | #681, #682 (#683 for snapshot variant) | Closes the epic with evidence; mirrors `internal/transfer/consistency_snapshot_pg_integration_test.go` (#678) |
 
 ## Key code seams (main 83e7f64f — revalidate)

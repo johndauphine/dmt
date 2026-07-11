@@ -232,7 +232,7 @@ func TestStrictSnapshotRejectsPartitionedJobs(t *testing.T) {
 		progress.New(),
 		nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), "does not support partitioned jobs") {
+	if err == nil || !strings.Contains(err.Error(), "requires a shared-view migration epoch") {
 		t.Fatalf("Execute partitioned strict job error = %v, want unsupported-partitions error", err)
 	}
 }

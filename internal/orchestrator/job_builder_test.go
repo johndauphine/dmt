@@ -122,7 +122,7 @@ func TestStrictConsistencyBuildsOneUnpartitionedJobPerTable(t *testing.T) {
 	}
 	builder := &JobBuilder{
 		state: state,
-		config: &config.Config{Migration: config.MigrationConfig{
+		config: &config.Config{Source: config.SourceConfig{Type: "postgres"}, Migration: config.MigrationConfig{
 			StrictConsistency:   true,
 			ChunkSize:           1_000,
 			MaxPartitions:       8,
@@ -162,7 +162,7 @@ func TestMigrationScopedStrictConsistencyBuildsPartitionedJobs(t *testing.T) {
 	}
 	builder := &JobBuilder{
 		state: state,
-		config: &config.Config{Migration: config.MigrationConfig{
+		config: &config.Config{Source: config.SourceConfig{Type: "postgres"}, Migration: config.MigrationConfig{
 			StrictConsistency:      true,
 			StrictConsistencyScope: "migration",
 			ChunkSize:              1_000,
@@ -187,7 +187,7 @@ func TestMigrationScopedStrictConsistencyBuildsPartitionedJobs(t *testing.T) {
 	}
 }
 
-func TestMSSQLMigrationScopedStrictDefersPartitioningToSharedViewCapability(t *testing.T) {
+func TestMSSQLMigrationScopedStrictUsesSharedViewPartitions(t *testing.T) {
 	state, err := checkpoint.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +221,12 @@ func TestMSSQLMigrationScopedStrictDefersPartitioningToSharedViewCapability(t *t
 	if err := builder.createJobsForTable(context.Background(), runID, table, nil, result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Jobs) != 1 || result.Jobs[0].Partition != nil {
-		t.Fatalf("MSSQL migration-snapshot jobs = %+v, want one unpartitioned job until #684", result.Jobs)
+	if len(result.Jobs) < 2 {
+		t.Fatalf("MSSQL migration-snapshot jobs = %+v, want shared-view partitions", result.Jobs)
+	}
+	for _, job := range result.Jobs {
+		if job.Partition == nil {
+			t.Fatalf("MSSQL migration-snapshot job = %+v, want partition", job)
+		}
 	}
 }

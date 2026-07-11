@@ -45,17 +45,41 @@ func executeParallelCompositeKeysetPagination(
 	tuner RuntimeTuner,
 	writeErrorAdjuster WriteErrorAdjuster,
 ) (*TransferStats, bool, error) {
-	if cfg.Migration.StrictConsistency || cfg.Migration.ParallelReaders <= 1 || job.Partition != nil {
+	if cfg.Migration.ParallelReaders <= 1 || job.Partition != nil {
 		return nil, false, nil
 	}
 	if !compositeRangeLeadingTypeEligible(job.Table) {
 		return nil, false, nil
 	}
 
-	db := sourceQueryerForJob(ctx, srcPool.DB(), job)
 	dialect := driver.GetDialect(srcPool.DBType())
 	if dialect == nil || !dialect.SupportsCompositeRangeKeyset() {
 		return nil, false, nil
+	}
+	db := sourceQueryerForJob(ctx, srcPool.DB(), job)
+	tableHint := dialect.TableHint(cfg.Migration.StrictConsistency)
+	numReaders := cfg.Migration.ParallelReaders
+	var queryerForWorker sourceQueryerFactory
+	if cfg.Migration.StrictConsistency {
+		strategyName, strategy, err := resolveStrictReaderStrategyForScope(srcPool.DBType(), cfg.Migration.StrictConsistencyScope)
+		if err != nil {
+			return nil, true, err
+		}
+		if strategy == nil || !strategy.perJobParallel() {
+			return nil, false, nil
+		}
+		queryerForWorker = sourceQueryerFactoryForJob(ctx, job)
+		if queryerForWorker == nil {
+			return nil, false, nil
+		}
+		var joins, clamped bool
+		numReaders, joins, clamped = strictKeysetReaderPlan(true, strategy, cfg.Migration.ParallelReaders, cfg.Migration.MaxSourceConnections)
+		if !joins {
+			return nil, false, nil
+		}
+		if clamped {
+			logging.Warn("Table %s: strict_consistency composite readers clamped from %d to %d for strategy %s and max_source_connections=%d", job.Table.Name, cfg.Migration.ParallelReaders, numReaders, strategyName, cfg.Migration.MaxSourceConnections)
+		}
 	}
 
 	pkIdxs := compositePKIndexes(job.Table.PrimaryKey, cols)
@@ -65,7 +89,7 @@ func executeParallelCompositeKeysetPagination(
 
 	ranges := resumeRanges
 	if len(ranges) == 0 {
-		min, max, eligible, err := compositeLeadingBounds(ctx, db, dialect, job)
+		min, max, eligible, err := compositeLeadingBounds(ctx, db, dialect, job, tableHint)
 		if err != nil {
 			return nil, true, err
 		}
@@ -86,7 +110,6 @@ func executeParallelCompositeKeysetPagination(
 		return nil, false, nil
 	}
 
-	numReaders := cfg.Migration.ParallelReaders
 	if numReaders > len(ranges) {
 		numReaders = len(ranges)
 	}
@@ -97,19 +120,20 @@ func executeParallelCompositeKeysetPagination(
 	colList := dialect.ColumnListForSelect(cols, colTypes, tgtPool.DBType())
 	valueConvs := dialect.ValueConverters(colTypes, tgtPool.DBType())
 	producer := &compositeParallelProducer{
-		db:         db,
-		dialect:    dialect,
-		colList:    colList,
-		tableHint:  dialect.TableHint(false),
-		job:        job,
-		pkCols:     job.Table.PrimaryKey,
-		pkIdxs:     pkIdxs,
-		srcDBType:  srcPool.DBType(),
-		valueConvs: valueConvs,
-		convIdx:    buildConvIdx(valueConvs),
-		numCols:    len(cols),
-		ranges:     ranges,
-		numReaders: numReaders,
+		db:               db,
+		queryerForWorker: queryerForWorker,
+		dialect:          dialect,
+		colList:          colList,
+		tableHint:        tableHint,
+		job:              job,
+		pkCols:           job.Table.PrimaryKey,
+		pkIdxs:           pkIdxs,
+		srcDBType:        srcPool.DBType(),
+		valueConvs:       valueConvs,
+		convIdx:          buildConvIdx(valueConvs),
+		numCols:          len(cols),
+		ranges:           ranges,
+		numReaders:       numReaders,
 	}
 
 	var partitionID *int
@@ -212,12 +236,12 @@ func compositeRangeLeadingTypeEligible(table driver.Table) bool {
 // compositeLeadingBounds is intentionally a narrow eligibility probe. The
 // single-reader tuple path needs no aggregates, so an empty or non-int64-safe
 // leading component simply preserves that path instead of changing behavior.
-func compositeLeadingBounds(ctx context.Context, db sourceQueryer, dialect driver.Dialect, job Job) (int64, int64, bool, error) {
+func compositeLeadingBounds(ctx context.Context, db sourceQueryer, dialect driver.Dialect, job Job, tableHint string) (int64, int64, bool, error) {
 	if len(job.Table.PrimaryKey) == 0 {
 		return 0, 0, false, nil
 	}
 	col := dialect.QuoteIdentifier(job.Table.PrimaryKey[0])
-	query := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s %s", col, col, dialect.QualifyTable(job.Table.Schema, job.Table.Name), dialect.TableHint(false))
+	query := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s %s", col, col, dialect.QualifyTable(job.Table.Schema, job.Table.Name), tableHint)
 	var min, max any
 	if err := db.QueryRowContext(ctx, query).Scan(&min, &max); err != nil {
 		return 0, 0, false, fmt.Errorf("composite keyset range boundaries: %w", err)
@@ -231,19 +255,20 @@ func compositeLeadingBounds(ctx context.Context, db sourceQueryer, dialect drive
 }
 
 type compositeParallelProducer struct {
-	db         sourceQueryer
-	dialect    driver.Dialect
-	colList    string
-	tableHint  string
-	job        Job
-	pkCols     []string
-	pkIdxs     []int
-	srcDBType  string
-	valueConvs []func(any) any
-	convIdx    []int
-	numCols    int
-	ranges     []compositeResumeRange
-	numReaders int
+	db               sourceQueryer
+	queryerForWorker sourceQueryerFactory
+	dialect          driver.Dialect
+	colList          string
+	tableHint        string
+	job              Job
+	pkCols           []string
+	pkIdxs           []int
+	srcDBType        string
+	valueConvs       []func(any) any
+	convIdx          []int
+	numCols          int
+	ranges           []compositeResumeRange
+	numReaders       int
 
 	rangesPerWorker []int64
 	rowsPerWorker   []int64
@@ -267,9 +292,20 @@ func (p *compositeParallelProducer) produce(ctx context.Context, env pipelineEnv
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+			queryer := p.db
+			if p.queryerForWorker != nil {
+				var release func()
+				var err error
+				queryer, release, err = p.queryerForWorker(ctx, workerID)
+				if err != nil {
+					sendChunkOrCancel(ctx, out, chunkResult{err: fmt.Errorf("starting composite reader %d: %w", workerID, err)})
+					return
+				}
+				defer release()
+			}
 			for rangeID := range queue {
 				p.rangesPerWorker[workerID]++
-				rows, ok := p.readRange(ctx, env, out, rangeID, p.ranges[rangeID])
+				rows, ok := p.readRange(ctx, queryer, env, out, rangeID, p.ranges[rangeID])
 				p.rowsPerWorker[workerID] += rows
 				if !ok {
 					return
@@ -281,7 +317,7 @@ func (p *compositeParallelProducer) produce(ctx context.Context, env pipelineEnv
 	logging.Debug("Composite tuple ranges for %s: ranges_per_worker=%v rows_per_worker=%v", p.job.Table.Name, p.rangesPerWorker, p.rowsPerWorker)
 }
 
-func (p *compositeParallelProducer) readRange(ctx context.Context, env pipelineEnv, out chan<- chunkResult, rangeID int, r compositeResumeRange) (int64, bool) {
+func (p *compositeParallelProducer) readRange(ctx context.Context, queryer sourceQueryer, env pipelineEnv, out chan<- chunkResult, rangeID int, r compositeResumeRange) (int64, bool) {
 	lastTuple := r.tuple
 	seq := int64(0)
 	var rowsRead int64
@@ -301,7 +337,7 @@ func (p *compositeParallelProducer) readRange(ctx context.Context, env pipelineE
 		query := p.dialect.BuildCompositeKeysetRangeQuery(p.colList, p.pkCols, p.job.Table.Schema, p.job.Table.Name, p.tableHint, hasLowerBound, r.minInclusive, p.job.DateFilter)
 		args := p.dialect.BuildCompositeKeysetRangeArgs(lastTuple, r.min, r.max, chunkSize, hasLowerBound, p.job.DateFilter)
 		queryStart := time.Now()
-		rows, err := p.db.QueryContext(ctx, query, args...)
+		rows, err := queryer.QueryContext(ctx, query, args...)
 		queryTime := time.Since(queryStart)
 		if err != nil {
 			sendChunkOrCancel(ctx, out, chunkResult{err: fmt.Errorf("composite range query: %w", err)})
