@@ -107,6 +107,43 @@ Implications:
   drift entirely. Host-side numbers are only comparable across identical
   Docker Desktop versions and must note the engine version.
 
+## Strict Consistency: Parallel Readers (July 2026)
+
+The pre-change baseline used StackOverflow2010 (19,310,703 rows), SQL Server
+to PostgreSQL, with identical settings except for `strict_consistency`:
+
+| Path | Relaxed | Strict (one reader) | Penalty |
+|---|---|---|---|
+| Host-side (Docker proxy-bound) | 598K rows/s | 614K rows/s | ~0% — the proxy ceiling masks the reader clamp |
+| In-VM (headline methodology) | 1,008K rows/s (19s) | 877K rows/s (22s) | ~13% |
+
+After strict parallel-reader support, the same in-VM method was repeated on
+2026-07-11 with a static Linux arm64 build, fixed `workers: 8`,
+`write_ahead_writers: 4`, `chunk_size: 50000`, `parallel_readers: 4`,
+`read_ahead_buffers: 4`, and `max_partitions: 8`, with runtime tuning disabled.
+Connection caps requested as 20 source / 30 target were normalized to the
+runtime minimum of 36 for both runs. Transfer-only results were:
+
+| Mode | Throughput | Transfer time | Delta vs relaxed |
+|---|---|---|---|
+| Relaxed (two bracketing runs) | 886–910K rows/s | 21–22s | baseline |
+| Strict, SQL Server table scope | **919K rows/s** | **21s** | +1% to +4% (benchmark noise) |
+
+The engine-specific live proofs isolate reader scaling from whole-migration
+noise by scanning one million rows with per-query server parallelism disabled.
+With four readers, MySQL lock-window sessions measured 19ms versus 74ms for
+one strict reader (4.0×); SQL Server shared-table-lock readers measured 30ms
+versus 206ms (7.0×); and SQL Server database-snapshot readers measured 35ms
+versus 207ms (5.9×). The companion mutation tests prove every reader sees the
+same frozen source view.
+
+Environment attribution matters: a host-side run can saturate Docker's proxy
+with one reader and hide both the old penalty and the new speedup. A schema
+with one dominant table magnifies reader parallelism; on a multi-table schema,
+concurrent table jobs already overlap some of the single-reader cost. Use the
+in-VM method above for headline comparisons and interpret differences of a few
+percent as normal run-to-run variance.
+
 ## M5 Pro vs M3 Max Comparison (StackOverflow2010, drop_recreate)
 
 ### Test Environment

@@ -158,12 +158,13 @@ func TestMSSQLStrictSharedLockTimeoutFallbackIntegration(t *testing.T) {
 
 func TestMSSQLStrictSharedLockReadThroughputIntegration(t *testing.T) {
 	_, db, _, table, _ := openMSSQLStrictIntegration(t)
+	table = createMSSQLThroughputFixture(t, db, table)
 	src := &mssqlIntegrationSource{keysetRuntimeSourcePool{db: db}}
 	view, err := (mssqlTableSharedLockStrategy{}).begin(context.Background(), src, table, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ranges := [][2]int{{1, 25}, {26, 50}, {51, 75}, {76, 100}}
+	ranges := [][2]int{{1, 250_000}, {250_001, 500_000}, {500_001, 750_000}, {750_001, 1_000_000}}
 	single := timeMSSQLRangeReads(t, []sourceQueryer{view.queryer}, ranges, false)
 	strictReaders := make([]sourceQueryer, 4)
 	for worker := range 4 {
@@ -187,12 +188,29 @@ func TestMSSQLStrictSharedLockReadThroughputIntegration(t *testing.T) {
 	t.Logf("sequential strict=%s parallel strict=%s relaxed parallel=%s", single, strictParallel, relaxedParallel)
 }
 
+func createMSSQLThroughputFixture(t *testing.T, db *sql.DB, table source.Table) source.Table {
+	t.Helper()
+	if _, err := db.Exec(`
+CREATE TABLE dbo.throughput_events (id INT NOT NULL PRIMARY KEY, val INT NOT NULL);
+WITH numbers AS (
+    SELECT TOP (1000000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS id
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT INTO dbo.throughput_events (id, val)
+SELECT CONVERT(INT, id), CONVERT(INT, id) FROM numbers OPTION (MAXDOP 1);`); err != nil {
+		t.Fatal(err)
+	}
+	table.Name = "throughput_events"
+	table.RowCount = 1_000_000
+	return table
+}
+
 func timeMSSQLRangeReads(t *testing.T, readers []sourceQueryer, ranges [][2]int, parallel bool) time.Duration {
 	t.Helper()
 	start := time.Now()
 	read := func(queryer sourceQueryer, bounds [2]int) error {
-		var count int
-		return queryer.QueryRowContext(context.Background(), `WAITFOR DELAY '00:00:00.200'; SELECT COUNT(*) FROM dbo.events WHERE id BETWEEN @p1 AND @p2`, bounds[0], bounds[1]).Scan(&count)
+		var sum int64
+		return queryer.QueryRowContext(context.Background(), `SELECT COALESCE(SUM(CONVERT(BIGINT, val)), 0) FROM dbo.throughput_events WHERE id BETWEEN @p1 AND @p2 OPTION (MAXDOP 1)`, bounds[0], bounds[1]).Scan(&sum)
 	}
 	if !parallel {
 		for _, bounds := range ranges {

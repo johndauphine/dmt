@@ -233,6 +233,46 @@ func TestMSSQLMigrationSnapshotPartitionedIntegration(t *testing.T) {
 	}
 }
 
+func TestMSSQLMigrationSnapshotReadThroughputIntegration(t *testing.T) {
+	_, db, _, _, dbName := openMSSQLStrictIntegration(t)
+	createMSSQLThroughputFixture(t, db, source.Table{})
+	runID := fmt.Sprintf("%08x-throughput", uint32(time.Now().UnixNano()))
+	epoch, err := BeginStrictSnapshotEpochForRun(context.Background(), &mssqlIntegrationSource{keysetRuntimeSourcePool{db: db}}, StrictSnapshotEpochOptions{
+		RunID: runID,
+		SourceConfig: config.SourceConfig{
+			Type: "mssql", Host: "localhost", Port: 1433, Database: dbName,
+			User: "sa", Password: "TestPass2024", Schema: "dbo", SSLMode: "disable",
+		},
+		MaxConnections: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer epoch.Close()
+
+	ranges := [][2]int{{1, 250_000}, {250_001, 500_000}, {500_001, 750_000}, {750_001, 1_000_000}}
+	single := timeMSSQLRangeReads(t, []sourceQueryer{epoch.queryer()}, ranges, false)
+	strictReaders := make([]sourceQueryer, len(ranges))
+	for worker := range strictReaders {
+		queryer, release, err := epoch.queryerForWorker(context.Background(), worker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+		strictReaders[worker] = queryer
+	}
+	strictParallel := timeMSSQLRangeReads(t, strictReaders, ranges, true)
+	if strictParallel*2 > single {
+		t.Fatalf("snapshot parallel reads %s are less than 2x faster than sequential snapshot reads %s", strictParallel, single)
+	}
+	relaxedParallel := timeMSSQLRangeReads(t, []sourceQueryer{db, db, db, db}, ranges, true)
+	slowdown := float64(strictParallel-relaxedParallel) / float64(relaxedParallel)
+	if slowdown > 0.15 {
+		t.Fatalf("snapshot parallel reads %s are %.1f%% slower than relaxed %s, want <=15%%", strictParallel, slowdown*100, relaxedParallel)
+	}
+	t.Logf("sequential snapshot=%s parallel snapshot=%s relaxed parallel=%s", single, strictParallel, relaxedParallel)
+}
+
 func TestMSSQLMigrationSnapshotResumeMissingFailsIntegration(t *testing.T) {
 	admin, db, _, _, dbName := openMSSQLStrictIntegration(t)
 	runID := fmt.Sprintf("%08x-missing", uint32(time.Now().UnixNano()))

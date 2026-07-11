@@ -49,20 +49,33 @@ knowledge that doesn't fit in an issue. Remove this file when the epic closes (p
   independent pre-push and post-CI reviews are clean. `make lint`, `make test-short`, `make test`,
   the live SQL Server snapshot/preflight suite, transfer/orchestrator race tests, and all six CI
   checks passed. Copilot's first response was quota-exhausted and contained no actionable comments.
-- 🚧 **#684 active** — shared-view partitioning and composite tuple-keyset parallelism on
-  `feat/issue-684-shared-view-partitioning`. Strategy capabilities now distinguish parallelism
+- ✅ **#684 complete** — shared-view partitioning and composite tuple-keyset parallelism merged in
+  [PR #691](../../pull/691) at `main` `198546a9`. Strategy capabilities now distinguish parallelism
   within one table job from a view shared across independent partition jobs. Composite workers
   acquire/release per-reader snapshot queryers; PostgreSQL migration epochs and SQL Server database
   snapshots enable partitions, while table-scoped lock-window/shared-lock strategies remain
   unpartitioned. Unit coverage passes. Live PostgreSQL migration-epoch, MySQL lock-window, SQL Server
   shared-lock composite proofs, and SQL Server database-snapshot partition mutation proof pass.
   `make lint`, `make test-short`, `make test`, and the combined live-DB transfer/orchestrator race
-  suite pass. Independent review found and verified fixes for two gaps: the live tests now prove
+  suite passed. Independent review found and verified fixes for two gaps: the live tests now prove
   automatic production `Execute` routing with a measured PostgreSQL strict speedup (727ms one
   reader vs 217ms four readers), and worker-session acquisition now rejects tuple-unsafe fallback
   tables instead of taking an unused MySQL lock window or SQL Server table lock. Final review is clean;
-  publication/CI remain.
-- ⏳ Remaining after #684: #685.
+  final review was clean, all six CI checks passed, and the PR was merged.
+- 🚧 **#685 active** — complete the MySQL and SQL Server throughput proofs, document the strict
+  per-engine blocking/prerequisite matrix and before/after in-VM benchmark, and expand diagnosis
+  coverage for strategy degradation/failure classes on `feat/issue-685-strict-throughput-docs`.
+  The missing SQL Server database-snapshot proof now scans one million rows and measures 207ms
+  sequential versus 35ms with four readers (5.9×). The corresponding million-row proofs measure
+  4.0× for MySQL and 7.0× for SQL Server table locks. A fresh 19.3M-row in-VM comparison measures relaxed at 886–910K rows/s (21–22s)
+  and table-scoped strict at 919K rows/s (21s), within +1–4% benchmark noise. The per-engine
+  config/docs matrix, catalog guidance, and MySQL 1044/1142/1205 plus SQL Server 1222/snapshot
+  deterministic diagnoses are implemented. `make test-short`, `make lint`, `make test`, focused
+  live tests, and the benchmark pass. Independent review found and prompted fixes for nonexistent
+  timeout-setting advice, overbroad diagnosis wording, stale strict-tuple documentation, and the
+  original controlled 100-row proof fixtures. The focused re-review is clean and independently
+  repeated all three million-row live proofs three times with stable ratios; publication and CI remain.
+- ⏳ Remaining after #685: final epic audit, handoff removal, and epic closure.
 
 **Stakes (measured 2026-07-10, SO2010 19.3M rows, mssql→pg, same config, strict toggled):**
 
@@ -96,8 +109,8 @@ live DBs: `make test-dbs-up` (MSSQL :1433 `sa/TestPass2024`, Postgres :5432); fi
 | 2a | ✅ [#681](../../issues/681) MySQL `lock_window_sessions` | #680 | Merged in [PR #688](../../pull/688): lock-window sessions, filtered privilege probe, audited fallback, and live correctness/performance/leak proofs |
 | 2b | ✅ [#682](../../issues/682) MSSQL `table_shared_lock` | #680 | Merged in [PR #689](../../pull/689): frozen table view, audited blocking/fallback, pooled readers, and live correctness/performance/leak proofs |
 | 3 | ✅ [#683](../../issues/683) MSSQL `database_snapshot` (migration scope) | #682 | Merged in [PR #690](../../pull/690): deterministic lifecycle/resume, snapshot-routed reads, fail-closed preflight/diagnosis, live frozen-view and cleanup proofs |
-| 4 | 🚧 [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | Active on `feat/issue-684-shared-view-partitioning`; `composite_parallel.go`, `job_builder.go`, `transfer.go` |
-| 5 | [#685](../../issues/685) proofs + docs + diagnosis | #681, #682 (#683 for snapshot variant) | Closes the epic with evidence; mirrors `internal/transfer/consistency_snapshot_pg_integration_test.go` (#678) |
+| 4 | ✅ [#684](../../issues/684) unclamp partitioning + composite | #680 (PG half), #683 (partition half) | Merged in [PR #691](../../pull/691): shared-view partitioning, composite worker queryers, and production routing/speed proofs |
+| 5 | 🚧 [#685](../../issues/685) proofs + docs + diagnosis | #681, #682 (#683 for snapshot variant) | Active on `feat/issue-685-strict-throughput-docs`; closes the epic with evidence |
 
 ## Key code seams (main 83e7f64f — revalidate)
 

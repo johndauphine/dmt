@@ -272,8 +272,10 @@ var mssqlPatterns = []Pattern{
 		Regex: regexp.MustCompile(`Lock request time out period exceeded`),
 		Diagnose: func(_ []string) Diagnosis {
 			return Diagnosis{
-				Cause: "A lock request waited longer than LOCK_TIMEOUT permitted.",
+				Cause: "A SQL Server lock request waited longer than LOCK_TIMEOUT permitted.",
 				Suggestions: []string{
+					"For table-scoped strict reads, identify the writer blocking the shared table lock. Dmt reports this timeout and degrades to one reader.",
+					"That strict fallback remains consistent but loses parallel-reader throughput; use migration-scoped database snapshots when table-long writer blocking is unacceptable.",
 					"Identify what's holding the conflicting lock (sp_who2, sys.dm_exec_requests).",
 					"Increase LOCK_TIMEOUT on the migration session (SET LOCK_TIMEOUT -1 disables it; risky in production).",
 					"Avoid running the migration during peak hours on the target.",

@@ -176,6 +176,38 @@ var mysqlPatterns = []Pattern{
 		},
 	},
 	{
+		Name:  "mysql_database_access_denied",
+		Regex: regexp.MustCompile(`Access denied for user '([^']+)'@'([^']+)' to database '([^']+)'`),
+		Diagnose: func(m []string) Diagnosis {
+			return Diagnosis{
+				Cause: fmt.Sprintf("MySQL user %q from %q cannot access database %q.", m[1], m[2], m[3]),
+				Suggestions: []string{
+					"Grant the migration user the privileges required by the failed operation on the affected database.",
+					"Verify the configured database and the account's host binding on the affected endpoint.",
+					"If this occurred while acquiring strict lock-window readers, grant source SELECT and LOCK TABLES; dmt degrades to one reader until preflight passes.",
+				},
+				Confidence: "high",
+				Category:   "permission",
+			}
+		},
+	},
+	{
+		Name:  "mysql_command_denied",
+		Regex: regexp.MustCompile(`([A-Z ]+) command denied to user '([^']+)'@'([^']+)' for table '([^']+)'`),
+		Diagnose: func(m []string) Diagnosis {
+			return Diagnosis{
+				Cause: fmt.Sprintf("MySQL denied %s for user %q on table %q.", m[1], m[2], m[4]),
+				Suggestions: []string{
+					"Grant the denied command privilege on the affected table or database to the migration user.",
+					"Run `SHOW GRANTS FOR CURRENT_USER` on the affected endpoint to confirm effective privileges.",
+					"If this occurred while acquiring strict lock-window readers, grant source SELECT and LOCK TABLES; dmt degrades to one reader until preflight passes.",
+				},
+				Confidence: "high",
+				Category:   "permission",
+			}
+		},
+	},
+	{
 		Name:  "mysql_access_denied",
 		Regex: regexp.MustCompile(`Access denied for user '([^']+)'@'([^']+)' \(using password: (YES|NO)\)`),
 		Diagnose: func(m []string) Diagnosis {
@@ -259,8 +291,9 @@ var mysqlPatterns = []Pattern{
 		Regex: regexp.MustCompile(`Lock wait timeout exceeded; try restarting transaction`),
 		Diagnose: func(_ []string) Diagnosis {
 			return Diagnosis{
-				Cause: "InnoDB row-lock wait exceeded innodb_lock_wait_timeout (default 50s).",
+				Cause: "A MySQL lock wait timed out. During strict source reads this means the LOCK TABLES window could not start, so dmt loudly degrades to one reader; during target writes it is an InnoDB row-lock timeout.",
 				Suggestions: []string{
+					"For strict source reads, identify the session blocking LOCK TABLES or schedule the table for a quieter window.",
 					"Reduce write_ahead_writers — concurrent writers contending for the same rows are the typical cause.",
 					"Identify what's holding locks: SELECT * FROM information_schema.innodb_trx;",
 					"Avoid running the migration during peak hours on the target.",

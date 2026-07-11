@@ -252,10 +252,9 @@ func Execute(
 	srcDialect := driver.GetDialect(srcPool.DBType())
 	if driver.TupleKeysetRoutable(&job.Table, srcPool.DBType()) &&
 		!convertersTouchPK(srcDialect, cols, colTypes, tgtPool.DBType(), job.Table.PrimaryKey) {
-		// Parallel tuple ranges are intentionally disabled for strict snapshots
-		// until tuple readers have the same imported-snapshot plumbing as the
-		// legacy keyset producer. Ineligible leading values fall through to the
-		// current single-reader tuple path without changing its behavior.
+		// Strict tuple ranges additionally require a strategy that supplies
+		// tuple-safe worker queryers. Ineligible strategies or leading values fall
+		// through to the current single-reader tuple path without changing it.
 		// A pre-#667 checkpoint has one tuple watermark but no range envelope.
 		// Preserve its exact single-reader resume rather than splitting from the
 		// table minimum and replaying the already-copied prefix. Fresh work and

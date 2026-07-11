@@ -336,12 +336,14 @@ func TestMySQLStrictSessionsReleasedAfterFailureAndCancelIntegration(t *testing.
 
 func TestMySQLStrictParallelReadThroughputIntegration(t *testing.T) {
 	_, db, _, table := openMySQLStrictIntegration(t, "dmt_strict_throughput")
+	table = createMySQLThroughputFixture(t, db, table)
 	src := &mysqlTupleSourcePool{keysetRuntimeSourcePool{db: db}}
 	singleView, err := (mysqlLockWindowStrategy{}).begin(context.Background(), src, table, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	single := timeMySQLSleepRead(t, []sourceQueryer{singleView.queryer}, table, false)
+	ranges := [][2]int{{1, 250_000}, {250_001, 500_000}, {500_001, 750_000}, {750_001, 1_000_000}}
+	single := timeMySQLRangeReads(t, []sourceQueryer{singleView.queryer}, table, ranges, false)
 	singleView.release()
 
 	parallelView, err := (mysqlLockWindowStrategy{}).begin(context.Background(), src, table, 4)
@@ -356,14 +358,14 @@ func TestMySQLStrictParallelReadThroughputIntegration(t *testing.T) {
 		}
 		strictReaders[worker] = queryer
 	}
-	strictParallel := timeMySQLSleepRead(t, strictReaders, table, true)
+	strictParallel := timeMySQLRangeReads(t, strictReaders, table, ranges, true)
 	parallelView.release()
 
 	relaxedReaders := make([]sourceQueryer, 4)
 	for i := range relaxedReaders {
 		relaxedReaders[i] = db
 	}
-	relaxedParallel := timeMySQLSleepRead(t, relaxedReaders, table, true)
+	relaxedParallel := timeMySQLRangeReads(t, relaxedReaders, table, ranges, true)
 	if strictParallel*2 > single {
 		t.Fatalf("strict parallel read %s is less than 2x faster than single strict %s", strictParallel, single)
 	}
@@ -374,26 +376,55 @@ func TestMySQLStrictParallelReadThroughputIntegration(t *testing.T) {
 	t.Logf("single strict=%s parallel strict=%s relaxed parallel=%s", single, strictParallel, relaxedParallel)
 }
 
-func timeMySQLSleepRead(t *testing.T, readers []sourceQueryer, table source.Table, partitioned bool) time.Duration {
+func createMySQLThroughputFixture(t *testing.T, db *sql.DB, table source.Table) source.Table {
+	t.Helper()
+	if _, err := db.Exec(`CREATE TABLE throughput_events (id INT PRIMARY KEY, val INT NOT NULL) ENGINE=InnoDB`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO throughput_events VALUES (1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	for rows := 1; rows < 1_000_000; {
+		add := rows
+		if rows+add > 1_000_000 {
+			add = 1_000_000 - rows
+		}
+		if _, err := db.Exec(`INSERT INTO throughput_events SELECT id + ?, val + ? FROM throughput_events WHERE id <= ?`, rows, rows, add); err != nil {
+			t.Fatal(err)
+		}
+		rows += add
+	}
+	table.Name = "throughput_events"
+	table.RowCount = 1_000_000
+	return table
+}
+
+func timeMySQLRangeReads(t *testing.T, readers []sourceQueryer, table source.Table, ranges [][2]int, parallel bool) time.Duration {
 	t.Helper()
 	start := time.Now()
-	errCh := make(chan error, len(readers))
+	read := func(queryer sourceQueryer, bounds [2]int) error {
+		query := `SELECT COALESCE(SUM(val), 0) FROM ` + mysqlTestIdentifier(table.Name) + ` WHERE id BETWEEN ? AND ?`
+		var sum int64
+		return queryer.QueryRowContext(context.Background(), query, bounds[0], bounds[1]).Scan(&sum)
+	}
+	if !parallel {
+		for _, bounds := range ranges {
+			if err := read(readers[0], bounds); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return time.Since(start)
+	}
+	errCh := make(chan error, len(ranges))
 	var wg sync.WaitGroup
-	for worker, queryer := range readers {
+	for worker, bounds := range ranges {
 		wg.Add(1)
-		go func(worker int, queryer sourceQueryer) {
+		go func(queryer sourceQueryer, bounds [2]int) {
 			defer wg.Done()
-			query := `SELECT COALESCE(SUM(SLEEP(0.02)), 0) FROM events`
-			var args []any
-			if partitioned {
-				query += ` WHERE MOD(id, 4) = ?`
-				args = append(args, worker)
+			if err := read(queryer, bounds); err != nil {
+				errCh <- fmt.Errorf("range read %s: %w", table.FullName(), err)
 			}
-			var ignored int
-			if err := queryer.QueryRowContext(context.Background(), query, args...).Scan(&ignored); err != nil {
-				errCh <- fmt.Errorf("sleep read %s: %w", table.FullName(), err)
-			}
-		}(worker, queryer)
+		}(readers[worker], bounds)
 	}
 	wg.Wait()
 	close(errCh)

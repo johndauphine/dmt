@@ -38,6 +38,17 @@ the durable YAML lease record remains authoritative after a process exits.
 
 ### Migration-scoped strict snapshots
 
+Strict consistency uses the strongest parallel stable-view mechanism exposed by
+each source engine:
+
+| Source and scope | Mechanism | Parallelism | Source-write blocking | Prerequisites |
+|---|---|---|---|---|
+| PostgreSQL, table or migration | Exported MVCC snapshot | Parallel readers; migration epochs also permit partitions | None | None beyond normal reads |
+| MySQL/MariaDB, table | Repeatable-read sessions opened during a `LOCK TABLES` window | Parallel readers | Writes to that table pause for the few milliseconds needed to start reader sessions | InnoDB, `SELECT`, and `LOCK TABLES` |
+| SQL Server, table | Shared table lock | Parallel readers | Writes to that table wait for the full table transfer | None beyond normal reads |
+| SQL Server, migration | Database snapshot | Parallel readers and partitions | None; changed pages consume copy-on-write disk until cleanup | SQL Server 2016 SP1+, not Azure SQL Database, plus a documented create-database permission path |
+| SQLite, table | Serializable read transaction | One reader by design | SQLite/file-lock dependent | No WAL snapshot API is exposed by the supported Go drivers |
+
 With PostgreSQL or SQL Server `migration.strict_consistency: true` and
 `migration.strict_consistency_scope: migration`, dmt opens one source epoch
 for every table and partition reader. PostgreSQL imports one exported MVCC
@@ -338,10 +349,13 @@ Tuple keyset is used for composite and otherwise tuple-safe primary keys. It
 keeps the source engine's tuple ordering semantics, including text collation:
 
 - **Query**: `WHERE (a,b,...) > (last_a,last_b,...) ORDER BY a,b,...`
-- **Parallel eligibility**: when the leading component is int64-safe,
-  `parallel_readers > 1`, and `strict_consistency` is off, DMT splits that
-  leading component into work-stealing ranges. Each reader still advances with
-  the complete tuple inside its own `min <= a <= max` range.
+- **Parallel eligibility**: when the leading component is int64-safe and
+  `parallel_readers > 1`, DMT splits that component into work-stealing ranges.
+  Relaxed reads always qualify; strict reads additionally require an engine
+  strategy with tuple-safe worker sessions (PostgreSQL exported snapshots,
+  MySQL lock-window sessions, or SQL Server shared locks/database snapshots).
+  Each reader still advances with the complete tuple inside its own
+  `min <= a <= max` range.
 - **Progress tracking**: parallel tuple readers save a versioned
   `range_state` envelope containing each range's bounds, completion bit, and
   typed tuple watermark. A periodic checkpoint's legacy `last_pk` is a
@@ -362,9 +376,9 @@ Checkpoint compatibility:
   and skip or replay the wrong suffix. Resume it with this or a newer binary,
   or begin a fresh migration after the normal target recovery procedure.
 
-Nonnumeric leading keys, strict-consistency jobs, PK value converters, and
-engines without a vetted range template keep the prior single-reader tuple
-path.
+Nonnumeric leading keys, PK value converters, engines without a vetted range
+template, and strict strategies without tuple-safe worker sessions keep the
+prior single-reader tuple path.
 
 ### ROW_NUMBER Pagination (Fallback)
 
