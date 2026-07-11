@@ -73,6 +73,8 @@ SQLite is intended primarily for testing dmt end-to-end without external databas
 
 **Capability interfaces (#460)**: a writer surface an engine cannot honor must be an optional interface (e.g. `driver.ConstraintWriter` for post-transfer FK/CHECK creation) with caller-side type assertion and uniform degradation — never a silent or warning no-op stub on the engine. The conformance harness pins each driver's capability matrix (`conformance.CheckWriterCapabilities`); a new engine declares what it supports there.
 
+Strict parallel reads are catalog-driven: `strict_parallel_strategy` names the table-scoped acquisition tier (`exported_snapshot` for PostgreSQL, `lock_window_sessions` for MySQL/MariaDB, `table_shared_lock` for SQL Server, `none` for SQLite). The transfer registry resolves that name and supplies per-worker queryers; only strategies whose view is shared across jobs may enable table partitions. Migration scope is an engine tier above that table strategy: PostgreSQL shares one exported-snapshot epoch, while SQL Server routes all reads and partition planning through a copy-on-write database snapshot.
+
 ### Data Transfer Pipeline
 
 ```

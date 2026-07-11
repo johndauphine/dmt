@@ -72,6 +72,30 @@ var mysqlCases = []struct {
 		mustCateg: "type_mismatch",
 	},
 	{
+		pattern:   "mysql_database_access_denied",
+		errMsg:    `Error 1044 (42000): Access denied for user 'dmt'@'%' to database 'prod'`,
+		mustMatch: "LOCK TABLES",
+		mustCateg: "permission",
+	},
+	{
+		pattern:   "mysql_database_access_denied",
+		errMsg:    `Error 1044 (42000): Access denied for user 'dmt'@'%' to database 'target'`,
+		mustMatch: "failed operation",
+		mustCateg: "permission",
+	},
+	{
+		pattern:   "mysql_command_denied",
+		errMsg:    `Error 1142 (42000): LOCK TABLES command denied to user 'dmt'@'%' for table 'events'`,
+		mustMatch: "strict lock-window",
+		mustCateg: "permission",
+	},
+	{
+		pattern:   "mysql_command_denied",
+		errMsg:    `Error 1142 (42000): INSERT command denied to user 'dmt'@'%' for table 'events'`,
+		mustMatch: "denied command privilege",
+		mustCateg: "permission",
+	},
+	{
 		pattern:   "mysql_access_denied",
 		errMsg:    `Error 1045: Access denied for user 'dmt'@'10.0.0.5' (using password: YES)`,
 		mustMatch: "dmt",
@@ -104,7 +128,7 @@ var mysqlCases = []struct {
 	{
 		pattern:   "mysql_lock_wait_timeout",
 		errMsg:    `Error 1205: Lock wait timeout exceeded; try restarting transaction`,
-		mustMatch: "innodb_lock_wait_timeout",
+		mustMatch: "strict source reads",
 		mustCateg: "other",
 	},
 	{

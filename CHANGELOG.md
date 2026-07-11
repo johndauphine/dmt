@@ -24,6 +24,11 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Strict MySQL and SQL Server readers now have one-million-row live throughput
+  proofs, per-engine blocking/prerequisite documentation, in-VM before/after
+  benchmark evidence, and deterministic diagnoses for lock-window, shared-lock,
+  and database-snapshot degradation classes (#685).
+
 - Strict composite tuple-keyset transfers now use parallel readers whenever
   the source strategy can share one stable per-job view, including PostgreSQL
   exported snapshots, MySQL lock-window sessions, and SQL Server shared locks

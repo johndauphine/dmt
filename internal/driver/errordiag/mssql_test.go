@@ -18,6 +18,12 @@ var mssqlCases = []struct {
 		mustCateg: "permission",
 	},
 	{
+		pattern:   "mssql_database_snapshot_create",
+		errMsg:    `creating SQL Server strict snapshot [dmt_strict_abc12345]: database snapshots are not supported by this edition of SQL Server`,
+		mustMatch: "2016 SP1+",
+		mustCateg: "permission",
+	},
+	{
 		pattern:   "mssql_pk_duplicate",
 		errMsg:    `mssql: Violation of PRIMARY KEY constraint 'PK_users'. Cannot insert duplicate key in object 'dbo.users'.`,
 		mustMatch: "PK_users",
@@ -110,7 +116,7 @@ var mssqlCases = []struct {
 	{
 		pattern:   "mssql_lock_timeout",
 		errMsg:    `mssql: Lock request time out period exceeded.`,
-		mustMatch: "LOCK_TIMEOUT",
+		mustMatch: "strict fallback",
 		mustCateg: "other",
 	},
 	{

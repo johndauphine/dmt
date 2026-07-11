@@ -72,26 +72,30 @@ migration:
   create_check_constraints: true # Create CHECK constraints
 
   # Consistency options
-  # strict_consistency pins every page of one table to a stable read transaction
-  # (#640). PostgreSQL keyset readers share an exported snapshot, so they may
-  # run in parallel (clamped to max_source_connections minus the lead transaction);
-  # all other engines use one reader. Table partitioning remains disabled. PostgreSQL /
-  # InnoDB MySQL use repeatable-read snapshots (other MySQL engines are rejected), SQL Server uses serializable locks, and
-  # SQLite uses a serializable read transaction. Unsupported sources fail before
-  # target mutation. Full-table strict jobs validate against a COUNT captured
-  # in that same snapshot; live-source drift is reported but does not fail the
-  # copy. Incremental date-filter jobs keep normal live-count validation. Long
-  # snapshots can retain MVCC history or block writers.
+  # strict_consistency pins source reads to a stable view. Engine matrix:
+  # - postgres: exported snapshot; parallel readers and migration-scope partitions;
+  #   no writer blocking; table + migration scope; no extra privileges.
+  # - mysql/mariadb (InnoDB): repeatable-read sessions opened under a short
+  #   LOCK TABLES window; parallel readers; source-table writes pause for the
+  #   few milliseconds needed to start sessions; table scope; requires SELECT
+  #   and LOCK TABLES. Other MySQL storage engines are rejected.
+  # - mssql table scope: shared table lock; parallel readers; source-table writes
+  #   wait for that table's full transfer; no privilege beyond normal source reads.
+  # - mssql migration scope: database snapshot; parallel readers + partitions;
+  #   no writer blocking, with copy-on-write disk cost; requires SQL Server 2016
+  #   SP1+, not Azure SQL Database, and CREATE ANY DATABASE, ALTER ANY DATABASE,
+  #   CREATE DATABASE in master, or dbcreator membership.
+  # - sqlite: one serializable reader by design; its Go drivers expose no WAL
+  #   snapshot API; table scope only.
+  # Unsupported sources fail before target mutation. Full-table strict jobs
+  # validate against a COUNT captured in the same view; live-source drift is
+  # reported but does not fail the copy. Incremental date-filter jobs keep normal
+  # live-count validation. Long snapshots can retain MVCC history or block writers.
   strict_consistency: false
-  # table (default): one stable snapshot per table. migration: PostgreSQL uses
-  # one exported snapshot; SQL Server creates a database snapshot and reads
-  # every table from it. PostgreSQL resume starts a new epoch; SQL Server resume
-  # reuses the surviving dmt_strict_<runid> snapshot or fails closed if missing.
-  # SQL Server writers are never blocked but their copy-on-write divergence
-  # consumes space beside the source data files until the snapshot is dropped.
-  # The login must be able to CREATE DATABASE (directly, through CREATE ANY /
-  # ALTER ANY DATABASE, or dbcreator); preflight reports unsupported editions,
-  # versions, missing permission, and leftover dmt_strict_* snapshots.
+  # table (default): one stable view per table. migration: PostgreSQL uses one
+  # exported snapshot; SQL Server creates one database snapshot and reads every
+  # table from it. PostgreSQL resume starts a new epoch; SQL Server resume reuses
+  # the surviving dmt_strict_<runid> snapshot or fails closed if missing.
   strict_consistency_scope: table
 
   # Schema drift reporting (#305). DMT compares the current source
