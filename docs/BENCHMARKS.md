@@ -109,36 +109,64 @@ Implications:
 
 ## Strict Consistency: Parallel Readers (July 2026)
 
-The pre-change baseline used StackOverflow2010 (19,310,703 rows), SQL Server
-to PostgreSQL, with identical settings except for `strict_consistency`:
+The original pre-change check used one relaxed/strict pair on StackOverflow2010
+(19,310,703 rows), SQL Server to PostgreSQL, with identical settings except for
+`strict_consistency`. It is a historical point estimate, not a sampled
+distribution:
 
-| Path | Relaxed | Strict (one reader) | Penalty |
+| Path | Relaxed | Strict (one reader) | Original point estimate |
 |---|---|---|---|
 | Host-side (Docker proxy-bound) | 598K rows/s | 614K rows/s | ~0% — the proxy ceiling masks the reader clamp |
 | In-VM (headline methodology) | 1,008K rows/s (19s) | 877K rows/s (22s) | ~13% |
 
-After strict parallel-reader support, the same in-VM method was repeated on
-2026-07-11 with a static Linux arm64 build, fixed `workers: 8`,
-`write_ahead_writers: 4`, `chunk_size: 50000`, `parallel_readers: 4`,
-`read_ahead_buffers: 4`, and `max_partitions: 8`, with runtime tuning disabled.
-Connection caps requested as 20 source / 30 target were normalized to the
-runtime minimum of 36 for both runs. An initial two-bracketing-run sample
-put the delta at +1% to +4%, but that sample size was too small to be
-reliable; a follow-up of 10 alternating relaxed/strict pairs (fresh target
-database each run, wall-clock timing to sub-second precision) on the same
-in-VM setup showed:
+The post-change result was re-measured on 2026-07-11 with every observation
+retained. The static Linux arm64 binary was built from `0f33ecf7`; Docker
+Desktop Engine 29.5.3 ran in an arm64 VM with 18 CPUs and 25.2GB shared across
+uncapped containers. The `dmt` and PostgreSQL processes were arm64. SQL Server
+ran cross-architecture under emulation: its 2022-latest amd64 image reported
+SQL Server 16.0.4250.1 X64. The image digests were
+SQL Server
+(`mcr.microsoft.com/mssql/server@sha256:2dca9ee5cd5316952d9b6ef4a0c088ac95b55e3502accdda0fc12ad6ede7b905`)
+and PostgreSQL 16-alpine
+(`postgres@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50`).
+`dmt` ran inside the Docker network with runtime tuning disabled and fixed
+`workers: 8`, `write_ahead_writers: 4`, `chunk_size: 50000`,
+`parallel_readers: 4`, `read_ahead_buffers: 4`, and `max_partitions: 8`.
+Requested connection caps of 20 source / 30 target were normalized to the
+runtime minimum of 36 in both modes.
 
-| Mode | Transfer time (10 runs) | Penalty vs relaxed |
-|---|---|---|
-| Relaxed | 15.7–19.9s | baseline |
-| Strict, SQL Server table scope | 18.0–23.1s | **4–20%, median 6.4%, mean 9.3%** |
+Each observation used the same target database name, dropped and recreated
+before the run. Odd pairs ran relaxed then strict; even pairs reversed the
+order to counterbalance cache and time trends. The values below are the
+transfer-phase metric: seconds are reconstructed as 19,310,703 divided by the
+integer `rows/sec` emitted by `Transfer complete`, so validation and
+finalization are excluded. All 20 runs completed successfully with exactly
+19,310,703 transferred rows. Paired penalty is
+`(strict_seconds / relaxed_seconds) - 1`; a negative value means strict was
+faster.
 
-The wider sample confirms the qualitative result — strict mode is no longer
-the flat ~13% tax it was pre-epic, and most runs land in the single digits —
-but the penalty is noisier than a single bracketed pair suggests. Treat "+1%
-to +4%" as an optimistic point estimate from a small sample, not the steady
-state; **4–20%, centered mid-single-digits, is the more defensible range**
-pending a larger sample or averaged repeated runs.
+| Pair | Order | Relaxed | Strict, table scope | Paired penalty |
+|---:|---|---:|---:|---:|
+| 1 | relaxed → strict | 913,122 rows/s (21.148s) | 977,195 rows/s (19.761s) | -6.56% |
+| 2 | strict → relaxed | 1,005,780 rows/s (19.200s) | 962,782 rows/s (20.057s) | +4.46% |
+| 3 | relaxed → strict | 968,398 rows/s (19.941s) | 976,866 rows/s (19.768s) | -0.87% |
+| 4 | strict → relaxed | 1,010,537 rows/s (19.109s) | 1,003,230 rows/s (19.249s) | +0.73% |
+| 5 | relaxed → strict | 981,203 rows/s (19.681s) | 980,180 rows/s (19.701s) | +0.10% |
+| 6 | strict → relaxed | 978,423 rows/s (19.737s) | 989,533 rows/s (19.515s) | -1.12% |
+| 7 | relaxed → strict | 967,231 rows/s (19.965s) | 946,033 rows/s (20.412s) | +2.24% |
+| 8 | strict → relaxed | 903,120 rows/s (21.382s) | 901,084 rows/s (21.431s) | +0.23% |
+| 9 | relaxed → strict | 885,489 rows/s (21.808s) | 882,381 rows/s (21.885s) | +0.35% |
+| 10 | strict → relaxed | 872,159 rows/s (22.141s) | 873,606 rows/s (22.105s) | -0.16% |
+
+In this sample, the median paired penalty is **+0.17%** and the mean is
+**-0.06%**, with an observed range of **-6.56% to +4.46%**. The sign is not
+stable across pairs, so no consistent directional difference was detected in
+this sample. This is a descriptive result, not an equivalence test, and it does
+not bound the true effect outside the recorded setup. The original ~13%
+pre-change value is only one historical pair and does not support a statistical
+before/after effect size. The isolated reader proofs below establish removal of
+the reader clamp; the paired migration sample shows that no repeatable
+whole-migration penalty was detected on the recorded setup.
 
 The engine-specific live proofs isolate reader scaling from whole-migration
 noise by scanning one million rows with per-query server parallelism disabled.
@@ -149,16 +177,14 @@ versus 207ms (5.9×). The companion mutation tests prove every reader sees the
 same frozen source view.
 
 Environment attribution matters: a host-side run can saturate Docker's proxy
-with one reader and hide both the old penalty and the new speedup. Host-side
-re-testing of the full StackOverflow2010 migration (not the isolated reader
-proofs above) measured a consistent ~9–11% penalty across 4 alternating runs,
-higher than the in-VM figures in this section — host-side numbers are not
-comparable to in-VM ones and should be reported separately. A schema with one
-dominant table magnifies reader parallelism; on a multi-table schema,
-concurrent table jobs already overlap some of the single-reader cost. Use the
-in-VM method above for headline comparisons, run at least 8-10 alternating
-pairs before quoting a delta, and interpret single-digit-to-low-teens
-differences as normal run-to-run variance rather than a fixed number.
+with one reader and hide both the old penalty and the new speedup, so host-side
+observations are excluded from the post-change headline result. A schema with
+one dominant table magnifies reader parallelism; on a multi-table schema,
+concurrent table jobs already overlap some of the single-reader cost. Future
+comparisons should predetermine their repetition count, counterbalance run
+order, recreate the target for every observation, publish every pair, and
+report descriptive statistics rather than promote one pair or a min/max range
+to a steady-state estimate.
 
 ## M5 Pro vs M3 Max Comparison (StackOverflow2010, drop_recreate)
 
