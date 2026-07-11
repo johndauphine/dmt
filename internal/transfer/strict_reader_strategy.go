@@ -34,6 +34,8 @@ type strictReaderView struct {
 type strictReaderStrategy interface {
 	begin(context.Context, pool.SourcePool, source.Table, int) (strictReaderView, error)
 	joinBudget() int
+	perJobParallel() bool
+	sharedViewAcrossJobs(scope string) bool
 }
 
 type exportedSnapshotStrategy struct{}
@@ -47,7 +49,9 @@ func (migrationEpochReaderStrategy) begin(context.Context, pool.SourcePool, sour
 	return strictReaderView{}, fmt.Errorf("migration epoch is acquired by the orchestrator")
 }
 
-func (migrationEpochReaderStrategy) joinBudget() int { return 0 }
+func (migrationEpochReaderStrategy) joinBudget() int                  { return 0 }
+func (migrationEpochReaderStrategy) perJobParallel() bool             { return true }
+func (migrationEpochReaderStrategy) sharedViewAcrossJobs(string) bool { return true }
 
 func (exportedSnapshotStrategy) begin(ctx context.Context, srcPool pool.SourcePool, _ source.Table, _ int) (strictReaderView, error) {
 	snapshot, err := beginPostgresExportedSnapshot(ctx, srcPool.DB())
@@ -63,7 +67,9 @@ func (exportedSnapshotStrategy) begin(ctx context.Context, srcPool pool.SourcePo
 	}, nil
 }
 
-func (exportedSnapshotStrategy) joinBudget() int { return 1 }
+func (exportedSnapshotStrategy) joinBudget() int                        { return 1 }
+func (exportedSnapshotStrategy) perJobParallel() bool                   { return true }
+func (exportedSnapshotStrategy) sharedViewAcrossJobs(scope string) bool { return scope == "migration" }
 
 var strictReaderStrategies = map[string]strictReaderStrategy{
 	strictParallelExportedSnapshot: exportedSnapshotStrategy{},
@@ -95,8 +101,28 @@ func resolveStrictReaderStrategyForDBType(dbType string) (string, strictReaderSt
 	return resolveStrictReaderStrategy(dialect)
 }
 
+func resolveStrictReaderStrategyForScope(dbType, scope string) (string, strictReaderStrategy, error) {
+	if driver.Canonicalize(dbType) == "mssql" && scope == "migration" {
+		return strictParallelMigrationEpoch, migrationEpochReaderStrategy{}, nil
+	}
+	return resolveStrictReaderStrategyForDBType(dbType)
+}
+
+// StrictStrategyAllowsPartitioning reports whether independently scheduled
+// strict jobs can share one stable source view for the requested scope.
+func StrictStrategyAllowsPartitioning(dbType, scope string) (bool, string, error) {
+	name, strategy, err := resolveStrictReaderStrategyForScope(dbType, scope)
+	if err != nil || strategy == nil {
+		return false, name, err
+	}
+	return strategy.sharedViewAcrossJobs(scope), name, nil
+}
+
 func strictStrategyWorkerCountForTable(dbType string, table source.Table, requested, maxSourceConnections int) (int, error) {
-	if !table.SupportsKeysetPagination() {
+	dialect := driver.GetDialect(dbType)
+	compositeEligible := dialect != nil && dialect.SupportsCompositeRangeKeyset() &&
+		driver.TupleKeysetRoutable(&table, dbType) && compositeRangeLeadingTypeEligible(table)
+	if !table.SupportsKeysetPagination() && !compositeEligible {
 		return 0, nil
 	}
 	strategyName, strategy, err := resolveStrictReaderStrategyForDBType(dbType)

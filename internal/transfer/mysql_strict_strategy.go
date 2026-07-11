@@ -22,7 +22,9 @@ type mysqlLockWindowStrategy struct {
 	afterLock       func()
 }
 
-func (mysqlLockWindowStrategy) joinBudget() int { return 1 }
+func (mysqlLockWindowStrategy) joinBudget() int                  { return 1 }
+func (mysqlLockWindowStrategy) perJobParallel() bool             { return true }
+func (mysqlLockWindowStrategy) sharedViewAcrossJobs(string) bool { return false }
 
 func (s mysqlLockWindowStrategy) begin(ctx context.Context, srcPool pool.SourcePool, table source.Table, workerSessions int) (strictReaderView, error) {
 	if workerSessions < 1 {

@@ -226,6 +226,31 @@ func TestParallelTupleKeysetPostgres(t *testing.T) {
 				t.Fatalf("rows = %d, want %d", stats.Rows, table.RowCount)
 			}
 			tgt.assertExact(t, int(table.RowCount))
+
+			if tc.name == "integer_second_component" {
+				src := &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}
+				epoch, err := BeginStrictSnapshotEpoch(context.Background(), src)
+				if err != nil {
+					t.Fatalf("begin migration epoch: %v", err)
+				}
+				defer epoch.Close()
+				if _, err := db.Exec(`INSERT INTO dmt_tuple_parallel_pg_int VALUES (99, 1, 'later')`); err != nil {
+					t.Fatalf("post-epoch insert: %v", err)
+				}
+				strictCfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+					StrictConsistency: true, StrictConsistencyScope: "migration", ChunkSize: 5, ParallelReaders: 4,
+					MaxSourceConnections: 5, WriteAheadWriters: 1, TargetMode: "drop_recreate",
+				}}
+				strictTarget := newCompositeAnyTargetPool()
+				strictStats, strictUsed, err := executeParallelCompositeKeysetPagination(
+					context.Background(), src, strictTarget, strictCfg, Job{Table: table, StrictSnapshotEpoch: epoch},
+					tc.cols, tc.cols, tc.types, []int{0, 0, 0}, progress.New(), nil, 0, table.Name, nil, nil,
+				)
+				if err != nil || !strictUsed || strictStats.Rows != table.RowCount {
+					t.Fatalf("strict migration PG tuple path = (used=%v, rows=%v, err=%v), want snapshot %d", strictUsed, strictStats, err, table.RowCount)
+				}
+				strictTarget.assertExact(t, int(table.RowCount))
+			}
 		})
 	}
 }
@@ -286,39 +311,27 @@ func TestParallelTupleKeysetPostgresReaderSpeedup(t *testing.T) {
 		EstimatedRowSize: 64,
 	}
 	table.PopulatePKColumns()
-	cols := []string{"tenant_id", "seq", "val"}
-	types := []string{"int8", "int8", "text"}
-	runSingle := func() time.Duration {
-		cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
-			ChunkSize: 2, ParallelReaders: 1, WriteAheadWriters: 1, TargetMode: "drop_recreate",
-		}}
-		start := time.Now()
-		stats, err := executeCompositeKeysetPagination(
-			context.Background(), &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}, newCompositeAnyTargetPool(), cfg, Job{Table: table},
-			cols, cols, types, []int{0, 0, 0}, progress.New(), nil, 0, table.Name, nil, nil,
-		)
-		if err != nil || stats.Rows != table.RowCount {
-			t.Fatalf("single-reader run = (rows=%v, err=%v), want %d rows", stats, err, table.RowCount)
+	runStrict := func(readers int) time.Duration {
+		src := &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}
+		epoch, err := BeginStrictSnapshotEpoch(context.Background(), src)
+		if err != nil {
+			t.Fatalf("begin strict speed epoch: %v", err)
 		}
-		return time.Since(start)
-	}
-	runParallel := func() time.Duration {
+		defer epoch.Close()
 		cfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
-			ChunkSize: 2, ParallelReaders: 4, WriteAheadWriters: 1, TargetMode: "drop_recreate",
+			StrictConsistency: true, StrictConsistencyScope: "migration", MaxSourceConnections: 5,
+			ChunkSize: 2, ParallelReaders: readers, WriteAheadWriters: 1, TargetMode: "drop_recreate",
 		}}
 		start := time.Now()
-		stats, used, err := executeParallelCompositeKeysetPagination(
-			context.Background(), &pgTupleSourcePool{keysetRuntimeSourcePool{db: db}}, newCompositeAnyTargetPool(), cfg, Job{Table: table},
-			cols, cols, types, []int{0, 0, 0}, progress.New(), nil, 0, table.Name, nil, nil,
-		)
-		if err != nil || !used || stats.Rows != table.RowCount {
-			t.Fatalf("parallel-reader run = (used=%v, rows=%v, err=%v), want success/%d rows", used, stats, err, table.RowCount)
+		stats, err := Execute(context.Background(), src, newCompositeAnyTargetPool(), cfg, Job{Table: table, StrictSnapshotEpoch: epoch}, progress.New(), nil)
+		if err != nil || stats.Rows != table.RowCount {
+			t.Fatalf("strict Execute with %d reader(s) = (rows=%v, err=%v), want %d rows", readers, stats, err, table.RowCount)
 		}
 		return time.Since(start)
 	}
 
-	single := runSingle()
-	parallel := runParallel()
+	single := runStrict(1)
+	parallel := runStrict(4)
 	t.Logf("live PG composite tuple benchmark: one reader=%v, four readers=%v", single, parallel)
 	if parallel >= single*80/100 {
 		t.Fatalf("four tuple readers took %v vs one reader %v; want at least 20%% speedup", parallel, single)

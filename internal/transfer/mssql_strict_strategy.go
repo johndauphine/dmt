@@ -18,7 +18,9 @@ type mssqlTableSharedLockStrategy struct {
 	afterLock     func()
 }
 
-func (mssqlTableSharedLockStrategy) joinBudget() int { return 1 }
+func (mssqlTableSharedLockStrategy) joinBudget() int                  { return 1 }
+func (mssqlTableSharedLockStrategy) perJobParallel() bool             { return true }
+func (mssqlTableSharedLockStrategy) sharedViewAcrossJobs(string) bool { return false }
 
 func (s mssqlTableSharedLockStrategy) begin(ctx context.Context, srcPool pool.SourcePool, table source.Table, _ int) (strictReaderView, error) {
 	conn, err := srcPool.DB().Conn(ctx)

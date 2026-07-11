@@ -33,11 +33,11 @@ func Execute(
 		adjuster = writeErrorAdjuster[0]
 	}
 
-	// A table-scoped strict snapshot cannot make independently started
-	// partitions one stable view. An explicit migration epoch imports one
-	// PostgreSQL snapshot into all partitions, so it is the sole exception.
+	// Independently scheduled strict partitions require an explicit epoch whose
+	// strategy shares one stable view across jobs (PostgreSQL export or SQL
+	// Server database snapshot).
 	if cfg.Migration.StrictConsistency && job.Partition != nil && job.StrictSnapshotEpoch == nil {
-		return nil, fmt.Errorf("strict_consistency does not support partitioned jobs for %s; rebuild the run with one unpartitioned job per table", job.Table.FullName())
+		return nil, fmt.Errorf("strict_consistency partitioned job for %s requires a shared-view migration epoch", job.Table.FullName())
 	}
 	if job.StrictSnapshotEpoch != nil && !cfg.Migration.StrictConsistency {
 		return nil, fmt.Errorf("strict snapshot epoch for %s requires strict_consistency", job.Table.FullName())

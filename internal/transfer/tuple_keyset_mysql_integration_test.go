@@ -218,6 +218,32 @@ func TestParallelTupleKeysetMySQLCollation(t *testing.T) {
 		t.Fatalf("rows = %d, want %d", stats.Rows, table.RowCount)
 	}
 	tgt.assertExact(t, int(table.RowCount))
+
+	// Table-scoped strict mode supplies one pinned snapshot session per
+	// composite worker. A post-window insert must be invisible to all four.
+	src := &mysqlTupleSourcePool{keysetRuntimeSourcePool{db: db}}
+	strictCtx, releaseStrict, err := beginStrictSourceSnapshotForJob(context.Background(), src, Job{Table: table}, 4)
+	if err != nil {
+		t.Fatalf("begin strict composite view: %v", err)
+	}
+	defer releaseStrict()
+	if _, err := db.Exec(`INSERT INTO tenant_names VALUES (99, 'later', 99)`); err != nil {
+		t.Fatalf("post-snapshot insert: %v", err)
+	}
+	strictCfg := &config.Config{Target: config.TargetConfig{Schema: ""}, Migration: config.MigrationConfig{
+		StrictConsistency: true, StrictConsistencyScope: "table", ChunkSize: 3, ParallelReaders: 4,
+		MaxSourceConnections: 5, WriteAheadWriters: 1, TargetMode: "drop_recreate",
+	}}
+	strictTarget := newCompositeAnyTargetPool()
+	strictStats, strictUsed, err := executeParallelCompositeKeysetPagination(
+		strictCtx, src, strictTarget, strictCfg, Job{Table: table},
+		[]string{"tenant_id", "name", "val"}, []string{"tenant_id", "name", "val"}, []string{"bigint", "varchar", "int"}, []int{0, 0, 0},
+		progress.New(), nil, 0, table.Name, nil, nil,
+	)
+	if err != nil || !strictUsed || strictStats.Rows != table.RowCount {
+		t.Fatalf("strict parallel MySQL tuple path = (used=%v, rows=%v, err=%v), want snapshot %d", strictUsed, strictStats, err, table.RowCount)
+	}
+	strictTarget.assertExact(t, int(table.RowCount))
 }
 
 // compositeTextTargetPool captures text PKs in write order.

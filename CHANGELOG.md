@@ -24,6 +24,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Strict composite tuple-keyset transfers now use parallel readers whenever
+  the source strategy can share one stable per-job view, including PostgreSQL
+  exported snapshots, MySQL lock-window sessions, and SQL Server shared locks
+  or database snapshots. Strict table partitioning is enabled only for
+  migration-wide PostgreSQL and SQL Server snapshot epochs (#684).
+
 - SQL Server migrations using `strict_consistency_scope: migration` now read
   every table through one engine-native database snapshot while source writers
   continue normally. Snapshots have deterministic run-scoped names, survive a

@@ -163,7 +163,7 @@ func runParallelCompositeForTest(t *testing.T, srcPool *keysetRuntimeSourcePool,
 	t.Helper()
 	ctx := context.Background()
 	dialect := driver.GetDialect("sqlite")
-	min, max, eligible, err := compositeLeadingBounds(ctx, srcPool.DB(), dialect, job)
+	min, max, eligible, err := compositeLeadingBounds(ctx, srcPool.DB(), dialect, job, dialect.TableHint(false))
 	if err != nil || !eligible {
 		return nil, nil, err
 	}
