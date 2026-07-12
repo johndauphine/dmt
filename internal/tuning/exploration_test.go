@@ -456,8 +456,17 @@ func TestTune_LowThroughputOutlierDoesNotAdvanceUsableCount(t *testing.T) {
 	rows[0].FinalThroughputBytes = in.AvgRowBytes
 
 	got := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
+	want := baseline(in, profile)
+	applyGridExploration(&want, in, profile, explorationGridRuns-1, explorationGridRuns)
+	applyMemoryClamp(&want, in)
 	if got.Tier != TierExploration {
 		t.Fatalf("one post-filter outlier should leave 11 usable rows: Tier=%q reasoning=%q", got.Tier, got.Reasoning)
+	}
+	if got.WriteAheadWriters != want.WriteAheadWriters || got.ChunkSize != want.ChunkSize ||
+		got.ParallelReaders != want.ParallelReaders || got.ReadAheadBuffers != want.ReadAheadBuffers {
+		t.Errorf("outlier-filtered output = (WAW=%d CS=%d PR=%d RAB=%d), want usable-index-11/raw-index-12 cell (WAW=%d CS=%d PR=%d RAB=%d)",
+			got.WriteAheadWriters, got.ChunkSize, got.ParallelReaders, got.ReadAheadBuffers,
+			want.WriteAheadWriters, want.ChunkSize, want.ParallelReaders, want.ReadAheadBuffers)
 	}
 	if !strings.Contains(got.Reasoning, "run 12/12") {
 		t.Errorf("outlier-filtered attempt reasoning = %q, want usable-count label run 12/12", got.Reasoning)
