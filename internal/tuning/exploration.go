@@ -9,11 +9,11 @@ import (
 // PR2 exploration (#179). Two complementary modes layered on top of the
 // regression / smoothed-bins selection from history.go:
 //
-//  1. Planned grid (cold start). For the first explorationGridRuns runs
-//     in a (source, target) bucket, deliberately rotate through a small
-//     set of (WAW, CS) candidates regardless of what the regression
-//     would predict. This guarantees the regression has variance to fit
-//     on instead of locking at the cold-start choice.
+//  1. Planned grid (cold start). For the first explorationGridRuns usable
+//     runs in a (source, target) bucket, deliberately rotate through a
+//     balanced set of (WAW, CS, PR, RAB) candidates regardless of what the
+//     regression would predict. This guarantees the regression has variance
+//     to fit on instead of locking at the cold-start choice.
 //
 //  2. ε-perturbation (steady state). After the planned phase, the
 //     regression's argmax pick gets a small random nudge with
@@ -28,7 +28,7 @@ import (
 // explorationGridRuns is the K from the issue spec — the number of
 // initial runs in a bucket that go through the planned grid before the
 // regression takes over.
-const explorationGridRuns = 6
+const explorationGridRuns = 12
 
 // perturbPRMax / perturbRABMax / perturbRABMin bound the ε-perturbation
 // directions for parallel_readers and read_ahead_buffers (#219). The
@@ -44,44 +44,58 @@ const (
 	perturbRABMin = 2
 )
 
-// gridCandidate is one (WAW × CS_BYTES_FRACTION) probe point on the
-// outer grid. The fraction is multiplied by the per-target
-// OptimumBulkChunkBytes (with the conservative 10 MB fallback for
-// unmeasured targets) to derive the actual chunk-byte target.
-type gridCandidate struct {
-	WAW        int
-	CSFraction float64
-}
-
-// readerCandidate is one (parallel_readers, read_ahead_buffers) probe
-// point on the inner grid (#219). Attached to outer cells via bucketCount
-// modulo so the cold-start phase visits all 4 inner combos within its
-// first 4 runs even when explorationGridRuns is small.
+// readerCandidate is one (parallel_readers, read_ahead_buffers) point in
+// the reader domain used by regression argmax and epsilon perturbation.
 type readerCandidate struct {
 	ParallelReaders  int
 	ReadAheadBuffers int
 }
 
-// explorationGrid is the planned-grid menu. WAW values from the issue
-// spec ({1, 2, 3, drv.MaxWAW}); the drv.MaxWAW slot uses maxWAWForGrid
-// since profile doesn't yet expose a per-driver max. CS fractions are
-// the documented {0.5×, 1.0×} of the per-target optimum.
-var explorationGrid = []gridCandidate{
-	{WAW: 1, CSFraction: halfOptimumFraction},
-	{WAW: 2, CSFraction: halfOptimumFraction},
-	{WAW: 3, CSFraction: halfOptimumFraction},
-	{WAW: maxWAWForGrid, CSFraction: halfOptimumFraction},
-	{WAW: 1, CSFraction: fullOptimumFraction},
-	{WAW: 2, CSFraction: fullOptimumFraction},
-	{WAW: 3, CSFraction: fullOptimumFraction},
-	{WAW: maxWAWForGrid, CSFraction: fullOptimumFraction},
+// explorationCell is one complete planned probe. Keeping all four knobs in
+// one cell prevents the WAW/CS and reader domains from advancing in lockstep
+// and deterministically confounding WAW with a single reader combination.
+// CSFraction is multiplied by OptimumBulkChunkBytes (or the conservative
+// 10 MB fallback) to derive the actual chunk-byte target.
+type explorationCell struct {
+	WAW              int
+	CSFraction       float64
+	ParallelReaders  int
+	ReadAheadBuffers int
 }
 
-// readerGrid is the inner 2×2 menu over (parallel_readers,
-// read_ahead_buffers). Values picked to bracket the baseline (PR=2,
-// RAB=4) — small enough that doubling stays within the typical 8-16
-// GB host's connection budget, large enough that the regression can
-// actually distinguish them from baseline.
+// explorationCells is the ordered twelve-run cold-start design (#698).
+// The first eight entries are unique and balanced across the four knobs. The
+// last four deliberately replicate cells 0, 1, 6, and 7 so the production
+// regression reaches its twelve-row gate while every WAW and reader
+// combination appears three times and both CS fractions appear six times.
+var explorationCells = [...]explorationCell{
+	{WAW: 1, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
+	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
+	{WAW: 3, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+	{WAW: maxWAWForGrid, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
+	{WAW: 1, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
+	{WAW: 2, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
+	{WAW: 3, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
+	{WAW: maxWAWForGrid, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+
+	// Deliberate replicates of 0, 1, 6, and 7.
+	{WAW: 1, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
+	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
+	{WAW: 3, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
+	{WAW: maxWAWForGrid, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+}
+
+// Compile-time equality check: either expression becomes a negative array
+// length if the table and the cold-start threshold diverge.
+var (
+	_ [explorationGridRuns - len(explorationCells)]struct{}
+	_ [len(explorationCells) - explorationGridRuns]struct{}
+)
+
+// readerGrid is the 2×2 reader candidate domain used by regression argmax.
+// Values bracket the baseline (PR=2, RAB=4): small enough that doubling
+// stays within a typical 8-16 GB host's connection budget, but distinct
+// enough for the regression to learn both reader axes.
 var readerGrid = []readerCandidate{
 	{ParallelReaders: 2, ReadAheadBuffers: 4},
 	{ParallelReaders: 2, ReadAheadBuffers: 8},
@@ -93,15 +107,16 @@ var readerGrid = []readerCandidate{
 // grid instead of the regression's argmax: either the user forced it
 // via --explore, or the bucket hasn't accumulated enough runs to make
 // the regression meaningful.
-func shouldExplore(in Input, bucketCount int) bool {
-	return in.ForceExplore || bucketCount < explorationGridRuns
+func shouldExplore(in Input, usableCount int) bool {
+	return in.ForceExplore || usableCount < explorationGridRuns
 }
 
 // applyGridExploration picks the next probe from the planned grid based
-// on raw persisted attempts, intersected with HardChunkLimit only. The clean
-// count separately controls cold-start labels and completion (#697). The raw
-// count is a sequential rotation proxy; concurrent tuners can observe the same
-// value and this function does not claim to reserve cells globally.
+// on raw persisted attempts, intersected with HardChunkLimit only. The usable
+// post-filter count separately controls cold-start labels and completion
+// (#697, #698). The raw count is a sequential rotation proxy; concurrent
+// tuners can observe the same value and this function does not claim to
+// reserve cells globally.
 // Historical-retry exclusions are intentionally NOT applied here: the
 // planned grid's job is to gather data so historical verdicts can be
 // re-examined as new runs accrue (issue #186 — under the original
@@ -109,7 +124,7 @@ func shouldExplore(in Input, bucketCount int) bool {
 // permanently locked the deterministic tuner out of probing it). On
 // a fully-filtered grid (every candidate skipped by HardChunkLimit),
 // the baseline output stands.
-func applyGridExploration(out *Output, in Input, profile DriverProfile, cleanCount, gridIndexCount int) {
+func applyGridExploration(out *Output, in Input, profile DriverProfile, usableCount, rawIndex int) {
 	const fallbackBytes int64 = 10_000_000
 	avg := in.AvgRowBytes
 	if avg <= 0 {
@@ -120,25 +135,20 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, cleanCou
 		optimumBytes = fallbackBytes
 	}
 
-	// Walk the grid starting at the raw persisted-attempt count modulo the grid
-	// length. Scan forward through every candidate; pick the first that
-	// passes the filters. This way a forced --explore on a bucket past
-	// the cold-start window still gets a deterministic next-probe.
-	//
-	// Inner cell (#219) is keyed off the same bucketCount+i index modulo
-	// the reader-grid length, so each step on the outer grid also advances
-	// the inner grid. With outer=8 and inner=4, the first 4 cold-start
-	// runs cycle through every reader combo paired with distinct outer
-	// cells; the next 4 repeat the inner combos against the second half
-	// of the outer grid, giving 2-way coverage of (outer × inner) by run 8.
-	n := len(explorationGrid)
-	rn := len(readerGrid)
-	for i := 0; i < n; i++ {
-		idx := (gridIndexCount + i) % n
-		cand := explorationGrid[idx]
-		readerIdx := (gridIndexCount + i) % rn
-		reader := readerGrid[readerIdx]
-		csBytes := int64(cand.CSFraction * float64(optimumBytes))
+	// Filter first, then index the eligible ring with the raw persisted-attempt
+	// count. A scan-forward implementation makes several consecutive raw
+	// indexes collapse onto the same later cell when HardChunkLimit removes a
+	// cluster of candidates. Modulo over the eligible ring preserves a complete,
+	// deterministic rotation. Keep the original table index for audit labels.
+	type indexedCell struct {
+		index   int
+		cell    explorationCell
+		csBytes int64
+		csRows  int
+	}
+	eligible := make([]indexedCell, 0, len(explorationCells))
+	for idx, cell := range explorationCells {
+		csBytes := int64(cell.CSFraction * float64(optimumBytes))
 		csRows := int(csBytes / avg)
 		if csRows < 1 {
 			csRows = 1
@@ -146,21 +156,27 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, cleanCou
 		if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 			continue
 		}
-		out.WriteAheadWriters = cand.WAW
-		out.ChunkSize = csRows
-		out.ParallelReaders = reader.ParallelReaders
-		out.ReadAheadBuffers = reader.ReadAheadBuffers
+		eligible = append(eligible, indexedCell{index: idx, cell: cell, csBytes: csBytes, csRows: csRows})
+	}
+	if len(eligible) > 0 {
+		selected := eligible[rawIndex%len(eligible)]
+		cell := selected.cell
+
+		out.WriteAheadWriters = cell.WAW
+		out.ChunkSize = selected.csRows
+		out.ParallelReaders = cell.ParallelReaders
+		out.ReadAheadBuffers = cell.ReadAheadBuffers
 		out.Tier = TierExploration
-		// Label the run within the cold-start window when we're in it;
-		// for forced-explore on a bucket past K runs, just report the
-		// grid-cell index so we don't print "run 42/6" (Copilot review).
-		runLabel := fmt.Sprintf("probe idx %d/%d", idx+1, len(explorationGrid))
-		if cleanCount < explorationGridRuns {
-			runLabel = fmt.Sprintf("run %d/%d", cleanCount+1, explorationGridRuns)
+		// Label the run within the cold-start window when we're in it; for
+		// forced exploration after the usable-row threshold, report the
+		// original table index instead of an impossible "run 42/12".
+		runLabel := fmt.Sprintf("probe idx %d/%d", selected.index+1, len(explorationCells))
+		if usableCount < explorationGridRuns {
+			runLabel = fmt.Sprintf("run %d/%d", usableCount+1, explorationGridRuns)
 		}
 		out.Reasoning = appendReasoning(out.Reasoning,
 			"exploration: planned grid %s (WAW=%d, CS=%.1f×optimum=%.1fMB, PR=%d, RAB=%d)",
-			runLabel, cand.WAW, cand.CSFraction, float64(csBytes)/1024/1024, reader.ParallelReaders, reader.ReadAheadBuffers,
+			runLabel, cell.WAW, cell.CSFraction, float64(selected.csBytes)/1024/1024, cell.ParallelReaders, cell.ReadAheadBuffers,
 		)
 		return
 	}

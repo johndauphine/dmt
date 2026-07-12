@@ -33,6 +33,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Cold-start autotuning now uses twelve complete four-knob exploration cells:
+  eight unique balanced probes plus four marginally balanced replicates. The
+  usable-row threshold now matches the regression floor, while raw attempts
+  rotate deterministically over the cells allowed by the hard chunk limit
+  (#698).
+
 - Strict MySQL and SQL Server readers now have one-million-row live throughput
   proofs, per-engine blocking/prerequisite documentation, in-VM before/after
   benchmark evidence, and deterministic diagnoses for lock-window, shared-lock,
