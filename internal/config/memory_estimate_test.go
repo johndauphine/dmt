@@ -1,7 +1,9 @@
 package config
 
 import (
+	"math"
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
@@ -51,5 +53,34 @@ func TestApplyRuntimeMemoryLimit_EnvWins(t *testing.T) {
 
 	if got := debug.SetMemoryLimit(-1); got != prev {
 		t.Fatalf("memory limit = %d, want untouched %d when GOMEMLIMIT env is set", got, prev)
+	}
+}
+
+func TestEstimateMemoryUsageSaturatesOverflow(t *testing.T) {
+	cfg := &Config{Migration: MigrationConfig{
+		Workers:          int(^uint(0) >> 1),
+		ReadAheadBuffers: int(^uint(0) >> 1),
+		ChunkSize:        int(^uint(0) >> 1),
+	}}
+	if got := cfg.EstimateMemoryUsage(math.MaxInt64); got != math.MaxInt64 {
+		t.Fatalf("overflowing memory estimate = %d, want MaxInt64 saturation", got)
+	}
+	formatted := cfg.FormatMemoryEstimate(0)
+	if strings.Contains(formatted, "-") || !strings.Contains(formatted, "500 bytes/row") {
+		t.Fatalf("overflow/fallback memory display is misleading: %q", formatted)
+	}
+
+	_, summary := cfg.RefineSettingsForRowSizes([]TableRowSize{
+		{Name: "huge", RowCount: math.MaxInt64, EstimatedRowSize: math.MaxInt64},
+	})
+	if !strings.Contains(summary, "max") || strings.Contains(summary, "-") || strings.Contains(summary, "weighted avg 1 bytes") {
+		t.Fatalf("overflowing row-size summary became invalid: %q", summary)
+	}
+}
+
+func TestDefaultReadAheadBuffersOverflowClampsToSafeFloor(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	if got := defaultReadAheadBuffers(math.MaxInt64, maxInt, maxInt); got != 4 {
+		t.Fatalf("overflowing default RAB calculation = %d, want safe floor 4", got)
 	}
 }

@@ -82,6 +82,9 @@ func (o *Orchestrator) performanceAutoTuneInput(suggestions *driver.SmartConfigS
 		input.TotalTables = suggestions.TotalTables
 		input.TotalRows = suggestions.TotalRows
 		input.AvgRowBytes = suggestions.AvgRowSizeBytes
+		input.RepresentativeRowBytes = suggestions.RepresentativeRowBytes
+		input.SafetyRowBytes = suggestions.SafetyRowBytes
+		input.SafetyRowBytesKnown = suggestions.SafetyRowBytesKnown
 	}
 	return input
 }

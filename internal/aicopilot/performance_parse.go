@@ -437,6 +437,8 @@ func numbersForPerformanceGeneralText(payload PerformancePayload) map[string]boo
 	addNonZero(payload.Workload.TotalRows)
 	addNonZero(payload.Workload.AvgRowBytes)
 	addNonZero(payload.Workload.UncappedAvgRowBytes)
+	addNonZero(payload.Workload.RepresentativeRowBytes)
+	addNonZero(payload.Workload.SafetyRowBytes)
 	addNonZero(payload.Workload.LargestTableBytes)
 	addNonZero(payload.Workload.EstimatedMemoryMB)
 	addPerformanceKnobNumbers(payload.DeterministicKnobs, addNonZero)
@@ -600,9 +602,16 @@ func numbersForPerformanceTarget(payload PerformancePayload, target string, incl
 		}
 		add(v)
 	}
+	addMemoryWorkload := func() {
+		addNonZero(payload.Workload.RepresentativeRowBytes)
+		addNonZero(payload.Workload.SafetyRowBytes)
+		addNonZero(payload.Workload.EstimatedMemoryMB)
+		addNonZero(payload.Workload.MaxMemoryMB)
+	}
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "workers":
 		addNonZero(payload.DeterministicKnobs.Workers)
+		addMemoryWorkload()
 		if includeRuntimeMetrics {
 			addNonZero(payload.Workload.CPUCores)
 		}
@@ -610,14 +619,17 @@ func numbersForPerformanceTarget(payload PerformancePayload, target string, incl
 		addRecentRunNumbers(payload, target, includeRuntimeMetrics, add)
 	case "chunk_size":
 		addNonZero(payload.DeterministicKnobs.ChunkSize)
+		addMemoryWorkload()
 		addRuntimeAdjustmentNumbers(payload, target, includeRuntimeMetrics, add)
 		addRecentRunNumbers(payload, target, includeRuntimeMetrics, add)
 	case "read_ahead_buffers":
 		addNonZero(payload.DeterministicKnobs.ReadAheadBuffers)
+		addMemoryWorkload()
 		addRuntimeAdjustmentNumbers(payload, target, includeRuntimeMetrics, add)
 		addRecentRunNumbers(payload, target, includeRuntimeMetrics, add)
 	case "write_ahead_writers":
 		addNonZero(payload.DeterministicKnobs.WriteAheadWriters)
+		addMemoryWorkload()
 		addRuntimeAdjustmentNumbers(payload, target, includeRuntimeMetrics, add)
 		addRecentRunNumbers(payload, target, includeRuntimeMetrics, add)
 	case "parallel_readers":

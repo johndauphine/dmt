@@ -67,10 +67,16 @@ type SmartConfigSuggestions struct {
 	MaxRetries           int
 
 	// Database statistics
-	TotalTables     int
-	TotalRows       int64
-	AvgRowSizeBytes int64
-	EstimatedMemMB  int64
+	TotalTables            int
+	TotalRows              int64
+	AvgRowSizeBytes        int64 // legacy capped top-five feature
+	RepresentativeRowBytes int64 // row-count-weighted width across all in-scope tables
+	SafetyRowBytes         int64 // widest observed positive table-average width, or fallback estimate
+	SafetyRowBytesKnown    bool  // true only when a positive schema width was observed
+	EstimatedMemMB         int64
+	// MemoryEstimateOverBudget remains true when a one-row minimum-progress
+	// recommendation still exceeds the modeled memory budget.
+	MemoryEstimateOverBudget bool
 
 	// Warnings contains any issues detected during analysis
 	Warnings []string
@@ -113,7 +119,16 @@ type AutoTuneInput struct {
 	TargetMode   string
 	TotalTables  int
 	TotalRows    int64
-	AvgRowBytes  int64 // capped at 2000B (memory-budget math)
+	AvgRowBytes  int64 // legacy capped top-five feature used by persisted history/model.Predict
+
+	// RepresentativeRowBytes is the row-count-weighted width across every
+	// in-scope table. SafetyRowBytes is the widest observed positive table
+	// average, or the 500-byte fallback when schema widths are unavailable.
+	// SafetyRowBytesKnown distinguishes those two cases; a table average is a
+	// modeled safety width, not a hard bound on every serialized row.
+	RepresentativeRowBytes int64
+	SafetyRowBytes         int64
+	SafetyRowBytesKnown    bool
 
 	// UncappedAvgRowBytes is the same average without the 2KB cap (#214).
 	// Used by the regime classifier so wide-row workloads get bucketed
@@ -217,9 +232,11 @@ type SmartConfigAnalyzer struct {
 	pinnedReadAheadBuffers   *int        // user-pinned RAB — same
 	exploreMode              string      // mirrors cfg.Migration.ExploreMode
 	targetProbe              TargetProbe // populated via SetTargetProbe (#166)
-	uncappedAvgRowBytes      int64       // pre-cap average row size from sampled tables (#166)
-	maxSampledRowBytes       int64       // widest row in sampled tables (#166) â€” used for the packet cap so wide tables can't exceed @@max_allowed_packet
-	largestSampledTableBytes int64       // max RowCount Ã— AvgRowSizeBytes across ALL tables (#214) â€” feeds skew-tier classifier; iterating LargestTables[:5] alone would miss a wide-row low-row-count outlier
+	uncappedAvgRowBytes      int64       // legacy uncapped top-five average used by regime classification
+	representativeRowBytes   int64       // row-count-weighted width across all in-scope row-bearing tables (#703)
+	safetyRowBytes           int64       // widest positive table-average width, or the fallback estimate (#703)
+	safetyRowBytesKnown      bool        // true only when at least one positive schema width was observed (#703)
+	largestSampledTableBytes int64       // saturated max RowCount Ã— AvgRowSizeBytes across ALL tables (#214/#703)
 
 	// tableNameFilter restricts Analyze to a caller-supplied set of table
 	// names (#241). The orchestrator applies include/exclude filters
@@ -308,24 +325,16 @@ func (s *SmartConfigAnalyzer) SetTargetProbe(probe TargetProbe) {
 // on #166 â€” earlier doc claimed "returns 0 when no probe is set",
 // which understated the static-limit fallthrough path.)
 //
-// The packet calc uses s.maxSampledRowBytes (the widest row across
-// sampled tables) rather than the average â€” chunk_size is global
-// across all tables in a migration, so a workload that mixes narrow
-// and wide tables would otherwise let chunks for the wide table
-// exceed @@max_allowed_packet. Falls back to the uncapped average if
-// max isn't populated.
+// The packet calculation uses SafetyRowBytes, the widest observed table
+// average. This is the best available sizing estimate, not a guarantee that
+// every serialized row fits; structural write-error reduction remains the
+// backstop for unusually wide individual rows.
 func (s *SmartConfigAnalyzer) TargetHardChunkLimit() int {
 	d, err := Get(s.targetDBType)
 	staticLimit := 0
+	packetRowBytes := s.packetSizingRowBytes()
 	if err == nil {
-		staticLimit = d.HardChunkLimit(s.suggestions.AvgRowSizeBytes)
-	}
-	packetRowBytes := s.maxSampledRowBytes
-	if packetRowBytes == 0 {
-		packetRowBytes = s.uncappedAvgRowBytes
-	}
-	if packetRowBytes == 0 {
-		packetRowBytes = s.suggestions.AvgRowSizeBytes
+		staticLimit = d.HardChunkLimit(packetRowBytes)
 	}
 	return chunkLimitFromProbe(staticLimit, s.targetProbe, packetRowBytes)
 }
@@ -418,7 +427,9 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	s.suggestions.TotalTables = len(tables)
 	var totalRows int64
 	for _, t := range tables {
-		totalRows += t.RowCount
+		if t.RowCount > 0 {
+			totalRows, _ = saturatingAddPositive(totalRows, t.RowCount)
+		}
 	}
 	s.suggestions.TotalRows = totalRows
 

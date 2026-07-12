@@ -1,6 +1,7 @@
 package tuning
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -249,8 +250,8 @@ func TestClassifyRegime_AsymmetryAcrossBands(t *testing.T) {
 }
 
 // TestClassifyRegime_UncappedAvgRowBytesUsedForBand pins the Copilot
-// fix on PR #288: AvgRowBytes is capped at 2KB by calculateAvgRowSize
-// for memory-budget math, but using that capped value for band
+// fix on PR #288: AvgRowBytes is the legacy 2KB-capped feature, but using
+// that capped value for band
 // classification mis-buckets wide-row workloads. A 2M-row workload at
 // 8KB/row (16 GB physical → Medium band) would otherwise look like
 // 2M × 2KB (4 GB → Small) and never match a 16 GB Medium-band history.
@@ -288,6 +289,43 @@ func TestClassifyRegime_UncappedAvgRowBytesUsedForBand(t *testing.T) {
 	if label2 != RegimeDifferentWorkload {
 		t.Errorf("history without uncapped value should fall back to capped (Small) and mismatch current (Medium); got %q",
 			label2)
+	}
+}
+
+func TestClassifyRegime_NewWidthsDoNotChangeLegacyComparison(t *testing.T) {
+	history := HistoryRecord{
+		CPUCores:            16,
+		MemoryGB:            48,
+		TotalRows:           2_000_000,
+		AvgRowBytes:         2_000,
+		UncappedAvgRowBytes: 8_000,
+	}
+	current := Input{
+		CPUCores:            16,
+		MemoryGB:            48,
+		TotalRows:           2_000_000,
+		AvgRowBytes:         2_000,
+		UncappedAvgRowBytes: 8_000,
+	}
+
+	wantLabel, wantDeltas := ClassifyRegime(history, current, DBTuning{})
+	current.RepresentativeRowBytes = 200
+	current.SafetyRowBytes = 64 * 1024
+	current.SafetyRowBytesKnown = true
+	gotLabel, gotDeltas := ClassifyRegime(history, current, DBTuning{})
+
+	if gotLabel != wantLabel || strings.Join(gotDeltas, "|") != strings.Join(wantDeltas, "|") {
+		t.Fatalf("new widths changed legacy regime comparison: before=(%q,%v) after=(%q,%v)",
+			wantLabel, wantDeltas, gotLabel, gotDeltas)
+	}
+}
+
+func TestTotalBytes_OverflowSaturates(t *testing.T) {
+	if got := totalBytes(math.MaxInt64, 2); got != math.MaxInt64 {
+		t.Fatalf("overflowing totalBytes = %d, want MaxInt64 saturation", got)
+	}
+	if got := workloadBand(math.MaxInt64, 2); got != bandHuge {
+		t.Fatalf("overflowing workload band = %q, want %q", got, bandHuge)
 	}
 }
 

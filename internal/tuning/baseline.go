@@ -6,10 +6,7 @@ package tuning
 // Source of truth for the per-knob formulas — replaces the
 // applyDefaultSuggestions path in internal/driver/ai_smartconfig.go.
 func baseline(in Input, profile DriverProfile) Output {
-	workers := in.CPUCores - 2
-	if workers < 2 {
-		workers = 2
-	}
+	workers := baselineWorkers(in.CPUCores)
 
 	const (
 		readAheadBuffers     = 4
@@ -22,7 +19,7 @@ func baseline(in Input, profile DriverProfile) Output {
 
 	waw := baselineWAW(in, profile)
 
-	chunkSize := chunkRowsFromProfile(profile, in.AvgRowBytes)
+	chunkSize := chunkRowsFromProfile(profile, in.representativeRowBytes())
 
 	return Output{
 		Workers:              workers,
@@ -38,6 +35,21 @@ func baseline(in Input, profile DriverProfile) Output {
 		CheckpointFrequency:  checkpointFrequency,
 		MaxRetries:           maxRetries,
 	}
+}
+
+// baselineWorkers preserves the cores-2 formula while bounding it so the
+// derived workers+4 and workers*2+4 connection counts cannot overflow int.
+func baselineWorkers(cpuCores int) int {
+	if cpuCores <= 4 {
+		return 2
+	}
+	workers := cpuCores - 2 // safe because cpuCores is now positive and > 4.
+	maxInt := int(^uint(0) >> 1)
+	maxWorkers := (maxInt - 4) / 2
+	if workers > maxWorkers {
+		return maxWorkers
+	}
+	return workers
 }
 
 // baselineWAW computes the platform- and core-aware baseline write_ahead_writers.
@@ -96,10 +108,7 @@ func chunkRowsFromProfile(profile DriverProfile, avgRowBytes int64) int {
 	if bytes <= 0 {
 		bytes = fallbackBytes
 	}
-	rows := int(bytes / avgRowBytes)
-	if rows < 1 {
-		rows = 1
-	}
+	rows := rowsFromBytes(bytes, avgRowBytes)
 	if profile.HardChunkLimit > 0 && rows > profile.HardChunkLimit {
 		rows = profile.HardChunkLimit
 	}

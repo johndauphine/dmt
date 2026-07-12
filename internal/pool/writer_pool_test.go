@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -717,5 +718,19 @@ func TestCalculatePipelineBuffers_OverheadSlotsReserved(t *testing.T) {
 	}
 	if got.ChunkChanDepth < cfg.NumReaders {
 		t.Errorf("chunkDepth %d below reader floor %d", got.ChunkChanDepth, cfg.NumReaders)
+	}
+}
+
+func TestCalculatePipelineBuffers_OverflowDoesNotCreateExtraSlots(t *testing.T) {
+	got := CalculatePipelineBuffers(PipelineBufferConfig{
+		MemoryBudgetMB:   math.MaxInt64,
+		ChunkSize:        int(^uint(0) >> 1),
+		RowBytes:         math.MaxInt64,
+		NumWriters:       1,
+		NumReaders:       1,
+		ReadAheadBuffers: 4,
+	})
+	if got.ChunkChanDepth != 1 || got.JobChanDepth != 2 {
+		t.Fatalf("overflowing chunk model produced extra buffers: %+v, want minimum 1/2", got)
 	}
 }

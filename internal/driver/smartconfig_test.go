@@ -109,6 +109,10 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 		t.Errorf("EstimatedMemoryMB = %d, want %d (recomputed from post-override params)",
 			mock.saved.EstimatedMemoryMB, want)
 	}
+	if analyzer.suggestions.RepresentativeRowBytes != fallbackRowBytes ||
+		analyzer.suggestions.SafetyRowBytes != fallbackRowBytes || analyzer.suggestions.SafetyRowBytesKnown {
+		t.Errorf("direct pending save did not preserve unproven numeric fallbacks: %+v", analyzer.suggestions)
+	}
 }
 
 // TestSaveTuningWithActualParams_NoOverride pins #160's no-op acceptance:
@@ -163,6 +167,94 @@ func TestSaveTuningWithActualParams_NoOverride(t *testing.T) {
 	}
 }
 
+func TestSaveTuningWithActualParams_UsesSafetyWidthAndPersistsLegacyFeature(t *testing.T) {
+	const (
+		legacyRowBytes         = int64(500)
+		representativeRowBytes = int64(220)
+		safetyRowBytes         = int64(2 * 1024 * 1024)
+	)
+	mock := &mockHistoryProvider{}
+	analyzer := &SmartConfigAnalyzer{
+		dbType:          "mssql",
+		targetDBType:    "postgres",
+		historyProvider: mock,
+		suggestions: &SmartConfigSuggestions{
+			AvgRowSizeBytes: legacyRowBytes,
+		},
+		pendingSave: &pendingTuningSave{
+			input: AutoTuneInput{
+				AvgRowBytes:            legacyRowBytes,
+				MemoryBudgetMB:         1,
+				RepresentativeRowBytes: representativeRowBytes,
+				SafetyRowBytes:         safetyRowBytes,
+				SafetyRowBytesKnown:    true,
+			},
+			representativeRowBytes: representativeRowBytes,
+			safetyRowBytes:         safetyRowBytes,
+			safetyRowBytesKnown:    true,
+		},
+	}
+	actual := ActualParams{
+		Workers:           4,
+		ChunkSize:         1,
+		ReadAheadBuffers:  4,
+		WriteAheadWriters: 2,
+		ParallelReaders:   2,
+	}
+
+	analyzer.SaveTuningWithActualParams(actual)
+
+	wantEstimate := tuning.EstimatedMemMB(actual.Workers, actual.ReadAheadBuffers, actual.WriteAheadWriters, actual.ChunkSize, safetyRowBytes)
+	if analyzer.suggestions.EstimatedMemMB != wantEstimate {
+		t.Errorf("post-override estimate = %d, want %d from safety width", analyzer.suggestions.EstimatedMemMB, wantEstimate)
+	}
+	if !analyzer.suggestions.MemoryEstimateOverBudget {
+		t.Error("post-override minimum-progress surface must retain over-budget state")
+	}
+	if analyzer.suggestions.RepresentativeRowBytes != representativeRowBytes ||
+		analyzer.suggestions.SafetyRowBytes != safetyRowBytes || !analyzer.suggestions.SafetyRowBytesKnown {
+		t.Errorf("pending #703 width state was not preserved: %+v", analyzer.suggestions)
+	}
+	if mock.saved == nil {
+		t.Fatal("expected tuning record to be saved")
+	}
+	if mock.saved.AvgRowSizeBytes != legacyRowBytes {
+		t.Errorf("persisted AvgRowSizeBytes = %d, want legacy feature %d", mock.saved.AvgRowSizeBytes, legacyRowBytes)
+	}
+	if mock.saved.EstimatedMemoryMB != wantEstimate {
+		t.Errorf("persisted estimate = %d, want %d from safety width", mock.saved.EstimatedMemoryMB, wantEstimate)
+	}
+}
+
+func TestApplyTuningOutputCarriesMemoryEstimateOverBudget(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	analyzer.applyTuningOutput(tuning.Output{EstimatedMemMB: 2, MemoryEstimateOverBudget: true})
+	if analyzer.suggestions.EstimatedMemMB != 2 || !analyzer.suggestions.MemoryEstimateOverBudget {
+		t.Errorf("applyTuningOutput lost over-budget surface: %+v", analyzer.suggestions)
+	}
+}
+
+func TestSaveTuningWithActualParams_OverflowRemainsOverBudget(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	analyzer := &SmartConfigAnalyzer{
+		suggestions: &SmartConfigSuggestions{},
+		pendingSave: &pendingTuningSave{input: AutoTuneInput{
+			MemoryBudgetMB:      math.MaxInt64,
+			SafetyRowBytes:      math.MaxInt64,
+			SafetyRowBytesKnown: true,
+		}},
+	}
+	analyzer.SaveTuningWithActualParams(ActualParams{
+		Workers:           maxInt,
+		ReadAheadBuffers:  maxInt,
+		WriteAheadWriters: maxInt,
+		ChunkSize:         maxInt,
+	})
+	if !analyzer.suggestions.MemoryEstimateOverBudget {
+		t.Fatalf("overflowing post-override model appeared safe: %+v", analyzer.suggestions)
+	}
+}
+
 // TestSaveTuningWithActualParams_NoPending: no-op when there's nothing
 // to save (Analyze never ran or already saved).
 func TestSaveTuningWithActualParams_NoPending(t *testing.T) {
@@ -202,6 +294,10 @@ func TestBuildAutoTuneInput_NoEnvelopeDoesNotInventMemory(t *testing.T) {
 	input := analyzer.buildAutoTuneInput(nil, 500)
 	if input.MemoryGB != 0 || input.AvailableMemoryMB != 0 || input.MemoryBudgetMB != 0 || input.MaxMemoryMB != 0 {
 		t.Errorf("unset envelope produced memory values: %+v", input)
+	}
+	if input.AvgRowBytes != 500 || input.UncappedAvgRowBytes != 500 || input.RepresentativeRowBytes != 500 ||
+		input.SafetyRowBytes != 500 || input.SafetyRowBytesKnown {
+		t.Errorf("direct input did not carry explicit unproven width fallbacks: %+v", input)
 	}
 }
 
@@ -254,10 +350,10 @@ func TestChunkLimitFromProbe(t *testing.T) {
 			want:              0,
 		},
 		{
-			// Codex review on #166: when row size exceeds 80% of the
+			// When the modeled table-average width exceeds 80% of the
 			// packet budget, integer division rounds down to 0. Clamping
-			// to 1 keeps the cap meaningful — one row per chunk is the
-			// minimum unit and is still less than the packet limit.
+			// to 1 keeps the cap meaningful as minimum progress; it does
+			// not claim every individual row will fit the packet.
 			name:              "row larger than packet budget — clamped to 1",
 			driverStaticLimit: 0,
 			probe:             TargetProbe{MaxAllowedPacket: 4 * 1024 * 1024},
@@ -327,12 +423,122 @@ func TestCalculateAvgRowSize_NoCapWhenSmall(t *testing.T) {
 	}
 }
 
-// TestCalculateAvgRowSize_TracksMaxForPacketCap guards the #166
-// follow-up fix: when sampled tables have mixed row widths, the packet
-// cap must be derived from the WIDEST row, not the average. Otherwise
-// chunks sized for the average would still exceed @@max_allowed_packet
-// when inserting the wide table.
-func TestCalculateAvgRowSize_TracksMaxForPacketCap(t *testing.T) {
+func TestCalculateAvgRowSize_SeparatesLegacyRepresentativeAndSafetyWidths(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	tables := []tableInfo{
+		{Name: "dominant_narrow", RowCount: 100_000_000, AvgRowSizeBytes: 200},
+		{Name: "tiny_wide", RowCount: 100, AvgRowSizeBytes: 8 * 1024},
+	}
+
+	legacyCapped := analyzer.calculateAvgRowSize(tables)
+	if legacyCapped != 2000 || analyzer.uncappedAvgRowBytes != 4196 {
+		t.Fatalf("legacy widths = capped %d/uncapped %d, want 2000/4196",
+			legacyCapped, analyzer.uncappedAvgRowBytes)
+	}
+	if analyzer.representativeRowBytes != 200 {
+		t.Errorf("RepresentativeRowBytes = %d, want 200 (tiny wide table must not distort byte-shaped sizing)", analyzer.representativeRowBytes)
+	}
+	if analyzer.safetyRowBytes != 8*1024 || !analyzer.safetyRowBytesKnown {
+		t.Errorf("safety width = (%d, known=%v), want (8192, true)", analyzer.safetyRowBytes, analyzer.safetyRowBytesKnown)
+	}
+	if analyzer.largestSampledTableBytes != 100_000_000*200 {
+		t.Errorf("LargestTableBytes = %d, want %d", analyzer.largestSampledTableBytes, int64(100_000_000*200))
+	}
+
+	input := analyzer.buildAutoTuneInput(tables, legacyCapped)
+	tuningInput := analyzer.toTuningInput(input)
+	if input.RepresentativeRowBytes != 200 || input.SafetyRowBytes != 8192 || !input.SafetyRowBytesKnown {
+		t.Errorf("AutoTuneInput lost #703 widths: %+v", input)
+	}
+	if tuningInput.RepresentativeRowBytes != input.RepresentativeRowBytes ||
+		tuningInput.SafetyRowBytes != input.SafetyRowBytes ||
+		tuningInput.SafetyRowBytesKnown != input.SafetyRowBytesKnown {
+		t.Errorf("tuning.Input mapping lost #703 widths: %+v", tuningInput)
+	}
+}
+
+func TestCalculateAvgRowSize_UniformTablesPreserveWidths(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	legacy := analyzer.calculateAvgRowSize([]tableInfo{
+		{Name: "a", RowCount: 10_000, AvgRowSizeBytes: 640},
+		{Name: "b", RowCount: 1_000, AvgRowSizeBytes: 640},
+		{Name: "c", RowCount: 100, AvgRowSizeBytes: 640},
+	})
+	if legacy != 640 || analyzer.uncappedAvgRowBytes != 640 || analyzer.representativeRowBytes != 640 ||
+		analyzer.safetyRowBytes != 640 || !analyzer.safetyRowBytesKnown {
+		t.Fatalf("uniform widths diverged: legacy=%d uncapped=%d representative=%d safety=(%d,%v)",
+			legacy, analyzer.uncappedAvgRowBytes, analyzer.representativeRowBytes,
+			analyzer.safetyRowBytes, analyzer.safetyRowBytesKnown)
+	}
+}
+
+func TestCalculateAvgRowSize_UnknownAndWidthOnlySafety(t *testing.T) {
+	t.Run("no observed widths uses unproven fallback", func(t *testing.T) {
+		analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+		legacy := analyzer.calculateAvgRowSize([]tableInfo{{Name: "unknown", RowCount: 10}})
+		if legacy != fallbackRowBytes || analyzer.uncappedAvgRowBytes != fallbackRowBytes ||
+			analyzer.representativeRowBytes != fallbackRowBytes || analyzer.safetyRowBytes != fallbackRowBytes ||
+			analyzer.safetyRowBytesKnown {
+			t.Fatalf("unknown widths did not retain explicit fallback state: legacy=%d uncapped=%d representative=%d safety=(%d,%v)",
+				legacy, analyzer.uncappedAvgRowBytes, analyzer.representativeRowBytes,
+				analyzer.safetyRowBytes, analyzer.safetyRowBytesKnown)
+		}
+	})
+
+	t.Run("positive width with unknown count proves safety only", func(t *testing.T) {
+		analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+		legacy := analyzer.calculateAvgRowSize([]tableInfo{{Name: "width_only", RowCount: 0, AvgRowSizeBytes: 8192}})
+		if legacy != fallbackRowBytes || analyzer.representativeRowBytes != fallbackRowBytes {
+			t.Fatalf("count-less width changed legacy/representative: legacy=%d representative=%d", legacy, analyzer.representativeRowBytes)
+		}
+		if analyzer.safetyRowBytes != 8192 || !analyzer.safetyRowBytesKnown {
+			t.Fatalf("count-less positive width did not prove safety: (%d,%v)", analyzer.safetyRowBytes, analyzer.safetyRowBytesKnown)
+		}
+	})
+}
+
+func TestCalculateAvgRowSize_SaturatesPathologicalProducts(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	analyzer.calculateAvgRowSize([]tableInfo{
+		{Name: "huge", RowCount: math.MaxInt64, AvgRowSizeBytes: math.MaxInt64},
+		{Name: "also_huge", RowCount: math.MaxInt64, AvgRowSizeBytes: 2},
+	})
+
+	if analyzer.largestSampledTableBytes != math.MaxInt64 {
+		t.Errorf("LargestTableBytes = %d, want saturated MaxInt64", analyzer.largestSampledTableBytes)
+	}
+	if analyzer.safetyRowBytes != math.MaxInt64 || !analyzer.safetyRowBytesKnown {
+		t.Errorf("safety width = (%d,%v), want (MaxInt64,true)", analyzer.safetyRowBytes, analyzer.safetyRowBytesKnown)
+	}
+	if analyzer.representativeRowBytes != math.MaxInt64 || analyzer.uncappedAvgRowBytes != math.MaxInt64/2+1 {
+		t.Errorf("overflow widths = representative %d/legacy %d, want conservative representative MaxInt64 and exact legacy mean %d",
+			analyzer.representativeRowBytes, analyzer.uncappedAvgRowBytes, math.MaxInt64/2+1)
+	}
+}
+
+func TestTargetHardChunkLimitUsesSafetyWidthEstimate(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{
+		suggestions:         &SmartConfigSuggestions{AvgRowSizeBytes: 500},
+		uncappedAvgRowBytes: 500,
+		safetyRowBytes:      8192,
+		targetProbe:         TargetProbe{MaxAllowedPacket: 4 * 1024 * 1024},
+	}
+	if got, want := analyzer.TargetHardChunkLimit(), 409; got != want {
+		t.Errorf("TargetHardChunkLimit() = %d, want %d from the 8192-byte safety estimate", got, want)
+	}
+}
+
+func TestChunkLimitFromProbeSaturatesPacketMath(t *testing.T) {
+	got := chunkLimitFromProbe(0, TargetProbe{MaxAllowedPacket: math.MaxInt64}, 1)
+	if got <= 0 {
+		t.Fatalf("near-MaxInt64 packet produced non-positive chunk limit %d", got)
+	}
+}
+
+// TestCalculateAvgRowSize_TracksSafetyWidthForPacketSizing verifies the
+// packet estimate uses the widest observed table-average width. This is a
+// modeled sizing input, not a hard bound on every serialized row.
+func TestCalculateAvgRowSize_TracksSafetyWidthForPacketSizing(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
 	tables := []tableInfo{
 		{Name: "narrow1", RowCount: 1_000_000, AvgRowSizeBytes: 100},
@@ -343,8 +549,8 @@ func TestCalculateAvgRowSize_TracksMaxForPacketCap(t *testing.T) {
 	analyzer.calculateAvgRowSize(tables)
 
 	// Average of {100, 150, 8192, 200} ≈ 2160. The capped value is 2000.
-	if analyzer.maxSampledRowBytes != 8192 {
-		t.Errorf("maxSampledRowBytes = %d, want 8192 (the wide_json row)", analyzer.maxSampledRowBytes)
+	if analyzer.safetyRowBytes != 8192 || !analyzer.safetyRowBytesKnown {
+		t.Errorf("safety width = (%d, known=%v), want (8192, true)", analyzer.safetyRowBytes, analyzer.safetyRowBytesKnown)
 	}
 	// uncapped average should still reflect the mix
 	const wantUncapped = 2160
@@ -354,14 +560,9 @@ func TestCalculateAvgRowSize_TracksMaxForPacketCap(t *testing.T) {
 	}
 }
 
-// TestCalculateAvgRowSize_MaxIncludesTablesOutsideTop5 guards the
-// second-round #166 fix: maxSampledRowBytes must consider ALL tables,
-// not just the top-5 by row count used for the average. Otherwise a
-// small wide table (low row count, but each row huge) gets missed by
-// the packet cap, and the runtime controller can still produce chunks
-// that crash mid-migration when that table is being transferred
-// (Codex review).
-func TestCalculateAvgRowSize_MaxIncludesTablesOutsideTop5(t *testing.T) {
+// TestCalculateAvgRowSize_SafetyIncludesTablesOutsideTop5 verifies a small
+// wide table cannot evade the all-table safety-width model.
+func TestCalculateAvgRowSize_SafetyIncludesTablesOutsideTop5(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
 	tables := []tableInfo{
 		// Top-5 by row count: five narrow tables. The average is small.
@@ -376,9 +577,9 @@ func TestCalculateAvgRowSize_MaxIncludesTablesOutsideTop5(t *testing.T) {
 		{Name: "tiny_wide", RowCount: 1000, AvgRowSizeBytes: 16384},
 	}
 	analyzer.calculateAvgRowSize(tables)
-	if analyzer.maxSampledRowBytes != 16384 {
-		t.Errorf("maxSampledRowBytes = %d, want 16384 (the small-but-wide tiny_wide table); top-5 limit must not gate the max",
-			analyzer.maxSampledRowBytes)
+	if analyzer.safetyRowBytes != 16384 {
+		t.Errorf("safetyRowBytes = %d, want 16384 (the small-but-wide tiny_wide table); top-5 limit must not gate safety width",
+			analyzer.safetyRowBytes)
 	}
 }
 
@@ -418,16 +619,16 @@ func TestApplyTableNameFilter_ExcludedWideTableDoesNotDrivePacketCap(t *testing.
 	// Run the same packet-cap derivation that calculateAutoTuneParams
 	// does, but only over the in-scope tables.
 	analyzer.calculateAvgRowSize(kept)
-	if analyzer.maxSampledRowBytes != 140 {
-		t.Errorf("maxSampledRowBytes = %d, want 140 (widest narrow row); the excluded 16384-byte blob_archive must not drive the packet cap",
-			analyzer.maxSampledRowBytes)
+	if analyzer.safetyRowBytes != 140 {
+		t.Errorf("safetyRowBytes = %d, want 140 (widest narrow table average); the excluded 16384-byte blob_archive must not drive packet sizing",
+			analyzer.safetyRowBytes)
 	}
 }
 
 // TestApplyTableNameFilter_NoFilterIsIdentity is the regression test
 // called out in #241: existing migrations with no include/exclude
 // filters must produce identical caps before and after this change.
-// Same input through both code paths must yield the same maxSampledRowBytes
+// Same input through both code paths must yield the same safetyRowBytes
 // and same uncappedAvgRowBytes.
 func TestApplyTableNameFilter_NoFilterIsIdentity(t *testing.T) {
 	tables := []tableInfo{
@@ -451,9 +652,9 @@ func TestApplyTableNameFilter_NoFilterIsIdentity(t *testing.T) {
 	filteredTables := filtered.applyTableNameFilter(tables)
 	filtered.calculateAvgRowSize(filteredTables)
 
-	if baseline.maxSampledRowBytes != filtered.maxSampledRowBytes {
-		t.Errorf("maxSampledRowBytes differs: baseline=%d, filtered=%d (no-filter behavior changed)",
-			baseline.maxSampledRowBytes, filtered.maxSampledRowBytes)
+	if baseline.safetyRowBytes != filtered.safetyRowBytes || baseline.safetyRowBytesKnown != filtered.safetyRowBytesKnown {
+		t.Errorf("safety width differs: baseline=(%d,%v), filtered=(%d,%v) (no-filter behavior changed)",
+			baseline.safetyRowBytes, baseline.safetyRowBytesKnown, filtered.safetyRowBytes, filtered.safetyRowBytesKnown)
 	}
 	if baseline.uncappedAvgRowBytes != filtered.uncappedAvgRowBytes {
 		t.Errorf("uncappedAvgRowBytes differs: baseline=%d, filtered=%d (no-filter behavior changed)",

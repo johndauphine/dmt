@@ -1,12 +1,23 @@
 package orchestrator
 
 import (
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/exitcodes"
 )
+
+func TestEstimatedTargetBytesSaturatesOverflow(t *testing.T) {
+	o := &Orchestrator{tables: []driver.Table{
+		{Name: "huge", RowCount: math.MaxInt64, EstimatedRowSize: math.MaxInt64},
+		{Name: "more", RowCount: 10, EstimatedRowSize: 10},
+	}}
+	if got := o.estimatedTargetBytes(); got != math.MaxInt64 {
+		t.Fatalf("overflowing target-byte estimate = %d, want MaxInt64 saturation", got)
+	}
+}
 
 // TestPreFlightSkipSet pins the parse rules for --skip-preflight: comma
 // splitting, whitespace trim, case-fold, and the dropping of empty tokens.

@@ -325,14 +325,16 @@ type HealthCheckResult struct {
 
 // DryRunResult contains the migration plan preview.
 type DryRunResult struct {
-	SourceType     string        `json:"source_type"`
-	TargetType     string        `json:"target_type"`
-	SourceSchema   string        `json:"source_schema"`
-	TargetSchema   string        `json:"target_schema"`
-	Tables         []DryRunTable `json:"tables"`
-	TotalRows      int64         `json:"total_rows"`
-	TotalTables    int           `json:"total_tables"`
-	EstimatedMemMB int64         `json:"estimated_memory_mb"`
+	SourceType          string        `json:"source_type"`
+	TargetType          string        `json:"target_type"`
+	SourceSchema        string        `json:"source_schema"`
+	TargetSchema        string        `json:"target_schema"`
+	Tables              []DryRunTable `json:"tables"`
+	TotalRows           int64         `json:"total_rows"`
+	TotalTables         int           `json:"total_tables"`
+	EstimatedMemMB      int64         `json:"estimated_memory_mb"`
+	SafetyRowBytes      int64         `json:"safety_row_bytes,omitempty"`
+	SafetyRowBytesKnown bool          `json:"safety_row_bytes_known"`
 	// EstimatedDurationSeconds is populated when recent same-direction
 	// throughput history is available.
 	EstimatedDurationSeconds float64                        `json:"estimated_duration_seconds,omitempty"`

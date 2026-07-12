@@ -40,7 +40,25 @@ type Input struct {
 	TargetMode   string // "drop_recreate" | "upsert"
 	TotalTables  int
 	TotalRows    int64
-	AvgRowBytes  int64 // capped at 2000B for memory-budget math
+
+	// AvgRowBytes is the legacy, capped, unweighted top-five-table average.
+	// It remains the persisted regression feature for compatibility with
+	// historical models; it must not be reused for performance or safety math.
+	AvgRowBytes int64
+
+	// RepresentativeRowBytes is the row-count-weighted workload width used to
+	// convert byte-shaped performance choices (baseline, exploration, and
+	// regression candidates) into row counts. Non-positive values use the
+	// conservative 500-byte fallback rather than aliasing the legacy average.
+	RepresentativeRowBytes int64
+
+	// SafetyRowBytes is the widest observed positive per-table average and is
+	// used exclusively for memory clamps and estimates. SafetyRowBytesKnown is
+	// true only when schema statistics supplied that positive width; fallback
+	// estimates keep it false so callers never present an assumed width as
+	// observed fact.
+	SafetyRowBytes      int64
+	SafetyRowBytesKnown bool
 
 	// UncappedAvgRowBytes is the pre-cap average row size in bytes
 	// (#214 Copilot fix on PR #288). ClassifyRegime reads this for
@@ -131,6 +149,12 @@ type Output struct {
 	MaxRetries           int
 
 	EstimatedMemMB int64
+
+	// MemoryEstimateOverBudget is true when the final recommendation's modeled
+	// working set exceeds MemoryBudgetMB. In particular, it remains true when
+	// the tuner returns a one-row minimum-progress chunk that still cannot fit;
+	// the recommendation must never imply that such a chunk is memory-safe.
+	MemoryEstimateOverBudget bool
 
 	// Tier names which selector picked the WAW/ChunkSize values. One of
 	// the Tier* constants above. Always populated by Tune.

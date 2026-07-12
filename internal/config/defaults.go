@@ -419,24 +419,14 @@ func (c *Config) applyDefaults() error {
 	// MSSQLRowsPerBatch defaults to chunk_size (set after chunk_size is finalized)
 	// This is applied later since it depends on ChunkSize being set
 	if c.Migration.ReadAheadBuffers == 0 {
-		// Scale buffers: enough to keep writers fed, but within memory limits
-		// Formula: envelope budget / workers / (chunkSize * 500 bytes avg)
-		bytesPerChunk := int64(c.Migration.ChunkSize) * 500 // ~500 bytes per row average
-		buffersPerWorker := (memoryBudgetMB * 1024 * 1024) / int64(c.Migration.Workers) / bytesPerChunk
-		c.Migration.ReadAheadBuffers = int(buffersPerWorker)
-		if c.Migration.ReadAheadBuffers < 4 {
-			c.Migration.ReadAheadBuffers = 4
-		}
-		if c.Migration.ReadAheadBuffers > 32 {
-			c.Migration.ReadAheadBuffers = 32 // Cap to avoid excessive memory
-		}
+		c.Migration.ReadAheadBuffers = defaultReadAheadBuffers(memoryBudgetMB, c.Migration.Workers, c.Migration.ChunkSize)
 	}
 
 	// Auto-size connection pools based on workers, readers, and writers
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
 	// Add 4 connections for headroom (orchestrator, health checks, etc.)
-	requiredSourceConns := c.Migration.Workers*c.Migration.ParallelReaders + 4
-	requiredTargetConns := c.Migration.Workers*c.Migration.WriteAheadWriters + 4
+	requiredSourceConns := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.ParallelReaders)
+	requiredTargetConns := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.WriteAheadWriters)
 	if c.Migration.MaxSourceConnections < requiredSourceConns {
 		c.Migration.MaxSourceConnections = requiredSourceConns
 	}
@@ -579,4 +569,37 @@ func (c *Config) applyDefaults() error {
 
 	c.fillDefaultTunableProvenance()
 	return nil
+}
+
+func defaultReadAheadBuffers(memoryBudgetMB int64, workers, chunkSize int) int {
+	// Scale buffers: enough to keep writers fed, but within memory limits.
+	// The formula-only path uses the unobserved 500-byte width fallback;
+	// saturating products ensure pathological inputs clamp to the safe floor
+	// instead of wrapping into an apparently tiny chunk.
+	budgetBytes := saturatingMemoryMultiply(memoryBudgetMB, 1024*1024)
+	bytesPerChunk := saturatingMemoryMultiply(int64(chunkSize), 500)
+	denominator := saturatingMemoryMultiply(int64(workers), bytesPerChunk)
+	if budgetBytes <= 0 || denominator <= 0 {
+		return 4
+	}
+	buffers := budgetBytes / denominator
+	if buffers < 4 {
+		return 4
+	}
+	if buffers > 32 {
+		return 32
+	}
+	return int(buffers)
+}
+
+func saturatingConnectionRequirement(workers, connectionsPerWorker int) int {
+	const headroom = 4
+	maxInt := int(^uint(0) >> 1)
+	if workers <= 0 || connectionsPerWorker <= 0 {
+		return headroom
+	}
+	if workers > (maxInt-headroom)/connectionsPerWorker {
+		return maxInt
+	}
+	return workers*connectionsPerWorker + headroom
 }

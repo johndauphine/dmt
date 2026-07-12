@@ -1,6 +1,8 @@
 package transfer
 
 import (
+	"math"
+
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/pool"
@@ -25,24 +27,42 @@ func pipelineBudgetMB(cfg *config.Config) (budgetMB int64, reserveExhausted bool
 		return 0, false
 	}
 
-	connCount := int64(cfg.Migration.MaxSourceConnections + cfg.Migration.MaxTargetConnections)
-	if connCount <= 0 {
-		connCount = defaultConnectionCount
-	}
+	connCount := configuredConnectionCount(cfg)
 	return subtractConnectionOverheadMB(budgetMB, connCount)
+}
+
+func configuredConnectionCount(cfg *config.Config) int64 {
+	var total int64
+	for _, count := range []int{cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections} {
+		if count <= 0 {
+			continue
+		}
+		count64 := int64(count)
+		if total > math.MaxInt64-count64 {
+			return math.MaxInt64
+		}
+		total += count64
+	}
+	if total == 0 {
+		return defaultConnectionCount
+	}
+	return total
 }
 
 func subtractConnectionOverheadMB(budgetMB, connCount int64) (pipelineMB int64, reserveExhausted bool) {
 	if budgetMB <= 0 {
 		return 0, false
 	}
-	pipelineMB = budgetMB - connCount*connectionOverheadMB
-	if pipelineMB <= 0 {
+	if connCount <= 0 {
+		connCount = defaultConnectionCount
+	}
+	if connCount > (budgetMB-1)/connectionOverheadMB {
 		// The connection model already consumes the envelope. Preserve only a
 		// 1 MiB positive coordination budget; MemoryGuard remains the hard
 		// backstop, and the caller surfaces the exhausted reserve.
 		return 1, true
 	}
+	pipelineMB = budgetMB - connCount*connectionOverheadMB
 	return pipelineMB, false
 }
 
@@ -96,14 +116,22 @@ func PipelineMemBudgetBytes(cfg *config.Config) int64 {
 	budgetMB, reserveExhausted := pipelineBudgetMB(cfg)
 	if reserveExhausted {
 		envelopeMB := cfg.AutoConfig().MemoryEnvelope.BudgetMB
-		connections := cfg.Migration.MaxSourceConnections + cfg.Migration.MaxTargetConnections
-		if connections <= 0 {
-			connections = int(defaultConnectionCount)
-		}
+		connections := configuredConnectionCount(cfg)
 		logging.Warn("transfer memory envelope exhausted by connection-overhead estimate (budget=%d MB, connections=%d at %d MB each); limiting shared pipeline budget to %d MB",
 			envelopeMB, connections, connectionOverheadMB, budgetMB)
 	}
-	return budgetMB * 1024 * 1024
+	return pipelineBudgetBytes(budgetMB)
+}
+
+func pipelineBudgetBytes(budgetMB int64) int64 {
+	const bytesPerMiB = int64(1024 * 1024)
+	if budgetMB <= 0 {
+		return 0
+	}
+	if budgetMB > math.MaxInt64/bytesPerMiB {
+		return math.MaxInt64
+	}
+	return budgetMB * bytesPerMiB
 }
 
 // MemoryGuardLimitMB returns the migration-wide heap limit used by the

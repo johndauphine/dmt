@@ -109,7 +109,7 @@ func filterOutliersByResiduals(rows []HistoryRecord) ([]HistoryRecord, []outlier
 		avg := safeAvgRowBytes(r.AvgRowBytes)
 		x := model.featureVector(
 			r.WriteAheadWriters,
-			int64(r.ChunkSize)*avg,
+			chunkBytesForModel(r.ChunkSize, avg),
 			r.ParallelReaders,
 			r.ReadAheadBuffers,
 			r.SourceDBType,

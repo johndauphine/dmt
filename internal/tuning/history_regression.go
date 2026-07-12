@@ -44,14 +44,9 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 		return false
 	}
 
-	avg := in.AvgRowBytes
-	if avg <= 0 {
-		avg = 500
-	}
-	csRows := int(pickedCSBytes / avg)
-	if csRows < 1 {
-		csRows = 1 // mirror chunkRowsFromProfile's floor (Copilot PR #183 review)
-	}
+	representativeWidth := in.representativeRowBytes()
+	legacyModelWidth := safeAvgRowBytes(in.AvgRowBytes)
+	csRows := rowsFromBytes(pickedCSBytes, representativeWidth)
 	out.WriteAheadWriters = pickedWAW
 	out.ChunkSize = csRows
 	out.ParallelReaders = pickedPR
@@ -75,7 +70,7 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	// model.r2 is still computed and remains available to debug logs
 	// and unit tests.
 	ciStr := "N/A"
-	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, avg); ok {
+	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth); ok {
 		ciStr = formatPredictionInterval(predicted, low, high)
 	}
 
@@ -119,13 +114,11 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 	if optimumBytes <= 0 {
 		optimumBytes = fallbackBytes
 	}
-	avg := in.AvgRowBytes
-	if avg <= 0 {
-		avg = 500
-	}
+	representativeWidth := in.representativeRowBytes()
+	legacyModelWidth := safeAvgRowBytes(in.AvgRowBytes)
 	csCandidates := []int64{
-		int64(halfOptimumFraction * float64(optimumBytes)),
-		int64(fullOptimumFraction * float64(optimumBytes)),
+		scaledByteTarget(optimumBytes, halfOptimumFraction),
+		scaledByteTarget(optimumBytes, fullOptimumFraction),
 	}
 
 	bestWAW := -1
@@ -135,7 +128,7 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 
 	for w := 1; w <= maxWAWForGrid; w++ {
 		for _, cs := range csCandidates {
-			csRows := int(cs / avg)
+			csRows := rowsFromBytes(cs, representativeWidth)
 			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 				continue
 			}
@@ -146,7 +139,7 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 				if !covered[coverageCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
 					continue
 				}
-				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, avg)
+				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth)
 				if pred > bestPred {
 					bestPred = pred
 					bestWAW = w

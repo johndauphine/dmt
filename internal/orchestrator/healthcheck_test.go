@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 // TestGetSystemBasedSuggestions_NonDegenerate is the post-PR-#175 successor
@@ -55,6 +56,13 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 			if s.EstimatedMemMB <= 0 {
 				t.Errorf("EstimatedMemMB=%d, want > 0", s.EstimatedMemMB)
 			}
+			if s.AvgRowSizeBytes != 500 || s.RepresentativeRowBytes != 500 || s.SafetyRowBytes != 500 {
+				t.Errorf("offline fallback widths = legacy %d representative %d safety %d, want 500/500/500",
+					s.AvgRowSizeBytes, s.RepresentativeRowBytes, s.SafetyRowBytes)
+			}
+			if s.SafetyRowBytesKnown {
+				t.Error("offline 500-byte safety fallback must remain explicitly unobserved")
+			}
 		})
 	}
 }
@@ -68,6 +76,24 @@ func TestGetSystemBasedSuggestions_UsesResolvedMemoryEnvelope(t *testing.T) {
 	}
 	if s.ChunkSizeRecommendation >= 50_000 {
 		t.Errorf("small envelope left offline chunk_size=%d, want a memory clamp below 50000", s.ChunkSizeRecommendation)
+	}
+}
+
+func TestDryRunEstimatedMemMBIncludesReadAndWriteBuffers(t *testing.T) {
+	cfg := &config.Config{Migration: config.MigrationConfig{
+		Workers:           4,
+		ReadAheadBuffers:  4,
+		WriteAheadWriters: 2,
+		ChunkSize:         10_000,
+	}}
+	got := dryRunEstimatedMemMB(cfg)
+	want := tuning.EstimatedMemMB(4, 4, 2, 10_000, 500)
+	if got != want {
+		t.Fatalf("dry-run estimate = %d MB, want %d MB from RAB+WAW model", got, want)
+	}
+	withoutWriters := tuning.EstimatedMemMB(4, 4, 0, 10_000, 500)
+	if got <= withoutWriters {
+		t.Fatalf("dry-run estimate %d MB did not include writers; RAB-only estimate is %d MB", got, withoutWriters)
 	}
 }
 

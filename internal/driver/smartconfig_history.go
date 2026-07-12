@@ -9,8 +9,11 @@ import (
 )
 
 type pendingTuningSave struct {
-	input     AutoTuneInput
-	reasoning string
+	input                  AutoTuneInput
+	reasoning              string
+	representativeRowBytes int64
+	safetyRowBytes         int64
+	safetyRowBytesKnown    bool
 }
 
 // ActualParams holds the actual migration parameters used after user overrides,
@@ -50,15 +53,36 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) in
 	s.suggestions.WriteAheadWriters = actual.WriteAheadWriters
 	s.suggestions.ParallelReaders = actual.ParallelReaders
 	s.suggestions.MaxPartitions = actual.MaxPartitions
+	s.suggestions.RepresentativeRowBytes = pendingRepresentativeRowBytes(ps)
+	s.suggestions.SafetyRowBytes = pendingSafetyRowBytes(ps)
+	s.suggestions.SafetyRowBytesKnown = pendingSafetyRowBytesKnown(ps)
 	// Re-derive EstimatedMemMB so the persisted history reflects the
-	// post-override params, not the pre-override estimate (#160).
+	// post-override params, not the pre-override estimate (#160). The safety
+	// width drives the estimate; the legacy AvgRowSizeBytes remains the
+	// persisted regression feature and no checkpoint schema change is needed.
 	s.suggestions.EstimatedMemMB = tuning.EstimatedMemMB(
 		actual.Workers,
 		actual.ReadAheadBuffers,
 		actual.WriteAheadWriters,
 		actual.ChunkSize,
-		ps.input.AvgRowBytes,
+		pendingSafetyRowBytes(ps),
 	)
+	s.suggestions.MemoryEstimateOverBudget = tuning.MemoryEstimateExceedsBudget(
+		ps.input.MemoryBudgetMB,
+		actual.Workers,
+		actual.ReadAheadBuffers,
+		actual.WriteAheadWriters,
+		actual.ChunkSize,
+		pendingSafetyRowBytes(ps),
+	)
+	if s.suggestions.MemoryEstimateOverBudget {
+		widthSource := "unobserved fallback estimate"
+		if s.suggestions.SafetyRowBytesKnown {
+			widthSource = "widest observed table-average model"
+		}
+		logging.Warn("Post-override tuning memory estimate exceeds the resolved budget (estimate=%d MB budget=%d MB safety_width=%d B source=%s)",
+			s.suggestions.EstimatedMemMB, ps.input.MemoryBudgetMB, s.suggestions.SafetyRowBytes, widthSource)
+	}
 
 	rowID, err := s.saveTuningResult(ps.input, ps.reasoning, actual)
 	if err != nil {
@@ -66,6 +90,36 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) in
 		return 0
 	}
 	return rowID
+}
+
+func pendingRepresentativeRowBytes(ps *pendingTuningSave) int64 {
+	if ps.representativeRowBytes > 0 {
+		return ps.representativeRowBytes
+	}
+	if ps.input.RepresentativeRowBytes > 0 {
+		return ps.input.RepresentativeRowBytes
+	}
+	return fallbackRowBytes
+}
+
+func pendingSafetyRowBytes(ps *pendingTuningSave) int64 {
+	if ps.safetyRowBytes > 0 {
+		return ps.safetyRowBytes
+	}
+	if ps.input.SafetyRowBytes > 0 {
+		return ps.input.SafetyRowBytes
+	}
+	return fallbackRowBytes
+}
+
+func pendingSafetyRowBytesKnown(ps *pendingTuningSave) bool {
+	if ps.safetyRowBytes > 0 {
+		return ps.safetyRowBytesKnown
+	}
+	if ps.input.SafetyRowBytes > 0 {
+		return ps.input.SafetyRowBytesKnown
+	}
+	return false
 }
 
 // saveTuningResult saves the tuning recommendation to history.

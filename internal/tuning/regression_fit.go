@@ -50,7 +50,7 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 	var wawSqSum, csSqSum, logAvgSqSum, prSqSum, rabSqSum float64
 	for _, r := range rows {
 		w := float64(r.WriteAheadWriters)
-		c := float64(int64(r.ChunkSize) * safeAvgRowBytes(r.AvgRowBytes)) // CS in bytes
+		c := float64(chunkBytesForModel(r.ChunkSize, safeAvgRowBytes(r.AvgRowBytes))) // CS in bytes
 		la := math.Log(float64(safeAvgRowBytes(r.AvgRowBytes)))
 		pr := float64(r.ParallelReaders)
 		rab := float64(r.ReadAheadBuffers)
@@ -93,7 +93,7 @@ func fitRegression(rows []HistoryRecord) (*regressionModel, error) {
 
 	for i, r := range rows {
 		wz := standardize(float64(r.WriteAheadWriters), wawMean, wawStd)
-		cz := standardize(float64(int64(r.ChunkSize)*safeAvgRowBytes(r.AvgRowBytes)), csMean, csStd)
+		cz := standardize(float64(chunkBytesForModel(r.ChunkSize, safeAvgRowBytes(r.AvgRowBytes))), csMean, csStd)
 		laz := standardize(math.Log(float64(safeAvgRowBytes(r.AvgRowBytes))), logAvgMean, logAvgStd)
 		prz := standardize(float64(r.ParallelReaders), prMean, prStd)
 		rabz := standardize(float64(r.ReadAheadBuffers), rabMean, rabStd)

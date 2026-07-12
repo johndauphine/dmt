@@ -65,7 +65,12 @@ func TestBuildPerformanceExplanationPayloadOmitsEndpointIdentity(t *testing.T) {
 func TestPerformanceAutoTuneInputMapsResolvedEnvelope(t *testing.T) {
 	cfg := loadSmallEnvelopeConfig(t)
 	orch := &Orchestrator{config: cfg}
-	input := orch.performanceAutoTuneInput(&driver.SmartConfigSuggestions{})
+	input := orch.performanceAutoTuneInput(&driver.SmartConfigSuggestions{
+		AvgRowSizeBytes:        2_000,
+		RepresentativeRowBytes: 320,
+		SafetyRowBytes:         8_192,
+		SafetyRowBytesKnown:    true,
+	})
 	envelope := cfg.AutoConfig().MemoryEnvelope
 
 	if input.AvailableMemoryMB != envelope.AvailableMB {
@@ -77,6 +82,10 @@ func TestPerformanceAutoTuneInputMapsResolvedEnvelope(t *testing.T) {
 	wantMemoryGB := int((envelope.CapacityMB + 1023) / 1024)
 	if input.MemoryGB != wantMemoryGB {
 		t.Errorf("MemoryGB=%d, want %d from capacity (not availability)", input.MemoryGB, wantMemoryGB)
+	}
+	if input.AvgRowBytes != 2_000 || input.RepresentativeRowBytes != 320 || input.SafetyRowBytes != 8_192 || !input.SafetyRowBytesKnown {
+		t.Errorf("row-width mappings = legacy %d representative %d safety %d known %v",
+			input.AvgRowBytes, input.RepresentativeRowBytes, input.SafetyRowBytes, input.SafetyRowBytesKnown)
 	}
 }
 

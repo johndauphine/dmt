@@ -15,36 +15,40 @@ import (
 
 func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing.T) {
 	input := driver.AutoTuneInput{
-		CPUCores:          8,
-		MemoryGB:          32,
-		AvailableMemoryMB: 24000,
-		DatabaseType:      "postgres",
-		TargetType:        "mssql",
-		TargetMode:        "upsert",
-		TotalTables:       12,
-		TotalRows:         100000,
-		AvgRowBytes:       500,
-		SourceHost:        "source.internal",
-		SourcePort:        5432,
-		SourceDatabase:    "source_prod",
-		SourceSchema:      "private_schema",
-		TargetHost:        "target.internal",
-		TargetPort:        1433,
-		TargetDatabase:    "target_prod",
-		TargetSchema:      "dbo",
+		CPUCores:               8,
+		MemoryGB:               32,
+		AvailableMemoryMB:      24000,
+		DatabaseType:           "postgres",
+		TargetType:             "mssql",
+		TargetMode:             "upsert",
+		TotalTables:            12,
+		TotalRows:              100000,
+		AvgRowBytes:            500,
+		RepresentativeRowBytes: 420,
+		SafetyRowBytes:         8_192,
+		SafetyRowBytesKnown:    true,
+		SourceHost:             "source.internal",
+		SourcePort:             5432,
+		SourceDatabase:         "source_prod",
+		SourceSchema:           "private_schema",
+		TargetHost:             "target.internal",
+		TargetPort:             1433,
+		TargetDatabase:         "target_prod",
+		TargetSchema:           "dbo",
 	}
 	suggestions := driver.SmartConfigSuggestions{
-		Workers:                 6,
-		ChunkSizeRecommendation: 50000,
-		ReadAheadBuffers:        4,
-		WriteAheadWriters:       2,
-		ParallelReaders:         2,
-		MaxPartitions:           6,
-		MaxSourceConnections:    10,
-		MaxTargetConnections:    16,
-		EstimatedMemMB:          512,
-		Tier:                    "regression",
-		Reasoning:               "regression-selected WAW=2 from token=abc123",
+		Workers:                  6,
+		ChunkSizeRecommendation:  50000,
+		ReadAheadBuffers:         4,
+		WriteAheadWriters:        2,
+		ParallelReaders:          2,
+		MaxPartitions:            6,
+		MaxSourceConnections:     10,
+		MaxTargetConnections:     16,
+		EstimatedMemMB:           512,
+		MemoryEstimateOverBudget: true,
+		Tier:                     "regression",
+		Reasoning:                "regression-selected WAW=2 from token=abc123",
 	}
 	payload := BuildPerformancePayload(input, suggestions, []checkpoint.TuningRecord{{
 		Timestamp:       time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC),
@@ -90,6 +94,12 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 	}
 	if !payload.Workload.SourceIdentityOmitted || !payload.Workload.TargetIdentityOmitted {
 		t.Fatalf("identity omission flags = %+v", payload.Workload)
+	}
+	if payload.Workload.RepresentativeRowBytes != 420 || payload.Workload.SafetyRowBytes != 8_192 || !payload.Workload.SafetyRowBytesKnown {
+		t.Fatalf("payload lost row-width provenance: %+v", payload.Workload)
+	}
+	if !payload.Workload.MemoryEstimateOverBudget {
+		t.Fatalf("payload lost structured over-budget state: %+v", payload.Workload)
 	}
 	if got := payload.RuntimeAdjustments[0].Adjustments["workers"]; got != 6 {
 		t.Fatalf("runtime workers adjustment = %d, want 6", got)
@@ -261,6 +271,9 @@ func TestBuildPerformancePromptRequiresEvidenceFindings(t *testing.T) {
 		"Include at least one finding",
 		"Every finding must include a non-empty evidence array",
 		"Use only allowed_finding_targets values",
+		"unobserved fallback estimate",
+		"widest observed table-average model",
+		"never a hard bound on every serialized row",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
@@ -361,6 +374,31 @@ func TestParsePerformanceExplanationAllowsRuntimeAdjustmentNumbers(t *testing.T)
 	}
 	if len(explanation.Findings) != 1 {
 		t.Fatalf("runtime adjustment finding should be kept: %+v", explanation.Findings)
+	}
+}
+
+func TestParsePerformanceExplanationAllowsWidthEvidenceForChunkSize(t *testing.T) {
+	payload := PerformancePayload{
+		Workload: PerformanceWorkloadSummary{
+			RepresentativeRowBytes: 200,
+			SafetyRowBytes:         8_192,
+			EstimatedMemoryMB:      512,
+			MaxMemoryMB:            1_024,
+		},
+		DeterministicKnobs: PerformanceKnobs{ChunkSize: 50_000},
+		AllowedKnobs:       []string{"chunk_size"},
+	}
+	explanation, err := ParsePerformanceExplanation(`{
+  "summary": "Width evidence is present.",
+  "findings": [
+    {"knob":"chunk_size","rationale":"50000 rows uses representative width 200 while safety width 8192 yields 512 MB within 1024 MB.","evidence":["workload representative_row_bytes=200 safety_row_bytes=8192 estimated_memory_mb=512 max_memory_mb=1024"]}
+  ]
+}`, payload)
+	if err != nil {
+		t.Fatalf("ParsePerformanceExplanation() error = %v", err)
+	}
+	if len(explanation.Findings) != 1 {
+		t.Fatalf("row-width evidence should keep chunk-size finding: %+v", explanation.Findings)
 	}
 }
 

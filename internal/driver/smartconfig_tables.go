@@ -3,10 +3,17 @@ package driver
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"runtime"
 	"strings"
+)
+
+const (
+	fallbackRowBytes       int64 = 500
+	legacyMaxAvgRowBytes   int64 = 2000
+	legacyRowBearingSample       = 5
 )
 
 func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableInfo {
@@ -22,78 +29,149 @@ func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableIn
 	return kept
 }
 
-// calculateAvgRowSize returns the average row size from the largest
-// tables, capped at 2000 bytes for the memory-budget math (the cap
-// keeps a single wide table from inflating the per-chunk memory
-// estimate beyond what it would actually consume in practice).
+// calculateAvgRowSize returns the legacy capped top-five width used by
+// persisted history and model.Predict. It also derives the additive #703
+// representative and safety widths in one overflow-safe pass across every
+// in-scope table.
 //
-// Side effects (#166 and #214):
-//   - s.uncappedAvgRowBytes: pre-cap average across sampled tables.
-//     Used by the regime classifier (#214) so wide-row workloads land
-//     in the right band; ClassifyRegime would otherwise see a 2KB-
-//     capped value and undercount total_bytes.
-//   - s.maxSampledRowBytes: widest row in sampled tables (#166). The
-//     packet cap must hold for the worst-case row, not the average â€”
-//     chunk_size is global across all tables in a migration, so a mix
-//     of narrow and wide tables would otherwise allow chunks that
-//     exceed @@max_allowed_packet when inserting the wide one (Codex
-//     review on #166).
-//   - s.largestSampledTableBytes: max RowCount Ã— AvgRowSizeBytes across
-//     ALL tables (#214). Used by the skew tier classifier â€” picking
-//     "largest table" from a slice ordered by row count would miss a
-//     low-row but extremely wide table that's actually the bytes
-//     heavyweight (Copilot review on PR #288).
+// The legacy values remain the arithmetic mean of positive widths among the
+// first five row-bearing input tables: uncapped in uncappedAvgRowBytes and
+// capped at 2 KiB in the return value. New fields must not be aliased to that
+// historical feature.
 func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
-	// Average: top-5 largest tables only â€” they dominate runtime, so
-	// averaging across them approximates the steady-state row size
-	// for memory-budget purposes.
-	var totalSize int64
-	var count int
-	for i, t := range tables {
-		if i >= 5 || t.RowCount == 0 {
-			break
-		}
-		if t.AvgRowSizeBytes > 0 {
-			totalSize += t.AvgRowSizeBytes
-			count++
-		}
-	}
-	uncapped := int64(500)
-	if count > 0 {
-		uncapped = totalSize / int64(count)
-	}
-	s.uncappedAvgRowBytes = uncapped
-
-	// Max-row-size AND max-table-bytes both walk all tables (Codex
-	// review on #166 + Copilot review on PR #288). For #214, ordering
-	// LargestTables by row count and picking [0] would miss a small-
-	// row-count, wide-row table that's the actual bytes heavyweight.
-	var maxRow int64
+	var legacyWidths [legacyRowBearingSample]int64
+	legacyRowBearing := 0
+	legacyWidthCount := 0
+	var weightedRows int64
+	var weightedBytes int64
+	weightedOverflow := false
+	var safetyRowBytes int64
+	safetyKnown := false
 	var maxTableBytes int64
+
 	for _, t := range tables {
-		if t.AvgRowSizeBytes > maxRow {
-			maxRow = t.AvgRowSizeBytes
-		}
-		if t.RowCount > 0 && t.AvgRowSizeBytes > 0 {
-			bytes := t.RowCount * t.AvgRowSizeBytes
-			if bytes > maxTableBytes {
-				maxTableBytes = bytes
+		// Preserve the historical feature: the first five row-bearing input
+		// tables define the sample, and only their positive widths contribute.
+		if legacyRowBearing < legacyRowBearingSample && t.RowCount > 0 {
+			legacyRowBearing++
+			if t.AvgRowSizeBytes > 0 {
+				legacyWidths[legacyWidthCount] = t.AvgRowSizeBytes
+				legacyWidthCount++
 			}
 		}
+
+		if t.AvgRowSizeBytes > 0 {
+			safetyKnown = true
+			if t.AvgRowSizeBytes > safetyRowBytes {
+				safetyRowBytes = t.AvgRowSizeBytes
+			}
+		}
+
+		if t.RowCount <= 0 || t.AvgRowSizeBytes <= 0 {
+			continue
+		}
+		tableBytes, productOverflow := saturatingMultiplyPositive(t.RowCount, t.AvgRowSizeBytes)
+		var rowsOverflow, bytesOverflow bool
+		weightedRows, rowsOverflow = saturatingAddPositive(weightedRows, t.RowCount)
+		weightedBytes, bytesOverflow = saturatingAddPositive(weightedBytes, tableBytes)
+		weightedOverflow = weightedOverflow || productOverflow || rowsOverflow || bytesOverflow
+		if tableBytes > maxTableBytes {
+			maxTableBytes = tableBytes
+		}
 	}
-	s.maxSampledRowBytes = maxRow
+
+	uncapped := fallbackRowBytes
+	if legacyWidthCount > 0 {
+		uncapped = overflowSafeMean(legacyWidths[:legacyWidthCount])
+	}
+	representative := fallbackRowBytes
+	if weightedOverflow {
+		// Once the weighted numerator or denominator exceeds int64, dividing
+		// independently saturated values can manufacture a tiny width (for
+		// example MaxInt64/MaxInt64 == 1). Use the observed safety width for
+		// these pathological inputs so overflow never looks deceptively narrow.
+		representative = safetyRowBytes
+	} else if weightedRows > 0 {
+		representative = weightedBytes / weightedRows
+		if representative <= 0 {
+			representative = fallbackRowBytes
+		}
+	}
+	if !safetyKnown {
+		safetyRowBytes = fallbackRowBytes
+	}
+
+	s.uncappedAvgRowBytes = uncapped
+	s.representativeRowBytes = representative
+	s.safetyRowBytes = safetyRowBytes
+	s.safetyRowBytesKnown = safetyKnown
 	s.largestSampledTableBytes = maxTableBytes
 
-	if uncapped > 2000 {
-		return 2000
+	if uncapped > legacyMaxAvgRowBytes {
+		return legacyMaxAvgRowBytes
 	}
 	return uncapped
+}
+
+func saturatingMultiplyPositive(left, right int64) (value int64, overflow bool) {
+	if left <= 0 || right <= 0 {
+		return 0, false
+	}
+	if left > math.MaxInt64/right {
+		return math.MaxInt64, true
+	}
+	return left * right, false
+}
+
+func saturatingAddPositive(left, right int64) (value int64, overflow bool) {
+	if left < 0 {
+		left = 0
+	}
+	if right <= 0 {
+		return left, false
+	}
+	if left > math.MaxInt64-right {
+		return math.MaxInt64, true
+	}
+	return left + right, false
+}
+
+// overflowSafeMean returns the exact floor of the arithmetic mean without
+// summing the inputs into an int64 first. The slice is bounded to five values,
+// but each width may itself be near MaxInt64 in malformed fixture data.
+func overflowSafeMean(values []int64) int64 {
+	if len(values) == 0 {
+		return fallbackRowBytes
+	}
+	count := int64(len(values))
+	var quotientSum int64
+	var remainderSum int64
+	for _, value := range values {
+		quotientSum += value / count
+		remainderSum += value % count
+	}
+	return quotientSum + remainderSum/count
 }
 
 // buildAutoTuneInput constructs input for the tuner.
 func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize int64) AutoTuneInput {
 	cores := runtime.NumCPU()
 	memoryGB := int((s.memoryCapacityMB + 1023) / 1024)
+	representativeRowBytes := s.representativeRowBytes
+	if representativeRowBytes <= 0 {
+		representativeRowBytes = fallbackRowBytes
+	}
+	safetyRowBytes := s.safetyRowBytes
+	if safetyRowBytes <= 0 {
+		safetyRowBytes = fallbackRowBytes
+	}
+	uncappedAvgRowBytes := s.uncappedAvgRowBytes
+	if uncappedAvgRowBytes <= 0 {
+		uncappedAvgRowBytes = avgRowSize
+		if uncappedAvgRowBytes <= 0 {
+			uncappedAvgRowBytes = fallbackRowBytes
+		}
+	}
 
 	var largestTables []TableStats
 	for i, t := range tables {
@@ -108,21 +186,24 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 	}
 
 	return AutoTuneInput{
-		CPUCores:            cores,
-		MemoryGB:            memoryGB,
-		AvailableMemoryMB:   s.availableMemoryMB,
-		Platform:            DetectPlatform(),
-		MaxMemoryMB:         s.memoryBudgetMB,
-		MemoryBudgetMB:      s.memoryBudgetMB,
-		DatabaseType:        s.dbType,
-		TargetType:          s.targetDBType,
-		TargetMode:          s.targetMode,
-		TotalTables:         s.suggestions.TotalTables,
-		TotalRows:           s.suggestions.TotalRows,
-		AvgRowBytes:         avgRowSize,
-		UncappedAvgRowBytes: s.uncappedAvgRowBytes,
-		LargestTableBytes:   s.largestSampledTableBytes,
-		LargestTables:       largestTables,
+		CPUCores:               cores,
+		MemoryGB:               memoryGB,
+		AvailableMemoryMB:      s.availableMemoryMB,
+		Platform:               DetectPlatform(),
+		MaxMemoryMB:            s.memoryBudgetMB,
+		MemoryBudgetMB:         s.memoryBudgetMB,
+		DatabaseType:           s.dbType,
+		TargetType:             s.targetDBType,
+		TargetMode:             s.targetMode,
+		TotalTables:            s.suggestions.TotalTables,
+		TotalRows:              s.suggestions.TotalRows,
+		AvgRowBytes:            avgRowSize,
+		RepresentativeRowBytes: representativeRowBytes,
+		SafetyRowBytes:         safetyRowBytes,
+		SafetyRowBytesKnown:    s.safetyRowBytesKnown,
+		UncappedAvgRowBytes:    uncappedAvgRowBytes,
+		LargestTableBytes:      s.largestSampledTableBytes,
+		LargestTables:          largestTables,
 		// Workload identity passthrough (#215).
 		SourceHost:     s.identitySourceHost,
 		SourcePort:     s.identitySourcePort,

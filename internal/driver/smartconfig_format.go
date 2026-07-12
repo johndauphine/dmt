@@ -10,8 +10,14 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	var sb strings.Builder
 
 	sb.WriteString("# Smart Configuration Suggestions\n")
-	fmt.Fprintf(&sb, "# Database: %d tables, %s rows, ~%d bytes/row avg\n\n",
+	fmt.Fprintf(&sb, "# Database: %d tables, %s rows, ~%d bytes/row legacy top-five avg\n",
 		s.TotalTables, formatRowCount(s.TotalRows), s.AvgRowSizeBytes)
+	fmt.Fprintf(&sb, "# Representative row width: %d bytes (row-count weighted)\n", s.RepresentativeRowBytes)
+	safetySource := "500-byte fallback estimate; no positive schema width observed"
+	if s.SafetyRowBytesKnown {
+		safetySource = "widest observed table-average model; not a per-row bound"
+	}
+	fmt.Fprintf(&sb, "# Safety row width: %d bytes (%s)\n\n", s.SafetyRowBytes, safetySource)
 
 	sb.WriteString("migration:\n")
 	sb.WriteString("  # Deterministic tuner (internal/tuning) -- see #175\n")
@@ -29,6 +35,9 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	fmt.Fprintf(&sb, "  checkpoint_frequency: %d\n", s.CheckpointFrequency)
 	fmt.Fprintf(&sb, "  max_retries: %d\n", s.MaxRetries)
 	fmt.Fprintf(&sb, "  # Estimated memory: ~%dMB\n", s.EstimatedMemMB)
+	if s.MemoryEstimateOverBudget {
+		sb.WriteString("  # WARNING: the final modeled configuration exceeds the memory budget\n")
+	}
 
 	if s.Reasoning != "" {
 		fmt.Fprintf(&sb, "  # Tuning reasoning: %s\n", s.Reasoning)
