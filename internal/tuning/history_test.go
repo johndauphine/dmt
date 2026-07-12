@@ -1532,8 +1532,9 @@ func TestTune_ExplorationUsesRawPersistedCountAndUsableLabel(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:    "linux",
-		AvgRowBytes: 500,
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	rows := make([]HistoryRecord, 10)
@@ -1589,9 +1590,10 @@ func TestTune_ForcedExplorationUsesRawIndexWithoutColdStartLabel(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:     "linux",
-		AvgRowBytes:  500,
-		ForceExplore: true,
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
+		ForceExplore:   true,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	rows := make([]HistoryRecord, 16)

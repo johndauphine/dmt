@@ -134,7 +134,7 @@ notifications:
 migration_defaults:
   # Performance settings (auto-tuned if not set)
   # workers: 4                    # Parallel workers (default: based on CPU cores)
-  # max_memory_mb: 0              # Max memory in MB (default: 70% of available)
+  # max_memory_mb: 0              # Optional ceiling on the resolved automatic memory budget
   # read_ahead_buffers: 8         # Chunks to buffer ahead
   # write_ahead_writers: 2        # Parallel writers per job
   # parallel_readers: 2           # Parallel readers per job

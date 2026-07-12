@@ -25,11 +25,14 @@ import (
 // data collection — no new probes here.
 type Input struct {
 	// System
-	CPUCores          int
-	MemoryGB          int
-	AvailableMemoryMB int64
-	MaxMemoryMB       int64
-	Platform          string // "linux", "wsl2", "darwin", "windows"
+	CPUCores int
+	MemoryGB int
+	// MemoryBudgetMB is the resolved process memory budget supplied by the
+	// caller's shared memory envelope (#708). A positive value is enforced
+	// exactly; zero or negative means no budget was supplied, so tuning still
+	// computes EstimatedMemMB but does not clamp ChunkSize.
+	MemoryBudgetMB int64
+	Platform       string // "linux", "wsl2", "darwin", "windows"
 
 	// Workload
 	SourceDBType string

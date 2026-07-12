@@ -104,9 +104,9 @@ type AutoTuneInput struct {
 	CPUCores          int
 	MemoryGB          int
 	AvailableMemoryMB int64
-	SwapTotalMB       int64
 	Platform          string
-	MaxMemoryMB       int64
+	MaxMemoryMB       int64 // compatibility projection of MemoryBudgetMB
+	MemoryBudgetMB    int64
 
 	DatabaseType string
 	TargetType   string
@@ -206,7 +206,9 @@ type SmartConfigAnalyzer struct {
 	targetMode               string
 	suggestions              *SmartConfigSuggestions
 	historyProvider          TuningHistoryProvider
-	maxMemoryMB              int64
+	memoryCapacityMB         int64
+	availableMemoryMB        int64
+	memoryBudgetMB           int64
 	pendingSave              *pendingTuningSave
 	currentTuning            DBTuningSnapshot
 	forceExplore             bool        // mirrors cfg.Migration.Explore
@@ -266,9 +268,14 @@ func (s *SmartConfigAnalyzer) SetCurrentTuning(t DBTuningSnapshot) {
 	s.currentTuning = t
 }
 
-// SetMaxMemoryMB sets the user-configured memory cap.
-func (s *SmartConfigAnalyzer) SetMaxMemoryMB(mb int64) {
-	s.maxMemoryMB = mb
+// SetMemoryEnvelope supplies the one config-resolved memory envelope used by
+// tuning (#708). Capacity is stable regime metadata; available and budget are
+// the effective host/cgroup values resolved during config loading. The
+// analyzer must not probe or derive a second memory policy.
+func (s *SmartConfigAnalyzer) SetMemoryEnvelope(capacityMB, availableMB, budgetMB int64) {
+	s.memoryCapacityMB = capacityMB
+	s.availableMemoryMB = availableMB
+	s.memoryBudgetMB = budgetMB
 }
 
 // SetTargetDBType sets the target database type for per-target tuning.

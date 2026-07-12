@@ -42,65 +42,6 @@ func TestSafeChunkSize(t *testing.T) {
 	}
 }
 
-// TestMemoryBudgetMB locks in the budget-source selection rules
-// (#158 fallback + #161 floor against the non-monotone cliff).
-func TestMemoryBudgetMB(t *testing.T) {
-	cases := []struct {
-		name       string
-		in         Input
-		wantBudget int64
-		wantSource string
-	}{
-		{
-			"both unset → fallback default",
-			Input{},
-			fallbackBudgetMB,
-			"fallback default",
-		},
-		{
-			"cap only",
-			Input{MaxMemoryMB: 2000},
-			2000,
-			"user max_memory_mb=2000",
-		},
-		{
-			"available only — headroom",
-			Input{AvailableMemoryMB: 30000},
-			27952,
-			"available_memory_mb=30000 - 2048 MB headroom",
-		},
-		{
-			"available below 2GB+fallback → floored",
-			Input{AvailableMemoryMB: 1000},
-			fallbackBudgetMB,
-			"floored at 1024",
-		},
-		{
-			"both — cap is tighter",
-			Input{MaxMemoryMB: 8000, AvailableMemoryMB: 30000},
-			8000,
-			"user max_memory_mb=8000",
-		},
-		{
-			"both — headroom is tighter",
-			Input{MaxMemoryMB: 50000, AvailableMemoryMB: 30000},
-			27952,
-			"available_memory_mb=30000",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			gotBudget, gotSource := memoryBudgetMB(tc.in)
-			if gotBudget != tc.wantBudget {
-				t.Errorf("budget: got %d, want %d", gotBudget, tc.wantBudget)
-			}
-			if !strings.Contains(gotSource, tc.wantSource) {
-				t.Errorf("source: got %q, want substring %q", gotSource, tc.wantSource)
-			}
-		})
-	}
-}
-
 // TestApplyMemoryClamp_NoOpWhenWithinBudget verifies the clamp leaves
 // chunk_size alone when it already fits, and populates EstimatedMemMB.
 func TestApplyMemoryClamp_NoOpWhenWithinBudget(t *testing.T) {
@@ -110,7 +51,7 @@ func TestApplyMemoryClamp_NoOpWhenWithinBudget(t *testing.T) {
 		WriteAheadWriters: 2,
 		ChunkSize:         10000,
 	}
-	in := Input{AvgRowBytes: 500, MaxMemoryMB: 8000}
+	in := Input{AvgRowBytes: 500, MemoryBudgetMB: 8000}
 	applyMemoryClamp(&out, in)
 	if out.ChunkSize != 10000 {
 		t.Errorf("ChunkSize should be unchanged at 10000, got %d", out.ChunkSize)
@@ -131,7 +72,7 @@ func TestApplyMemoryClamp_ShrinksWhenOverBudget(t *testing.T) {
 		ChunkSize:         1_000_000,
 		Reasoning:         "regression-selected WAW=2, chunk_size=1000000",
 	}
-	in := Input{AvgRowBytes: 500, MaxMemoryMB: 1024}
+	in := Input{AvgRowBytes: 500, MemoryBudgetMB: 1024}
 	applyMemoryClamp(&out, in)
 	if out.ChunkSize >= 1_000_000 {
 		t.Errorf("ChunkSize should be clamped down from 1_000_000; got %d", out.ChunkSize)
@@ -161,10 +102,36 @@ func TestApplyMemoryClamp_NoReasoningWhenNoClamp(t *testing.T) {
 		ChunkSize:         10_000,
 		Reasoning:         "smoothed-bins kept WAW=1",
 	}
-	in := Input{AvgRowBytes: 500, MaxMemoryMB: 8_000}
+	in := Input{AvgRowBytes: 500, MemoryBudgetMB: 8_000}
 	applyMemoryClamp(&out, in)
 	if strings.Contains(out.Reasoning, "memory clamp") {
 		t.Errorf("Reasoning must not mention clamp on within-budget run; got %q", out.Reasoning)
+	}
+}
+
+// TestApplyMemoryClamp_ZeroBudgetIsNonbinding pins the #708 boundary:
+// callers must resolve the envelope. An absent budget does not recreate a
+// hidden fallback policy inside tuning, but estimates remain available for
+// diagnostics and persistence.
+func TestApplyMemoryClamp_ZeroBudgetIsNonbinding(t *testing.T) {
+	out := Output{
+		Workers:           16,
+		ReadAheadBuffers:  4,
+		WriteAheadWriters: 2,
+		ChunkSize:         1_000_000,
+		Reasoning:         "baseline",
+	}
+
+	applyMemoryClamp(&out, Input{AvgRowBytes: 500})
+
+	if out.ChunkSize != 1_000_000 {
+		t.Errorf("zero budget changed ChunkSize to %d, want 1000000", out.ChunkSize)
+	}
+	if out.EstimatedMemMB == 0 {
+		t.Error("zero budget must still populate EstimatedMemMB")
+	}
+	if strings.Contains(out.Reasoning, "memory clamp") {
+		t.Errorf("zero budget emitted clamp reasoning: %q", out.Reasoning)
 	}
 }
 
@@ -178,7 +145,7 @@ func TestApplyMemoryClamp_RefusesZeroChunk(t *testing.T) {
 		WriteAheadWriters: 2,
 		ChunkSize:         10000,
 	}
-	in := Input{AvgRowBytes: 500, MaxMemoryMB: 1024}
+	in := Input{AvgRowBytes: 500, MemoryBudgetMB: 1024}
 	applyMemoryClamp(&out, in)
 	if out.ChunkSize == 0 {
 		t.Errorf("clamp should refuse to clamp chunk_size to 0; got 0")

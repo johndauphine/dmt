@@ -9,7 +9,6 @@ import (
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/tuning"
-	"github.com/shirou/gopsutil/v3/mem"
 	"os"
 	"runtime"
 	"strings"
@@ -237,14 +236,8 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 	suggestions := &driver.SmartConfigSuggestions{}
 
 	cores := runtime.NumCPU()
-	memGB := 8 // default assumption
-	availableMemoryMB := int64(memGB) * 1024
-
-	// Get memory info if available
-	if v, err := mem.VirtualMemory(); err == nil {
-		memGB = int(v.Total / (1024 * 1024 * 1024))
-		availableMemoryMB = int64(v.Available / (1024 * 1024))
-	}
+	envelope := cfg.AutoConfig().MemoryEnvelope
+	memGB := int((envelope.CapacityMB + 1023) / 1024)
 
 	// Build a tuning.Input directly — offline path has no source schema, so
 	// AvgRowBytes defaults to 500 (mirrors calculateAvgRowSize's fallback
@@ -253,8 +246,7 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 	in := tuning.Input{
 		CPUCores:           cores,
 		MemoryGB:           memGB,
-		AvailableMemoryMB:  availableMemoryMB,
-		MaxMemoryMB:        cfg.Migration.MaxMemoryMB,
+		MemoryBudgetMB:     envelope.BudgetMB,
 		Platform:           driver.DetectPlatform(),
 		SourceDBType:       cfg.Source.Type,
 		TargetDBType:       cfg.Target.Type,
@@ -325,10 +317,10 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	if o.sourcePool == nil && o.targetPool != nil {
 		logging.Debug("Analyzing target database only (source unavailable)...")
 
-		suggestions := &driver.SmartConfigSuggestions{}
-
-		// Apply sensible defaults based on system resources
-		o.applySystemDefaults(suggestions)
+		// Use the same envelope-aware deterministic baseline as the offline
+		// path. Fixed 50K/core-only defaults can exceed a small container and,
+		// once applied, become pinned values that later tuning cannot repair.
+		suggestions := GetSystemBasedSuggestions(o.config)
 
 		// Add target database tuning recommendations
 		o.addDatabaseTuningRecommendations(ctx, suggestions)
@@ -345,6 +337,8 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 
 	// Create the smart config analyzer
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
+	envelope := o.config.AutoConfig().MemoryEnvelope
+	analyzer.SetMemoryEnvelope(envelope.CapacityMB, envelope.AvailableMB, envelope.BudgetMB)
 
 	// Set up history provider using the state backend for learning from past completed migrations.
 	if o.state != nil {
@@ -418,30 +412,6 @@ func (o *Orchestrator) AnalyzeConfig(ctx context.Context, schema string) (*drive
 	o.addDatabaseTuningRecommendations(ctx, suggestions)
 
 	return suggestions, nil
-}
-
-// applySystemDefaults applies sensible defaults based on system resources.
-func (o *Orchestrator) applySystemDefaults(suggestions *driver.SmartConfigSuggestions) {
-	cores := runtime.NumCPU()
-
-	// Workers: CPU cores minus 2 for OS, minimum 2
-	workers := cores - 2
-	if workers < 2 {
-		workers = 2
-	}
-
-	suggestions.Workers = workers
-	suggestions.ChunkSizeRecommendation = 50000
-	suggestions.ReadAheadBuffers = 4
-	suggestions.WriteAheadWriters = 2
-	suggestions.ParallelReaders = 2
-	suggestions.MaxPartitions = workers
-	suggestions.LargeTableThreshold = 1000000
-	suggestions.MaxSourceConnections = workers + 4
-	suggestions.MaxTargetConnections = workers*2 + 4
-	suggestions.UpsertMergeChunkSize = 5000
-	suggestions.CheckpointFrequency = 20
-	suggestions.MaxRetries = 3
 }
 
 // addDatabaseTuningRecommendations adds source and target database

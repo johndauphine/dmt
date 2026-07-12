@@ -27,8 +27,7 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 	return tuning.Input{
 		CPUCores:            in.CPUCores,
 		MemoryGB:            in.MemoryGB,
-		AvailableMemoryMB:   in.AvailableMemoryMB,
-		MaxMemoryMB:         in.MaxMemoryMB,
+		MemoryBudgetMB:      in.MemoryBudgetMB,
 		Platform:            in.Platform,
 		SourceDBType:        in.DatabaseType,
 		TargetDBType:        in.TargetType,

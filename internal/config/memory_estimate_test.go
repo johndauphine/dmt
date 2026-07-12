@@ -6,7 +6,7 @@ import (
 )
 
 // TestApplyRuntimeMemoryLimit_SetsGOMEMLIMIT verifies the #462 wiring: the
-// effective budget becomes the runtime's soft memory limit so GC pacing and
+// envelope budget becomes the runtime's soft memory limit so GC pacing and
 // pipeline buffer sizing work from the same number.
 func TestApplyRuntimeMemoryLimit_SetsGOMEMLIMIT(t *testing.T) {
 	t.Setenv("GOMEMLIMIT", "") // isolate from an inherited operator env var
@@ -14,7 +14,9 @@ func TestApplyRuntimeMemoryLimit_SetsGOMEMLIMIT(t *testing.T) {
 	t.Cleanup(func() { debug.SetMemoryLimit(prev) })
 
 	c := &Config{}
-	c.autoConfig.EffectiveMaxMemoryMB = 512
+	c.autoConfig.MemoryEnvelope.BudgetMB = 512
+	// Compatibility fields are projections only; the envelope is authoritative.
+	c.autoConfig.EffectiveMaxMemoryMB = 999
 	c.ApplyRuntimeMemoryLimit()
 
 	if got := debug.SetMemoryLimit(-1); got != int64(512)<<20 {
@@ -44,7 +46,7 @@ func TestApplyRuntimeMemoryLimit_EnvWins(t *testing.T) {
 	t.Cleanup(func() { debug.SetMemoryLimit(prev) })
 
 	c := &Config{}
-	c.autoConfig.EffectiveMaxMemoryMB = 512
+	c.autoConfig.MemoryEnvelope.BudgetMB = 512
 	c.ApplyRuntimeMemoryLimit()
 
 	if got := debug.SetMemoryLimit(-1); got != prev {

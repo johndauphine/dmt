@@ -242,25 +242,12 @@ func (c *Config) applyDefaults() error {
 	if c.autoConfig.CPUCores == 0 {
 		c.autoConfig.CPUCores = runtime.NumCPU()
 	}
-	availMem, err := getAvailableMemoryMB()
-	if err != nil {
-		// If user set max_memory_mb, we don't need system detection
-		if c.Migration.MaxMemoryMB > 0 {
-			availMem = c.Migration.MaxMemoryMB
-		} else {
-			return fmt.Errorf("detecting available memory: %w (set max_memory_mb in config to override)", err)
-		}
+	// Resolve the host/cgroup-aware memory envelope exactly once. A user cap is
+	// only a ceiling on a successful snapshot; detection failures are fatal so
+	// a finite container can never silently inherit host capacity (#708).
+	if err := c.resolveMemoryEnvelope(); err != nil {
+		return fmt.Errorf("resolving memory envelope: %w", err)
 	}
-	c.autoConfig.AvailableMemoryMB = availMem
-
-	// Calculate target memory for auto-tuning (50% of limit)
-	// If user specified max_memory_mb, use that as the base
-	// Otherwise use available memory
-	baseMemoryMB := c.autoConfig.AvailableMemoryMB
-	if c.Migration.MaxMemoryMB > 0 && c.Migration.MaxMemoryMB < baseMemoryMB {
-		baseMemoryMB = c.Migration.MaxMemoryMB
-	}
-	c.autoConfig.TargetMemoryMB = baseMemoryMB / 2
 
 	// Source defaults - use driver registry for pluggable defaults
 	if c.Source.Type == "" {
@@ -338,9 +325,9 @@ func (c *Config) applyDefaults() error {
 	// Auto-tune chunk size based on available RAM
 	// Formula: 75K base + 25K per 8GB RAM, clamped to 50K-200K
 	// This matches the Rust implementation for consistent behavior
-	targetMemoryMB := c.autoConfig.TargetMemoryMB
+	memoryBudgetMB := c.autoConfig.MemoryEnvelope.BudgetMB
 	if c.Migration.ChunkSize == 0 {
-		ramGB := float64(c.autoConfig.AvailableMemoryMB) / 1024.0
+		ramGB := float64(c.autoConfig.MemoryEnvelope.AvailableMB) / 1024.0
 		chunkSize := 75000 + int(ramGB*25000.0/8.0)
 		if chunkSize < 50000 {
 			chunkSize = 50000
@@ -433,9 +420,9 @@ func (c *Config) applyDefaults() error {
 	// This is applied later since it depends on ChunkSize being set
 	if c.Migration.ReadAheadBuffers == 0 {
 		// Scale buffers: enough to keep writers fed, but within memory limits
-		// Formula: targetMemoryMB / workers / (chunkSize * 500 bytes avg)
+		// Formula: envelope budget / workers / (chunkSize * 500 bytes avg)
 		bytesPerChunk := int64(c.Migration.ChunkSize) * 500 // ~500 bytes per row average
-		buffersPerWorker := (targetMemoryMB * 1024 * 1024) / int64(c.Migration.Workers) / bytesPerChunk
+		buffersPerWorker := (memoryBudgetMB * 1024 * 1024) / int64(c.Migration.Workers) / bytesPerChunk
 		c.Migration.ReadAheadBuffers = int(buffersPerWorker)
 		if c.Migration.ReadAheadBuffers < 4 {
 			c.Migration.ReadAheadBuffers = 4
@@ -444,18 +431,6 @@ func (c *Config) applyDefaults() error {
 			c.Migration.ReadAheadBuffers = 32 // Cap to avoid excessive memory
 		}
 	}
-
-	// Calculate effective memory limit for Go GC soft limit
-	// Hard cap at 70% of available memory to leave room for OS and other processes
-	hardCapMB := c.autoConfig.AvailableMemoryMB * 70 / 100
-	effectiveMaxMB := hardCapMB
-	if c.Migration.MaxMemoryMB > 0 {
-		// User specified a limit - use it, but enforce hard cap
-		if c.Migration.MaxMemoryMB < hardCapMB {
-			effectiveMaxMB = c.Migration.MaxMemoryMB
-		}
-	}
-	c.autoConfig.EffectiveMaxMemoryMB = effectiveMaxMB
 
 	// Auto-size connection pools based on workers, readers, and writers
 	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
@@ -486,9 +461,9 @@ func (c *Config) applyDefaults() error {
 	// Smaller chunks reduce SQL Server memory pressure during merge operations
 	if c.Migration.UpsertMergeChunkSize == 0 {
 		if c.Migration.TargetMode == "upsert" {
-			// For upsert mode, use smaller chunks based on available memory
+			// For upsert mode, use smaller chunks based on the shared budget
 			// Base: 5000 rows, scale up with memory (max 20000)
-			memoryFactor := targetMemoryMB / 1024 // Scale factor per GB
+			memoryFactor := memoryBudgetMB / 1024 // Scale factor per GB
 			if memoryFactor < 1 {
 				memoryFactor = 1
 			}
