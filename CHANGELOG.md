@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Exploration-tier migrations now suppress runtime writer/chunk growth while
+  retaining memory and error backoffs. Planned-grid rotation uses raw pair
+  history, so safety-adjusted or otherwise filtered attempts do not pin the
+  next sequential run to the same starting cell (#697).
+
 - Completed migrations now stamp throughput and retry results onto the exact
   tuning-history row created for that run, preventing failed analyses or
   concurrent runs from attributing results to another configuration (#695).
