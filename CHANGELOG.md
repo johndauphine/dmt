@@ -11,6 +11,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Completed migrations now stamp throughput and retry results onto the exact
+  tuning-history row created for that run, preventing failed analyses or
+  concurrent runs from attributing results to another configuration (#695).
+
 - Concurrent table pipelines now share one migration-scoped memory-pressure
   guard, preventing a heap-threshold crossing from electing multiple
   simultaneous `FreeOSMemory` / forced-GC leaders. Direct transfer callers

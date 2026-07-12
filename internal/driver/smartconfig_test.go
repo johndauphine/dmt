@@ -17,8 +17,10 @@ import (
 // tuner reads raw rows and aggregates in-package). Just enough to verify
 // SaveTuningWithActualParams persists the post-override params.
 type mockHistoryProvider struct {
-	saved   *checkpoint.TuningRecord
-	history []checkpoint.TuningRecord
+	saved     *checkpoint.TuningRecord
+	history   []checkpoint.TuningRecord
+	rowID     int64
+	saveError error
 }
 
 func (m *mockHistoryProvider) GetRuntimeAdjustments(int) ([]checkpoint.RuntimeAdjustmentRecord, error) {
@@ -29,19 +31,19 @@ func (m *mockHistoryProvider) GetTuningHistory(_ int, _, _ string) ([]checkpoint
 	return m.history, nil
 }
 
-func (m *mockHistoryProvider) SaveTuningRecord(record checkpoint.TuningRecord) error {
+func (m *mockHistoryProvider) SaveTuningRecord(record checkpoint.TuningRecord) (int64, error) {
 	m.saved = &record
-	return nil
+	return m.rowID, m.saveError
 }
 
-func (m *mockHistoryProvider) UpdateTuningResult(float64, float64, int, bool) error {
+func (m *mockHistoryProvider) UpdateTuningResult(int64, float64, float64, int, bool) error {
 	return nil
 }
 
 // TestSaveTuningWithActualParams verifies the persisted record uses
 // post-override params (issue #160) and the recomputed memory estimate.
 func TestSaveTuningWithActualParams(t *testing.T) {
-	mock := &mockHistoryProvider{}
+	mock := &mockHistoryProvider{rowID: 42}
 
 	analyzer := &SmartConfigAnalyzer{
 		dbType:          "mssql",
@@ -66,7 +68,7 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 		reasoning: "test reasoning",
 	}
 
-	analyzer.SaveTuningWithActualParams(ActualParams{
+	rowID := analyzer.SaveTuningWithActualParams(ActualParams{
 		Workers:           12,
 		ChunkSize:         14000,
 		ReadAheadBuffers:  4,
@@ -74,6 +76,9 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 		ParallelReaders:   6,
 		MaxPartitions:     8,
 	})
+	if rowID != 42 {
+		t.Fatalf("SaveTuningWithActualParams row ID = %d, want 42", rowID)
+	}
 
 	if analyzer.pendingSave != nil {
 		t.Error("pendingSave should be nil after SaveTuningWithActualParams")

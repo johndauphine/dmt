@@ -93,6 +93,10 @@ type Orchestrator struct {
 	// ai_tuning_history so the tuner can exclude the row from training.
 	lastRunAdjusted bool
 
+	// Identifies the ai_tuning_history row created by applyTuning for this
+	// run. Zero means no row exists, so completion must not stamp history.
+	lastTuningRowID int64
+
 	// metrics is the observability surface for #229. Always non-nil —
 	// observability.Noop() satisfies the interface when metrics are
 	// disabled, so call sites can invoke methods unconditionally without
