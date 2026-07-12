@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Runtime memory rules now use the more constrained host or finite-cgroup
+  pressure instead of Go heap allocation divided by runtime-reserved memory.
+  Failed or unavailable telemetry is explicit and cannot authorize writer
+  growth; heap allocation remains a separate diagnostic (#696).
+
 - Smart configuration now separates representative workload width from the
   widest observed table-average safety width. Performance sizing is no longer
   distorted by tiny wide tables, while memory clamps use the safer width,

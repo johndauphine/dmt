@@ -8,10 +8,11 @@
 //
 // Rule set (evaluated in priority order, first match wins per tick):
 //
-//	IF memory_pct > 90:
+//	IF memory_pressure_known AND memory_pct > 90:
 //	    chunk_size *= 0.75   (back off under memory pressure)
 //
 //	ELIF queue_depth grew for 3 consecutive ticks
+//	   AND memory_pressure_known
 //	   AND memory_pct < 80                       (#199 interlock)
 //	   AND prior writer-add improved throughput  (#199 throughput-aware):
 //	    write_ahead_writers += 1   (consumer is the bottleneck —
@@ -30,11 +31,10 @@
 // rules can still fire if their cooldown has expired.
 //
 // Rule 2 has two extra suppression gates added after #199:
-//   - Memory interlock: if memory% ≥ 80, adding a writer compounds
-//     pressure on the target DB. Rule 1's 90% threshold targets
-//     OOM-imminent; the 80% interlock is the broader "PG is already
-//     swamped" guard that spans the gap between Rule 1 and a healthy
-//     baseline.
+//   - Memory interlock: adding a writer requires known memory pressure below
+//     80%. Unknown telemetry cannot be treated as abundant memory, while known
+//     pressure ≥80% means a new writer would compound target-DB pressure.
+//     Rule 1's 90% threshold targets OOM-imminent pressure.
 //   - Throughput-aware: after a writer-add, if the recent mean
 //     throughput hasn't improved by ≥2%, the writer didn't help —
 //     the bottleneck is somewhere else (PG WAL flush, disk I/O,
@@ -193,11 +193,12 @@ const controllerCooldown = 90 * time.Second
 const memoryPressureThreshold = 90.0
 
 // writerAddMemoryInterlockThreshold is the upper bound on memory% for
-// Rule 2 to fire (#199). Rule 1's chunk-shrink threshold is 90% (OOM-
-// imminent); this 80% gate suppresses writer-adds in the broader
+// Rule 2 to fire (#199/#696). Rule 1's chunk-shrink threshold is 90%
+// (OOM-imminent); this 80% gate suppresses writer-adds in the broader
 // "target DB is already under pressure" zone where a new writer would
-// compound memory contention without draining the queue. Set lower
-// than memoryPressureThreshold so the gate fires before Rule 1 does.
+// compound memory contention without draining the queue. Unknown pressure also
+// suppresses Rule 2, because a failed telemetry read is not evidence of spare
+// memory. Set lower than memoryPressureThreshold so the gate fires first.
 const writerAddMemoryInterlockThreshold = 80.0
 
 // writerAddMinImprovementRatio is the minimum throughput improvement
@@ -357,8 +358,9 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	latest := recent[len(recent)-1]
 	cur := latest.CurrentConfig
 
-	// Rule 1: memory pressure → shrink chunk_size.
-	if latest.MemoryPercent > memoryPressureThreshold && c.knobReady("chunk_size", now) {
+	// Rule 1: known memory pressure → shrink chunk_size. Unknown telemetry
+	// is not fabricated into either a safe reading or a shrink event (#696).
+	if latest.MemoryPressureKnown && latest.MemoryPercent > memoryPressureThreshold && c.knobReady("chunk_size", now) {
 		next := shrinkChunk(cur.ChunkSize, chunkShrinkFactor, c.minChunkSize)
 		if next < cur.ChunkSize {
 			return &Decision{
@@ -375,8 +377,8 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 
 	// Rule 2: queue depth grew for N consecutive ticks → add a writer.
 	// Two suppression gates added in #199:
-	//   - Memory interlock: don't add a writer when memory% is already
-	//     in the "swamped" zone (≥80, below Rule 1's 90% OOM threshold).
+	//   - Memory interlock: only add a writer when pressure is known and below
+	//     80%. Unknown telemetry cannot authorize performance growth (#696).
 	//   - Throughput-aware: if the prior writer-add didn't improve the
 	//     recent-window mean throughput by ≥2%, the writer-side wasn't
 	//     the bottleneck — don't add another.
@@ -384,7 +386,7 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	// to Rules 3 and 4 normally.
 	if !c.safetyOnly && c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
 		suppressed := false
-		if latest.MemoryPercent >= writerAddMemoryInterlockThreshold {
+		if !latest.MemoryPressureKnown || latest.MemoryPercent >= writerAddMemoryInterlockThreshold {
 			suppressed = true
 		}
 		if !suppressed && c.lastWAWAddThroughputSet {

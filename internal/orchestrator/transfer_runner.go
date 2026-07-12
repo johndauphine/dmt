@@ -13,6 +13,7 @@ import (
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/internal/systemmemory"
 	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/johndauphine/dmt/internal/tuning"
 	"strings"
@@ -281,7 +282,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		}
 	}
 	if adjustEnabled {
-		collector := monitor.NewMetricsCollector(tuner, adjustInterval)
+		collector := monitor.NewMetricsCollector(tuner, adjustInterval, systemmemory.NewReader())
 
 		// Carry the probe-derived hard cap from applyTuning into the
 		// controller so growth and shrink rules can't push chunk_size
