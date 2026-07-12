@@ -88,6 +88,7 @@ type Controller struct {
 	maxChunkSize int
 	minChunkSize int
 	maxWAW       int
+	safetyOnly   bool
 
 	// nowFn is the clock — overridable in tests via NewController's
 	// options-style setter so cooldown logic can be exercised
@@ -103,6 +104,11 @@ type Controller struct {
 // ControllerOptions wraps the optional knobs the rule controller
 // uses for clamping. Zero values fall back to defensive defaults.
 type ControllerOptions struct {
+	// SafetyOnly suppresses performance-growth Rules 2 and 4 while keeping
+	// the memory/error backoff Rules 1 and 3 active. Exploration probes use
+	// this mode so safety still wins without contaminating clean cohorts.
+	SafetyOnly bool
+
 	// MaxChunkSize caps the chunk_size knob's growth rule. The driver
 	// layer's HardChunkLimit (#166) is the natural source. Zero =
 	// unlimited.
@@ -254,6 +260,7 @@ func NewController(tuner transfer.RuntimeTuner, collector *MetricsCollector, int
 		maxChunkSize: opts.MaxChunkSize,
 		minChunkSize: opts.MinChunkSize,
 		maxWAW:       opts.MaxWAW,
+		safetyOnly:   opts.SafetyOnly,
 		nowFn:        time.Now,
 
 		runID:                opts.RunID,
@@ -375,7 +382,7 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	//     the bottleneck — don't add another.
 	// Both gates are skip-only — when either fires, control falls through
 	// to Rules 3 and 4 normally.
-	if c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
+	if !c.safetyOnly && c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
 		suppressed := false
 		if latest.MemoryPercent >= writerAddMemoryInterlockThreshold {
 			suppressed = true
@@ -447,7 +454,7 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	}
 
 	// Rule 4: idle CPU + stable throughput → grow chunk_size.
-	if latest.CPUPercent < idleCPUThreshold && c.knobReady("chunk_size", now) && throughputStable(recent) {
+	if !c.safetyOnly && latest.CPUPercent < idleCPUThreshold && c.knobReady("chunk_size", now) && throughputStable(recent) {
 		next := growChunk(cur.ChunkSize, chunkGrowFactor, c.maxChunkSize)
 		if next > cur.ChunkSize {
 			return &Decision{

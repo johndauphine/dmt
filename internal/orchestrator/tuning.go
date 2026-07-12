@@ -17,8 +17,9 @@ import (
 // on any failure (logged at Debug/Warn level).
 func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// An Orchestrator may be reused for resume segments. Never let a failed
-	// or manual analysis inherit a row created by an earlier segment.
+	// or manual analysis inherit a row or tier created by an earlier segment.
 	o.lastTuningRowID = 0
+	o.lastTuningTier = ""
 
 	// Coarse switch (#461): migration.tuning: manual disables pre-run
 	// parameter derivation entirely — user values and formula defaults
@@ -152,6 +153,7 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 		logging.Warn("Tuning analysis failed, using formula defaults: %v", err)
 		return
 	}
+	o.lastTuningTier = suggestions.Tier
 
 	// Apply suggestions only where user didn't specify values
 	changes := o.config.ApplyTunerSuggestions(suggestions)

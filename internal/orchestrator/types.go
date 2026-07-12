@@ -97,6 +97,11 @@ type Orchestrator struct {
 	// run. Zero means no row exists, so completion must not stamp history.
 	lastTuningRowID int64
 
+	// Identifies which deterministic tier selected this run's parameters.
+	// TransferRunner uses the exploration tier to suppress performance-growth
+	// rules while retaining runtime safety backoffs (#697).
+	lastTuningTier string
+
 	// metrics is the observability surface for #229. Always non-nil —
 	// observability.Noop() satisfies the interface when metrics are
 	// disabled, so call sites can invoke methods unconditionally without

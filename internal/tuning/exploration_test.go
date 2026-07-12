@@ -43,7 +43,7 @@ func TestApplyGridExploration_RotatesByBucketCount(t *testing.T) {
 	picks := make(map[gridCandidate]int)
 	for i := 0; i < explorationGridRuns; i++ {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, i)
+		applyGridExploration(&out, in, profile, i, i)
 		// Reverse the CSFraction from out.ChunkSize for set-membership check.
 		// At avg=500, full optimum 25MB → 50000 rows; half → 25000 rows.
 		var frac float64
@@ -75,7 +75,7 @@ func TestApplyGridExploration_CoversReaderGrid(t *testing.T) {
 	seen := map[readerCandidate]bool{}
 	for i := 0; i < explorationGridRuns; i++ {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, i)
+		applyGridExploration(&out, in, profile, i, i)
 		seen[readerCandidate{ParallelReaders: out.ParallelReaders, ReadAheadBuffers: out.ReadAheadBuffers}] = true
 	}
 	if len(seen) != len(readerGrid) {
@@ -94,7 +94,7 @@ func TestApplyGridExploration_SetsReaderFields(t *testing.T) {
 
 	for i := 0; i < explorationGridRuns; i++ {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, i)
+		applyGridExploration(&out, in, profile, i, i)
 		if out.ParallelReaders < 1 || out.ReadAheadBuffers < 1 {
 			t.Errorf("bucketCount=%d: grid pick produced invalid (PR=%d, RAB=%d); expected positives",
 				i, out.ParallelReaders, out.ReadAheadBuffers)
@@ -151,7 +151,7 @@ func TestApplyGridExploration_IgnoresHistoricalRetries(t *testing.T) {
 	wawCounts := map[int]int{}
 	for i := 0; i < explorationGridRuns; i++ {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, i)
+		applyGridExploration(&out, in, profile, i, i)
 		wawCounts[out.WriteAheadWriters]++
 	}
 	if wawCounts[2] < 2 {
@@ -175,7 +175,7 @@ func TestApplyGridExploration_RespectsHardChunkLimit(t *testing.T) {
 	}
 	out := baseline(in, profile)
 	originalChunk := out.ChunkSize
-	applyGridExploration(&out, in, profile, 0)
+	applyGridExploration(&out, in, profile, 0, 0)
 	if out.ChunkSize > 10000 {
 		t.Errorf("ChunkSize=%d exceeds HardChunkLimit=10000; filter should have skipped or baseline should hold", out.ChunkSize)
 	}

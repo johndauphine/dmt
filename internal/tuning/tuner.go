@@ -165,10 +165,9 @@ type DriverProfile struct {
 // no-history and returns a pure-baseline output.
 type HistoryProvider interface {
 	// Records returns the migration history for the given (source, target)
-	// pair. Order is not significant — Tune sorts/filters as needed.
-	// Implementations may bound the result; PR1 doesn't depend on a
-	// specific bound (regime + outlier filtering shrink the effective
-	// dataset before selection).
+	// pair. Order is not significant — Tune sorts/filters as needed. The
+	// result must be the unbounded pair history: planned-grid rotation uses
+	// its raw length as a sequential at-least-once attempt index (#697).
 	Records(sourceDBType, targetDBType string) ([]HistoryRecord, error)
 }
 
@@ -327,9 +326,15 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	var regimeRows []HistoryRecord
 	var regimeFilter outlierFilterResult
 	historyAvailable := false
+	rawCount := 0
 	if history != nil {
 		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
 			historyAvailable = true
+			// Pair-scoped raw persisted attempts advance planned-grid rotation
+			// even when runtime-adjusted, regime, or outlier filters later
+			// exclude them. This is a sequential at-least-once index, not an
+			// atomic reservation across concurrent Tune calls.
+			rawCount = len(r)
 			// #451: runtime-adjusted rows are dropped before any cohort
 			// is built — regime filter, drift detector, outlier passes,
 			// the exploration bucket count, and both selection tiers all
@@ -396,7 +401,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// output — leave appendOutlierReasoning unfired.
 	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
 	if in.ForceExplore || driftDetected {
-		applyGridExploration(&out, in, profile, len(rows))
+		applyGridExploration(&out, in, profile, len(rows), rawCount)
 		// Advice runs after the selector so the reader-settings filter
 		// uses the FINAL output readers, not baseline. Suppressed on
 		// drift: the tuner just declared this history stale, so means
@@ -469,7 +474,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		// regression's prediction surface isn't consumed, so the
 		// regime cohort's outlier drops aren't part of the chosen
 		// output — leave appendOutlierReasoning unfired.
-		applyGridExploration(&out, in, profile, len(rows))
+		applyGridExploration(&out, in, profile, len(rows), rawCount)
 	} else if len(rows) > 0 {
 		// Tier 2/3 fallback consumes the regime-filtered cohort —
 		// emit its drops as the audit trail for the chosen output.
