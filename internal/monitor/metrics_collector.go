@@ -2,12 +2,14 @@ package monitor
 
 import (
 	"context"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/systemmemory"
 	"github.com/johndauphine/dmt/internal/transfer"
 	"github.com/shirou/gopsutil/v3/cpu"
 )
@@ -21,9 +23,14 @@ type PerformanceSnapshot struct {
 	ThroughputTrend float64 // % change from previous sample
 
 	// Resource usage
-	MemoryUsedMB  int64
-	MemoryPercent float64
-	CPUPercent    float64
+	MemoryPercent       float64 // effective host/container used percent
+	MemoryPressureKnown bool
+	HeapAllocMB         int64 // process heap diagnostic only; controller rules must not consume it
+	CPUPercent          float64
+
+	// memoryPressureSource is deliberately package-private: it explains the
+	// effective pressure in logs without becoming another controller signal.
+	memoryPressureSource string
 
 	// Database metrics
 	QueryLatencyMs   float64
@@ -69,6 +76,7 @@ type TrendAnalysis struct {
 // MetricsCollector continuously collects performance metrics during migration.
 type MetricsCollector struct {
 	tuner         transfer.RuntimeTuner
+	memoryReader  systemmemory.Reader
 	startTime     time.Time
 	interval      time.Duration
 	rowsProcessed atomic.Int64
@@ -86,13 +94,19 @@ type MetricsCollector struct {
 	metrics   []PerformanceSnapshot
 }
 
-// NewMetricsCollector creates a new metrics collector.
-func NewMetricsCollector(tuner transfer.RuntimeTuner, interval time.Duration) *MetricsCollector {
+// NewMetricsCollector creates a new metrics collector. memoryReader is
+// injectable so tests and callers use the same component-aware pressure
+// contract; nil falls back to the current platform reader.
+func NewMetricsCollector(tuner transfer.RuntimeTuner, interval time.Duration, memoryReader systemmemory.Reader) *MetricsCollector {
+	if memoryReader == nil {
+		memoryReader = systemmemory.NewReader()
+	}
 	return &MetricsCollector{
-		tuner:     tuner,
-		startTime: time.Now(),
-		interval:  interval,
-		metrics:   make([]PerformanceSnapshot, 0, 128), // Pre-allocate for ~64 minutes of data
+		tuner:        tuner,
+		memoryReader: memoryReader,
+		startTime:    time.Now(),
+		interval:     interval,
+		metrics:      make([]PerformanceSnapshot, 0, 128), // Pre-allocate for ~64 minutes of data
 	}
 }
 
@@ -132,11 +146,18 @@ func (mc *MetricsCollector) collectSnapshot() {
 	// Collect expensive I/O metrics outside the lock
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	snapshot.MemoryUsedMB = int64(m.Alloc / 1024 / 1024)
+	snapshot.HeapAllocMB = int64(m.HeapAlloc / 1024 / 1024)
 
-	totalMemBytes := int64(m.Sys)
-	if totalMemBytes > 0 {
-		snapshot.MemoryPercent = float64(m.Alloc) / float64(totalMemBytes) * 100
+	if mc.memoryReader != nil {
+		if memorySnapshot, err := mc.memoryReader.Read(); err == nil {
+			if percent, source, ok := memorySnapshot.EffectivePressure(); ok {
+				if percent, valid := clampMemoryPressure(percent); valid {
+					snapshot.MemoryPercent = percent
+					snapshot.MemoryPressureKnown = true
+					snapshot.memoryPressureSource = source
+				}
+			}
+		}
 	}
 
 	cpuPercent, err := cpu.Percent(100*time.Millisecond, false)
@@ -204,8 +225,27 @@ func (mc *MetricsCollector) collectSnapshot() {
 	mc.metrics = append(mc.metrics, snapshot)
 	mc.metricsMu.Unlock()
 
-	logging.Debug("Metrics snapshot: %.0f rows/sec, memory=%dMB (%.1f%%), CPU=%.1f%%, throughput_trend=%.1f%%",
-		snapshot.Throughput, snapshot.MemoryUsedMB, snapshot.MemoryPercent, snapshot.CPUPercent, snapshot.ThroughputTrend)
+	if snapshot.MemoryPressureKnown {
+		logging.Debug("Metrics snapshot: %.0f rows/sec, memory_pressure=%.1f%% source=%s, heap_alloc=%dMB, CPU=%.1f%%, throughput_trend=%.1f%%",
+			snapshot.Throughput, snapshot.MemoryPercent, snapshot.memoryPressureSource, snapshot.HeapAllocMB, snapshot.CPUPercent, snapshot.ThroughputTrend)
+	} else {
+		logging.Debug("Metrics snapshot: %.0f rows/sec, memory_pressure=unknown, heap_alloc=%dMB, CPU=%.1f%%, throughput_trend=%.1f%%",
+			snapshot.Throughput, snapshot.HeapAllocMB, snapshot.CPUPercent, snapshot.ThroughputTrend)
+	}
+}
+
+func clampMemoryPressure(percent float64) (float64, bool) {
+	if math.IsNaN(percent) || math.IsInf(percent, 0) {
+		return 0, false
+	}
+	switch {
+	case percent < 0:
+		return 0, true
+	case percent > 100:
+		return 100, true
+	default:
+		return percent, true
+	}
 }
 
 // GetRecentMetrics returns the last N snapshots.
@@ -268,10 +308,12 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 		}
 	}
 
-	// Memory trend (>5% increase per sample)
-	if len(recent) >= 3 {
-		memIncrease1 := float64(recent[1].MemoryUsedMB-recent[0].MemoryUsedMB) / float64(max(1, recent[0].MemoryUsedMB))
-		memIncrease2 := float64(recent[2].MemoryUsedMB-recent[1].MemoryUsedMB) / float64(max(1, recent[1].MemoryUsedMB))
+	// Memory-pressure trend (>5% relative increase per sample). HeapAllocMB is
+	// diagnostic only and deliberately does not participate. Unknown pressure
+	// suppresses the trend rather than being interpreted as zero utilization.
+	if recent[0].MemoryPressureKnown && recent[1].MemoryPressureKnown && recent[2].MemoryPressureKnown {
+		memIncrease1 := (recent[1].MemoryPercent - recent[0].MemoryPercent) / math.Max(1, recent[0].MemoryPercent)
+		memIncrease2 := (recent[2].MemoryPercent - recent[1].MemoryPercent) / math.Max(1, recent[1].MemoryPercent)
 		if memIncrease1 > 0.05 && memIncrease2 > 0.05 {
 			result.MemoryIncreasing = true
 		}
@@ -283,7 +325,7 @@ func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
 	}
 
 	// Memory saturation
-	if recent[len(recent)-1].MemoryPercent > 75 {
+	if recent[len(recent)-1].MemoryPressureKnown && recent[len(recent)-1].MemoryPercent > 75 {
 		result.MemorySaturated = true
 	}
 

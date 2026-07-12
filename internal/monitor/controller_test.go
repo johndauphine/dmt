@@ -30,7 +30,7 @@ func newTestController(t *testing.T, opts ControllerOptions) (*Controller, *Metr
 		ReadAheadBuffers:  4,
 		ParallelReaders:   2,
 	})
-	collector := NewMetricsCollector(tuner, 30*time.Second)
+	collector := NewMetricsCollector(tuner, 30*time.Second, nil)
 	c := NewController(tuner, collector, 30*time.Second, opts)
 	return c, collector, tuner
 }
@@ -45,17 +45,18 @@ func pushSnapshots(c *MetricsCollector, snaps ...PerformanceSnapshot) {
 	c.metrics = append(c.metrics, snaps...)
 }
 
-// snap builds a PerformanceSnapshot with the given knobs. Unset
-// fields stay zero — rules that read them treat zero as "no
-// signal" (queue depth, errors, throughput).
+// snap builds a PerformanceSnapshot with known memory pressure and the given
+// knobs. Existing controller fixtures model successful telemetry reads; tests
+// for failed/unknown reads clear MemoryPressureKnown explicitly.
 func snap(memPct, cpuPct float64, queueDepth, errorCount int, throughput float64, chunk, waw int) PerformanceSnapshot {
 	return PerformanceSnapshot{
-		Timestamp:     time.Now(),
-		MemoryPercent: memPct,
-		CPUPercent:    cpuPct,
-		QueueDepth:    queueDepth,
-		ErrorCount:    errorCount,
-		Throughput:    throughput,
+		Timestamp:           time.Now(),
+		MemoryPercent:       memPct,
+		MemoryPressureKnown: true,
+		CPUPercent:          cpuPct,
+		QueueDepth:          queueDepth,
+		ErrorCount:          errorCount,
+		Throughput:          throughput,
 		CurrentConfig: ConfigSnapshot{
 			ChunkSize:         chunk,
 			WriteAheadWriters: waw,
@@ -576,6 +577,41 @@ func TestController_QueueGrew_MemoryJustBelowInterlock_AddsWriter(t *testing.T) 
 	if d == nil || d.Knob != "write_ahead_writers" {
 		t.Fatalf("memory just under interlock should permit writer-add; got %+v", d)
 	}
+}
+
+// Unknown pressure is neither a high-pressure shrink signal nor evidence that
+// writer growth is safe. Exercise both numeric representations independently:
+// a stale/high value must not fabricate Rule 1, and the zero that previously
+// represented a failed telemetry read must not authorize Rule 2 (#696). CPU=80
+// prevents the intentionally out-of-scope Rule 4 from firing.
+func TestController_UnknownMemoryPressure_FiresNeitherRule1NorRule2(t *testing.T) {
+	t.Run("high numeric value does not shrink", func(t *testing.T) {
+		c, col, _ := newTestController(t, ControllerOptions{})
+		snapshot := snap(95, 80, 0, 0, 500_000, 50000, 2)
+		snapshot.MemoryPressureKnown = false
+		pushSnapshots(col, snapshot)
+
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("unknown memory pressure must not shrink chunks; got %+v", d)
+		}
+	})
+
+	t.Run("zero numeric value does not add writer", func(t *testing.T) {
+		c, col, _ := newTestController(t, ControllerOptions{})
+		snapshots := []PerformanceSnapshot{
+			snap(0, 80, 5, 0, 500_000, 50000, 2),
+			snap(0, 80, 8, 0, 500_000, 50000, 2),
+			snap(0, 80, 12, 0, 500_000, 50000, 2),
+		}
+		for i := range snapshots {
+			snapshots[i].MemoryPressureKnown = false
+		}
+		pushSnapshots(col, snapshots...)
+
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("unknown zero pressure must not authorize a writer add; got %+v", d)
+		}
+	})
 }
 
 // TestController_WAWAdd_ThroughputDidNotImprove_SuppressesNextAdd:

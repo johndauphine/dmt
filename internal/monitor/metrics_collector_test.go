@@ -1,11 +1,28 @@
 package monitor
 
 import (
+	"bytes"
+	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/systemmemory"
 	"github.com/johndauphine/dmt/internal/transfer"
 )
+
+type fakeMemoryReader struct {
+	snapshot systemmemory.Snapshot
+	err      error
+	reads    int
+}
+
+func (r *fakeMemoryReader) Read() (systemmemory.Snapshot, error) {
+	r.reads++
+	return r.snapshot, r.err
+}
 
 func TestAnalyzeTrends(t *testing.T) {
 	t.Run("insufficient data", func(t *testing.T) {
@@ -122,9 +139,9 @@ func TestAnalyzeTrends(t *testing.T) {
 	t.Run("memory saturated", func(t *testing.T) {
 		mc := &MetricsCollector{
 			metrics: []PerformanceSnapshot{
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 70},
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 75},
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 80}, // >75%
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 70, MemoryPressureKnown: true},
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 75, MemoryPressureKnown: true},
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 80, MemoryPressureKnown: true}, // >75%
 			},
 		}
 
@@ -135,12 +152,26 @@ func TestAnalyzeTrends(t *testing.T) {
 		}
 	})
 
+	t.Run("unknown memory is not saturated", func(t *testing.T) {
+		mc := &MetricsCollector{
+			metrics: []PerformanceSnapshot{
+				{Throughput: 100000, MemoryPercent: 70, MemoryPressureKnown: true},
+				{Throughput: 100000, MemoryPercent: 75, MemoryPressureKnown: true},
+				{Throughput: 100000, MemoryPercent: 99, MemoryPressureKnown: false},
+			},
+		}
+
+		if trends := mc.AnalyzeTrends(); trends.MemorySaturated {
+			t.Error("unknown pressure must not be classified as saturated")
+		}
+	})
+
 	t.Run("memory increasing", func(t *testing.T) {
 		mc := &MetricsCollector{
 			metrics: []PerformanceSnapshot{
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 50, MemoryUsedMB: 1000},
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 56, MemoryUsedMB: 1100}, // >5% increase
-				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 63, MemoryUsedMB: 1210}, // >5% increase
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 50, MemoryPressureKnown: true},
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 56, MemoryPressureKnown: true}, // >5% increase
+				{Throughput: 100000, CPUPercent: 50, MemoryPercent: 63, MemoryPressureKnown: true}, // >5% increase
 			},
 		}
 
@@ -150,11 +181,148 @@ func TestAnalyzeTrends(t *testing.T) {
 			t.Error("expected MemoryIncreasing=true when memory increases >5% per sample")
 		}
 	})
+
+	t.Run("unknown sample suppresses memory trend", func(t *testing.T) {
+		mc := &MetricsCollector{
+			metrics: []PerformanceSnapshot{
+				{MemoryPercent: 50, MemoryPressureKnown: true, HeapAllocMB: 100},
+				{MemoryPercent: 60, MemoryPressureKnown: false, HeapAllocMB: 200},
+				{MemoryPercent: 70, MemoryPressureKnown: true, HeapAllocMB: 400},
+			},
+		}
+
+		if trends := mc.AnalyzeTrends(); trends.MemoryIncreasing {
+			t.Error("unknown pressure must suppress MemoryIncreasing even when heap allocation rises")
+		}
+	})
+}
+
+func TestCollectSnapshotUsesEffectiveMemoryPressureAndLogsSource(t *testing.T) {
+	reader := &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		HostCapacityMB:  16_000,
+		HostAvailableMB: 4_000, // host pressure 75%
+		CgroupLimitMB:   1_000,
+		CgroupCurrentMB: 950, // cgroup pressure 95% wins
+		Source:          "cgroup-v2",
+	}}
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000})
+	mc := NewMetricsCollector(tuner, 30*time.Second, reader)
+
+	var logs bytes.Buffer
+	previousLevel := logging.GetLevel()
+	logging.SetLevel(logging.LevelDebug)
+	logging.SetOutput(&logs)
+	t.Cleanup(func() {
+		logging.SetLevel(previousLevel)
+		logging.SetOutput(os.Stdout)
+	})
+
+	mc.collectSnapshot()
+	got := mc.GetRecentMetrics(1)[0]
+	if !got.MemoryPressureKnown || got.MemoryPercent != 95 {
+		t.Fatalf("memory pressure = (%.1f, known=%v), want (95.0, true)", got.MemoryPercent, got.MemoryPressureKnown)
+	}
+	if got.memoryPressureSource != "cgroup-v2" {
+		t.Fatalf("pressure source = %q, want cgroup-v2", got.memoryPressureSource)
+	}
+	if reader.reads != 1 {
+		t.Fatalf("memory reader calls = %d, want 1", reader.reads)
+	}
+	logText := logs.String()
+	if !strings.Contains(logText, "memory_pressure=95.0% source=cgroup-v2") || !strings.Contains(logText, "heap_alloc=") {
+		t.Fatalf("metrics log does not separate effective pressure from heap diagnostic: %q", logText)
+	}
+}
+
+func TestCollectSnapshotClampsEffectivePressure(t *testing.T) {
+	reader := &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		CgroupLimitMB:   100,
+		CgroupCurrentMB: 250,
+		Source:          "cgroup-v1",
+	}}
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000})
+	mc := NewMetricsCollector(tuner, 30*time.Second, reader)
+
+	mc.collectSnapshot()
+	got := mc.GetRecentMetrics(1)[0]
+	if !got.MemoryPressureKnown || got.MemoryPercent != 100 || got.memoryPressureSource != "cgroup-v1" {
+		t.Fatalf("clamped pressure = (%.1f, %v, %q), want (100, true, cgroup-v1)",
+			got.MemoryPercent, got.MemoryPressureKnown, got.memoryPressureSource)
+	}
+}
+
+func TestCollectSnapshotUsesComponentPressureNotEffectiveMinima(t *testing.T) {
+	reader := &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		CapacityMB:      8_000,
+		AvailableMB:     4_000, // combining effective minima would report 50%
+		HostCapacityMB:  16_000,
+		HostAvailableMB: 4_000, // real host pressure is 75% and wins
+		CgroupLimitMB:   8_000,
+		CgroupCurrentMB: 2_000, // real cgroup pressure is 25%
+		Source:          "cgroup-v2",
+	}}
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000})
+	mc := NewMetricsCollector(tuner, 30*time.Second, reader)
+
+	mc.collectSnapshot()
+	got := mc.GetRecentMetrics(1)[0]
+	if !got.MemoryPressureKnown || got.MemoryPercent != 75 || got.memoryPressureSource != "host" {
+		t.Fatalf("component pressure = (%.1f, %v, %q), want (75, true, host)",
+			got.MemoryPercent, got.MemoryPressureKnown, got.memoryPressureSource)
+	}
+}
+
+func TestCollectSnapshotUnknownOnMemoryReadOrCalculationFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		reader *fakeMemoryReader
+	}{
+		{name: "read failure", reader: &fakeMemoryReader{err: errors.New("memory unavailable")}},
+		{name: "calculation failure", reader: &fakeMemoryReader{snapshot: systemmemory.Snapshot{}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000})
+			mc := NewMetricsCollector(tuner, 30*time.Second, tc.reader)
+
+			mc.collectSnapshot()
+			got := mc.GetRecentMetrics(1)[0]
+			if got.MemoryPressureKnown || got.MemoryPercent != 0 || got.memoryPressureSource != "" {
+				t.Fatalf("unknown pressure encoded as real signal: %+v", got)
+			}
+			if tc.reader.reads != 1 {
+				t.Fatalf("memory reader calls = %d, want 1", tc.reader.reads)
+			}
+		})
+	}
+}
+
+func TestCollectSnapshotLogsUnknownPressureSeparatelyFromHeap(t *testing.T) {
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000})
+	mc := NewMetricsCollector(tuner, 30*time.Second, &fakeMemoryReader{err: errors.New("memory unavailable")})
+
+	var logs bytes.Buffer
+	previousLevel := logging.GetLevel()
+	logging.SetLevel(logging.LevelDebug)
+	logging.SetOutput(&logs)
+	t.Cleanup(func() {
+		logging.SetLevel(previousLevel)
+		logging.SetOutput(os.Stdout)
+	})
+
+	mc.collectSnapshot()
+	logText := logs.String()
+	if !strings.Contains(logText, "memory_pressure=unknown") || !strings.Contains(logText, "heap_alloc=") {
+		t.Fatalf("unknown-pressure log must preserve heap as a separate diagnostic: %q", logText)
+	}
 }
 
 func TestWindowedTimePercentages(t *testing.T) {
 	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000, ReadAheadBuffers: 4})
-	mc := NewMetricsCollector(tuner, 30*time.Second)
+	mc := NewMetricsCollector(tuner, 30*time.Second, &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		HostCapacityMB:  100,
+		HostAvailableMB: 50,
+	}})
 
 	// First snapshot: report some transfer time
 	tuner.ReportTransferTime(400, 100, 500, 1000) // query=400, scan=100, write=500 → source=50%, write=50%
@@ -197,7 +365,10 @@ func TestWindowedTimePercentages(t *testing.T) {
 
 func TestWindowedTimePercentagesZeroDelta(t *testing.T) {
 	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000, ReadAheadBuffers: 4})
-	mc := NewMetricsCollector(tuner, 30*time.Second)
+	mc := NewMetricsCollector(tuner, 30*time.Second, &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		HostCapacityMB:  100,
+		HostAvailableMB: 50,
+	}})
 
 	// Report some time then collect
 	tuner.ReportTransferTime(500, 500, 1000, 100)
