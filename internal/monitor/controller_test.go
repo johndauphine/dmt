@@ -265,6 +265,54 @@ func TestController_NewErrors_ReducesWAW(t *testing.T) {
 	}
 }
 
+func TestController_SafetyOnlySuppressesGrowthAndKeepsBackoffs(t *testing.T) {
+	t.Run("rule 1 memory backoff remains active", func(t *testing.T) {
+		c, col, _ := newTestController(t, ControllerOptions{SafetyOnly: true})
+		pushSnapshots(col, snap(95, 30, 0, 0, 500_000, 50000, 2))
+		d := c.Evaluate(time.Now())
+		if d == nil || d.Knob != "chunk_size" || d.NewValue >= d.PreviousValue {
+			t.Fatalf("safety-only Rule 1 decision = %+v, want chunk shrink", d)
+		}
+	})
+
+	t.Run("rule 2 writer growth is suppressed", func(t *testing.T) {
+		c, col, _ := newTestController(t, ControllerOptions{SafetyOnly: true})
+		pushSnapshots(col,
+			snap(50, 80, 5, 0, 500_000, 50000, 2),
+			snap(50, 80, 8, 0, 500_000, 50000, 2),
+			snap(50, 80, 12, 0, 500_000, 50000, 2),
+		)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("safety-only queue growth decision = %+v, want nil", d)
+		}
+	})
+
+	t.Run("disabled rule 2 falls through to rule 3", func(t *testing.T) {
+		c, col, _ := newTestController(t, ControllerOptions{SafetyOnly: true})
+		pushSnapshots(col,
+			snap(50, 80, 5, 0, 500_000, 50000, 4),
+			snap(50, 80, 8, 0, 500_000, 50000, 4),
+			snap(50, 80, 12, 2, 500_000, 50000, 4),
+		)
+		d := c.Evaluate(time.Now())
+		if d == nil || d.Knob != "write_ahead_writers" || d.NewValue != 3 {
+			t.Fatalf("safety-only Rule 3 decision = %+v, want WAW 4 -> 3", d)
+		}
+	})
+
+	t.Run("rule 4 chunk growth is suppressed", func(t *testing.T) {
+		c, col, _ := newTestController(t, ControllerOptions{SafetyOnly: true})
+		pushSnapshots(col,
+			snap(50, 30, 0, 0, 500_000, 50000, 2),
+			snap(50, 30, 0, 0, 510_000, 50000, 2),
+			snap(50, 30, 0, 0, 495_000, 50000, 2),
+		)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("safety-only stable-throughput decision = %+v, want nil", d)
+		}
+	})
+}
+
 // TestController_StaleErrors_NoFire — Codex P2 regression on PR #194.
 // ErrorCount is cumulative; a naive `latest.ErrorCount > 0` check
 // would fire the back-off rule on every cooldown after a single

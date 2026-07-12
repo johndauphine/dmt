@@ -14,6 +14,7 @@ import (
 	"github.com/johndauphine/dmt/internal/progress"
 	"github.com/johndauphine/dmt/internal/source"
 	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/internal/tuning"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,11 @@ type TransferRunner struct {
 	progress   *progress.Tracker
 	notifier   notify.Provider
 	targetMode TargetModeStrategy
+
+	// tuningTier is the deterministic pre-run selector tier for this run.
+	// Exploration probes run the controller in safety-only mode so Rules 1
+	// and 3 remain available without corrupting the planned configuration.
+	tuningTier string
 	// auditEvent records transfer degradation in the run's immutable audit log.
 	// It is copied into each Job because the transfer package owns the point at
 	// which it knows a final checkpoint superseded a periodic failure (#665).
@@ -106,6 +112,26 @@ func NewTransferRunner(
 		notifier:   notifier,
 		targetMode: targetMode,
 	}
+}
+
+func (r *TransferRunner) runtimeControllerOptions(runID string, recorder *runtimeAdjustmentRecorder) monitor.ControllerOptions {
+	opts := monitor.ControllerOptions{
+		SafetyOnly: r.tuningTier == tuning.TierExploration,
+		RunID:      runID,
+	}
+	if recorder != nil {
+		opts.NextAdjustmentNumber = recorder.nextNumber
+		opts.AdjustmentRecorder = recorder.record
+	}
+	if hardCap := r.config.Migration.TargetHardChunkLimit; hardCap > 0 {
+		opts.MaxChunkSize = hardCap
+		// Keep the memory-pressure floor below a protocol cap; otherwise a
+		// shrink decision could paradoxically increase chunk_size.
+		if hardCap < monitor.DefaultMinChunkSize {
+			opts.MinChunkSize = hardCap
+		}
+	}
+	return opts
 }
 
 // RunResult contains the outcome of a transfer run.
@@ -263,27 +289,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		// Without this, MySQL targets with a default 4MB @@max_allowed_packet
 		// could exceed the packet via runtime growth even when the
 		// initial chunk_size was packet-safe. Codex review on #166.
-		controllerOpts := monitor.ControllerOptions{
-			// MaxWAW left at default (8). The RuleWriteErrorAdjuster
-			// constructed below catches chunk-too-big errors by
-			// halving on write error, which is the fast-feedback
-			// safety net; MaxChunkSize is the proactive cap.
-			RunID:                runID,
-			NextAdjustmentNumber: runtimeAdjustments.nextNumber,
-			AdjustmentRecorder:   runtimeAdjustments.record,
-		}
-		if hardCap := r.config.Migration.TargetHardChunkLimit; hardCap > 0 {
-			controllerOpts.MaxChunkSize = hardCap
-			// Clamp the memory-pressure shrink floor under the cap so
-			// the controller can't paradoxically raise chunk_size to
-			// monitor.DefaultMinChunkSize when that exceeds the packet
-			// limit. Referencing the exported constant keeps this
-			// in sync with the controller's actual default (Copilot
-			// review on #166).
-			if hardCap < monitor.DefaultMinChunkSize {
-				controllerOpts.MinChunkSize = hardCap
-			}
-		}
+		// MaxWAW remains at its defensive default. Structural write errors
+		// still use RuleWriteErrorAdjuster below in every controller mode.
+		controllerOpts := r.runtimeControllerOptions(runID, runtimeAdjustments)
 		runtimeMonitor = monitor.NewController(tuner, collector, adjustInterval, controllerOpts)
 
 		monitorCtx, cancelMonitor := context.WithCancel(ctx)
@@ -422,6 +430,7 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResul
 	)
 	runner.auditEvent = o.auditEvent
 	runner.strictSnapshotEpoch = epoch
+	runner.tuningTier = o.lastTuningTier
 
 	result, err := runner.Run(ctx, runID, buildResult, tables, resume)
 	if err != nil {

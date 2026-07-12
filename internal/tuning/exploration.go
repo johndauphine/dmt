@@ -98,7 +98,10 @@ func shouldExplore(in Input, bucketCount int) bool {
 }
 
 // applyGridExploration picks the next probe from the planned grid based
-// on the bucket's run count, intersected with HardChunkLimit only.
+// on raw persisted attempts, intersected with HardChunkLimit only. The clean
+// count separately controls cold-start labels and completion (#697). The raw
+// count is a sequential rotation proxy; concurrent tuners can observe the same
+// value and this function does not claim to reserve cells globally.
 // Historical-retry exclusions are intentionally NOT applied here: the
 // planned grid's job is to gather data so historical verdicts can be
 // re-examined as new runs accrue (issue #186 — under the original
@@ -106,7 +109,7 @@ func shouldExplore(in Input, bucketCount int) bool {
 // permanently locked the deterministic tuner out of probing it). On
 // a fully-filtered grid (every candidate skipped by HardChunkLimit),
 // the baseline output stands.
-func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCount int) {
+func applyGridExploration(out *Output, in Input, profile DriverProfile, cleanCount, gridIndexCount int) {
 	const fallbackBytes int64 = 10_000_000
 	avg := in.AvgRowBytes
 	if avg <= 0 {
@@ -117,7 +120,7 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 		optimumBytes = fallbackBytes
 	}
 
-	// Walk the grid starting at the bucket's run count modulo the grid
+	// Walk the grid starting at the raw persisted-attempt count modulo the grid
 	// length. Scan forward through every candidate; pick the first that
 	// passes the filters. This way a forced --explore on a bucket past
 	// the cold-start window still gets a deterministic next-probe.
@@ -131,9 +134,9 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 	n := len(explorationGrid)
 	rn := len(readerGrid)
 	for i := 0; i < n; i++ {
-		idx := (bucketCount + i) % n
+		idx := (gridIndexCount + i) % n
 		cand := explorationGrid[idx]
-		readerIdx := (bucketCount + i) % rn
+		readerIdx := (gridIndexCount + i) % rn
 		reader := readerGrid[readerIdx]
 		csBytes := int64(cand.CSFraction * float64(optimumBytes))
 		csRows := int(csBytes / avg)
@@ -152,8 +155,8 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, bucketCo
 		// for forced-explore on a bucket past K runs, just report the
 		// grid-cell index so we don't print "run 42/6" (Copilot review).
 		runLabel := fmt.Sprintf("probe idx %d/%d", idx+1, len(explorationGrid))
-		if bucketCount < explorationGridRuns {
-			runLabel = fmt.Sprintf("run %d/%d", bucketCount+1, explorationGridRuns)
+		if cleanCount < explorationGridRuns {
+			runLabel = fmt.Sprintf("run %d/%d", cleanCount+1, explorationGridRuns)
 		}
 		out.Reasoning = appendReasoning(out.Reasoning,
 			"exploration: planned grid %s (WAW=%d, CS=%.1f×optimum=%.1fMB, PR=%d, RAB=%d)",

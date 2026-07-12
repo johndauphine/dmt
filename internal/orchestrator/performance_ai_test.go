@@ -278,6 +278,9 @@ func TestRecordingWriteErrorAdjusterPersistsStructuralAdjustment(t *testing.T) {
 	if !strings.Contains(record.Reasoning, "chunk_size") {
 		t.Fatalf("record reasoning should identify adjustment type: %q", record.Reasoning)
 	}
+	if !recorder.applied() {
+		t.Fatal("recorded structural write adjustment must mark the run adjusted")
+	}
 }
 
 func TestSamePerformanceRunConfigRequiresExactIdentity(t *testing.T) {

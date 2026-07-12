@@ -1527,3 +1527,94 @@ func TestTune_AllRowsRuntimeAdjusted_TreatedAsColdStart(t *testing.T) {
 		t.Errorf("Reasoning missing runtime-adjusted hygiene note; got %q", out.Reasoning)
 	}
 }
+
+func TestTune_ExplorationUsesRawPersistedCountAndCleanLabel(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:    "linux",
+		AvgRowBytes: 500,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	rows := make([]HistoryRecord, 10)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 800_000,
+			CPUCores:        16, MemoryGB: 48,
+			AdjustedAtRuntime: i >= 2,
+		}
+	}
+
+	assertPick := func(t *testing.T, historyRows []HistoryRecord, rawCount int) Output {
+		t.Helper()
+		want := baseline(in, profile)
+		applyGridExploration(&want, in, profile, 2, rawCount)
+		applyMemoryClamp(&want, in)
+		got := Tune(in, profile, &stubHistory{rows: historyRows}, DBTuning{})
+		if got.Tier != TierExploration {
+			t.Fatalf("Tier = %q, want %q; reasoning: %s", got.Tier, TierExploration, got.Reasoning)
+		}
+		if got.WriteAheadWriters != want.WriteAheadWriters || got.ChunkSize != want.ChunkSize ||
+			got.ParallelReaders != want.ParallelReaders || got.ReadAheadBuffers != want.ReadAheadBuffers {
+			t.Fatalf("exploration pick = (WAW=%d CS=%d PR=%d RAB=%d), want (WAW=%d CS=%d PR=%d RAB=%d)",
+				got.WriteAheadWriters, got.ChunkSize, got.ParallelReaders, got.ReadAheadBuffers,
+				want.WriteAheadWriters, want.ChunkSize, want.ParallelReaders, want.ReadAheadBuffers)
+		}
+		if !strings.Contains(got.Reasoning, "run 3/6") {
+			t.Fatalf("reasoning = %q, want clean-count label run 3/6", got.Reasoning)
+		}
+		return got
+	}
+
+	first := assertPick(t, rows, 10)
+	rows = append(rows, HistoryRecord{
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500,
+		ParallelReaders: 2, ReadAheadBuffers: 4,
+		FinalThroughput: 800_000,
+		CPUCores:        16, MemoryGB: 48,
+		AdjustedAtRuntime: true,
+	})
+	second := assertPick(t, rows, 11)
+	if first.WriteAheadWriters == second.WriteAheadWriters && first.ChunkSize == second.ChunkSize &&
+		first.ParallelReaders == second.ParallelReaders && first.ReadAheadBuffers == second.ReadAheadBuffers {
+		t.Fatal("appending a filtered raw row did not advance the exploration cell")
+	}
+}
+
+func TestTune_ForcedExplorationUsesRawIndexWithoutColdStartLabel(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:     "linux",
+		AvgRowBytes:  500,
+		ForceExplore: true,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	rows := make([]HistoryRecord, 10)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 800_000,
+			CPUCores:        16, MemoryGB: 48,
+			AdjustedAtRuntime: i >= 6,
+		}
+	}
+
+	want := baseline(in, profile)
+	applyGridExploration(&want, in, profile, 6, 10)
+	applyMemoryClamp(&want, in)
+	got := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
+	if got.WriteAheadWriters != want.WriteAheadWriters || got.ChunkSize != want.ChunkSize ||
+		got.ParallelReaders != want.ParallelReaders || got.ReadAheadBuffers != want.ReadAheadBuffers {
+		t.Fatalf("forced exploration did not use raw index: got %+v, want %+v", got, want)
+	}
+	if !strings.Contains(got.Reasoning, "probe idx") || strings.Contains(got.Reasoning, "run 7/6") {
+		t.Fatalf("forced exploration reasoning has invalid cold-start label: %q", got.Reasoning)
+	}
+}
