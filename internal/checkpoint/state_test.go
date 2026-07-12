@@ -160,12 +160,13 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		ChunkSize:    50000,
 		WasAIUsed:    true,
 	}
-	if err := state.SaveTuningRecord(record); err != nil {
+	rowID, err := state.SaveTuningRecord(record)
+	if err != nil {
 		t.Fatalf("SaveTuningRecord() error: %v", err)
 	}
 
 	// Update with throughput result
-	if err := state.UpdateTuningResult(450000, 240.5, 0, false); err != nil {
+	if err := state.UpdateTuningResult(rowID, 450000, 240.5, 0, false); err != nil {
 		t.Fatalf("UpdateTuningResult() error: %v", err)
 	}
 
@@ -195,10 +196,11 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 		ChunkSize:    100000,
 		WasAIUsed:    true,
 	}
-	if err := state.SaveTuningRecord(record2); err != nil {
+	rowID2, err := state.SaveTuningRecord(record2)
+	if err != nil {
 		t.Fatalf("SaveTuningRecord(record2) error: %v", err)
 	}
-	if err := state.UpdateTuningResult(300000, 350.0, 2, false); err != nil {
+	if err := state.UpdateTuningResult(rowID2, 300000, 350.0, 2, false); err != nil {
 		t.Fatalf("UpdateTuningResult(record2) error: %v", err)
 	}
 
@@ -228,6 +230,86 @@ func TestAITuningThroughputFeedback(t *testing.T) {
 	// Oldest record was updated with chunkRetryCount=0
 	if history[1].ChunkRetryCount != 0 {
 		t.Errorf("Oldest ChunkRetryCount = %d, want 0", history[1].ChunkRetryCount)
+	}
+}
+
+func TestUpdateTuningResultTargetsExactRow(t *testing.T) {
+	state, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	defer state.Close()
+
+	base := TuningRecord{
+		SourceDBType: "mssql",
+		TargetDBType: "postgres",
+		Workers:      6,
+	}
+	older := base
+	older.Timestamp = time.Now()
+	older.ChunkSize = 50_000
+	olderID, err := state.SaveTuningRecord(older)
+	if err != nil {
+		t.Fatalf("SaveTuningRecord(older): %v", err)
+	}
+
+	newer := base
+	newer.Timestamp = older.Timestamp.Add(time.Second)
+	newer.ChunkSize = 100_000
+	newerID, err := state.SaveTuningRecord(newer)
+	if err != nil {
+		t.Fatalf("SaveTuningRecord(newer): %v", err)
+	}
+
+	if err := state.UpdateTuningResult(newerID, 300_000, 20, 2, false); err != nil {
+		t.Fatalf("UpdateTuningResult(newer): %v", err)
+	}
+	// A duplicate completion must not overwrite the first observed result.
+	if err := state.UpdateTuningResult(newerID, 999_000, 1, 0, true); err != nil {
+		t.Fatalf("UpdateTuningResult(newer duplicate): %v", err)
+	}
+
+	history, err := state.GetTuningHistory(0, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetTuningHistory: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history length = %d, want 2", len(history))
+	}
+	byID := make(map[int64]TuningRecord, len(history))
+	for _, record := range history {
+		byID[record.ID] = record
+	}
+	if got := byID[olderID].FinalThroughput; got != 0 {
+		t.Errorf("older crashed row throughput = %v, want 0", got)
+	}
+	if got := byID[newerID].FinalThroughput; got != 300_000 {
+		t.Errorf("newer row throughput = %v, want 300000", got)
+	}
+	if got := byID[newerID].ChunkRetryCount; got != 2 {
+		t.Errorf("newer row chunk retries = %d, want 2", got)
+	}
+	if byID[newerID].AdjustedAtRuntime {
+		t.Error("duplicate update overwrote adjusted_at_runtime")
+	}
+
+	// The older run can finish later and still stamp its own row.
+	if err := state.UpdateTuningResult(olderID, 200_000, 30, 1, true); err != nil {
+		t.Fatalf("UpdateTuningResult(older late completion): %v", err)
+	}
+	history, err = state.GetTuningHistory(0, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetTuningHistory after late completion: %v", err)
+	}
+	byID = make(map[int64]TuningRecord, len(history))
+	for _, record := range history {
+		byID[record.ID] = record
+	}
+	if got := byID[olderID].FinalThroughput; got != 200_000 {
+		t.Errorf("older row throughput after late completion = %v, want 200000", got)
+	}
+	if got := byID[newerID].FinalThroughput; got != 300_000 {
+		t.Errorf("newer row throughput after older completion = %v, want 300000", got)
 	}
 }
 
@@ -270,11 +352,12 @@ func TestGetAITuningAggregatesByWaw(t *testing.T) {
 			WriteAheadWriters: f.waw,
 			WasAIUsed:         true,
 		}
-		if err := state.SaveTuningRecord(rec); err != nil {
+		rowID, err := state.SaveTuningRecord(rec)
+		if err != nil {
 			t.Fatalf("SaveTuningRecord %d: %v", i, err)
 		}
 		if f.throughput > 0 {
-			if err := state.UpdateTuningResult(f.throughput, f.durationSecs, f.retries, false); err != nil {
+			if err := state.UpdateTuningResult(rowID, f.throughput, f.durationSecs, f.retries, false); err != nil {
 				t.Fatalf("UpdateTuningResult %d: %v", i, err)
 			}
 		}
@@ -342,10 +425,11 @@ func TestGetAITuningAggregatesByChunkSize(t *testing.T) {
 			WriteAheadWriters: 1,
 			WasAIUsed:         true,
 		}
-		if err := state.SaveTuningRecord(rec); err != nil {
+		rowID, err := state.SaveTuningRecord(rec)
+		if err != nil {
 			t.Fatalf("SaveTuningRecord %d: %v", i, err)
 		}
-		if err := state.UpdateTuningResult(s.throughput, 20, 0, false); err != nil {
+		if err := state.UpdateTuningResult(rowID, s.throughput, 20, 0, false); err != nil {
 			t.Fatalf("UpdateTuningResult %d: %v", i, err)
 		}
 	}
@@ -396,10 +480,10 @@ func TestAITuningHistoryDirectionFilter(t *testing.T) {
 		ChunkSize:    14000,
 		WasAIUsed:    true,
 	}
-	if err := state.SaveTuningRecord(mssqlToPG); err != nil {
+	if _, err := state.SaveTuningRecord(mssqlToPG); err != nil {
 		t.Fatalf("SaveTuningRecord(mssql→pg) error: %v", err)
 	}
-	if err := state.SaveTuningRecord(pgToPG); err != nil {
+	if _, err := state.SaveTuningRecord(pgToPG); err != nil {
 		t.Fatalf("SaveTuningRecord(pg→pg) error: %v", err)
 	}
 
@@ -456,7 +540,7 @@ func TestAITuningHistoryLimitZeroReturnsAll(t *testing.T) {
 			ChunkSize:    50000,
 			WasAIUsed:    true,
 		}
-		if err := state.SaveTuningRecord(rec); err != nil {
+		if _, err := state.SaveTuningRecord(rec); err != nil {
 			t.Fatalf("SaveTuningRecord(%d) error: %v", i, err)
 		}
 	}
@@ -1094,7 +1178,7 @@ func TestAITuningRegimeColumnsRoundTrip(t *testing.T) {
 		TargetWALLevel:          "replica",
 		SourceMaxServerMemoryMB: 8192,
 	}
-	if err := state.SaveTuningRecord(rec); err != nil {
+	if _, err := state.SaveTuningRecord(rec); err != nil {
 		t.Fatalf("SaveTuningRecord error: %v", err)
 	}
 
@@ -1149,7 +1233,7 @@ func TestAITuningRegimeColumnsNullForOldRecords(t *testing.T) {
 		TargetDBType: "postgres",
 		Workers:      16,
 	}
-	if err := state.SaveTuningRecord(rec); err != nil {
+	if _, err := state.SaveTuningRecord(rec); err != nil {
 		t.Fatalf("SaveTuningRecord error: %v", err)
 	}
 
@@ -1192,16 +1276,18 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 		}
 	}
 
-	if err := state.SaveTuningRecord(mkRecord(0)); err != nil {
+	cleanRowID, err := state.SaveTuningRecord(mkRecord(0))
+	if err != nil {
 		t.Fatalf("SaveTuningRecord(clean): %v", err)
 	}
-	if err := state.UpdateTuningResult(500_000, 100, 0, false); err != nil {
+	if err := state.UpdateTuningResult(cleanRowID, 500_000, 100, 0, false); err != nil {
 		t.Fatalf("UpdateTuningResult(clean): %v", err)
 	}
-	if err := state.SaveTuningRecord(mkRecord(time.Second)); err != nil {
+	adjustedRowID, err := state.SaveTuningRecord(mkRecord(time.Second))
+	if err != nil {
 		t.Fatalf("SaveTuningRecord(adjusted): %v", err)
 	}
-	if err := state.UpdateTuningResult(400_000, 120, 1, true); err != nil {
+	if err := state.UpdateTuningResult(adjustedRowID, 400_000, 120, 1, true); err != nil {
 		t.Fatalf("UpdateTuningResult(adjusted): %v", err)
 	}
 

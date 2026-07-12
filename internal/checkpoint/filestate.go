@@ -505,12 +505,12 @@ func (fs *FileState) GetRuntimeAdjustmentsByAction(action string, limit int) ([]
 }
 
 // SaveTuningRecord is a no-op for file state (doesn't persist tuning history).
-func (fs *FileState) SaveTuningRecord(record TuningRecord) error {
-	return nil
+func (fs *FileState) SaveTuningRecord(record TuningRecord) (int64, error) {
+	return 0, nil
 }
 
 // UpdateTuningResult is a no-op for file state.
-func (fs *FileState) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+func (fs *FileState) UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	return nil
 }
 

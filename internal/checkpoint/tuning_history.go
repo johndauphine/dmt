@@ -3,6 +3,8 @@ package checkpoint
 import (
 	"database/sql"
 	"time"
+
+	"github.com/johndauphine/dmt/internal/logging"
 )
 
 // SaveRuntimeAdjustment saves an AI adjustment record for historical analysis.
@@ -125,8 +127,9 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, er
 	return records, rows.Err()
 }
 
-// SaveTuningRecord saves tuning parameters from a migration run.
-func (s *State) SaveTuningRecord(record TuningRecord) error {
+// SaveTuningRecord saves tuning parameters from a migration run and returns
+// the inserted row ID so the same run can stamp its result onto that row.
+func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
 	wasAIUsed := 0
 	if record.WasAIUsed {
 		wasAIUsed = 1
@@ -149,7 +152,7 @@ func (s *State) SaveTuningRecord(record TuningRecord) error {
 		return v
 	}
 
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		INSERT INTO ai_tuning_history (
 			timestamp, source_db_type, target_db_type,
 			total_tables, total_rows, avg_row_size_bytes,
@@ -182,12 +185,14 @@ func (s *State) SaveTuningRecord(record TuningRecord) error {
 		nullStr(record.SourceHost), nullInt(int64(record.SourcePort)), nullStr(record.SourceDatabase), nullStr(record.SourceSchema),
 		nullStr(record.TargetHost), nullInt(int64(record.TargetPort)), nullStr(record.TargetDatabase), nullStr(record.TargetSchema),
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
-// UpdateTuningResult updates the most recent tuning record that hasn't been
-// populated with results yet. This avoids race conditions with concurrent
-// analyze runs by targeting NULL final_throughput rather than MAX(id).
+// UpdateTuningResult stamps the outcome onto exactly the tuning row created
+// for this run. The NULL guard makes duplicate completion calls idempotent.
 //
 // chunkRetryCount is the cumulative count of transient chunk retries observed
 // during the run (RuntimeMetrics.ChunkRetryCount); 0 for a clean run.
@@ -195,20 +200,23 @@ func (s *State) SaveTuningRecord(record TuningRecord) error {
 // adjustedAtRuntime marks the row as runtime-adjusted (#451): the run's
 // observed throughput blends multiple configs, so the deterministic tuner
 // excludes the row from regression / smoothed-bins / drift cohorts.
-func (s *State) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+func (s *State) UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	adjusted := 0
 	if adjustedAtRuntime {
 		adjusted = 1
 	}
-	_, err := s.db.Exec(`
+	res, err := s.db.Exec(`
 		UPDATE ai_tuning_history
 		SET final_throughput = ?, final_duration_seconds = ?, chunk_retry_count = ?, adjusted_at_runtime = ?
-		WHERE id = (
-			SELECT MAX(id) FROM ai_tuning_history
-			WHERE final_throughput IS NULL
-		)
-	`, throughput, durationSecs, chunkRetryCount, adjusted)
-	return err
+		WHERE id = ? AND final_throughput IS NULL
+	`, throughput, durationSecs, chunkRetryCount, adjusted, rowID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		logging.Debug("tuning row %d already stamped or missing", rowID)
+	}
+	return nil
 }
 
 // GetTuningHistory returns AI tuning recommendations filtered by migration

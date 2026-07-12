@@ -188,11 +188,11 @@ type TuningHistoryProvider interface {
 	GetTuningHistory(limit int, sourceType, targetType string) ([]checkpoint.TuningRecord, error)
 
 	// SaveTuningRecord saves a tuning recommendation for future reference.
-	SaveTuningRecord(record checkpoint.TuningRecord) error
+	SaveTuningRecord(record checkpoint.TuningRecord) (int64, error)
 
-	// UpdateTuningResult updates the most recent tuning record with final
-	// throughput and chunk retry count from the completed run.
-	UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
+	// UpdateTuningResult stamps final metrics onto the tuning row created by
+	// the completed run.
+	UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 }
 
 // SmartConfigAnalyzer analyzes source database metadata to suggest optimal

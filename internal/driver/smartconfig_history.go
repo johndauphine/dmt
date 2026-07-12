@@ -37,9 +37,9 @@ type ActualParams struct {
 
 // SaveTuningWithActualParams saves tuning history with the actual params
 // used (after user overrides), not the recommendations.
-func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
+func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) int64 {
 	if s.pendingSave == nil {
-		return
+		return 0
 	}
 	ps := s.pendingSave
 	s.pendingSave = nil
@@ -60,13 +60,18 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) {
 		ps.input.AvgRowBytes,
 	)
 
-	s.saveTuningResult(ps.input, ps.reasoning, actual)
+	rowID, err := s.saveTuningResult(ps.input, ps.reasoning, actual)
+	if err != nil {
+		logging.Debug("Failed to save tuning history: %v", err)
+		return 0
+	}
+	return rowID
 }
 
 // saveTuningResult saves the tuning recommendation to history.
-func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning string, actual ActualParams) {
+func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning string, actual ActualParams) (int64, error) {
 	if s.historyProvider == nil {
-		return
+		return 0, nil
 	}
 
 	record := checkpoint.TuningRecord{
@@ -114,9 +119,7 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		TargetSchema:   input.TargetSchema,
 	}
 
-	if err := s.historyProvider.SaveTuningRecord(record); err != nil {
-		logging.Debug("Failed to save tuning history: %v", err)
-	}
+	return s.historyProvider.SaveTuningRecord(record)
 }
 
 func firstNonEmpty(values ...string) string {

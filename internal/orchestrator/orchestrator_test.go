@@ -742,7 +742,7 @@ func TestPrepareResumeTargetTableUpsertSkipsDestructiveRestarts(t *testing.T) {
 
 func TestRecordSuccessfulTuningResult(t *testing.T) {
 	state := &tuningResultState{}
-	o := &Orchestrator{state: state, lastChunkRetryCount: 3}
+	o := &Orchestrator{state: state, lastChunkRetryCount: 3, lastTuningRowID: 42}
 
 	o.recordSuccessfulTuningResult(1000, 2*time.Second)
 
@@ -758,14 +758,28 @@ func TestRecordSuccessfulTuningResult(t *testing.T) {
 	if state.chunkRetryCount != 3 {
 		t.Errorf("chunkRetryCount = %d, want 3", state.chunkRetryCount)
 	}
+	if state.rowID != 42 {
+		t.Errorf("rowID = %d, want 42", state.rowID)
+	}
 }
 
 func TestRecordSuccessfulTuningResultSkipsInvalidDuration(t *testing.T) {
 	state := &tuningResultState{}
-	o := &Orchestrator{state: state}
+	o := &Orchestrator{state: state, lastTuningRowID: 42}
 
 	o.recordSuccessfulTuningResult(1000, 0)
 	o.recordSuccessfulTuningResult(1000, -time.Second)
+
+	if state.calls != 0 {
+		t.Fatalf("UpdateTuningResult calls = %d, want 0", state.calls)
+	}
+}
+
+func TestRecordSuccessfulTuningResultSkipsWithoutTuningRow(t *testing.T) {
+	state := &tuningResultState{}
+	o := &Orchestrator{state: state}
+
+	o.recordSuccessfulTuningResult(1000, 2*time.Second)
 
 	if state.calls != 0 {
 		t.Fatalf("UpdateTuningResult calls = %d, want 0", state.calls)
@@ -925,13 +939,15 @@ func (s *resumePrepState) ClearPartitionTransferProgress(string, string) error {
 type tuningResultState struct {
 	checkpoint.StateBackend
 	calls           int
+	rowID           int64
 	throughput      float64
 	durationSecs    float64
 	chunkRetryCount int
 }
 
-func (s *tuningResultState) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+func (s *tuningResultState) UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	s.calls++
+	s.rowID = rowID
 	s.throughput = throughput
 	s.durationSecs = durationSecs
 	s.chunkRetryCount = chunkRetryCount

@@ -119,7 +119,7 @@ type StateBackend interface {
 
 	// tuning history for analyze command. Check Capabilities().TuningHistory
 	// before expecting durable history; unsupported backends return empty/no-op.
-	SaveTuningRecord(record TuningRecord) error
+	SaveTuningRecord(record TuningRecord) (int64, error)
 	GetTuningHistory(limit int, sourceType, targetType string) ([]TuningRecord, error)
 	// GetAITuningAggregatesByWaw returns per-write_ahead_writers aggregates over the
 	// FULL ai_tuning_history (no limit). Pulled via SQL GROUP BY so the smartconfig
@@ -132,7 +132,7 @@ type StateBackend interface {
 	// adjustedAtRuntime flags the row as runtime-adjusted (#451): the
 	// run's throughput blends multiple configs, so the deterministic
 	// tuner excludes the row from its training cohorts.
-	UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
+	UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 
 	// AI fallback events (#176). UPSERT semantics: each call bumps the
 	// count for (run_id, surface, fingerprint). The file backend is the

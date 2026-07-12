@@ -16,6 +16,10 @@ import (
 // cleanup (#175 PR1 minimized public-API churn). Falls back to baseline
 // on any failure (logged at Debug/Warn level).
 func (o *Orchestrator) applyTuning(ctx context.Context) {
+	// An Orchestrator may be reused for resume segments. Never let a failed
+	// or manual analysis inherit a row created by an earlier segment.
+	o.lastTuningRowID = 0
+
 	// Coarse switch (#461): migration.tuning: manual disables pre-run
 	// parameter derivation entirely — user values and formula defaults
 	// rule. Distinct from migration.runtime_tuning, which controls the
@@ -177,7 +181,7 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// `tuning` was captured earlier so the smartconfig prompt could classify
 	// against it; same snapshot is persisted here so future runs see this
 	// run's effective tuning when classifying their own trajectory rows.
-	analyzer.SaveTuningWithActualParams(driver.ActualParams{
+	o.lastTuningRowID = analyzer.SaveTuningWithActualParams(driver.ActualParams{
 		Workers:           o.config.Migration.Workers,
 		ChunkSize:         o.config.Migration.ChunkSize,
 		ReadAheadBuffers:  o.config.Migration.ReadAheadBuffers,
@@ -216,12 +220,9 @@ func (o *Orchestrator) recordSuccessfulTuningResult(totalRows int64, transferDur
 	if o.state == nil {
 		return
 	}
-	// migration.tuning: manual skips applyTuning, so no tuning-history
-	// row was created for this run. UpdateTuningResult targets the
-	// newest NULL-throughput row — without this gate it could stamp a
-	// manual run's results onto a stale row from a previous run's
-	// parameters (codex review on #461).
-	if o.config != nil && o.config.Migration.Tuning == "manual" {
+	// No row means tuning was manual, analysis or persistence failed, or the
+	// backend does not persist tuning history. Never guess a global row.
+	if o.lastTuningRowID == 0 {
 		return
 	}
 	transferDurationSecs := transferDuration.Seconds()
@@ -230,7 +231,7 @@ func (o *Orchestrator) recordSuccessfulTuningResult(totalRows int64, transferDur
 	}
 
 	transferThroughput := float64(totalRows) / transferDurationSecs
-	if err := o.state.UpdateTuningResult(transferThroughput, transferDurationSecs, o.lastChunkRetryCount, o.lastRunAdjusted); err != nil {
+	if err := o.state.UpdateTuningResult(o.lastTuningRowID, transferThroughput, transferDurationSecs, o.lastChunkRetryCount, o.lastRunAdjusted); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 }

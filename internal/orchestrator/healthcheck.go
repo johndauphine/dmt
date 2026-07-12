@@ -306,13 +306,13 @@ func (a *stateHistoryAdapter) GetTuningHistory(limit int, sourceType, targetType
 }
 
 // SaveTuningRecord saves a tuning recommendation for future reference.
-func (a *stateHistoryAdapter) SaveTuningRecord(record checkpoint.TuningRecord) error {
+func (a *stateHistoryAdapter) SaveTuningRecord(record checkpoint.TuningRecord) (int64, error) {
 	return a.state.SaveTuningRecord(record)
 }
 
-// UpdateTuningResult updates the most recent tuning record with final migration throughput.
-func (a *stateHistoryAdapter) UpdateTuningResult(throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
-	return a.state.UpdateTuningResult(throughput, durationSecs, chunkRetryCount, adjustedAtRuntime)
+// UpdateTuningResult stamps final migration metrics onto the selected tuning row.
+func (a *stateHistoryAdapter) UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
+	return a.state.UpdateTuningResult(rowID, throughput, durationSecs, chunkRetryCount, adjustedAtRuntime)
 }
 
 // AnalyzeConfig analyzes the source database and emits tuning
