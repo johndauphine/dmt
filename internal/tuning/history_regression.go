@@ -93,9 +93,9 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 // HardChunkLimit (skip CS values above the protocol cap). Returns
 // ok=false when every grid point is filtered out.
 //
-// The PR and RAB grids match the exploration inner grid ({2,4} × {4,8})
-// so argmax only picks values the planned grid actually probes — avoids
-// the extrapolation that drove #218's astronomical CI.
+// The PR and RAB grids match the reader domain in the exploration design
+// ({2,4} × {4,8}) so argmax only picks values the planned cells actually
+// probe — avoids the extrapolation that drove #218's astronomical CI.
 //
 // cellSkip is keyed by (WAW, ParallelReaders, ReadAheadBuffers) rather
 // than WAW alone (Codex review on #219): a reader-induced retry pattern

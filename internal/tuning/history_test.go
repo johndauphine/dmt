@@ -674,7 +674,7 @@ func TestTune_ExplorationProbesAIPollutedWAW(t *testing.T) {
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 1, OptimumBulkChunkBytes: 25_000_000}
 
 	// 5 AI-era rows at WAW=2 each with retries — places us in cold-
-	// start (rows < explorationGridRuns=6) so the planned grid fires.
+	// start (rows < explorationGridRuns=12) so the planned grid fires.
 	// With bucketCount=5 the grid lands on idx 5 = {WAW=2, CS=1.0×opt}.
 	history := &stubHistory{rows: []HistoryRecord{
 		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 600_000, ChunkRetryCount: 3},
@@ -1528,7 +1528,7 @@ func TestTune_AllRowsRuntimeAdjusted_TreatedAsColdStart(t *testing.T) {
 	}
 }
 
-func TestTune_ExplorationUsesRawPersistedCountAndCleanLabel(t *testing.T) {
+func TestTune_ExplorationUsesRawPersistedCountAndUsableLabel(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
@@ -1563,8 +1563,8 @@ func TestTune_ExplorationUsesRawPersistedCountAndCleanLabel(t *testing.T) {
 				got.WriteAheadWriters, got.ChunkSize, got.ParallelReaders, got.ReadAheadBuffers,
 				want.WriteAheadWriters, want.ChunkSize, want.ParallelReaders, want.ReadAheadBuffers)
 		}
-		if !strings.Contains(got.Reasoning, "run 3/6") {
-			t.Fatalf("reasoning = %q, want clean-count label run 3/6", got.Reasoning)
+		if !strings.Contains(got.Reasoning, "run 3/12") {
+			t.Fatalf("reasoning = %q, want usable-count label run 3/12", got.Reasoning)
 		}
 		return got
 	}
@@ -1594,7 +1594,7 @@ func TestTune_ForcedExplorationUsesRawIndexWithoutColdStartLabel(t *testing.T) {
 		ForceExplore: true,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
-	rows := make([]HistoryRecord, 10)
+	rows := make([]HistoryRecord, 16)
 	for i := range rows {
 		rows[i] = HistoryRecord{
 			SourceDBType: "mssql", TargetDBType: "postgres",
@@ -1602,19 +1602,19 @@ func TestTune_ForcedExplorationUsesRawIndexWithoutColdStartLabel(t *testing.T) {
 			ParallelReaders: 2, ReadAheadBuffers: 4,
 			FinalThroughput: 800_000,
 			CPUCores:        16, MemoryGB: 48,
-			AdjustedAtRuntime: i >= 6,
+			AdjustedAtRuntime: i >= 12,
 		}
 	}
 
 	want := baseline(in, profile)
-	applyGridExploration(&want, in, profile, 6, 10)
+	applyGridExploration(&want, in, profile, 12, 16)
 	applyMemoryClamp(&want, in)
 	got := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
 	if got.WriteAheadWriters != want.WriteAheadWriters || got.ChunkSize != want.ChunkSize ||
 		got.ParallelReaders != want.ParallelReaders || got.ReadAheadBuffers != want.ReadAheadBuffers {
 		t.Fatalf("forced exploration did not use raw index: got %+v, want %+v", got, want)
 	}
-	if !strings.Contains(got.Reasoning, "probe idx") || strings.Contains(got.Reasoning, "run 7/6") {
+	if !strings.Contains(got.Reasoning, "probe idx") || strings.Contains(got.Reasoning, "run ") {
 		t.Fatalf("forced exploration reasoning has invalid cold-start label: %q", got.Reasoning)
 	}
 }

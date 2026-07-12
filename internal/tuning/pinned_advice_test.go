@@ -54,7 +54,9 @@ func TestAppendPinnedWAWAdvice_SilentWithoutEvidence(t *testing.T) {
 
 // TestTune_PinnedAdviceThreadsThrough verifies the Input→Output plumbing.
 func TestTune_PinnedAdviceThreadsThrough(t *testing.T) {
-	rows := append(pinnedAdviceRows(4, 500_000, 5), pinnedAdviceRows(8, 800_000, 5)...)
+	// Twelve usable rows place Tune past the cold-start exploration window;
+	// six per bin still exceeds the measured-advice evidence floor.
+	rows := append(pinnedAdviceRows(4, 500_000, 6), pinnedAdviceRows(8, 800_000, 6)...)
 	for i := range rows {
 		rows[i].SourceDBType, rows[i].TargetDBType = "mssql", "postgres"
 		rows[i].CPUCores, rows[i].MemoryGB = 16, 48
@@ -78,7 +80,7 @@ func TestTune_PinnedAdviceThreadsThrough(t *testing.T) {
 // pinned, the advice cohort filters by the PINNED reader settings (what
 // will actually run), not the tuner's output (codex review on #461).
 func TestTune_PinnedAdviceUsesPinnedReaderSettings(t *testing.T) {
-	rows := append(pinnedAdviceRows(4, 500_000, 5), pinnedAdviceRows(8, 800_000, 5)...)
+	rows := append(pinnedAdviceRows(4, 500_000, 6), pinnedAdviceRows(8, 800_000, 6)...)
 	for i := range rows {
 		rows[i].SourceDBType, rows[i].TargetDBType = "mssql", "postgres"
 		rows[i].CPUCores, rows[i].MemoryGB = 16, 48

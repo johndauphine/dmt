@@ -81,15 +81,18 @@ func TestTune_DriftDetectedBeforeOutlierFilter(t *testing.T) {
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 
-	// 6 older runs around 1M rows/s + 3 recent runs around 380K. The
+	// 12 older runs around 1M rows/s + 3 recent runs around 380K. The
 	// recent runs are clean (no retries), so the outlier filter would
 	// drop them as "noise" (380K < 0.5 × 1M median). Without the fix,
-	// drift detection on the post-outlier set wouldn't see the recent
-	// runs and would NOT fire. With the fix, drift runs on the
-	// regime-filtered set and catches the shift.
+	// drift detection on the post-outlier set wouldn't see the recent runs;
+	// the 12 survivors are deliberately past the cold-start threshold, so
+	// Tune would choose history instead of reaching exploration by accident.
+	// With the fix, drift runs on the regime-filtered set and catches the shift.
 	rows := makeFixedConfigRuns(2, 50000, []float64{
 		1_000_000, 1_050_000, 980_000,
 		1_020_000, 1_010_000, 990_000,
+		1_030_000, 970_000, 1_040_000,
+		995_000, 1_005_000, 1_015_000,
 		380_000, 400_000, 360_000, // recent — would be "noise" post-filter
 	})
 	history := &stubHistory{rows: rows}
