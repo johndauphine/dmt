@@ -8,13 +8,11 @@ import (
 
 // TestGetSystemBasedSuggestions_NonDegenerate is the post-PR-#175 successor
 // to TestBuildOfflineAutoTuneInput (issue #157). The old test pinned that
-// the AI offline-input had non-zero AvailableMemoryMB / AvgRowBytes so the
-// AI prompt's memory-budget block didn't render "0 MB" / "~0 rows". After
-// PR #175 the AI prompt is gone; the same protection lives inside the
-// deterministic tuner (memoryBudgetMB falls back to fallbackBudgetMB,
-// baseline defaults avg to 500). End-to-end check: GetSystemBasedSuggestions
-// must produce a usable parameter set across reasonable system sizes,
-// including pathological zero inputs.
+// the AI offline-input had non-zero AvailableMemoryMB / AvgRowBytes. After
+// PR #175 the AI prompt is gone; #708 also makes a zero memory envelope mean
+// "no clamp input" instead of inventing a fallback. End-to-end check:
+// GetSystemBasedSuggestions must still produce a usable parameter set across
+// reasonable configurations, including direct callers with no envelope.
 func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 	cases := []struct {
 		name string
@@ -25,14 +23,6 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 			&config.Config{
 				Source: config.SourceConfig{Type: "postgres"},
 				Target: config.TargetConfig{Type: "postgres"},
-			},
-		},
-		{
-			"user cap honored",
-			&config.Config{
-				Source:    config.SourceConfig{Type: "mssql"},
-				Target:    config.TargetConfig{Type: "postgres"},
-				Migration: config.MigrationConfig{MaxMemoryMB: 2000},
 			},
 		},
 		{
@@ -67,6 +57,58 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetSystemBasedSuggestions_UsesResolvedMemoryEnvelope(t *testing.T) {
+	cfg := loadSmallEnvelopeConfig(t)
+	budgetMB := cfg.AutoConfig().MemoryEnvelope.BudgetMB
+	s := GetSystemBasedSuggestions(cfg)
+	if s.EstimatedMemMB > budgetMB {
+		t.Fatalf("EstimatedMemMB=%d exceeds resolved budget=%d", s.EstimatedMemMB, budgetMB)
+	}
+	if s.ChunkSizeRecommendation >= 50_000 {
+		t.Errorf("small envelope left offline chunk_size=%d, want a memory clamp below 50000", s.ChunkSizeRecommendation)
+	}
+}
+
+func TestAnalyzeConfig_TargetOnlyUsesEnvelopeAwareSuggestions(t *testing.T) {
+	cfg := loadSmallEnvelopeConfig(t)
+	orch := &Orchestrator{
+		config:     cfg,
+		targetPool: &deleteRuntimeTargetPool{},
+	}
+	s, err := orch.AnalyzeConfig(t.Context(), "")
+	if err != nil {
+		t.Fatalf("AnalyzeConfig: %v", err)
+	}
+	budgetMB := cfg.AutoConfig().MemoryEnvelope.BudgetMB
+	if s.EstimatedMemMB > budgetMB {
+		t.Fatalf("target-only EstimatedMemMB=%d exceeds resolved budget=%d", s.EstimatedMemMB, budgetMB)
+	}
+	if s.ChunkSizeRecommendation >= 50_000 {
+		t.Errorf("target-only chunk_size=%d, want envelope-aware clamp below 50000", s.ChunkSizeRecommendation)
+	}
+}
+
+func loadSmallEnvelopeConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg, err := config.LoadBytes([]byte(`
+source:
+  type: sqlite
+  database: source.db
+target:
+  type: sqlite
+  database: target.db
+migration:
+  max_memory_mb: 64
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if got := cfg.AutoConfig().MemoryEnvelope.BudgetMB; got != 64 {
+		t.Fatalf("test requires 64 MB envelope; got %d", got)
+	}
+	return cfg
 }
 
 func TestIsLocalDBHost(t *testing.T) {

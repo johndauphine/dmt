@@ -62,6 +62,24 @@ func TestBuildPerformanceExplanationPayloadOmitsEndpointIdentity(t *testing.T) {
 	}
 }
 
+func TestPerformanceAutoTuneInputMapsResolvedEnvelope(t *testing.T) {
+	cfg := loadSmallEnvelopeConfig(t)
+	orch := &Orchestrator{config: cfg}
+	input := orch.performanceAutoTuneInput(&driver.SmartConfigSuggestions{})
+	envelope := cfg.AutoConfig().MemoryEnvelope
+
+	if input.AvailableMemoryMB != envelope.AvailableMB {
+		t.Errorf("AvailableMemoryMB=%d, want envelope value %d", input.AvailableMemoryMB, envelope.AvailableMB)
+	}
+	if input.MemoryBudgetMB != envelope.BudgetMB || input.MaxMemoryMB != envelope.BudgetMB {
+		t.Errorf("budget mappings = %d/%d, want %d", input.MemoryBudgetMB, input.MaxMemoryMB, envelope.BudgetMB)
+	}
+	wantMemoryGB := int((envelope.CapacityMB + 1023) / 1024)
+	if input.MemoryGB != wantMemoryGB {
+		t.Errorf("MemoryGB=%d, want %d from capacity (not availability)", input.MemoryGB, wantMemoryGB)
+	}
+}
+
 func TestExplainPerformanceWithAIFallsBackWhenProviderUnavailable(t *testing.T) {
 	orch := &Orchestrator{
 		config: &config.Config{},

@@ -958,7 +958,7 @@ notifications:
 		"workers":                 8,
 		"max_source_connections":  12,
 		"max_target_connections":  10,
-		"max_memory_mb":           2049,
+		"max_memory_mb":           8192,
 		"chunk_size":              50000,
 		"max_partitions":          16,
 		"large_table_threshold":   1000000,
@@ -986,22 +986,6 @@ notifications:
 	if strings.Contains(string(updated), "    workers:") {
 		t.Fatalf("migration block was rendered with 4-space child indentation:\n%s", updated)
 	}
-}
-
-func TestAppliedMaxMemoryMBCeilsFlooredEstimate(t *testing.T) {
-	t.Run("positive_estimate_gets_one_mb_headroom", func(t *testing.T) {
-		got := appliedMaxMemoryMB(&driver.SmartConfigSuggestions{EstimatedMemMB: 2048})
-		if got != 2049 {
-			t.Fatalf("appliedMaxMemoryMB() = %d, want 2049", got)
-		}
-	})
-
-	t.Run("non_positive_estimate_stays_unset", func(t *testing.T) {
-		got := appliedMaxMemoryMB(&driver.SmartConfigSuggestions{EstimatedMemMB: 0})
-		if got != 0 {
-			t.Fatalf("appliedMaxMemoryMB() = %d, want 0", got)
-		}
-	})
 }
 
 func TestApplyTuningToConfigFileTreatsNullMigrationAsMissing(t *testing.T) {
@@ -1641,53 +1625,6 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	if cfg.Migration.MaxTargetConnections < expectedTargetConns {
 		t.Errorf("insufficient target connections: got %d, need at least %d",
 			cfg.Migration.MaxTargetConnections, expectedTargetConns)
-	}
-}
-
-func TestApplyDefaultsMemoryDetectionFallback(t *testing.T) {
-	// Test that applyDefaults succeeds when max_memory_mb is set,
-	// even on platforms where memory detection might fail.
-	// The 70% hard cap is always applied to EffectiveMaxMemoryMB.
-	cfg := &Config{
-		Source: SourceConfig{
-			Type:     "postgres",
-			Host:     "localhost",
-			Port:     5432,
-			Database: "source",
-			User:     "user",
-			Password: "pass",
-		},
-		Target: TargetConfig{
-			Type:     "postgres",
-			Host:     "localhost",
-			Port:     5432,
-			Database: "target",
-			User:     "user",
-			Password: "pass",
-		},
-		Migration: MigrationConfig{
-			MaxMemoryMB: 8192,
-		},
-	}
-	if err := cfg.applyDefaults(); err != nil {
-		t.Fatalf("applyDefaults() should succeed with max_memory_mb set: %v", err)
-	}
-
-	if cfg.autoConfig.AvailableMemoryMB == 0 {
-		t.Error("AvailableMemoryMB should not be 0")
-	}
-
-	// EffectiveMaxMemoryMB should never exceed 70% of available memory
-	hardCap := cfg.autoConfig.AvailableMemoryMB * 70 / 100
-	if cfg.autoConfig.EffectiveMaxMemoryMB > hardCap {
-		t.Errorf("EffectiveMaxMemoryMB %d exceeds 70%% hard cap %d",
-			cfg.autoConfig.EffectiveMaxMemoryMB, hardCap)
-	}
-
-	// When max_memory_mb < hard cap, it should be used directly
-	if cfg.Migration.MaxMemoryMB < hardCap && cfg.autoConfig.EffectiveMaxMemoryMB != cfg.Migration.MaxMemoryMB {
-		t.Errorf("EffectiveMaxMemoryMB should equal MaxMemoryMB (%d) when below hard cap, got %d",
-			cfg.Migration.MaxMemoryMB, cfg.autoConfig.EffectiveMaxMemoryMB)
 	}
 }
 

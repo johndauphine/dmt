@@ -176,6 +176,35 @@ func TestSaveTuningWithActualParams_NoPending(t *testing.T) {
 	}
 }
 
+func TestBuildAutoTuneInput_UsesInjectedMemoryEnvelope(t *testing.T) {
+	analyzer := NewSmartConfigAnalyzer(nil, "mssql")
+	analyzer.SetMemoryEnvelope(24*1024, 3*1024, 2*1024)
+
+	input := analyzer.buildAutoTuneInput(nil, 500)
+	if input.MemoryGB != 24 {
+		t.Errorf("MemoryGB = %d, want 24 from capacity (not transient availability)", input.MemoryGB)
+	}
+	if input.AvailableMemoryMB != 3*1024 {
+		t.Errorf("AvailableMemoryMB = %d, want %d", input.AvailableMemoryMB, 3*1024)
+	}
+	if input.MemoryBudgetMB != 2*1024 || input.MaxMemoryMB != input.MemoryBudgetMB {
+		t.Errorf("budget projections = MemoryBudgetMB %d / MaxMemoryMB %d, want %d", input.MemoryBudgetMB, input.MaxMemoryMB, 2*1024)
+	}
+
+	tuningInput := analyzer.toTuningInput(input)
+	if tuningInput.MemoryBudgetMB != input.MemoryBudgetMB {
+		t.Errorf("tuning MemoryBudgetMB = %d, want %d", tuningInput.MemoryBudgetMB, input.MemoryBudgetMB)
+	}
+}
+
+func TestBuildAutoTuneInput_NoEnvelopeDoesNotInventMemory(t *testing.T) {
+	analyzer := NewSmartConfigAnalyzer(nil, "mssql")
+	input := analyzer.buildAutoTuneInput(nil, 500)
+	if input.MemoryGB != 0 || input.AvailableMemoryMB != 0 || input.MemoryBudgetMB != 0 || input.MaxMemoryMB != 0 {
+		t.Errorf("unset envelope produced memory values: %+v", input)
+	}
+}
+
 // TestChunkLimitFromProbe is the pure-function test for the #166
 // HardChunkLimit calculation. Each row drives the exact path used in
 // toTuningProfile without depending on driver registration (the

@@ -371,8 +371,9 @@ func TestTune_ColdStartUsesTwelveUsableRuns(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:    "linux",
-		AvgRowBytes: 500,
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	rows := explorationRowsForTest(profile, in.AvgRowBytes, func(explorationCell) float64 { return 1_000 })
@@ -410,8 +411,9 @@ func TestTune_AdjustedAttemptAdvancesRawIndexNotUsableCount(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:    "linux",
-		AvgRowBytes: 500,
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	rows := explorationRowsForTest(profile, in.AvgRowBytes, func(explorationCell) float64 { return 1_000 })
@@ -447,8 +449,9 @@ func TestTune_LowThroughputOutlierDoesNotAdvanceUsableCount(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:    "linux",
-		AvgRowBytes: 500,
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	rows := explorationRowsForTest(profile, in.AvgRowBytes, func(explorationCell) float64 { return 1_000 })
@@ -470,6 +473,32 @@ func TestTune_LowThroughputOutlierDoesNotAdvanceUsableCount(t *testing.T) {
 	}
 	if !strings.Contains(got.Reasoning, "run 12/12") {
 		t.Errorf("outlier-filtered attempt reasoning = %q, want usable-count label run 12/12", got.Reasoning)
+	}
+}
+
+func TestTune_ExplorationSmallBudgetPreservesSelectorProvenance(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	out := Tune(in, profile, &stubHistory{}, DBTuning{})
+
+	if out.Tier != TierExploration {
+		t.Fatalf("Tier = %q, want %q", out.Tier, TierExploration)
+	}
+	if !strings.Contains(out.Reasoning, "exploration: planned grid") || !strings.Contains(out.Reasoning, "memory clamp") {
+		t.Fatalf("Reasoning = %q, want exploration selection followed by memory clamp", out.Reasoning)
+	}
+	if out.ChunkSize >= 25_000 {
+		t.Errorf("small budget left exploration ChunkSize=%d, want clamp below 25000", out.ChunkSize)
+	}
+	if out.EstimatedMemMB > in.MemoryBudgetMB {
+		t.Errorf("EstimatedMemMB=%d exceeds budget=%d", out.EstimatedMemMB, in.MemoryBudgetMB)
 	}
 }
 
@@ -545,9 +574,10 @@ func TestTune_ForceExploreOverridesHistory(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
 		SourceDBType: "mssql", TargetDBType: "postgres",
-		Platform:     "linux",
-		AvgRowBytes:  500,
-		ForceExplore: true,
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
+		ForceExplore:   true,
 	}
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000, ScaleWritersWithCores: true}
 	rows := make([]HistoryRecord, 60)

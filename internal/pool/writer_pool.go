@@ -15,7 +15,7 @@ import (
 // PipelineBufferConfig contains the parameters needed to compute pipeline buffer sizes.
 // All values come from system detection, user config, or per-table metadata.
 type PipelineBufferConfig struct {
-	MemoryBudgetMB   int64 // Memory available for the pipeline (from EffectiveMaxMemoryMB minus connection overhead)
+	MemoryBudgetMB   int64 // Memory available for the pipeline (from the resolved envelope minus connection overhead)
 	ChunkSize        int   // Rows per batch
 	RowBytes         int64 // Bytes per row for this specific table (from Table.GoHeapBytesPerRow)
 	NumWriters       int   // Writer goroutines (each holds one chunk being written)

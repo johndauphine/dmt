@@ -44,6 +44,8 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 
 	// Create analyzer (same pattern as AnalyzeConfig in healthcheck.go).
 	analyzer := driver.NewSmartConfigAnalyzer(o.sourcePool.DB(), o.sourcePool.DBType())
+	envelope := o.config.AutoConfig().MemoryEnvelope
+	analyzer.SetMemoryEnvelope(envelope.CapacityMB, envelope.AvailableMB, envelope.BudgetMB)
 
 	// Scope the analyzer to the post-filter table set (#241). Both Run
 	// and Resume have already applied include/exclude filters into
@@ -102,11 +104,6 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 			o.config.Migration.TargetHardChunkLimit = analyzer.TargetHardChunkLimit()
 		}
 	}()
-
-	// Pass user-configured memory cap
-	if o.config.Migration.MaxMemoryMB > 0 {
-		analyzer.SetMaxMemoryMB(o.config.Migration.MaxMemoryMB)
-	}
 
 	// Wire exploration policy (#179): --explore flag forces a planned-grid
 	// pick this run; ExploreMode controls steady-state ε strength.

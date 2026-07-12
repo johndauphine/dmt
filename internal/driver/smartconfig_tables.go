@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-
-	"github.com/shirou/gopsutil/v3/mem"
 )
 
 func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableInfo {
@@ -95,18 +93,7 @@ func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
 // buildAutoTuneInput constructs input for the tuner.
 func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize int64) AutoTuneInput {
 	cores := runtime.NumCPU()
-	memoryGB := 8
-	var availableMemoryMB, swapTotalMB int64
-	if v, err := mem.VirtualMemory(); err == nil {
-		memoryGB = int(v.Total / (1024 * 1024 * 1024))
-		availableMemoryMB = int64(v.Available / (1024 * 1024))
-	}
-	if availableMemoryMB == 0 {
-		availableMemoryMB = int64(memoryGB) * 1024 / 2
-	}
-	if sw, err := mem.SwapMemory(); err == nil {
-		swapTotalMB = int64(sw.Total / (1024 * 1024))
-	}
+	memoryGB := int((s.memoryCapacityMB + 1023) / 1024)
 
 	var largestTables []TableStats
 	for i, t := range tables {
@@ -123,10 +110,10 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 	return AutoTuneInput{
 		CPUCores:            cores,
 		MemoryGB:            memoryGB,
-		AvailableMemoryMB:   availableMemoryMB,
-		SwapTotalMB:         swapTotalMB,
+		AvailableMemoryMB:   s.availableMemoryMB,
 		Platform:            DetectPlatform(),
-		MaxMemoryMB:         s.maxMemoryMB,
+		MaxMemoryMB:         s.memoryBudgetMB,
+		MemoryBudgetMB:      s.memoryBudgetMB,
 		DatabaseType:        s.dbType,
 		TargetType:          s.targetDBType,
 		TargetMode:          s.targetMode,

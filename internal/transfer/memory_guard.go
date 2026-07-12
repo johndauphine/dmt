@@ -65,11 +65,11 @@ func startHeapSampler() {
 // NewMemoryGuard creates a guard that pauses readers when heap usage exceeds
 // 80% of the configured memory limit. It returns nil if no limit is
 // configured, allowing callers with no memory cap to skip this backstop.
-func NewMemoryGuard(effectiveMaxMemoryMB int64) *MemoryGuard {
-	if effectiveMaxMemoryMB <= 0 {
+func NewMemoryGuard(memoryBudgetMB int64) *MemoryGuard {
+	if memoryBudgetMB <= 0 {
 		return nil
 	}
-	limitBytes := uint64(effectiveMaxMemoryMB) * 1024 * 1024
+	limitBytes := uint64(memoryBudgetMB) * 1024 * 1024
 	return &MemoryGuard{
 		limitBytes: limitBytes,
 		threshold:  limitBytes * 80 / 100, // pause at 80% of limit

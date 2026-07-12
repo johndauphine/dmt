@@ -61,17 +61,10 @@ func (o *Orchestrator) performanceAutoTuneInput(suggestions *driver.SmartConfigS
 	if input.CPUCores <= 0 {
 		input.CPUCores = runtime.NumCPU()
 	}
-	input.AvailableMemoryMB = auto.AvailableMemoryMB
-	input.MaxMemoryMB = auto.EffectiveMaxMemoryMB
-	if input.MaxMemoryMB == 0 {
-		input.MaxMemoryMB = o.config.Migration.MaxMemoryMB
-	}
-	if input.AvailableMemoryMB == 0 {
-		input.AvailableMemoryMB = input.MaxMemoryMB
-	}
-	if input.AvailableMemoryMB > 0 {
-		input.MemoryGB = int((input.AvailableMemoryMB + 1023) / 1024)
-	}
+	input.AvailableMemoryMB = auto.MemoryEnvelope.AvailableMB
+	input.MaxMemoryMB = auto.MemoryEnvelope.BudgetMB
+	input.MemoryBudgetMB = auto.MemoryEnvelope.BudgetMB
+	input.MemoryGB = int((auto.MemoryEnvelope.CapacityMB + 1023) / 1024)
 	input.Platform = driver.DetectPlatform()
 	input.DatabaseType = driver.Canonicalize(o.config.Source.Type)
 	input.TargetType = driver.Canonicalize(o.config.Target.Type)

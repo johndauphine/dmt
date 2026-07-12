@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Memory budgeting now resolves one host/cgroup-aware envelope during config
+  loading and passes its exact budget to tuning, GC pacing, transfer buffers,
+  and MemoryGuard. Linux cgroup v1/v2 limits fail closed when identified but
+  unreadable, and small containers no longer inherit the tuner's former 1 GiB
+  fallback floor (#708).
+
 - Exploration-tier migrations now suppress runtime writer/chunk growth while
   retaining memory and error backoffs. Planned-grid rotation uses raw pair
   history, so safety-adjusted or otherwise filtered attempts do not pin the

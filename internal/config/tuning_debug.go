@@ -89,11 +89,13 @@ func (c *Config) DebugDump() string {
 
 	// System Resources
 	b.WriteString("System Resources:\n")
-	fmt.Fprintf(&b, "  Available Memory: %d MB\n", ac.AvailableMemoryMB)
+	fmt.Fprintf(&b, "  Memory Capacity: %d MB\n", ac.MemoryEnvelope.CapacityMB)
+	fmt.Fprintf(&b, "  Memory Available: %d MB\n", ac.MemoryEnvelope.AvailableMB)
+	fmt.Fprintf(&b, "  Memory Budget: %d MB\n", ac.MemoryEnvelope.BudgetMB)
+	fmt.Fprintf(&b, "  Memory Source: %s\n", ac.MemoryEnvelope.Source)
 	if c.Migration.MaxMemoryMB > 0 {
-		fmt.Fprintf(&b, "  Max Memory Limit: %d MB (user configured)\n", c.Migration.MaxMemoryMB)
+		fmt.Fprintf(&b, "  Max Memory Limit: %d MB (user ceiling)\n", c.Migration.MaxMemoryMB)
 	}
-	fmt.Fprintf(&b, "  Effective Max Memory: %d MB (hard cap 70%%)\n", ac.EffectiveMaxMemoryMB)
 	fmt.Fprintf(&b, "  CPU Cores: %d\n", ac.CPUCores)
 
 	// Source Database
@@ -164,12 +166,12 @@ func (c *Config) DebugDump() string {
 	fmt.Fprintf(&b, "  Workers: %s\n", c.formatTunableValue(c.Migration.Workers, ac.OriginalWorkers, provenanceMigrationWorkers, workersExpl))
 
 	// ChunkSize
-	ramGB := float64(ac.AvailableMemoryMB) / 1024.0
+	ramGB := float64(ac.MemoryEnvelope.AvailableMB) / 1024.0
 	chunkExpl := fmt.Sprintf("75K + %.1fGB*3.1K", ramGB)
 	fmt.Fprintf(&b, "  ChunkSize: %s\n", c.formatTunableValue(c.Migration.ChunkSize, ac.OriginalChunkSize, provenanceMigrationChunkSize, chunkExpl))
 
 	// ReadAheadBuffers
-	buffersExpl := fmt.Sprintf("memory/%d workers/chunk bytes", c.Migration.Workers)
+	buffersExpl := fmt.Sprintf("%dMB budget/%d workers/chunk bytes", ac.MemoryEnvelope.BudgetMB, c.Migration.Workers)
 	fmt.Fprintf(&b, "  ReadAheadBuffers: %s\n", c.formatTunableValue(c.Migration.ReadAheadBuffers, ac.OriginalReadAheadBuffers, provenanceMigrationReadAheadBuffers, buffersExpl))
 
 	// MaxPartitions
@@ -215,7 +217,7 @@ func (c *Config) DebugDump() string {
 
 	// UpsertMergeChunkSize - only show in upsert mode
 	if c.Migration.TargetMode == "upsert" {
-		upsertExpl := "auto: memory-scaled 5K-20K"
+		upsertExpl := "auto: envelope-budget-scaled 5K-20K"
 		fmt.Fprintf(&b, "  UpsertMergeChunkSize: %s\n", c.formatTunableValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, provenanceMigrationUpsertMergeChunkSize, upsertExpl))
 		// DateUpdatedColumns - only show in upsert mode if configured
 		if len(c.Migration.DateUpdatedColumns) > 0 {

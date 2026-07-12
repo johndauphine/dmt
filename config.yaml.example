@@ -182,7 +182,7 @@ migration:
   # large_table_threshold: 5000000   # rows before a table is partitioned
   # max_source_connections: 12       # source connection pool size
   # max_target_connections: 12       # target connection pool size
-  # max_memory_mb: 8192              # cap the pipeline memory budget
+  # max_memory_mb: 8192              # optional ceiling on the container-aware automatic budget
 
 # Slack notifications (optional)
 slack:

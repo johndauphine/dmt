@@ -29,7 +29,7 @@ type MigrationDefaults struct {
 	Workers              int   `yaml:"workers,omitempty"`                // Number of parallel workers (default: auto based on CPU)
 	MaxSourceConnections int   `yaml:"max_source_connections,omitempty"` // Max source DB connections
 	MaxTargetConnections int   `yaml:"max_target_connections,omitempty"` // Max target DB connections
-	MaxMemoryMB          int64 `yaml:"max_memory_mb,omitempty"`          // Max memory usage in MB
+	MaxMemoryMB          int64 `yaml:"max_memory_mb,omitempty"`          // Optional ceiling on the resolved automatic memory budget
 	ReadAheadBuffers     int   `yaml:"read_ahead_buffers,omitempty"`     // Chunks to buffer ahead
 	WriteAheadWriters    int   `yaml:"write_ahead_writers,omitempty"`    // Parallel writers per job
 	ParallelReaders      int   `yaml:"parallel_readers,omitempty"`       // Parallel readers per job

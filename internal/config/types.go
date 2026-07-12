@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/internal/systemmemory"
 	"gopkg.in/yaml.v3"
 	"strings"
 )
@@ -25,11 +26,25 @@ const (
 	ProvenanceRuntimeControl ConfigValueProvenance = "runtime controller"
 )
 
+// MemoryEnvelope is the one immutable capacity/budget decision made while
+// loading a config. Capacity and availability come from the shared
+// host/cgroup-aware detector; BudgetMB applies the automatic reserve and the
+// optional migration.max_memory_mb ceiling exactly once.
+type MemoryEnvelope struct {
+	CapacityMB  int64
+	AvailableMB int64
+	BudgetMB    int64
+	Source      string
+}
+
 // AutoConfig tracks which values were auto-configured and why
 type AutoConfig struct {
-	// System resources detected
+	// System resources detected. AvailableMemoryMB and EffectiveMaxMemoryMB
+	// are compatibility projections retained during the memory-envelope epic;
+	// new consumers should use MemoryEnvelope directly.
+	MemoryEnvelope       MemoryEnvelope
 	AvailableMemoryMB    int64
-	EffectiveMaxMemoryMB int64 // After applying user limit and 70% cap
+	EffectiveMaxMemoryMB int64
 	CPUCores             int
 
 	// Raw user-supplied values captured after YAML/template expansion and
@@ -56,9 +71,6 @@ type AutoConfig struct {
 	OriginalTargetChunkSize      int
 	OriginalCheckpointFrequency  int
 	OriginalMaxRetries           int
-
-	// Target memory used for calculations
-	TargetMemoryMB int64
 }
 
 // Config holds all configuration for the migration tool.
@@ -73,6 +85,10 @@ type Config struct {
 
 	// AutoConfig stores auto-tuning metadata (not serialized to YAML)
 	autoConfig AutoConfig
+
+	// memoryReader is injectable for deterministic config tests. Production
+	// loading leaves it nil and resolves one systemmemory.NewReader snapshot.
+	memoryReader systemmemory.Reader
 }
 
 // SlackConfig holds Slack notification settings.
@@ -283,7 +299,7 @@ type MigrationConfig struct {
 	WriteAheadWriters    int              `yaml:"write_ahead_writers"`     // Number of parallel writers per job (default=2)
 	ParallelReaders      int              `yaml:"parallel_readers"`        // Number of parallel readers per job (default=2)
 	UpsertMergeChunkSize int              `yaml:"upsert_merge_chunk_size"` // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
-	MaxMemoryMB          int64            `yaml:"max_memory_mb"`           // Max memory to use (default=70% of available, hard cap at 70%)
+	MaxMemoryMB          int64            `yaml:"max_memory_mb"`           // Optional ceiling on the resolved automatic memory budget
 	// Restartability settings
 	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)

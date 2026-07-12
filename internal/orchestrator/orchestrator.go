@@ -29,6 +29,15 @@ func New(cfg *config.Config) (*Orchestrator, error) {
 
 // NewWithOptions creates a new orchestrator with custom options.
 func NewWithOptions(cfg *config.Config, opts Options) (*Orchestrator, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	envelope := cfg.AutoConfig().MemoryEnvelope
+	if envelope.CapacityMB <= 0 || envelope.AvailableMB <= 0 || envelope.BudgetMB <= 0 {
+		return nil, fmt.Errorf("config memory envelope is unresolved (capacity=%d MB available=%d MB budget=%d MB); load config through config.Load or config.LoadBytes before constructing an orchestrator",
+			envelope.CapacityMB, envelope.AvailableMB, envelope.BudgetMB)
+	}
+
 	// Pace the GC against the same budget the pipeline buffers are sized
 	// from (#462). Idempotent and env-override-aware; the transfer memory
 	// guard remains the backstop.
