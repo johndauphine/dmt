@@ -45,6 +45,7 @@ func TestFormatDryRunResult(t *testing.T) {
 		"Workers: 8",
 		"Chunk Size: 50000",
 		"Estimated Memory: ~256 MB",
+		"unobserved row-width fallback, 500 bytes",
 		"Delete Reconciliation:",
 		"Due: true (interval elapsed)",
 		"Candidate Deletes: 42",

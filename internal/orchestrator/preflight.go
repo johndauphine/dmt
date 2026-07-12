@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -169,7 +170,19 @@ func (o *Orchestrator) estimatedTargetBytes() int64 {
 	}
 	var total int64
 	for _, t := range o.tables {
-		total += t.RowCount * t.EstimatedRowSize
+		if t.RowCount <= 0 || t.EstimatedRowSize <= 0 {
+			continue
+		}
+		var tableBytes int64
+		if t.RowCount > math.MaxInt64/t.EstimatedRowSize {
+			tableBytes = math.MaxInt64
+		} else {
+			tableBytes = t.RowCount * t.EstimatedRowSize
+		}
+		if total > math.MaxInt64-tableBytes {
+			return math.MaxInt64
+		}
+		total += tableBytes
 	}
 	return total
 }

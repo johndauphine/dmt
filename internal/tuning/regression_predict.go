@@ -124,9 +124,9 @@ func tCritical(dof int) float64 {
 // for a candidate (waw, csBytes) at the given current run's (source,
 // target, target_mode, avg_row_bytes). #224 switched the dependent
 // variable from rows/sec to bytes/sec — callers that need rows/sec
-// divide by avg_row_bytes at the boundary (argmaxRegression's
-// `csRows := int(pickedCSBytes / avg)` is unaffected because it
-// only consumes csBytes, not the prediction itself). Pair and mode
+// divide by avg_row_bytes at the boundary. Candidate bytes are converted to
+// rows with RepresentativeRowBytes outside the model; this avg_row_bytes
+// parameter intentionally remains the legacy persisted feature. Pair and mode
 // the model didn't see during training contribute zero (the
 // categorical features are absent); the prediction then collapses
 // to the numeric-feature surface plus the intercept.

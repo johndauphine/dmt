@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Smart configuration now separates representative workload width from the
+  widest observed table-average safety width. Performance sizing is no longer
+  distorted by tiny wide tables, while memory clamps use the safer width,
+  preserve unknown-width provenance, round estimates up, and saturate extreme
+  arithmetic instead of wrapping (#703).
+
 - Memory budgeting now resolves one host/cgroup-aware envelope during config
   loading and passes its exact budget to tuning, GC pacing, transfer buffers,
   and MemoryGuard. Linux cgroup v1/v2 limits fail closed when identified but

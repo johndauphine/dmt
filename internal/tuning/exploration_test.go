@@ -170,6 +170,23 @@ func TestApplyGridExploration_UsesOrderedCells(t *testing.T) {
 	}
 }
 
+func TestApplyGridExploration_UsesRepresentativeWidth(t *testing.T) {
+	in := Input{
+		AvgRowBytes:            2_000,
+		RepresentativeRowBytes: 8_000,
+		Platform:               "linux",
+		CPUCores:               8,
+	}
+	profile := DriverProfile{BaselineWAW: 2, OptimumBulkChunkBytes: 16_000_000}
+	out := baseline(in, profile)
+
+	applyGridExploration(&out, in, profile, 0, 0)
+	// Cell zero is the 0.5x candidate: 8 MB / 8 KB = 1000 rows.
+	if out.ChunkSize != 1_000 {
+		t.Fatalf("exploration ChunkSize = %d, want 1000 from representative width", out.ChunkSize)
+	}
+}
+
 // TestApplyGridExploration_SetsReaderFields (#219) — every grid pick
 // must produce non-zero PR and RAB. Pre-fix the exploration left both
 // at whatever the baseline produced (PR=2, RAB=4); after #219 they must

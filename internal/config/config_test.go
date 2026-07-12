@@ -1628,6 +1628,35 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 	}
 }
 
+func TestConnectionPoolSizingSaturatesOnOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	if got := saturatingConnectionRequirement(maxInt, 2); got != maxInt {
+		t.Fatalf("overflowing connection requirement = %d, want %d", got, maxInt)
+	}
+
+	cfg := &Config{
+		Migration: MigrationConfig{
+			Workers:              1,
+			ParallelReaders:      1,
+			WriteAheadWriters:    1,
+			MaxSourceConnections: 1,
+			MaxTargetConnections: 1,
+		},
+	}
+	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+		Workers:           maxInt,
+		ParallelReaders:   2,
+		WriteAheadWriters: 2,
+	})
+
+	if cfg.Migration.MaxSourceConnections != maxInt {
+		t.Fatalf("source connections = %d, want saturation at %d", cfg.Migration.MaxSourceConnections, maxInt)
+	}
+	if cfg.Migration.MaxTargetConnections != maxInt {
+		t.Fatalf("target connections = %d, want saturation at %d", cfg.Migration.MaxTargetConnections, maxInt)
+	}
+}
+
 func TestExpandTemplateValue(t *testing.T) {
 	// Create a temp file with a secret
 	tmpDir := t.TempDir()

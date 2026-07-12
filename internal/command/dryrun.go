@@ -32,7 +32,15 @@ func FormatDryRunResult(r *orchestrator.DryRunResult) string {
 
 	fmt.Fprintf(&b, "Workers: %d\n", r.Workers)
 	fmt.Fprintf(&b, "Chunk Size: %d\n", r.ChunkSize)
-	fmt.Fprintf(&b, "Estimated Memory: ~%d MB\n", r.EstimatedMemMB)
+	rowBytes := r.SafetyRowBytes
+	if rowBytes <= 0 {
+		rowBytes = 500
+	}
+	widthSource := "unobserved row-width fallback"
+	if r.SafetyRowBytesKnown {
+		widthSource = "widest observed table-average model; not a per-row bound"
+	}
+	fmt.Fprintf(&b, "Estimated Memory: ~%d MB (%s, %d bytes)\n", r.EstimatedMemMB, widthSource, rowBytes)
 	if r.EstimatedRowsPerSecond > 0 && r.EstimatedDurationSeconds > 0 {
 		eta := time.Duration(r.EstimatedDurationSeconds * float64(time.Second)).Round(time.Second)
 		fmt.Fprintf(&b, "Estimated Duration: ~%s at %s rows/sec from recent history\n",

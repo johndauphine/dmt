@@ -8,6 +8,9 @@ import (
 func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 	avgRowSize := s.calculateAvgRowSize(tables)
 	s.suggestions.AvgRowSizeBytes = avgRowSize
+	s.suggestions.RepresentativeRowBytes = s.representativeRowBytes
+	s.suggestions.SafetyRowBytes = s.safetyRowBytes
+	s.suggestions.SafetyRowBytesKnown = s.safetyRowBytesKnown
 
 	input := s.buildAutoTuneInput(tables, avgRowSize)
 	output := tuning.Tune(
@@ -18,25 +21,34 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 	)
 	s.applyTuningOutput(output)
 
-	s.pendingSave = &pendingTuningSave{input: input, reasoning: output.Reasoning}
+	s.pendingSave = &pendingTuningSave{
+		input:                  input,
+		reasoning:              output.Reasoning,
+		representativeRowBytes: input.RepresentativeRowBytes,
+		safetyRowBytes:         input.SafetyRowBytes,
+		safetyRowBytesKnown:    input.SafetyRowBytesKnown,
+	}
 }
 
 // toTuningInput maps the analyzer's AutoTuneInput onto tuning.Input,
 // adding the exploration fields from the analyzer's configured state.
 func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 	return tuning.Input{
-		CPUCores:            in.CPUCores,
-		MemoryGB:            in.MemoryGB,
-		MemoryBudgetMB:      in.MemoryBudgetMB,
-		Platform:            in.Platform,
-		SourceDBType:        in.DatabaseType,
-		TargetDBType:        in.TargetType,
-		TargetMode:          in.TargetMode,
-		TotalTables:         in.TotalTables,
-		TotalRows:           in.TotalRows,
-		AvgRowBytes:         in.AvgRowBytes,
-		UncappedAvgRowBytes: in.UncappedAvgRowBytes,
-		LargestTableBytes:   in.LargestTableBytes,
+		CPUCores:               in.CPUCores,
+		MemoryGB:               in.MemoryGB,
+		MemoryBudgetMB:         in.MemoryBudgetMB,
+		Platform:               in.Platform,
+		SourceDBType:           in.DatabaseType,
+		TargetDBType:           in.TargetType,
+		TargetMode:             in.TargetMode,
+		TotalTables:            in.TotalTables,
+		TotalRows:              in.TotalRows,
+		AvgRowBytes:            in.AvgRowBytes,
+		RepresentativeRowBytes: in.RepresentativeRowBytes,
+		SafetyRowBytes:         in.SafetyRowBytes,
+		SafetyRowBytesKnown:    in.SafetyRowBytesKnown,
+		UncappedAvgRowBytes:    in.UncappedAvgRowBytes,
+		LargestTableBytes:      in.LargestTableBytes,
 		// Workload identity passthrough (#215).
 		SourceHost:              in.SourceHost,
 		SourcePort:              in.SourcePort,
@@ -100,42 +112,55 @@ func (s *SmartConfigAnalyzer) toTuningProfile() tuning.DriverProfile {
 	profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
 	profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
 
-	avgRowBytes := s.suggestions.AvgRowSizeBytes
-	// For the packet calculation, use the *widest sampled* row, not
-	// the average. chunk_size is global across all tables in a
-	// migration; the protocol cap must hold for the worst-case row.
-	// Falls back to uncapped average and then to capped average for
-	// code paths that don't run calculateAvgRowSize (Codex review on
-	// #166).
-	packetRowBytes := s.maxSampledRowBytes
-	if packetRowBytes == 0 {
-		packetRowBytes = s.uncappedAvgRowBytes
-	}
-	if packetRowBytes == 0 {
-		packetRowBytes = avgRowBytes
-	}
-	profile.HardChunkLimit = chunkLimitFromProbe(d.HardChunkLimit(avgRowBytes), s.targetProbe, packetRowBytes)
+	// SafetyRowBytes is the widest observed table-average width and is the
+	// best available packet-sizing estimate. It is not a bound on every
+	// serialized row; write-error-driven chunk reduction remains the backstop.
+	packetRowBytes := s.packetSizingRowBytes()
+	profile.HardChunkLimit = chunkLimitFromProbe(d.HardChunkLimit(packetRowBytes), s.targetProbe, packetRowBytes)
 	return profile
+}
+
+func (s *SmartConfigAnalyzer) packetSizingRowBytes() int64 {
+	if s.safetyRowBytes > 0 {
+		return s.safetyRowBytes
+	}
+	if s.uncappedAvgRowBytes > 0 {
+		return s.uncappedAvgRowBytes
+	}
+	if s.suggestions != nil && s.suggestions.AvgRowSizeBytes > 0 {
+		return s.suggestions.AvgRowSizeBytes
+	}
+	return fallbackRowBytes
 }
 
 // chunkLimitFromProbe picks the HardChunkLimit value used in the
 // DriverProfile. When a target-side probe surfaces a protocol cap
 // (today: MySQL @@max_allowed_packet), that wins â€” it's the hard
-// physical limit, server-configurable, and only knowable at runtime.
-// Otherwise the driver's static HardChunkLimit applies. Extracted as
+// physical limit, server-configurable, and only knowable at runtime. The
+// row-count conversion is still modeled from a table-average width, so it
+// does not prove that every individual serialized row fits. Otherwise the
+// driver's static HardChunkLimit applies. Extracted as
 // a pure function so smartconfig tests can exercise the math without
 // depending on driver-registry state (#166).
-func chunkLimitFromProbe(driverStaticLimit int, probe TargetProbe, avgRowBytes int64) int {
-	if probe.MaxAllowedPacket > 0 && avgRowBytes > 0 {
+func chunkLimitFromProbe(driverStaticLimit int, probe TargetProbe, estimatedRowBytes int64) int {
+	if probe.MaxAllowedPacket > 0 && estimatedRowBytes > 0 {
 		const safetyMarginPct = 80
-		safeBytes := probe.MaxAllowedPacket * safetyMarginPct / 100
-		limit := int(safeBytes / avgRowBytes)
-		// Clamp to at least 1 â€” when avgRowBytes exceeds 80% of the
-		// packet, integer division returns 0 and downstream code would
-		// treat that as "no cap," which is the opposite of the intent.
-		// One row per chunk is the smallest meaningful unit, and
-		// matches what the protocol permits in this scenario (Codex
-		// review on #166).
+		// Decompose before multiplying so a malformed near-MaxInt64 probe
+		// cannot wrap the packet budget negative.
+		safeBytes := (probe.MaxAllowedPacket/100)*safetyMarginPct +
+			(probe.MaxAllowedPacket%100)*safetyMarginPct/100
+		limit64 := safeBytes / estimatedRowBytes
+		maxInt := int64(^uint(0) >> 1)
+		if limit64 > maxInt {
+			return int(maxInt)
+		}
+		limit := int(limit64)
+		// Clamp to at least 1 â€” when the modeled table-average width
+		// exceeds 80% of the packet, integer division returns 0 and downstream
+		// code would
+		// treat that as "no cap." One row is minimum progress, but may still
+		// exceed the modeled packet budget; runtime structural error handling
+		// remains responsible for that over-budget case.
 		if limit < 1 {
 			limit = 1
 		}
@@ -267,6 +292,7 @@ func (s *SmartConfigAnalyzer) applyTuningOutput(out tuning.Output) {
 	s.suggestions.CheckpointFrequency = out.CheckpointFrequency
 	s.suggestions.MaxRetries = out.MaxRetries
 	s.suggestions.EstimatedMemMB = out.EstimatedMemMB
+	s.suggestions.MemoryEstimateOverBudget = out.MemoryEstimateOverBudget
 	s.suggestions.Reasoning = out.Reasoning
 	s.suggestions.Tier = out.Tier
 	s.suggestions.PinnedAdvice = out.PinnedAdvice

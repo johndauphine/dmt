@@ -53,14 +53,14 @@ func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []Param
 	if len(changes) > 0 {
 		// Connection pools (only if user didn't specify)
 		if c.smartConfigCanOverride(provenanceMigrationMaxSourceConns, ac.OriginalMaxSourceConns == 0) {
-			required := c.Migration.Workers*c.Migration.ParallelReaders + 4
+			required := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.ParallelReaders)
 			if required != c.Migration.MaxSourceConnections {
 				c.Migration.MaxSourceConnections = required
 				c.setTunableProvenance(provenanceMigrationMaxSourceConns, ProvenanceSmartConfig)
 			}
 		}
 		if c.smartConfigCanOverride(provenanceMigrationMaxTargetConns, ac.OriginalMaxTargetConns == 0) {
-			required := c.Migration.Workers*c.Migration.WriteAheadWriters + 4
+			required := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.WriteAheadWriters)
 			if required != c.Migration.MaxTargetConnections {
 				c.Migration.MaxTargetConnections = required
 				c.setTunableProvenance(provenanceMigrationMaxTargetConns, ProvenanceSmartConfig)
@@ -254,15 +254,20 @@ func (c *Config) DebugDump() string {
 
 	// Memory Estimate (conservative estimate, actual may vary based on row content)
 	b.WriteString("\nMemory Estimate:\n")
-	bytesPerRow := int64(500) // conservative default - actual sizes queried during schema extraction
-	bufferMemory := int64(c.Migration.Workers) * int64(c.Migration.ReadAheadBuffers) * int64(c.Migration.ChunkSize) * bytesPerRow
+	bytesPerRow := int64(500) // unobserved fallback; actual widths require schema analysis
+	bufferMemory := saturatingMemoryProduct(
+		int64(c.Migration.Workers),
+		int64(c.Migration.ReadAheadBuffers),
+		int64(c.Migration.ChunkSize),
+		bytesPerRow,
+	)
 	fmt.Fprintf(&b, "  Buffer Memory: ~%s (%d workers * %d buffers * %d rows * %d bytes/row)\n",
 		formatMemorySize(bufferMemory),
 		c.Migration.Workers,
 		c.Migration.ReadAheadBuffers,
 		c.Migration.ChunkSize,
 		bytesPerRow)
-	b.WriteString("  Note: Actual memory depends on row sizes. Tables with large text columns use more.\n")
+	b.WriteString("  Note: Uses an unobserved 500-byte row-width fallback; schema-aware tuning uses the widest observed table-average model.\n")
 
 	// Profile (if set)
 	if c.Profile.Name != "" || c.Profile.Description != "" {

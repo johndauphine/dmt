@@ -48,7 +48,7 @@ func TestBaseline_KnobsByCPU(t *testing.T) {
 func TestBaseline_ChunkSizeFloors(t *testing.T) {
 	// Floor: 10 MB fallback budget at 50 MB/row → 0 rows mathematically;
 	// floored to 1 so WriteBatch doesn't get a zero-size chunk.
-	in := Input{CPUCores: 8, AvgRowBytes: 50_000_000, Platform: "linux"}
+	in := Input{CPUCores: 8, AvgRowBytes: 2_000, RepresentativeRowBytes: 50_000_000, Platform: "linux"}
 	profile := DriverProfile{Name: "test", BaselineWAW: 2}
 	out := baseline(in, profile)
 	if out.ChunkSize != 1 {
@@ -57,7 +57,7 @@ func TestBaseline_ChunkSizeFloors(t *testing.T) {
 
 	// Hard limit cap: 25 MB optimum at 500 B = 50000 rows mathematically;
 	// HardChunkLimit=1000 should cap to 1000.
-	in = Input{CPUCores: 8, AvgRowBytes: 500, Platform: "linux"}
+	in = Input{CPUCores: 8, AvgRowBytes: 500, RepresentativeRowBytes: 500, Platform: "linux"}
 	profile = DriverProfile{
 		Name:                  "test",
 		BaselineWAW:           2,
@@ -98,12 +98,40 @@ func TestBaseline_ChunkSizeFromProfile(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: tc.optimumBy}
-			in := Input{CPUCores: 8, AvgRowBytes: tc.avgRowBytes, Platform: "linux"}
+			in := Input{CPUCores: 8, AvgRowBytes: tc.avgRowBytes, RepresentativeRowBytes: tc.avgRowBytes, Platform: "linux"}
 			out := baseline(in, profile)
 			if out.ChunkSize != tc.wantRows {
 				t.Errorf("ChunkSize: got %d, want %d", out.ChunkSize, tc.wantRows)
 			}
 		})
+	}
+}
+
+// TestBaseline_UsesRepresentativeWidth pins the #703 semantic split: the
+// legacy capped model feature must not drive byte-target-to-row conversion.
+func TestBaseline_UsesRepresentativeWidth(t *testing.T) {
+	in := Input{
+		CPUCores:               8,
+		Platform:               "linux",
+		AvgRowBytes:            2_000,
+		RepresentativeRowBytes: 8_000,
+	}
+	profile := DriverProfile{BaselineWAW: 2, OptimumBulkChunkBytes: 16_000_000}
+
+	out := baseline(in, profile)
+	if out.ChunkSize != 2_000 {
+		t.Fatalf("ChunkSize = %d, want 2000 from representative width; legacy AvgRowBytes would produce 8000", out.ChunkSize)
+	}
+}
+
+func TestBaseline_PathologicalCPUCoresDoNotOverflow(t *testing.T) {
+	minInt := -int(^uint(0)>>1) - 1
+	maxInt := int(^uint(0) >> 1)
+	for _, cores := range []int{minInt, maxInt} {
+		out := baseline(Input{CPUCores: cores, RepresentativeRowBytes: 500}, DriverProfile{BaselineWAW: 1})
+		if out.Workers < 2 || out.MaxSourceConnections < out.Workers || out.MaxTargetConnections < out.Workers {
+			t.Fatalf("CPUCores=%d produced overflowed baseline: %+v", cores, out)
+		}
 	}
 }
 

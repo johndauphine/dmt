@@ -18,6 +18,49 @@ func TestFitRegression_InsufficientData(t *testing.T) {
 	}
 }
 
+func TestArgmaxRegression_SplitsRepresentativeAndLegacyWidths(t *testing.T) {
+	model := &regressionModel{
+		nFeat:     8,
+		beta:      []float64{0, 0, 0, 0, 0, 1, 0, 0},
+		logAvgStd: 1,
+	}
+	in := Input{
+		SourceDBType:           "mssql",
+		TargetDBType:           "postgres",
+		AvgRowBytes:            2_000,
+		RepresentativeRowBytes: 8_000,
+	}
+	profile := DriverProfile{
+		OptimumBulkChunkBytes: 16_000_000,
+		HardChunkLimit:        1_500,
+	}
+	covered := map[coverageCellKey]bool{{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true}
+
+	_, csBytes, _, _, predicted, ok := argmaxRegression(model, in, profile, nil, covered)
+	if !ok {
+		t.Fatal("argmax rejected every candidate; representative width should make the 8 MB candidate fit the 1500-row hard limit")
+	}
+	if csBytes != 8_000_000 {
+		t.Fatalf("candidate bytes = %d, want 8000000", csBytes)
+	}
+	if want := math.Log(float64(in.AvgRowBytes)); math.Abs(predicted-want) > 1e-9 {
+		t.Fatalf("prediction = %f, want log(legacy AvgRowBytes)=%f; representative width leaked into model feature", predicted, want)
+	}
+}
+
+func TestByteTargetAndChunkScalingSaturate(t *testing.T) {
+	if got := scaledByteTarget(math.MaxInt64, 1); got != math.MaxInt64 {
+		t.Fatalf("full MaxInt64 byte target = %d, want saturation", got)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if got := scalePositiveIntRatio(maxInt, 3, 2); got != maxInt {
+		t.Fatalf("near-MaxInt chunk growth = %d, want saturated MaxInt", got)
+	}
+	if got := scalePositiveIntRatio(maxInt, 67, 100); got <= 0 || got >= maxInt {
+		t.Fatalf("near-MaxInt chunk reduction = %d, want a positive decrease", got)
+	}
+}
+
 // TestFitRegression_RecoversLinearTrend generates rows where throughput
 // is a known linear function of WAW, fits the model, and verifies the
 // predictions track the data. Doesn't test for exact β recovery (the
@@ -646,6 +689,13 @@ func TestThroughputBytes_FallbackWhenBytesUnset(t *testing.T) {
 	r3 := HistoryRecord{FinalThroughput: 1, AvgRowBytes: 1, FinalThroughputBytes: 42}
 	if throughputBytes(r3) != 42 {
 		t.Errorf("explicit FinalThroughputBytes should win, got %.0f", throughputBytes(r3))
+	}
+
+	if got := throughputBytes(HistoryRecord{FinalThroughput: math.Inf(1), AvgRowBytes: math.MaxInt64}); got != 0 {
+		t.Errorf("infinite throughput fallback = %.0f, want rejected zero", got)
+	}
+	if got := throughputBytes(HistoryRecord{FinalThroughput: float64(math.MaxInt64), AvgRowBytes: math.MaxInt64}); got != float64(math.MaxInt64) {
+		t.Errorf("overflowing throughput bytes = %.0f, want MaxInt64 saturation", got)
 	}
 }
 

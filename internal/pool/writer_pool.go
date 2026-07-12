@@ -4,6 +4,7 @@ package pool
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,15 +62,19 @@ const writerEncodeAmplification = 2
 // reserved first; the remaining budget is split between chunkChan (reader
 // side) and jobChan (writer side).
 func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
-	bytesPerChunk := int64(cfg.ChunkSize) * cfg.RowBytes
+	bytesPerChunk := saturatingPositiveProduct64(int64(cfg.ChunkSize), cfg.RowBytes)
 	numReaders := cfg.NumReaders
 	if numReaders < 1 {
 		numReaders = 1
 	}
+	numWriters := cfg.NumWriters
+	if numWriters < 0 {
+		numWriters = 0
+	}
 
 	// Minimum safe values to prevent deadlock
-	minJobDepth := cfg.NumWriters + 1 // each writer + 1 for consumer to submit
-	minChunkDepth := numReaders       // default: each reader can produce 1 chunk without blocking
+	minJobDepth := saturatingNonNegativeIntAdd(numWriters, 1) // each writer + 1 for consumer to submit
+	minChunkDepth := numReaders                               // default: each reader can produce 1 chunk without blocking
 	// Allow a completely unbuffered reader→consumer channel when there is
 	// exactly one reader and read-ahead buffering is explicitly disabled.
 	if numReaders == 1 && cfg.ReadAheadBuffers == 0 {
@@ -83,23 +88,32 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 		}
 	}
 
-	budgetBytes := cfg.MemoryBudgetMB * 1024 * 1024
+	budgetBytes := saturatingPositiveProduct64(cfg.MemoryBudgetMB, 1024*1024)
 
 	// Slots consumed outside the two channels: each writer holds a chunk
 	// plus its encode copy; each reader accumulates one chunk in scanRows
 	// before it ever occupies a chunkChan slot (#465).
-	overheadSlots := cfg.NumWriters*writerEncodeAmplification + numReaders
+	overheadSlots := saturatingNonNegativeIntAdd(
+		saturatingNonNegativeIntMultiply(numWriters, writerEncodeAmplification),
+		numReaders,
+	)
 
 	// Total chunk slots that fit in memory, capped to prevent excessive buffering
 	// on narrow-row tables where thousands of tiny chunks would fit in budget.
-	totalSlots := int(budgetBytes / bytesPerChunk)
-	if totalSlots > maxBufferDepth+overheadSlots {
-		totalSlots = maxBufferDepth + overheadSlots
+	slots64 := budgetBytes / bytesPerChunk
+	maxInt := int(^uint(0) >> 1)
+	totalSlots := maxInt
+	if slots64 <= int64(maxInt) {
+		totalSlots = int(slots64)
+	}
+	maxTotalSlots := saturatingNonNegativeIntAdd(maxBufferDepth, overheadSlots)
+	if totalSlots > maxTotalSlots {
+		totalSlots = maxTotalSlots
 	}
 
 	// Reserve the overhead slots first
 	available := totalSlots - overheadSlots
-	if available < minChunkDepth+minJobDepth {
+	if available < saturatingNonNegativeIntAdd(minChunkDepth, minJobDepth) {
 		return PipelineBufferSizes{
 			ChunkChanDepth: minChunkDepth,
 			JobChanDepth:   minJobDepth,
@@ -109,7 +123,11 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 	// Split remaining slots: give readers enough to stay busy, rest goes to job queue.
 	// Readers need at least numReaders × readAheadBuffers slots to pipeline reads,
 	// but cap at half the available budget so the job queue gets its share.
-	chunkDepth := numReaders * cfg.ReadAheadBuffers
+	readAheadBuffers := cfg.ReadAheadBuffers
+	if readAheadBuffers < 0 {
+		readAheadBuffers = 0
+	}
+	chunkDepth := saturatingNonNegativeIntMultiply(numReaders, readAheadBuffers)
 	if chunkDepth > available/2 {
 		chunkDepth = available / 2
 	}
@@ -126,6 +144,41 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 		ChunkChanDepth: chunkDepth,
 		JobChanDepth:   jobDepth,
 	}
+}
+
+func saturatingPositiveProduct64(left, right int64) int64 {
+	if left <= 0 || right <= 0 {
+		return 0
+	}
+	if left > math.MaxInt64/right {
+		return math.MaxInt64
+	}
+	return left * right
+}
+
+func saturatingNonNegativeIntAdd(left, right int) int {
+	if left < 0 {
+		left = 0
+	}
+	if right < 0 {
+		right = 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if left > maxInt-right {
+		return maxInt
+	}
+	return left + right
+}
+
+func saturatingNonNegativeIntMultiply(left, right int) int {
+	if left <= 0 || right <= 0 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if left > maxInt/right {
+		return maxInt
+	}
+	return left * right
 }
 
 // CalculateJobBufferSize is a convenience wrapper for callers that only need jobChan depth.

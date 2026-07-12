@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"runtime/debug"
 
@@ -52,13 +53,19 @@ func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool
 	// Calculate weighted average row size based on row counts (for informational purposes)
 	var totalRows int64
 	var weightedSum int64
+	weightedOverflow := false
 	var maxRowSize int64
 	var maxRowSizeTable string
 
 	for _, t := range tables {
-		if t.EstimatedRowSize > 0 {
-			totalRows += t.RowCount
-			weightedSum += t.RowCount * t.EstimatedRowSize
+		if t.RowCount > 0 && t.EstimatedRowSize > 0 {
+			tableProductOverflow := t.RowCount > math.MaxInt64/t.EstimatedRowSize
+			rowsOverflow := totalRows > math.MaxInt64-t.RowCount
+			tableBytes := saturatingMemoryMultiply(t.RowCount, t.EstimatedRowSize)
+			bytesOverflow := weightedSum > math.MaxInt64-tableBytes
+			weightedOverflow = weightedOverflow || tableProductOverflow || rowsOverflow || bytesOverflow
+			totalRows = saturatingMemoryAdd(totalRows, t.RowCount)
+			weightedSum = saturatingMemoryAdd(weightedSum, tableBytes)
 			if t.EstimatedRowSize > maxRowSize {
 				maxRowSize = t.EstimatedRowSize
 				maxRowSizeTable = t.Name
@@ -71,6 +78,12 @@ func (c *Config) RefineSettingsForRowSizes(tables []TableRowSize) (adjusted bool
 	}
 
 	weightedAvgRowSize := weightedSum / totalRows
+	if weightedOverflow {
+		// Independently saturated numerator/denominator could collapse to one
+		// byte. Use the widest observed table average so overflow never makes
+		// the informational diagnostic look deceptively narrow.
+		weightedAvgRowSize = maxRowSize
+	}
 
 	// No adjustments made - just report row sizes for visibility
 	return false, fmt.Sprintf("Row sizes: weighted avg %s, max %s in %s",
@@ -122,19 +135,63 @@ func (c *Config) EstimateMemoryUsage(avgRowSize int64) int64 {
 	// Formula: workers * (readers * buffers + writers * buffers) * chunk_size * avg_row_size
 	// Simplified: workers * total_buffers * chunk_size * avg_row_size
 	// Each worker has read-ahead buffers + pending writes
-	totalBuffers := int64(c.Migration.ReadAheadBuffers) * 2 // read + write queues
-	return int64(c.Migration.Workers) * totalBuffers * int64(c.Migration.ChunkSize) * avgRowSize
+	totalBuffers := saturatingMemoryMultiply(int64(c.Migration.ReadAheadBuffers), 2) // read + write queues
+	return saturatingMemoryProduct(
+		int64(c.Migration.Workers),
+		totalBuffers,
+		int64(c.Migration.ChunkSize),
+		avgRowSize,
+	)
+}
+
+func saturatingMemoryProduct(values ...int64) int64 {
+	product := int64(1)
+	for _, value := range values {
+		if value <= 0 {
+			return 0
+		}
+		product = saturatingMemoryMultiply(product, value)
+	}
+	return product
+}
+
+func saturatingMemoryMultiply(left, right int64) int64 {
+	if left <= 0 || right <= 0 {
+		return 0
+	}
+	if left > math.MaxInt64/right {
+		return math.MaxInt64
+	}
+	return left * right
+}
+
+func saturatingMemoryAdd(left, right int64) int64 {
+	if left < 0 {
+		left = 0
+	}
+	if right <= 0 {
+		return left
+	}
+	if left > math.MaxInt64-right {
+		return math.MaxInt64
+	}
+	return left + right
 }
 
 // FormatMemoryEstimate returns a human-readable memory estimate string.
 func (c *Config) FormatMemoryEstimate(avgRowSize int64) string {
-	mem := c.EstimateMemoryUsage(avgRowSize)
+	rowBytes := avgRowSize
+	if rowBytes <= 0 {
+		rowBytes = 500
+	}
+	mem := c.EstimateMemoryUsage(rowBytes)
+	totalBuffers := saturatingMemoryMultiply(int64(c.Migration.ReadAheadBuffers), 2)
 	return fmt.Sprintf("~%s (%d workers * %d buffers * %d chunk * %d bytes/row)",
 		formatMemorySize(mem),
 		c.Migration.Workers,
-		c.Migration.ReadAheadBuffers*2,
+		totalBuffers,
 		c.Migration.ChunkSize,
-		avgRowSize)
+		rowBytes)
 }
 
 // FormatMemorySize exports the formatMemorySize function for use by other packages.

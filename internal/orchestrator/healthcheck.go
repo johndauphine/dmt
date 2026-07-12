@@ -127,6 +127,8 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 		ChunkSize:               o.config.Migration.ChunkSize,
 		TargetMode:              o.config.Migration.TargetMode,
 		TotalTables:             len(tables),
+		SafetyRowBytes:          500,
+		SafetyRowBytesKnown:     false,
 		SchemaContractDecisions: o.schemaEvolution().LastContractDecisions(),
 	}
 	if o.opts.EnableAISchemaAdvisor && schemaReport.HasChanges() {
@@ -136,11 +138,7 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	}
 
 	// Calculate estimated memory
-	bufferMem := int64(o.config.Migration.Workers) *
-		int64(o.config.Migration.ReadAheadBuffers) *
-		int64(o.config.Migration.ChunkSize) *
-		500 // bytes per row estimate
-	result.EstimatedMemMB = bufferMem / (1024 * 1024)
+	result.EstimatedMemMB = dryRunEstimatedMemMB(o.config)
 
 	// Analyze each table
 	for _, t := range tables {
@@ -196,6 +194,19 @@ func (o *Orchestrator) DryRun(ctx context.Context) (*DryRunResult, error) {
 	return result, nil
 }
 
+func dryRunEstimatedMemMB(cfg *config.Config) int64 {
+	if cfg == nil {
+		return 0
+	}
+	return tuning.EstimatedMemMB(
+		cfg.Migration.Workers,
+		cfg.Migration.ReadAheadBuffers,
+		cfg.Migration.WriteAheadWriters,
+		cfg.Migration.ChunkSize,
+		500, // unobserved formula-only safety-width fallback (#703)
+	)
+}
+
 func (o *Orchestrator) estimateDryRunRowsPerSecond() int64 {
 	history, err := o.state.GetTuningHistory(5, o.sourcePool.DBType(), o.targetPool.DBType())
 	if err != nil {
@@ -239,21 +250,25 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 	envelope := cfg.AutoConfig().MemoryEnvelope
 	memGB := int((envelope.CapacityMB + 1023) / 1024)
 
-	// Build a tuning.Input directly — offline path has no source schema, so
-	// AvgRowBytes defaults to 500 (mirrors calculateAvgRowSize's fallback
-	// when no row stats are available, #157). The deterministic tuner
-	// handles the rest, including the per-target chunk-byte anchor (#166).
+	// Build a tuning.Input directly — the offline path has no source schema,
+	// so all numeric widths use the documented 500-byte fallback. The safety
+	// flag remains false: this best-effort estimate may clamp an initial
+	// recommendation, but it cannot later authorize runtime growth (#703).
 	in := tuning.Input{
-		CPUCores:           cores,
-		MemoryGB:           memGB,
-		MemoryBudgetMB:     envelope.BudgetMB,
-		Platform:           driver.DetectPlatform(),
-		SourceDBType:       cfg.Source.Type,
-		TargetDBType:       cfg.Target.Type,
-		TargetMode:         cfg.Migration.TargetMode,
-		AvgRowBytes:        500,
-		ForceExplore:       cfg.Migration.Explore,
-		ExplorationEpsilon: driver.ExplorationEpsilon(cfg.Migration.ExploreMode),
+		CPUCores:               cores,
+		MemoryGB:               memGB,
+		MemoryBudgetMB:         envelope.BudgetMB,
+		Platform:               driver.DetectPlatform(),
+		SourceDBType:           cfg.Source.Type,
+		TargetDBType:           cfg.Target.Type,
+		TargetMode:             cfg.Migration.TargetMode,
+		AvgRowBytes:            500,
+		UncappedAvgRowBytes:    500,
+		RepresentativeRowBytes: 500,
+		SafetyRowBytes:         500,
+		SafetyRowBytesKnown:    false,
+		ForceExplore:           cfg.Migration.Explore,
+		ExplorationEpsilon:     driver.ExplorationEpsilon(cfg.Migration.ExploreMode),
 	}
 	profile := tuning.DriverProfile{Name: cfg.Target.Type, BaselineWAW: 2}
 	if d, err := driver.Get(cfg.Target.Type); err == nil {
@@ -261,7 +276,7 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 		profile.BaselineWAW = defaults.WriteAheadWriters
 		profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
 		profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
-		profile.HardChunkLimit = d.HardChunkLimit(in.AvgRowBytes)
+		profile.HardChunkLimit = d.HardChunkLimit(in.SafetyRowBytes)
 	}
 	out := tuning.Tune(in, profile, nil, tuning.DBTuning{})
 
@@ -277,7 +292,12 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 	suggestions.UpsertMergeChunkSize = out.UpsertMergeChunkSize
 	suggestions.CheckpointFrequency = out.CheckpointFrequency
 	suggestions.MaxRetries = out.MaxRetries
+	suggestions.AvgRowSizeBytes = in.AvgRowBytes
+	suggestions.RepresentativeRowBytes = in.RepresentativeRowBytes
+	suggestions.SafetyRowBytes = in.SafetyRowBytes
+	suggestions.SafetyRowBytesKnown = in.SafetyRowBytesKnown
 	suggestions.EstimatedMemMB = out.EstimatedMemMB
+	suggestions.MemoryEstimateOverBudget = out.MemoryEstimateOverBudget
 	suggestions.Reasoning = out.Reasoning
 	return suggestions
 }

@@ -126,10 +126,7 @@ func shouldExplore(in Input, usableCount int) bool {
 // the baseline output stands.
 func applyGridExploration(out *Output, in Input, profile DriverProfile, usableCount, rawIndex int) {
 	const fallbackBytes int64 = 10_000_000
-	avg := in.AvgRowBytes
-	if avg <= 0 {
-		avg = 500
-	}
+	representativeWidth := in.representativeRowBytes()
 	optimumBytes := profile.OptimumBulkChunkBytes
 	if optimumBytes <= 0 {
 		optimumBytes = fallbackBytes
@@ -148,11 +145,8 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, usableCo
 	}
 	eligible := make([]indexedCell, 0, len(explorationCells))
 	for idx, cell := range explorationCells {
-		csBytes := int64(cell.CSFraction * float64(optimumBytes))
-		csRows := int(csBytes / avg)
-		if csRows < 1 {
-			csRows = 1
-		}
+		csBytes := scaledByteTarget(optimumBytes, cell.CSFraction)
+		csRows := rowsFromBytes(csBytes, representativeWidth)
 		if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 			continue
 		}
@@ -240,23 +234,23 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float6
 	}
 	dirs := []direction{
 		{"waw", "WAW+1", func(o *Output) bool {
-			next := o.WriteAheadWriters + 1
-			if next > maxWAWForGrid {
+			if o.WriteAheadWriters < 1 || o.WriteAheadWriters >= maxWAWForGrid {
 				return false
 			}
+			next := o.WriteAheadWriters + 1
 			o.WriteAheadWriters = next
 			return true
 		}},
 		{"waw", "WAW-1", func(o *Output) bool {
-			next := o.WriteAheadWriters - 1
-			if next < 1 {
+			if o.WriteAheadWriters <= 1 {
 				return false
 			}
+			next := o.WriteAheadWriters - 1
 			o.WriteAheadWriters = next
 			return true
 		}},
 		{"cs", "CS×1.5", func(o *Output) bool {
-			next := int(float64(o.ChunkSize) * 1.5)
+			next := scalePositiveIntRatio(o.ChunkSize, 3, 2)
 			if profile.HardChunkLimit > 0 && next > profile.HardChunkLimit {
 				return false
 			}
@@ -267,7 +261,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float6
 			return true
 		}},
 		{"cs", "CS×0.67", func(o *Output) bool {
-			next := int(float64(o.ChunkSize) * 0.67)
+			next := scalePositiveIntRatio(o.ChunkSize, 67, 100)
 			if next < 1 {
 				next = 1
 			}
@@ -278,10 +272,10 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float6
 			return true
 		}},
 		{"pr", "PR×2", func(o *Output) bool {
-			next := o.ParallelReaders * 2
-			if next > perturbPRMax || next == o.ParallelReaders {
+			if o.ParallelReaders <= 0 || o.ParallelReaders > perturbPRMax/2 {
 				return false
 			}
+			next := o.ParallelReaders * 2
 			o.ParallelReaders = next
 			return true
 		}},
@@ -294,10 +288,10 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float6
 			return true
 		}},
 		{"rab", "RAB×2", func(o *Output) bool {
-			next := o.ReadAheadBuffers * 2
-			if next > perturbRABMax || next == o.ReadAheadBuffers {
+			if o.ReadAheadBuffers <= 0 || o.ReadAheadBuffers > perturbRABMax/2 {
 				return false
 			}
+			next := o.ReadAheadBuffers * 2
 			o.ReadAheadBuffers = next
 			return true
 		}},

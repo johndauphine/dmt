@@ -114,43 +114,51 @@ func newValidateDTO(r *orchestrator.ValidationRunResult) validateDTO {
 // rendered as YAML on the CLI). It surfaces the tuning recommendations and
 // database statistics an operator reviews before a run.
 type analyzeDTO struct {
-	ChunkSizeRecommendation int                 `json:"chunk_size_recommendation"`
-	Workers                 int                 `json:"workers"`
-	ReadAheadBuffers        int                 `json:"read_ahead_buffers"`
-	WriteAheadWriters       int                 `json:"write_ahead_writers"`
-	ParallelReaders         int                 `json:"parallel_readers"`
-	MaxPartitions           int                 `json:"max_partitions"`
-	MaxSourceConnections    int                 `json:"max_source_connections"`
-	MaxTargetConnections    int                 `json:"max_target_connections"`
-	TotalTables             int                 `json:"total_tables"`
-	TotalRows               int64               `json:"total_rows"`
-	AvgRowSizeBytes         int64               `json:"avg_row_size_bytes"`
-	EstimatedMemMB          int64               `json:"estimated_memory_mb"`
-	Tier                    string              `json:"tier,omitempty"`
-	Reasoning               string              `json:"reasoning,omitempty"`
-	Warnings                []string            `json:"warnings,omitempty"`
-	ExcludeTables           []string            `json:"exclude_tables,omitempty"`
-	DateColumns             map[string][]string `json:"date_columns,omitempty"`
+	ChunkSizeRecommendation  int                 `json:"chunk_size_recommendation"`
+	Workers                  int                 `json:"workers"`
+	ReadAheadBuffers         int                 `json:"read_ahead_buffers"`
+	WriteAheadWriters        int                 `json:"write_ahead_writers"`
+	ParallelReaders          int                 `json:"parallel_readers"`
+	MaxPartitions            int                 `json:"max_partitions"`
+	MaxSourceConnections     int                 `json:"max_source_connections"`
+	MaxTargetConnections     int                 `json:"max_target_connections"`
+	TotalTables              int                 `json:"total_tables"`
+	TotalRows                int64               `json:"total_rows"`
+	AvgRowSizeBytes          int64               `json:"avg_row_size_bytes"`
+	RepresentativeRowBytes   int64               `json:"representative_row_bytes"`
+	SafetyRowBytes           int64               `json:"safety_row_bytes"`
+	SafetyRowBytesKnown      bool                `json:"safety_row_bytes_known"`
+	EstimatedMemMB           int64               `json:"estimated_memory_mb"`
+	MemoryEstimateOverBudget bool                `json:"memory_estimate_over_budget"`
+	Tier                     string              `json:"tier,omitempty"`
+	Reasoning                string              `json:"reasoning,omitempty"`
+	Warnings                 []string            `json:"warnings,omitempty"`
+	ExcludeTables            []string            `json:"exclude_tables,omitempty"`
+	DateColumns              map[string][]string `json:"date_columns,omitempty"`
 }
 
 func newAnalyzeDTO(s *driver.SmartConfigSuggestions) analyzeDTO {
 	return analyzeDTO{
-		ChunkSizeRecommendation: s.ChunkSizeRecommendation,
-		Workers:                 s.Workers,
-		ReadAheadBuffers:        s.ReadAheadBuffers,
-		WriteAheadWriters:       s.WriteAheadWriters,
-		ParallelReaders:         s.ParallelReaders,
-		MaxPartitions:           s.MaxPartitions,
-		MaxSourceConnections:    s.MaxSourceConnections,
-		MaxTargetConnections:    s.MaxTargetConnections,
-		TotalTables:             s.TotalTables,
-		TotalRows:               s.TotalRows,
-		AvgRowSizeBytes:         s.AvgRowSizeBytes,
-		EstimatedMemMB:          s.EstimatedMemMB,
-		Tier:                    s.Tier,
-		Reasoning:               s.Reasoning,
-		Warnings:                s.Warnings,
-		ExcludeTables:           s.ExcludeTables,
-		DateColumns:             s.DateColumns,
+		ChunkSizeRecommendation:  s.ChunkSizeRecommendation,
+		Workers:                  s.Workers,
+		ReadAheadBuffers:         s.ReadAheadBuffers,
+		WriteAheadWriters:        s.WriteAheadWriters,
+		ParallelReaders:          s.ParallelReaders,
+		MaxPartitions:            s.MaxPartitions,
+		MaxSourceConnections:     s.MaxSourceConnections,
+		MaxTargetConnections:     s.MaxTargetConnections,
+		TotalTables:              s.TotalTables,
+		TotalRows:                s.TotalRows,
+		AvgRowSizeBytes:          s.AvgRowSizeBytes,
+		RepresentativeRowBytes:   s.RepresentativeRowBytes,
+		SafetyRowBytes:           s.SafetyRowBytes,
+		SafetyRowBytesKnown:      s.SafetyRowBytesKnown,
+		EstimatedMemMB:           s.EstimatedMemMB,
+		MemoryEstimateOverBudget: s.MemoryEstimateOverBudget,
+		Tier:                     s.Tier,
+		Reasoning:                s.Reasoning,
+		Warnings:                 s.Warnings,
+		ExcludeTables:            s.ExcludeTables,
+		DateColumns:              s.DateColumns,
 	}
 }

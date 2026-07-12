@@ -1,6 +1,9 @@
 package tuning
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Regime labels classify how comparable a historical run is to the current
 // one. Selection logic uses these to discount or exclude history rows that
@@ -175,8 +178,8 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 	// cache, spills-to-disk) so they remain stable through smooth
 	// dataset growth and fire only when a real regime boundary crosses.
 	// Use the uncapped row size when the caller computed it (Copilot
-	// fix on PR #288). AvgRowBytes is capped at 2KB by the smartconfig
-	// analyzer for memory-budget math; using the capped value for
+	// fix on PR #288). AvgRowBytes is the legacy capped regression
+	// feature; using the capped value for
 	// regime classification would mis-bucket wide-row workloads (8KB
 	// rows → looks like 2KB rows → undercount total_bytes → wrong
 	// band). Historical rows don't carry the uncapped value yet
@@ -234,8 +237,7 @@ func ClassifyRegime(history HistoryRecord, current Input, currentTuning DBTuning
 
 // effectiveAvgRowBytes returns the row-size value the band classifier
 // should multiply against TotalRows: prefer the uncapped value when
-// populated, fall back to the capped one. The cap (2KB, applied in
-// the smartconfig analyzer for memory-budget math) understates total
+// populated, fall back to the legacy capped one. That cap understates total
 // bytes for wide-row workloads — using it for regime classification
 // would mis-bucket an 8KB-row migration as Small instead of Medium.
 // Zero on both sides falls through to bandUnknown (caller short-
@@ -255,7 +257,11 @@ func totalBytes(rows, avgRowBytes int64) int64 {
 	if rows <= 0 || avgRowBytes <= 0 {
 		return 0
 	}
-	return rows * avgRowBytes
+	total, overflow := saturatingMulPositive(rows, avgRowBytes)
+	if overflow {
+		return math.MaxInt64
+	}
+	return total
 }
 
 // workloadBand returns the bucket label for the given dataset

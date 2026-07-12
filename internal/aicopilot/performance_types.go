@@ -2,25 +2,33 @@ package aicopilot
 
 import "time"
 
-const PerformancePromptVersion = "ai-performance-explanation-v1"
+// v2 adds representative/safety row-width semantics and explicit observed
+// provenance to the current-run workload payload (#703). Historical rows stay
+// on the legacy persisted average because this issue intentionally adds no
+// checkpoint schema migration.
+const PerformancePromptVersion = "ai-performance-explanation-v2"
 
 type PerformanceWorkloadSummary struct {
-	SourceDBType          string `json:"source_db_type,omitempty"`
-	TargetDBType          string `json:"target_db_type,omitempty"`
-	TargetMode            string `json:"target_mode,omitempty"`
-	Platform              string `json:"platform,omitempty"`
-	CPUCores              int    `json:"cpu_cores,omitempty"`
-	MemoryGB              int    `json:"memory_gb,omitempty"`
-	AvailableMemoryMB     int64  `json:"available_memory_mb,omitempty"`
-	MaxMemoryMB           int64  `json:"max_memory_mb,omitempty"`
-	TotalTables           int    `json:"total_tables,omitempty"`
-	TotalRows             int64  `json:"total_rows,omitempty"`
-	AvgRowBytes           int64  `json:"avg_row_bytes,omitempty"`
-	UncappedAvgRowBytes   int64  `json:"uncapped_avg_row_bytes,omitempty"`
-	LargestTableBytes     int64  `json:"largest_table_bytes,omitempty"`
-	EstimatedMemoryMB     int64  `json:"estimated_memory_mb,omitempty"`
-	SourceIdentityOmitted bool   `json:"source_identity_omitted"`
-	TargetIdentityOmitted bool   `json:"target_identity_omitted"`
+	SourceDBType             string `json:"source_db_type,omitempty"`
+	TargetDBType             string `json:"target_db_type,omitempty"`
+	TargetMode               string `json:"target_mode,omitempty"`
+	Platform                 string `json:"platform,omitempty"`
+	CPUCores                 int    `json:"cpu_cores,omitempty"`
+	MemoryGB                 int    `json:"memory_gb,omitempty"`
+	AvailableMemoryMB        int64  `json:"available_memory_mb,omitempty"`
+	MaxMemoryMB              int64  `json:"max_memory_mb,omitempty"`
+	TotalTables              int    `json:"total_tables,omitempty"`
+	TotalRows                int64  `json:"total_rows,omitempty"`
+	AvgRowBytes              int64  `json:"avg_row_bytes,omitempty"`
+	UncappedAvgRowBytes      int64  `json:"uncapped_avg_row_bytes,omitempty"`
+	RepresentativeRowBytes   int64  `json:"representative_row_bytes,omitempty"`
+	SafetyRowBytes           int64  `json:"safety_row_bytes,omitempty"`
+	SafetyRowBytesKnown      bool   `json:"safety_row_bytes_known"`
+	LargestTableBytes        int64  `json:"largest_table_bytes,omitempty"`
+	EstimatedMemoryMB        int64  `json:"estimated_memory_mb,omitempty"`
+	MemoryEstimateOverBudget bool   `json:"memory_estimate_over_budget,omitempty"`
+	SourceIdentityOmitted    bool   `json:"source_identity_omitted"`
+	TargetIdentityOmitted    bool   `json:"target_identity_omitted"`
 }
 
 type PerformanceKnobs struct {
