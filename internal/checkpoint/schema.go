@@ -1,10 +1,16 @@
 package checkpoint
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+
+	"github.com/johndauphine/dmt/internal/logging"
 )
+
+var legacyAITimestampWarnings sync.Map
 
 func (s *State) migrate() error {
 	schema := `
@@ -145,6 +151,7 @@ func (s *State) migrate() error {
 		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
 		adjustment_number INTEGER NOT NULL,
 		timestamp TEXT NOT NULL,
+		timestamp_unix_ms INTEGER,
 		action TEXT NOT NULL,
 		adjustments TEXT NOT NULL,
 		throughput_before REAL,
@@ -166,6 +173,7 @@ func (s *State) migrate() error {
 	CREATE TABLE IF NOT EXISTS ai_tuning_history (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		timestamp TEXT NOT NULL,
+		timestamp_unix_ms INTEGER,
 		source_db_type TEXT NOT NULL,
 		target_db_type TEXT,
 		total_tables INTEGER NOT NULL,
@@ -235,9 +243,116 @@ func (s *State) migrate() error {
 	if err := s.ensureTuningResultColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureAITimestampColumns(); err != nil {
+		return err
+	}
 
 	// One-time migration: sanitize any passwords stored in config column
 	return s.sanitizeStoredConfigs()
+}
+
+// ensureAITimestampColumns transactionally adds the unambiguous UTC epoch
+// representation used by AI tuning history and runtime adjustments. Existing
+// text timestamps are deliberately retained and left unresolved: their source
+// timezone was never stored, so assigning an instant would fabricate data.
+func (s *State) ensureAITimestampColumns() (err error) {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("opening connection for AI timestamp migration: %w", err)
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("beginning AI timestamp migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	type timestampTable struct {
+		name     string
+		pragma   string
+		alterDDL string
+		indexDDL string
+	}
+	tables := []timestampTable{
+		{
+			name:   "ai_tuning_history",
+			pragma: "PRAGMA table_info(ai_tuning_history)",
+			alterDDL: "ALTER TABLE ai_tuning_history " +
+				"ADD COLUMN timestamp_unix_ms INTEGER",
+			indexDDL: `CREATE INDEX IF NOT EXISTS idx_ai_tuning_timestamp_unix_ms
+				ON ai_tuning_history(timestamp_unix_ms)`,
+		},
+		{
+			name:   "ai_adjustments",
+			pragma: "PRAGMA table_info(ai_adjustments)",
+			alterDDL: "ALTER TABLE ai_adjustments " +
+				"ADD COLUMN timestamp_unix_ms INTEGER",
+			indexDDL: `CREATE INDEX IF NOT EXISTS idx_ai_adjustments_timestamp_unix_ms
+				ON ai_adjustments(timestamp_unix_ms)`,
+		},
+	}
+
+	for _, table := range tables {
+		rows, queryErr := conn.QueryContext(ctx, table.pragma)
+		if queryErr != nil {
+			return fmt.Errorf("reading %s columns for AI timestamp migration: %w", table.name, queryErr)
+		}
+		hasEpoch := false
+		for rows.Next() {
+			var cid int
+			var name, columnType string
+			var notNull int
+			var defaultValue any
+			var primaryKey int
+			if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scanning %s columns for AI timestamp migration: %w", table.name, scanErr)
+			}
+			if name == "timestamp_unix_ms" {
+				hasEpoch = true
+			}
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return fmt.Errorf("reading %s columns for AI timestamp migration: %w", table.name, rowsErr)
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return fmt.Errorf("closing %s columns for AI timestamp migration: %w", table.name, closeErr)
+		}
+
+		if !hasEpoch {
+			if _, err = conn.ExecContext(ctx, table.alterDDL); err != nil {
+				return fmt.Errorf("migrating %s.timestamp_unix_ms: %w", table.name, err)
+			}
+		}
+		if _, err = conn.ExecContext(ctx, table.indexDDL); err != nil {
+			return fmt.Errorf("indexing %s.timestamp_unix_ms: %w", table.name, err)
+		}
+	}
+
+	var unresolved bool
+	if err = conn.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM ai_tuning_history WHERE timestamp_unix_ms IS NULL)
+		    OR EXISTS(SELECT 1 FROM ai_adjustments WHERE timestamp_unix_ms IS NULL)
+	`).Scan(&unresolved); err != nil {
+		return fmt.Errorf("checking unresolved legacy AI timestamps: %w", err)
+	}
+
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("committing AI timestamp migration: %w", err)
+	}
+	committed = true
+	if unresolved {
+		if _, alreadyWarned := legacyAITimestampWarnings.LoadOrStore(s.dbPath, struct{}{}); !alreadyWarned {
+			logging.Warn("Legacy AI history timestamps remain unresolved because their timezone is unknown; time-based calculations exclude them and count-based reads use deterministic ID ordering")
+		}
+	}
+	return nil
 }
 
 // ensureRuntimeAdjustmentColumns transactionally upgrades legacy

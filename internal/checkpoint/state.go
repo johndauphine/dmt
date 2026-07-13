@@ -15,6 +15,7 @@ import (
 // State manages migration state in SQLite
 type State struct {
 	db      *sql.DB
+	dbPath  string
 	leaseMu sync.RWMutex
 	lease   *MigrationLease
 }
@@ -142,7 +143,7 @@ func New(dataDir string) (*State, error) {
 	db.SetMaxIdleConns(0)
 	db.SetMaxOpenConns(1)
 
-	s := &State{db: db}
+	s := &State{db: db, dbPath: dbPath}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrating schema: %w", err)

@@ -66,6 +66,39 @@ func TestDetectRegimeDrift_BelowGlobalMin(t *testing.T) {
 	}
 }
 
+func TestDetectRegimeDrift_UnresolvedLegacyRowsDoNotSatisfyTimeWindow(t *testing.T) {
+	unknown := makeFixedConfigRuns(2, 50000, []float64{100_000, 100_000, 100_000})
+	for i := range unknown {
+		unknown[i].Timestamp = time.Time{}
+		unknown[i].ID = int64(100 + i)
+	}
+	known := makeFixedConfigRuns(2, 50000, []float64{1_000_000, 1_000_000, 1_000_000})
+	if detectRegimeDrift(append(unknown, known...)) {
+		t.Error("unresolved legacy rows must not satisfy or influence a chronological drift window")
+	}
+	if _, ok := mostRecentCell(unknown); ok {
+		t.Error("all-unresolved history must not produce a most-recent cell")
+	}
+}
+
+func TestDetectRegimeDrift_EqualEpochUsesIDOrder(t *testing.T) {
+	at := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	byID := map[int64]float64{1: 1_000_000, 2: 1_000_000, 3: 1_000_000, 4: 100_000, 5: 100_000, 6: 100_000}
+	rows := make([]HistoryRecord, 0, len(byID))
+	for _, id := range []int64{6, 1, 5, 2, 4, 3} {
+		rows = append(rows, HistoryRecord{
+			ID:                id,
+			Timestamp:         at,
+			WriteAheadWriters: 2,
+			ChunkSize:         50000,
+			FinalThroughput:   byID[id],
+		})
+	}
+	if !detectRegimeDrift(rows) {
+		t.Error("equal-millisecond runs should use ID order and detect the newer-ID throughput shift")
+	}
+}
+
 // TestTune_DriftDetectedBeforeOutlierFilter is the regression for the
 // Codex-flagged ordering bug on PR #183: when recent clean runs slow
 // down enough to fall below the outlier-filter floor (< 0.5×median),
@@ -277,6 +310,7 @@ func makeFixedConfigRuns(waw, chunkSize int, throughputs []float64) []HistoryRec
 	rows := make([]HistoryRecord, len(throughputs))
 	for i, th := range throughputs {
 		rows[i] = HistoryRecord{
+			ID:                int64(i + 1),
 			Timestamp:         base.Add(time.Duration(i) * time.Hour),
 			WriteAheadWriters: waw,
 			ChunkSize:         chunkSize,
@@ -296,6 +330,7 @@ func makeFixedConfigRunsWithReaders(waw, chunkSize, pr, rab int, throughputs []f
 	rows := make([]HistoryRecord, len(throughputs))
 	for i, th := range throughputs {
 		rows[i] = HistoryRecord{
+			ID:                int64(i + 1),
 			Timestamp:         base.Add(time.Duration(i) * time.Hour),
 			WriteAheadWriters: waw,
 			ChunkSize:         chunkSize,

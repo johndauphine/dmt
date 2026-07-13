@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver"
@@ -125,9 +126,22 @@ type disagreement struct {
 // order, replaying each through tuning.Tune with history-as-of-the-row's-
 // timestamp.
 func replayPair(rows []checkpoint.TuningRecord) replayResult {
-	// State's GetTuningHistory orders by Timestamp DESC; we want ASC for
-	// chronological replay so each row sees the prior history.
+	// Legacy wall-clock strings have no known instant and cannot be replayed
+	// chronologically. Keep them in ordinary count-based tuning, but exclude
+	// them from this explicitly time-ordered diagnostic.
+	resolved := make([]checkpoint.TuningRecord, 0, len(rows))
+	for _, row := range rows {
+		if !row.Timestamp.IsZero() {
+			resolved = append(resolved, row)
+		}
+	}
+	rows = resolved
+	// State returns normalized rows newest first; replay oldest first so each
+	// row sees only prior history. ID breaks equal-millisecond ties.
 	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Timestamp.Equal(rows[j].Timestamp) {
+			return rows[i].ID < rows[j].ID
+		}
 		return rows[i].Timestamp.Before(rows[j].Timestamp)
 	})
 
@@ -201,6 +215,7 @@ func convertHistoryRows(rows []checkpoint.TuningRecord) []tuning.HistoryRecord {
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{
+			ID:                      r.ID,
 			Timestamp:               r.Timestamp,
 			SourceDBType:            r.SourceDBType,
 			TargetDBType:            r.TargetDBType,
@@ -223,6 +238,17 @@ func convertHistoryRows(rows []checkpoint.TuningRecord) []tuning.HistoryRecord {
 		})
 	}
 	return out
+}
+
+func TestConvertHistoryRowsPreservesEqualEpochTieBreakID(t *testing.T) {
+	at := time.Date(2026, 7, 13, 1, 2, 3, 0, time.UTC)
+	got := convertHistoryRows([]checkpoint.TuningRecord{
+		{ID: 41, Timestamp: at},
+		{ID: 42, Timestamp: at},
+	})
+	if len(got) != 2 || got[0].ID != 41 || got[1].ID != 42 {
+		t.Fatalf("converted history IDs = %#v, want 41 and 42", got)
+	}
 }
 
 func buildProfile(targetType string) tuning.DriverProfile {

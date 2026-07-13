@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- AI tuning and runtime-adjustment history now dual-writes UTC epoch
+  milliseconds while retaining legacy text for compatibility. Zone-less legacy
+  timestamps remain explicitly unresolved, use deterministic ID fallback only
+  for count-based reads, and are excluded from chronological calculations (#706).
+
 - Runtime-controller adjustments now capture an explicitly observational
   three-sample before/after delta when equal, uncontaminated windows are
   available. Intervening adjustments censor older observations, and the

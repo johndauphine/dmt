@@ -240,7 +240,9 @@ var _ HistoryBackend = (*State)(nil)
 // TuningRecord represents historical tuning data from completed migrations.
 // These completed migration measurements feed future tuning recommendations.
 type TuningRecord struct {
-	ID              int64     `json:"id"`
+	ID int64 `json:"id"`
+	// Timestamp is the normalized UTC instant. It is zero for unresolved
+	// legacy rows whose zone-less wall-clock text cannot be interpreted safely.
 	Timestamp       time.Time `json:"timestamp"`
 	SourceDBType    string    `json:"source_db_type"`
 	TargetDBType    string    `json:"target_db_type"`
@@ -330,9 +332,11 @@ type ChunkSizeAggregateRecord struct {
 
 // RuntimeAdjustmentRecord represents a historical runtime adjustment decision.
 type RuntimeAdjustmentRecord struct {
-	ID               int64          `json:"id"`
-	RunID            string         `json:"run_id"`
-	AdjustmentNumber int            `json:"adjustment_number"`
+	ID               int64  `json:"id"`
+	RunID            string `json:"run_id"`
+	AdjustmentNumber int    `json:"adjustment_number"`
+	// Timestamp is the normalized UTC instant. It is zero for unresolved
+	// legacy rows whose original timezone was never persisted.
 	Timestamp        time.Time      `json:"timestamp"`
 	Action           string         `json:"action"`
 	Adjustments      map[string]int `json:"adjustments"`

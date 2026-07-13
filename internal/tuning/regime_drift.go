@@ -69,8 +69,13 @@ const (
 //
 // rows must be the post-regime, post-outlier filtered set the rest of
 // applyHistory operates on. Order doesn't matter — this function sorts
-// by Timestamp internally.
+// by Timestamp internally. Rows with an unknown timestamp are deliberately
+// excluded: legacy checkpoint wall-clock strings have no stored timezone and
+// cannot safely participate in chronological drift windows. They remain usable
+// by count-based tuning paths that do not assign them fabricated instants.
 func detectRegimeDrift(rows []HistoryRecord) bool {
+	timestamped := rowsWithKnownTimestamps(rows)
+	rows = timestamped
 	if len(rows) < driftMinAtConfig {
 		return false
 	}
@@ -88,8 +93,12 @@ func detectRegimeDrift(rows []HistoryRecord) bool {
 	}
 
 	// Sort by timestamp ascending so the last driftRecentN entries
-	// are the chronologically most recent.
+	// are the chronologically most recent. Equal epoch milliseconds use
+	// checkpoint ID as the deterministic insertion-order tie-break.
 	sort.Slice(atCell, func(i, j int) bool {
+		if atCell[i].Timestamp.Equal(atCell[j].Timestamp) {
+			return atCell[i].ID < atCell[j].ID
+		}
 		return atCell[i].Timestamp.Before(atCell[j].Timestamp)
 	})
 	recent := atCell[len(atCell)-driftRecentN:]
@@ -112,6 +121,17 @@ func detectRegimeDrift(rows []HistoryRecord) bool {
 		return true
 	}
 	return false
+}
+
+func rowsWithKnownTimestamps(rows []HistoryRecord) []HistoryRecord {
+	out := make([]HistoryRecord, 0, len(rows))
+	for _, row := range rows {
+		if row.Timestamp.IsZero() {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // configKey identifies a (WAW, ChunkSize, ParallelReaders,
@@ -145,10 +165,11 @@ type configKey struct {
 func mostRecentCell(rows []HistoryRecord) (configKey, bool) {
 	var latest *HistoryRecord
 	for i := range rows {
-		if rows[i].FinalThroughput <= 0 {
+		if rows[i].FinalThroughput <= 0 || rows[i].Timestamp.IsZero() {
 			continue
 		}
-		if latest == nil || rows[i].Timestamp.After(latest.Timestamp) {
+		if latest == nil || rows[i].Timestamp.After(latest.Timestamp) ||
+			(rows[i].Timestamp.Equal(latest.Timestamp) && rows[i].ID > latest.ID) {
 			latest = &rows[i]
 		}
 	}
@@ -169,7 +190,7 @@ func mostRecentCell(rows []HistoryRecord) (configKey, bool) {
 func rowsAtCell(rows []HistoryRecord, cell configKey) []HistoryRecord {
 	out := make([]HistoryRecord, 0, len(rows))
 	for _, r := range rows {
-		if r.FinalThroughput <= 0 {
+		if r.FinalThroughput <= 0 || r.Timestamp.IsZero() {
 			continue
 		}
 		if r.WriteAheadWriters == cell.WAW &&

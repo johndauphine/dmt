@@ -89,6 +89,9 @@ func (o *Orchestrator) recentRunsForAIReview() []aicopilot.RunHistorySummary {
 	}
 	out := make([]aicopilot.RunHistorySummary, 0, len(records))
 	for _, r := range records {
+		if r.Timestamp.IsZero() {
+			continue
+		}
 		out = append(out, runHistorySummaryForAI(r))
 	}
 	return out
