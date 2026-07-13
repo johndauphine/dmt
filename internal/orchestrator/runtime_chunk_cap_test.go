@@ -12,6 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 const runtimeCapProbeDriverName = "runtime-cap-probe-test"
@@ -172,6 +173,51 @@ func TestClampInitialRuntimeChunkSizeUpdatesAndRecords(t *testing.T) {
 	}
 	if !strings.Contains(records[0].Reasoning, "1000") || !strings.Contains(records[0].Reasoning, "400") {
 		t.Fatalf("initial clamp reasoning = %q, want original and capped values", records[0].Reasoning)
+	}
+}
+
+func TestCardinalityAwareConfigCapFeedsFinalAtomicClamp(t *testing.T) {
+	cfg, err := config.LoadBytes([]byte(`
+source:
+  type: sqlite
+  database: source.db
+target:
+  type: sqlite
+  database: target.db
+migration:
+  max_memory_mb: 64
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	profile := tuning.NewMemoryProfile([]tuning.TableMemoryStat{
+		{Name: "tiny_lookup", RowCount: 2, AvgRowBytes: 36_864},
+		{Name: "large_table", RowCount: 2_000_000, AvgRowBytes: 100},
+	})
+	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+		Workers:                 1,
+		ReadAheadBuffers:        1,
+		WriteAheadWriters:       1,
+		ChunkSizeRecommendation: 1_000_000,
+		SafetyRowBytes:          36_864,
+		SafetyRowBytesKnown:     true,
+		RuntimeMemoryProfile:    profile,
+	})
+
+	wantCap := int(tuning.NewMemoryModel(profile, 36_864).SafeChunkSize(64, 1, 1, 1))
+	if wantCap != 335_544 || cfg.Migration.RuntimeChunkSizeCap != wantCap {
+		t.Fatalf("derived profile cap = %d (config %d), want 335544", wantCap, cfg.Migration.RuntimeChunkSizeCap)
+	}
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1_000_000, Workers: 1})
+	if err := clampInitialRuntimeChunkSize(tuner, cfg, nil); err != nil {
+		t.Fatalf("clampInitialRuntimeChunkSize: %v", err)
+	}
+	if got := tuner.Snapshot().ChunkSize; got != wantCap {
+		t.Fatalf("executed tuner chunk = %d, want profile cap %d", got, wantCap)
+	}
+	if cfg.Migration.ChunkSize != wantCap || cfg.Source.ChunkSize != wantCap || cfg.Target.ChunkSize != wantCap {
+		t.Fatalf("final atomic config views = migration:%d source:%d target:%d, want all %d",
+			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize, wantCap)
 	}
 }
 

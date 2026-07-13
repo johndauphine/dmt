@@ -3,9 +3,11 @@ package driver
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/johndauphine/dmt/internal/dbconfig"
 
 	"github.com/johndauphine/dmt/internal/tuning"
+	"gopkg.in/yaml.v3"
 )
 
 type tuningProfileTestDriver struct {
@@ -280,6 +283,49 @@ func TestSaveTuningWithActualParams_UsesSafetyWidthAndPersistsLegacyFeature(t *t
 	}
 	if mock.saved.EstimatedMemoryMB != wantEstimate {
 		t.Errorf("persisted estimate = %d, want %d from safety width", mock.saved.EstimatedMemoryMB, wantEstimate)
+	}
+}
+
+func TestSaveTuningWithActualParamsUsesRuntimeMemoryProfile(t *testing.T) {
+	profile := tuning.NewMemoryProfile([]tuning.TableMemoryStat{
+		{Name: "tiny_lookup", RowCount: 2, AvgRowBytes: 36_864},
+		{Name: "large_table", RowCount: 1_000_000, AvgRowBytes: 100},
+	})
+	mock := &mockHistoryProvider{}
+	analyzer := &SmartConfigAnalyzer{
+		dbType:          "mssql",
+		targetDBType:    "postgres",
+		historyProvider: mock,
+		suggestions:     &SmartConfigSuggestions{AvgRowSizeBytes: 500},
+		pendingSave: &pendingTuningSave{
+			input: AutoTuneInput{
+				MemoryBudgetMB:      1,
+				SafetyRowBytes:      36_864,
+				SafetyRowBytesKnown: true,
+				MemoryProfile:       profile,
+			},
+			memoryProfile:       profile,
+			safetyRowBytes:      36_864,
+			safetyRowBytesKnown: true,
+		},
+	}
+	actual := ActualParams{
+		Workers:          1,
+		ChunkSize:        10_000,
+		ReadAheadBuffers: 1,
+	}
+
+	analyzer.SaveTuningWithActualParams(actual)
+	want := tuning.NewMemoryModel(profile, 36_864).EstimatedMemMB(1, 1, 0, 10_000)
+	if want == tuning.EstimatedMemMB(1, 1, 0, 10_000, 36_864) {
+		t.Fatal("fixture does not distinguish table-aware and scalar estimates")
+	}
+	if analyzer.suggestions.EstimatedMemMB != want || analyzer.suggestions.MemoryEstimateOverBudget {
+		t.Fatalf("post-override profile estimate = %d/over=%v, want %d/false",
+			analyzer.suggestions.EstimatedMemMB, analyzer.suggestions.MemoryEstimateOverBudget, want)
+	}
+	if mock.saved == nil || mock.saved.EstimatedMemoryMB != want {
+		t.Fatalf("persisted profile estimate = %+v, want %d", mock.saved, want)
 	}
 }
 
@@ -605,8 +651,65 @@ func TestCalculateAvgRowSize_SeparatesLegacyRepresentativeAndSafetyWidths(t *tes
 	}
 	if tuningInput.RepresentativeRowBytes != input.RepresentativeRowBytes ||
 		tuningInput.SafetyRowBytes != input.SafetyRowBytes ||
-		tuningInput.SafetyRowBytesKnown != input.SafetyRowBytesKnown {
+		tuningInput.SafetyRowBytesKnown != input.SafetyRowBytesKnown ||
+		tuningInput.MemoryProfile.Len() != len(tables) || !tuningInput.MemoryProfile.Complete() {
 		t.Errorf("tuning.Input mapping lost #703 widths: %+v", tuningInput)
+	}
+}
+
+func TestCalculateAvgRowSizeCarriesEveryTableIntoRuntimeMemoryProfile(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	tables := []TableStatRow{
+		{Name: "one", RowCount: 100, AvgRowSizeBytes: 100},
+		{Name: "two", RowCount: 100, AvgRowSizeBytes: 100},
+		{Name: "three", RowCount: 100, AvgRowSizeBytes: 100},
+		{Name: "four", RowCount: 100, AvgRowSizeBytes: 100},
+		{Name: "five", RowCount: 100, AvgRowSizeBytes: 100},
+		{Name: "six_wide", RowCount: 2, AvgRowSizeBytes: 36_864},
+	}
+
+	analyzer.calculateAvgRowSize(tables)
+	profileTables := analyzer.memoryProfile.Tables()
+	if !analyzer.memoryProfile.Complete() || len(profileTables) != len(tables) {
+		t.Fatalf("runtime profile = complete %v/count %d, want true/%d", analyzer.memoryProfile.Complete(), len(profileTables), len(tables))
+	}
+	if got := profileTables[len(profileTables)-1]; got.Name != "six_wide" || got.RowCount != 2 || got.AvgRowBytes != 36_864 {
+		t.Fatalf("sixth table was truncated or changed: %+v", got)
+	}
+	if analyzer.safetyRowBytes != 36_864 {
+		t.Fatalf("SafetyRowBytes = %d, want unchanged widest width 36864", analyzer.safetyRowBytes)
+	}
+}
+
+func TestCalculateAvgRowSizeMissingFilteredTableMarksProfileIncomplete(t *testing.T) {
+	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
+	analyzer.SetTableNameFilter([]string{"orders", "missing_catalog_row"})
+	analyzer.calculateAvgRowSize([]TableStatRow{{Name: "orders", RowCount: 100, AvgRowSizeBytes: 200}})
+
+	if analyzer.memoryProfile.Complete() || analyzer.memoryProfile.Len() != 1 {
+		t.Fatalf("partial catalog profile = complete %v/count %d, want false/1", analyzer.memoryProfile.Complete(), analyzer.memoryProfile.Len())
+	}
+}
+
+func TestSmartConfigSuggestionsRuntimeMemoryProfileIsNotSerialized(t *testing.T) {
+	suggestions := SmartConfigSuggestions{
+		RuntimeMemoryProfile: tuning.NewMemoryProfile([]tuning.TableMemoryStat{{
+			Name: "serialization_sentinel", RowCount: 2, AvgRowBytes: 36_864,
+		}}),
+	}
+
+	jsonData, err := json.Marshal(suggestions)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	yamlData, err := yaml.Marshal(suggestions)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	for _, data := range []string{string(jsonData), string(yamlData)} {
+		if strings.Contains(data, "serialization_sentinel") || strings.Contains(data, "RuntimeMemoryProfile") || strings.Contains(data, "runtimememoryprofile") {
+			t.Fatalf("runtime memory profile leaked into serialization: %s", data)
+		}
 	}
 }
 
