@@ -42,6 +42,15 @@ type writerPool struct {
 	bytesPerRow int64
 }
 
+// writeErrorAdjustmentLifecycle lets an adapter bracket the actual per-table
+// tuner mutation. The interface is intentionally private; implementations in
+// other packages opt in through this exported method pair without expanding
+// the public WriteErrorAdjuster contract.
+type writeErrorAdjustmentLifecycle interface {
+	WriteErrorAdjustmentApplying()
+	WriteErrorAdjustmentApplied()
+}
+
 // writerPoolConfig holds the configuration for creating a writer pool.
 type writerPoolConfig struct {
 	NumWriters             int
@@ -243,6 +252,10 @@ func (wp *writerPool) evaluateAndAdjust(ctx context.Context, rows [][]any, write
 
 	newSize := wp.writeErrorAdjuster.EvaluateWriteError(ctx, errCtx)
 	if newSize > 0 && wp.tuner != nil {
+		if lifecycle, ok := wp.writeErrorAdjuster.(writeErrorAdjustmentLifecycle); ok {
+			lifecycle.WriteErrorAdjustmentApplying()
+			defer lifecycle.WriteErrorAdjustmentApplied()
+		}
 		// Set both chunk size (for reader retry batching) and batch size (for writer sub-batching)
 		wp.tuner.SetTableChunkSize(wp.tableName, newSize)
 		wp.tuner.SetTableBatchSize(wp.tableName, newSize)

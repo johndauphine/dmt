@@ -56,6 +56,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -108,6 +109,14 @@ type Controller struct {
 	adjustmentRecorder   AdjustmentRecorder
 	adjustmentNumber     int
 	nextAdjustmentNumber func() int
+
+	// pendingAdjustmentObservation is telemetry-only. It is sampled at tick
+	// start and never participates in Evaluate or any controller rule.
+	observationMu                sync.Mutex
+	pendingAdjustmentObservation *adjustmentObservation
+	observationGeneration        uint64
+	externalAdjustmentsInFlight  int
+	lastExternalAdjustmentAt     time.Time
 }
 
 // ControllerOptions wraps the optional knobs the rule controller uses for
@@ -179,6 +188,17 @@ type AdjustmentRecord struct {
 	MemoryAfter      float64
 	Reasoning        string
 	Confidence       string
+}
+
+const adjustmentObservationSamples = 3
+
+type adjustmentObservation struct {
+	adjustmentNumber int
+	action           string
+	appliedAt        time.Time
+	throughputBefore float64
+	cpuBefore        float64
+	memoryBefore     float64
 }
 
 // defaultMaxWAW is the cap the controller uses when ControllerOptions
@@ -331,10 +351,17 @@ func (c *Controller) Start(ctx context.Context) {
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
+	defer c.CensorPendingObservation()
 
 	for {
 		select {
 		case <-ticker.C:
+			// Cancellation wins over telemetry capture when both become ready.
+			// Never synthesize a final observation during shutdown.
+			if ctx.Err() != nil {
+				logging.Debug("rule controller stopped")
+				return
+			}
 			c.tick()
 		case <-ctx.Done():
 			logging.Debug("rule controller stopped")
@@ -347,6 +374,10 @@ func (c *Controller) Start(ctx context.Context) {
 // apply the first matching adjustment. Exposed via Evaluate for
 // tests; the production ticker calls this directly.
 func (c *Controller) tick() {
+	// Observation is deliberately first: a decision applied by this tick must
+	// not contaminate the pending adjustment's post window.
+	c.captureAdjustmentObservation()
+
 	decision := c.Evaluate(c.nowFn())
 	if decision == nil {
 		return
@@ -545,7 +576,12 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 // cooldown for 90s, suppressing retries even though no change took
 // effect (Copilot review on PR #194).
 func (c *Controller) apply(d *Decision) error {
-	before := c.latestSnapshot()
+	// Capture the external-contamination epoch before reading the pre-window.
+	// A structural adjustment at any point before the later arm invalidates
+	// this controller observation, even if it arrives while persistence blocks.
+	observationGeneration, externalInFlight, lastExternalAdjustmentAt := c.currentObservationState()
+	before, observationEligible := c.adjustmentBeforeWindow(lastExternalAdjustmentAt)
+	observationEligible = observationEligible && externalInFlight == 0
 	update := transfer.RuntimeUpdate{}
 	switch d.Knob {
 	case "chunk_size":
@@ -611,41 +647,230 @@ func (c *Controller) apply(d *Decision) error {
 			c.lastWAWAddThroughputSet = false
 		}
 	}
-	c.recordAdjustment(d, before)
+
+	// Any successful adjustment contaminates the prior post window, even when
+	// this decision's telemetry write later fails. Failed tuner updates return
+	// above and therefore preserve the prior observation unchanged.
+	c.clearPendingObservation()
+	adjustmentNumber := c.recordAdjustment(d, now, before)
+	if observationEligible && adjustmentNumber > 0 {
+		c.observationMu.Lock()
+		if c.observationGeneration == observationGeneration && c.externalAdjustmentsInFlight == 0 {
+			c.pendingAdjustmentObservation = &adjustmentObservation{
+				adjustmentNumber: adjustmentNumber,
+				action:           d.Knob,
+				appliedAt:        now,
+				throughputBefore: before.throughputBefore,
+				cpuBefore:        before.cpuBefore,
+				memoryBefore:     before.memoryBefore,
+			}
+		}
+		c.observationMu.Unlock()
+	}
 	return nil
 }
 
-func (c *Controller) latestSnapshot() PerformanceSnapshot {
-	recent := c.collector.GetRecentMetrics(1)
-	if len(recent) == 0 {
-		return PerformanceSnapshot{}
+// adjustmentBeforeWindow returns equal three-sample pre-adjustment means.
+// Insufficient history preserves the prior latest-snapshot fields for
+// compatibility but cannot arm an observation. A complete window with zero
+// mean throughput is persisted as a valid initial decision but is also
+// ineligible because the percentage delta would have no positive denominator.
+func (c *Controller) adjustmentBeforeWindow(lastExternalAdjustmentAt time.Time) (adjustmentObservation, bool) {
+	recent := c.collector.GetRecentMetrics(adjustmentObservationSamples)
+	if len(recent) < adjustmentObservationSamples {
+		if len(recent) == 0 {
+			return adjustmentObservation{}, false
+		}
+		latest := recent[len(recent)-1]
+		return adjustmentObservation{
+			throughputBefore: latest.Throughput,
+			cpuBefore:        latest.CPUPercent,
+			memoryBefore:     latest.MemoryPercent,
+		}, false
 	}
-	return recent[len(recent)-1]
+	throughput, cpu, memory, complete := meanAdjustmentMetrics(recent)
+	observation := adjustmentObservation{
+		throughputBefore: throughput,
+		cpuBefore:        cpu,
+		memoryBefore:     memory,
+	}
+	followsExternalAdjustment := lastExternalAdjustmentAt.IsZero()
+	if !followsExternalAdjustment {
+		followsExternalAdjustment = true
+		for _, snapshot := range recent {
+			if !snapshot.Timestamp.After(lastExternalAdjustmentAt) {
+				followsExternalAdjustment = false
+				break
+			}
+		}
+	}
+	return observation, complete && throughput > 0 && followsExternalAdjustment
 }
 
-func (c *Controller) recordAdjustment(d *Decision, before PerformanceSnapshot) {
-	if c.adjustmentRecorder == nil || c.runID == "" || d == nil {
+// captureAdjustmentObservation persists the first complete post-adjustment
+// window. It is telemetry-only: completion or persistence failure clears the
+// pending state, and none of these values feed Evaluate or Rule 2 state.
+func (c *Controller) captureAdjustmentObservation() {
+	c.observationMu.Lock()
+	observation := c.pendingAdjustmentObservation
+	if observation == nil {
+		c.observationMu.Unlock()
 		return
+	}
+
+	post := make([]PerformanceSnapshot, 0, adjustmentObservationSamples)
+	for _, snapshot := range c.collector.GetAllMetrics() {
+		if !snapshot.Timestamp.After(observation.appliedAt) {
+			continue
+		}
+		post = append(post, snapshot)
+		if len(post) == adjustmentObservationSamples {
+			break
+		}
+	}
+	throughputAfter, cpuAfter, memoryAfter, complete := meanAdjustmentMetrics(post)
+	if !complete {
+		c.observationMu.Unlock()
+		return
+	}
+
+	// Clear before the best-effort recorder call. A failed telemetry write is
+	// warned once and never retried on later controller ticks.
+	c.pendingAdjustmentObservation = nil
+	c.observationMu.Unlock()
+	effectPercent := (throughputAfter - observation.throughputBefore) / observation.throughputBefore * 100
+	record := AdjustmentRecord{
+		AdjustmentNumber: observation.adjustmentNumber,
+		Timestamp:        c.nowFn(),
+		Action:           observation.action,
+		ThroughputBefore: observation.throughputBefore,
+		ThroughputAfter:  throughputAfter,
+		EffectPercent:    effectPercent,
+		EffectMeasured:   true,
+		CPUBefore:        observation.cpuBefore,
+		CPUAfter:         cpuAfter,
+		MemoryBefore:     observation.memoryBefore,
+		MemoryAfter:      memoryAfter,
+		Reasoning: fmt.Sprintf(
+			"observational three-sample delta after %s adjustment: throughput %.2f to %.2f (%.2f%%)",
+			observation.action, observation.throughputBefore, throughputAfter, effectPercent,
+		),
+		Confidence: "deterministic",
+	}
+	if err := c.adjustmentRecorder(c.runID, record); err != nil {
+		logging.Warn("rule controller: failed to persist observational three-sample delta: %v", err)
+	}
+}
+
+// CensorPendingObservation discards an incomplete observation after another
+// successful runtime adjustment contaminates its post window. Structural
+// write-error adjustments happen outside the controller ticker and use this
+// concurrency-safe hook; censoring never emits a synthetic measurement.
+func (c *Controller) CensorPendingObservation() {
+	if c == nil {
+		return
+	}
+	c.observationMu.Lock()
+	c.observationGeneration++
+	c.pendingAdjustmentObservation = nil
+	c.observationMu.Unlock()
+}
+
+// BeginExternalAdjustment starts a two-phase contamination fence around a
+// structural adjustment performed outside Controller.apply. While any fence
+// is in flight, controller updates may still succeed and persist their initial
+// decision, but they cannot arm an observational window.
+func (c *Controller) BeginExternalAdjustment() {
+	if c == nil {
+		return
+	}
+	c.observationMu.Lock()
+	c.observationGeneration++
+	c.externalAdjustmentsInFlight++
+	c.pendingAdjustmentObservation = nil
+	c.observationMu.Unlock()
+}
+
+// CompleteExternalAdjustment closes a structural-adjustment fence after its
+// runtime setters have installed the change. A future observation requires a
+// complete three-sample pre-window strictly after appliedAt.
+func (c *Controller) CompleteExternalAdjustment(appliedAt time.Time) {
+	if c == nil {
+		return
+	}
+	c.observationMu.Lock()
+	c.observationGeneration++
+	if c.externalAdjustmentsInFlight > 0 {
+		c.externalAdjustmentsInFlight--
+	}
+	if appliedAt.After(c.lastExternalAdjustmentAt) {
+		c.lastExternalAdjustmentAt = appliedAt
+	}
+	c.pendingAdjustmentObservation = nil
+	c.observationMu.Unlock()
+}
+
+func (c *Controller) currentObservationState() (generation uint64, inFlight int, lastExternalAdjustmentAt time.Time) {
+	c.observationMu.Lock()
+	defer c.observationMu.Unlock()
+	return c.observationGeneration, c.externalAdjustmentsInFlight, c.lastExternalAdjustmentAt
+}
+
+// clearPendingObservation is the controller's own successful-adjustment
+// transition. Unlike the exported censor hook, it does not advance the
+// external-contamination generation that guards the new observation's arm.
+func (c *Controller) clearPendingObservation() {
+	c.observationMu.Lock()
+	c.pendingAdjustmentObservation = nil
+	c.observationMu.Unlock()
+}
+
+func meanAdjustmentMetrics(snapshots []PerformanceSnapshot) (throughput, cpu, memory float64, complete bool) {
+	if len(snapshots) != adjustmentObservationSamples {
+		return 0, 0, 0, false
+	}
+	for _, snapshot := range snapshots {
+		throughput += snapshot.Throughput
+		cpu += snapshot.CPUPercent
+		memory += snapshot.MemoryPercent
+	}
+	denominator := float64(adjustmentObservationSamples)
+	return throughput / denominator, cpu / denominator, memory / denominator, true
+}
+
+// recordAdjustment persists the initial unmeasured decision and returns its
+// single allocated positive number. Zero means there is no durable initial row
+// to observe (recorder absent, invalid allocator output, or recorder failure).
+func (c *Controller) recordAdjustment(d *Decision, appliedAt time.Time, before adjustmentObservation) int {
+	if c.adjustmentRecorder == nil || c.runID == "" || d == nil {
+		return 0
+	}
+	adjustmentNumber := c.nextAdjustmentNumberValue()
+	if adjustmentNumber <= 0 {
+		logging.Warn("rule controller: adjustment recorder allocated non-positive number %d", adjustmentNumber)
+		return 0
 	}
 	adjustments := map[string]int{d.Knob: d.NewValue}
 	if d.CompanionChunkSize != nil {
 		adjustments["chunk_size"] = *d.CompanionChunkSize
 	}
 	record := AdjustmentRecord{
-		AdjustmentNumber: c.nextAdjustmentNumberValue(),
-		Timestamp:        c.nowFn(),
+		AdjustmentNumber: adjustmentNumber,
+		Timestamp:        appliedAt,
 		Action:           d.Knob,
 		Adjustments:      adjustments,
-		ThroughputBefore: before.Throughput,
+		ThroughputBefore: before.throughputBefore,
 		EffectMeasured:   false,
-		CPUBefore:        before.CPUPercent,
-		MemoryBefore:     before.MemoryPercent,
+		CPUBefore:        before.cpuBefore,
+		MemoryBefore:     before.memoryBefore,
 		Reasoning:        d.Reasoning,
 		Confidence:       "deterministic",
 	}
 	if err := c.adjustmentRecorder(c.runID, record); err != nil {
 		logging.Warn("rule controller: failed to persist runtime adjustment: %v", err)
+		return 0
 	}
+	return adjustmentNumber
 }
 
 func (c *Controller) nextAdjustmentNumberValue() int {

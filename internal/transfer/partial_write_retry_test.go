@@ -56,6 +56,29 @@ type fixedAdjuster int
 
 func (f fixedAdjuster) EvaluateWriteError(context.Context, WriteErrorContext) int { return int(f) }
 
+type lifecycleAdjuster struct {
+	tuner                       RuntimeTuner
+	applyingCalls, appliedCalls int
+	applyingSawOverride         bool
+	appliedSawChunk             int
+	appliedSawBatch             int
+}
+
+func (*lifecycleAdjuster) EvaluateWriteError(context.Context, WriteErrorContext) int { return 3 }
+
+func (a *lifecycleAdjuster) WriteErrorAdjustmentApplying() {
+	a.applyingCalls++
+	_, chunkSet := a.tuner.TableChunkSize("t")
+	_, batchSet := a.tuner.TableBatchSize("t")
+	a.applyingSawOverride = chunkSet || batchSet
+}
+
+func (a *lifecycleAdjuster) WriteErrorAdjustmentApplied() {
+	a.appliedCalls++
+	a.appliedSawChunk, _ = a.tuner.TableChunkSize("t")
+	a.appliedSawBatch, _ = a.tuner.TableBatchSize("t")
+}
+
 func makeRows(n int) [][]any {
 	rows := make([][]any, n)
 	for i := range rows {
@@ -74,6 +97,22 @@ func newRetryTestPool(fake pool.TargetPool) *writerPool {
 		batchSizeFn:        func() int { return 1000 },
 		writeErrorAdjuster: fixedAdjuster(3),
 		tableName:          "t",
+	}
+}
+
+func TestWriteErrorAdjustmentLifecycleBracketsActualTunerSetters(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
+	adjuster := &lifecycleAdjuster{tuner: tuner}
+	wp := newRetryTestPool(&partialWriteFakePool{})
+	wp.tuner = tuner
+	wp.writeErrorAdjuster = adjuster
+
+	if got := wp.evaluateAndAdjust(context.Background(), makeRows(10), errors.New("structural limit")); got != 3 {
+		t.Fatalf("adjustment = %d, want 3", got)
+	}
+	if adjuster.applyingCalls != 1 || adjuster.appliedCalls != 1 || adjuster.applyingSawOverride ||
+		adjuster.appliedSawChunk != 3 || adjuster.appliedSawBatch != 3 {
+		t.Fatalf("lifecycle ordering = %+v", adjuster)
 	}
 }
 

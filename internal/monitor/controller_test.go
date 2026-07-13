@@ -6,6 +6,9 @@
 package monitor
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +67,16 @@ func pushSnapshots(c *MetricsCollector, snaps ...PerformanceSnapshot) {
 	c.metrics = append(c.metrics, snaps...)
 }
 
+func pendingObservation(c *Controller) *adjustmentObservation {
+	c.observationMu.Lock()
+	defer c.observationMu.Unlock()
+	if c.pendingAdjustmentObservation == nil {
+		return nil
+	}
+	observation := *c.pendingAdjustmentObservation
+	return &observation
+}
+
 // snap builds a PerformanceSnapshot with known memory pressure and the given
 // knobs. Existing controller fixtures model successful telemetry reads; tests
 // for failed/unknown reads clear MemoryPressureKnown explicitly.
@@ -85,11 +98,21 @@ func snap(memPct, cpuPct float64, queueDepth, errorCount int, throughput float64
 	}
 }
 
+func snapAt(at time.Time, memPct, cpuPct float64, queueDepth, errorCount int, throughput float64, chunk, waw int) PerformanceSnapshot {
+	snapshot := snap(memPct, cpuPct, queueDepth, errorCount, throughput, chunk, waw)
+	snapshot.Timestamp = at
+	return snapshot
+}
+
 // ---------- Rule 1: memory pressure → shrink chunk_size ----------
 
 func TestController_MemoryPressure_ShrinksChunkSize(t *testing.T) {
 	c, col, _ := newTestController(t, ControllerOptions{})
-	pushSnapshots(col, snap(95.0, 30, 0, 0, 500_000, 50000, 2))
+	pushSnapshots(col,
+		snap(93.0, 20, 0, 0, 400_000, 50000, 2),
+		snap(95.0, 30, 0, 0, 500_000, 50000, 2),
+		snap(97.0, 40, 0, 0, 600_000, 50000, 2),
+	)
 
 	d := c.Evaluate(time.Now())
 	if d == nil {
@@ -119,7 +142,11 @@ func TestControllerApplyPersistsRuntimeAdjustment(t *testing.T) {
 	})
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	c.SetClock(fixedClock(now))
-	pushSnapshots(col, snap(95.0, 30, 0, 0, 500_000, 50000, 2))
+	pushSnapshots(col,
+		snap(93.0, 20, 0, 0, 400_000, 50000, 2),
+		snap(95.0, 30, 0, 0, 500_000, 50000, 2),
+		snap(97.0, 40, 0, 0, 600_000, 50000, 2),
+	)
 	decision := &Decision{
 		Knob:          "chunk_size",
 		PreviousValue: 50000,
@@ -154,6 +181,604 @@ func TestControllerApplyPersistsRuntimeAdjustment(t *testing.T) {
 	}
 	if record.Confidence != "deterministic" || record.Reasoning != "memory pressure" {
 		t.Fatalf("record reason/confidence = %+v", record)
+	}
+}
+
+func TestControllerObservationUsesEqualFirstThreeWindows(t *testing.T) {
+	var records []AdjustmentRecord
+	allocations := 0
+	t0 := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "observation-run",
+		NextAdjustmentNumber: func() int {
+			allocations++
+			return 37
+		},
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 30, 10, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 40, 20, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 30, 0, 0, 300, 50_000, 2),
+	)
+	decision := &Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "memory pressure"}
+	if err := c.apply(decision); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].AdjustmentNumber != 37 || records[0].EffectMeasured {
+		t.Fatalf("initial observation record = %+v", records)
+	}
+	if records[0].ThroughputBefore != 200 || records[0].CPUBefore != 20 || records[0].MemoryBefore != 40 {
+		t.Fatalf("initial three-sample means = %+v", records[0])
+	}
+
+	// A sample at appliedAt is excluded. The fourth strictly-later sample is
+	// also ignored: capture must use the first three after the adjustment.
+	pushSnapshots(col,
+		snapAt(t0, 99, 99, 0, 0, 9_999, 37_500, 2),
+		snapAt(t0.Add(time.Second), 50, 40, 0, 0, 300, 37_500, 2),
+		snapAt(t0.Add(2*time.Second), 60, 50, 0, 0, 600, 37_500, 2),
+		snapAt(t0.Add(3*time.Second), 70, 60, 0, 0, 900, 37_500, 2),
+		snapAt(t0.Add(4*time.Second), 80, 90, 0, 0, 5_000, 37_500, 2),
+	)
+	c.SetClock(fixedClock(t0.Add(5 * time.Second)))
+	c.tick()
+
+	if allocations != 1 {
+		t.Fatalf("adjustment number allocations = %d, want exactly 1", allocations)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %+v, want initial plus measured upsert", records)
+	}
+	measured := records[1]
+	if !measured.EffectMeasured || measured.AdjustmentNumber != 37 || measured.AdjustmentNumber <= 0 || measured.Action != "chunk_size" {
+		t.Fatalf("measured record identity/state = %+v", measured)
+	}
+	if measured.ThroughputBefore != 200 || measured.CPUBefore != 20 || measured.MemoryBefore != 40 {
+		t.Fatalf("measured record changed pre-window means = %+v", measured)
+	}
+	if measured.ThroughputAfter != 600 || measured.CPUAfter != 50 || measured.MemoryAfter != 60 || measured.EffectPercent != 200 {
+		t.Fatalf("first post-window means/delta = %+v", measured)
+	}
+	if !strings.Contains(measured.Reasoning, "observational three-sample delta") {
+		t.Fatalf("measured reasoning is not explicitly observational: %q", measured.Reasoning)
+	}
+	if pending := pendingObservation(c); pending != nil {
+		t.Fatalf("completed observation remained pending: %+v", pending)
+	}
+}
+
+func TestControllerSecondSuccessfulAdjustmentCensorsPendingObservation(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 13, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "censor-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	firstNumber := records[0].AdjustmentNumber
+	pushSnapshots(col, snapAt(t0.Add(time.Second), 50, 80, 0, 0, 400, 37_500, 2))
+
+	t1 := t0.Add(10 * time.Second)
+	c.SetClock(fixedClock(t1))
+	if err := c.apply(&Decision{Knob: "write_ahead_writers", PreviousValue: 2, NewValue: 1, Reasoning: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[1].AdjustmentNumber == firstNumber {
+		t.Fatalf("second initial record = %+v", records)
+	}
+	secondNumber := records[1].AdjustmentNumber
+	pushSnapshots(col,
+		snapAt(t1.Add(time.Second), 50, 80, 0, 0, 500, 37_500, 1),
+		snapAt(t1.Add(2*time.Second), 50, 80, 0, 0, 600, 37_500, 1),
+		snapAt(t1.Add(3*time.Second), 50, 80, 0, 0, 700, 37_500, 1),
+	)
+	c.SetClock(fixedClock(t1.Add(4 * time.Second)))
+	c.tick()
+
+	if len(records) != 3 || !records[2].EffectMeasured || records[2].AdjustmentNumber != secondNumber {
+		t.Fatalf("censored/new observation records = %+v", records)
+	}
+	for _, record := range records[1:] {
+		if record.EffectMeasured && record.AdjustmentNumber == firstNumber {
+			t.Fatalf("first observation was measured after contamination: %+v", records)
+		}
+	}
+}
+
+func TestControllerFailedSecondAdjustmentPreservesPendingObservation(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 14, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "failed-second-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	firstNumber := records[0].AdjustmentNumber
+	pushSnapshots(col, snapAt(t0.Add(time.Second), 50, 80, 0, 0, 300, 37_500, 2))
+
+	c.tuner = failingTuner{}
+	c.SetClock(fixedClock(t0.Add(2 * time.Second)))
+	if err := c.apply(&Decision{Knob: "write_ahead_writers", PreviousValue: 2, NewValue: 1, Reasoning: "fails"}); err == nil {
+		t.Fatal("second adjustment unexpectedly succeeded")
+	}
+	pending := pendingObservation(c)
+	if len(records) != 1 || pending == nil || pending.adjustmentNumber != firstNumber {
+		t.Fatalf("failed adjustment changed pending observation: records=%+v pending=%+v", records, pending)
+	}
+
+	pushSnapshots(col,
+		snapAt(t0.Add(3*time.Second), 50, 80, 0, 0, 600, 37_500, 2),
+		snapAt(t0.Add(4*time.Second), 50, 80, 0, 0, 900, 37_500, 2),
+	)
+	c.captureAdjustmentObservation()
+	if len(records) != 2 || !records[1].EffectMeasured || records[1].AdjustmentNumber != firstNumber {
+		t.Fatalf("preserved observation did not complete: %+v", records)
+	}
+}
+
+func TestControllerObservationRequiresCompletePositivePreWindow(t *testing.T) {
+	tests := []struct {
+		name        string
+		pre         []PerformanceSnapshot
+		wantCPU     float64
+		wantMemory  float64
+		wantThrough float64
+	}{
+		{
+			name: "insufficient",
+			pre: []PerformanceSnapshot{
+				snap(50, 10, 0, 0, 100, 50_000, 2),
+				snap(60, 20, 0, 0, 200, 50_000, 2),
+			},
+			wantCPU: 20, wantMemory: 60, wantThrough: 200,
+		},
+		{
+			name: "zero throughput mean",
+			pre: []PerformanceSnapshot{
+				snap(40, 10, 0, 0, 0, 50_000, 2),
+				snap(50, 20, 0, 0, 0, 50_000, 2),
+				snap(60, 30, 0, 0, 0, 50_000, 2),
+			},
+			wantCPU: 20, wantMemory: 50,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var records []AdjustmentRecord
+			c, col, _ := newTestController(t, ControllerOptions{
+				RunID: "ineligible-run",
+				AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+					records = append(records, record)
+					return nil
+				},
+			})
+			pushSnapshots(col, tc.pre...)
+			if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}); err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 1 || records[0].ThroughputBefore != tc.wantThrough ||
+				records[0].CPUBefore != tc.wantCPU || records[0].MemoryBefore != tc.wantMemory {
+				t.Fatalf("initial ineligible record = %+v", records)
+			}
+			if pending := pendingObservation(c); pending != nil {
+				t.Fatalf("ineligible pre-window armed observation: %+v", pending)
+			}
+		})
+	}
+}
+
+func TestControllerShutdownDropsPendingObservation(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 15, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "shutdown-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.interval = time.Hour
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	// Even a complete post window must not be flushed when the controller is
+	// entered with an already-canceled context.
+	pushSnapshots(col,
+		snapAt(t0.Add(time.Second), 50, 80, 0, 0, 300, 37_500, 2),
+		snapAt(t0.Add(2*time.Second), 50, 80, 0, 0, 600, 37_500, 2),
+		snapAt(t0.Add(3*time.Second), 50, 80, 0, 0, 900, 37_500, 2),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		c.Start(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("controller did not stop after cancellation")
+	}
+	if pending := pendingObservation(c); pending != nil || len(records) != 1 {
+		t.Fatalf("shutdown synthesized or retained observation: records=%+v pending=%+v", records, pending)
+	}
+}
+
+func TestControllerCompletedObservationRecorderFailureClearsWithoutRetry(t *testing.T) {
+	calls := 0
+	t0 := time.Date(2026, 7, 13, 16, 0, 0, 0, time.UTC)
+	c, col, tuner := newTestController(t, ControllerOptions{
+		RunID: "recorder-failure-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			calls++
+			if record.EffectMeasured {
+				return errors.New("telemetry unavailable")
+			}
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	pushSnapshots(col,
+		snapAt(t0.Add(time.Second), 50, 80, 0, 0, 300, 37_500, 2),
+		snapAt(t0.Add(2*time.Second), 50, 80, 0, 0, 600, 37_500, 2),
+		snapAt(t0.Add(3*time.Second), 50, 80, 0, 0, 900, 37_500, 2),
+	)
+	beforeTick := tuner.Snapshot()
+	c.SetClock(fixedClock(t0.Add(4 * time.Second)))
+	c.tick()
+	c.tick()
+	if pending := pendingObservation(c); calls != 2 || pending != nil {
+		t.Fatalf("failed measured write retried or remained pending: calls=%d pending=%+v", calls, pending)
+	}
+	if got := tuner.Snapshot(); got != beforeTick {
+		t.Fatalf("telemetry failure changed controller runtime state: before=%+v after=%+v", beforeTick, got)
+	}
+}
+
+func TestControllerObservationDoesNotChangeRule2StateOrDecision(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 17, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "rule2-observation-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 5, 0, 400, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 8, 0, 500, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 12, 0, 600, 50_000, 2),
+	)
+	decision := c.Evaluate(t0)
+	if decision == nil || decision.Knob != "write_ahead_writers" {
+		t.Fatalf("first Rule 2 decision = %+v", decision)
+	}
+	if err := c.apply(decision); err != nil {
+		t.Fatal(err)
+	}
+	if c.lastWAWAddThroughput != 500 || !c.lastWAWAddThroughputSet {
+		t.Fatalf("Rule 2 baseline changed at apply: value=%v set=%v", c.lastWAWAddThroughput, c.lastWAWAddThroughputSet)
+	}
+
+	t1 := t0.Add(controllerCooldown + time.Second)
+	pushSnapshots(col,
+		snapAt(t1.Add(-3*time.Second), 50, 80, 15, 0, 520, 50_000, 3),
+		snapAt(t1.Add(-2*time.Second), 50, 80, 18, 0, 520, 50_000, 3),
+		snapAt(t1.Add(-time.Second), 50, 80, 22, 0, 520, 50_000, 3),
+	)
+	c.captureAdjustmentObservation()
+	if c.lastWAWAddThroughput != 500 || !c.lastWAWAddThroughputSet {
+		t.Fatalf("observation capture mutated Rule 2 baseline: value=%v set=%v", c.lastWAWAddThroughput, c.lastWAWAddThroughputSet)
+	}
+	decision = c.Evaluate(t1)
+	if decision == nil || decision.Knob != "write_ahead_writers" || decision.NewValue != 4 {
+		t.Fatalf("Rule 2 decision changed by observation telemetry: %+v", decision)
+	}
+	if len(records) != 2 || !records[1].EffectMeasured {
+		t.Fatalf("observation telemetry did not complete independently: %+v", records)
+	}
+}
+
+func TestControllerObservationInitialPersistenceEligibility(t *testing.T) {
+	pre := func(col *MetricsCollector) {
+		pushSnapshots(col,
+			snap(50, 80, 0, 0, 100, 50_000, 2),
+			snap(50, 80, 0, 0, 200, 50_000, 2),
+			snap(50, 80, 0, 0, 300, 50_000, 2),
+		)
+	}
+	decision := &Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}
+
+	t.Run("initial recorder failure does not arm", func(t *testing.T) {
+		calls := 0
+		c, col, tuner := newTestController(t, ControllerOptions{
+			RunID: "initial-failure-run",
+			AdjustmentRecorder: func(_ string, _ AdjustmentRecord) error {
+				calls++
+				return errors.New("checkpoint unavailable")
+			},
+		})
+		pre(col)
+		if err := c.apply(decision); err != nil {
+			t.Fatalf("telemetry failure changed successful apply: %v", err)
+		}
+		if calls != 1 || pendingObservation(c) != nil {
+			t.Fatalf("initial recorder failure calls/pending = %d/%+v", calls, pendingObservation(c))
+		}
+		if got := tuner.Snapshot().ChunkSize; got != 37_500 {
+			t.Fatalf("runtime update rolled back after telemetry failure: %d", got)
+		}
+	})
+
+	t.Run("nonpositive allocation does not persist or arm", func(t *testing.T) {
+		recorderCalls := 0
+		c, col, tuner := newTestController(t, ControllerOptions{
+			RunID: "bad-number-run",
+			NextAdjustmentNumber: func() int {
+				return 0
+			},
+			AdjustmentRecorder: func(_ string, _ AdjustmentRecord) error {
+				recorderCalls++
+				return nil
+			},
+		})
+		pre(col)
+		if err := c.apply(decision); err != nil {
+			t.Fatal(err)
+		}
+		if recorderCalls != 0 || pendingObservation(c) != nil {
+			t.Fatalf("nonpositive number recorder/pending = %d/%+v", recorderCalls, pendingObservation(c))
+		}
+		if got := tuner.Snapshot().ChunkSize; got != 37_500 {
+			t.Fatalf("runtime update failed with invalid telemetry number: %d", got)
+		}
+	})
+}
+
+func TestControllerApplyUsesOnePostSuccessInstant(t *testing.T) {
+	var records []AdjustmentRecord
+	clockCalls := 0
+	t0 := time.Date(2026, 7, 13, 18, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "single-clock-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(func() time.Time {
+		clockCalls++
+		return t0.Add(time.Duration(clockCalls) * time.Second)
+	})
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if clockCalls != 1 || len(records) != 1 {
+		t.Fatalf("post-success clock calls/records = %d/%d, want 1/1", clockCalls, len(records))
+	}
+	pending := pendingObservation(c)
+	if pending == nil || !records[0].Timestamp.Equal(pending.appliedAt) ||
+		!c.chunkSizeCooldownUntil.Equal(pending.appliedAt.Add(controllerCooldown)) {
+		t.Fatalf("post-success instants diverged: record=%v applied=%+v cooldown=%v",
+			records[0].Timestamp, pending, c.chunkSizeCooldownUntil)
+	}
+}
+
+func TestControllerCensorPendingObservationPreventsExternalContamination(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 19, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "external-censor-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	c.CensorPendingObservation()
+	pushSnapshots(col,
+		snapAt(t0.Add(time.Second), 50, 80, 0, 0, 300, 37_500, 2),
+		snapAt(t0.Add(2*time.Second), 50, 80, 0, 0, 600, 37_500, 2),
+		snapAt(t0.Add(3*time.Second), 50, 80, 0, 0, 900, 37_500, 2),
+	)
+	c.captureAdjustmentObservation()
+	if len(records) != 1 || pendingObservation(c) != nil {
+		t.Fatalf("external censor emitted/retained observation: records=%+v pending=%+v", records, pendingObservation(c))
+	}
+}
+
+func TestControllerExternalCensorDuringInitialPersistencePreventsArm(t *testing.T) {
+	var records []AdjustmentRecord
+	var c *Controller
+	t0 := time.Date(2026, 7, 13, 19, 30, 0, 0, time.UTC)
+	c, col, tuner := newTestController(t, ControllerOptions{
+		RunID: "interleaved-censor-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			// Deterministically model a structural write-error adjustment in
+			// the former clear -> persist -> arm race window.
+			if !record.EffectMeasured {
+				c.CensorPendingObservation()
+			}
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := tuner.Snapshot().ChunkSize; got != 37_500 {
+		t.Fatalf("controller adjustment was not applied: chunk_size=%d", got)
+	}
+	if len(records) != 1 || pendingObservation(c) != nil {
+		t.Fatalf("overlapping external censor left an observation armed: records=%+v pending=%+v",
+			records, pendingObservation(c))
+	}
+}
+
+func TestControllerExternalAdjustmentLifecycleBlocksAndRefreshesPreWindow(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 19, 45, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "external-lifecycle-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+
+	// The actual per-table setters are bracketed by Begin/Complete. A
+	// controller adjustment that lands inside that interval may persist its
+	// initial decision, but cannot arm a mixed observation.
+	c.BeginExternalAdjustment()
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	c.SetClock(fixedClock(t0))
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 40_000, Reasoning: "during external"}); err != nil {
+		t.Fatal(err)
+	}
+	if pendingObservation(c) != nil {
+		t.Fatalf("controller armed while external adjustment was in flight: %+v", pendingObservation(c))
+	}
+
+	t1 := t0.Add(time.Second)
+	c.CompleteExternalAdjustment(t1)
+	// Three samples that are not strictly after the external application are
+	// not a clean pre-window for a later controller adjustment.
+	pushSnapshots(col,
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 400, 40_000, 2),
+		snapAt(t0, 50, 80, 0, 0, 500, 40_000, 2),
+		snapAt(t1, 50, 80, 0, 0, 600, 40_000, 2),
+	)
+	c.SetClock(fixedClock(t1.Add(time.Second)))
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 40_000, NewValue: 35_000, Reasoning: "stale pre"}); err != nil {
+		t.Fatal(err)
+	}
+	if pendingObservation(c) != nil {
+		t.Fatalf("stale pre-window armed after external adjustment: %+v", pendingObservation(c))
+	}
+
+	pushSnapshots(col,
+		snapAt(t1.Add(time.Second), 50, 80, 0, 0, 700, 35_000, 2),
+		snapAt(t1.Add(2*time.Second), 50, 80, 0, 0, 800, 35_000, 2),
+		snapAt(t1.Add(3*time.Second), 50, 80, 0, 0, 900, 35_000, 2),
+	)
+	c.SetClock(fixedClock(t1.Add(4 * time.Second)))
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 35_000, NewValue: 30_000, Reasoning: "fresh pre"}); err != nil {
+		t.Fatal(err)
+	}
+	if pendingObservation(c) == nil {
+		t.Fatalf("three fresh samples after external application did not arm; records=%+v", records)
+	}
+}
+
+func TestControllerTickCapturesCompleteWindowBeforeApplyingNextDecision(t *testing.T) {
+	var records []AdjustmentRecord
+	t0 := time.Date(2026, 7, 13, 20, 0, 0, 0, time.UTC)
+	c, col, _ := newTestController(t, ControllerOptions{
+		RunID: "tick-order-run",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snapAt(t0.Add(-3*time.Second), 50, 80, 0, 0, 100, 50_000, 2),
+		snapAt(t0.Add(-2*time.Second), 50, 80, 0, 0, 200, 50_000, 2),
+		snapAt(t0.Add(-time.Second), 50, 80, 0, 0, 300, 50_000, 2),
+	)
+	if err := c.apply(&Decision{Knob: "chunk_size", PreviousValue: 50_000, NewValue: 37_500, Reasoning: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	firstNumber := records[0].AdjustmentNumber
+
+	t1 := t0.Add(controllerCooldown + time.Second)
+	pushSnapshots(col,
+		snapAt(t1.Add(-3*time.Second), 95, 80, 0, 0, 300, 37_500, 2),
+		snapAt(t1.Add(-2*time.Second), 95, 80, 0, 0, 600, 37_500, 2),
+		snapAt(t1.Add(-time.Second), 95, 80, 0, 0, 900, 37_500, 2),
+	)
+	c.SetClock(fixedClock(t1))
+	c.tick()
+
+	if len(records) != 3 {
+		t.Fatalf("tick record order = %+v, want initial/measured/next-initial", records)
+	}
+	if !records[1].EffectMeasured || records[1].AdjustmentNumber != firstNumber {
+		t.Fatalf("complete window was censored before capture: %+v", records)
+	}
+	if records[2].EffectMeasured || records[2].AdjustmentNumber == firstNumber || records[2].Action != "chunk_size" {
+		t.Fatalf("next decision initial record = %+v", records[2])
+	}
+	pending := pendingObservation(c)
+	if pending == nil || pending.adjustmentNumber != records[2].AdjustmentNumber {
+		t.Fatalf("next observation not armed after ordered tick: %+v", pending)
 	}
 }
 
