@@ -204,9 +204,9 @@ func (o *Orchestrator) probeTargetHardChunkLimit(ctx context.Context) int {
 	return analyzer.TargetHardChunkLimit()
 }
 
-// sanitizeForLog flattens AI-supplied strings to a single line before logging.
+// sanitizeForLog flattens generated reasoning and advice to a single log line.
 // Newlines, carriage returns, and tabs become spaces; runs of whitespace
-// collapse. Without this, multi-paragraph reasoning from the model would
+// collapse. Without this, multi-paragraph diagnostic text could
 // produce log entries where the second+ lines lack timestamps/levels and
 // break log parsers (issue #143 / PR #151 review).
 func sanitizeForLog(s string) string {

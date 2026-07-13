@@ -1,25 +1,5 @@
-// Package driver - smartconfig analyzer.
-//
-// PR1 of #175 replaced the AI-driven prompt path with the deterministic
-// internal/tuning package. The "AI" prefix on file names and exported
-// types is preserved to minimize the public-API churn in this PR; a
-// follow-up cleanup will rename ai_smartconfig.go -> smartconfig.go and
-// drop the unused AISuggestions field on SmartConfigSuggestions.
-//
-// What lives in this file:
-//   - SmartConfigAnalyzer scaffolding and schema-stats collection entrypoint
-//
-// What got lifted out (now in internal/tuning/):
-//   - effectiveMemoryBudgetMB, computeSafeChunkSize, ComputeEstimatedMemMB,
-//     clampChunkSizeToBudget body, classifyRegime + DBTuningSnapshot
-//
-// What got deleted (~1500 LOC, all AI-prompt machinery):
-//   - getAIAutoTune, applyAISuggestions, applyDefaultSuggestions,
-//     formatHistoricalContext{,ForInput}, buildMemoryBudgetBlock,
-//     formatWaw/ChunkSize aggregate blocks, formatTuningSnippet*,
-//     detectParameterTrend (PR2 #179 reintroduces a regime-drift
-//     variant), extractJSON, truncate, GetOfflineAutoTune,
-//     buildOfflinePrompt
+// Package driver contains the smart-configuration analyzer that collects
+// schema and system inputs for the deterministic internal/tuning package.
 package driver
 
 import (
@@ -61,7 +41,9 @@ type SmartConfigSuggestions struct {
 	MaxPartitions       int
 	LargeTableThreshold int64
 
-	// Connection pool tuning
+	// Connection-pool recommendations remain part of the analysis result for
+	// YAML/--apply, Web API, and advisory payload consumers. Runtime config
+	// independently re-derives its effective pools after applying pinned knobs.
 	MaxSourceConnections int
 	MaxTargetConnections int
 
@@ -85,14 +67,9 @@ type SmartConfigSuggestions struct {
 	// Warnings contains any issues detected during analysis
 	Warnings []string
 
-	// AISuggestions is preserved for backwards compatibility with code
-	// that reads it; PR1 always leaves it nil (no AI path runs). Removed
-	// in a follow-up cleanup PR.
-	AISuggestions *AutoTuneOutput
-
 	// Reasoning is the tuning engine's short explanation of the picking
 	// path, populated from tuning.Output.Reasoning. Always non-empty after
-	// the deterministic tuner runs (#202 â€” silence is not a valid signal).
+	// the deterministic tuner runs (#202 — silence is not a valid signal).
 	Reasoning string
 
 	// Tier names which selector picked the WAW/ChunkSize values, populated
@@ -141,7 +118,7 @@ type AutoTuneInput struct {
 	// classifier falls through to AvgRowBytes.
 	UncappedAvgRowBytes int64
 
-	// LargestTableBytes is max(RowCount Ã— AvgRowSizeBytes) across ALL
+	// LargestTableBytes is max(RowCount × AvgRowSizeBytes) across ALL
 	// tables in the workload (#214). Used by the skew tier classifier.
 	// Calculated alongside the avg/max-row passes in calculateAvgRowSize
 	// so it sees every table, not just the top-5-by-row-count slice
@@ -174,30 +151,8 @@ type TableStats struct {
 	AvgRowBytes int64
 }
 
-// AutoTuneOutput is preserved for backwards compatibility â€” see the
-// SmartConfigSuggestions.AISuggestions field. PR1 doesn't populate it;
-// a follow-up cleanup PR removes the type entirely.
-type AutoTuneOutput struct {
-	Workers              int    `json:"workers"`
-	ChunkSize            int    `json:"chunk_size"`
-	ReadAheadBuffers     int    `json:"read_ahead_buffers"`
-	WriteAheadWriters    int    `json:"write_ahead_writers"`
-	ParallelReaders      int    `json:"parallel_readers"`
-	MaxPartitions        int    `json:"max_partitions"`
-	LargeTableThreshold  int64  `json:"large_table_threshold"`
-	MaxSourceConnections int    `json:"max_source_connections"`
-	MaxTargetConnections int    `json:"max_target_connections"`
-	UpsertMergeChunkSize int    `json:"upsert_merge_chunk_size"`
-	CheckpointFrequency  int    `json:"checkpoint_frequency"`
-	MaxRetries           int    `json:"max_retries"`
-	ObservedRetryRates   string `json:"observed_retry_rates"`
-	Reasoning            string `json:"reasoning,omitempty"`
-}
-
-// TuningHistoryProvider supplies past-run data to the analyzer. PR1
-// trimmed the interface â€” the per-WAW / per-chunk_size aggregate methods
-// the AI prompt used were dropped; the new tuner reads raw records and
-// does its own aggregation in-package.
+// TuningHistoryProvider supplies raw past-run data to the analyzer. The
+// deterministic tuner performs its own filtering and aggregation in-package.
 type TuningHistoryProvider interface {
 	// GetRuntimeAdjustments returns normalized rows first by UTC epoch and ID,
 	// followed by unresolved legacy rows in descending ID order.
@@ -217,10 +172,8 @@ type TuningHistoryProvider interface {
 	UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error
 }
 
-// SmartConfigAnalyzer analyzes source database metadata to suggest optimal
-// configuration. PR1 dropped the aiMapper / useAI fields â€” the deterministic
-// tuner doesn't need them. PR2 added forceExplore + exploreMode for the
-// exploration policy in internal/tuning (#179).
+// SmartConfigAnalyzer analyzes source database metadata and delegates parameter
+// selection to the deterministic tuner.
 type SmartConfigAnalyzer struct {
 	db                       *sql.DB
 	dbType                   string
