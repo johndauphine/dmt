@@ -35,18 +35,16 @@ func availableDriverTypes() []string {
 // rather than a network endpoint, in which case `host` is meaningless
 // and the connection identity is carried on `database` (the path).
 //
-// Today the only file-based driver is sqlite (registered as primary
-// name "sqlite" with aliases "sqlite3" / "sqlitedb" — see
-// the sqlite catalog in internal/driver/generic/catalogs). The alias forms are
-// handled correctly here because canonicalDriverName resolves through
-// driver.Get(...).Name(), which collapses aliases to the canonical
-// primary name before comparison.
+// Today the only file-based driver is sqlite. The decision comes from the
+// catalog-backed DriverDefaults.Portless declaration, so aliases and future
+// portless engines do not require another config-layer name switch.
 //
 // Used by validate() to skip the `host is required` check for file
 // drivers — without this, a config like `type: sqlite, database:
 // ./foo.db` would error at load time even though sqlite has no host.
 func isFileBasedDriver(dbType string) bool {
-	return canonicalDriverName(dbType) == "sqlite"
+	d, err := driver.Get(dbType)
+	return err == nil && d.Defaults().Portless
 }
 
 // expandTilde expands ~ or ~/ at the start of a path to the user's home directory

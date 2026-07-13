@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -231,6 +232,124 @@ func TestClickHouseEndToEnd(t *testing.T) {
 	col, typ, found := dates.GetDateColumnInfo(ctx, "dmt_it", "orders", []string{"missing", "created_at"})
 	if !found || col != "created_at" || typ != "datetime64" {
 		t.Errorf("GetDateColumnInfo = (%q,%q,%v)", col, typ, found)
+	}
+}
+
+func TestClickHouseSchemaStats(t *testing.T) {
+	bootstrapClickhouseDB(t)
+	ctx := context.Background()
+	db, err := sql.Open("clickhouse", "clickhouse://localhost:9000/dmt_it?password=TestPass2024&username=default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.PingContext(ctx); err != nil {
+		if os.Getenv("CLICKHOUSE_REQUIRED") == "1" {
+			t.Fatalf("clickhouse required but schema-stats connection failed: %v", err)
+		}
+		t.Skipf("clickhouse not reachable: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE schema_stats_events (
+			id UInt64,
+			on_date Date,
+			on_date32 Date32,
+			at_time DateTime('UTC'),
+			at_precise DateTime64(3, 'UTC'),
+			at_nullable Nullable(DateTime64(6, 'UTC')),
+			note String
+		) ENGINE = MergeTree ORDER BY id
+	`); err != nil {
+		t.Fatalf("create schema-stats table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO schema_stats_events VALUES
+			(1, '2025-01-01', '2025-01-01', '2025-01-01 10:30:00', '2025-01-01 10:30:00.123', NULL, 'first'),
+			(2, '2025-01-02', '2025-01-02', '2025-01-02 11:30:00', '2025-01-02 11:30:00.456', '2025-01-02 11:30:00.456789', 'second')
+	`); err != nil {
+		t.Fatalf("insert schema-stats rows: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE VIEW schema_stats_view AS SELECT * FROM schema_stats_events;
+	`); err != nil {
+		t.Fatalf("create schema-stats view: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE MATERIALIZED VIEW schema_stats_materialized
+		ENGINE = MergeTree ORDER BY id
+		AS SELECT * FROM schema_stats_events
+	`); err != nil {
+		t.Fatalf("create schema-stats materialized view: %v", err)
+	}
+
+	cat, err := LoadCatalog("clickhouse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsReader, supported := NewDriver(cat).SchemaStatsReader()
+	if !supported || statsReader == nil {
+		t.Fatal("clickhouse catalog did not expose schema-statistics support")
+	}
+	stats, err := statsReader.TableStats(ctx, db, "dmt_it", nil)
+	if err != nil {
+		t.Fatalf("TableStats: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Name != "schema_stats_events" {
+		t.Fatalf("table stats = %+v, want base table only (views excluded)", stats)
+	}
+	if stats[0].RowCount != 2 || stats[0].AvgRowSizeBytes <= 0 {
+		t.Fatalf("table stats = %+v, want two rows and positive average width", stats[0])
+	}
+
+	dates, err := statsReader.DateColumns(ctx, db, "dmt_it", []string{"schema_stats_events"})
+	if err != nil {
+		t.Fatalf("DateColumns: %v", err)
+	}
+	wantDates := []string{"on_date", "on_date32", "at_time", "at_precise", "at_nullable"}
+	if got := dates["schema_stats_events"]; !reflect.DeepEqual(got, wantDates) {
+		t.Fatalf("date columns = %v, want Date/Date32/parameterized/nullable families %v", got, wantDates)
+	}
+
+	// Exercise the public analyzer and persistence boundary too: the catalog
+	// reader must feed deterministic tuning and arm a history record using the
+	// real ClickHouse endpoint identity.
+	history := &sqliteSchemaStatsHistory{}
+	analyzer := driver.NewSmartConfigAnalyzer(db, "clickhouse")
+	analyzer.SetTargetDBType("clickhouse")
+	analyzer.SetMemoryEnvelope(8*1024, 4*1024, 2*1024)
+	analyzer.SetHistoryProvider(history)
+	analyzer.SetWorkloadIdentity(
+		"localhost", 9000, "dmt_it", "dmt_it",
+		"localhost", 9000, "dmt_it", "dmt_it",
+	)
+	suggestions, err := analyzer.Analyze(ctx, "dmt_it")
+	if err != nil {
+		t.Fatalf("ClickHouse Analyze: %v", err)
+	}
+	if suggestions.TotalTables != 1 || suggestions.TotalRows != 2 ||
+		!reflect.DeepEqual(suggestions.DateColumns["schema_stats_events"], wantDates) ||
+		suggestions.Workers <= 0 || suggestions.ChunkSizeRecommendation <= 0 {
+		t.Fatalf("ClickHouse analyzer suggestions = %+v", suggestions)
+	}
+	rowID := analyzer.SaveTuningWithActualParams(driver.ActualParams{
+		Workers:              suggestions.Workers,
+		ChunkSize:            suggestions.ChunkSizeRecommendation,
+		ReadAheadBuffers:     suggestions.ReadAheadBuffers,
+		WriteAheadWriters:    suggestions.WriteAheadWriters,
+		ParallelReaders:      suggestions.ParallelReaders,
+		MaxPartitions:        suggestions.MaxPartitions,
+		MaxSourceConnections: suggestions.MaxSourceConnections,
+		MaxTargetConnections: suggestions.MaxTargetConnections,
+	})
+	if rowID != 77 || history.saved == nil {
+		t.Fatalf("ClickHouse pending history save = row %d / %#v, want row 77", rowID, history.saved)
+	}
+	if history.saved.SourceDBType != "clickhouse" || history.saved.TargetDBType != "clickhouse" ||
+		history.saved.SourceHost != "localhost" || history.saved.TargetHost != "localhost" ||
+		history.saved.SourcePort != 9000 || history.saved.TargetPort != 9000 ||
+		history.saved.SourceDatabase != "dmt_it" || history.saved.TargetDatabase != "dmt_it" {
+		t.Fatalf("ClickHouse history identity = %+v", history.saved)
 	}
 }
 

@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Smart configuration now obtains table and date statistics through explicit
+  catalog capabilities, adding bounded SQLite and ClickHouse analysis while
+  keeping unsupported or failed statistics out of tuning history. Portless
+  SQLite identities can now participate in exact-workload learning (#699).
+
 - Load-time defaults and cold-start tuning now share one memory-clamped policy:
   workers stay within 4-12, generated writers stay within the learnable 1-8
   range, and auto chunk sizing accounts for effective pinned concurrency while

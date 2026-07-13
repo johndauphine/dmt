@@ -578,12 +578,23 @@ func (r *readerWithDates) GetDateColumnInfo(ctx context.Context, schema, table s
 		if err != nil || !dt.Valid {
 			continue
 		}
-		t := strings.ToLower(strings.TrimSpace(dt.String))
+		t := normalizedDateType(dt.String)
 		if valid[t] {
 			return col, t, true
 		}
 	}
 	return "", "", false
+}
+
+// normalizedDateType reduces declared types such as SQLite TIME(6) and
+// TIMESTAMP WITH TIME ZONE to the catalog's canonical date family. Server
+// catalogs already return bare DATA_TYPE values, so this is a no-op for them.
+func normalizedDateType(declared string) string {
+	t := strings.ToLower(strings.TrimSpace(declared))
+	if end := strings.IndexAny(t, "( \t\r\n"); end >= 0 {
+		t = t[:end]
+	}
+	return t
 }
 
 // GetMaxDateColumnValue returns the source-side high watermark for a

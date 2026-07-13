@@ -3,11 +3,11 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"github.com/johndauphine/dmt/internal/checkpoint"
 	"runtime"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
@@ -71,10 +71,12 @@ func (o *Orchestrator) performanceAutoTuneInput(suggestions *driver.SmartConfigS
 	input.TargetMode = o.config.Migration.TargetMode
 	input.SourceHost = o.config.Source.Host
 	input.SourcePort = o.config.Source.Port
+	input.SourcePortless = performanceDriverPortless(input.DatabaseType)
 	input.SourceDatabase = o.config.Source.Database
 	input.SourceSchema = o.config.Source.Schema
 	input.TargetHost = o.config.Target.Host
 	input.TargetPort = o.config.Target.Port
+	input.TargetPortless = performanceDriverPortless(input.TargetType)
 	input.TargetDatabase = o.config.Target.Database
 	input.TargetSchema = o.config.Target.Schema
 
@@ -87,6 +89,11 @@ func (o *Orchestrator) performanceAutoTuneInput(suggestions *driver.SmartConfigS
 		input.SafetyRowBytesKnown = suggestions.SafetyRowBytesKnown
 	}
 	return input
+}
+
+func performanceDriverPortless(dbType string) bool {
+	d, err := driver.Get(dbType)
+	return err == nil && d.Defaults().Portless
 }
 
 func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]checkpoint.TuningRecord, []checkpoint.RuntimeAdjustmentRecord) {
@@ -151,14 +158,15 @@ func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []chec
 }
 
 func samePerformanceWorkload(input driver.AutoTuneInput, row checkpoint.TuningRecord) bool {
-	return nonEmptyEqual(input.SourceHost, row.SourceHost) &&
-		input.SourcePort > 0 && input.SourcePort == row.SourcePort &&
-		nonEmptyEqual(input.SourceDatabase, row.SourceDatabase) &&
-		nonEmptyEqual(input.SourceSchema, row.SourceSchema) &&
-		nonEmptyEqual(input.TargetHost, row.TargetHost) &&
-		input.TargetPort > 0 && input.TargetPort == row.TargetPort &&
-		nonEmptyEqual(input.TargetDatabase, row.TargetDatabase) &&
-		nonEmptyEqual(input.TargetSchema, row.TargetSchema)
+	return samePerformanceEndpoint(
+		input.SourcePortless,
+		input.SourceHost, input.SourcePort, input.SourceDatabase, input.SourceSchema,
+		row.SourceHost, row.SourcePort, row.SourceDatabase, row.SourceSchema,
+	) && samePerformanceEndpoint(
+		input.TargetPortless,
+		input.TargetHost, input.TargetPort, input.TargetDatabase, input.TargetSchema,
+		row.TargetHost, row.TargetPort, row.TargetDatabase, row.TargetSchema,
+	)
 }
 
 func nonEmptyEqual(a, b string) bool {
@@ -173,14 +181,42 @@ func samePerformanceRunConfig(input driver.AutoTuneInput, rawConfig string) bool
 	if err := json.Unmarshal([]byte(rawConfig), &cfg); err != nil {
 		return false
 	}
-	return nonEmptyEqual(input.SourceHost, cfg.Source.Host) &&
-		input.SourcePort > 0 && input.SourcePort == cfg.Source.Port &&
-		nonEmptyEqual(input.SourceDatabase, cfg.Source.Database) &&
-		nonEmptyEqual(input.SourceSchema, cfg.Source.Schema) &&
-		nonEmptyEqual(input.TargetHost, cfg.Target.Host) &&
-		input.TargetPort > 0 && input.TargetPort == cfg.Target.Port &&
-		nonEmptyEqual(input.TargetDatabase, cfg.Target.Database) &&
-		nonEmptyEqual(input.TargetSchema, cfg.Target.Schema)
+	return samePerformanceEndpoint(
+		input.SourcePortless,
+		input.SourceHost, input.SourcePort, input.SourceDatabase, input.SourceSchema,
+		cfg.Source.Host, cfg.Source.Port, cfg.Source.Database, cfg.Source.Schema,
+	) && samePerformanceEndpoint(
+		input.TargetPortless,
+		input.TargetHost, input.TargetPort, input.TargetDatabase, input.TargetSchema,
+		cfg.Target.Host, cfg.Target.Port, cfg.Target.Database, cfg.Target.Schema,
+	)
+}
+
+// samePerformanceEndpoint applies the same endpoint identity distinction as
+// deterministic tuning. Database/path is always required. Network endpoints
+// additionally require exact non-empty host and positive port matches. Schemas
+// are optional for engines without a schema concept, but always compare
+// exactly. Portless endpoints ignore meaningless host/port values.
+func samePerformanceEndpoint(
+	portless bool,
+	inputHost string,
+	inputPort int,
+	inputDatabase string,
+	inputSchema string,
+	storedHost string,
+	storedPort int,
+	storedDatabase string,
+	storedSchema string,
+) bool {
+	if !nonEmptyEqual(inputDatabase, storedDatabase) {
+		return false
+	}
+	if portless {
+		return inputSchema == storedSchema
+	}
+	return nonEmptyEqual(inputHost, storedHost) &&
+		inputPort > 0 && inputPort == storedPort &&
+		inputSchema == storedSchema
 }
 
 func (o *Orchestrator) performanceRunConfigByID() map[string]string {

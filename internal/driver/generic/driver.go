@@ -16,7 +16,10 @@ type Driver struct {
 	cat *Catalog
 }
 
-var _ driver.Driver = (*Driver)(nil)
+var (
+	_ driver.Driver              = (*Driver)(nil)
+	_ driver.SchemaStatsProvider = (*Driver)(nil)
+)
 
 // NewDriver wraps a validated catalog.
 func NewDriver(cat *Catalog) *Driver { return &Driver{cat: cat} }
@@ -27,6 +30,7 @@ func (d *Driver) Aliases() []string { return d.cat.Aliases }
 func (d *Driver) Defaults() driver.DriverDefaults {
 	return driver.DriverDefaults{
 		Port:                  d.cat.Connection.DefaultPort,
+		Portless:              d.cat.Connection.Portless,
 		Schema:                d.cat.Defaults.Schema,
 		SSLMode:               d.cat.Defaults.SSLMode,
 		Encrypt:               d.cat.Defaults.Encrypt,
@@ -34,6 +38,30 @@ func (d *Driver) Defaults() driver.DriverDefaults {
 		WriteAheadWriters:     d.cat.Defaults.WriteAheadWriters,
 		ScaleWritersWithCores: d.cat.Defaults.ScaleWritersWithCores,
 		OptimumBulkChunkBytes: int64(d.cat.Defaults.OptimumBulkChunkBytes),
+	}
+}
+
+// SchemaStatsReader returns the reader explicitly selected by this catalog.
+// Every catalog-backed engine shares the same concrete Driver type, so support
+// must be reported through catalog data rather than an interface assertion.
+func (d *Driver) SchemaStatsReader() (driver.SchemaStatsReader, bool) {
+	if !d.cat.Capabilities.SchemaStats {
+		return nil, false
+	}
+	switch d.cat.SchemaStats.Strategy {
+	case "query":
+		return driver.NewQuerySchemaStatsReader(
+			d.cat.SchemaStats.TableStats,
+			d.cat.SchemaStats.DateColumns,
+		), true
+	case "sqlite":
+		return newSQLiteSchemaStatsReader(d.cat), true
+	case "none":
+		return nil, false
+	default:
+		// Catalog validation rejects this path. Keep the runtime fallback
+		// conservative for hand-built Catalog values used by callers/tests.
+		return nil, false
 	}
 }
 

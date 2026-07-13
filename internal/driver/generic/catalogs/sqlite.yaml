@@ -9,6 +9,8 @@ aliases: [sqlite3, sqlitedb]
 connection:
   backend: sqlite                # database/sql driver (modernc, pure Go)
   dsn_strategy: sqlite_file      # imperative DSN: file/:memory:/pragmas
+  default_port: 0
+  portless: true
   single_writer: true            # file lock: one open write connection
 
 defaults:
@@ -20,6 +22,10 @@ capabilities:
   sequence_resetter: true        # sqlite_sequence update
   constraint_writer: false       # FK/CHECK are inline-only (#460)
   incremental_date_reader: true
+  schema_stats: true
+
+schema_stats:
+  strategy: sqlite
 
 strict_parallel_strategy: none
 
@@ -165,7 +171,7 @@ context:
   bytes_per_char: 4
   features: [WAL, FTS5, JSON1]
 
-date_types: [datetime, timestamp, date, text]
+date_types: [datetime, timestamp, date, time, text]
 
 value_converters: default
 

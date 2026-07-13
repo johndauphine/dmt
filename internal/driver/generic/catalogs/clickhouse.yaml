@@ -12,6 +12,7 @@ connection:
   backend: clickhouse            # database/sql driver (clickhouse-go/v2)
   dsn_strategy: clickhouse_url   # URL-escapes credentials
   default_port: 9000             # native protocol
+  portless: false
 
 defaults:
   write_ahead_writers: 4
@@ -22,6 +23,39 @@ capabilities:
   sequence_resetter: false       # no sequences/identity
   constraint_writer: false       # no post-transfer FK/CHECK DDL
   incremental_date_reader: true
+  schema_stats: true
+
+schema_stats:
+  strategy: query
+  table_stats: |
+    SELECT
+      name,
+      toInt64(ifNull(total_rows, 0)) AS row_count,
+      toInt64(if(ifNull(total_rows, 0) > 0,
+        ifNull(total_bytes, 0) / ifNull(total_rows, 1),
+        0)) AS avg_row_size
+    FROM system.tables
+    WHERE database = ?
+      AND engine NOT LIKE '%View'
+      AND NOT startsWith(name, '.inner_id.')
+      AND NOT startsWith(name, '.inner.')
+    ORDER BY row_count DESC, name
+  date_columns: |
+    SELECT table, name
+    FROM system.columns
+    WHERE database = ?
+      AND (
+        type IN (
+          'Date', 'Date32', 'DateTime', 'DateTime64',
+          'Nullable(Date)', 'Nullable(Date32)',
+          'Nullable(DateTime)', 'Nullable(DateTime64)'
+        )
+        OR type LIKE 'DateTime(%'
+        OR type LIKE 'DateTime64(%'
+        OR type LIKE 'Nullable(DateTime(%'
+        OR type LIKE 'Nullable(DateTime64(%'
+      )
+    ORDER BY table, position
 
 strict_parallel_strategy: none
 

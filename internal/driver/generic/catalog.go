@@ -26,6 +26,7 @@ type Catalog struct {
 	// honors (#460). The generic Writer/Reader expose exactly these and
 	// the conformance harness pins them.
 	Capabilities CapabilitiesSpec `yaml:"capabilities"`
+	SchemaStats  SchemaStatsSpec  `yaml:"schema_stats"`
 
 	Quoting     QuotingSpec    `yaml:"quoting"`
 	Placeholder string         `yaml:"placeholder"` // "?", "$%d", "@p%d", ":%d"
@@ -76,6 +77,9 @@ type ConnectionSpec struct {
 	URLTemplate string `yaml:"url_template"`
 	DSNStrategy string `yaml:"dsn_strategy"`
 	DefaultPort int    `yaml:"default_port"`
+	// Portless marks engines whose endpoint identity is carried entirely by
+	// the database/path rather than a network host and port.
+	Portless bool `yaml:"portless"`
 	// Backend is the database/sql driver name to open ("sqlite",
 	// "pgx", "sqlserver", "mysql"). The generic package blank-imports
 	// each supported backend in backends.go.
@@ -106,6 +110,17 @@ type CapabilitiesSpec struct {
 	SequenceResetter      bool `yaml:"sequence_resetter"`
 	ConstraintWriter      bool `yaml:"constraint_writer"`
 	IncrementalDateReader bool `yaml:"incremental_date_reader"`
+	SchemaStats           bool `yaml:"schema_stats"`
+}
+
+// SchemaStatsSpec selects how smartconfig obtains schema-wide table and date
+// metadata. "query" uses the two fixed-shape catalog statements; "sqlite"
+// selects the imperative reader that safely performs bounded per-table work;
+// "none" explicitly declares that the engine has no provider.
+type SchemaStatsSpec struct {
+	Strategy    string `yaml:"strategy"`
+	TableStats  string `yaml:"table_stats"`
+	DateColumns string `yaml:"date_columns"`
 }
 
 // SpatialSelectSpec declares the cross-engine SELECT wrapper for

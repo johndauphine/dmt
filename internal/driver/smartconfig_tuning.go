@@ -5,7 +5,7 @@ import (
 	"math"
 )
 
-func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
+func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []TableStatRow) {
 	avgRowSize := s.calculateAvgRowSize(tables)
 	s.suggestions.AvgRowSizeBytes = avgRowSize
 	s.suggestions.RepresentativeRowBytes = s.representativeRowBytes
@@ -30,6 +30,22 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []tableInfo) {
 	}
 }
 
+// calculateFormulaOnlyParams applies the canonical no-history policy without
+// arming a history save. It is used when source schema statistics are
+// unsupported or unavailable, so incomplete metadata never becomes training
+// evidence and an existing history cohort cannot masquerade as current facts.
+func (s *SmartConfigAnalyzer) calculateFormulaOnlyParams() {
+	avgRowSize := s.calculateAvgRowSize(nil)
+	s.suggestions.AvgRowSizeBytes = avgRowSize
+	s.suggestions.RepresentativeRowBytes = s.representativeRowBytes
+	s.suggestions.SafetyRowBytes = s.safetyRowBytes
+	s.suggestions.SafetyRowBytesKnown = s.safetyRowBytesKnown
+
+	input := s.buildAutoTuneInput(nil, avgRowSize)
+	output := tuning.DefaultOutput(s.toTuningInput(input), s.toTuningProfile())
+	s.applyTuningOutput(output)
+}
+
 // toTuningInput maps the analyzer's AutoTuneInput onto tuning.Input,
 // adding the exploration fields from the analyzer's configured state.
 func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
@@ -52,10 +68,12 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		// Workload identity passthrough (#215).
 		SourceHost:              in.SourceHost,
 		SourcePort:              in.SourcePort,
+		SourcePortless:          in.SourcePortless,
 		SourceDatabase:          in.SourceDatabase,
 		SourceSchema:            in.SourceSchema,
 		TargetHost:              in.TargetHost,
 		TargetPort:              in.TargetPort,
+		TargetPortless:          in.TargetPortless,
 		TargetDatabase:          in.TargetDatabase,
 		TargetSchema:            in.TargetSchema,
 		ForceExplore:            s.forceExplore,

@@ -14,6 +14,7 @@ connection:
   backend: pgx                   # jackc/pgx stdlib database/sql driver
   dsn_strategy: postgres_url     # escaped URL, sslmode default prefer
   default_port: 5432
+  portless: false
 
 defaults:
   schema: public
@@ -30,6 +31,27 @@ capabilities:
   sequence_resetter: true        # setval(<table>_<col>_seq, MAX)
   constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
   incremental_date_reader: true
+  schema_stats: true
+
+schema_stats:
+  strategy: query
+  table_stats: |
+    SELECT
+      relname AS table_name,
+      COALESCE(n_live_tup, 0) AS row_count,
+      CASE WHEN n_live_tup > 0
+        THEN pg_relation_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
+        ELSE 0
+      END AS avg_row_size
+    FROM pg_stat_user_tables
+    WHERE schemaname = $1
+    ORDER BY n_live_tup DESC
+  date_columns: |
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = $1
+      AND data_type IN ('timestamp without time zone', 'timestamp with time zone', 'date')
+    ORDER BY table_name, ordinal_position
 
 strict_parallel_strategy: exported_snapshot
 

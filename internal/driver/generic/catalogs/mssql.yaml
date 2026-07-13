@@ -16,6 +16,7 @@ connection:
   backend: sqlserver             # microsoft/go-mssqldb
   dsn_strategy: sqlserver_url    # encrypt/TrustServerCertificate/packet size
   default_port: 1433
+  portless: false
   # STRING_AGG (introspection) needs compatibility level 140+.
   validate_strategy: mssql_compat
 
@@ -38,6 +39,44 @@ capabilities:
   sequence_resetter: true        # DBCC CHECKIDENT RESEED
   constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
   incremental_date_reader: true
+  schema_stats: true
+
+schema_stats:
+  strategy: query
+  table_stats: |
+    WITH partition_stats AS (
+      SELECT
+        p.object_id,
+        p.index_id,
+        p.partition_number,
+        p.rows AS row_count,
+        SUM(a.total_pages) AS total_pages
+      FROM sys.partitions p
+      INNER JOIN sys.allocation_units a
+        ON (a.type IN (1, 3) AND a.container_id = p.hobt_id)
+        OR (a.type = 2 AND a.container_id = p.partition_id)
+      WHERE p.index_id <= 1
+      GROUP BY p.object_id, p.index_id, p.partition_number, p.rows
+    )
+    SELECT
+      t.name AS table_name,
+      SUM(ps.row_count) AS row_count,
+      ISNULL(SUM(ps.total_pages) * 8 * 1024 / NULLIF(SUM(ps.row_count), 0), 0) AS avg_row_size
+    FROM sys.tables t
+    INNER JOIN partition_stats ps ON t.object_id = ps.object_id
+    INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE s.name = @p1
+    GROUP BY t.object_id, t.name
+    ORDER BY row_count DESC, t.name
+  date_columns: |
+    SELECT tbl.name, c.name
+    FROM sys.columns c
+    INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
+    INNER JOIN sys.tables tbl ON c.object_id = tbl.object_id
+    INNER JOIN sys.schemas s ON tbl.schema_id = s.schema_id
+    WHERE s.name = @p1
+      AND t.name IN ('datetime', 'datetime2', 'datetimeoffset', 'smalldatetime', 'date')
+    ORDER BY tbl.name, c.column_id
 
 strict_parallel_strategy: table_shared_lock
 
