@@ -187,12 +187,14 @@ func requireValidMetadataTuning(t *testing.T, got *SmartConfigSuggestions) {
 
 func actualParamsFromSuggestions(got *SmartConfigSuggestions) ActualParams {
 	return ActualParams{
-		Workers:           got.Workers,
-		ChunkSize:         got.ChunkSizeRecommendation,
-		ReadAheadBuffers:  got.ReadAheadBuffers,
-		WriteAheadWriters: got.WriteAheadWriters,
-		ParallelReaders:   got.ParallelReaders,
-		MaxPartitions:     got.MaxPartitions,
+		Workers:              got.Workers,
+		ChunkSize:            got.ChunkSizeRecommendation,
+		ReadAheadBuffers:     got.ReadAheadBuffers,
+		WriteAheadWriters:    got.WriteAheadWriters,
+		ParallelReaders:      got.ParallelReaders,
+		MaxPartitions:        got.MaxPartitions,
+		MaxSourceConnections: got.MaxSourceConnections,
+		MaxTargetConnections: got.MaxTargetConnections,
 	}
 }
 

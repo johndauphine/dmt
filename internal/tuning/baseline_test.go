@@ -13,10 +13,10 @@ func TestBaseline_KnobsByCPU(t *testing.T) {
 		wantSrcConns     int
 		wantTgtConns     int
 	}{
-		{"low — floor at 2", 1, 2, 2, 6, 8},
-		{"low — exact floor", 4, 2, 2, 6, 8},
-		{"medium", 8, 6, 6, 10, 16},
-		{"high", 18, 16, 16, 20, 36},
+		{"low — floor at 2", 1, 2, 2, 8, 8},
+		{"low — exact floor", 4, 2, 2, 8, 8},
+		{"medium", 8, 6, 6, 16, 16},
+		{"high", 18, 16, 16, 36, 36},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,6 +160,12 @@ func TestBaseline_PlatformWAW(t *testing.T) {
 			if out.WriteAheadWriters != tc.wantWAW {
 				t.Errorf("platform=%s baselineWAW=%d: WriteAheadWriters got %d, want %d",
 					tc.platform, tc.baselineWAW, out.WriteAheadWriters, tc.wantWAW)
+			}
+			wantSource, wantTarget := ConnectionPoolSizes(out.Workers, out.ParallelReaders, out.WriteAheadWriters)
+			if out.MaxSourceConnections != wantSource || out.MaxTargetConnections != wantTarget {
+				t.Errorf("platform=%s baselineWAW=%d: pools got (%d,%d), want (%d,%d)",
+					tc.platform, tc.baselineWAW,
+					out.MaxSourceConnections, out.MaxTargetConnections, wantSource, wantTarget)
 			}
 		})
 	}

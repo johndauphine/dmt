@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Connection-pool sizing now uses one overflow-safe formula across tuning and
+  configuration, rederives generated limits from the effective worker/reader/
+  writer tuple, applies final limits to live pools, and persists the limits
+  engines actually accepted in tuning history (#701).
+
 - Smart configuration now batches server-engine date-column metadata into one
   schema query after deterministic tuning and history state are ready. Date
   metadata errors or timeouts emit one warning without discarding valid tuning,

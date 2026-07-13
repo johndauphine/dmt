@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/secrets"
-	"strings"
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 // ParamChange records a parameter change from formula to AI value.
@@ -49,23 +51,28 @@ func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []Param
 	apply("checkpoint_frequency", provenanceMigrationCheckpointFrequency, ac.OriginalCheckpointFrequency, &c.Migration.CheckpointFrequency, s.CheckpointFrequency)
 	apply("max_retries", provenanceMigrationMaxRetries, ac.OriginalMaxRetries, &c.Migration.MaxRetries, s.MaxRetries)
 
-	// Re-derive dependent values after core parameter changes
+	// Generated pools always track the effective tuple, including when all core
+	// suggestions are no-ops. Suggestions for PR/WAW may be pinned, so derive
+	// from config after the gates above rather than from suggestion pool fields.
+	derivedSourceConns, derivedTargetConns := tuning.ConnectionPoolSizes(
+		c.Migration.Workers,
+		c.Migration.ParallelReaders,
+		c.Migration.WriteAheadWriters,
+	)
+	if c.smartConfigCanOverride(provenanceMigrationMaxSourceConns, ac.OriginalMaxSourceConns == 0) &&
+		derivedSourceConns != c.Migration.MaxSourceConnections {
+		c.Migration.MaxSourceConnections = derivedSourceConns
+		c.setTunableProvenance(provenanceMigrationMaxSourceConns, ProvenanceSmartConfig)
+	}
+	if c.smartConfigCanOverride(provenanceMigrationMaxTargetConns, ac.OriginalMaxTargetConns == 0) &&
+		derivedTargetConns != c.Migration.MaxTargetConnections {
+		c.Migration.MaxTargetConnections = derivedTargetConns
+		c.setTunableProvenance(provenanceMigrationMaxTargetConns, ProvenanceSmartConfig)
+	}
+
+	// Re-derive non-pool dependent values only after a core parameter change.
+	// Chunk propagation deliberately retains its prior conditional semantics.
 	if len(changes) > 0 {
-		// Connection pools (only if user didn't specify)
-		if c.smartConfigCanOverride(provenanceMigrationMaxSourceConns, ac.OriginalMaxSourceConns == 0) {
-			required := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.ParallelReaders)
-			if required != c.Migration.MaxSourceConnections {
-				c.Migration.MaxSourceConnections = required
-				c.setTunableProvenance(provenanceMigrationMaxSourceConns, ProvenanceSmartConfig)
-			}
-		}
-		if c.smartConfigCanOverride(provenanceMigrationMaxTargetConns, ac.OriginalMaxTargetConns == 0) {
-			required := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.WriteAheadWriters)
-			if required != c.Migration.MaxTargetConnections {
-				c.Migration.MaxTargetConnections = required
-				c.setTunableProvenance(provenanceMigrationMaxTargetConns, ProvenanceSmartConfig)
-			}
-		}
 		// Source/Target chunk sizes default to migration chunk_size
 		if c.smartConfigCanOverride(provenanceSourceChunkSize, ac.OriginalSourceChunkSize == 0) {
 			c.Source.ChunkSize = c.Migration.ChunkSize

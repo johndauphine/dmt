@@ -439,6 +439,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		}
 		finalizeTierAndReasoning(&out, history, historyAvailable)
 		applyMemoryClamp(&out, in)
+		finalizeConnectionPoolSizes(&out)
 		return out
 	}
 
@@ -476,6 +477,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			pinnedAdvice(identityFilter.kept)
 			finalizeTierAndReasoning(&out, history, historyAvailable)
 			applyMemoryClamp(&out, in)
+			finalizeConnectionPoolSizes(&out)
 			return out
 		}
 	}
@@ -515,6 +517,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	pinnedAdvice(rows)
 	finalizeTierAndReasoning(&out, history, historyAvailable)
 	applyMemoryClamp(&out, in)
+	finalizeConnectionPoolSizes(&out)
 	return out
 }
 

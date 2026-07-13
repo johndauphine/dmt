@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
@@ -25,6 +26,7 @@ import (
 type Writer struct {
 	db               *sql.DB
 	config           *dbconfig.TargetConfig
+	poolMu           sync.RWMutex
 	maxConns         int
 	defaultBatchSize int
 	sourceType       string
@@ -73,10 +75,13 @@ func (w *writerFull) CreateCheckConstraint(ctx context.Context, t *driver.Table,
 }
 
 var (
-	_ driver.Writer           = (*Writer)(nil)
-	_ driver.Upserter         = (*writerUpsertSeq)(nil)
-	_ driver.SequenceResetter = (*writerUpsertSeq)(nil)
-	_ driver.ConstraintWriter = (*writerFull)(nil)
+	_ driver.Writer                = (*Writer)(nil)
+	_ driver.Upserter              = (*writerUpsertSeq)(nil)
+	_ driver.SequenceResetter      = (*writerUpsertSeq)(nil)
+	_ driver.ConstraintWriter      = (*writerFull)(nil)
+	_ driver.ConnectionPoolResizer = (*Writer)(nil)
+	_ driver.ConnectionPoolResizer = (*writerUpsertSeq)(nil)
+	_ driver.ConnectionPoolResizer = (*writerFull)(nil)
 )
 
 // NewWriter opens the catalog's backend as a write target.
@@ -174,8 +179,36 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 func (w *Writer) Close()                         { w.db.Close() }
 func (w *Writer) Ping(ctx context.Context) error { return w.db.PingContext(ctx) }
 func (w *Writer) DB() *sql.DB                    { return w.db }
-func (w *Writer) MaxConns() int                  { return w.maxConns }
-func (w *Writer) DBType() string                 { return w.cat.Name }
+func (w *Writer) MaxConns() int {
+	w.poolMu.RLock()
+	defer w.poolMu.RUnlock()
+	return w.maxConns
+}
+
+// ResizeConnectionPool applies the target pool's tuned live limit. Engines
+// that require serialized writes remain clamped to one connection regardless
+// of the requested limit; other writers retain their construction-time idle
+// policy of allowing the full pool to remain idle.
+func (w *Writer) ResizeConnectionPool(maxConns int) int {
+	if maxConns < 0 {
+		maxConns = 0
+	}
+	if w.cat.Connection.SingleWriter {
+		maxConns = 1
+	}
+
+	w.poolMu.Lock()
+	defer w.poolMu.Unlock()
+
+	w.db.SetMaxOpenConns(maxConns)
+	w.db.SetMaxIdleConns(maxConns)
+
+	actual := w.db.Stats().MaxOpenConnections
+	w.maxConns = actual
+	return actual
+}
+
+func (w *Writer) DBType() string { return w.cat.Name }
 
 func (w *Writer) PoolStats() stats.PoolStats {
 	dbStats := w.db.Stats()

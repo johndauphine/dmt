@@ -56,6 +56,8 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 			WriteAheadWriters:       2,
 			ParallelReaders:         4,
 			MaxPartitions:           3,
+			MaxSourceConnections:    111,
+			MaxTargetConnections:    222,
 			// Pre-set to a stale value (the smartconfig-time estimate, which
 			// is wrong once user overrides land below). Issue #160: without
 			// the recompute this stale value would be saved alongside the
@@ -69,12 +71,14 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 	}
 
 	rowID := analyzer.SaveTuningWithActualParams(ActualParams{
-		Workers:           12,
-		ChunkSize:         14000,
-		ReadAheadBuffers:  4,
-		WriteAheadWriters: 3,
-		ParallelReaders:   6,
-		MaxPartitions:     8,
+		Workers:              12,
+		ChunkSize:            14000,
+		ReadAheadBuffers:     4,
+		WriteAheadWriters:    3,
+		ParallelReaders:      6,
+		MaxPartitions:        8,
+		MaxSourceConnections: 37,
+		MaxTargetConnections: 49,
 	})
 	if rowID != 42 {
 		t.Fatalf("SaveTuningWithActualParams row ID = %d, want 42", rowID)
@@ -89,6 +93,14 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 	if mock.saved.Workers != 12 || mock.saved.ChunkSize != 14000 {
 		t.Errorf("post-override params not persisted: workers=%d chunk=%d (want 12, 14000)",
 			mock.saved.Workers, mock.saved.ChunkSize)
+	}
+	if mock.saved.MaxSourceConns != 37 || mock.saved.MaxTargetConns != 49 {
+		t.Errorf("actual pool limits not persisted: source=%d target=%d (want 37, 49)",
+			mock.saved.MaxSourceConns, mock.saved.MaxTargetConns)
+	}
+	if analyzer.suggestions.MaxSourceConnections != 37 || analyzer.suggestions.MaxTargetConnections != 49 {
+		t.Errorf("effective suggestions do not reflect actual pools: source=%d target=%d (want 37, 49)",
+			analyzer.suggestions.MaxSourceConnections, analyzer.suggestions.MaxTargetConnections)
 	}
 	if mock.saved.SourceDBType != "mssql" || mock.saved.TargetDBType != "postgres" {
 		t.Errorf("DB types wrong: source=%q target=%q", mock.saved.SourceDBType, mock.saved.TargetDBType)

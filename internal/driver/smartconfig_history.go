@@ -19,12 +19,14 @@ type pendingTuningSave struct {
 // ActualParams holds the actual migration parameters used after user overrides,
 // plus effective DB tuning captured at run start (#144).
 type ActualParams struct {
-	Workers           int
-	ChunkSize         int
-	ReadAheadBuffers  int
-	WriteAheadWriters int
-	ParallelReaders   int
-	MaxPartitions     int
+	Workers              int
+	ChunkSize            int
+	ReadAheadBuffers     int
+	WriteAheadWriters    int
+	ParallelReaders      int
+	MaxPartitions        int
+	MaxSourceConnections int
+	MaxTargetConnections int
 
 	// Regime fields (#144). Populated by the orchestrator from
 	// captureDBTuning before this struct reaches SaveTuningWithActualParams.
@@ -53,6 +55,8 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) in
 	s.suggestions.WriteAheadWriters = actual.WriteAheadWriters
 	s.suggestions.ParallelReaders = actual.ParallelReaders
 	s.suggestions.MaxPartitions = actual.MaxPartitions
+	s.suggestions.MaxSourceConnections = actual.MaxSourceConnections
+	s.suggestions.MaxTargetConnections = actual.MaxTargetConnections
 	s.suggestions.RepresentativeRowBytes = pendingRepresentativeRowBytes(ps)
 	s.suggestions.SafetyRowBytes = pendingSafetyRowBytes(ps)
 	s.suggestions.SafetyRowBytesKnown = pendingSafetyRowBytesKnown(ps)
@@ -144,8 +148,8 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 		ParallelReaders:         s.suggestions.ParallelReaders,
 		MaxPartitions:           s.suggestions.MaxPartitions,
 		LargeTableThreshold:     s.suggestions.LargeTableThreshold,
-		MaxSourceConns:          s.suggestions.MaxSourceConnections,
-		MaxTargetConns:          s.suggestions.MaxTargetConnections,
+		MaxSourceConns:          actual.MaxSourceConnections,
+		MaxTargetConns:          actual.MaxTargetConnections,
 		EstimatedMemoryMB:       s.suggestions.EstimatedMemMB,
 		Reasoning:               reasoning, // deterministic tuner's reasoning string
 		WasAIUsed:               false,     // PR1 dropped the AI path entirely

@@ -104,6 +104,15 @@ type Driver interface {
 	PreFlight(ctx context.Context, db *sql.DB, req PreFlightRequest) []PreFlightFinding
 }
 
+// ConnectionPoolResizer is the optional capability for applying a new live
+// database connection limit after schema-aware tuning has finalized the
+// effective configuration. The returned value is the maximum the engine
+// actually accepted; callers must treat it as authoritative because engines
+// with stricter concurrency contracts may clamp the requested value.
+type ConnectionPoolResizer interface {
+	ResizeConnectionPool(maxConns int) int
+}
+
 // TargetProbe carries runtime-probed values from the target database
 // that affect chunk_size selection. Zero values mean "not probed" or
 // "not applicable for this driver"; callers should treat any field
