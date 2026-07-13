@@ -197,6 +197,7 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{
+			ID:                r.ID,
 			Timestamp:         r.Timestamp,
 			SourceDBType:      r.SourceDBType,
 			TargetDBType:      r.TargetDBType,

@@ -199,13 +199,14 @@ type AutoTuneOutput struct {
 // the AI prompt used were dropped; the new tuner reads raw records and
 // does its own aggregation in-package.
 type TuningHistoryProvider interface {
-	// GetRuntimeAdjustments returns recent runtime adjustments. Used by
-	// the runtime monitor (separate AI surface; not retired in PR1).
+	// GetRuntimeAdjustments returns normalized rows first by UTC epoch and ID,
+	// followed by unresolved legacy rows in descending ID order.
 	GetRuntimeAdjustments(limit int) ([]checkpoint.RuntimeAdjustmentRecord, error)
 
-	// GetTuningHistory returns recent tuning recommendations filtered by
-	// migration direction, ordered by Timestamp DESC. limit > 0 bounds the
-	// slice; the bridge passes 0 for unbounded.
+	// GetTuningHistory returns recommendations filtered by migration direction.
+	// Resolved UTC epochs sort first (epoch DESC, ID DESC), followed by
+	// unresolved legacy rows (ID DESC). limit > 0 bounds the mixed-order slice;
+	// the bridge passes 0 for unbounded count-based tuning.
 	GetTuningHistory(limit int, sourceType, targetType string) ([]checkpoint.TuningRecord, error)
 
 	// SaveTuningRecord saves a tuning recommendation for future reference.

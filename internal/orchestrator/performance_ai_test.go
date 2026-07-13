@@ -326,17 +326,20 @@ func TestScopedPerformanceAdjustmentsRequiresScopedRunConfig(t *testing.T) {
   "Target": {"Host":"target.internal","Port":1433,"Database":"target_prod","Schema":"dbo"}
 }`
 	otherRaw := strings.Replace(raw, "target_prod", "other_target", 1)
+	now := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	adjustments := []checkpoint.RuntimeAdjustmentRecord{
-		{RunID: "other", Action: "other"},
-		{RunID: "", Action: "legacy"},
-		{RunID: "matching-ai", Action: "legacy", Confidence: "high"},
-		{RunID: "matching", Action: "matching", Confidence: "deterministic"},
+		{RunID: "other", Timestamp: now, Action: "other"},
+		{RunID: "", Timestamp: now, Action: "legacy"},
+		{RunID: "matching-unknown", Action: "unknown", Confidence: "deterministic"},
+		{RunID: "matching-ai", Timestamp: now, Action: "legacy", Confidence: "high"},
+		{RunID: "matching", Timestamp: now, Action: "matching", Confidence: "deterministic"},
 	}
 
 	got := scopedPerformanceAdjustments(input, adjustments, map[string]string{
-		"other":       otherRaw,
-		"matching-ai": raw,
-		"matching":    raw,
+		"other":            otherRaw,
+		"matching-unknown": raw,
+		"matching-ai":      raw,
+		"matching":         raw,
 	}, 5)
 	if len(got) != 1 || got[0].Action != "matching" {
 		t.Fatalf("expected scoped adjustment: %+v", got)

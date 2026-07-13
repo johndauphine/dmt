@@ -217,7 +217,7 @@ func (o *Orchestrator) estimateDryRunRowsPerSecond() int64 {
 	var sum float64
 	var count int64
 	for _, record := range history {
-		if record.FinalThroughput <= 0 {
+		if record.Timestamp.IsZero() || record.FinalThroughput <= 0 {
 			continue
 		}
 		sum += record.FinalThroughput

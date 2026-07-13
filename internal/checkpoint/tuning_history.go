@@ -2,13 +2,28 @@ package checkpoint
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/logging"
 )
 
+const legacyAITimestampLayout = "2006-01-02 15:04:05"
+
+func normalizedAITimestamp(timestamp time.Time) (string, int64, error) {
+	if timestamp.IsZero() {
+		return "", 0, fmt.Errorf("AI history timestamp must be non-zero")
+	}
+	utc := timestamp.UTC()
+	return utc.Format(legacyAITimestampLayout), utc.UnixMilli(), nil
+}
+
 // SaveRuntimeAdjustment saves an AI adjustment record for historical analysis.
 func (s *State) SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentRecord) error {
+	legacyTimestamp, timestampUnixMS, err := normalizedAITimestamp(record.Timestamp)
+	if err != nil {
+		return err
+	}
 	effectMeasured := 0
 	var throughputAfter, effectPercent, cpuAfter, memoryAfter any
 	if record.EffectMeasured {
@@ -19,20 +34,20 @@ func (s *State) SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentReco
 		memoryAfter = record.MemoryAfter
 	}
 
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 		INSERT INTO ai_adjustments (
-			run_id, adjustment_number, timestamp, action, adjustments,
+			run_id, adjustment_number, timestamp, timestamp_unix_ms, action, adjustments,
 			throughput_before, effect_measured, throughput_after, effect_percent,
 			cpu_before, cpu_after, memory_before, memory_after,
 			reasoning, confidence
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id, adjustment_number) DO UPDATE SET
 			effect_measured = excluded.effect_measured,
 			throughput_after = excluded.throughput_after,
 			effect_percent = excluded.effect_percent,
 			cpu_after = excluded.cpu_after,
 			memory_after = excluded.memory_after
-	`, runID, record.AdjustmentNumber, record.Timestamp.Format("2006-01-02 15:04:05"),
+	`, runID, record.AdjustmentNumber, legacyTimestamp, timestampUnixMS,
 		record.Action, record.AdjustmentsJSON(),
 		record.ThroughputBefore, effectMeasured, throughputAfter, effectPercent,
 		record.CPUBefore, cpuAfter, record.MemoryBefore, memoryAfter,
@@ -48,15 +63,16 @@ func (s *State) queryWithOptionalLimit(query string, limit int, args ...any) (*s
 	return s.db.Query(query, args...)
 }
 
-// GetRuntimeAdjustments returns the most recent AI adjustment records across all runs.
+// GetRuntimeAdjustments returns normalized records first by UTC epoch and ID,
+// followed by unresolved legacy records in descending ID order.
 func (s *State) GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
-		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
+		SELECT id, run_id, adjustment_number, timestamp, timestamp_unix_ms, action, adjustments,
 		       throughput_before, effect_measured, throughput_after, effect_percent,
 		       cpu_before, cpu_after, memory_before, memory_after,
 		       reasoning, confidence
 		FROM ai_adjustments
-		ORDER BY timestamp DESC`, limit)
+		ORDER BY timestamp_unix_ms IS NULL ASC, timestamp_unix_ms DESC, id DESC`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -65,16 +81,17 @@ func (s *State) GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, err
 	return s.scanAIAdjustments(rows)
 }
 
-// GetRuntimeAdjustmentsByAction returns AI adjustment records filtered by action type.
+// GetRuntimeAdjustmentsByAction returns AI adjustment records filtered by action
+// type using the same normalized-then-legacy ordering as GetRuntimeAdjustments.
 func (s *State) GetRuntimeAdjustmentsByAction(action string, limit int) ([]RuntimeAdjustmentRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
-		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
+		SELECT id, run_id, adjustment_number, timestamp, timestamp_unix_ms, action, adjustments,
 		       throughput_before, effect_measured, throughput_after, effect_percent,
 		       cpu_before, cpu_after, memory_before, memory_after,
 		       reasoning, confidence
 		FROM ai_adjustments
 		WHERE action = ?
-		ORDER BY timestamp DESC`, limit, action)
+		ORDER BY timestamp_unix_ms IS NULL ASC, timestamp_unix_ms DESC, id DESC`, limit, action)
 	if err != nil {
 		return nil, err
 	}
@@ -88,14 +105,15 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, er
 	var records []RuntimeAdjustmentRecord
 	for rows.Next() {
 		var r RuntimeAdjustmentRecord
-		var timestampStr, adjustmentsStr string
+		var legacyTimestamp, adjustmentsStr string
+		var timestampUnixMS sql.NullInt64
 		var reasoning, confidence sql.NullString
 		var effectMeasured int
 		var throughputBefore, throughputAfter, effectPercent sql.NullFloat64
 		var cpuBefore, cpuAfter, memoryBefore, memoryAfter sql.NullFloat64
 
 		if err := rows.Scan(
-			&r.ID, &r.RunID, &r.AdjustmentNumber, &timestampStr, &r.Action, &adjustmentsStr,
+			&r.ID, &r.RunID, &r.AdjustmentNumber, &legacyTimestamp, &timestampUnixMS, &r.Action, &adjustmentsStr,
 			&throughputBefore, &effectMeasured, &throughputAfter, &effectPercent,
 			&cpuBefore, &cpuAfter, &memoryBefore, &memoryAfter,
 			&reasoning, &confidence,
@@ -103,7 +121,9 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, er
 			return nil, err
 		}
 
-		r.Timestamp, _ = time.Parse("2006-01-02 15:04:05", timestampStr)
+		if timestampUnixMS.Valid {
+			r.Timestamp = time.UnixMilli(timestampUnixMS.Int64).UTC()
+		}
 		r.Adjustments = ParseAdjustments(adjustmentsStr)
 
 		if throughputBefore.Valid {
@@ -144,6 +164,10 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, er
 // SaveTuningRecord saves tuning parameters from a migration run and returns
 // the inserted row ID so the same run can stamp its result onto that row.
 func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
+	legacyTimestamp, timestampUnixMS, err := normalizedAITimestamp(record.Timestamp)
+	if err != nil {
+		return 0, err
+	}
 	wasAIUsed := 0
 	if record.WasAIUsed {
 		wasAIUsed = 1
@@ -168,7 +192,7 @@ func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
 
 	res, err := s.db.Exec(`
 		INSERT INTO ai_tuning_history (
-			timestamp, source_db_type, target_db_type,
+			timestamp, timestamp_unix_ms, source_db_type, target_db_type,
 			total_tables, total_rows, avg_row_size_bytes,
 			cpu_cores, memory_gb,
 			workers, chunk_size, read_ahead_buffers, write_ahead_writers,
@@ -180,9 +204,9 @@ func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
 			target_wal_level, source_max_server_memory_mb,
 			source_host, source_port, source_database, source_schema,
 			target_host, target_port, target_database, target_schema
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		record.Timestamp.Format("2006-01-02 15:04:05"),
+		legacyTimestamp, timestampUnixMS,
 		record.SourceDBType, record.TargetDBType,
 		record.TotalTables, record.TotalRows, record.AvgRowSizeBytes,
 		record.CPUCores, record.MemoryGB,
@@ -234,10 +258,11 @@ func (s *State) UpdateTuningResult(rowID int64, throughput float64, durationSecs
 }
 
 // GetTuningHistory returns AI tuning recommendations filtered by migration
-// direction (e.g., "mssql"→"postgres"). Pass limit=0 to fetch all records.
+// direction (e.g., "mssql"→"postgres"). Resolved epochs sort first by time
+// and ID; unresolved legacy rows follow by ID. Pass limit=0 to fetch all rows.
 func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]TuningRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
-		SELECT id, timestamp, source_db_type, target_db_type,
+		SELECT id, timestamp, timestamp_unix_ms, source_db_type, target_db_type,
 		       total_tables, total_rows, avg_row_size_bytes,
 		       cpu_cores, memory_gb,
 		       workers, chunk_size, read_ahead_buffers, write_ahead_writers,
@@ -253,7 +278,7 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 		       adjusted_at_runtime
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
-		ORDER BY timestamp DESC`, limit, sourceType, targetType)
+		ORDER BY timestamp_unix_ms IS NULL ASC, timestamp_unix_ms DESC, id DESC`, limit, sourceType, targetType)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +287,8 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 	var records []TuningRecord
 	for rows.Next() {
 		var r TuningRecord
-		var timestampStr string
+		var legacyTimestamp string
+		var timestampUnixMS sql.NullInt64
 		var targetDBType, aiReasoning sql.NullString
 		var avgRowSize, cpuCores, memoryGB sql.NullInt64
 		var readAhead, writeAhead, parallelReaders, maxPartitions sql.NullInt64
@@ -279,7 +305,7 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 		var adjustedAtRuntime sql.NullInt64
 
 		if err := rows.Scan(
-			&r.ID, &timestampStr, &r.SourceDBType, &targetDBType,
+			&r.ID, &legacyTimestamp, &timestampUnixMS, &r.SourceDBType, &targetDBType,
 			&r.TotalTables, &r.TotalRows, &avgRowSize,
 			&cpuCores, &memoryGB,
 			&r.Workers, &r.ChunkSize, &readAhead, &writeAhead,
@@ -352,7 +378,9 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 			r.SourceMaxServerMemoryMB = sourceMaxServerMemoryMB.Int64
 		}
 
-		r.Timestamp, _ = time.Parse("2006-01-02 15:04:05", timestampStr)
+		if timestampUnixMS.Valid {
+			r.Timestamp = time.UnixMilli(timestampUnixMS.Int64).UTC()
+		}
 		r.WasAIUsed = wasAIUsed == 1
 
 		if targetDBType.Valid {

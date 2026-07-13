@@ -219,9 +219,13 @@ type HistoryProvider interface {
 // schema; the smartconfig analyzer's adapter populates this from the
 // checkpoint backend.
 type HistoryRecord struct {
-	// Timestamp is the migration completion time. Used by PR2's regime-
-	// drift detector to compare median throughput in the most-recent N
-	// runs against earlier runs at the same (WAW, CS) config.
+	// ID is the checkpoint row ID. Time-based consumers use it only to make
+	// equal-millisecond ordering deterministic; count-based consumers may use
+	// checkpoint-provided ID ordering for unresolved legacy rows.
+	ID int64
+	// Timestamp is the normalized UTC migration time. It is zero when a
+	// legacy zone-less wall clock cannot be resolved. Regime drift excludes
+	// those rows; count-based tuning paths retain them as non-temporal evidence.
 	Timestamp time.Time
 
 	SourceDBType string

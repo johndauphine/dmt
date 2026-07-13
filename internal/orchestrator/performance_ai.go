@@ -115,7 +115,7 @@ func (o *Orchestrator) performanceHistoryForAI(input driver.AutoTuneInput) ([]ch
 	}
 	recent := make([]checkpoint.TuningRecord, 0, 5)
 	for _, row := range rows {
-		if !samePerformanceWorkload(input, row) || row.FinalThroughput <= 0 {
+		if row.Timestamp.IsZero() || !samePerformanceWorkload(input, row) || row.FinalThroughput <= 0 {
 			continue
 		}
 		recent = append(recent, row)
@@ -140,7 +140,7 @@ func scopedPerformanceAdjustments(input driver.AutoTuneInput, adjustments []chec
 	}
 	scoped := make([]checkpoint.RuntimeAdjustmentRecord, 0, limit)
 	for _, adjustment := range adjustments {
-		if strings.TrimSpace(adjustment.RunID) == "" {
+		if adjustment.Timestamp.IsZero() || strings.TrimSpace(adjustment.RunID) == "" {
 			continue
 		}
 		if !samePerformanceRunConfig(input, runConfigs[adjustment.RunID]) {
