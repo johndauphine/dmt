@@ -20,6 +20,7 @@ func baseline(in Input, profile DriverProfile) Output {
 	waw := baselineWAW(in, profile)
 
 	chunkSize := chunkRowsFromProfile(profile, in.representativeRowBytes())
+	maxSourceConnections, maxTargetConnections := ConnectionPoolSizes(workers, parallelReaders, waw)
 
 	return Output{
 		Workers:              workers,
@@ -29,16 +30,16 @@ func baseline(in Input, profile DriverProfile) Output {
 		ParallelReaders:      parallelReaders,
 		MaxPartitions:        workers,
 		LargeTableThreshold:  largeTableThreshold,
-		MaxSourceConnections: workers + 4,
-		MaxTargetConnections: workers*2 + 4,
+		MaxSourceConnections: maxSourceConnections,
+		MaxTargetConnections: maxTargetConnections,
 		UpsertMergeChunkSize: upsertMergeChunkSize,
 		CheckpointFrequency:  checkpointFrequency,
 		MaxRetries:           maxRetries,
 	}
 }
 
-// baselineWorkers preserves the cores-2 formula while bounding it so the
-// derived workers+4 and workers*2+4 connection counts cannot overflow int.
+// baselineWorkers preserves the cores-2 formula and its historical upper
+// bound. ConnectionPoolSizes independently saturates every derived pool.
 func baselineWorkers(cpuCores int) int {
 	if cpuCores <= 4 {
 		return 2

@@ -2,12 +2,14 @@ package config
 
 import (
 	"fmt"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/secrets"
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 func (c *Config) applyGlobalDefaults() {
@@ -299,13 +301,6 @@ func (c *Config) applyDefaults() error {
 		}
 	}
 
-	// Set default max connections for source and target
-	if c.Migration.MaxSourceConnections == 0 {
-		c.Migration.MaxSourceConnections = 12
-	}
-	if c.Migration.MaxTargetConnections == 0 {
-		c.Migration.MaxTargetConnections = 12
-	}
 	// Auto-detect CPU cores for workers
 	// Formula: (cores - 2), clamped to 4-12 for optimal performance
 	// This aligns with Rust implementation for consistent behavior
@@ -422,16 +417,19 @@ func (c *Config) applyDefaults() error {
 		c.Migration.ReadAheadBuffers = defaultReadAheadBuffers(memoryBudgetMB, c.Migration.Workers, c.Migration.ChunkSize)
 	}
 
-	// Auto-size connection pools based on workers, readers, and writers
-	// Each worker needs: parallel_readers source connections + write_ahead_writers target connections
-	// Add 4 connections for headroom (orchestrator, health checks, etc.)
-	requiredSourceConns := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.ParallelReaders)
-	requiredTargetConns := saturatingConnectionRequirement(c.Migration.Workers, c.Migration.WriteAheadWriters)
-	if c.Migration.MaxSourceConnections < requiredSourceConns {
-		c.Migration.MaxSourceConnections = requiredSourceConns
+	// Derive generated connection pools exactly after workers/readers/writers
+	// reach their effective defaults. User and secrets values are pins, even
+	// when they are below the generated requirement (#701).
+	derivedSourceConns, derivedTargetConns := tuning.ConnectionPoolSizes(
+		c.Migration.Workers,
+		c.Migration.ParallelReaders,
+		c.Migration.WriteAheadWriters,
+	)
+	if c.smartConfigCanOverride(provenanceMigrationMaxSourceConns, c.autoConfig.OriginalMaxSourceConns == 0) {
+		c.Migration.MaxSourceConnections = derivedSourceConns
 	}
-	if c.Migration.MaxTargetConnections < requiredTargetConns {
-		c.Migration.MaxTargetConnections = requiredTargetConns
+	if c.smartConfigCanOverride(provenanceMigrationMaxTargetConns, c.autoConfig.OriginalMaxTargetConns == 0) {
+		c.Migration.MaxTargetConnections = derivedTargetConns
 	}
 
 	// Default source chunk_size to migration chunk_size if not specified
@@ -590,16 +588,4 @@ func defaultReadAheadBuffers(memoryBudgetMB int64, workers, chunkSize int) int {
 		return 32
 	}
 	return int(buffers)
-}
-
-func saturatingConnectionRequirement(workers, connectionsPerWorker int) int {
-	const headroom = 4
-	maxInt := int(^uint(0) >> 1)
-	if workers <= 0 || connectionsPerWorker <= 0 {
-		return headroom
-	}
-	if workers > (maxInt-headroom)/connectionsPerWorker {
-		return maxInt
-	}
-	return workers*connectionsPerWorker + headroom
 }

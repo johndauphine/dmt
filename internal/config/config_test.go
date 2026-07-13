@@ -12,6 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/internal/tuning"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1589,7 +1590,7 @@ func minConfigWithAI() *Config {
 }
 
 func TestAutoTuneConnectionPoolSizing(t *testing.T) {
-	// Test that connection pools get reasonable values
+	withEmptySecretsFile(t)
 	cfg := &Config{
 		Source: SourceConfig{
 			Type:     "postgres",
@@ -1612,26 +1613,198 @@ func TestAutoTuneConnectionPoolSizing(t *testing.T) {
 		t.Fatalf("applyDefaults() failed: %v", err)
 	}
 
-	// With 8 cores: readers=2, writers=2
-	// Source connections: workers * readers + 4 = 4 * 2 + 4 = 12
-	// Target connections: workers * writers + 4 = 4 * 2 + 4 = 12
-	expectedSourceConns := cfg.Migration.Workers*cfg.Migration.ParallelReaders + 4
-	expectedTargetConns := cfg.Migration.Workers*cfg.Migration.WriteAheadWriters + 4
-
-	if cfg.Migration.MaxSourceConnections < expectedSourceConns {
-		t.Errorf("insufficient source connections: got %d, need at least %d",
-			cfg.Migration.MaxSourceConnections, expectedSourceConns)
+	wantSource, wantTarget := tuning.ConnectionPoolSizes(
+		cfg.Migration.Workers,
+		cfg.Migration.ParallelReaders,
+		cfg.Migration.WriteAheadWriters,
+	)
+	if cfg.Migration.MaxSourceConnections != wantSource || cfg.Migration.MaxTargetConnections != wantTarget {
+		t.Errorf("generated connection pools = %d/%d, want exact shared formula %d/%d",
+			cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections, wantSource, wantTarget)
 	}
-	if cfg.Migration.MaxTargetConnections < expectedTargetConns {
-		t.Errorf("insufficient target connections: got %d, need at least %d",
-			cfg.Migration.MaxTargetConnections, expectedTargetConns)
+}
+
+func TestApplyDefaultsConnectionPoolsDeriveDownwardAndPreservePins(t *testing.T) {
+	t.Run("generated pools use exact downward formula", func(t *testing.T) {
+		withEmptySecretsFile(t)
+		cfg := minConfigWithoutAI()
+		cfg.Migration.Workers = 2
+		cfg.Migration.ParallelReaders = 2
+		cfg.Migration.WriteAheadWriters = 1
+		if err := cfg.applyDefaults(); err != nil {
+			t.Fatalf("applyDefaults: %v", err)
+		}
+		if cfg.Migration.MaxSourceConnections != 8 || cfg.Migration.MaxTargetConnections != 6 {
+			t.Fatalf("generated pools = %d/%d, want 8/6 (including target below legacy floor 12)",
+				cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections)
+		}
+		if got := cfg.tunableProvenance(provenanceMigrationMaxSourceConns); got != ProvenanceAutoDefault {
+			t.Fatalf("source pool provenance = %q, want auto default", got)
+		}
+		if got := cfg.tunableProvenance(provenanceMigrationMaxTargetConns); got != ProvenanceAutoDefault {
+			t.Fatalf("target pool provenance = %q, want auto default", got)
+		}
+	})
+
+	t.Run("user pools are pins even below formula", func(t *testing.T) {
+		withEmptySecretsFile(t)
+		cfg := minConfigWithoutAI()
+		cfg.Migration.Workers = 4
+		cfg.Migration.ParallelReaders = 3
+		cfg.Migration.WriteAheadWriters = 2
+		cfg.Migration.MaxSourceConnections = 5
+		cfg.Migration.MaxTargetConnections = 6
+		if err := cfg.applyDefaults(); err != nil {
+			t.Fatalf("applyDefaults: %v", err)
+		}
+		cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+			Workers:           6,
+			ParallelReaders:   8,
+			WriteAheadWriters: 7,
+		})
+		if cfg.Migration.MaxSourceConnections != 5 || cfg.Migration.MaxTargetConnections != 6 {
+			t.Fatalf("user-pinned pools changed to %d/%d, want 5/6", cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections)
+		}
+		if cfg.tunableProvenance(provenanceMigrationMaxSourceConns) != ProvenanceUserConfig ||
+			cfg.tunableProvenance(provenanceMigrationMaxTargetConns) != ProvenanceUserConfig {
+			t.Fatalf("user pool provenance changed: %q/%q",
+				cfg.tunableProvenance(provenanceMigrationMaxSourceConns), cfg.tunableProvenance(provenanceMigrationMaxTargetConns))
+		}
+	})
+
+	t.Run("pool ownership is independent per side", func(t *testing.T) {
+		withEmptySecretsFile(t)
+		cfg := minConfigWithoutAI()
+		cfg.Migration.Workers = 4
+		cfg.Migration.ParallelReaders = 3
+		cfg.Migration.WriteAheadWriters = 2
+		cfg.Migration.MaxSourceConnections = 5
+		if err := cfg.applyDefaults(); err != nil {
+			t.Fatalf("applyDefaults: %v", err)
+		}
+		_, wantTarget := tuning.ConnectionPoolSizes(4, 3, 2)
+		if cfg.Migration.MaxSourceConnections != 5 || cfg.Migration.MaxTargetConnections != wantTarget {
+			t.Fatalf("mixed-ownership pools = %d/%d, want pinned source 5 and generated target %d",
+				cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections, wantTarget)
+		}
+		if cfg.tunableProvenance(provenanceMigrationMaxSourceConns) != ProvenanceUserConfig ||
+			cfg.tunableProvenance(provenanceMigrationMaxTargetConns) != ProvenanceAutoDefault {
+			t.Fatalf("mixed pool provenance = %q/%q, want user/auto",
+				cfg.tunableProvenance(provenanceMigrationMaxSourceConns), cfg.tunableProvenance(provenanceMigrationMaxTargetConns))
+		}
+	})
+
+	t.Run("secrets pools remain pins", func(t *testing.T) {
+		withSecretsFile(t, `
+migration_defaults:
+  max_source_connections: 7
+  max_target_connections: 9
+`)
+		cfg, err := LoadBytes(minConfigYAML(`  target_mode: drop_recreate
+  workers: 4
+  parallel_readers: 3
+  write_ahead_writers: 2
+`))
+		if err != nil {
+			t.Fatalf("LoadBytes: %v", err)
+		}
+		cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+			Workers:           6,
+			ParallelReaders:   8,
+			WriteAheadWriters: 7,
+		})
+		if cfg.Migration.MaxSourceConnections != 7 || cfg.Migration.MaxTargetConnections != 9 {
+			t.Fatalf("secrets-pinned pools changed to %d/%d, want 7/9", cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections)
+		}
+		if cfg.tunableProvenance(provenanceMigrationMaxSourceConns) != ProvenanceSecretsDefault ||
+			cfg.tunableProvenance(provenanceMigrationMaxTargetConns) != ProvenanceSecretsDefault {
+			t.Fatalf("secrets pool provenance changed: %q/%q",
+				cfg.tunableProvenance(provenanceMigrationMaxSourceConns), cfg.tunableProvenance(provenanceMigrationMaxTargetConns))
+		}
+	})
+}
+
+func TestApplyTunerSuggestionsAlwaysRederivesGeneratedConnectionPools(t *testing.T) {
+	withEmptySecretsFile(t)
+	cfg := minConfigWithoutAI()
+	cfg.Migration.Workers = 4
+	cfg.Migration.ParallelReaders = 3
+	cfg.Migration.WriteAheadWriters = 2
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
+	}
+
+	wantSource, wantTarget := tuning.ConnectionPoolSizes(4, 3, 2)
+	cfg.Source.ChunkSize = cfg.Migration.ChunkSize - 1
+	cfg.Target.ChunkSize = cfg.Migration.ChunkSize - 2
+	sourceChunkBefore, targetChunkBefore := cfg.Source.ChunkSize, cfg.Target.ChunkSize
+	cfg.Migration.MaxSourceConnections = wantSource + 100
+	cfg.Migration.MaxTargetConnections = wantTarget + 100
+	suggestions := &driver.SmartConfigSuggestions{
+		Workers:              4,
+		ParallelReaders:      3,
+		WriteAheadWriters:    2,
+		MaxSourceConnections: 1, // pool suggestions are not the effective tuple
+		MaxTargetConnections: 1,
+	}
+	if changes := cfg.ApplyTunerSuggestions(suggestions); len(changes) != 0 {
+		t.Fatalf("matching core suggestions produced changes: %+v", changes)
+	}
+	if cfg.Migration.MaxSourceConnections != wantSource || cfg.Migration.MaxTargetConnections != wantTarget {
+		t.Fatalf("stale auto-default pools = %d/%d, want %d/%d", cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections, wantSource, wantTarget)
+	}
+	if cfg.Source.ChunkSize != sourceChunkBefore || cfg.Target.ChunkSize != targetChunkBefore {
+		t.Fatalf("empty core changes altered chunk propagation: source %d->%d target %d->%d",
+			sourceChunkBefore, cfg.Source.ChunkSize, targetChunkBefore, cfg.Target.ChunkSize)
+	}
+	if cfg.tunableProvenance(provenanceMigrationMaxSourceConns) != ProvenanceSmartConfig ||
+		cfg.tunableProvenance(provenanceMigrationMaxTargetConns) != ProvenanceSmartConfig {
+		t.Fatalf("rederived pool provenance = %q/%q, want smartconfig",
+			cfg.tunableProvenance(provenanceMigrationMaxSourceConns), cfg.tunableProvenance(provenanceMigrationMaxTargetConns))
+	}
+
+	// Smartconfig-owned pools remain generated and must rederive in either
+	// direction on another no-op suggestion pass.
+	cfg.Migration.MaxSourceConnections = 1
+	cfg.Migration.MaxTargetConnections = 1
+	if changes := cfg.ApplyTunerSuggestions(suggestions); len(changes) != 0 {
+		t.Fatalf("second matching suggestion pass produced changes: %+v", changes)
+	}
+	if cfg.Migration.MaxSourceConnections != wantSource || cfg.Migration.MaxTargetConnections != wantTarget {
+		t.Fatalf("stale smartconfig pools = %d/%d, want %d/%d", cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections, wantSource, wantTarget)
+	}
+}
+
+func TestApplyTunerSuggestionsConnectionPoolsUseEffectivePinnedFanout(t *testing.T) {
+	withEmptySecretsFile(t)
+	cfg := minConfigWithoutAI()
+	cfg.Migration.ParallelReaders = 7
+	cfg.Migration.WriteAheadWriters = 5
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
+	}
+
+	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+		Workers:              3,
+		ParallelReaders:      2,
+		WriteAheadWriters:    2,
+		MaxSourceConnections: 999,
+		MaxTargetConnections: 999,
+	})
+	wantSource, wantTarget := tuning.ConnectionPoolSizes(3, 7, 5)
+	if cfg.Migration.Workers != 3 || cfg.Migration.ParallelReaders != 7 || cfg.Migration.WriteAheadWriters != 5 {
+		t.Fatalf("effective tuple = workers:%d PR:%d WAW:%d, want 3/7/5",
+			cfg.Migration.Workers, cfg.Migration.ParallelReaders, cfg.Migration.WriteAheadWriters)
+	}
+	if cfg.Migration.MaxSourceConnections != wantSource || cfg.Migration.MaxTargetConnections != wantTarget {
+		t.Fatalf("pinned-fanout pools = %d/%d, want %d/%d", cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections, wantSource, wantTarget)
 	}
 }
 
 func TestConnectionPoolSizingSaturatesOnOverflow(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
-	if got := saturatingConnectionRequirement(maxInt, 2); got != maxInt {
-		t.Fatalf("overflowing connection requirement = %d, want %d", got, maxInt)
+	if source, target := tuning.ConnectionPoolSizes(maxInt, 2, 2); source != maxInt || target != maxInt {
+		t.Fatalf("overflowing connection pools = %d/%d, want %d/%d", source, target, maxInt, maxInt)
 	}
 
 	cfg := &Config{

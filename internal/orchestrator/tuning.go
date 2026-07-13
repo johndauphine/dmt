@@ -152,7 +152,7 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 			logging.Info("  %s: %d -> %d", c.Name, c.OldValue, c.NewValue)
 		}
 	} else {
-		logging.Info("Tuning: no changes (recommendation matches current config)")
+		logging.Info("Tuning: no core parameter changes (recommendation matches current config)")
 	}
 	// Always log the tuner's reasoning. The deterministic tuner
 	// guarantees a non-empty Reasoning + Tier on every run (#202 — silence
@@ -172,24 +172,10 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// `tuning` was captured earlier so the smartconfig prompt could classify
 	// against it; same snapshot is persisted here so future runs see this
 	// run's effective tuning when classifying their own trajectory rows.
-	o.lastTuningRowID = analyzer.SaveTuningWithActualParams(driver.ActualParams{
-		Workers:           o.config.Migration.Workers,
-		ChunkSize:         o.config.Migration.ChunkSize,
-		ReadAheadBuffers:  o.config.Migration.ReadAheadBuffers,
-		WriteAheadWriters: o.config.Migration.WriteAheadWriters,
-		ParallelReaders:   o.config.Migration.ParallelReaders,
-		MaxPartitions:     o.config.Migration.MaxPartitions,
-		// #144 regime fields. Platform comes from gopsutil-detected runtime
-		// (already in AutoTuneInput); the DB-tuning fields come from
-		// captureDBTuning above.
-		TargetSharedBuffersMB:   tuning.TargetSharedBuffersMB,
-		TargetSyncCommit:        tuning.TargetSyncCommit,
-		TargetFsync:             tuning.TargetFsync,
-		TargetFullPageWrites:    tuning.TargetFullPageWrites,
-		TargetMaxWALSizeMB:      tuning.TargetMaxWALSizeMB,
-		TargetWALLevel:          tuning.TargetWALLevel,
-		SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
-	})
+	// Platform comes from the analyzer's AutoTuneInput; the DB regime fields
+	// come from captureDBTuning above. Pool fields come from the live pools,
+	// including engine constraints such as SQLite's single-writer limit.
+	o.lastTuningRowID = o.saveTuningWithLivePools(analyzer, tuning)
 }
 
 // configureAnalyzerTarget attaches the live target identity and bounded probe

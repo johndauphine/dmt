@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
@@ -21,6 +22,7 @@ import (
 type Reader struct {
 	db       *sql.DB
 	config   *dbconfig.SourceConfig
+	poolMu   sync.RWMutex
 	maxConns int
 	cat      *Catalog
 	dialect  *Dialect
@@ -37,6 +39,8 @@ type readerWithDates struct {
 var (
 	_ driver.Reader                = (*Reader)(nil)
 	_ driver.IncrementalDateReader = (*readerWithDates)(nil)
+	_ driver.ConnectionPoolResizer = (*Reader)(nil)
+	_ driver.ConnectionPoolResizer = (*readerWithDates)(nil)
 )
 
 // NewReader opens the catalog's backend with the shared pool sizing.
@@ -78,9 +82,37 @@ func NewReader(cat *Catalog, cfg *dbconfig.SourceConfig, maxConns int) (driver.R
 	return r, nil
 }
 
-func (r *Reader) Close() error  { return r.db.Close() }
-func (r *Reader) DB() *sql.DB   { return r.db }
-func (r *Reader) MaxConns() int { return r.maxConns }
+func (r *Reader) Close() error { return r.db.Close() }
+func (r *Reader) DB() *sql.DB  { return r.db }
+func (r *Reader) MaxConns() int {
+	r.poolMu.RLock()
+	defer r.poolMu.RUnlock()
+	return r.maxConns
+}
+
+// ResizeConnectionPool applies the source pool's tuned live limit while
+// preserving the reader idle policy used at construction time: retain one
+// idle connection per four open connections, with a floor of one.
+func (r *Reader) ResizeConnectionPool(maxConns int) int {
+	if maxConns < 0 {
+		maxConns = 0
+	}
+
+	r.poolMu.Lock()
+	defer r.poolMu.Unlock()
+
+	r.db.SetMaxOpenConns(maxConns)
+	idle := maxConns / 4
+	if idle < 1 {
+		idle = 1
+	}
+	r.db.SetMaxIdleConns(idle)
+
+	actual := r.db.Stats().MaxOpenConnections
+	r.maxConns = actual
+	return actual
+}
+
 func (r *Reader) DBType() string {
 	return r.cat.Name
 }
