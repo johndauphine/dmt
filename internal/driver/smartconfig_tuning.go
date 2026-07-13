@@ -82,6 +82,8 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		TargetSchema:            in.TargetSchema,
 		ForceExplore:            s.forceExplore,
 		ExplorationEpsilon:      explorationEpsilon(s.exploreMode),
+		PinnedWorkers:           s.pinnedWorkers,
+		PinnedChunkSize:         s.pinnedChunkSize,
 		PinnedWriteAheadWriters: s.pinnedWriteAheadWriters,
 		PinnedParallelReaders:   s.pinnedParallelReaders,
 		PinnedReadAheadBuffers:  s.pinnedReadAheadBuffers,

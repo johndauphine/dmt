@@ -2,19 +2,21 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
+	"time"
+
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
-	"strings"
-	"time"
 )
 
 // applyTuning runs the deterministic tuner (internal/tuning) to set
-// migration parameters before transfer begins. Only overrides
-// formula-computed values (where Original* == 0), never user-specified
-// values. Function name kept for now; rename pending in a follow-up
-// cleanup (#175 PR1 minimized public-API churn). Falls back to baseline
-// on any failure (logged at Debug/Warn level).
+// migration parameters before transfer begins. Performance suggestions only
+// override formula-computed values (where Original* == 0); the shared hard
+// safety projection may still lower a user-requested chunk while retaining its
+// requested/effective provenance. Function name is retained to minimize public
+// API churn (#175). Falls back to baseline on any failure (logged at Debug/Warn
+// level).
 func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// An Orchestrator may be reused for resume segments. Never let a failed
 	// or manual analysis inherit a row or tier created by an earlier segment.
@@ -33,6 +35,9 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	if o.config.Migration.Tuning == "manual" {
 		o.config.Migration.TargetHardChunkLimit = o.probeTargetHardChunkLimit(ctx)
 		o.config.FinalizeRuntimeChunkSizeCap()
+		if before, after := o.config.MaterializeRuntimeChunkSizeCap(); before != after {
+			logging.Info("Manual chunk_size safety projection: requested=%d effective=%d", before, after)
+		}
 		logging.Info("Tuning disabled (migration.tuning: manual) — using configured values and formula defaults")
 		logging.Info("Tuning provenance: %s", o.config.TuningProvenanceSummary())
 		return
@@ -70,18 +75,8 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 		analyzer.SetHistoryProvider(&stateHistoryAdapter{state: o.state})
 	}
 
-	// Override-cost advice (#461): tell the tuner which WAW value is
-	// pinned so it can compare the pin against measured history bins.
-	for _, name := range o.config.PinnedTunables() {
-		switch name {
-		case config.TunableWriteAheadWriters:
-			analyzer.SetPinnedWriteAheadWriters(o.config.Migration.WriteAheadWriters)
-		case config.TunableParallelReaders:
-			analyzer.SetPinnedParallelReaders(o.config.Migration.ParallelReaders)
-		case config.TunableReadAheadBuffers:
-			analyzer.SetPinnedReadAheadBuffers(o.config.Migration.ReadAheadBuffers)
-		}
-	}
+	// Candidate-domain pins and WAW override-cost advice (#461/#728).
+	configureAnalyzerPins(o.config, analyzer)
 
 	// Set target DB type and probe runtime protocol limits (#166). The same
 	// helper is used by manual tuning so disabling parameter derivation never
@@ -139,6 +134,9 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 		// preserves only a protocol cap and keeps resource growth disabled.
 		o.config.ResetRuntimeChunkSafety()
 		o.config.FinalizeRuntimeChunkSizeCap()
+		if before, after := o.config.MaterializeRuntimeChunkSizeCap(); before != after {
+			logging.Info("Fallback chunk_size safety projection: requested=%d effective=%d", before, after)
+		}
 		logging.Warn("Tuning analysis failed, using formula defaults: %v", err)
 		return
 	}
@@ -176,6 +174,37 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// come from captureDBTuning above. Pool fields come from the live pools,
 	// including engine constraints such as SQLite's single-writer limit.
 	o.lastTuningRowID = o.saveTuningWithLivePools(analyzer, tuning)
+}
+
+type tuningPinSink interface {
+	SetPinnedWorkers(int)
+	SetPinnedChunkSize(int)
+	SetPinnedWriteAheadWriters(int)
+	SetPinnedParallelReaders(int)
+	SetPinnedReadAheadBuffers(int)
+}
+
+// configureAnalyzerPins bridges config ownership into the tuner's candidate
+// domain. Keeping this narrow seam separately testable prevents a provenance
+// pin from being honored during config application but omitted during scoring.
+func configureAnalyzerPins(cfg *config.Config, sink tuningPinSink) {
+	if cfg == nil || sink == nil {
+		return
+	}
+	for _, name := range cfg.PinnedTunables() {
+		switch name {
+		case config.TunableWorkers:
+			sink.SetPinnedWorkers(cfg.Migration.Workers)
+		case config.TunableChunkSize:
+			sink.SetPinnedChunkSize(cfg.Migration.ChunkSize)
+		case config.TunableWriteAheadWriters:
+			sink.SetPinnedWriteAheadWriters(cfg.Migration.WriteAheadWriters)
+		case config.TunableParallelReaders:
+			sink.SetPinnedParallelReaders(cfg.Migration.ParallelReaders)
+		case config.TunableReadAheadBuffers:
+			sink.SetPinnedReadAheadBuffers(cfg.Migration.ReadAheadBuffers)
+		}
+	}
 }
 
 // configureAnalyzerTarget attaches the live target identity and bounded probe

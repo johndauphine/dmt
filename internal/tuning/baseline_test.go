@@ -382,6 +382,36 @@ func TestDefaultOutputWithOverrides_IgnoresNonPositiveValues(t *testing.T) {
 	}
 }
 
+func TestDefaultOutputAppliesPinnedAxesBeforeFinalization(t *testing.T) {
+	workers, chunk, waw, pr, rab := 7, 40_000, 5, 3, 6
+	in := Input{
+		CPUCores:                8,
+		MemoryBudgetMB:          64_000,
+		AvgRowBytes:             500,
+		RepresentativeRowBytes:  500,
+		SafetyRowBytes:          500,
+		SafetyRowBytesKnown:     true,
+		PinnedWorkers:           &workers,
+		PinnedChunkSize:         &chunk,
+		PinnedWriteAheadWriters: &waw,
+		PinnedParallelReaders:   &pr,
+		PinnedReadAheadBuffers:  &rab,
+	}
+	out := DefaultOutput(in, DriverProfile{
+		BaselineWAW:           2,
+		OptimumBulkChunkBytes: 25_000_000,
+		HardChunkLimit:        30_000,
+	})
+
+	if out.Workers != workers || out.MaxPartitions != workers || out.ChunkSize != 30_000 ||
+		out.WriteAheadWriters != waw || out.ParallelReaders != pr || out.ReadAheadBuffers != rab {
+		t.Fatalf("pinned default output = %+v", out)
+	}
+	if !strings.Contains(out.Reasoning, "clamp=protocol=30000") {
+		t.Fatalf("pinned default reasoning = %q, want protocol projection", out.Reasoning)
+	}
+}
+
 func TestDefaultOutputMatchesTuneWithoutHistory(t *testing.T) {
 	in := Input{
 		CPUCores:               64,

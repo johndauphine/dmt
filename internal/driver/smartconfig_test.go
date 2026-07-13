@@ -142,6 +142,12 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 		t.Errorf("post-override params not persisted: workers=%d chunk=%d (want 12, 14000)",
 			mock.saved.Workers, mock.saved.ChunkSize)
 	}
+	if mock.saved.ReadAheadBuffers != 4 || mock.saved.WriteAheadWriters != 3 ||
+		mock.saved.ParallelReaders != 6 || mock.saved.MaxPartitions != 8 {
+		t.Errorf("post-override tuple not persisted: RAB=%d WAW=%d PR=%d partitions=%d (want 4/3/6/8)",
+			mock.saved.ReadAheadBuffers, mock.saved.WriteAheadWriters,
+			mock.saved.ParallelReaders, mock.saved.MaxPartitions)
+	}
 	if mock.saved.MaxSourceConns != 37 || mock.saved.MaxTargetConns != 49 {
 		t.Errorf("actual pool limits not persisted: source=%d target=%d (want 37, 49)",
 			mock.saved.MaxSourceConns, mock.saved.MaxTargetConns)
@@ -390,6 +396,31 @@ func TestBuildAutoTuneInput_UsesInjectedMemoryEnvelope(t *testing.T) {
 	if tuningInput.MemoryBudgetMB != input.MemoryBudgetMB {
 		t.Errorf("tuning MemoryBudgetMB = %d, want %d", tuningInput.MemoryBudgetMB, input.MemoryBudgetMB)
 	}
+}
+
+func TestPinnedCandidateAxesFlowToTuningInput(t *testing.T) {
+	analyzer := NewSmartConfigAnalyzer(nil, "mssql")
+	analyzer.SetPinnedWorkers(9)
+	analyzer.SetPinnedChunkSize(12_345)
+	analyzer.SetPinnedWriteAheadWriters(4)
+	analyzer.SetPinnedParallelReaders(3)
+	analyzer.SetPinnedReadAheadBuffers(7)
+
+	got := analyzer.toTuningInput(AutoTuneInput{})
+	assertPin := func(name string, pin *int, want int) {
+		t.Helper()
+		if pin == nil || *pin != want {
+			if pin == nil {
+				t.Fatalf("%s pin = nil, want %d", name, want)
+			}
+			t.Fatalf("%s pin = %d, want %d", name, *pin, want)
+		}
+	}
+	assertPin("workers", got.PinnedWorkers, 9)
+	assertPin("chunk_size", got.PinnedChunkSize, 12_345)
+	assertPin("write_ahead_writers", got.PinnedWriteAheadWriters, 4)
+	assertPin("parallel_readers", got.PinnedParallelReaders, 3)
+	assertPin("read_ahead_buffers", got.PinnedReadAheadBuffers, 7)
 }
 
 func TestBuildAutoTuneInput_NoEnvelopeDoesNotInventMemory(t *testing.T) {

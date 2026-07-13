@@ -68,6 +68,20 @@ func (c *Config) validate() error {
 	if err := c.validateStrictConsistencyScope(); err != nil {
 		return err
 	}
+	for _, tunable := range []struct {
+		name  string
+		value int
+	}{
+		{name: "migration.workers", value: c.Migration.Workers},
+		{name: "migration.chunk_size", value: c.Migration.ChunkSize},
+		{name: "migration.write_ahead_writers", value: c.Migration.WriteAheadWriters},
+		{name: "migration.parallel_readers", value: c.Migration.ParallelReaders},
+		{name: "migration.read_ahead_buffers", value: c.Migration.ReadAheadBuffers},
+	} {
+		if tunable.value < 0 {
+			return fmt.Errorf("%s must not be negative", tunable.name)
+		}
+	}
 
 	switch c.Migration.Tuning {
 	case "", "auto", "manual":

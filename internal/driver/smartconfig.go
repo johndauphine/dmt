@@ -192,9 +192,11 @@ type SmartConfigAnalyzer struct {
 	pendingSave              *pendingTuningSave
 	currentTuning            DBTuningSnapshot
 	forceExplore             bool                 // mirrors cfg.Migration.Explore
-	pinnedWriteAheadWriters  *int                 // user-pinned WAW for override-cost advice (#461); nil = tuner-managed
-	pinnedParallelReaders    *int                 // user-pinned PR — advice filters history to the settings that will run
-	pinnedReadAheadBuffers   *int                 // user-pinned RAB — same
+	pinnedWorkers            *int                 // effective candidate-domain pin (#728); nil = tuner-managed
+	pinnedChunkSize          *int                 // effective candidate-domain pin (#728); nil = tuner-managed
+	pinnedWriteAheadWriters  *int                 // effective pin plus override-cost advice (#461/#728)
+	pinnedParallelReaders    *int                 // effective pin; advice filters history to the settings that will run
+	pinnedReadAheadBuffers   *int                 // effective pin; same
 	exploreMode              string               // mirrors cfg.Migration.ExploreMode
 	targetProbe              TargetProbe          // populated via SetTargetProbe (#166)
 	uncappedAvgRowBytes      int64                // legacy uncapped top-five average used by regime classification
@@ -323,9 +325,23 @@ func (s *SmartConfigAnalyzer) SetExploration(force bool, mode string) {
 	s.exploreMode = mode
 }
 
+// SetPinnedWorkers records the user-pinned worker count so memory projection
+// uses the concurrency that will actually run.
+func (s *SmartConfigAnalyzer) SetPinnedWorkers(v int) {
+	s.pinnedWorkers = &v
+}
+
+// SetPinnedChunkSize records the user-pinned nominal chunk. Candidate
+// projection retains the pin as the requested value and applies only hard
+// memory/protocol safety caps to derive the effective chunk.
+func (s *SmartConfigAnalyzer) SetPinnedChunkSize(v int) {
+	s.pinnedChunkSize = &v
+}
+
 // SetPinnedWriteAheadWriters records the user-pinned WAW value so the
-// tuner can emit measured override-cost advice (#461). Call only when
-// config provenance marks write_ahead_writers as pinned.
+// tuner scores only the effective pinned domain and can emit measured
+// override-cost advice (#461/#728). Call only when config provenance marks
+// write_ahead_writers as pinned.
 func (s *SmartConfigAnalyzer) SetPinnedWriteAheadWriters(v int) {
 	s.pinnedWriteAheadWriters = &v
 }
