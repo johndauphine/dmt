@@ -62,17 +62,6 @@ type ConfigSnapshot struct {
 	WriteAheadWriters int
 }
 
-// TrendAnalysis captures detected performance trends.
-type TrendAnalysis struct {
-	Insufficient         bool
-	ThroughputDecreasing bool    // >20% decline (significant threshold)
-	ThroughputDecline    float64 // actual decline percentage
-	MemoryIncreasing     bool    // >5% increase per sample
-	LatencyIncreasing    bool    // >20% increase
-	CPUSaturated         bool
-	MemorySaturated      bool
-}
-
 // MetricsCollector continuously collects performance metrics during migration.
 type MetricsCollector struct {
 	tuner         transfer.RuntimeTuner
@@ -275,60 +264,5 @@ func (mc *MetricsCollector) GetAllMetrics() []PerformanceSnapshot {
 
 	result := make([]PerformanceSnapshot, len(mc.metrics))
 	copy(result, mc.metrics)
-	return result
-}
-
-// AnalyzeTrends examines recent metrics for performance patterns.
-func (mc *MetricsCollector) AnalyzeTrends() TrendAnalysis {
-	mc.metricsMu.RLock()
-	defer mc.metricsMu.RUnlock()
-
-	result := TrendAnalysis{}
-
-	// Need at least 3 samples for trend analysis
-	if len(mc.metrics) < 3 {
-		result.Insufficient = true
-		return result
-	}
-
-	// Analyze last 3 samples
-	recent := mc.metrics[len(mc.metrics)-3:]
-
-	// Throughput trend (>20% decline - significant threshold to avoid over-adjusting)
-	if recent[0].Throughput > 0 && recent[2].Throughput > 0 {
-		decline := (recent[0].Throughput - recent[2].Throughput) / recent[0].Throughput
-		if decline > 0 {
-			// Store positive decline as percentage; direction captured by ThroughputDecreasing
-			result.ThroughputDecline = decline * 100
-			if decline > 0.20 {
-				result.ThroughputDecreasing = true
-			}
-		} else {
-			// No decline (flat or increasing throughput)
-			result.ThroughputDecline = 0
-		}
-	}
-
-	// Memory-pressure trend (>5% relative increase per sample). HeapAllocMB is
-	// diagnostic only and deliberately does not participate. Unknown pressure
-	// suppresses the trend rather than being interpreted as zero utilization.
-	if recent[0].MemoryPressureKnown && recent[1].MemoryPressureKnown && recent[2].MemoryPressureKnown {
-		memIncrease1 := (recent[1].MemoryPercent - recent[0].MemoryPercent) / math.Max(1, recent[0].MemoryPercent)
-		memIncrease2 := (recent[2].MemoryPercent - recent[1].MemoryPercent) / math.Max(1, recent[1].MemoryPercent)
-		if memIncrease1 > 0.05 && memIncrease2 > 0.05 {
-			result.MemoryIncreasing = true
-		}
-	}
-
-	// CPU saturation
-	if recent[len(recent)-1].CPUPercent > 90 {
-		result.CPUSaturated = true
-	}
-
-	// Memory saturation
-	if recent[len(recent)-1].MemoryPressureKnown && recent[len(recent)-1].MemoryPercent > 75 {
-		result.MemorySaturated = true
-	}
-
 	return result
 }

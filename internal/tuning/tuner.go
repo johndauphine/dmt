@@ -132,8 +132,7 @@ const (
 	TierSmoothedBins = "smoothed-bins"
 )
 
-// Output is the complete recommended parameter set. Mirrors the fields
-// the smartconfig analyzer's AutoTuneOutput populates today.
+// Output is the complete recommended parameter set.
 type Output struct {
 	Workers             int
 	ChunkSize           int
@@ -143,6 +142,8 @@ type Output struct {
 	MaxPartitions       int
 	LargeTableThreshold int64
 
+	// Pool outputs remain live for analyze-mode presentation and --apply.
+	// Runtime config re-derives effective limits after respecting pinned knobs.
 	MaxSourceConnections int
 	MaxTargetConnections int
 

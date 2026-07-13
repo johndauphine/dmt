@@ -9,14 +9,14 @@ import (
 	"github.com/johndauphine/dmt/internal/tuning"
 )
 
-// ParamChange records a parameter change from formula to AI value.
+// ParamChange records a parameter change made by deterministic tuning.
 type ParamChange struct {
 	Name     string
 	OldValue int64
 	NewValue int64
 }
 
-// ApplyTunerSuggestions overrides formula-computed defaults with AI recommendations.
+// ApplyTunerSuggestions overrides generated defaults with tuner recommendations.
 // Only parameters the user didn't explicitly set (Original* == 0) are overridden.
 // Returns a list of parameters that were changed.
 func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []ParamChange {

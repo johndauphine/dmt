@@ -811,7 +811,7 @@ func TestAutoTuneUserOverride(t *testing.T) {
 	}
 }
 
-// TestApplyAISuggestions_UserOverridesPRRAB (#219) pins the
+// TestApplyTunerSuggestionsUserOverridesPRRAB (#219) pins the
 // user-override mechanism for parallel_readers and read_ahead_buffers
 // across the full round-trip: user sets explicit values in YAML →
 // applyDefaults snapshots them as Original* → tuner produces different
@@ -821,7 +821,7 @@ func TestAutoTuneUserOverride(t *testing.T) {
 // Pre-#219 the tuner ignored these axes entirely so the override path
 // was never exercised for them in tests. Now that the tuner actively
 // recommends PR/RAB values, this test guards the gate.
-func TestApplyAISuggestions_UserOverridesPRRAB(t *testing.T) {
+func TestApplyTunerSuggestionsUserOverridesPRRAB(t *testing.T) {
 	cfg := &Config{
 		Source: SourceConfig{Type: "postgres", Host: "localhost", Port: 5432, Database: "s", User: "u", Password: "p"},
 		Target: TargetConfig{Type: "mssql", Host: "localhost", Port: 1433, Database: "t", User: "u", Password: "p"},
@@ -859,10 +859,10 @@ func TestApplyAISuggestions_UserOverridesPRRAB(t *testing.T) {
 	}
 }
 
-// TestApplyAISuggestions_AppliesPRRABWhenUnset (#219) is the
+// TestApplyTunerSuggestionsAppliesPRRABWhenUnset (#219) is the
 // complementary case: when the user did NOT set PR/RAB in YAML, the
 // tuner's suggestion must take effect (Original*==0 gate).
-func TestApplyAISuggestions_AppliesPRRABWhenUnset(t *testing.T) {
+func TestApplyTunerSuggestionsAppliesPRRABWhenUnset(t *testing.T) {
 	cfg := &Config{
 		Source:    SourceConfig{Type: "postgres", Host: "localhost", Port: 5432, Database: "s", User: "u", Password: "p"},
 		Target:    TargetConfig{Type: "mssql", Host: "localhost", Port: 1433, Database: "t", User: "u", Password: "p"},
@@ -1185,7 +1185,7 @@ migration_defaults:
 	}
 }
 
-func TestApplyAISuggestionsPinsSecretsDefaultsAndOverridesGeneratedDefaults(t *testing.T) {
+func TestApplyTunerSuggestionsPinsSecretsDefaultsAndOverridesGeneratedDefaults(t *testing.T) {
 	withSecretsFile(t, `
 migration_defaults:
   workers: 8

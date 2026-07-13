@@ -428,9 +428,8 @@ func TestOptionsWithValues(t *testing.T) {
 	}
 }
 
-// TestSanitizeForLog pins the log-injection guard added in PR #151 review:
-// AI-supplied strings (ObservedRetryRates / Reasoning) are logged verbatim
-// at INFO and could otherwise contain newlines that break log parsers.
+// TestSanitizeForLog pins the log-injection guard for generated reasoning and
+// advice, which could otherwise contain newlines that break log parsers.
 func TestSanitizeForLog(t *testing.T) {
 	cases := []struct {
 		in, want string
