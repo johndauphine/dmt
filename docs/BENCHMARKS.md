@@ -1671,7 +1671,7 @@ PR #163's review pinned the smartconfig default at `min(50000, ceiling)`. The em
 
 ### Methodology
 
-Smartconfig and generated-default clamps are out of the loop. `chunk_size` is set directly in YAML and locked alongside every other tunable knob (`workers=16`, `read_ahead_buffers=4`, `write_ahead_writers=2`, `parallel_readers=2`, `max_partitions=16`, all connection pools and thresholds explicit). Runtime tuning is disabled so the controller doesn't move parameters during the run. State directory wiped between runs; `target_mode: drop_recreate` so each run starts from a fresh PG schema. AI mapper may still run for unsupported type/DDL fallback surfaces, but `applyAISuggestions` produces zero changes because every tunable is user-set.
+Smartconfig and generated-default clamps are out of the loop. `chunk_size` is set directly in YAML and locked alongside every other tunable knob (`workers=16`, `read_ahead_buffers=4`, `write_ahead_writers=2`, `parallel_readers=2`, `max_partitions=16`, all connection pools and thresholds explicit). Runtime tuning is disabled so the controller doesn't move parameters during the run. State directory wiped between runs; `target_mode: drop_recreate` so each run starts from a fresh PG schema. AI mapper may still run for unsupported type/DDL fallback surfaces, but `ApplyTunerSuggestions` produces zero parameter changes because every tunable is user-set.
 
 Sweep grid: `chunk_size ∈ {50000, 87896, 100000, 175792, 250000}`, **3 runs per cell** = 15 runs total. Same fixture as the rest of this section (M5 Pro 48GB, SO2010 mssql→pg, transfer-only).
 
