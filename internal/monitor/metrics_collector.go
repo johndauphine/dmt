@@ -168,6 +168,7 @@ func (mc *MetricsCollector) collectSnapshot() {
 	snap := mc.tuner.Snapshot()
 	snapshot.CurrentConfig = ConfigSnapshot{
 		ChunkSize:         snap.ChunkSize,
+		Workers:           snap.Workers,
 		ReadAheadBuffers:  snap.ReadAheadBuffers,
 		ParallelReaders:   snap.ParallelReaders,
 		WriteAheadWriters: snap.WriteAheadWriters,

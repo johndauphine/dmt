@@ -20,12 +20,19 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// or manual analysis inherit a row or tier created by an earlier segment.
 	o.lastTuningRowID = 0
 	o.lastTuningTier = ""
+	// Runtime safety evidence is run-scoped. The orchestrator owns the target
+	// probe lifecycle, so clear both the prior protocol cap and the config-owned
+	// width/growth metadata before every fresh attempt (#709).
+	o.config.Migration.TargetHardChunkLimit = 0
+	o.config.ResetRuntimeChunkSafety()
 
 	// Coarse switch (#461): migration.tuning: manual disables pre-run
 	// parameter derivation entirely — user values and formula defaults
 	// rule. Distinct from migration.runtime_tuning, which controls the
 	// mid-run rule-based controller.
 	if o.config.Migration.Tuning == "manual" {
+		o.config.Migration.TargetHardChunkLimit = o.probeTargetHardChunkLimit(ctx)
+		o.config.FinalizeRuntimeChunkSizeCap()
 		logging.Info("Tuning disabled (migration.tuning: manual) — using configured values and formula defaults")
 		logging.Info("Tuning provenance: %s", o.config.TuningProvenanceSummary())
 		return
@@ -76,34 +83,11 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 		}
 	}
 
-	// Set target DB type and migration mode for cross-engine awareness
-	if o.targetPool != nil {
-		analyzer.SetTargetDBType(o.targetPool.DBType())
-
-		// Probe target for runtime values that affect chunk_size
-		// selection (#166). MySQL surfaces @@max_allowed_packet here
-		// so the tuner's HardChunkLimit reflects the live cap rather
-		// than the static 0; without this the migration path could
-		// pick a chunk_size that exceeds the packet limit and crash
-		// mid-transfer. PG/MSSQL return empty probes.
-		if td, err := driver.Get(o.targetPool.DBType()); err == nil {
-			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-			analyzer.SetTargetProbe(td.ProbeTarget(probeCtx, o.targetPool.DB()))
-			probeCancel()
-		}
-	}
+	// Set target DB type and probe runtime protocol limits (#166). The same
+	// helper is used by manual tuning so disabling parameter derivation never
+	// disables target safety discovery (#709).
+	o.configureAnalyzerTarget(ctx, analyzer)
 	analyzer.SetTargetMode(o.config.Migration.TargetMode)
-
-	// Capture the probe-derived hard cap so transfer_runner can carry it
-	// into the runtime controller. Without this, runtime growth rules can
-	// push chunk_size above the packet limit and crash mid-migration
-	// (Codex review on #166). Set after Analyze runs (below) so the
-	// uncapped row size is populated.
-	defer func() {
-		if o.targetPool != nil {
-			o.config.Migration.TargetHardChunkLimit = analyzer.TargetHardChunkLimit()
-		}
-	}()
 
 	// Wire exploration policy (#179): --explore flag forces a planned-grid
 	// pick this run; ExploreMode controls steady-state ε strength.
@@ -146,7 +130,15 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	defer cancel()
 
 	suggestions, err := analyzer.Analyze(analyzeCtx, o.config.Source.Schema)
+	// Analyze populates the safety width used to convert packet bytes into a
+	// row-count cap. Install that protocol cap before ApplyTunerSuggestions so
+	// config derives min(memory, protocol) from the values that will run.
+	o.config.Migration.TargetHardChunkLimit = analyzer.TargetHardChunkLimit()
 	if err != nil {
+		// Failed analysis has no trusted width evidence. Finalization therefore
+		// preserves only a protocol cap and keeps resource growth disabled.
+		o.config.ResetRuntimeChunkSafety()
+		o.config.FinalizeRuntimeChunkSizeCap()
 		logging.Warn("Tuning analysis failed, using formula defaults: %v", err)
 		return
 	}
@@ -198,6 +190,32 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 		TargetWALLevel:          tuning.TargetWALLevel,
 		SourceMaxServerMemoryMB: tuning.SourceMaxServerMemoryMB,
 	})
+}
+
+// configureAnalyzerTarget attaches the live target identity and bounded probe
+// to a smartconfig analyzer. It is safe with a nil target and intentionally
+// best-effort: an unavailable probe yields no protocol cap rather than blocking
+// the migration.
+func (o *Orchestrator) configureAnalyzerTarget(ctx context.Context, analyzer *driver.SmartConfigAnalyzer) {
+	if o == nil || analyzer == nil || o.targetPool == nil {
+		return
+	}
+	targetType := o.targetPool.DBType()
+	analyzer.SetTargetDBType(targetType)
+	if td, err := driver.Get(targetType); err == nil {
+		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+		analyzer.SetTargetProbe(td.ProbeTarget(probeCtx, o.targetPool.DB()))
+		probeCancel()
+	}
+}
+
+func (o *Orchestrator) probeTargetHardChunkLimit(ctx context.Context) int {
+	if o == nil || o.targetPool == nil {
+		return 0
+	}
+	analyzer := driver.NewSmartConfigAnalyzer(nil, "")
+	o.configureAnalyzerTarget(ctx, analyzer)
+	return analyzer.TargetHardChunkLimit()
 }
 
 // sanitizeForLog flattens AI-supplied strings to a single line before logging.

@@ -77,6 +77,14 @@ func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []Param
 		}
 	}
 
+	// Retain current-run width evidence only after the effective tuple is known:
+	// the apply gates above preserve user/secrets pins, so these values are the
+	// workers and buffers that will actually run. Unknown/fallback width remains
+	// explicit and cannot authorize resource growth (#709).
+	c.Migration.RuntimeSafetyRowBytes = s.SafetyRowBytes
+	c.Migration.RuntimeSafetyRowBytesKnown = s.SafetyRowBytesKnown
+	c.FinalizeRuntimeChunkSizeCap()
+
 	return changes
 }
 

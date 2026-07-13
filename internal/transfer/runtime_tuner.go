@@ -9,6 +9,7 @@ import (
 // RuntimeSnapshot holds the current runtime parameters as a point-in-time copy.
 type RuntimeSnapshot struct {
 	ChunkSize            int
+	Workers              int
 	ReadAheadBuffers     int
 	ParallelReaders      int
 	WriteAheadWriters    int

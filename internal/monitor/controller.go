@@ -55,9 +55,11 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"math"
+	"time"
+
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/transfer"
-	"time"
 )
 
 // Controller is the rule-based runtime adjuster. Same lifecycle as
@@ -90,6 +92,13 @@ type Controller struct {
 	maxWAW       int
 	safetyOnly   bool
 
+	// Resource growth is fail-closed: a positive cap and explicit
+	// authorization from an observed safety width are both required. The cap
+	// recomputer derives a prospective cap before a writer increase so WAW and
+	// any required companion chunk clamp can be applied atomically.
+	allowResourceGrowth   bool
+	recomputeMaxChunkSize func(workers, readAheadBuffers, writeAheadWriters int) int
+
 	// nowFn is the clock — overridable in tests via NewController's
 	// options-style setter so cooldown logic can be exercised
 	// deterministically without sleeping.
@@ -101,18 +110,30 @@ type Controller struct {
 	nextAdjustmentNumber func() int
 }
 
-// ControllerOptions wraps the optional knobs the rule controller
-// uses for clamping. Zero values fall back to defensive defaults.
+// ControllerOptions wraps the optional knobs the rule controller uses for
+// clamping. Individual fields document whether zero means a default or
+// disables the corresponding behavior.
 type ControllerOptions struct {
 	// SafetyOnly suppresses performance-growth Rules 2 and 4 while keeping
 	// the memory/error backoff Rules 1 and 3 active. Exploration probes use
 	// this mode so safety still wins without contaminating clean cohorts.
 	SafetyOnly bool
 
-	// MaxChunkSize caps the chunk_size knob's growth rule. The driver
-	// layer's HardChunkLimit (#166) is the natural source. Zero =
-	// unlimited.
+	// MaxChunkSize is the initial memory/protocol cap for chunk growth. Zero
+	// disables growth; it never means unlimited (#709).
 	MaxChunkSize int
+
+	// AllowResourceGrowth is true only when the caller derived a memory cap
+	// from an observed safety width. Protocol-only caps still constrain the
+	// current chunk but cannot authorize Rules 2 or 4.
+	AllowResourceGrowth bool
+
+	// RecomputeMaxChunkSize derives the cap for a prospective runtime tuple.
+	// Rule 2 requires a positive result before increasing WAW and ratchets the
+	// controller cap downward when the new writer count reduces safe chunk size.
+	// It must return zero when even a one-row chunk exceeds the prospective
+	// tuple's memory budget; non-positive results suppress resource growth.
+	RecomputeMaxChunkSize func(workers, readAheadBuffers, writeAheadWriters int) int
 
 	// MinChunkSize floors the chunk_size knob's shrink rule.
 	// Without a floor, sustained memory pressure could shrink
@@ -254,15 +275,20 @@ func NewController(tuner transfer.RuntimeTuner, collector *MetricsCollector, int
 	if opts.MinChunkSize == 0 {
 		opts.MinChunkSize = defaultMinChunkSize
 	}
+	if opts.MaxChunkSize > 0 && opts.MinChunkSize > opts.MaxChunkSize {
+		opts.MinChunkSize = opts.MaxChunkSize
+	}
 	return &Controller{
-		tuner:        tuner,
-		collector:    collector,
-		interval:     interval,
-		maxChunkSize: opts.MaxChunkSize,
-		minChunkSize: opts.MinChunkSize,
-		maxWAW:       opts.MaxWAW,
-		safetyOnly:   opts.SafetyOnly,
-		nowFn:        time.Now,
+		tuner:                 tuner,
+		collector:             collector,
+		interval:              interval,
+		maxChunkSize:          opts.MaxChunkSize,
+		minChunkSize:          opts.MinChunkSize,
+		maxWAW:                opts.MaxWAW,
+		safetyOnly:            opts.SafetyOnly,
+		allowResourceGrowth:   opts.AllowResourceGrowth,
+		recomputeMaxChunkSize: opts.RecomputeMaxChunkSize,
+		nowFn:                 time.Now,
 
 		runID:                opts.RunID,
 		adjustmentNumber:     opts.InitialAdjustmentNumber,
@@ -340,6 +366,15 @@ type Decision struct {
 	PreviousValue int
 	NewValue      int
 	Reasoning     string
+
+	// CompanionChunkSize carries an atomic chunk clamp paired with a WAW
+	// increase. A single RuntimeTuner.Update applies both fields, so readers
+	// never observe the higher writer count under the obsolete chunk cap.
+	CompanionChunkSize *int
+
+	// nextMaxChunkSize is the prospective nonincreasing cap computed during
+	// Evaluate. It becomes controller state only after Update succeeds.
+	nextMaxChunkSize int
 }
 
 // Evaluate inspects the latest metrics + cooldowns and returns the
@@ -362,6 +397,9 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	// is not fabricated into either a safe reading or a shrink event (#696).
 	if latest.MemoryPressureKnown && latest.MemoryPercent > memoryPressureThreshold && c.knobReady("chunk_size", now) {
 		next := shrinkChunk(cur.ChunkSize, chunkShrinkFactor, c.minChunkSize)
+		if c.maxChunkSize > 0 && next > c.maxChunkSize {
+			next = c.maxChunkSize
+		}
 		if next < cur.ChunkSize {
 			return &Decision{
 				Knob:          "chunk_size",
@@ -384,7 +422,8 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 	//     the bottleneck — don't add another.
 	// Both gates are skip-only — when either fires, control falls through
 	// to Rules 3 and 4 normally.
-	if !c.safetyOnly && c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
+	if !c.safetyOnly && c.allowResourceGrowth && c.maxChunkSize > 0 &&
+		c.recomputeMaxChunkSize != nil && c.knobReady("write_ahead_writers", now) && queueGrew(recent) {
 		suppressed := false
 		if !latest.MemoryPressureKnown || latest.MemoryPercent >= writerAddMemoryInterlockThreshold {
 			suppressed = true
@@ -412,16 +451,37 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 			}
 		}
 		if !suppressed {
-			next := cur.WriteAheadWriters + 1
-			if next <= c.maxWAW {
-				return &Decision{
-					Knob:          "write_ahead_writers",
-					PreviousValue: cur.WriteAheadWriters,
-					NewValue:      next,
-					Reasoning: fmt.Sprintf(
+			if cur.WriteAheadWriters < c.maxWAW {
+				next := cur.WriteAheadWriters + 1
+				recomputed := c.recomputeMaxChunkSize(cur.Workers, cur.ReadAheadBuffers, next)
+				if recomputed > 0 {
+					prospectiveCap := recomputed
+					if c.maxChunkSize < prospectiveCap {
+						prospectiveCap = c.maxChunkSize
+					}
+					var companion *int
+					if cur.ChunkSize > prospectiveCap {
+						clamped := prospectiveCap
+						companion = &clamped
+					}
+					reasoning := fmt.Sprintf(
 						"queue_depth grew for %d consecutive ticks — adding writer (%d → %d)",
 						queueGrowthLookback, cur.WriteAheadWriters, next,
-					),
+					)
+					if companion != nil {
+						reasoning += fmt.Sprintf(
+							" with atomic chunk_size clamp (%d → %d; cap ratcheted to %d)",
+							cur.ChunkSize, *companion, prospectiveCap,
+						)
+					}
+					return &Decision{
+						Knob:               "write_ahead_writers",
+						PreviousValue:      cur.WriteAheadWriters,
+						NewValue:           next,
+						CompanionChunkSize: companion,
+						nextMaxChunkSize:   prospectiveCap,
+						Reasoning:          reasoning,
+					}
 				}
 			}
 		}
@@ -455,8 +515,12 @@ func (c *Controller) Evaluate(now time.Time) *Decision {
 		}
 	}
 
-	// Rule 4: idle CPU + stable throughput → grow chunk_size.
-	if !c.safetyOnly && latest.CPUPercent < idleCPUThreshold && c.knobReady("chunk_size", now) && throughputStable(recent) {
+	// Rule 4: authorized resource growth requires a positive cap and a known,
+	// healthy memory-pressure reading. Missing analysis, protocol-only limits,
+	// and telemetry failures all fail closed (#709).
+	if !c.safetyOnly && c.allowResourceGrowth && c.maxChunkSize > 0 &&
+		latest.MemoryPressureKnown && latest.MemoryPercent < writerAddMemoryInterlockThreshold &&
+		latest.CPUPercent < idleCPUThreshold && c.knobReady("chunk_size", now) && throughputStable(recent) {
 		next := growChunk(cur.ChunkSize, chunkGrowFactor, c.maxChunkSize)
 		if next > cur.ChunkSize {
 			return &Decision{
@@ -487,15 +551,36 @@ func (c *Controller) apply(d *Decision) error {
 		update.ChunkSize = &d.NewValue
 	case "write_ahead_writers":
 		update.WriteAheadWriters = &d.NewValue
+		if d.CompanionChunkSize != nil {
+			if *d.CompanionChunkSize <= 0 {
+				return fmt.Errorf("invalid companion chunk_size %d", *d.CompanionChunkSize)
+			}
+			update.ChunkSize = d.CompanionChunkSize
+		}
 	default:
 		return fmt.Errorf("unknown knob %q", d.Knob)
 	}
 	if err := c.tuner.Update(update); err != nil {
 		return err
 	}
-	switch d.Knob {
-	case "chunk_size":
-		c.chunkSizeCooldownUntil = c.nowFn().Add(controllerCooldown)
+
+	now := c.nowFn()
+	chunkChanged := d.Knob == "chunk_size" || d.CompanionChunkSize != nil
+	if d.Knob == "write_ahead_writers" && d.NewValue > d.PreviousValue && d.nextMaxChunkSize > 0 {
+		// Evaluate already ratcheted against the current cap. Commit only after
+		// the atomic runtime update succeeds. Defensively ratchet again so an
+		// externally constructed Decision cannot raise the cap.
+		nextCap := d.nextMaxChunkSize
+		if c.maxChunkSize > 0 && nextCap > c.maxChunkSize {
+			nextCap = c.maxChunkSize
+		}
+		c.maxChunkSize = nextCap
+		if c.minChunkSize > c.maxChunkSize {
+			c.minChunkSize = c.maxChunkSize
+		}
+	}
+	if chunkChanged {
+		c.chunkSizeCooldownUntil = now.Add(controllerCooldown)
 		// Reset the WAW throughput-aware baseline (#199): chunk-size
 		// changes alter the throughput surface, so prior WAW-add
 		// throughput isn't comparable. Treating the next WAW add as
@@ -503,8 +588,9 @@ func (c *Controller) apply(d *Decision) error {
 		// is to keep a stale baseline that suppresses legit adds.
 		c.lastWAWAddThroughput = 0
 		c.lastWAWAddThroughputSet = false
-	case "write_ahead_writers":
-		c.writeAheadCooldownUntil = c.nowFn().Add(controllerCooldown)
+	}
+	if d.Knob == "write_ahead_writers" {
+		c.writeAheadCooldownUntil = now.Add(controllerCooldown)
 		// #199 throughput-aware gate (Codex review on PR #201):
 		//   - Increase (Rule 2 add): snapshot the recent-window mean
 		//     throughput so the next Rule 2 evaluation can verify
@@ -516,7 +602,7 @@ func (c *Controller) apply(d *Decision) error {
 		//     reading and could suppress the recovery indefinitely.
 		// Use the same lookback window Evaluate uses for queueGrew so
 		// the comparison is apples-to-apples.
-		if d.NewValue > d.PreviousValue {
+		if d.NewValue > d.PreviousValue && !chunkChanged {
 			c.lastWAWAddThroughput = meanThroughput(c.collector.GetRecentMetrics(queueGrowthLookback))
 			c.lastWAWAddThroughputSet = true
 		} else {
@@ -540,11 +626,15 @@ func (c *Controller) recordAdjustment(d *Decision, before PerformanceSnapshot) {
 	if c.adjustmentRecorder == nil || c.runID == "" || d == nil {
 		return
 	}
+	adjustments := map[string]int{d.Knob: d.NewValue}
+	if d.CompanionChunkSize != nil {
+		adjustments["chunk_size"] = *d.CompanionChunkSize
+	}
 	record := AdjustmentRecord{
 		AdjustmentNumber: c.nextAdjustmentNumberValue(),
 		Timestamp:        c.nowFn(),
 		Action:           d.Knob,
-		Adjustments:      map[string]int{d.Knob: d.NewValue},
+		Adjustments:      adjustments,
 		ThroughputBefore: before.Throughput,
 		CPUBefore:        before.CPUPercent,
 		MemoryBefore:     before.MemoryPercent,
@@ -676,8 +766,15 @@ func newErrorsSinceLast(recent []PerformanceSnapshot) int {
 // is fine here — for shrink we'd rather over-shrink slightly than
 // undershrink. minChunkSize=0 falls back to a defensive 1.
 func shrinkChunk(cur int, factor float64, minChunkSize int) int {
+	if cur <= 0 {
+		return cur
+	}
 	if minChunkSize <= 0 {
 		minChunkSize = 1
+	}
+	if minChunkSize > cur {
+		// A stale floor must never turn the memory-pressure rule into growth.
+		minChunkSize = cur
 	}
 	scaled := int(float64(cur) * factor)
 	if scaled < minChunkSize {
@@ -691,14 +788,22 @@ func shrinkChunk(cur int, factor float64, minChunkSize int) int {
 // small `cur × 1.10` doesn't stay at the original value (Copilot
 // review on PR #194 — int truncation could pin chunk_size at 1).
 // Guarantees at least +1 when growth would otherwise round to a
-// no-op. maxChunkSize=0 means uncapped (the driver-layer
-// HardChunkLimit isn't always known to the controller).
+// no-op. A non-positive maxChunkSize disables growth; zero is never treated
+// as unlimited. The cap comparison happens before converting a potentially
+// overflowing float back to int, so extreme values converge exactly at cap.
 func growChunk(cur int, factor float64, maxChunkSize int) int {
-	scaled := int(float64(cur)*factor + 0.5) // round half up
+	if cur <= 0 || factor <= 1 || math.IsNaN(factor) || maxChunkSize <= 0 || cur >= maxChunkSize {
+		return cur
+	}
+	scaledFloat := float64(cur)*factor + 0.5 // round half up
+	if math.IsInf(scaledFloat, 0) || scaledFloat >= float64(maxChunkSize) {
+		return maxChunkSize
+	}
+	scaled := int(scaledFloat)
 	if scaled <= cur {
 		scaled = cur + 1
 	}
-	if maxChunkSize > 0 && scaled > maxChunkSize {
+	if scaled > maxChunkSize {
 		scaled = maxChunkSize
 	}
 	return scaled
