@@ -9,22 +9,33 @@ import (
 
 // SaveRuntimeAdjustment saves an AI adjustment record for historical analysis.
 func (s *State) SaveRuntimeAdjustment(runID string, record RuntimeAdjustmentRecord) error {
+	effectMeasured := 0
+	var throughputAfter, effectPercent, cpuAfter, memoryAfter any
+	if record.EffectMeasured {
+		effectMeasured = 1
+		throughputAfter = record.ThroughputAfter
+		effectPercent = record.EffectPercent
+		cpuAfter = record.CPUAfter
+		memoryAfter = record.MemoryAfter
+	}
+
 	_, err := s.db.Exec(`
 		INSERT INTO ai_adjustments (
 			run_id, adjustment_number, timestamp, action, adjustments,
-			throughput_before, throughput_after, effect_percent,
+			throughput_before, effect_measured, throughput_after, effect_percent,
 			cpu_before, cpu_after, memory_before, memory_after,
 			reasoning, confidence
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id, adjustment_number) DO UPDATE SET
+			effect_measured = excluded.effect_measured,
 			throughput_after = excluded.throughput_after,
 			effect_percent = excluded.effect_percent,
 			cpu_after = excluded.cpu_after,
 			memory_after = excluded.memory_after
 	`, runID, record.AdjustmentNumber, record.Timestamp.Format("2006-01-02 15:04:05"),
 		record.Action, record.AdjustmentsJSON(),
-		record.ThroughputBefore, record.ThroughputAfter, record.EffectPercent,
-		record.CPUBefore, record.CPUAfter, record.MemoryBefore, record.MemoryAfter,
+		record.ThroughputBefore, effectMeasured, throughputAfter, effectPercent,
+		record.CPUBefore, cpuAfter, record.MemoryBefore, memoryAfter,
 		record.Reasoning, record.Confidence)
 	return err
 }
@@ -41,7 +52,7 @@ func (s *State) queryWithOptionalLimit(query string, limit int, args ...any) (*s
 func (s *State) GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
-		       throughput_before, throughput_after, effect_percent,
+		       throughput_before, effect_measured, throughput_after, effect_percent,
 		       cpu_before, cpu_after, memory_before, memory_after,
 		       reasoning, confidence
 		FROM ai_adjustments
@@ -58,7 +69,7 @@ func (s *State) GetRuntimeAdjustments(limit int) ([]RuntimeAdjustmentRecord, err
 func (s *State) GetRuntimeAdjustmentsByAction(action string, limit int) ([]RuntimeAdjustmentRecord, error) {
 	rows, err := s.queryWithOptionalLimit(`
 		SELECT id, run_id, adjustment_number, timestamp, action, adjustments,
-		       throughput_before, throughput_after, effect_percent,
+		       throughput_before, effect_measured, throughput_after, effect_percent,
 		       cpu_before, cpu_after, memory_before, memory_after,
 		       reasoning, confidence
 		FROM ai_adjustments
@@ -79,12 +90,13 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, er
 		var r RuntimeAdjustmentRecord
 		var timestampStr, adjustmentsStr string
 		var reasoning, confidence sql.NullString
+		var effectMeasured int
 		var throughputBefore, throughputAfter, effectPercent sql.NullFloat64
 		var cpuBefore, cpuAfter, memoryBefore, memoryAfter sql.NullFloat64
 
 		if err := rows.Scan(
 			&r.ID, &r.RunID, &r.AdjustmentNumber, &timestampStr, &r.Action, &adjustmentsStr,
-			&throughputBefore, &throughputAfter, &effectPercent,
+			&throughputBefore, &effectMeasured, &throughputAfter, &effectPercent,
 			&cpuBefore, &cpuAfter, &memoryBefore, &memoryAfter,
 			&reasoning, &confidence,
 		); err != nil {
@@ -97,23 +109,25 @@ func (s *State) scanAIAdjustments(rows *sql.Rows) ([]RuntimeAdjustmentRecord, er
 		if throughputBefore.Valid {
 			r.ThroughputBefore = throughputBefore.Float64
 		}
-		if throughputAfter.Valid {
-			r.ThroughputAfter = throughputAfter.Float64
-		}
-		if effectPercent.Valid {
-			r.EffectPercent = effectPercent.Float64
-		}
 		if cpuBefore.Valid {
 			r.CPUBefore = cpuBefore.Float64
-		}
-		if cpuAfter.Valid {
-			r.CPUAfter = cpuAfter.Float64
 		}
 		if memoryBefore.Valid {
 			r.MemoryBefore = memoryBefore.Float64
 		}
-		if memoryAfter.Valid {
-			r.MemoryAfter = memoryAfter.Float64
+		if effectMeasured == 1 {
+			if throughputAfter.Valid && effectPercent.Valid && cpuAfter.Valid && memoryAfter.Valid {
+				r.EffectMeasured = true
+				r.ThroughputAfter = throughputAfter.Float64
+				r.EffectPercent = effectPercent.Float64
+				r.CPUAfter = cpuAfter.Float64
+				r.MemoryAfter = memoryAfter.Float64
+			} else {
+				logging.WarnEvent("runtime adjustment marked measured with incomplete after metrics; treating as unmeasured",
+					"run_id", r.RunID,
+					"adjustment_number", r.AdjustmentNumber,
+				)
+			}
 		}
 		if reasoning.Valid {
 			r.Reasoning = reasoning.String

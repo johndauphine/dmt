@@ -143,6 +143,9 @@ func TestControllerApplyPersistsRuntimeAdjustment(t *testing.T) {
 	if record.Adjustments["chunk_size"] != 37500 {
 		t.Fatalf("record adjustments = %+v", record.Adjustments)
 	}
+	if record.EffectMeasured {
+		t.Fatal("initial controller record must remain unmeasured")
+	}
 	if record.ThroughputBefore != 500_000 || record.CPUBefore != 30 || record.MemoryBefore != 95 {
 		t.Fatalf("record metrics = %+v", record)
 	}

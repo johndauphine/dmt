@@ -63,14 +63,15 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 		FinalThroughput: 2500,
 		ChunkRetryCount: 2,
 	}}, []checkpoint.RuntimeAdjustmentRecord{{
-		Action:       "increase",
-		Adjustments:  map[string]int{"workers": 6, "invented_knob": 99},
-		CPUBefore:    70,
-		CPUAfter:     82,
-		MemoryBefore: 512,
-		MemoryAfter:  640,
-		Reasoning:    "runtime kept known knob",
-		Confidence:   "deterministic",
+		Action:         "increase",
+		Adjustments:    map[string]int{"workers": 6, "invented_knob": 99},
+		CPUBefore:      70,
+		CPUAfter:       82,
+		MemoryBefore:   512,
+		MemoryAfter:    640,
+		EffectMeasured: true,
+		Reasoning:      "runtime kept known knob",
+		Confidence:     "deterministic",
 	}})
 
 	data, err := json.Marshal(payload)
@@ -104,7 +105,8 @@ func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing
 	if got := payload.RuntimeAdjustments[0].Adjustments["workers"]; got != 6 {
 		t.Fatalf("runtime workers adjustment = %d, want 6", got)
 	}
-	if payload.RuntimeAdjustments[0].CPUBefore != 70 || payload.RuntimeAdjustments[0].Confidence != "deterministic" {
+	if payload.RuntimeAdjustments[0].CPUBefore != 70 || payload.RuntimeAdjustments[0].CPUAfter == nil ||
+		*payload.RuntimeAdjustments[0].CPUAfter != 82 || payload.RuntimeAdjustments[0].Confidence != "deterministic" {
 		t.Fatalf("runtime metrics were not preserved: %+v", payload.RuntimeAdjustments[0])
 	}
 	if payload.RuntimeAdjustments[0].Reasoning != "" {
@@ -155,6 +157,107 @@ func TestBuildPerformancePayloadOmitsNonDeterministicRuntimeAdjustments(t *testi
 	if payload.ObservedMetrics.RuntimeAdjustmentCount != 1 {
 		t.Fatalf("observed metrics should count only deterministic runtime adjustments: %+v", payload.ObservedMetrics)
 	}
+}
+
+func TestBuildPerformancePayloadPreservesRuntimeAdjustmentMeasurementState(t *testing.T) {
+	payload := BuildPerformancePayload(driver.AutoTuneInput{}, driver.SmartConfigSuggestions{}, nil, []checkpoint.RuntimeAdjustmentRecord{
+		{
+			Action: "workers", Adjustments: map[string]int{"workers": 2}, Confidence: "deterministic",
+			ThroughputAfter: 101, EffectPercent: 102, CPUAfter: 103, MemoryAfter: 104,
+			// Legacy rows can contain phantom numeric after-values while the new
+			// explicit state remains false.
+			EffectMeasured: false,
+		},
+		{
+			Action: "workers", Adjustments: map[string]int{"workers": 3}, Confidence: "deterministic",
+			// A newly recorded adjustment is also unmeasured until observation.
+			EffectMeasured: false,
+		},
+		{
+			Action: "workers", Adjustments: map[string]int{"workers": 4}, Confidence: "deterministic",
+			EffectMeasured: true,
+		},
+		{
+			Action: "workers", Adjustments: map[string]int{"workers": 5}, Confidence: "deterministic",
+			ThroughputAfter: 201, EffectPercent: 202, CPUAfter: 203, MemoryAfter: 204,
+			EffectMeasured: true,
+		},
+	})
+
+	if len(payload.RuntimeAdjustments) != 4 {
+		t.Fatalf("runtime adjustments len = %d, want 4", len(payload.RuntimeAdjustments))
+	}
+	for i := 0; i < 2; i++ {
+		summary := payload.RuntimeAdjustments[i]
+		if summary.ThroughputAfter != nil || summary.EffectPercent != nil ||
+			summary.CPUAfter != nil || summary.MemoryAfter != nil {
+			t.Fatalf("unmeasured adjustment %d exposed after metrics: %+v", i, summary)
+		}
+	}
+	measuredZero := payload.RuntimeAdjustments[2]
+	if measuredZero.ThroughputAfter == nil || *measuredZero.ThroughputAfter != 0 ||
+		measuredZero.EffectPercent == nil || *measuredZero.EffectPercent != 0 ||
+		measuredZero.CPUAfter == nil || *measuredZero.CPUAfter != 0 ||
+		measuredZero.MemoryAfter == nil || *measuredZero.MemoryAfter != 0 {
+		t.Fatalf("measured zeros were not retained: %+v", measuredZero)
+	}
+	measuredNonZero := payload.RuntimeAdjustments[3]
+	if measuredNonZero.ThroughputAfter == nil || *measuredNonZero.ThroughputAfter != 201 ||
+		measuredNonZero.EffectPercent == nil || *measuredNonZero.EffectPercent != 202 ||
+		measuredNonZero.CPUAfter == nil || *measuredNonZero.CPUAfter != 203 ||
+		measuredNonZero.MemoryAfter == nil || *measuredNonZero.MemoryAfter != 204 {
+		t.Fatalf("measured values were not retained independently: %+v", measuredNonZero)
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded struct {
+		RuntimeAdjustments []map[string]any `json:"runtime_adjustments"`
+	}
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	afterFields := []string{"throughput_after", "effect_percent", "cpu_after", "memory_after"}
+	for i := 0; i < 2; i++ {
+		for _, field := range afterFields {
+			if _, exists := encoded.RuntimeAdjustments[i][field]; exists {
+				t.Errorf("unmeasured adjustment %d serialized %s: %s", i, field, data)
+			}
+		}
+	}
+	for _, field := range afterFields {
+		value, exists := encoded.RuntimeAdjustments[2][field]
+		if !exists || value != float64(0) {
+			t.Errorf("measured-zero %s = %#v, exists=%v; payload=%s", field, value, exists, data)
+		}
+	}
+}
+
+func TestRuntimeAdjustmentNumberValidationHonorsOptionalAfterMetrics(t *testing.T) {
+	payload := PerformancePayload{
+		RuntimeAdjustments: []RuntimeAdjustmentSummary{{
+			Action:      "workers",
+			Adjustments: map[string]int{"workers": 4},
+		}},
+	}
+	assertZeroAllowed := func(t *testing.T, want bool) {
+		t.Helper()
+		for name, numbers := range map[string]map[string]bool{
+			"general": numbersForPerformanceGeneralText(payload),
+			"target":  numbersForPerformanceTarget(payload, "workers", true),
+		} {
+			if got := numbers["0"]; got != want {
+				t.Errorf("%s validation allows zero = %v, want %v; numbers=%v", name, got, want, numbers)
+			}
+		}
+	}
+
+	assertZeroAllowed(t, false)
+	measuredZero := 0.0
+	payload.RuntimeAdjustments[0].CPUAfter = &measuredZero
+	assertZeroAllowed(t, true)
 }
 
 func TestBuildPerformancePayloadIncludesRedactedDBTuningEvidence(t *testing.T) {

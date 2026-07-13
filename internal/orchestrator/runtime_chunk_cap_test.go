@@ -167,6 +167,9 @@ func TestClampInitialRuntimeChunkSizeUpdatesAndRecords(t *testing.T) {
 	if len(records) != 1 || records[0].Action != "chunk_size" || records[0].Adjustments["chunk_size"] != 400 {
 		t.Fatalf("initial clamp records = %+v, want one chunk_size=400 adjustment", records)
 	}
+	if records[0].EffectMeasured {
+		t.Fatal("initial runtime cap record must remain unmeasured")
+	}
 	if !strings.Contains(records[0].Reasoning, "1000") || !strings.Contains(records[0].Reasoning, "400") {
 		t.Fatalf("initial clamp reasoning = %q, want original and capped values", records[0].Reasoning)
 	}

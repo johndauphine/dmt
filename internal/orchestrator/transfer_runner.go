@@ -164,9 +164,10 @@ func clampInitialRuntimeChunkSize(
 
 		if recorder != nil {
 			record := monitor.AdjustmentRecord{
-				Timestamp:   time.Now(),
-				Action:      "chunk_size",
-				Adjustments: map[string]int{"chunk_size": cap},
+				Timestamp:      time.Now(),
+				Action:         "chunk_size",
+				Adjustments:    map[string]int{"chunk_size": cap},
+				EffectMeasured: false,
 				Reasoning: fmt.Sprintf(
 					"initial chunk_size %d exceeded runtime memory/protocol cap %d — clamped before transfer",
 					before.ChunkSize, cap,

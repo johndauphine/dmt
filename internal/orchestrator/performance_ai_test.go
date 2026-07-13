@@ -386,6 +386,9 @@ func TestRecordingWriteErrorAdjusterPersistsStructuralAdjustment(t *testing.T) {
 	if record.Adjustments["chunk_size"] != 500 {
 		t.Fatalf("record adjustments = %+v", record.Adjustments)
 	}
+	if record.EffectMeasured {
+		t.Fatal("initial structural write-error record must remain unmeasured")
+	}
 	if strings.Contains(record.Reasoning, "orders") || strings.Contains(record.Reasoning, "too many placeholders") {
 		t.Fatalf("record reasoning should omit table name and raw error text: %q", record.Reasoning)
 	}

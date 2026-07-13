@@ -337,6 +337,7 @@ type RuntimeAdjustmentRecord struct {
 	Action           string         `json:"action"`
 	Adjustments      map[string]int `json:"adjustments"`
 	ThroughputBefore float64        `json:"throughput_before"`
+	EffectMeasured   bool           `json:"effect_measured"`
 	ThroughputAfter  float64        `json:"throughput_after"`
 	EffectPercent    float64        `json:"effect_percent"`
 	CPUBefore        float64        `json:"cpu_before"`
