@@ -126,7 +126,7 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 	var bestPR, bestRAB int
 	bestPred := math.Inf(-1)
 
-	for w := 1; w <= maxWAWForGrid; w++ {
+	for w := 1; w <= maxLearnableWAW; w++ {
 		for _, cs := range csCandidates {
 			csRows := rowsFromBytes(cs, representativeWidth)
 			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {

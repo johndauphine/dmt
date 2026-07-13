@@ -244,6 +244,9 @@ func (c *Config) applyDefaults() error {
 	if c.autoConfig.CPUCores == 0 {
 		c.autoConfig.CPUCores = runtime.NumCPU()
 	}
+	if c.autoConfig.Platform == "" {
+		c.autoConfig.Platform = driver.DetectPlatform()
+	}
 	// Resolve the host/cgroup-aware memory envelope exactly once. A user cap is
 	// only a ceiling on a successful snapshot; detection failures are fatal so
 	// a finite container can never silently inherit host capacity (#708).
@@ -301,48 +304,20 @@ func (c *Config) applyDefaults() error {
 		}
 	}
 
-	// Auto-detect CPU cores for workers
-	// Formula: (cores - 2), clamped to 4-12 for optimal performance
-	// This aligns with Rust implementation for consistent behavior
-	if c.Migration.Workers == 0 {
-		cores := runtime.NumCPU()
-		c.Migration.Workers = cores - 2
-		if c.Migration.Workers < 4 {
-			c.Migration.Workers = 4
-		}
-		if c.Migration.Workers > 12 {
-			c.Migration.Workers = 12 // Cap at 12 workers (diminishing returns beyond)
-		}
+	if c.Migration.TargetMode == "" {
+		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
-	if c.Migration.MaxPartitions == 0 {
-		c.Migration.MaxPartitions = c.Migration.Workers // Match workers
-	}
-	// Auto-tune chunk size based on available RAM
-	// Formula: 75K base + 25K per 8GB RAM, clamped to 50K-200K
-	// This matches the Rust implementation for consistent behavior
-	memoryBudgetMB := c.autoConfig.MemoryEnvelope.BudgetMB
-	if c.Migration.ChunkSize == 0 {
-		ramGB := float64(c.autoConfig.MemoryEnvelope.AvailableMB) / 1024.0
-		chunkSize := 75000 + int(ramGB*25000.0/8.0)
-		if chunkSize < 50000 {
-			chunkSize = 50000
-		}
-		if chunkSize > 200000 {
-			chunkSize = 200000
-		}
-		c.Migration.ChunkSize = chunkSize
-	}
-	if c.Migration.LargeTableThreshold == 0 {
-		c.Migration.LargeTableThreshold = 5000000
-	}
+
+	// All performance/restartability defaults come from the same finalized
+	// no-history policy as runtime tuning (#711). Pinned concurrency is part of
+	// finalization so a generated chunk is clamped for the tuple that will run.
+	c.applyDefaultPolicy(c.loadTimeDefaultOutput())
+
 	if c.Migration.DataDir == "" {
 		home, _ := os.UserHomeDir()
 		c.Migration.DataDir = filepath.Join(home, ".dmt")
 	} else {
 		c.Migration.DataDir = expandTilde(c.Migration.DataDir)
-	}
-	if c.Migration.TargetMode == "" {
-		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
 	c.Migration.applyDeleteDefaults()
 	if c.Migration.CreateIndexes == nil {
@@ -380,42 +355,8 @@ func (c *Config) applyDefaults() error {
 	if c.Migration.SampleSize == 0 {
 		c.Migration.SampleSize = 100 // Default sample size for validation
 	}
-	// Auto-tune parallel writers based on target driver defaults
-	if c.Migration.WriteAheadWriters == 0 {
-		if targetDriver, err := driver.Get(c.Target.Type); err == nil {
-			defaults := targetDriver.Defaults()
-			if defaults.ScaleWritersWithCores {
-				// Scale with CPU cores (e.g., PostgreSQL COPY handles parallelism well)
-				cores := c.autoConfig.CPUCores
-				writers := cores / 4
-				if writers < defaults.WriteAheadWriters {
-					writers = defaults.WriteAheadWriters
-				}
-				c.Migration.WriteAheadWriters = writers
-			} else {
-				// Use fixed value (e.g., MSSQL TABLOCK serializes writes)
-				c.Migration.WriteAheadWriters = defaults.WriteAheadWriters
-			}
-		} else {
-			// Fallback for unknown drivers - log warning as this may indicate a config issue
-			logging.Warn("Unknown target driver type '%s', using fallback WriteAheadWriters=2", c.Target.Type)
-			c.Migration.WriteAheadWriters = 2
-		}
-	}
-	// Auto-tune parallel readers based on CPU cores
-	if c.Migration.ParallelReaders == 0 {
-		cores := c.autoConfig.CPUCores
-		readers := cores / 4
-		if readers < 2 {
-			readers = 2
-		}
-		c.Migration.ParallelReaders = readers
-	}
 	// MSSQLRowsPerBatch defaults to chunk_size (set after chunk_size is finalized)
 	// This is applied later since it depends on ChunkSize being set
-	if c.Migration.ReadAheadBuffers == 0 {
-		c.Migration.ReadAheadBuffers = defaultReadAheadBuffers(memoryBudgetMB, c.Migration.Workers, c.Migration.ChunkSize)
-	}
 
 	// Derive generated connection pools exactly after workers/readers/writers
 	// reach their effective defaults. User and secrets values are pins, even
@@ -444,37 +385,7 @@ func (c *Config) applyDefaults() error {
 		c.Target.ChunkSize = c.Migration.ChunkSize
 	}
 
-	// Auto-tune UpsertMergeChunkSize for upsert mode
-	// This controls UPDATE+INSERT chunk size for MSSQL target
-	// Smaller chunks reduce SQL Server memory pressure during merge operations
-	if c.Migration.UpsertMergeChunkSize == 0 {
-		if c.Migration.TargetMode == "upsert" {
-			// For upsert mode, use smaller chunks based on the shared budget
-			// Base: 5000 rows, scale up with memory (max 20000)
-			memoryFactor := memoryBudgetMB / 1024 // Scale factor per GB
-			if memoryFactor < 1 {
-				memoryFactor = 1
-			}
-			c.Migration.UpsertMergeChunkSize = int(5000 * memoryFactor)
-			if c.Migration.UpsertMergeChunkSize > 20000 {
-				c.Migration.UpsertMergeChunkSize = 20000
-			}
-			if c.Migration.UpsertMergeChunkSize < 2000 {
-				c.Migration.UpsertMergeChunkSize = 2000
-			}
-		} else {
-			// Not in upsert mode - set a sensible default anyway
-			c.Migration.UpsertMergeChunkSize = 10000
-		}
-	}
-
-	// Restartability defaults
-	if c.Migration.CheckpointFrequency == 0 {
-		c.Migration.CheckpointFrequency = 10 // Save progress every 10 chunks
-	}
-	if c.Migration.MaxRetries == 0 {
-		c.Migration.MaxRetries = 3 // Retry failed tables 3 times
-	}
+	// Non-policy restartability retention remains a config concern.
 	if c.Migration.HistoryRetentionDays == 0 {
 		c.Migration.HistoryRetentionDays = 30 // Keep run history for 30 days
 	}
@@ -567,25 +478,4 @@ func (c *Config) applyDefaults() error {
 
 	c.fillDefaultTunableProvenance()
 	return nil
-}
-
-func defaultReadAheadBuffers(memoryBudgetMB int64, workers, chunkSize int) int {
-	// Scale buffers: enough to keep writers fed, but within memory limits.
-	// The formula-only path uses the unobserved 500-byte width fallback;
-	// saturating products ensure pathological inputs clamp to the safe floor
-	// instead of wrapping into an apparently tiny chunk.
-	budgetBytes := saturatingMemoryMultiply(memoryBudgetMB, 1024*1024)
-	bytesPerChunk := saturatingMemoryMultiply(int64(chunkSize), 500)
-	denominator := saturatingMemoryMultiply(int64(workers), bytesPerChunk)
-	if budgetBytes <= 0 || denominator <= 0 {
-		return 4
-	}
-	buffers := budgetBytes / denominator
-	if buffers < 4 {
-		return 4
-	}
-	if buffers > 32 {
-		return 32
-	}
-	return int(buffers)
 }

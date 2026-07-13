@@ -181,7 +181,7 @@ type AdjustmentRecord struct {
 }
 
 // defaultMaxWAW is the cap the controller uses when ControllerOptions
-// doesn't set one. Mirrors internal/tuning's maxWAWForGrid (8) — most
+// doesn't set one. Mirrors internal/tuning's maxLearnableWAW (8) — most
 // parallel-write workloads peak well below 8 and additional writers
 // just add contention.
 const defaultMaxWAW = 8

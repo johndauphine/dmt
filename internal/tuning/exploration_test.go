@@ -91,7 +91,7 @@ func TestExplorationCells_BalancedDesign(t *testing.T) {
 	if len(unique) != 8 {
 		t.Errorf("first eight cells contain %d unique cells, want 8", len(unique))
 	}
-	for _, waw := range []int{1, 2, 3, maxWAWForGrid} {
+	for _, waw := range []int{1, 2, 3, maxLearnableWAW} {
 		if wawCounts[waw] != 2 {
 			t.Errorf("first-eight WAW=%d count = %d, want 2", waw, wawCounts[waw])
 		}
@@ -116,7 +116,7 @@ func TestExplorationCells_BalancedDesign(t *testing.T) {
 		allReaderCounts[readerCandidate{ParallelReaders: cell.ParallelReaders, ReadAheadBuffers: cell.ReadAheadBuffers}]++
 		allFractionCounts[cell.CSFraction]++
 	}
-	for _, waw := range []int{1, 2, 3, maxWAWForGrid} {
+	for _, waw := range []int{1, 2, 3, maxLearnableWAW} {
 		if allWAWCounts[waw] != 3 {
 			t.Errorf("twelve-run WAW=%d count = %d, want 3", waw, allWAWCounts[waw])
 		}
@@ -257,7 +257,7 @@ func TestApplyGridExploration_IgnoresHistoricalRetries(t *testing.T) {
 		applyGridExploration(&out, in, profile, i, i)
 		wawCounts[out.WriteAheadWriters]++
 	}
-	for _, waw := range []int{1, 2, 3, maxWAWForGrid} {
+	for _, waw := range []int{1, 2, 3, maxLearnableWAW} {
 		if wawCounts[waw] != 3 {
 			t.Errorf("planned grid WAW=%d count = %d, want 3 (counts %v)", waw, wawCounts[waw], wawCounts)
 		}
@@ -356,12 +356,12 @@ func TestExplorationCells_RegressionReady(t *testing.T) {
 			t.Fatalf("fitRegression: %v", err)
 		}
 		low := model.Predict(1, 25_000_000, 2, 4, "mssql", "postgres", "", avgRowBytes)
-		high := model.Predict(maxWAWForGrid, 25_000_000, 2, 4, "mssql", "postgres", "", avgRowBytes)
+		high := model.Predict(maxLearnableWAW, 25_000_000, 2, 4, "mssql", "postgres", "", avgRowBytes)
 		if math.IsNaN(low) || math.IsInf(low, 0) || math.IsNaN(high) || math.IsInf(high, 0) {
 			t.Fatalf("WAW predictions must be finite: low=%v high=%v", low, high)
 		}
 		if high <= low {
-			t.Errorf("WAW-generated direction lost with other inputs fixed: predict(WAW=%d)=%.2f <= predict(WAW=1)=%.2f", maxWAWForGrid, high, low)
+			t.Errorf("WAW-generated direction lost with other inputs fixed: predict(WAW=%d)=%.2f <= predict(WAW=1)=%.2f", maxLearnableWAW, high, low)
 		}
 	})
 
@@ -553,9 +553,9 @@ func TestApplyEpsilonPerturbation_NudgesOneStep(t *testing.T) {
 			t.Errorf("trial %d: perturbation didn't change anything (WAW=%d, CS=%d)",
 				trial, out.WriteAheadWriters, out.ChunkSize)
 		}
-		if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxWAWForGrid {
+		if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxLearnableWAW {
 			t.Errorf("trial %d: WAW=%d outside valid range [1..%d]",
-				trial, out.WriteAheadWriters, maxWAWForGrid)
+				trial, out.WriteAheadWriters, maxLearnableWAW)
 		}
 		if out.ChunkSize < 1 {
 			t.Errorf("trial %d: ChunkSize=%d below 1", trial, out.ChunkSize)

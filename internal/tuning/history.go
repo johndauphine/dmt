@@ -24,10 +24,11 @@ const minRunsPerBin = 3
 // WITH retries is real load contention and stays in the pool.
 const outlierFloorRatio = 0.5
 
-// maxWAWForGrid bounds the WAW search grid used by the regression's
-// argmax. Most parallel-write workloads peak well below 8; PR3+ can
-// derive this dynamically from cores or driver hints.
-const maxWAWForGrid = 8
+// maxLearnableWAW is the inclusive upper bound for every tuner-managed
+// write-ahead-writer value. Keeping the baseline, exploration grid,
+// perturbation, and regression validation on one constant prevents the
+// default policy from producing history outside the learnable domain.
+const maxLearnableWAW = 8
 
 // retryRateExclusionThreshold is the per-WAW retry rate above which the
 // selection paths (smoothed bins, regression argmax) refuse to recommend

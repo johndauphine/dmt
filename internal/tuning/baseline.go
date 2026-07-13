@@ -20,7 +20,6 @@ func baseline(in Input, profile DriverProfile) Output {
 	waw := baselineWAW(in, profile)
 
 	chunkSize := chunkRowsFromProfile(profile, in.representativeRowBytes())
-	maxSourceConnections, maxTargetConnections := ConnectionPoolSizes(workers, parallelReaders, waw)
 
 	return Output{
 		Workers:              workers,
@@ -30,27 +29,26 @@ func baseline(in Input, profile DriverProfile) Output {
 		ParallelReaders:      parallelReaders,
 		MaxPartitions:        workers,
 		LargeTableThreshold:  largeTableThreshold,
-		MaxSourceConnections: maxSourceConnections,
-		MaxTargetConnections: maxTargetConnections,
 		UpsertMergeChunkSize: upsertMergeChunkSize,
 		CheckpointFrequency:  checkpointFrequency,
 		MaxRetries:           maxRetries,
 	}
 }
 
-// baselineWorkers preserves the cores-2 formula and its historical upper
-// bound. ConnectionPoolSizes independently saturates every derived pool.
+// baselineWorkers keeps the canonical cores-2 policy within the established
+// load-time floor and high-core safety ceiling.
 func baselineWorkers(cpuCores int) int {
-	if cpuCores <= 4 {
-		return 2
+	const (
+		minWorkers = 4
+		maxWorkers = 12
+	)
+	if cpuCores <= minWorkers+2 {
+		return minWorkers
 	}
-	workers := cpuCores - 2 // safe because cpuCores is now positive and > 4.
-	maxInt := int(^uint(0) >> 1)
-	maxWorkers := (maxInt - 4) / 2
-	if workers > maxWorkers {
+	if cpuCores >= maxWorkers+2 {
 		return maxWorkers
 	}
-	return workers
+	return cpuCores - 2
 }
 
 // baselineWAW computes the platform- and core-aware baseline write_ahead_writers.
@@ -70,6 +68,8 @@ func baselineWorkers(cpuCores int) int {
 //     transport layer's per-flow throughput is lower there and parallel
 //     writers contend; on native Linux (Unix socket or real NIC) the
 //     scaled value applies.
+//  5. Cap tuner-managed values at maxLearnableWAW so defaults stay inside
+//     the exploration, regression, and runtime-controller domain.
 func baselineWAW(in Input, profile DriverProfile) int {
 	waw := profile.BaselineWAW
 	if profile.ScaleWritersWithCores && in.CPUCores > 0 {
@@ -85,6 +85,9 @@ func baselineWAW(in Input, profile DriverProfile) int {
 		if waw > 1 {
 			waw = 1
 		}
+	}
+	if waw > maxLearnableWAW {
+		waw = maxLearnableWAW
 	}
 	return waw
 }

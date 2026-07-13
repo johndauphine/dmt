@@ -66,11 +66,16 @@ func aggregateByWAW(rows []HistoryRecord) []wawBin {
 // eligible bin was found. ok=false when every bin clears the retry-rate
 // threshold (or no bins exist).
 func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
-	// Global mean across all bins (including ones with retries — they're
+	// Legacy history can contain values outside the current learnable domain.
+	// Keep those rows available to pinned-override advice, but do not let them
+	// become selection candidates or distort the selector's global prior.
+	learnable := learnableWAWBins(bins)
+
+	// Global mean across learnable bins (including ones with retries — they're
 	// real measurements; just not eligible for selection).
 	var total float64
 	var totalN int
-	for _, b := range bins {
+	for _, b := range learnable {
 		total += b.MeanThroughput * float64(b.TotalRuns)
 		totalN += b.TotalRuns
 	}
@@ -81,11 +86,11 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 
 	// Median throughput across eligible bins (#204 — gates the retry-rate
 	// filter so high-retry-but-also-high-throughput WAWs aren't excluded).
-	median := binMedianThroughput(bins)
+	median := binMedianThroughput(learnable)
 
 	bestWAW := -1
 	bestShrunk := -1.0
-	for _, b := range bins {
+	for _, b := range learnable {
 		if isHighRetryRateBin(b, median) {
 			continue // retry-rate AND below-median throughput (issue #204)
 		}
@@ -110,14 +115,25 @@ func selectWAW(bins []wawBin) (waw int, shrunkMean float64, ok bool) {
 // runs to clear the minRunsPerBin floor. Used in the reasoning string
 // so a reviewer can see how thin the basis was.
 func countEligibleBins(bins []wawBin) int {
-	median := binMedianThroughput(bins)
+	learnable := learnableWAWBins(bins)
+	median := binMedianThroughput(learnable)
 	n := 0
-	for _, b := range bins {
+	for _, b := range learnable {
 		if !isHighRetryRateBin(b, median) && b.TotalRuns >= minRunsPerBin {
 			n++
 		}
 	}
 	return n
+}
+
+func learnableWAWBins(bins []wawBin) []wawBin {
+	learnable := make([]wawBin, 0, len(bins))
+	for _, b := range bins {
+		if b.WAW >= 1 && b.WAW <= maxLearnableWAW {
+			learnable = append(learnable, b)
+		}
+	}
+	return learnable
 }
 
 // isHighRetryRateBin is the bin-level mirror of wawsWithHighRetryRate.

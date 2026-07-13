@@ -1,6 +1,8 @@
 package driver
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"reflect"
@@ -8,9 +10,50 @@ import (
 	"time"
 
 	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/internal/dbconfig"
 
 	"github.com/johndauphine/dmt/internal/tuning"
 )
+
+type tuningProfileTestDriver struct {
+	name             string
+	defaults         DriverDefaults
+	staticChunkLimit int
+	lastRowBytes     int64
+}
+
+func (d *tuningProfileTestDriver) Name() string             { return d.name }
+func (d *tuningProfileTestDriver) Aliases() []string        { return nil }
+func (d *tuningProfileTestDriver) Defaults() DriverDefaults { return d.defaults }
+func (d *tuningProfileTestDriver) Dialect() Dialect         { return nil }
+func (d *tuningProfileTestDriver) NewReader(*dbconfig.SourceConfig, int) (Reader, error) {
+	return nil, nil
+}
+func (d *tuningProfileTestDriver) NewWriter(*dbconfig.TargetConfig, int, WriterOptions) (Writer, error) {
+	return nil, nil
+}
+func (d *tuningProfileTestDriver) HardChunkLimit(rowBytes int64) int {
+	d.lastRowBytes = rowBytes
+	return d.staticChunkLimit
+}
+func (d *tuningProfileTestDriver) ProbeTarget(context.Context, *sql.DB) TargetProbe {
+	return TargetProbe{}
+}
+func (d *tuningProfileTestDriver) PreFlight(context.Context, *sql.DB, PreFlightRequest) []PreFlightFinding {
+	return nil
+}
+
+func registerTuningProfileTestDriver(t *testing.T, d Driver) {
+	t.Helper()
+	registryMu.Lock()
+	drivers[d.Name()] = d
+	registryMu.Unlock()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		delete(drivers, d.Name())
+		registryMu.Unlock()
+	})
+}
 
 // mockHistoryProvider satisfies the trimmed TuningHistoryProvider interface
 // (PR #175 dropped the per-WAW / per-chunk_size aggregate methods; the new
@@ -310,6 +353,77 @@ func TestBuildAutoTuneInput_NoEnvelopeDoesNotInventMemory(t *testing.T) {
 	if input.AvgRowBytes != 500 || input.UncappedAvgRowBytes != 500 || input.RepresentativeRowBytes != 500 ||
 		input.SafetyRowBytes != 500 || input.SafetyRowBytesKnown {
 		t.Errorf("direct input did not carry explicit unproven width fallbacks: %+v", input)
+	}
+}
+
+func TestBuildTuningProfile_KnownTargetMatchesAnalyzer(t *testing.T) {
+	d := &tuningProfileTestDriver{
+		name: "tuning-profile-known-test",
+		defaults: DriverDefaults{
+			WriteAheadWriters:     3,
+			ScaleWritersWithCores: true,
+			OptimumBulkChunkBytes: 12_000_000,
+		},
+		staticChunkLimit: 321,
+	}
+	registerTuningProfileTestDriver(t, d)
+
+	const rowBytes int64 = 8 * 1024
+	want := BuildTuningProfile(d.name, rowBytes, TargetProbe{})
+	if want.Name != d.name || want.BaselineWAW != 3 || !want.ScaleWritersWithCores ||
+		want.OptimumBulkChunkBytes != 12_000_000 || want.HardChunkLimit != 321 {
+		t.Fatalf("known target profile did not carry driver policy: %+v", want)
+	}
+	if d.lastRowBytes != rowBytes {
+		t.Fatalf("HardChunkLimit row width = %d, want %d", d.lastRowBytes, rowBytes)
+	}
+
+	analyzer := NewSmartConfigAnalyzer(nil, "source-test")
+	analyzer.SetTargetDBType(d.name)
+	analyzer.safetyRowBytes = rowBytes
+	if got := analyzer.toTuningProfile(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("analyzer profile = %+v, shared builder = %+v", got, want)
+	}
+}
+
+func TestBuildTuningProfile_UnknownTargetMatchesAnalyzer(t *testing.T) {
+	const target = "tuning-profile-missing-test"
+	want := tuning.DriverProfile{Name: target, BaselineWAW: 2}
+	if got := BuildTuningProfile(target, fallbackRowBytes, TargetProbe{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("unknown target profile = %+v, want conservative fallback %+v", got, want)
+	}
+
+	analyzer := NewSmartConfigAnalyzer(nil, "source-test")
+	analyzer.SetTargetDBType(target)
+	if got := analyzer.toTuningProfile(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("unknown analyzer profile = %+v, shared fallback = %+v", got, want)
+	}
+}
+
+func TestBuildTuningProfile_ProbeOverridesStaticLimit(t *testing.T) {
+	d := &tuningProfileTestDriver{
+		name:             "tuning-profile-probe-test",
+		defaults:         DriverDefaults{WriteAheadWriters: 2},
+		staticChunkLimit: 321,
+	}
+	registerTuningProfileTestDriver(t, d)
+
+	const rowBytes int64 = 8 * 1024
+	probe := TargetProbe{MaxAllowedPacket: 4 * 1024 * 1024}
+	got := BuildTuningProfile(d.name, rowBytes, probe)
+	if got.HardChunkLimit != 409 {
+		t.Fatalf("packet-derived HardChunkLimit = %d, want 409 (probe must override static 321)", got.HardChunkLimit)
+	}
+
+	analyzer := NewSmartConfigAnalyzer(nil, "source-test")
+	analyzer.SetTargetDBType(d.name)
+	analyzer.safetyRowBytes = rowBytes
+	analyzer.SetTargetProbe(probe)
+	if analyzerProfile := analyzer.toTuningProfile(); !reflect.DeepEqual(analyzerProfile, got) {
+		t.Fatalf("probed analyzer profile = %+v, shared builder = %+v", analyzerProfile, got)
+	}
+	if limit := analyzer.TargetHardChunkLimit(); limit != got.HardChunkLimit {
+		t.Fatalf("TargetHardChunkLimit = %d, shared builder = %d", limit, got.HardChunkLimit)
 	}
 }
 

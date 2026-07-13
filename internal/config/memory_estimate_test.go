@@ -5,6 +5,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 // TestApplyRuntimeMemoryLimit_SetsGOMEMLIMIT verifies the #462 wiring: the
@@ -78,9 +80,12 @@ func TestEstimateMemoryUsageSaturatesOverflow(t *testing.T) {
 	}
 }
 
-func TestDefaultReadAheadBuffersOverflowClampsToSafeFloor(t *testing.T) {
-	maxInt := int(^uint(0) >> 1)
-	if got := defaultReadAheadBuffers(math.MaxInt64, maxInt, maxInt); got != 4 {
-		t.Fatalf("overflowing default RAB calculation = %d, want safe floor 4", got)
+func TestDefaultPolicyReadAheadBuffersUsesCanonicalValue(t *testing.T) {
+	out := tuning.DefaultOutput(
+		tuning.Input{CPUCores: 64, Platform: "linux", RepresentativeRowBytes: 500},
+		tuning.DriverProfile{BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000},
+	)
+	if out.ReadAheadBuffers != 4 {
+		t.Fatalf("canonical default RAB = %d, want 4", out.ReadAheadBuffers)
 	}
 }

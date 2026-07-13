@@ -46,6 +46,14 @@ type AutoConfig struct {
 	AvailableMemoryMB    int64
 	EffectiveMaxMemoryMB int64
 	CPUCores             int
+	Platform             string
+
+	// DefaultPolicyReasoning is the load-time tuner's clamp/width audit trail.
+	// DefaultPolicyChunkPinned distinguishes an authoritative explicit chunk
+	// from the generated chunk described by that policy. Both are runtime-only
+	// diagnostics and are intentionally omitted from serialized config.
+	DefaultPolicyReasoning   string
+	DefaultPolicyChunkPinned bool
 
 	// Raw user-supplied values captured after YAML/template expansion and
 	// before secrets, driver defaults, smartconfig, or runtime tuning apply.
@@ -295,13 +303,13 @@ type MigrationConfig struct {
 	// pre-#226 behavior (row-count validation only). See the Validation
 	// struct's field docs for the full mode taxonomy.
 	Validation           ValidationConfig `yaml:"validation"`
-	ReadAheadBuffers     int              `yaml:"read_ahead_buffers"`      // Number of chunks to read ahead (default=8)
+	ReadAheadBuffers     int              `yaml:"read_ahead_buffers"`      // Number of chunks to read ahead (default=4)
 	WriteAheadWriters    int              `yaml:"write_ahead_writers"`     // Number of parallel writers per job (default=2)
 	ParallelReaders      int              `yaml:"parallel_readers"`        // Number of parallel readers per job (default=2)
 	UpsertMergeChunkSize int              `yaml:"upsert_merge_chunk_size"` // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
 	MaxMemoryMB          int64            `yaml:"max_memory_mb"`           // Optional ceiling on the resolved automatic memory budget
 	// Restartability settings
-	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=10)
+	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=20)
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)

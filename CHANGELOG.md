@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Load-time defaults and cold-start tuning now share one memory-clamped policy:
+  workers stay within 4-12, generated writers stay within the learnable 1-8
+  range, and auto chunk sizing accounts for effective pinned concurrency while
+  preserving explicit user values and their truthful diagnostics (#711).
+
 - Connection-pool sizing now uses one overflow-safe formula across tuning and
   configuration, rederives generated limits from the effective worker/reader/
   writer tuple, applies final limits to live pools, and persists the limits

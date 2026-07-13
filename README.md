@@ -699,7 +699,7 @@ Cross-engine migrations (PG→MSSQL) preserve spatial reference systems:
 - **Keyset pagination** - efficient partitioning for integer PKs (no OFFSET degradation)
 - **ROW_NUMBER pagination** - automatic fallback for composite/varchar PKs
 - **Parallel partitioning** - large tables split via NTILE for concurrent transfer
-- **Auto-tuning** - workers, connection pools, and buffers sized from CPU/RAM
+- **Auto-tuning** - workers and pools sized from CPU, with target-aware chunk sizing constrained by the memory budget
 - **Memory-bounded** - configurable memory cap (default: 70% available RAM)
 
 ### AI Integration
@@ -942,10 +942,10 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `workers` | No | CPU cores - 2 | Number of parallel transfer workers (min: 2, max: 32) |
-| `chunk_size` | No | Auto-scaled by RAM | Rows per chunk (100,000 - 500,000) |
-| `max_partitions` | No | Same as `workers` | Maximum partitions for large table parallelism |
-| `large_table_threshold` | No | 5,000,000 | Tables with more rows than this are partitioned |
+| `workers` | No | CPU cores - 2, clamped to 4-12 | Number of parallel transfer workers |
+| `chunk_size` | No | Target- and memory-aware | Rows per chunk, derived from the target driver's preferred byte size and estimated row width, then reduced when required by the memory budget |
+| `max_partitions` | No | Same as effective `workers` | Maximum partitions for large table parallelism |
+| `large_table_threshold` | No | 1,000,000 | Tables with more rows than this are partitioned |
 
 **Table Filtering:**
 
@@ -1025,8 +1025,8 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `read_ahead_buffers` | No | Auto-scaled (4-32) | Number of chunks to buffer ahead of writers |
-| `write_ahead_writers` | No | 2 | Parallel writers per job. Use 8 for PG→MSSQL |
+| `read_ahead_buffers` | No | 4 | Number of chunks to buffer ahead of writers |
+| `write_ahead_writers` | No | Target/platform-aware (1-8) | Parallel writers per job; generated values stay within the tuner's learnable range |
 | `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
 | `source.chunk_size` | No | Same as `migration.chunk_size` | Batch size for reading from source database |
 | `target.chunk_size` | No | Same as `migration.chunk_size` | Batch size for writing to target database |
@@ -1327,7 +1327,7 @@ Votes                          OK 52928720 rows
 3. **Transfer data** - Uses optimal pagination strategy per table:
    - **Keyset pagination** for single-column integer PKs (fastest)
    - **ROW_NUMBER pagination** for composite/varchar PKs
-4. **Save progress** - Checkpoints every 10 chunks to SQLite for resume capability
+4. **Save progress** - Checkpoints every 20 chunks by default to SQLite for resume capability
 5. **Finalize** - Resets identity sequences, creates primary keys
 6. **Create indexes** - Non-PK indexes (if enabled)
 7. **Create foreign keys** - FK constraints (if enabled)
@@ -1348,7 +1348,7 @@ The tool saves progress to enable efficient resume after failures. By default, s
   other recoverable run without deleting its checkpoint history
 
 ### Chunk-level resume
-- Progress saved every 10 chunks during transfer
+- Progress saved every 20 chunks by default during transfer
 - On resume, continues from the exact last successful chunk
 - Partial data from interrupted chunks is cleaned up automatically
 
