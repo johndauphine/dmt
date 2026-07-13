@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Runtime chunk growth now uses a recomputable memory/protocol cap derived
+  from the unified envelope and observed widest-table width. Writer growth
+  atomically applies any required chunk clamp, while missing analysis,
+  unknown pressure, protocol-only limits, and one-row over-budget fallbacks
+  disable resource growth (#709).
+
 - Runtime memory rules now use the more constrained host or finite-cgroup
   pressure instead of Go heap allocation divided by runtime-reserved memory.
   Failed or unavailable telemetry is explicit and cannot authorize writer

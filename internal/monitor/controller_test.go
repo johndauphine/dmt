@@ -24,8 +24,27 @@ func fixedClock(t time.Time) func() time.Time {
 // inject metrics via the collector's append (test-only) helper.
 func newTestController(t *testing.T, opts ControllerOptions) (*Controller, *MetricsCollector, transfer.RuntimeTuner) {
 	t.Helper()
+	// Legacy controller tests predate fail-closed resource growth. Keep those
+	// fixtures explicitly authorized while tests for the new defaults use
+	// newTestControllerExact below.
+	if opts.MaxChunkSize <= 0 {
+		opts.MaxChunkSize = 1_000_000
+	}
+	opts.AllowResourceGrowth = true
+	if opts.RecomputeMaxChunkSize == nil {
+		cap := opts.MaxChunkSize
+		opts.RecomputeMaxChunkSize = func(_, _, _ int) int { return cap }
+	}
+	return newTestControllerExact(t, opts)
+}
+
+// newTestControllerExact preserves ControllerOptions exactly, including the
+// fail-closed zero values introduced by #709.
+func newTestControllerExact(t *testing.T, opts ControllerOptions) (*Controller, *MetricsCollector, transfer.RuntimeTuner) {
+	t.Helper()
 	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
 		ChunkSize:         50000,
+		Workers:           4,
 		WriteAheadWriters: 2,
 		ReadAheadBuffers:  4,
 		ParallelReaders:   2,
@@ -58,6 +77,8 @@ func snap(memPct, cpuPct float64, queueDepth, errorCount int, throughput float64
 		ErrorCount:          errorCount,
 		Throughput:          throughput,
 		CurrentConfig: ConfigSnapshot{
+			Workers:           4,
+			ReadAheadBuffers:  4,
 			ChunkSize:         chunk,
 			WriteAheadWriters: waw,
 		},
@@ -461,6 +482,280 @@ func TestController_ChunkGrow_FromSmallValue_AlwaysIncreases(t *testing.T) {
 	}
 	if d.NewValue <= 10 {
 		t.Errorf("growChunk(10, 1.10) must increase, not stay at 10; got %d (#194 regression)", d.NewValue)
+	}
+}
+
+// ---------- #709: memory-safe resource-growth authorization ----------
+
+func TestController_ResourceGrowthFailsClosed(t *testing.T) {
+	t.Run("rule 2 requires explicit authorization", func(t *testing.T) {
+		c, col, _ := newTestControllerExact(t, ControllerOptions{
+			MaxChunkSize: 100_000,
+			RecomputeMaxChunkSize: func(_, _, _ int) int {
+				return 100_000
+			},
+		})
+		pushSnapshots(col,
+			snap(50, 80, 5, 0, 500_000, 50_000, 2),
+			snap(50, 80, 8, 0, 500_000, 50_000, 2),
+			snap(50, 80, 12, 0, 500_000, 50_000, 2),
+		)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("unauthorized writer growth decision = %+v, want nil", d)
+		}
+	})
+
+	t.Run("rule 4 requires explicit authorization", func(t *testing.T) {
+		c, col, _ := newTestControllerExact(t, ControllerOptions{MaxChunkSize: 100_000})
+		pushSnapshots(col,
+			snap(50, 30, 0, 0, 500_000, 50_000, 2),
+			snap(50, 30, 0, 0, 500_000, 50_000, 2),
+			snap(50, 30, 0, 0, 500_000, 50_000, 2),
+		)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("unauthorized chunk growth decision = %+v, want nil", d)
+		}
+	})
+
+	t.Run("rule 4 requires positive cap", func(t *testing.T) {
+		c, col, _ := newTestControllerExact(t, ControllerOptions{AllowResourceGrowth: true})
+		pushSnapshots(col,
+			snap(50, 30, 0, 0, 500_000, 50_000, 2),
+			snap(50, 30, 0, 0, 500_000, 50_000, 2),
+			snap(50, 30, 0, 0, 500_000, 50_000, 2),
+		)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("zero-cap chunk growth decision = %+v, want nil", d)
+		}
+	})
+
+	t.Run("rule 4 requires known healthy pressure", func(t *testing.T) {
+		c, col, _ := newTestControllerExact(t, ControllerOptions{
+			AllowResourceGrowth: true,
+			MaxChunkSize:        100_000,
+		})
+		snapshots := []PerformanceSnapshot{
+			snap(0, 30, 0, 0, 500_000, 50_000, 2),
+			snap(0, 30, 0, 0, 500_000, 50_000, 2),
+			snap(0, 30, 0, 0, 500_000, 50_000, 2),
+		}
+		for i := range snapshots {
+			snapshots[i].MemoryPressureKnown = false
+		}
+		pushSnapshots(col, snapshots...)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("unknown-pressure chunk growth decision = %+v, want nil", d)
+		}
+	})
+
+	t.Run("rule 4 rejects known pressure at interlock", func(t *testing.T) {
+		c, col, _ := newTestControllerExact(t, ControllerOptions{
+			AllowResourceGrowth: true,
+			MaxChunkSize:        100_000,
+		})
+		pushSnapshots(col,
+			snap(80, 30, 0, 0, 500_000, 50_000, 2),
+			snap(80, 30, 0, 0, 500_000, 50_000, 2),
+			snap(80, 30, 0, 0, 500_000, 50_000, 2),
+		)
+		if d := c.Evaluate(time.Now()); d != nil {
+			t.Fatalf("known pressure at 80%% interlock decision = %+v, want nil", d)
+		}
+	})
+}
+
+func TestController_Rule4SaturatesExactlyAtCap(t *testing.T) {
+	c, col, tuner := newTestControllerExact(t, ControllerOptions{
+		AllowResourceGrowth: true,
+		MaxChunkSize:        60_000,
+	})
+	t0 := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(t0))
+	pushSnapshots(col,
+		snap(50, 30, 0, 0, 500_000, 50_000, 2),
+		snap(50, 30, 0, 0, 500_000, 50_000, 2),
+		snap(50, 30, 0, 0, 500_000, 50_000, 2),
+	)
+	d := c.Evaluate(t0)
+	if d == nil || d.NewValue != 55_000 {
+		t.Fatalf("first growth decision = %+v, want chunk_size 55000", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	t1 := t0.Add(controllerCooldown + time.Second)
+	c.SetClock(fixedClock(t1))
+	pushSnapshots(col,
+		snap(50, 30, 0, 0, 500_000, 55_000, 2),
+		snap(50, 30, 0, 0, 500_000, 55_000, 2),
+		snap(50, 30, 0, 0, 500_000, 55_000, 2),
+	)
+	d = c.Evaluate(t1)
+	if d == nil || d.NewValue != 60_000 {
+		t.Fatalf("cap growth decision = %+v, want exact chunk_size cap 60000", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("cap apply: %v", err)
+	}
+	if got := tuner.Snapshot().ChunkSize; got != 60_000 {
+		t.Fatalf("runtime chunk_size = %d, want 60000", got)
+	}
+
+	t2 := t1.Add(controllerCooldown + time.Second)
+	pushSnapshots(col,
+		snap(50, 30, 0, 0, 500_000, 60_000, 2),
+		snap(50, 30, 0, 0, 500_000, 60_000, 2),
+		snap(50, 30, 0, 0, 500_000, 60_000, 2),
+	)
+	if d := c.Evaluate(t2); d != nil {
+		t.Fatalf("growth at cap decision = %+v, want nil", d)
+	}
+}
+
+func TestController_WAWIncreaseRatchetsCapAndClampsAtomically(t *testing.T) {
+	var records []AdjustmentRecord
+	var callbackTuple [3]int
+	c, col, tuner := newTestControllerExact(t, ControllerOptions{
+		AllowResourceGrowth: true,
+		MaxChunkSize:        50_000,
+		MinChunkSize:        45_000,
+		RecomputeMaxChunkSize: func(workers, readAheadBuffers, writeAheadWriters int) int {
+			callbackTuple = [3]int{workers, readAheadBuffers, writeAheadWriters}
+			return 40_000
+		},
+		RunID: "run-709",
+		AdjustmentRecorder: func(_ string, record AdjustmentRecord) error {
+			records = append(records, record)
+			return nil
+		},
+	})
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	c.SetClock(fixedClock(now))
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50_000, 2),
+		snap(50, 80, 8, 0, 500_000, 50_000, 2),
+		snap(50, 80, 12, 0, 500_000, 50_000, 2),
+	)
+	d := c.Evaluate(now)
+	if d == nil || d.Knob != "write_ahead_writers" || d.NewValue != 3 {
+		t.Fatalf("writer decision = %+v, want WAW 2 -> 3", d)
+	}
+	if callbackTuple != [3]int{4, 4, 3} {
+		t.Fatalf("cap callback tuple = %v, want [workers=4 RAB=4 WAW=3]", callbackTuple)
+	}
+	if d.CompanionChunkSize == nil || *d.CompanionChunkSize != 40_000 || d.nextMaxChunkSize != 40_000 {
+		t.Fatalf("atomic companion/cap decision = %+v, want chunk and cap 40000", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	got := tuner.Snapshot()
+	if got.WriteAheadWriters != 3 || got.ChunkSize != 40_000 {
+		t.Fatalf("runtime tuple = %+v, want WAW=3 and chunk_size=40000", got)
+	}
+	if c.maxChunkSize != 40_000 || c.minChunkSize != 40_000 {
+		t.Fatalf("committed cap/floor = %d/%d, want 40000/40000", c.maxChunkSize, c.minChunkSize)
+	}
+	if c.writeAheadCooldownUntil.IsZero() || c.chunkSizeCooldownUntil.IsZero() {
+		t.Fatalf("atomic update must start both cooldowns: WAW=%v chunk=%v", c.writeAheadCooldownUntil, c.chunkSizeCooldownUntil)
+	}
+	if len(records) != 1 || records[0].Adjustments["write_ahead_writers"] != 3 || records[0].Adjustments["chunk_size"] != 40_000 {
+		t.Fatalf("atomic adjustment record = %+v", records)
+	}
+
+	// Simulate a later external/retry clamp below the newly ratcheted floor.
+	// High pressure must never turn Rule 1 into a floor-driven increase.
+	later := now.Add(controllerCooldown + time.Second)
+	pushSnapshots(col, snap(95, 80, 0, 0, 500_000, 35_000, 3))
+	if d := c.Evaluate(later); d != nil {
+		t.Fatalf("high-pressure decision below ratcheted floor = %+v, want nil (never grow)", d)
+	}
+}
+
+func TestController_WAWIncreaseZeroProspectiveCapIsSuppressed(t *testing.T) {
+	c, col, _ := newTestControllerExact(t, ControllerOptions{
+		AllowResourceGrowth: true,
+		MaxChunkSize:        50_000,
+		RecomputeMaxChunkSize: func(_, _, _ int) int {
+			return 0 // prospective tuple cannot fit even a one-row chunk
+		},
+	})
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50_000, 2),
+		snap(50, 80, 8, 0, 500_000, 50_000, 2),
+		snap(50, 80, 12, 0, 500_000, 50_000, 2),
+	)
+	if d := c.Evaluate(time.Now()); d != nil {
+		t.Fatalf("zero prospective cap decision = %+v, want nil", d)
+	}
+}
+
+func TestController_WAWIncreaseFailureDoesNotCommitRatchet(t *testing.T) {
+	records := 0
+	c, col, _ := newTestControllerExact(t, ControllerOptions{
+		AllowResourceGrowth: true,
+		MaxChunkSize:        50_000,
+		MinChunkSize:        45_000,
+		RecomputeMaxChunkSize: func(_, _, _ int) int {
+			return 40_000
+		},
+		RunID: "run-709",
+		AdjustmentRecorder: func(_ string, _ AdjustmentRecord) error {
+			records++
+			return nil
+		},
+	})
+	pushSnapshots(col,
+		snap(50, 80, 5, 0, 500_000, 50_000, 2),
+		snap(50, 80, 8, 0, 500_000, 50_000, 2),
+		snap(50, 80, 12, 0, 500_000, 50_000, 2),
+	)
+	d := c.Evaluate(time.Now())
+	if d == nil || d.CompanionChunkSize == nil {
+		t.Fatalf("setup: expected atomic WAW+chunk decision, got %+v", d)
+	}
+	c.tuner = &failingTuner{}
+	if err := c.apply(d); err == nil {
+		t.Fatal("expected tuner update failure")
+	}
+	if c.maxChunkSize != 50_000 || c.minChunkSize != 45_000 {
+		t.Fatalf("failed update committed cap/floor = %d/%d", c.maxChunkSize, c.minChunkSize)
+	}
+	if !c.writeAheadCooldownUntil.IsZero() || !c.chunkSizeCooldownUntil.IsZero() {
+		t.Fatalf("failed update committed cooldowns: WAW=%v chunk=%v", c.writeAheadCooldownUntil, c.chunkSizeCooldownUntil)
+	}
+	if records != 0 {
+		t.Fatalf("failed update persisted %d adjustment records, want 0", records)
+	}
+}
+
+func TestController_WAWDecreaseNeverRaisesCap(t *testing.T) {
+	callbackCalls := 0
+	c, col, _ := newTestControllerExact(t, ControllerOptions{
+		AllowResourceGrowth: true,
+		MaxChunkSize:        40_000,
+		RecomputeMaxChunkSize: func(_, _, _ int) int {
+			callbackCalls++
+			return 100_000
+		},
+	})
+	pushSnapshots(col,
+		snap(50, 80, 0, 0, 500_000, 40_000, 3),
+		snap(50, 80, 0, 1, 500_000, 40_000, 3),
+	)
+	d := c.Evaluate(time.Now())
+	if d == nil || d.Knob != "write_ahead_writers" || d.NewValue != 2 {
+		t.Fatalf("backoff decision = %+v, want WAW 3 -> 2", d)
+	}
+	if err := c.apply(d); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if c.maxChunkSize != 40_000 {
+		t.Fatalf("WAW decrease raised cap to %d, want 40000", c.maxChunkSize)
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("WAW decrease recomputed cap %d times, want 0", callbackCalls)
 	}
 }
 
@@ -998,6 +1293,7 @@ func TestShrinkChunk(t *testing.T) {
 		{"floored_at_default_when_no_min_set", 10000, 5000, 0.75, 7500},
 		{"hits_floor", 6000, 5000, 0.75, 5000},
 		{"defensive_floor_at_1_when_min_zero", 1, 0, 0.75, 1},
+		{"stale_floor_never_grows", 1000, 5000, 0.75, 1000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1016,10 +1312,12 @@ func TestGrowChunk(t *testing.T) {
 		maxChunkSize int
 		want         int
 	}{
-		{"basic_grow", 1000, 1.10, 0, 1100},
+		{"basic_grow", 1000, 1.10, 10000, 1100},
 		{"capped", 1000, 1.10, 1050, 1050},
-		{"small_value_rounds_up_min_plus_one", 10, 1.10, 0, 11}, // 10×1.10 = 11 exactly with rounding
-		{"min_increment_guard_at_cur_1", 1, 1.10, 0, 2},         // (1×1.10)+0.5 = 1.6, int = 1; guard kicks → 2
+		{"small_value_rounds_up_min_plus_one", 10, 1.10, 10000, 11}, // 10×1.10 = 11 exactly with rounding
+		{"min_increment_guard_at_cur_1", 1, 1.10, 10000, 2},         // (1×1.10)+0.5 = 1.6, int = 1; guard kicks → 2
+		{"zero_cap_disables_growth", 1000, 1.10, 0, 1000},
+		{"saturates_at_extreme_cap", int(^uint(0)>>1) - 100, 1.10, int(^uint(0) >> 1), int(^uint(0) >> 1)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

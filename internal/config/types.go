@@ -362,6 +362,16 @@ type MigrationConfig struct {
 	// review on #166).
 	TargetHardChunkLimit int `yaml:"-" json:"-"`
 
+	// Runtime chunk-safety metadata is derived from the immutable memory
+	// envelope plus the current run's smartconfig analysis (#709). It is kept
+	// out of YAML and JSON because it is neither user configuration nor stable
+	// resume identity; failed/manual analysis must start from the zero-value,
+	// growth-disabled state instead of reusing an earlier run's evidence.
+	RuntimeChunkSizeCap        int   `yaml:"-" json:"-"`
+	RuntimeSafetyRowBytes      int64 `yaml:"-" json:"-"`
+	RuntimeSafetyRowBytesKnown bool  `yaml:"-" json:"-"`
+	RuntimeChunkGrowthAllowed  bool  `yaml:"-" json:"-"`
+
 	// Explore forces an exploration probe on this run instead of the
 	// tuner's argmax pick (PR2 #179 wires the actual exploration policy;
 	// PR1 #175 just plumbs the flag through CLI → config → orchestrator).

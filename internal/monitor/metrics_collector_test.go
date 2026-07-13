@@ -205,7 +205,7 @@ func TestCollectSnapshotUsesEffectiveMemoryPressureAndLogsSource(t *testing.T) {
 		CgroupCurrentMB: 950, // cgroup pressure 95% wins
 		Source:          "cgroup-v2",
 	}}
-	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000})
+	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{ChunkSize: 1000, Workers: 6})
 	mc := NewMetricsCollector(tuner, 30*time.Second, reader)
 
 	var logs bytes.Buffer
@@ -227,6 +227,9 @@ func TestCollectSnapshotUsesEffectiveMemoryPressureAndLogsSource(t *testing.T) {
 	}
 	if reader.reads != 1 {
 		t.Fatalf("memory reader calls = %d, want 1", reader.reads)
+	}
+	if got.CurrentConfig.Workers != 6 {
+		t.Fatalf("current config workers = %d, want 6 from runtime snapshot", got.CurrentConfig.Workers)
 	}
 	logText := logs.String()
 	if !strings.Contains(logText, "memory_pressure=95.0% source=cgroup-v2") || !strings.Contains(logText, "heap_alloc=") {

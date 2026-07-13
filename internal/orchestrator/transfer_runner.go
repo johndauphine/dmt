@@ -117,22 +117,81 @@ func NewTransferRunner(
 
 func (r *TransferRunner) runtimeControllerOptions(runID string, recorder *runtimeAdjustmentRecorder) monitor.ControllerOptions {
 	opts := monitor.ControllerOptions{
-		SafetyOnly: r.tuningTier == tuning.TierExploration,
-		RunID:      runID,
+		SafetyOnly:            r.tuningTier == tuning.TierExploration,
+		MaxChunkSize:          r.config.Migration.RuntimeChunkSizeCap,
+		AllowResourceGrowth:   r.config.Migration.RuntimeChunkGrowthAllowed,
+		RecomputeMaxChunkSize: r.config.RuntimeChunkGrowthCapFor,
+		RunID:                 runID,
 	}
 	if recorder != nil {
 		opts.NextAdjustmentNumber = recorder.nextNumber
 		opts.AdjustmentRecorder = recorder.record
 	}
-	if hardCap := r.config.Migration.TargetHardChunkLimit; hardCap > 0 {
-		opts.MaxChunkSize = hardCap
-		// Keep the memory-pressure floor below a protocol cap; otherwise a
-		// shrink decision could paradoxically increase chunk_size.
-		if hardCap < monitor.DefaultMinChunkSize {
-			opts.MinChunkSize = hardCap
+	if runtimeCap := r.config.Migration.RuntimeChunkSizeCap; runtimeCap > 0 {
+		// Keep the memory-pressure floor below the memory/protocol cap;
+		// otherwise a shrink decision could paradoxically increase chunk_size.
+		if runtimeCap < monitor.DefaultMinChunkSize {
+			opts.MinChunkSize = runtimeCap
 		}
 	}
 	return opts
+}
+
+// clampInitialRuntimeChunkSize applies the config-derived memory/protocol cap
+// before any controller or transfer goroutine can observe the tuner. The tuner
+// update is the runtime state transition; config's three compatibility views
+// are synchronized only after it succeeds. Persistence is telemetry: a record
+// failure is warned about but cannot roll back an already-applied safety clamp.
+func clampInitialRuntimeChunkSize(
+	tuner transfer.RuntimeTuner,
+	cfg *config.Config,
+	recorder *runtimeAdjustmentRecorder,
+) error {
+	if tuner == nil || cfg == nil {
+		return nil
+	}
+	cap := cfg.Migration.RuntimeChunkSizeCap
+	if cap <= 0 {
+		return nil
+	}
+
+	before := tuner.Snapshot()
+	if before.ChunkSize > cap {
+		clamped := cap
+		if err := tuner.Update(transfer.RuntimeUpdate{ChunkSize: &clamped}); err != nil {
+			return fmt.Errorf("clamping initial runtime chunk_size from %d to %d: %w", before.ChunkSize, cap, err)
+		}
+
+		if recorder != nil {
+			record := monitor.AdjustmentRecord{
+				Timestamp:   time.Now(),
+				Action:      "chunk_size",
+				Adjustments: map[string]int{"chunk_size": cap},
+				Reasoning: fmt.Sprintf(
+					"initial chunk_size %d exceeded runtime memory/protocol cap %d — clamped before transfer",
+					before.ChunkSize, cap,
+				),
+				Confidence: "deterministic",
+			}
+			if err := recorder.record("", record); err != nil {
+				logging.Warn("failed to persist initial runtime chunk_size clamp: %v", err)
+			}
+		}
+	}
+
+	// These fields are compatibility views used by setup/logging and by paths
+	// that do not consult RuntimeTuner directly. Keep all of them at or below
+	// the same cap that the transfer runtime will enforce.
+	if cfg.Migration.ChunkSize > cap {
+		cfg.Migration.ChunkSize = cap
+	}
+	if cfg.Source.ChunkSize > cap {
+		cfg.Source.ChunkSize = cap
+	}
+	if cfg.Target.ChunkSize > cap {
+		cfg.Target.ChunkSize = cap
+	}
+	return nil
 }
 
 // RunResult contains the outcome of a transfer run.
@@ -256,6 +315,7 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	// without runtime adjustment enabled.
 	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
 		ChunkSize:            r.config.Migration.ChunkSize,
+		Workers:              r.config.Migration.Workers,
 		ReadAheadBuffers:     r.config.Migration.ReadAheadBuffers,
 		ParallelReaders:      r.config.Migration.ParallelReaders,
 		WriteAheadWriters:    r.config.Migration.WriteAheadWriters,
@@ -263,6 +323,9 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		UpsertMergeChunkSize: r.config.Migration.UpsertMergeChunkSize,
 	})
 	runtimeAdjustments := newRuntimeAdjustmentRecorder(r.state, runID)
+	if err := clampInitialRuntimeChunkSize(tuner, r.config, runtimeAdjustments); err != nil {
+		return nil, err
+	}
 
 	// Setup runtime parameter adjustment via the rule-based controller
 	// (#172). Replaced the AI-driven monitor in PR 172b. The controller
@@ -284,14 +347,10 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 	if adjustEnabled {
 		collector := monitor.NewMetricsCollector(tuner, adjustInterval, systemmemory.NewReader())
 
-		// Carry the probe-derived hard cap from applyTuning into the
-		// controller so growth and shrink rules can't push chunk_size
-		// past the target's protocol limit mid-migration (#166).
-		// Without this, MySQL targets with a default 4MB @@max_allowed_packet
-		// could exceed the packet via runtime growth even when the
-		// initial chunk_size was packet-safe. Codex review on #166.
-		// MaxWAW remains at its defensive default. Structural write errors
-		// still use RuleWriteErrorAdjuster below in every controller mode.
+		// Carry the recomputable memory/protocol cap from applyTuning into the
+		// controller. Growth remains disabled for protocol-only or degraded
+		// analysis paths; structural write errors still use the deterministic
+		// RuleWriteErrorAdjuster below in every controller mode (#709).
 		controllerOpts := r.runtimeControllerOptions(runID, runtimeAdjustments)
 		runtimeMonitor = monitor.NewController(tuner, collector, adjustInterval, controllerOpts)
 
