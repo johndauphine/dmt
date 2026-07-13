@@ -27,6 +27,11 @@ func (o *Orchestrator) abandonResumeAttempt(runID string, err error, startTime t
 
 // Resume continues an interrupted migration
 func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
+	// Restore the pre-safety nominal chunk before comparing the current config
+	// with the run snapshot. applyTuning repeats this as an idempotent backstop,
+	// but resume compatibility is decided before tuning begins.
+	o.config.BeginRuntimeChunkSizeProjection()
+
 	leaseState, err := o.migrationLeaseBackend()
 	if err != nil {
 		return err

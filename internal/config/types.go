@@ -98,6 +98,19 @@ type Config struct {
 	// memoryReader is injectable for deterministic config tests. Production
 	// loading leaves it nil and resolves one systemmemory.NewReader snapshot.
 	memoryReader systemmemory.Reader
+
+	// runtimeChunkProjection preserves the nominal pre-safety chunk views
+	// across repeated tuning passes on the same Config. Safety materialization
+	// mutates the public compatibility fields, so a fresh pass must restore the
+	// prior request before it can derive and apply a new cap.
+	runtimeChunkProjection runtimeChunkProjectionState
+}
+
+type runtimeChunkProjectionState struct {
+	captured  bool
+	migration int
+	source    int
+	target    int
 }
 
 // SlackConfig holds Slack notification settings.

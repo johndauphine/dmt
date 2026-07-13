@@ -11,6 +11,13 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Auto-tune now projects exploration and regression candidates through user
+  pins plus memory and protocol limits before rotation, coverage checks, and
+  prediction. Accidental effective aliases are deduplicated without losing
+  deliberate exploration replicates, and the selected chunk is materialized
+  before planning and history save so configured, persisted, and executed
+  tuples agree (#728).
+
 - Auto-tune memory enforcement now accounts for each in-scope table's
   cardinality and average row width, so tiny wide lookup tables saturate at
   their real row counts instead of collapsing the global chunk-size domain.

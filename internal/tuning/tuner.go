@@ -109,11 +109,14 @@ type Input struct {
 	ForceExplore       bool
 	ExplorationEpsilon float64
 
-	// PinnedWriteAheadWriters is the user-pinned WAW value, when the
-	// config provenance says the tuner may not adjust it (#461). Tune
-	// still computes its recommendation; this field only enables the
-	// measured override-cost advice in Output.PinnedAdvice. Nil when
-	// WAW is tuner-managed.
+	// PinnedWorkers, PinnedChunkSize, and PinnedWriteAheadWriters carry
+	// authoritative user-owned axes. PR2 of #728 projects candidates into
+	// this effective domain before scoring; the WAW pin also retains measured
+	// override-cost advice. Nil means the tuner owns the axis. Hard memory and
+	// protocol safety may still lower a pinned chunk, with requested/effective
+	// provenance retained by the config layer.
+	PinnedWorkers           *int
+	PinnedChunkSize         *int
 	PinnedWriteAheadWriters *int
 
 	// PinnedParallelReaders / PinnedReadAheadBuffers mirror the pin for
@@ -363,6 +366,7 @@ func DefaultOutput(in Input, profile DriverProfile) Output {
 // effective positive pinned concurrency values for memory and pool sizing.
 func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides DefaultOverrides) Output {
 	out := baseline(in, profile)
+	applyPinnedAxes(&out, in)
 	if overrides.Workers > 0 {
 		out.Workers = overrides.Workers
 		out.MaxPartitions = overrides.Workers
@@ -377,7 +381,7 @@ func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides Defau
 		out.ParallelReaders = overrides.ParallelReaders
 	}
 	finalizeTierAndReasoning(&out, nil, false)
-	finalizeOutput(&out, in)
+	finalizeOutput(&out, in, profile)
 	return out
 }
 
@@ -394,6 +398,7 @@ func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides Defau
 //	) → memory clamp
 func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) Output {
 	out := baseline(in, profile)
+	applyPinnedAxes(&out, in)
 
 	// Fetch + filter once so both exploration and history-selection see
 	// the same row set. Track whether the fetch actually succeeded so a
@@ -493,7 +498,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			pinnedAdvice(rows)
 		}
 		finalizeTierAndReasoning(&out, history, historyAvailable)
-		finalizeOutput(&out, in)
+		finalizeOutput(&out, in, profile)
 		return out
 	}
 
@@ -526,11 +531,11 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			appendOutlierReasoning(&out, identityFilter)
 			applyHistorySelection(&out, in, profile, identityFilter.kept)
 			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-				applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
+				applyEpsilonPerturbation(&out, in, profile, in.ExplorationEpsilon)
 			}
 			pinnedAdvice(identityFilter.kept)
 			finalizeTierAndReasoning(&out, history, historyAvailable)
-			finalizeOutput(&out, in)
+			finalizeOutput(&out, in, profile)
 			return out
 		}
 	}
@@ -563,13 +568,13 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		appendOutlierReasoning(&out, regimeFilter)
 		applyHistorySelection(&out, in, profile, rows)
 		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-			applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
+			applyEpsilonPerturbation(&out, in, profile, in.ExplorationEpsilon)
 		}
 	}
 
 	pinnedAdvice(rows)
 	finalizeTierAndReasoning(&out, history, historyAvailable)
-	finalizeOutput(&out, in)
+	finalizeOutput(&out, in, profile)
 	return out
 }
 

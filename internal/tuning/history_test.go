@@ -1034,7 +1034,7 @@ func TestApplyHistory_RegressionFallsThroughWhenNoCoverage(t *testing.T) {
 
 	applyHistory(&out, in, profile, history, DBTuning{})
 
-	if !strings.Contains(out.Reasoning, "regression skipped: every grid candidate filtered") {
+	if !strings.Contains(out.Reasoning, "regression skipped: every projected grid candidate filtered") {
 		t.Errorf("Reasoning should announce regression-tier filter-empty skip; got %q", out.Reasoning)
 	}
 	// Coverage count is non-zero in the fixture (6 distinct WAW values
@@ -1119,10 +1119,10 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 }
 
 // TestApplyHistory_RegressionRespectsHardChunkLimit verifies the argmax
-// skips CS_BYTES candidates that translate to row counts above the
-// HardChunkLimit. Critical for MySQL once the @@max_allowed_packet probe
-// lands; PR1's #166 has all drivers returning 0 today so this is a
-// future-proofing test against synthetic data.
+// projects CS_BYTES candidates down to the reachable HardChunkLimit before
+// prediction. Critical for MySQL once the @@max_allowed_packet probe lands:
+// the model must score the tuple that can actually run rather than discard
+// the entire regression domain or score an inaccessible byte target.
 func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 	in := Input{
 		CPUCores: 16, MemoryGB: 48,
@@ -1130,10 +1130,9 @@ func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 		Platform:    "linux",
 		AvgRowBytes: 500,
 	}
-	// HardChunkLimit=10 (artificially tight). All grid CS values
-	// translate to row counts > 10, so HardChunkLimit filter rejects all
-	// candidates → argmax returns ok=false → falls through to smoothed
-	// bins.
+	// HardChunkLimit=10 (artificially tight). Both requested byte anchors
+	// translate to row counts > 10 and therefore alias to the same effective
+	// chunk for each covered (WAW, PR, RAB) cell.
 	profile := DriverProfile{
 		Name:                  "postgres",
 		BaselineWAW:           2,
@@ -1141,8 +1140,6 @@ func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 		HardChunkLimit:        10,
 	}
 	out := baseline(in, profile)
-	originalWAW := out.WriteAheadWriters
-
 	rows := make([]HistoryRecord, 60)
 	for i := range rows {
 		waw := (i % 6) + 1
@@ -1162,23 +1159,23 @@ func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 
 	applyHistory(&out, in, profile, history, DBTuning{})
 
-	// Either smoothed bins picked or baseline stood; regression's grid was
-	// fully filtered. WAW shouldn't be a wild value.
+	// Regression still owns the selection, but it must apply the reachable
+	// protocol-capped chunk rather than the requested byte-grid row count.
 	if out.WriteAheadWriters > maxLearnableWAW {
-		t.Errorf("WAW=%d outside valid range; HardChunkLimit filter should have constrained selection", out.WriteAheadWriters)
+		t.Errorf("WAW=%d outside valid range", out.WriteAheadWriters)
 	}
-	// Reasoning should not mention regression-selected (every grid point
-	// was filtered out).
-	if strings.Contains(out.Reasoning, "regression-selected") {
-		t.Errorf("Reasoning should not say regression-selected when grid was fully filtered; got %q", out.Reasoning)
+	if out.ChunkSize != 10 {
+		t.Errorf("ChunkSize = %d, want reachable HardChunkLimit 10", out.ChunkSize)
 	}
-	// The skip reason should specifically cite HardChunkLimit (not just
-	// that something filtered). Otherwise the test could pass via the
-	// coverage-gate fall-through and not actually exercise HardChunkLimit.
-	if !strings.Contains(out.Reasoning, "HardChunkLimit=10") {
-		t.Errorf("Reasoning should attribute the regression skip to HardChunkLimit=10; got %q", out.Reasoning)
+	if !strings.Contains(out.Reasoning, "regression-selected") {
+		t.Errorf("Reasoning should record the projected regression selection; got %q", out.Reasoning)
 	}
-	_ = originalWAW
+	if !strings.Contains(out.Reasoning, "clamp=protocol=10") {
+		t.Errorf("Reasoning should attribute the effective chunk to the protocol clamp; got %q", out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "raw=64, eligible_raw=12, unique_effective=6") {
+		t.Errorf("Reasoning should show byte-anchor alias deduplication; got %q", out.Reasoning)
+	}
 }
 
 // TestApplyHistory_OutOfRegimeRowsDropped verifies regime filter excludes
@@ -1329,7 +1326,7 @@ func TestApplyEpsilonPerturbation_OverridesTierToExploration(t *testing.T) {
 		Reasoning:         "regression-selected WAW=4, chunk_size=50000",
 	}
 	profile := DriverProfile{Name: "postgres"}
-	applyEpsilonPerturbation(out, profile, 0)
+	applyEpsilonPerturbation(out, Input{}, profile, 0)
 
 	if out.Tier != TierExploration {
 		t.Errorf("ε-perturbation should override Tier to %q (upstream regression's pick was nudged); got %q",

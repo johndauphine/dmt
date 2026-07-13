@@ -8,8 +8,10 @@ import (
 // RuntimeChunkSizeCapFor derives the current row-count ceiling for an
 // arbitrary effective runtime tuple. The immutable #708 memory envelope is the
 // only budget source. A complete runtime table profile uses cardinality-aware
-// sizing; otherwise #703's observed safety width supplies the conservative
-// scalar cap. TargetHardChunkLimit remains independently binding for protocol safety.
+// sizing; otherwise #703's safety width supplies a shrink-only scalar cap. An
+// unobserved fallback may lower an unsafe-looking initial chunk but can never
+// authorize runtime growth. TargetHardChunkLimit remains independently binding
+// for protocol safety.
 // A zero result means neither source can provide a usable cap; it never means
 // that runtime growth is unbounded.
 func (c *Config) RuntimeChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
@@ -62,7 +64,7 @@ func (c *Config) ResetRuntimeChunkSafety() {
 }
 
 func (c *Config) runtimeMemoryChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
-	if !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 {
+	if c.Migration.RuntimeSafetyRowBytes <= 0 {
 		return 0
 	}
 	rows := c.runtimeMemoryModel().SafeChunkSize(
@@ -84,9 +86,9 @@ func (c *Config) runtimeMemoryModel() tuning.MemoryModel {
 // TargetHardChunkLimit. That second use also covers manual tuning or failed
 // analysis: no width is invented, but a protocol-only cap remains available.
 //
-// This method deliberately does not mutate chunk_size. TransferRunner owns the
-// pre-controller atomic clamp so it can persist the original-to-cap runtime
-// adjustment and mark the run adjusted (#709).
+// This method deliberately does not mutate chunk_size. Callers materialize the
+// derived cap before history save and job construction; TransferRunner repeats
+// that synchronization as an atomic pre-controller backstop.
 func (c *Config) FinalizeRuntimeChunkSizeCap() {
 	if c == nil {
 		return
@@ -110,17 +112,27 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 
 	switch {
 	case oneRowOverBudget:
-		logging.Warn("Runtime chunk cap is the 1-row minimum-progress fallback, but one modeled row still exceeds the memory envelope (budget=%d MB safety_width=%d B workers=%d read_ahead=%d write_ahead=%d); resource growth disabled",
-			c.autoConfig.MemoryEnvelope.BudgetMB, m.RuntimeSafetyRowBytes, m.Workers, m.ReadAheadBuffers, m.WriteAheadWriters)
+		widthSource := "observed safety width"
+		if !m.RuntimeSafetyRowBytesKnown {
+			widthSource = "unobserved fallback estimate"
+		}
+		logging.Warn("Runtime chunk cap is the 1-row minimum-progress fallback, but one modeled row still exceeds the memory envelope (budget=%d MB %s=%d B workers=%d read_ahead=%d write_ahead=%d); resource growth disabled",
+			c.autoConfig.MemoryEnvelope.BudgetMB, widthSource, m.RuntimeSafetyRowBytes, m.Workers, m.ReadAheadBuffers, m.WriteAheadWriters)
 	case memoryCap > 0 && protocolCap > 0 && m.RuntimeChunkGrowthAllowed:
 		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d, protocol=%d, cardinality-aware tables=%d, observed safety width=%d B); resource growth enabled",
 			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeMemoryProfile.Len(), m.RuntimeSafetyRowBytes)
+	case memoryCap > 0 && protocolCap > 0 && !m.RuntimeSafetyRowBytesKnown:
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d unobserved fallback estimate, protocol=%d, fallback width=%d B); shrink only, resource growth disabled",
+			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeSafetyRowBytes)
 	case memoryCap > 0 && protocolCap > 0:
 		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d conservative scalar fallback, protocol=%d, observed safety width=%d B, incomplete cardinality profile); resource growth disabled",
 			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeSafetyRowBytes)
 	case memoryCap > 0 && m.RuntimeChunkGrowthAllowed:
 		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory cap, cardinality-aware tables=%d, observed safety width=%d B); resource growth enabled",
 			m.RuntimeChunkSizeCap, m.RuntimeMemoryProfile.Len(), m.RuntimeSafetyRowBytes)
+	case memoryCap > 0 && !m.RuntimeSafetyRowBytesKnown:
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (unobserved fallback estimate, fallback width=%d B); shrink only, resource growth disabled",
+			m.RuntimeChunkSizeCap, m.RuntimeSafetyRowBytes)
 	case memoryCap > 0:
 		logging.Debug("Runtime chunk cap derived: cap=%d rows (conservative scalar fallback, observed safety width=%d B, incomplete cardinality profile); resource growth disabled",
 			m.RuntimeChunkSizeCap, m.RuntimeSafetyRowBytes)
@@ -130,6 +142,59 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 	default:
 		logging.Debug("Runtime chunk cap unavailable (safety width unobserved and no protocol cap); resource growth disabled")
 	}
+}
+
+// BeginRuntimeChunkSizeProjection opens a fresh safety-projection cycle. When
+// the same Config is reused for another run or resume segment, restore the
+// nominal pre-cap chunk views retained by the previous materialization. This
+// prevents a prior restrictive table scope from becoming the next run's
+// authoritative request when the new scope permits a larger chunk.
+func (c *Config) BeginRuntimeChunkSizeProjection() {
+	if c == nil {
+		return
+	}
+	state := &c.runtimeChunkProjection
+	if state.captured {
+		c.Migration.ChunkSize = state.migration
+		c.Source.ChunkSize = state.source
+		c.Target.ChunkSize = state.target
+	}
+	state.captured = false
+}
+
+// MaterializeRuntimeChunkSizeCap synchronizes every compatibility chunk view
+// with the already-derived runtime safety cap. It runs before tuning history
+// save and job construction so configured, persisted, planned, and executed
+// tuples agree. The transfer runner retains its atomic clamp as a backstop.
+//
+// The returned values describe migration.chunk_size; endpoint views are only
+// lowered and are never raised to match it.
+func (c *Config) MaterializeRuntimeChunkSizeCap() (before, after int) {
+	if c == nil {
+		return 0, 0
+	}
+	state := &c.runtimeChunkProjection
+	if !state.captured {
+		state.captured = true
+		state.migration = c.Migration.ChunkSize
+		state.source = c.Source.ChunkSize
+		state.target = c.Target.ChunkSize
+	}
+	before = c.Migration.ChunkSize
+	cap := c.Migration.RuntimeChunkSizeCap
+	if cap <= 0 {
+		return before, before
+	}
+	if c.Migration.ChunkSize > cap {
+		c.Migration.ChunkSize = cap
+	}
+	if c.Source.ChunkSize > cap {
+		c.Source.ChunkSize = cap
+	}
+	if c.Target.ChunkSize > cap {
+		c.Target.ChunkSize = cap
+	}
+	return before, c.Migration.ChunkSize
 }
 
 func minNonZeroInt(values ...int) int {

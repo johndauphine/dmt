@@ -131,6 +131,34 @@ func TestComputeConfigHash(t *testing.T) {
 			t.Errorf("password change affected hash: %s != %s", hash1, hash2)
 		}
 	})
+
+	t.Run("reused config restores nominal chunk before run and resume hashing", func(t *testing.T) {
+		cfg := &config.Config{
+			Source:    config.SourceConfig{ChunkSize: 900},
+			Target:    config.TargetConfig{ChunkSize: 800},
+			Migration: config.MigrationConfig{ChunkSize: 1_000, RuntimeChunkSizeCap: 400},
+		}
+		nominalHash := computeConfigHash(cfg)
+
+		cfg.MaterializeRuntimeChunkSizeCap()
+		if effectiveHash := computeConfigHash(cfg); effectiveHash == nominalHash {
+			t.Fatal("fixture did not distinguish the effective capped config from its nominal hash")
+		}
+
+		// Run and Resume both begin with this restoration before any config
+		// hash or sanitized snapshot is computed.
+		cfg.BeginRuntimeChunkSizeProjection()
+		if got := computeConfigHash(cfg); got != nominalHash {
+			t.Fatalf("restored run hash = %s, want nominal hash %s", got, nominalHash)
+		}
+
+		cfg.Migration.RuntimeChunkSizeCap = 700
+		cfg.MaterializeRuntimeChunkSizeCap()
+		cfg.BeginRuntimeChunkSizeProjection()
+		if got := computeConfigHash(cfg); got != nominalHash {
+			t.Fatalf("restored resume hash = %s, want nominal hash %s", got, nominalHash)
+		}
+	})
 }
 
 func TestMigrationResultJSON(t *testing.T) {
