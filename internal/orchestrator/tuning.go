@@ -18,6 +18,10 @@ import (
 // API churn (#175). Falls back to baseline on any failure (logged at Debug/Warn
 // level).
 func (o *Orchestrator) applyTuning(ctx context.Context) {
+	// Materialization lowers the public chunk fields in place. Restore the
+	// nominal pre-safety request before a fresh analysis so a cap from an
+	// earlier run or resume segment cannot masquerade as the next pinned input.
+	o.config.BeginRuntimeChunkSizeProjection()
 	// An Orchestrator may be reused for resume segments. Never let a failed
 	// or manual analysis inherit a row or tier created by an earlier segment.
 	o.lastTuningRowID = 0

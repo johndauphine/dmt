@@ -144,6 +144,24 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 	}
 }
 
+// BeginRuntimeChunkSizeProjection opens a fresh safety-projection cycle. When
+// the same Config is reused for another run or resume segment, restore the
+// nominal pre-cap chunk views retained by the previous materialization. This
+// prevents a prior restrictive table scope from becoming the next run's
+// authoritative request when the new scope permits a larger chunk.
+func (c *Config) BeginRuntimeChunkSizeProjection() {
+	if c == nil {
+		return
+	}
+	state := &c.runtimeChunkProjection
+	if state.captured {
+		c.Migration.ChunkSize = state.migration
+		c.Source.ChunkSize = state.source
+		c.Target.ChunkSize = state.target
+	}
+	state.captured = false
+}
+
 // MaterializeRuntimeChunkSizeCap synchronizes every compatibility chunk view
 // with the already-derived runtime safety cap. It runs before tuning history
 // save and job construction so configured, persisted, planned, and executed
@@ -154,6 +172,13 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 func (c *Config) MaterializeRuntimeChunkSizeCap() (before, after int) {
 	if c == nil {
 		return 0, 0
+	}
+	state := &c.runtimeChunkProjection
+	if !state.captured {
+		state.captured = true
+		state.migration = c.Migration.ChunkSize
+		state.source = c.Source.ChunkSize
+		state.target = c.Target.ChunkSize
 	}
 	before = c.Migration.ChunkSize
 	cap := c.Migration.RuntimeChunkSizeCap

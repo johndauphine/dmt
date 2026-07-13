@@ -229,6 +229,44 @@ func TestMaterializeRuntimeChunkSizeCapIsIdempotentAndNeverRaisesEndpointViews(t
 	}
 }
 
+func TestBeginRuntimeChunkSizeProjectionRestoresNominalViewsAcrossRuns(t *testing.T) {
+	cfg := &Config{
+		Migration: MigrationConfig{ChunkSize: 1_000, RuntimeChunkSizeCap: 400},
+		Source:    SourceConfig{ChunkSize: 900},
+		Target:    TargetConfig{ChunkSize: 800},
+	}
+
+	cfg.MaterializeRuntimeChunkSizeCap()
+	if cfg.Migration.ChunkSize != 400 || cfg.Source.ChunkSize != 400 || cfg.Target.ChunkSize != 400 {
+		t.Fatalf("first projected views = %d/%d/%d, want 400/400/400",
+			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize)
+	}
+
+	cfg.BeginRuntimeChunkSizeProjection()
+	if cfg.Migration.ChunkSize != 1_000 || cfg.Source.ChunkSize != 900 || cfg.Target.ChunkSize != 800 {
+		t.Fatalf("restored nominal views = %d/%d/%d, want 1000/900/800",
+			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize)
+	}
+
+	// A later tuning suggestion becomes the next nominal request, while a
+	// looser cap is still materialized consistently for the run.
+	cfg.Migration.ChunkSize = 1_200
+	cfg.Source.ChunkSize = 1_100
+	cfg.Target.ChunkSize = 1_000
+	cfg.Migration.RuntimeChunkSizeCap = 700
+	cfg.MaterializeRuntimeChunkSizeCap()
+	if cfg.Migration.ChunkSize != 700 || cfg.Source.ChunkSize != 700 || cfg.Target.ChunkSize != 700 {
+		t.Fatalf("second projected views = %d/%d/%d, want 700/700/700",
+			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize)
+	}
+
+	cfg.BeginRuntimeChunkSizeProjection()
+	if cfg.Migration.ChunkSize != 1_200 || cfg.Source.ChunkSize != 1_100 || cfg.Target.ChunkSize != 1_000 {
+		t.Fatalf("restored updated nominal views = %d/%d/%d, want 1200/1100/1000",
+			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize)
+	}
+}
+
 func TestRuntimeChunkCapUnknownWidthCanShrinkButGrowthStaysDisabled(t *testing.T) {
 	cfg := runtimeCapTestConfig(1_024)
 	cfg.Migration.TargetHardChunkLimit = 750

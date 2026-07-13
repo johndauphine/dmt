@@ -43,3 +43,33 @@ migration:
 			sink.workers, sink.chunk, sink.waw, sink.pr, sink.rab)
 	}
 }
+
+func TestConfigureAnalyzerPinsUsesNominalChunkAfterPriorSafetyProjection(t *testing.T) {
+	cfg, err := config.LoadBytes([]byte(`
+source:
+  type: sqlite
+  database: source.db
+target:
+  type: sqlite
+  database: target.db
+migration:
+  chunk_size: 1234
+`))
+	if err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	cfg.Migration.RuntimeChunkSizeCap = 400
+	cfg.MaterializeRuntimeChunkSizeCap()
+	if cfg.Migration.ChunkSize != 400 {
+		t.Fatalf("projected chunk = %d, want 400", cfg.Migration.ChunkSize)
+	}
+
+	// applyTuning begins every fresh pass this way before wiring analyzer pins.
+	cfg.BeginRuntimeChunkSizeProjection()
+	sink := &recordingTuningPinSink{}
+	configureAnalyzerPins(cfg, sink)
+
+	if sink.chunk != 1_234 {
+		t.Fatalf("reused-run pinned chunk = %d, want original nominal request 1234", sink.chunk)
+	}
+}
