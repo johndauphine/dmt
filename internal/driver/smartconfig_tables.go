@@ -17,17 +17,26 @@ const (
 	legacyRowBearingSample       = 5
 )
 
-func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableInfo {
+func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []TableStatRow) []TableStatRow {
 	if len(s.tableNameFilter) == 0 {
 		return tables
 	}
-	kept := make([]tableInfo, 0, len(tables))
+	kept := make([]TableStatRow, 0, len(tables))
 	for _, t := range tables {
 		if s.tableNameFilter[strings.ToLower(t.Name)] {
 			kept = append(kept, t)
 		}
 	}
 	return kept
+}
+
+func (s *SmartConfigAnalyzer) tableFilter() TableFilter {
+	if len(s.tableNameFilter) == 0 {
+		return nil
+	}
+	return func(name string) bool {
+		return s.tableNameFilter[strings.ToLower(name)]
+	}
 }
 
 // calculateAvgRowSize returns the legacy capped top-five width used by
@@ -39,7 +48,7 @@ func (s *SmartConfigAnalyzer) applyTableNameFilter(tables []tableInfo) []tableIn
 // first five row-bearing input tables: uncapped in uncappedAvgRowBytes and
 // capped at 2 KiB in the return value. New fields must not be aliased to that
 // historical feature.
-func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []tableInfo) int64 {
+func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []TableStatRow) int64 {
 	var legacyWidths [legacyRowBearingSample]int64
 	legacyRowBearing := 0
 	legacyWidthCount := 0
@@ -155,7 +164,7 @@ func overflowSafeMean(values []int64) int64 {
 }
 
 // buildAutoTuneInput constructs input for the tuner.
-func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize int64) AutoTuneInput {
+func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []TableStatRow, avgRowSize int64) AutoTuneInput {
 	cores := runtime.NumCPU()
 	memoryGB := int((s.memoryCapacityMB + 1023) / 1024)
 	representativeRowBytes := s.representativeRowBytes
@@ -208,13 +217,20 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []tableInfo, avgRowSize 
 		// Workload identity passthrough (#215).
 		SourceHost:     s.identitySourceHost,
 		SourcePort:     s.identitySourcePort,
+		SourcePortless: driverIsPortless(s.dbType),
 		SourceDatabase: s.identitySourceDatabase,
 		SourceSchema:   s.identitySourceSchema,
 		TargetHost:     s.identityTargetHost,
 		TargetPort:     s.identityTargetPort,
+		TargetPortless: driverIsPortless(s.targetDBType),
 		TargetDatabase: s.identityTargetDatabase,
 		TargetSchema:   s.identityTargetSchema,
 	}
+}
+
+func driverIsPortless(dbType string) bool {
+	d, err := Get(dbType)
+	return err == nil && d.Defaults().Portless
 }
 
 // DetectPlatform returns the runtime platform, detecting WSL2 specifically.
@@ -245,156 +261,22 @@ func formatRowCount(count int64) string {
 	return fmt.Sprintf("%d", count)
 }
 
-// tableInfo holds basic table metadata.
-type tableInfo struct {
-	Name            string
-	RowCount        int64
-	AvgRowSizeBytes int64
-}
-
-// getTables retrieves table metadata from the source database.
-func (s *SmartConfigAnalyzer) getTables(ctx context.Context, schema string) ([]tableInfo, error) {
-	var query string
-	switch s.dbType {
-	case "mssql":
-		query = `
-			SELECT
-				t.name AS table_name,
-				p.rows AS row_count,
-				ISNULL(SUM(a.total_pages) * 8 * 1024 / NULLIF(p.rows, 0), 0) AS avg_row_size
-			FROM sys.tables t
-			INNER JOIN sys.indexes i ON t.object_id = i.object_id
-			INNER JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
-			INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
-			INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-			WHERE s.name = @p1 AND i.index_id <= 1
-			GROUP BY t.name, p.rows
-			ORDER BY p.rows DESC`
-	case "postgres":
-		query = `
-			SELECT
-				relname AS table_name,
-				COALESCE(n_live_tup, 0) AS row_count,
-				CASE WHEN n_live_tup > 0
-					THEN pg_relation_size(quote_ident(schemaname) || '.' || quote_ident(relname)) / n_live_tup
-					ELSE 0
-				END AS avg_row_size
-			FROM pg_stat_user_tables
-			WHERE schemaname = $1
-			ORDER BY n_live_tup DESC`
-	case "mysql":
-		query = `
-			SELECT
-				TABLE_NAME AS table_name,
-				IFNULL(TABLE_ROWS, 0) AS row_count,
-				IFNULL(AVG_ROW_LENGTH, 0) AS avg_row_size
-			FROM information_schema.TABLES
-			WHERE TABLE_SCHEMA = ?
-			  AND TABLE_TYPE = 'BASE TABLE'
-			ORDER BY TABLE_ROWS DESC`
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
+// detectDateColumns delegates catalog access to the resolved reader and keeps
+// the analyzer's user-facing ranking policy independent of the database.
+func (s *SmartConfigAnalyzer) detectDateColumns(
+	ctx context.Context,
+	reader SchemaStatsReader,
+	schema string,
+	tables []TableStatRow,
+) (map[string][]string, error) {
+	allowed := make([]string, 0, len(tables))
+	for _, table := range tables {
+		allowed = append(allowed, table.Name)
 	}
-
-	rows, err := s.db.QueryContext(ctx, query, schema)
+	dateColumns, err := reader.DateColumns(ctx, s.db, schema, allowed)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var tables []tableInfo
-	for rows.Next() {
-		var t tableInfo
-		if err := rows.Scan(&t.Name, &t.RowCount, &t.AvgRowSizeBytes); err != nil {
-			return nil, err
-		}
-		tables = append(tables, t)
-	}
-
-	return tables, rows.Err()
-}
-
-// detectDateColumns finds columns that could be used for incremental sync in
-// one schema-wide metadata query. Results for tables outside the already
-// scoped stats set are discarded client-side.
-func (s *SmartConfigAnalyzer) detectDateColumns(ctx context.Context, schema string, allowedTables []tableInfo) (map[string][]string, error) {
-	dateColumns := make(map[string][]string)
-	if len(allowedTables) == 0 {
-		return dateColumns, nil
-	}
-
-	var query string
-	switch s.dbType {
-	case "mssql":
-		query = `
-			SELECT tbl.name, c.name
-			FROM sys.columns c
-			INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-			INNER JOIN sys.tables tbl ON c.object_id = tbl.object_id
-			INNER JOIN sys.schemas s ON tbl.schema_id = s.schema_id
-			WHERE s.name = @p1
-			  AND t.name IN ('datetime', 'datetime2', 'datetimeoffset', 'date', 'timestamp')
-			ORDER BY tbl.name, c.column_id`
-	case "postgres":
-		query = `
-			SELECT table_name, column_name
-			FROM information_schema.columns
-			WHERE table_schema = $1
-			  AND data_type IN ('timestamp without time zone', 'timestamp with time zone', 'date')
-			ORDER BY table_name, ordinal_position`
-	case "mysql":
-		query = `
-			SELECT TABLE_NAME, COLUMN_NAME
-			FROM information_schema.COLUMNS
-			WHERE TABLE_SCHEMA = ?
-			  AND DATA_TYPE IN ('datetime', 'timestamp', 'date')
-			ORDER BY TABLE_NAME, ORDINAL_POSITION`
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
-	}
-
-	rows, err := s.db.QueryContext(ctx, query, schema)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	// Keep the table name returned by the stats query as the public map key,
-	// matching the prior per-table behavior. Exact matches take precedence;
-	// the case-folded lookup only handles engines whose metadata surfaces use
-	// different casing, and rejects ambiguous case-only table names.
-	allowedExact := make(map[string]string, len(allowedTables))
-	allowedFolded := make(map[string]string, len(allowedTables))
-	for _, table := range allowedTables {
-		allowedExact[table.Name] = table.Name
-		folded := strings.ToLower(table.Name)
-		if existing, ok := allowedFolded[folded]; ok && existing != table.Name {
-			allowedFolded[folded] = ""
-		} else if !ok {
-			allowedFolded[folded] = table.Name
-		}
-	}
-
-	for rows.Next() {
-		var table, column string
-		if err := rows.Scan(&table, &column); err != nil {
-			return nil, err
-		}
-
-		canonical, allowed := allowedExact[table]
-		if !allowed {
-			canonical, allowed = allowedFolded[strings.ToLower(table)]
-			allowed = allowed && canonical != ""
-		}
-		if !allowed {
-			continue
-		}
-		dateColumns[canonical] = append(dateColumns[canonical], column)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	for table, columns := range dateColumns {
 		dateColumns[table] = s.rankDateColumns(columns)
 	}

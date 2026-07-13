@@ -85,10 +85,12 @@ type Input struct {
 	// fallback behavior (which was the only path pre-#215).
 	SourceHost     string
 	SourcePort     int
+	SourcePortless bool
 	SourceDatabase string
 	SourceSchema   string
 	TargetHost     string
 	TargetPort     int
+	TargetPortless bool
 	TargetDatabase string
 	TargetSchema   string
 

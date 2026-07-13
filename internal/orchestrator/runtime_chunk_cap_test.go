@@ -20,6 +20,9 @@ type runtimeCapProbeDriver struct{ driver.Driver }
 
 func (runtimeCapProbeDriver) Name() string      { return runtimeCapProbeDriverName }
 func (runtimeCapProbeDriver) Aliases() []string { return nil }
+func (runtimeCapProbeDriver) Defaults() driver.DriverDefaults {
+	return driver.DriverDefaults{Port: 9999, WriteAheadWriters: 1}
+}
 func (runtimeCapProbeDriver) HardChunkLimit(int64) int {
 	return 0
 }
@@ -36,11 +39,13 @@ type runtimeCapTargetPool struct {
 
 func (p runtimeCapTargetPool) DB() *sql.DB    { return nil }
 func (p runtimeCapTargetPool) DBType() string { return p.dbType }
+func (p runtimeCapTargetPool) MaxConns() int  { return 4 }
 
 type runtimeCapFailureSourcePool struct{ pool.SourcePool }
 
 func (runtimeCapFailureSourcePool) DB() *sql.DB    { return nil }
 func (runtimeCapFailureSourcePool) DBType() string { return "runtime-cap-unsupported-source" }
+func (runtimeCapFailureSourcePool) MaxConns() int  { return 4 }
 
 func registerRuntimeCapProbeDriver() {
 	if !driver.IsRegistered(runtimeCapProbeDriverName) {
@@ -75,7 +80,7 @@ func TestApplyTuningManualPreservesProtocolCapAndResetsSafetyEvidence(t *testing
 	}
 }
 
-func TestApplyTuningFailureFinalizesProtocolOnlyCap(t *testing.T) {
+func TestApplyTuningUnsupportedStatsFinalizesProtocolOnlyCap(t *testing.T) {
 	registerRuntimeCapProbeDriver()
 	cfg := &config.Config{Migration: config.MigrationConfig{
 		ChunkSize:                  1_000,
@@ -92,11 +97,11 @@ func TestApplyTuningFailureFinalizesProtocolOnlyCap(t *testing.T) {
 	o.applyTuning(context.Background())
 
 	if cfg.Migration.TargetHardChunkLimit != 100 || cfg.Migration.RuntimeChunkSizeCap != 100 {
-		t.Fatalf("failed-analysis protocol caps = (target=%d runtime=%d), want 100/100",
+		t.Fatalf("formula-only protocol caps = (target=%d runtime=%d), want 100/100",
 			cfg.Migration.TargetHardChunkLimit, cfg.Migration.RuntimeChunkSizeCap)
 	}
 	if cfg.Migration.RuntimeSafetyRowBytesKnown || cfg.Migration.RuntimeChunkGrowthAllowed {
-		t.Fatalf("failed analysis authorized memory growth: %+v", cfg.Migration)
+		t.Fatalf("formula-only analysis authorized memory growth without schema width: %+v", cfg.Migration)
 	}
 }
 

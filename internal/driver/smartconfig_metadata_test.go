@@ -13,9 +13,16 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/johndauphine/dmt/internal/checkpoint"
 )
 
 const metadataShimDriverName = "dmt-smartconfig-metadata-test"
+
+const (
+	metadataTableStatsQuery  = "SELECT table_name, row_count, avg_row_size FROM schema_stats WHERE schema_name = ? ORDER BY row_count DESC"
+	metadataDateColumnsQuery = "SELECT table_name, column_name FROM schema_dates WHERE schema_name = ? ORDER BY table_name, ordinal_position"
+)
 
 var (
 	metadataShimRegisterOnce sync.Once
@@ -40,6 +47,16 @@ type metadataShimPlan struct {
 	dateReadyAtQuery  bool
 	dateDeadline      time.Time
 	dateDeadlineSeen  bool
+}
+
+type schemaStatsProviderTestDriver struct {
+	*tuningProfileTestDriver
+	reader    SchemaStatsReader
+	supported bool
+}
+
+func (d *schemaStatsProviderTestDriver) SchemaStatsReader() (SchemaStatsReader, bool) {
+	return d.reader, d.supported
 }
 
 func (p *metadataShimPlan) query(ctx context.Context, query string, args []sqldriver.NamedValue) (sqldriver.Rows, error) {
@@ -163,6 +180,13 @@ func openMetadataShim(t *testing.T, plan *metadataShimPlan) *sql.DB {
 	return db
 }
 
+func newMetadataAnalyzer(t *testing.T, plan *metadataShimPlan, dbType string) *SmartConfigAnalyzer {
+	t.Helper()
+	analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), dbType)
+	analyzer.schemaStatsReader = NewQuerySchemaStatsReader(metadataTableStatsQuery, metadataDateColumnsQuery)
+	return analyzer
+}
+
 func metadataStatsRow(name string, rowCount, avgRowSize int64) []sqldriver.Value {
 	return []sqldriver.Value{name, rowCount, avgRowSize}
 }
@@ -205,23 +229,9 @@ func requireBatchedDateQueryShape(t *testing.T, dbType, schema, query string, ar
 	}
 
 	normalized := strings.Join(strings.Fields(strings.ToLower(query)), " ")
-	var selectPair, orderBy, staleTablePredicate string
-	switch dbType {
-	case "mssql":
-		selectPair = "select tbl.name, c.name from"
-		orderBy = "order by tbl.name, c.column_id"
-		staleTablePredicate = "tbl.name = @p2"
-	case "postgres":
-		selectPair = "select table_name, column_name from"
-		orderBy = "order by table_name, ordinal_position"
-		staleTablePredicate = "table_name = $2"
-	case "mysql":
-		selectPair = "select table_name, column_name from"
-		orderBy = "order by table_name, ordinal_position"
-		staleTablePredicate = "and table_name = ?"
-	default:
-		t.Fatalf("unsupported test database type %q", dbType)
-	}
+	selectPair := "select table_name, column_name from"
+	orderBy := "order by table_name, ordinal_position"
+	staleTablePredicate := "and table_name = ?"
 	if !strings.Contains(normalized, selectPair) {
 		t.Fatalf("%s date query does not select table/column pairs: %s", dbType, normalized)
 	}
@@ -247,7 +257,7 @@ func TestAnalyzeServerMetadataQueryCount(t *testing.T) {
 				plan.dateRows = append(plan.dateRows, metadataDateRow(name, "updated_at"))
 			}
 
-			analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), dbType)
+			analyzer := newMetadataAnalyzer(t, plan, dbType)
 			analyzer.SetTargetDBType("postgres")
 			analyzer.SetMemoryEnvelope(16*1024, 8*1024, 4*1024)
 			got, err := analyzer.Analyze(context.Background(), schema)
@@ -294,7 +304,7 @@ func TestAnalyzeDateFailurePreservesTuningAndHistory(t *testing.T) {
 				dateQueryErr: tc.dateErr,
 			}
 			history := &mockHistoryProvider{rowID: 42}
-			analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), "postgres")
+			analyzer := newMetadataAnalyzer(t, plan, "postgres")
 			analyzer.SetTargetDBType("postgres")
 			analyzer.SetHistoryProvider(history)
 			analyzer.SetMemoryEnvelope(16*1024, 8*1024, 4*1024)
@@ -356,13 +366,57 @@ func TestAnalyzeDateFailurePreservesTuningAndHistory(t *testing.T) {
 	}
 }
 
+func TestAnalyzePropagatesParentCancellation(t *testing.T) {
+	t.Run("table statistics", func(t *testing.T) {
+		plan := &metadataShimPlan{}
+		analyzer := newMetadataAnalyzer(t, plan, "postgres")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		got, err := analyzer.Analyze(ctx, "public")
+		if !errors.Is(err, context.Canceled) || got != nil {
+			t.Fatalf("Analyze = (%+v, %v), want nil/context.Canceled", got, err)
+		}
+		if analyzer.pendingSave != nil {
+			t.Fatal("canceled table-stat lookup armed pending history")
+		}
+	})
+
+	t.Run("date metadata", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		plan := &metadataShimPlan{
+			statsRows:    [][]sqldriver.Value{metadataStatsRow("orders", 1_000, 500)},
+			dateQueryErr: context.Canceled,
+		}
+		plan.dateReady = func() bool {
+			cancel()
+			return true
+		}
+		history := &mockHistoryProvider{rowID: 42}
+		analyzer := newMetadataAnalyzer(t, plan, "postgres")
+		analyzer.SetTargetDBType("postgres")
+		analyzer.SetHistoryProvider(history)
+
+		got, err := analyzer.Analyze(ctx, "public")
+		if !errors.Is(err, context.Canceled) || got != nil {
+			t.Fatalf("Analyze = (%+v, %v), want nil/context.Canceled", got, err)
+		}
+		if analyzer.pendingSave != nil {
+			t.Fatal("canceled date lookup retained pending history")
+		}
+		if rowID := analyzer.SaveTuningWithActualParams(ActualParams{}); rowID != 0 || history.saved != nil {
+			t.Fatalf("canceled analysis saved history: row=%d record=%+v", rowID, history.saved)
+		}
+	})
+}
+
 func TestAnalyzeStatsFailureClearsPriorPendingHistory(t *testing.T) {
 	plan := &metadataShimPlan{
 		statsRows: [][]sqldriver.Value{metadataStatsRow("orders", 1_000, 500)},
 		dateRows:  [][]sqldriver.Value{metadataDateRow("orders", "updated_at")},
 	}
 	history := &mockHistoryProvider{rowID: 42}
-	analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), "postgres")
+	analyzer := newMetadataAnalyzer(t, plan, "postgres")
 	analyzer.SetTargetDBType("postgres")
 	analyzer.SetHistoryProvider(history)
 
@@ -376,8 +430,13 @@ func TestAnalyzeStatsFailureClearsPriorPendingHistory(t *testing.T) {
 
 	// The shim rejects the third query, which is the reused analyzer's next
 	// stats lookup. That failure must invalidate the first run's pending save.
-	if _, err := analyzer.Analyze(context.Background(), "public"); err == nil {
-		t.Fatal("reused Analyze unexpectedly accepted failed stats query")
+	degraded, err := analyzer.Analyze(context.Background(), "public")
+	if err != nil {
+		t.Fatalf("reused Analyze returned graceful stats failure: %v", err)
+	}
+	requireValidMetadataTuning(t, degraded)
+	if len(degraded.Warnings) != 1 || !strings.Contains(degraded.Warnings[0], "formula-only") {
+		t.Fatalf("stats failure warnings = %#v, want one formula-only warning", degraded.Warnings)
 	}
 	if analyzer.pendingSave != nil {
 		t.Fatal("failed stats lookup retained stale pending history")
@@ -409,7 +468,7 @@ func TestAnalyzeBatchedDateRankingParity(t *testing.T) {
 			metadataDateRow("events", "modified_at"),
 		},
 	}
-	analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), "postgres")
+	analyzer := newMetadataAnalyzer(t, plan, "postgres")
 	analyzer.SetTargetDBType("postgres")
 	got, err := analyzer.Analyze(context.Background(), "public")
 	if err != nil {
@@ -441,7 +500,7 @@ func TestAnalyzeBatchedDatesRespectScope(t *testing.T) {
 			metadataDateRow("ghost", "created_at"),
 		},
 	}
-	analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), "mysql")
+	analyzer := newMetadataAnalyzer(t, plan, "mysql")
 	analyzer.SetTargetDBType("mysql")
 	analyzer.SetTableNameFilter([]string{"orders"})
 	got, err := analyzer.Analyze(context.Background(), "app")
@@ -471,7 +530,7 @@ func TestAnalyzeDateRowsErrorDoesNotPublishPartialMetadata(t *testing.T) {
 		dateRows:    [][]sqldriver.Value{metadataDateRow("orders", "updated_at")},
 		dateRowsErr: rowsErr,
 	}
-	analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), "mssql")
+	analyzer := newMetadataAnalyzer(t, plan, "mssql")
 	analyzer.SetTargetDBType("mssql")
 	got, err := analyzer.Analyze(context.Background(), "dbo")
 	if err != nil {
@@ -499,4 +558,84 @@ func containsMetadataString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestAnalyzeRequiresExplicitUsableSchemaStatsProvider(t *testing.T) {
+	tests := []struct {
+		name   string
+		driver Driver
+	}{
+		{
+			name: "provider interface absent",
+			driver: &tuningProfileTestDriver{
+				name:     "schema-stats-provider-absent",
+				defaults: DriverDefaults{WriteAheadWriters: 2},
+			},
+		},
+		{
+			name: "provider explicitly unsupported",
+			driver: &schemaStatsProviderTestDriver{
+				tuningProfileTestDriver: &tuningProfileTestDriver{name: "schema-stats-provider-false", defaults: DriverDefaults{WriteAheadWriters: 2}},
+				supported:               false,
+			},
+		},
+		{
+			name: "provider returns nil reader",
+			driver: &schemaStatsProviderTestDriver{
+				tuningProfileTestDriver: &tuningProfileTestDriver{name: "schema-stats-provider-nil", defaults: DriverDefaults{WriteAheadWriters: 2}},
+				supported:               true,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registerTuningProfileTestDriver(t, tc.driver)
+			history := &mockHistoryProvider{history: []checkpoint.TuningRecord{{FinalThroughput: 123}}}
+			analyzer := NewSmartConfigAnalyzer(nil, tc.driver.Name())
+			analyzer.SetTargetDBType(tc.driver.Name())
+			analyzer.SetHistoryProvider(history)
+
+			got, err := analyzer.Analyze(context.Background(), "")
+			if err != nil {
+				t.Fatalf("Analyze: %v", err)
+			}
+			requireValidMetadataTuning(t, got)
+			if len(got.Warnings) != 1 || !strings.Contains(got.Warnings[0], "formula-only") {
+				t.Fatalf("warnings = %#v, want exactly one formula-only warning", got.Warnings)
+			}
+			if analyzer.pendingSave != nil {
+				t.Fatal("unusable provider armed pending history save")
+			}
+			if history.getCalls != 0 {
+				t.Fatalf("formula-only degradation read history %d time(s), want 0", history.getCalls)
+			}
+		})
+	}
+}
+
+func TestAnalyzeResolvesDeclaredSchemaStatsProvider(t *testing.T) {
+	plan := &metadataShimPlan{
+		statsRows: [][]sqldriver.Value{metadataStatsRow("orders", 100, 250)},
+		dateRows:  [][]sqldriver.Value{metadataDateRow("orders", "updated_at")},
+	}
+	d := &schemaStatsProviderTestDriver{
+		tuningProfileTestDriver: &tuningProfileTestDriver{name: "schema-stats-provider-supported", defaults: DriverDefaults{WriteAheadWriters: 2}},
+		reader:                  NewQuerySchemaStatsReader(metadataTableStatsQuery, metadataDateColumnsQuery),
+		supported:               true,
+	}
+	registerTuningProfileTestDriver(t, d)
+	analyzer := NewSmartConfigAnalyzer(openMetadataShim(t, plan), d.Name())
+	analyzer.SetTargetDBType(d.Name())
+
+	got, err := analyzer.Analyze(context.Background(), "app")
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if got.TotalTables != 1 || got.TotalRows != 100 || len(got.DateColumns) != 1 {
+		t.Fatalf("provider-backed metadata = %+v", got)
+	}
+	if analyzer.pendingSave == nil || len(got.Warnings) != 0 {
+		t.Fatalf("successful provider pending/warnings = %v/%#v", analyzer.pendingSave != nil, got.Warnings)
+	}
 }

@@ -345,57 +345,52 @@ func minInt(a, b int) int {
 	return b
 }
 
-// hasExactIdentity reports whether the Input carries a complete enough
-// workload-identity tuple for the Tier 1 classifier (#215) to do an
-// equality lookup. Hosts and database names are required; schemas may
-// legitimately be empty for drivers that don't expose them (MySQL has
-// no schema concept distinct from database). Ports are required because
-// SQL NULL ports scan as Go's zero value (0) in the SQLite reader, so
-// a missing port would make "unset" indistinguishable from "actual 0"
-// — both would then match pre-#215 rows whose ports also scanned as 0
-// from NULL. Requiring non-zero ports here keeps the Tier 1 comparison
-// honest about which rows it intends to match (Copilot review on
-// PR #223).
-//
-// Returns false on missing required fields → caller skips Tier 1 and
-// falls through to the Tier 2 / Tier 3 path (regime filter or baseline).
+// hasExactIdentity reports whether the Input carries a complete endpoint
+// tuple for Tier 1. Database (or file path) is always required. Network
+// endpoints additionally require host and a non-zero port; explicitly
+// portless endpoints carry their identity entirely in database/path and may
+// therefore use empty host and zero port. Schemas remain optional.
 func hasExactIdentity(in Input) bool {
-	if in.SourceHost == "" || in.SourceDatabase == "" {
-		return false
-	}
-	if in.TargetHost == "" || in.TargetDatabase == "" {
-		return false
-	}
-	if in.SourcePort == 0 || in.TargetPort == 0 {
-		return false
-	}
-	return true
+	return endpointIdentityComplete(in.SourcePortless, in.SourceHost, in.SourcePort, in.SourceDatabase) &&
+		endpointIdentityComplete(in.TargetPortless, in.TargetHost, in.TargetPort, in.TargetDatabase)
 }
 
-// filterByExactIdentity returns the subset of rows whose workload
-// identity tuple matches the input exactly (#215). All eight fields
-// must match by equality — same source host/port/db/schema AND same
-// target host/port/db/schema. Pre-#215 rows have empty identity fields
-// and naturally fall out of the match (empty string ≠ user's non-empty
-// host).
+func endpointIdentityComplete(portless bool, host string, port int, database string) bool {
+	if database == "" {
+		return false
+	}
+	return portless || (host != "" && port != 0)
+}
+
+// filterByExactIdentity returns rows matching the current endpoint tuple.
+// Database/path and schema always compare exactly. Host and port compare only
+// for network endpoints; those fields have no identity meaning for a portless
+// file endpoint. Pair-level history loading has already constrained database
+// engine types before this filter runs.
 //
 // No normalization is applied. `localhost` and `127.0.0.1` are treated
 // as distinct hosts. Case-sensitive comparison (PG identifiers are
 // case-sensitive by default; users who want loose matching can
 // normalize in their config).
 func filterByExactIdentity(rows []HistoryRecord, in Input) []HistoryRecord {
+	if !hasExactIdentity(in) {
+		return nil
+	}
 	out := make([]HistoryRecord, 0, len(rows))
 	for _, r := range rows {
-		if r.SourceHost == in.SourceHost &&
-			r.SourcePort == in.SourcePort &&
-			r.SourceDatabase == in.SourceDatabase &&
+		if endpointIdentityMatches(in.SourcePortless, r.SourceHost, r.SourcePort, r.SourceDatabase, in.SourceHost, in.SourcePort, in.SourceDatabase) &&
 			r.SourceSchema == in.SourceSchema &&
-			r.TargetHost == in.TargetHost &&
-			r.TargetPort == in.TargetPort &&
-			r.TargetDatabase == in.TargetDatabase &&
+			endpointIdentityMatches(in.TargetPortless, r.TargetHost, r.TargetPort, r.TargetDatabase, in.TargetHost, in.TargetPort, in.TargetDatabase) &&
 			r.TargetSchema == in.TargetSchema {
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+func endpointIdentityMatches(portless bool, rowHost string, rowPort int, rowDatabase, host string, port int, database string) bool {
+	if rowDatabase != database {
+		return false
+	}
+	return portless || (rowHost == host && rowPort == port)
 }

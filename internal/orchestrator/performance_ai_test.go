@@ -89,6 +89,37 @@ func TestPerformanceAutoTuneInputMapsResolvedEnvelope(t *testing.T) {
 	}
 }
 
+func TestPerformanceAutoTuneInputCarriesCatalogPortlessIdentity(t *testing.T) {
+	tests := []struct {
+		name                   string
+		sourceType, targetType string
+		wantSource, wantTarget bool
+	}{
+		{name: "portless source", sourceType: "sqlite", targetType: "postgres", wantSource: true},
+		{name: "portless target", sourceType: "postgres", targetType: "sqlite", wantTarget: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orch := &Orchestrator{config: &config.Config{
+				Source: config.SourceConfig{
+					Type: tc.sourceType, Host: "source.internal", Port: 5432,
+					Database: "source_db", Schema: "public",
+				},
+				Target: config.TargetConfig{
+					Type: tc.targetType, Host: "target.internal", Port: 5432,
+					Database: "target_db", Schema: "public",
+				},
+			}}
+
+			input := orch.performanceAutoTuneInput(nil)
+			if input.SourcePortless != tc.wantSource || input.TargetPortless != tc.wantTarget {
+				t.Fatalf("portless identity = source:%v target:%v, want %v/%v",
+					input.SourcePortless, input.TargetPortless, tc.wantSource, tc.wantTarget)
+			}
+		})
+	}
+}
+
 func TestExplainPerformanceWithAIFallsBackWhenProviderUnavailable(t *testing.T) {
 	orch := &Orchestrator{
 		config: &config.Config{},
@@ -223,6 +254,62 @@ func TestSamePerformanceWorkloadRequiresExactIdentity(t *testing.T) {
 	}
 }
 
+func TestSamePerformanceWorkloadSupportsPortlessEndpoint(t *testing.T) {
+	input := driver.AutoTuneInput{
+		SourcePortless: true,
+		SourceDatabase: "/tmp/source.db",
+		TargetHost:     "target.internal",
+		TargetPort:     5432,
+		TargetDatabase: "target_prod",
+		TargetSchema:   "public",
+	}
+	row := checkpoint.TuningRecord{
+		SourceHost:     "legacy-meaningless-host",
+		SourcePort:     9999,
+		SourceDatabase: input.SourceDatabase,
+		TargetHost:     input.TargetHost,
+		TargetPort:     input.TargetPort,
+		TargetDatabase: input.TargetDatabase,
+		TargetSchema:   input.TargetSchema,
+	}
+	if !samePerformanceWorkload(input, row) {
+		t.Fatal("expected portless source path plus exact portful target to match")
+	}
+
+	row.SourceDatabase = "/tmp/other.db"
+	if samePerformanceWorkload(input, row) {
+		t.Fatal("expected different portless source path to be rejected")
+	}
+	row.SourceDatabase = ""
+	if samePerformanceWorkload(input, row) {
+		t.Fatal("expected empty persisted portless source path to be rejected")
+	}
+	row.SourceDatabase = input.SourceDatabase
+	row.SourceSchema = "main"
+	if samePerformanceWorkload(input, row) {
+		t.Fatal("expected different portless source schema to be rejected")
+	}
+	row.SourceSchema = input.SourceSchema
+	row.TargetPort++
+	if samePerformanceWorkload(input, row) {
+		t.Fatal("expected different portful target port to be rejected")
+	}
+}
+
+func TestSamePerformanceWorkloadAllowsMatchingEmptySchemas(t *testing.T) {
+	input := driver.AutoTuneInput{
+		SourceHost: "source.internal", SourcePort: 5432, SourceDatabase: "source_prod",
+		TargetHost: "target.internal", TargetPort: 3306, TargetDatabase: "target_prod",
+	}
+	row := checkpoint.TuningRecord{
+		SourceHost: input.SourceHost, SourcePort: input.SourcePort, SourceDatabase: input.SourceDatabase,
+		TargetHost: input.TargetHost, TargetPort: input.TargetPort, TargetDatabase: input.TargetDatabase,
+	}
+	if !samePerformanceWorkload(input, row) {
+		t.Fatal("matching empty schemas should not disqualify engines without a schema concept")
+	}
+}
+
 func TestScopedPerformanceAdjustmentsRequiresScopedRunConfig(t *testing.T) {
 	input := driver.AutoTuneInput{
 		SourceHost:     "source.internal",
@@ -334,5 +421,31 @@ func TestSamePerformanceRunConfigRequiresExactIdentity(t *testing.T) {
 	}
 	if samePerformanceRunConfig(input, `{bad json`) {
 		t.Fatal("expected invalid config JSON to be rejected")
+	}
+}
+
+func TestSamePerformanceRunConfigSupportsPortlessEndpoint(t *testing.T) {
+	input := driver.AutoTuneInput{
+		SourcePortless: true,
+		SourceDatabase: "/tmp/source.db",
+		TargetHost:     "target.internal",
+		TargetPort:     5432,
+		TargetDatabase: "target_prod",
+		TargetSchema:   "public",
+	}
+	raw := `{
+  "Source": {"Host":"legacy-meaningless-host","Port":9999,"Database":"/tmp/source.db","Schema":""},
+  "Target": {"Host":"target.internal","Port":5432,"Database":"target_prod","Schema":"public"}
+}`
+	if !samePerformanceRunConfig(input, raw) {
+		t.Fatal("expected portless source path plus exact portful target run config to match")
+	}
+	otherSource := strings.Replace(raw, "/tmp/source.db", "/tmp/other.db", 1)
+	if samePerformanceRunConfig(input, otherSource) {
+		t.Fatal("expected different portless source path to be rejected")
+	}
+	otherTarget := strings.Replace(raw, "target.internal", "other-target.internal", 1)
+	if samePerformanceRunConfig(input, otherTarget) {
+		t.Fatal("expected different portful target host to be rejected")
 	}
 }

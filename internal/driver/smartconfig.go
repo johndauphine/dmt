@@ -25,6 +25,7 @@ package driver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -153,10 +154,12 @@ type AutoTuneInput struct {
 	// dbconfig.SourceConfig / TargetConfig.
 	SourceHost     string
 	SourcePort     int
+	SourcePortless bool
 	SourceDatabase string
 	SourceSchema   string
 	TargetHost     string
 	TargetPort     int
+	TargetPortless bool
 	TargetDatabase string
 	TargetSchema   string
 
@@ -249,6 +252,10 @@ type SmartConfigAnalyzer struct {
 	// actually ship. nil means "no filter â€” analyze every table the
 	// schema returned" (e.g. the `analyze` CLI subcommand).
 	tableNameFilter map[string]bool
+
+	// schemaStatsReader is a package-test seam. Production leaves it nil and
+	// resolves the source driver's explicit SchemaStatsProvider capability.
+	schemaStatsReader SchemaStatsReader
 
 	// Workload identity (#215). Populated by SetWorkloadIdentity from
 	// the orchestrator's cfg.Source / cfg.Target. Flows through
@@ -414,24 +421,19 @@ func (s *SmartConfigAnalyzer) SetWorkloadIdentity(sourceHost string, sourcePort 
 // Analyze performs smart configuration detection on the source database.
 func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*SmartConfigSuggestions, error) {
 	logging.Debug("Analyzing database schema for configuration suggestions...")
-	// An analyzer may be reused by callers. A failed stats query must not leave
-	// the previous successful run eligible for a later history save.
-	s.pendingSave = nil
+	s.resetAnalysisState()
 
-	tables, err := s.getTables(ctx, schema)
+	statsReader, err := s.resolveSchemaStatsReader()
 	if err != nil {
-		return nil, fmt.Errorf("getting tables: %w", err)
+		return s.formulaOnlySuggestions(err), nil
 	}
-
-	// Scope to caller-supplied table set if one was wired in (#241).
-	// The orchestrator filters with include/exclude before tuning runs;
-	// applying the same scope here keeps the packet cap, avg/max row
-	// sizes, and memory-budget math aligned with the actual workload â€”
-	// otherwise an excluded wide table can still drive the global cap.
-	tables = s.applyTableNameFilter(tables)
-	s.suggestions.DateColumns = make(map[string][]string)
-	s.suggestions.ExcludeTables = s.suggestions.ExcludeTables[:0]
-	s.suggestions.Warnings = s.suggestions.Warnings[:0]
+	tables, err := statsReader.TableStats(ctx, s.db, schema, s.tableFilter())
+	if err != nil {
+		if cancellationErr := analysisCancellationError(ctx, err); cancellationErr != nil {
+			return nil, cancellationErr
+		}
+		return s.formulaOnlySuggestions(fmt.Errorf("reading table statistics: %w", err)), nil
+	}
 
 	s.suggestions.TotalTables = len(tables)
 	var totalRows int64
@@ -451,9 +453,16 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	s.calculateAutoTuneParams(tables)
 
 	dateCtx, cancelDateLookup := context.WithTimeout(ctx, dateColumnDetectionTimeout)
-	dateColumns, dateErr := s.detectDateColumns(dateCtx, schema, tables)
+	dateColumns, dateErr := s.detectDateColumns(dateCtx, statsReader, schema, tables)
 	cancelDateLookup()
 	if dateErr != nil {
+		// The bounded child timeout is an optional-metadata failure, but a
+		// caller cancellation must still abort Analyze and must not leave a
+		// history record armed for an analysis the caller stopped.
+		if cancellationErr := analysisCancellationError(ctx, dateErr); cancellationErr != nil {
+			s.pendingSave = nil
+			return nil, cancellationErr
+		}
 		warning := fmt.Sprintf("date-column detection failed: %v", dateErr)
 		s.suggestions.Warnings = append(s.suggestions.Warnings, warning)
 		logging.Warn("Warning: %s", warning)
@@ -470,6 +479,62 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	logging.Debug("  - Estimated memory: %dMB", s.suggestions.EstimatedMemMB)
 
 	return s.suggestions, nil
+}
+
+func analysisCancellationError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	// DateColumns has a child timeout, so DeadlineExceeded remains advisory
+	// while the parent context is still live.
+	return nil
+}
+
+func (s *SmartConfigAnalyzer) resetAnalysisState() {
+	s.pendingSave = nil
+	s.uncappedAvgRowBytes = 0
+	s.representativeRowBytes = 0
+	s.safetyRowBytes = 0
+	s.safetyRowBytesKnown = false
+	s.largestSampledTableBytes = 0
+	s.suggestions = &SmartConfigSuggestions{
+		DateColumns:   make(map[string][]string),
+		ExcludeTables: []string{},
+		Warnings:      []string{},
+	}
+}
+
+func (s *SmartConfigAnalyzer) resolveSchemaStatsReader() (SchemaStatsReader, error) {
+	if s.schemaStatsReader != nil {
+		return s.schemaStatsReader, nil
+	}
+	d, err := Get(s.dbType)
+	if err != nil {
+		return nil, err
+	}
+	provider, ok := d.(SchemaStatsProvider)
+	if !ok {
+		return nil, fmt.Errorf("source driver %q does not declare schema-statistics support", d.Name())
+	}
+	reader, supported := provider.SchemaStatsReader()
+	if !supported || reader == nil {
+		return nil, fmt.Errorf("source driver %q does not support schema statistics", d.Name())
+	}
+	return reader, nil
+}
+
+func (s *SmartConfigAnalyzer) formulaOnlySuggestions(cause error) *SmartConfigSuggestions {
+	s.calculateFormulaOnlyParams()
+	warning := fmt.Sprintf("schema-statistics analysis unavailable: %v; using formula-only tuning", cause)
+	s.suggestions.Warnings = append(s.suggestions.Warnings, warning)
+	logging.Warn("Warning: %s", warning)
+	// Formula-only output is deliberately not training data. In particular,
+	// never let a reused analyzer retain or create a pending history save.
+	s.pendingSave = nil
+	return s.suggestions
 }
 
 // calculateAutoTuneParams runs the deterministic tuner and applies its

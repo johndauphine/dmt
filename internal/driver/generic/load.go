@@ -64,10 +64,37 @@ func (c *Catalog) Validate() error {
 	hasStrategy := c.Connection.DSNStrategy != ""
 	require(hasURL != hasStrategy,
 		"connection: exactly one of url_template or dsn_strategy must be set")
+	require(c.Connection.Portless == (c.Connection.DefaultPort == 0),
+		"connection.portless must be true if and only if connection.default_port is 0")
 	if hasStrategy {
 		if _, ok := dsnStrategies[c.Connection.DSNStrategy]; !ok {
 			errs = append(errs, fmt.Sprintf("connection.dsn_strategy %q is not a known strategy", c.Connection.DSNStrategy))
 		}
+	}
+
+	// Schema statistics are an optional driver capability whose presence is
+	// selected by catalog data, never inferred from generic.Driver's concrete
+	// Go type. Keep capability and strategy declarations in lockstep so a typo
+	// fails while loading the embedded catalog rather than during analysis.
+	stats := c.SchemaStats
+	switch stats.Strategy {
+	case "query":
+		require(c.Capabilities.SchemaStats,
+			"capabilities.schema_stats must be true when schema_stats.strategy is query")
+		require(stats.TableStats != "", "schema_stats.table_stats is required for query strategy")
+		require(stats.DateColumns != "", "schema_stats.date_columns is required for query strategy")
+	case "sqlite":
+		require(c.Capabilities.SchemaStats,
+			"capabilities.schema_stats must be true when schema_stats.strategy is sqlite")
+		require(stats.TableStats == "" && stats.DateColumns == "",
+			"schema_stats sqlite strategy does not accept query fields")
+	case "none":
+		require(!c.Capabilities.SchemaStats,
+			"capabilities.schema_stats must be false when schema_stats.strategy is none")
+		require(stats.TableStats == "" && stats.DateColumns == "",
+			"schema_stats none strategy does not accept query fields")
+	default:
+		errs = append(errs, fmt.Sprintf("schema_stats.strategy %q is not a known strategy", stats.Strategy))
 	}
 
 	// Pagination: templates and every variant's argument order are

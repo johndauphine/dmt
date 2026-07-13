@@ -514,6 +514,73 @@ func TestHasExactIdentity_MissingPortFails(t *testing.T) {
 	}
 }
 
+func TestHasExactIdentity_PortlessEndpointsUseDatabasePath(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Input)
+		want   bool
+	}{
+		{
+			name: "portless source permits empty host and zero port",
+			mutate: func(in *Input) {
+				in.SourcePortless = true
+				in.SourceHost = ""
+				in.SourcePort = 0
+				in.SourceDatabase = "/tmp/source.db"
+			},
+			want: true,
+		},
+		{
+			name: "both endpoints portless",
+			mutate: func(in *Input) {
+				in.SourcePortless, in.TargetPortless = true, true
+				in.SourceHost, in.TargetHost = "", ""
+				in.SourcePort, in.TargetPort = 0, 0
+				in.SourceDatabase, in.TargetDatabase = "/tmp/source.db", "/tmp/target.db"
+			},
+			want: true,
+		},
+		{
+			name: "portless source still requires path",
+			mutate: func(in *Input) {
+				in.SourcePortless = true
+				in.SourceHost, in.SourceDatabase = "", ""
+				in.SourcePort = 0
+			},
+			want: false,
+		},
+		{
+			name: "portless target still requires path",
+			mutate: func(in *Input) {
+				in.TargetPortless = true
+				in.TargetHost, in.TargetDatabase = "", ""
+				in.TargetPort = 0
+			},
+			want: false,
+		},
+		{
+			name: "portful peer still requires host",
+			mutate: func(in *Input) {
+				in.SourcePortless = true
+				in.SourceHost, in.SourcePort = "", 0
+				in.SourceDatabase = "/tmp/source.db"
+				in.TargetHost = ""
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := mkIdentity()
+			tc.mutate(&in)
+			if got := hasExactIdentity(in); got != tc.want {
+				t.Fatalf("hasExactIdentity() = %v, want %v for %+v", got, tc.want, in)
+			}
+		})
+	}
+}
+
 // TestHasExactIdentity_EmptySchemaAllowed — drivers without schema
 // concept (MySQL) leave the schema field empty. That's legitimate;
 // the check should pass.
@@ -540,6 +607,32 @@ func TestFilterByExactIdentity_AllMatchPass(t *testing.T) {
 	got := filterByExactIdentity(rows, in)
 	if len(got) != 2 {
 		t.Errorf("expected 2 matching rows, got %d", len(got))
+	}
+}
+
+func TestFilterByExactIdentity_PortlessIgnoresHostAndPort(t *testing.T) {
+	in := mkIdentity()
+	in.SourcePortless = true
+	in.SourceHost = ""
+	in.SourcePort = 0
+	in.SourceDatabase = "/tmp/source.db"
+
+	rows := []HistoryRecord{
+		{
+			SourceHost: "legacy-meaningless-host", SourcePort: 9999,
+			SourceDatabase: in.SourceDatabase, SourceSchema: in.SourceSchema,
+			TargetHost: in.TargetHost, TargetPort: in.TargetPort,
+			TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema,
+		},
+		{
+			SourceDatabase: "/tmp/other.db", SourceSchema: in.SourceSchema,
+			TargetHost: in.TargetHost, TargetPort: in.TargetPort,
+			TargetDatabase: in.TargetDatabase, TargetSchema: in.TargetSchema,
+		},
+	}
+	got := filterByExactIdentity(rows, in)
+	if len(got) != 1 || got[0].SourceDatabase != in.SourceDatabase {
+		t.Fatalf("portless identity rows = %+v, want only matching path", got)
 	}
 }
 
@@ -635,6 +728,35 @@ func TestTune_ExactIdentityCohort_FiresRegression(t *testing.T) {
 	// identity cohort), not 60 (all rows). Tier 1 isolation matters.
 	if !strings.Contains(out.Reasoning, "over 30 filtered rows") {
 		t.Errorf("Tier 1 should train on 30 matching rows, not the full 60; got: %q", out.Reasoning)
+	}
+}
+
+func TestTune_SQLitePortlessIdentityReachesExactIdentityTier(t *testing.T) {
+	current := Input{
+		SourceDBType: "sqlite", TargetDBType: "sqlite",
+		SourcePortless: true, TargetPortless: true,
+		SourceDatabase: "/tmp/source.db", TargetDatabase: "/tmp/target.db",
+		CPUCores: 16, MemoryGB: 48, AvgRowBytes: 500,
+	}
+	rows := make([]HistoryRecord, 0, 30)
+	for i := 0; i < 30; i++ {
+		waw := (i % 6) + 1
+		dev := waw - 3
+		rows = append(rows, HistoryRecord{
+			SourceDBType: "sqlite", TargetDBType: "sqlite",
+			SourceDatabase: current.SourceDatabase,
+			TargetDatabase: current.TargetDatabase,
+			CPUCores:       16, MemoryGB: 48,
+			WriteAheadWriters: waw, ChunkSize: 20_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 500_000 - 20_000*float64(dev*dev),
+		})
+	}
+
+	out := Tune(current, DriverProfile{Name: "sqlite", BaselineWAW: 1}, &stubHistory{rows: rows}, DBTuning{})
+	if !strings.Contains(out.Reasoning, "regression-selected") ||
+		!strings.Contains(out.Reasoning, "over 30 filtered rows") {
+		t.Fatalf("SQLite portless history did not reach exact-identity regression tier: %q", out.Reasoning)
 	}
 }
 

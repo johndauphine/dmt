@@ -64,6 +64,7 @@ type mockHistoryProvider struct {
 	history   []checkpoint.TuningRecord
 	rowID     int64
 	saveError error
+	getCalls  int
 }
 
 func (m *mockHistoryProvider) GetRuntimeAdjustments(int) ([]checkpoint.RuntimeAdjustmentRecord, error) {
@@ -71,6 +72,7 @@ func (m *mockHistoryProvider) GetRuntimeAdjustments(int) ([]checkpoint.RuntimeAd
 }
 
 func (m *mockHistoryProvider) GetTuningHistory(_ int, _, _ string) ([]checkpoint.TuningRecord, error) {
+	m.getCalls++
 	return m.history, nil
 }
 
@@ -356,6 +358,31 @@ func TestBuildAutoTuneInput_NoEnvelopeDoesNotInventMemory(t *testing.T) {
 	}
 }
 
+func TestBuildAutoTuneInputCarriesCatalogPortlessIdentity(t *testing.T) {
+	source := &tuningProfileTestDriver{
+		name:     "portless-source-test",
+		defaults: DriverDefaults{Portless: true, WriteAheadWriters: 1},
+	}
+	target := &tuningProfileTestDriver{
+		name:     "portful-target-test",
+		defaults: DriverDefaults{Port: 5432, WriteAheadWriters: 2},
+	}
+	registerTuningProfileTestDriver(t, source)
+	registerTuningProfileTestDriver(t, target)
+
+	analyzer := NewSmartConfigAnalyzer(nil, source.Name())
+	analyzer.SetTargetDBType(target.Name())
+	analyzer.SetWorkloadIdentity("", 0, "/tmp/source.db", "", "target", 5432, "target_db", "public")
+	input := analyzer.buildAutoTuneInput(nil, fallbackRowBytes)
+	if !input.SourcePortless || input.TargetPortless {
+		t.Fatalf("AutoTuneInput portless flags = source:%v target:%v", input.SourcePortless, input.TargetPortless)
+	}
+	tuningInput := analyzer.toTuningInput(input)
+	if !tuningInput.SourcePortless || tuningInput.TargetPortless {
+		t.Fatalf("tuning.Input portless flags = source:%v target:%v", tuningInput.SourcePortless, tuningInput.TargetPortless)
+	}
+}
+
 func TestBuildTuningProfile_KnownTargetMatchesAnalyzer(t *testing.T) {
 	d := &tuningProfileTestDriver{
 		name: "tuning-profile-known-test",
@@ -523,7 +550,7 @@ func TestSetTargetProbe_FlowsToAnalyzer(t *testing.T) {
 // chunk; would crash) instead of ~409 rows (3.3MB; fits).
 func TestCalculateAvgRowSize_StoresUncapped(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		{Name: "wide_json_table", RowCount: 1_000_000, AvgRowSizeBytes: 8192}, // 8KB rows
 	}
 	capped := analyzer.calculateAvgRowSize(tables)
@@ -540,7 +567,7 @@ func TestCalculateAvgRowSize_StoresUncapped(t *testing.T) {
 // cap is a no-op for those workloads).
 func TestCalculateAvgRowSize_NoCapWhenSmall(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		{Name: "narrow_table", RowCount: 1_000_000, AvgRowSizeBytes: 500},
 	}
 	capped := analyzer.calculateAvgRowSize(tables)
@@ -551,7 +578,7 @@ func TestCalculateAvgRowSize_NoCapWhenSmall(t *testing.T) {
 
 func TestCalculateAvgRowSize_SeparatesLegacyRepresentativeAndSafetyWidths(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		{Name: "dominant_narrow", RowCount: 100_000_000, AvgRowSizeBytes: 200},
 		{Name: "tiny_wide", RowCount: 100, AvgRowSizeBytes: 8 * 1024},
 	}
@@ -585,7 +612,7 @@ func TestCalculateAvgRowSize_SeparatesLegacyRepresentativeAndSafetyWidths(t *tes
 
 func TestCalculateAvgRowSize_UniformTablesPreserveWidths(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	legacy := analyzer.calculateAvgRowSize([]tableInfo{
+	legacy := analyzer.calculateAvgRowSize([]TableStatRow{
 		{Name: "a", RowCount: 10_000, AvgRowSizeBytes: 640},
 		{Name: "b", RowCount: 1_000, AvgRowSizeBytes: 640},
 		{Name: "c", RowCount: 100, AvgRowSizeBytes: 640},
@@ -601,7 +628,7 @@ func TestCalculateAvgRowSize_UniformTablesPreserveWidths(t *testing.T) {
 func TestCalculateAvgRowSize_UnknownAndWidthOnlySafety(t *testing.T) {
 	t.Run("no observed widths uses unproven fallback", func(t *testing.T) {
 		analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-		legacy := analyzer.calculateAvgRowSize([]tableInfo{{Name: "unknown", RowCount: 10}})
+		legacy := analyzer.calculateAvgRowSize([]TableStatRow{{Name: "unknown", RowCount: 10}})
 		if legacy != fallbackRowBytes || analyzer.uncappedAvgRowBytes != fallbackRowBytes ||
 			analyzer.representativeRowBytes != fallbackRowBytes || analyzer.safetyRowBytes != fallbackRowBytes ||
 			analyzer.safetyRowBytesKnown {
@@ -613,7 +640,7 @@ func TestCalculateAvgRowSize_UnknownAndWidthOnlySafety(t *testing.T) {
 
 	t.Run("positive width with unknown count proves safety only", func(t *testing.T) {
 		analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-		legacy := analyzer.calculateAvgRowSize([]tableInfo{{Name: "width_only", RowCount: 0, AvgRowSizeBytes: 8192}})
+		legacy := analyzer.calculateAvgRowSize([]TableStatRow{{Name: "width_only", RowCount: 0, AvgRowSizeBytes: 8192}})
 		if legacy != fallbackRowBytes || analyzer.representativeRowBytes != fallbackRowBytes {
 			t.Fatalf("count-less width changed legacy/representative: legacy=%d representative=%d", legacy, analyzer.representativeRowBytes)
 		}
@@ -625,7 +652,7 @@ func TestCalculateAvgRowSize_UnknownAndWidthOnlySafety(t *testing.T) {
 
 func TestCalculateAvgRowSize_SaturatesPathologicalProducts(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	analyzer.calculateAvgRowSize([]tableInfo{
+	analyzer.calculateAvgRowSize([]TableStatRow{
 		{Name: "huge", RowCount: math.MaxInt64, AvgRowSizeBytes: math.MaxInt64},
 		{Name: "also_huge", RowCount: math.MaxInt64, AvgRowSizeBytes: 2},
 	})
@@ -666,7 +693,7 @@ func TestChunkLimitFromProbeSaturatesPacketMath(t *testing.T) {
 // modeled sizing input, not a hard bound on every serialized row.
 func TestCalculateAvgRowSize_TracksSafetyWidthForPacketSizing(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		{Name: "narrow1", RowCount: 1_000_000, AvgRowSizeBytes: 100},
 		{Name: "narrow2", RowCount: 900_000, AvgRowSizeBytes: 150},
 		{Name: "wide_json", RowCount: 500_000, AvgRowSizeBytes: 8192},
@@ -690,7 +717,7 @@ func TestCalculateAvgRowSize_TracksSafetyWidthForPacketSizing(t *testing.T) {
 // wide table cannot evade the all-table safety-width model.
 func TestCalculateAvgRowSize_SafetyIncludesTablesOutsideTop5(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		// Top-5 by row count: five narrow tables. The average is small.
 		{Name: "narrow1", RowCount: 5_000_000, AvgRowSizeBytes: 100},
 		{Name: "narrow2", RowCount: 4_000_000, AvgRowSizeBytes: 110},
@@ -719,7 +746,7 @@ func TestCalculateAvgRowSize_SafetyIncludesTablesOutsideTop5(t *testing.T) {
 // (the narrow set's widest), not 16384.
 func TestApplyTableNameFilter_ExcludedWideTableDoesNotDrivePacketCap(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	allTables := []tableInfo{
+	allTables := []TableStatRow{
 		{Name: "narrow1", RowCount: 1_000_000, AvgRowSizeBytes: 100},
 		{Name: "narrow2", RowCount: 900_000, AvgRowSizeBytes: 110},
 		{Name: "narrow3", RowCount: 800_000, AvgRowSizeBytes: 120},
@@ -757,7 +784,7 @@ func TestApplyTableNameFilter_ExcludedWideTableDoesNotDrivePacketCap(t *testing.
 // Same input through both code paths must yield the same safetyRowBytes
 // and same uncappedAvgRowBytes.
 func TestApplyTableNameFilter_NoFilterIsIdentity(t *testing.T) {
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		{Name: "narrow1", RowCount: 1_000_000, AvgRowSizeBytes: 100},
 		{Name: "narrow2", RowCount: 900_000, AvgRowSizeBytes: 150},
 		{Name: "wide_json", RowCount: 500_000, AvgRowSizeBytes: 8192},
@@ -819,7 +846,7 @@ func TestSetTableNameFilter_EmptyClears(t *testing.T) {
 func TestApplyTableNameFilter_CaseInsensitive(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
 	analyzer.SetTableNameFilter([]string{"MyTable"})
-	kept := analyzer.applyTableNameFilter([]tableInfo{
+	kept := analyzer.applyTableNameFilter([]TableStatRow{
 		{Name: "mytable", AvgRowSizeBytes: 100},
 		{Name: "MYTABLE", AvgRowSizeBytes: 200},
 		{Name: "other", AvgRowSizeBytes: 300},
@@ -842,7 +869,7 @@ func TestApplyTableNameFilter_CaseInsensitive(t *testing.T) {
 // reflect that.
 func TestCalculateAvgRowSize_LargestSampledTableBytesUsesAllTables(t *testing.T) {
 	analyzer := &SmartConfigAnalyzer{suggestions: &SmartConfigSuggestions{}}
-	tables := []tableInfo{
+	tables := []TableStatRow{
 		// Top-5 by row count. The widest by bytes is narrow1: 5M × 100 = 500M.
 		{Name: "narrow1", RowCount: 5_000_000, AvgRowSizeBytes: 100},
 		{Name: "narrow2", RowCount: 4_000_000, AvgRowSizeBytes: 110},

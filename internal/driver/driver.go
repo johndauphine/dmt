@@ -16,6 +16,11 @@ type DriverDefaults struct {
 	// Port is the default port (e.g., 5432 for PostgreSQL, 1433 for MSSQL).
 	Port int
 
+	// Portless reports that endpoint identity does not require a network host
+	// or port. File-backed engines such as SQLite use Database as their
+	// connection identity and pair this with Port == 0.
+	Portless bool
+
 	// Schema is the default schema (e.g., "public" for PostgreSQL, "dbo" for MSSQL).
 	Schema string
 

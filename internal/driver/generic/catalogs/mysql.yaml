@@ -10,6 +10,7 @@ connection:
   backend: mysql                 # go-sql-driver/mysql
   dsn_strategy: mysql_tcp        # credential escaping + #252 TLS normalization
   default_port: 3306
+  portless: false
 
 defaults:
   ssl_mode: require              # maps to tls=true (fail closed, #252)
@@ -21,6 +22,25 @@ capabilities:
   sequence_resetter: true        # ALTER TABLE ... AUTO_INCREMENT
   constraint_writer: true        # post-transfer FK/CHECK via finalization DDL
   incremental_date_reader: true
+  schema_stats: true
+
+schema_stats:
+  strategy: query
+  table_stats: |
+    SELECT
+      TABLE_NAME AS table_name,
+      IFNULL(TABLE_ROWS, 0) AS row_count,
+      IFNULL(AVG_ROW_LENGTH, 0) AS avg_row_size
+    FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = ?
+      AND TABLE_TYPE = 'BASE TABLE'
+    ORDER BY TABLE_ROWS DESC
+  date_columns: |
+    SELECT TABLE_NAME, COLUMN_NAME
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ?
+      AND DATA_TYPE IN ('datetime', 'timestamp', 'date')
+    ORDER BY TABLE_NAME, ORDINAL_POSITION
 
 strict_parallel_strategy: lock_window_sessions
 
