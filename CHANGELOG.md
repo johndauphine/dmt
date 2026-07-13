@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Smart configuration now batches server-engine date-column metadata into one
+  schema query after deterministic tuning and history state are ready. Date
+  metadata errors or timeouts emit one warning without discarding valid tuning,
+  and out-of-scope tables are filtered without extra round trips (#700).
+
 - Runtime chunk growth now uses a recomputable memory/protocol cap derived
   from the unified envelope and observed widest-table width. Writer growth
   atomically applies any required chunk clamp, while missing analysis,
