@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Auto-tune memory enforcement now accounts for each in-scope table's
+  cardinality and average row width, so tiny wide lookup tables saturate at
+  their real row counts instead of collapsing the global chunk-size domain.
+  Incomplete schema evidence continues to use the conservative widest-row
+  fallback (#728).
+
 - Removed retired auto-tune suggestion, checkpoint aggregate, and monitor-trend
   APIs after verifying they have no production consumers. Live pool
   recommendations remain available to analyze, apply, Web, and advisory
