@@ -28,6 +28,14 @@ func runtimeCapTestConfig(budgetMB int64) *Config {
 	}
 }
 
+func completeRuntimeMemoryProfile(rowBytes int64) tuning.MemoryProfile {
+	return tuning.NewMemoryProfile([]tuning.TableMemoryStat{{
+		Name:        "large_table",
+		RowCount:    math.MaxInt64,
+		AvgRowBytes: rowBytes,
+	}})
+}
+
 func TestApplyTunerSuggestionsDerivesRuntimeMemoryCapForPostgresAndMSSQL(t *testing.T) {
 	for _, targetType := range []string{"postgres", "mssql"} {
 		t.Run(targetType, func(t *testing.T) {
@@ -39,6 +47,7 @@ func TestApplyTunerSuggestionsDerivesRuntimeMemoryCapForPostgresAndMSSQL(t *test
 				WriteAheadWriters:       2,
 				SafetyRowBytes:          8_192,
 				SafetyRowBytesKnown:     true,
+				RuntimeMemoryProfile:    completeRuntimeMemoryProfile(8_192),
 				ChunkSizeRecommendation: 50_000,
 			})
 
@@ -63,6 +72,7 @@ func TestRuntimeChunkSizeCapForUsesMinimumMemoryAndProtocolCap(t *testing.T) {
 	cfg := runtimeCapTestConfig(1_024)
 	cfg.Migration.RuntimeSafetyRowBytes = 8_192
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
+	cfg.Migration.RuntimeMemoryProfile = completeRuntimeMemoryProfile(8_192)
 	memoryCap := positiveInt64ToInt(tuning.SafeChunkSize(1_024, 4, 4, 2, 8_192))
 
 	cfg.Migration.TargetHardChunkLimit = memoryCap + 100
@@ -73,6 +83,52 @@ func TestRuntimeChunkSizeCapForUsesMinimumMemoryAndProtocolCap(t *testing.T) {
 	cfg.Migration.TargetHardChunkLimit = 100
 	if got := cfg.RuntimeChunkSizeCapFor(4, 4, 2); got != 100 {
 		t.Fatalf("protocol-limited cap = %d, want 100", got)
+	}
+}
+
+func TestRuntimeChunkSizeCapUsesCardinalityAwareProfile(t *testing.T) {
+	cfg := runtimeCapTestConfig(1)
+	cfg.Migration.Workers = 1
+	cfg.Migration.ReadAheadBuffers = 1
+	cfg.Migration.WriteAheadWriters = 0
+	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+		SafetyRowBytes:      36_864,
+		SafetyRowBytesKnown: true,
+		RuntimeMemoryProfile: tuning.NewMemoryProfile([]tuning.TableMemoryStat{
+			{Name: "tiny_lookup", RowCount: 2, AvgRowBytes: 36_864},
+			{Name: "large_table", RowCount: 1_000_000, AvgRowBytes: 100},
+		}),
+	})
+
+	if got, want := cfg.Migration.RuntimeChunkSizeCap, 10_485; got != want {
+		t.Fatalf("cardinality-aware runtime cap = %d, want %d", got, want)
+	}
+	if !cfg.Migration.RuntimeChunkGrowthAllowed {
+		t.Fatal("complete cardinality evidence should authorize fitting resource growth")
+	}
+	if scalar := tuning.SafeChunkSize(1, 1, 1, 0, 36_864); scalar >= int64(cfg.Migration.RuntimeChunkSizeCap) {
+		t.Fatalf("fixture did not separate scalar cap %d from table-aware cap %d", scalar, cfg.Migration.RuntimeChunkSizeCap)
+	}
+}
+
+func TestIncompleteRuntimeProfileFallsBackButDisablesGrowth(t *testing.T) {
+	cfg := runtimeCapTestConfig(1)
+	cfg.Migration.Workers = 1
+	cfg.Migration.ReadAheadBuffers = 1
+	cfg.Migration.WriteAheadWriters = 0
+	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
+		SafetyRowBytes:      2_000,
+		SafetyRowBytesKnown: true,
+		RuntimeMemoryProfile: tuning.NewMemoryProfile([]tuning.TableMemoryStat{
+			{Name: "unknown_cardinality", RowCount: 0, AvgRowBytes: 2_000},
+		}),
+	})
+
+	if got, want := cfg.Migration.RuntimeChunkSizeCap, 524; got != want {
+		t.Fatalf("incomplete-profile scalar fallback cap = %d, want %d", got, want)
+	}
+	if cfg.Migration.RuntimeChunkGrowthAllowed || cfg.RuntimeChunkGrowthCapFor(1, 1, 0) != 0 {
+		t.Fatal("incomplete cardinality evidence authorized runtime growth")
 	}
 }
 
@@ -91,6 +147,7 @@ func TestApplyTunerSuggestionsUsesEffectivePinnedTuple(t *testing.T) {
 		WriteAheadWriters:       1,
 		SafetyRowBytes:          4_096,
 		SafetyRowBytesKnown:     true,
+		RuntimeMemoryProfile:    completeRuntimeMemoryProfile(4_096),
 		ChunkSizeRecommendation: 50_000,
 	})
 
@@ -138,6 +195,9 @@ func TestRuntimeChunkCapOneRowOverBudgetDisablesGrowth(t *testing.T) {
 	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
 		SafetyRowBytes:      1024 * 1024,
 		SafetyRowBytesKnown: true,
+		RuntimeMemoryProfile: tuning.NewMemoryProfile([]tuning.TableMemoryStat{{
+			Name: "wide", RowCount: 1, AvgRowBytes: 1024 * 1024,
+		}}),
 	})
 
 	if cfg.Migration.RuntimeChunkSizeCap != 1 {
@@ -165,6 +225,7 @@ func TestRuntimeChunkGrowthCapForProspectiveWAWCanFailClosed(t *testing.T) {
 	cfg.Migration.WriteAheadWriters = 1
 	cfg.Migration.RuntimeSafetyRowBytes = 400 * 1024
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
+	cfg.Migration.RuntimeMemoryProfile = completeRuntimeMemoryProfile(400 * 1024)
 	cfg.FinalizeRuntimeChunkSizeCap()
 
 	if !cfg.Migration.RuntimeChunkGrowthAllowed || cfg.RuntimeChunkGrowthCapFor(1, 1, 1) != 1 {
@@ -180,12 +241,14 @@ func TestResetAndFinalizeRuntimeChunkSafetySupportsDegradedProtocolPath(t *testi
 	cfg.Migration.RuntimeChunkSizeCap = 500
 	cfg.Migration.RuntimeSafetyRowBytes = 8_192
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
+	cfg.Migration.RuntimeMemoryProfile = completeRuntimeMemoryProfile(8_192)
 	cfg.Migration.RuntimeChunkGrowthAllowed = true
 	cfg.Migration.TargetHardChunkLimit = 250
 
 	cfg.ResetRuntimeChunkSafety()
 	if cfg.Migration.RuntimeChunkSizeCap != 0 || cfg.Migration.RuntimeSafetyRowBytes != 0 ||
-		cfg.Migration.RuntimeSafetyRowBytesKnown || cfg.Migration.RuntimeChunkGrowthAllowed {
+		cfg.Migration.RuntimeSafetyRowBytesKnown || cfg.Migration.RuntimeMemoryProfile.Len() != 0 ||
+		cfg.Migration.RuntimeChunkGrowthAllowed {
 		t.Fatalf("runtime safety reset left stale metadata: %+v", cfg.Migration)
 	}
 	if cfg.Migration.TargetHardChunkLimit != 250 {
@@ -208,6 +271,7 @@ func TestRuntimeChunkCapExtremeInputsDoNotOverflow(t *testing.T) {
 	cfg := runtimeCapTestConfig(maxMemoryEnvelopeMB)
 	cfg.Migration.RuntimeSafetyRowBytes = math.MaxInt64
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
+	cfg.Migration.RuntimeMemoryProfile = completeRuntimeMemoryProfile(math.MaxInt64)
 	cfg.Migration.TargetHardChunkLimit = maxInt
 
 	if got := cfg.RuntimeChunkSizeCapFor(maxInt, maxInt, maxInt); got != 1 {
@@ -223,7 +287,10 @@ func TestRuntimeChunkSafetyMetadataIsNotSerialized(t *testing.T) {
 		RuntimeChunkSizeCap:        123,
 		RuntimeSafetyRowBytes:      8_192,
 		RuntimeSafetyRowBytesKnown: true,
-		RuntimeChunkGrowthAllowed:  true,
+		RuntimeMemoryProfile: tuning.NewMemoryProfile([]tuning.TableMemoryStat{{
+			Name: "serialization_sentinel", RowCount: 2, AvgRowBytes: 8_192,
+		}}),
+		RuntimeChunkGrowthAllowed: true,
 	}
 	jsonData, err := json.Marshal(m)
 	if err != nil {
@@ -235,8 +302,21 @@ func TestRuntimeChunkSafetyMetadataIsNotSerialized(t *testing.T) {
 	}
 	for _, data := range []string{string(jsonData), string(yamlData)} {
 		if strings.Contains(data, "RuntimeChunk") || strings.Contains(data, "RuntimeSafety") ||
-			strings.Contains(data, "runtimechunk") || strings.Contains(data, "runtimesafety") {
+			strings.Contains(data, "runtimechunk") || strings.Contains(data, "runtimesafety") ||
+			strings.Contains(data, "serialization_sentinel") {
 			t.Fatalf("runtime metadata leaked into serialization: %s", data)
 		}
+	}
+	baselineJSON, err := json.Marshal(MigrationConfig{})
+	if err != nil {
+		t.Fatalf("json.Marshal baseline: %v", err)
+	}
+	baselineYAML, err := yaml.Marshal(MigrationConfig{})
+	if err != nil {
+		t.Fatalf("yaml.Marshal baseline: %v", err)
+	}
+	if !bytes.Equal(jsonData, baselineJSON) || !bytes.Equal(yamlData, baselineYAML) {
+		t.Fatalf("runtime-only metadata changed serialized identity:\njson=%s\nbaseline=%s\nyaml=%s\nbaseline=%s",
+			jsonData, baselineJSON, yamlData, baselineYAML)
 	}
 }

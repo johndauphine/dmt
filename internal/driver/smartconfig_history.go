@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"fmt"
 	"github.com/johndauphine/dmt/internal/checkpoint"
 	"time"
 
@@ -14,6 +15,7 @@ type pendingTuningSave struct {
 	representativeRowBytes int64
 	safetyRowBytes         int64
 	safetyRowBytesKnown    bool
+	memoryProfile          tuning.MemoryProfile
 }
 
 // ActualParams holds the actual migration parameters used after user overrides,
@@ -60,28 +62,31 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) in
 	s.suggestions.RepresentativeRowBytes = pendingRepresentativeRowBytes(ps)
 	s.suggestions.SafetyRowBytes = pendingSafetyRowBytes(ps)
 	s.suggestions.SafetyRowBytesKnown = pendingSafetyRowBytesKnown(ps)
+	s.suggestions.RuntimeMemoryProfile = pendingMemoryProfile(ps)
 	// Re-derive EstimatedMemMB so the persisted history reflects the
-	// post-override params, not the pre-override estimate (#160). The safety
-	// width drives the estimate; the legacy AvgRowSizeBytes remains the
+	// post-override params, not the pre-override estimate (#160). The runtime
+	// table profile drives the estimate when complete and the safety width is
+	// its conservative fallback; the legacy AvgRowSizeBytes remains the
 	// persisted regression feature and no checkpoint schema change is needed.
-	s.suggestions.EstimatedMemMB = tuning.EstimatedMemMB(
+	memoryModel := tuning.NewMemoryModel(pendingMemoryProfile(ps), pendingSafetyRowBytes(ps))
+	s.suggestions.EstimatedMemMB = memoryModel.EstimatedMemMB(
 		actual.Workers,
 		actual.ReadAheadBuffers,
 		actual.WriteAheadWriters,
 		actual.ChunkSize,
-		pendingSafetyRowBytes(ps),
 	)
-	s.suggestions.MemoryEstimateOverBudget = tuning.MemoryEstimateExceedsBudget(
+	s.suggestions.MemoryEstimateOverBudget = memoryModel.ExceedsBudget(
 		ps.input.MemoryBudgetMB,
 		actual.Workers,
 		actual.ReadAheadBuffers,
 		actual.WriteAheadWriters,
 		actual.ChunkSize,
-		pendingSafetyRowBytes(ps),
 	)
 	if s.suggestions.MemoryEstimateOverBudget {
 		widthSource := "unobserved fallback estimate"
-		if s.suggestions.SafetyRowBytesKnown {
+		if memoryModel.UsesTableProfile() {
+			widthSource = fmt.Sprintf("cardinality-aware %d-table model", memoryModel.TableCount())
+		} else if s.suggestions.SafetyRowBytesKnown {
 			widthSource = "widest observed table-average model"
 		}
 		logging.Warn("Post-override tuning memory estimate exceeds the resolved budget (estimate=%d MB budget=%d MB safety_width=%d B source=%s)",
@@ -124,6 +129,13 @@ func pendingSafetyRowBytesKnown(ps *pendingTuningSave) bool {
 		return ps.input.SafetyRowBytesKnown
 	}
 	return false
+}
+
+func pendingMemoryProfile(ps *pendingTuningSave) tuning.MemoryProfile {
+	if ps.memoryProfile.Len() > 0 {
+		return ps.memoryProfile
+	}
+	return ps.input.MemoryProfile
 }
 
 // saveTuningResult saves the tuning recommendation to history.

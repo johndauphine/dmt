@@ -52,13 +52,19 @@ type Input struct {
 	// conservative 500-byte fallback rather than aliasing the legacy average.
 	RepresentativeRowBytes int64
 
-	// SafetyRowBytes is the widest observed positive per-table average and is
-	// used exclusively for memory clamps and estimates. SafetyRowBytesKnown is
-	// true only when schema statistics supplied that positive width; fallback
-	// estimates keep it false so callers never present an assumed width as
-	// observed fact.
+	// SafetyRowBytes is the widest observed positive per-table average. It is
+	// the conservative scalar fallback for memory clamps and estimates when the
+	// cardinality profile below is incomplete. SafetyRowBytesKnown is true only
+	// when schema statistics supplied that positive width; fallback estimates
+	// keep it false so callers never present an assumed width as observed fact.
 	SafetyRowBytes      int64
 	SafetyRowBytesKnown bool
+
+	// MemoryProfile carries every in-scope table's runtime-only cardinality
+	// and average width. Complete profiles enable the cardinality-aware memory
+	// model; incomplete profiles fall back to SafetyRowBytes and must not be
+	// persisted or treated as evidence authorizing runtime growth.
+	MemoryProfile MemoryProfile `json:"-" yaml:"-"`
 
 	// UncappedAvgRowBytes is the pre-cap average row size in bytes
 	// (#214 Copilot fix on PR #288). ClassifyRegime reads this for

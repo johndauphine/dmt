@@ -11,6 +11,7 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []TableStatRow) {
 	s.suggestions.RepresentativeRowBytes = s.representativeRowBytes
 	s.suggestions.SafetyRowBytes = s.safetyRowBytes
 	s.suggestions.SafetyRowBytesKnown = s.safetyRowBytesKnown
+	s.suggestions.RuntimeMemoryProfile = s.memoryProfile
 
 	input := s.buildAutoTuneInput(tables, avgRowSize)
 	output := tuning.Tune(
@@ -27,6 +28,7 @@ func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []TableStatRow) {
 		representativeRowBytes: input.RepresentativeRowBytes,
 		safetyRowBytes:         input.SafetyRowBytes,
 		safetyRowBytesKnown:    input.SafetyRowBytesKnown,
+		memoryProfile:          input.MemoryProfile,
 	}
 }
 
@@ -40,6 +42,7 @@ func (s *SmartConfigAnalyzer) calculateFormulaOnlyParams() {
 	s.suggestions.RepresentativeRowBytes = s.representativeRowBytes
 	s.suggestions.SafetyRowBytes = s.safetyRowBytes
 	s.suggestions.SafetyRowBytesKnown = s.safetyRowBytesKnown
+	s.suggestions.RuntimeMemoryProfile = s.memoryProfile
 
 	input := s.buildAutoTuneInput(nil, avgRowSize)
 	output := tuning.DefaultOutput(s.toTuningInput(input), s.toTuningProfile())
@@ -63,6 +66,7 @@ func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 		RepresentativeRowBytes: in.RepresentativeRowBytes,
 		SafetyRowBytes:         in.SafetyRowBytes,
 		SafetyRowBytesKnown:    in.SafetyRowBytesKnown,
+		MemoryProfile:          in.MemoryProfile,
 		UncappedAvgRowBytes:    in.UncappedAvgRowBytes,
 		LargestTableBytes:      in.LargestTableBytes,
 		// Workload identity passthrough (#215).

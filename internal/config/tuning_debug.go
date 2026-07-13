@@ -90,6 +90,7 @@ func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []Param
 	// explicit and cannot authorize resource growth (#709).
 	c.Migration.RuntimeSafetyRowBytes = s.SafetyRowBytes
 	c.Migration.RuntimeSafetyRowBytesKnown = s.SafetyRowBytesKnown
+	c.Migration.RuntimeMemoryProfile = s.RuntimeMemoryProfile
 	c.FinalizeRuntimeChunkSizeCap()
 
 	return changes

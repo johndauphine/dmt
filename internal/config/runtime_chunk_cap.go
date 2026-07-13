@@ -7,8 +7,9 @@ import (
 
 // RuntimeChunkSizeCapFor derives the current row-count ceiling for an
 // arbitrary effective runtime tuple. The immutable #708 memory envelope is the
-// only budget source, and only #703's observed safety width may create a memory
-// cap. TargetHardChunkLimit remains independently binding for protocol safety.
+// only budget source. A complete runtime table profile uses cardinality-aware
+// sizing; otherwise #703's observed safety width supplies the conservative
+// scalar cap. TargetHardChunkLimit remains independently binding for protocol safety.
 // A zero result means neither source can provide a usable cap; it never means
 // that runtime growth is unbounded.
 func (c *Config) RuntimeChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
@@ -21,23 +22,24 @@ func (c *Config) RuntimeChunkSizeCapFor(workers, readAheadBuffers, writeAheadWri
 
 // RuntimeChunkGrowthCapFor is the fail-closed recomputation callback for
 // resource growth. Unlike RuntimeChunkSizeCapFor, it returns zero when the
-// tuple lacks observed-width evidence or when even the one-row minimum-progress
-// footprint exceeds the immutable envelope. The controller must suppress a
-// prospective WAW increase on zero rather than treating cap=1 as fitting.
+// tuple lacks observed-width evidence, the cardinality profile is incomplete,
+// or even the one-row minimum-progress footprint exceeds the immutable
+// envelope. The controller must suppress a prospective WAW increase on zero
+// rather than treating cap=1 as fitting.
 func (c *Config) RuntimeChunkGrowthCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
-	if c == nil || !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 {
+	if c == nil || !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 ||
+		!c.Migration.RuntimeMemoryProfile.Complete() {
 		return 0
 	}
 	if c.runtimeMemoryChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters) <= 0 {
 		return 0
 	}
-	if tuning.MemoryEstimateExceedsBudget(
+	if c.runtimeMemoryModel().ExceedsBudget(
 		c.autoConfig.MemoryEnvelope.BudgetMB,
 		workers,
 		readAheadBuffers,
 		writeAheadWriters,
 		1,
-		c.Migration.RuntimeSafetyRowBytes,
 	) {
 		return 0
 	}
@@ -55,6 +57,7 @@ func (c *Config) ResetRuntimeChunkSafety() {
 	c.Migration.RuntimeChunkSizeCap = 0
 	c.Migration.RuntimeSafetyRowBytes = 0
 	c.Migration.RuntimeSafetyRowBytesKnown = false
+	c.Migration.RuntimeMemoryProfile = tuning.MemoryProfile{}
 	c.Migration.RuntimeChunkGrowthAllowed = false
 }
 
@@ -62,14 +65,17 @@ func (c *Config) runtimeMemoryChunkSizeCapFor(workers, readAheadBuffers, writeAh
 	if !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 {
 		return 0
 	}
-	rows := tuning.SafeChunkSize(
+	rows := c.runtimeMemoryModel().SafeChunkSize(
 		c.autoConfig.MemoryEnvelope.BudgetMB,
 		workers,
 		readAheadBuffers,
 		writeAheadWriters,
-		c.Migration.RuntimeSafetyRowBytes,
 	)
 	return positiveInt64ToInt(rows)
+}
+
+func (c *Config) runtimeMemoryModel() tuning.MemoryModel {
+	return tuning.NewMemoryModel(c.Migration.RuntimeMemoryProfile, c.Migration.RuntimeSafetyRowBytes)
 }
 
 // FinalizeRuntimeChunkSizeCap derives the cap using the current effective
@@ -92,13 +98,12 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 
 	oneRowOverBudget := false
 	if memoryCap > 0 {
-		oneRowOverBudget = tuning.MemoryEstimateExceedsBudget(
+		oneRowOverBudget = c.runtimeMemoryModel().ExceedsBudget(
 			c.autoConfig.MemoryEnvelope.BudgetMB,
 			m.Workers,
 			m.ReadAheadBuffers,
 			m.WriteAheadWriters,
 			1,
-			m.RuntimeSafetyRowBytes,
 		)
 	}
 	m.RuntimeChunkGrowthAllowed = c.RuntimeChunkGrowthCapFor(m.Workers, m.ReadAheadBuffers, m.WriteAheadWriters) > 0
@@ -107,11 +112,17 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 	case oneRowOverBudget:
 		logging.Warn("Runtime chunk cap is the 1-row minimum-progress fallback, but one modeled row still exceeds the memory envelope (budget=%d MB safety_width=%d B workers=%d read_ahead=%d write_ahead=%d); resource growth disabled",
 			c.autoConfig.MemoryEnvelope.BudgetMB, m.RuntimeSafetyRowBytes, m.Workers, m.ReadAheadBuffers, m.WriteAheadWriters)
+	case memoryCap > 0 && protocolCap > 0 && m.RuntimeChunkGrowthAllowed:
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d, protocol=%d, cardinality-aware tables=%d, observed safety width=%d B); resource growth enabled",
+			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeMemoryProfile.Len(), m.RuntimeSafetyRowBytes)
 	case memoryCap > 0 && protocolCap > 0:
-		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d, protocol=%d, observed safety width=%d B); resource growth enabled",
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d conservative scalar fallback, protocol=%d, observed safety width=%d B, incomplete cardinality profile); resource growth disabled",
 			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeSafetyRowBytes)
+	case memoryCap > 0 && m.RuntimeChunkGrowthAllowed:
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory cap, cardinality-aware tables=%d, observed safety width=%d B); resource growth enabled",
+			m.RuntimeChunkSizeCap, m.RuntimeMemoryProfile.Len(), m.RuntimeSafetyRowBytes)
 	case memoryCap > 0:
-		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory cap, observed safety width=%d B); resource growth enabled",
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (conservative scalar fallback, observed safety width=%d B, incomplete cardinality profile); resource growth disabled",
 			m.RuntimeChunkSizeCap, m.RuntimeSafetyRowBytes)
 	case protocolCap > 0:
 		logging.Debug("Runtime chunk cap derived: cap=%d rows (protocol-only; safety width unobserved); resource growth disabled",

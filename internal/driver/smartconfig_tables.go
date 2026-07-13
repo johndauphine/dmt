@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 const (
@@ -49,6 +51,7 @@ func (s *SmartConfigAnalyzer) tableFilter() TableFilter {
 // capped at 2 KiB in the return value. New fields must not be aliased to that
 // historical feature.
 func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []TableStatRow) int64 {
+	memoryTables := make([]tuning.TableMemoryStat, 0, len(tables))
 	var legacyWidths [legacyRowBearingSample]int64
 	legacyRowBearing := 0
 	legacyWidthCount := 0
@@ -60,6 +63,11 @@ func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []TableStatRow) int64 {
 	var maxTableBytes int64
 
 	for _, t := range tables {
+		memoryTables = append(memoryTables, tuning.TableMemoryStat{
+			Name:        t.Name,
+			RowCount:    t.RowCount,
+			AvgRowBytes: t.AvgRowSizeBytes,
+		})
 		// Preserve the historical feature: the first five row-bearing input
 		// tables define the sample, and only their positive widths contribute.
 		if legacyRowBearing < legacyRowBearingSample && t.RowCount > 0 {
@@ -115,6 +123,11 @@ func (s *SmartConfigAnalyzer) calculateAvgRowSize(tables []TableStatRow) int64 {
 	s.representativeRowBytes = representative
 	s.safetyRowBytes = safetyRowBytes
 	s.safetyRowBytesKnown = safetyKnown
+	expectedTableCount := len(tables)
+	if len(s.tableNameFilter) > 0 {
+		expectedTableCount = len(s.tableNameFilter)
+	}
+	s.memoryProfile = tuning.NewMemoryProfileForTableCount(memoryTables, expectedTableCount)
 	s.largestSampledTableBytes = maxTableBytes
 
 	if uncapped > legacyMaxAvgRowBytes {
@@ -211,6 +224,7 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []TableStatRow, avgRowSi
 		RepresentativeRowBytes: representativeRowBytes,
 		SafetyRowBytes:         safetyRowBytes,
 		SafetyRowBytesKnown:    s.safetyRowBytesKnown,
+		MemoryProfile:          s.memoryProfile,
 		UncappedAvgRowBytes:    uncappedAvgRowBytes,
 		LargestTableBytes:      s.largestSampledTableBytes,
 		LargestTables:          largestTables,

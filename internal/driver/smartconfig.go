@@ -59,7 +59,11 @@ type SmartConfigSuggestions struct {
 	RepresentativeRowBytes int64 // row-count-weighted width across all in-scope tables
 	SafetyRowBytes         int64 // widest observed positive table-average width, or fallback estimate
 	SafetyRowBytesKnown    bool  // true only when a positive schema width was observed
-	EstimatedMemMB         int64
+	// RuntimeMemoryProfile carries all in-scope table cardinalities and widths
+	// into the shared memory model. It is current-run evidence only and must
+	// never enter API serialization, persisted history, or resume identity.
+	RuntimeMemoryProfile tuning.MemoryProfile `json:"-" yaml:"-"`
+	EstimatedMemMB       int64
 	// MemoryEstimateOverBudget remains true when a one-row minimum-progress
 	// recommendation still exceeds the modeled memory budget.
 	MemoryEstimateOverBudget bool
@@ -110,6 +114,7 @@ type AutoTuneInput struct {
 	RepresentativeRowBytes int64
 	SafetyRowBytes         int64
 	SafetyRowBytesKnown    bool
+	MemoryProfile          tuning.MemoryProfile `json:"-" yaml:"-"`
 
 	// UncappedAvgRowBytes is the same average without the 2KB cap (#214).
 	// Used by the regime classifier so wide-row workloads get bucketed
@@ -186,17 +191,18 @@ type SmartConfigAnalyzer struct {
 	memoryBudgetMB           int64
 	pendingSave              *pendingTuningSave
 	currentTuning            DBTuningSnapshot
-	forceExplore             bool        // mirrors cfg.Migration.Explore
-	pinnedWriteAheadWriters  *int        // user-pinned WAW for override-cost advice (#461); nil = tuner-managed
-	pinnedParallelReaders    *int        // user-pinned PR — advice filters history to the settings that will run
-	pinnedReadAheadBuffers   *int        // user-pinned RAB — same
-	exploreMode              string      // mirrors cfg.Migration.ExploreMode
-	targetProbe              TargetProbe // populated via SetTargetProbe (#166)
-	uncappedAvgRowBytes      int64       // legacy uncapped top-five average used by regime classification
-	representativeRowBytes   int64       // row-count-weighted width across all in-scope row-bearing tables (#703)
-	safetyRowBytes           int64       // widest positive table-average width, or the fallback estimate (#703)
-	safetyRowBytesKnown      bool        // true only when at least one positive schema width was observed (#703)
-	largestSampledTableBytes int64       // saturated max RowCount Ã— AvgRowSizeBytes across ALL tables (#214/#703)
+	forceExplore             bool                 // mirrors cfg.Migration.Explore
+	pinnedWriteAheadWriters  *int                 // user-pinned WAW for override-cost advice (#461); nil = tuner-managed
+	pinnedParallelReaders    *int                 // user-pinned PR — advice filters history to the settings that will run
+	pinnedReadAheadBuffers   *int                 // user-pinned RAB — same
+	exploreMode              string               // mirrors cfg.Migration.ExploreMode
+	targetProbe              TargetProbe          // populated via SetTargetProbe (#166)
+	uncappedAvgRowBytes      int64                // legacy uncapped top-five average used by regime classification
+	representativeRowBytes   int64                // row-count-weighted width across all in-scope row-bearing tables (#703)
+	safetyRowBytes           int64                // widest positive table-average width, or the fallback estimate (#703)
+	safetyRowBytesKnown      bool                 // true only when at least one positive schema width was observed (#703)
+	memoryProfile            tuning.MemoryProfile // all-table runtime-only cardinality/width evidence (#728)
+	largestSampledTableBytes int64                // saturated max RowCount Ã— AvgRowSizeBytes across ALL tables (#214/#703)
 
 	// tableNameFilter restricts Analyze to a caller-supplied set of table
 	// names (#241). The orchestrator applies include/exclude filters
@@ -453,6 +459,7 @@ func (s *SmartConfigAnalyzer) resetAnalysisState() {
 	s.representativeRowBytes = 0
 	s.safetyRowBytes = 0
 	s.safetyRowBytesKnown = false
+	s.memoryProfile = tuning.MemoryProfile{}
 	s.largestSampledTableBytes = 0
 	s.suggestions = &SmartConfigSuggestions{
 		DateColumns:   make(map[string][]string),
