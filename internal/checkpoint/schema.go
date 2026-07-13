@@ -148,6 +148,7 @@ func (s *State) migrate() error {
 		action TEXT NOT NULL,
 		adjustments TEXT NOT NULL,
 		throughput_before REAL,
+		effect_measured INTEGER NOT NULL DEFAULT 0,
 		throughput_after REAL,
 		effect_percent REAL,
 		cpu_before REAL,
@@ -228,12 +229,74 @@ func (s *State) migrate() error {
 	if err := s.ensureTaskIdentityColumns(); err != nil {
 		return err
 	}
+	if err := s.ensureRuntimeAdjustmentColumns(); err != nil {
+		return err
+	}
 	if err := s.ensureTuningResultColumns(); err != nil {
 		return err
 	}
 
 	// One-time migration: sanitize any passwords stored in config column
 	return s.sanitizeStoredConfigs()
+}
+
+// ensureRuntimeAdjustmentColumns transactionally upgrades legacy
+// ai_adjustments tables with an explicit observation-state bit. SQLite fills
+// the NOT NULL DEFAULT 0 value for every existing row without rewriting any of
+// its legacy after metrics; those values remain available for forensics but
+// are semantically unmeasured. The PRAGMA check makes repeated startup
+// migrations idempotent.
+func (s *State) ensureRuntimeAdjustmentColumns() (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning ai_adjustments migration: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.Query("PRAGMA table_info(ai_adjustments)")
+	if err != nil {
+		return fmt.Errorf("reading ai_adjustments columns: %w", err)
+	}
+	hasEffectMeasured := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if scanErr := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); scanErr != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scanning ai_adjustments columns: %w", scanErr)
+		}
+		if name == "effect_measured" {
+			hasEffectMeasured = true
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		_ = rows.Close()
+		return fmt.Errorf("reading ai_adjustments columns: %w", rowsErr)
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return fmt.Errorf("closing ai_adjustments columns: %w", closeErr)
+	}
+
+	if !hasEffectMeasured {
+		if _, err = tx.Exec(`
+			ALTER TABLE ai_adjustments
+			ADD COLUMN effect_measured INTEGER NOT NULL DEFAULT 0
+		`); err != nil {
+			return fmt.Errorf("migrating ai_adjustments.effect_measured: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("committing ai_adjustments migration: %w", err)
+	}
+	return nil
 }
 
 func (s *State) ensureTaskIdentityColumns() error {

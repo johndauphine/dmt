@@ -447,12 +447,12 @@ func numbersForPerformanceGeneralText(payload PerformancePayload) map[string]boo
 			addNonZero(value)
 		}
 		addRuntimeMetricNumber(adjustment.ThroughputBefore, add)
-		addRuntimeMetricNumber(adjustment.ThroughputAfter, add)
-		addRuntimeMetricNumber(adjustment.EffectPercent, add)
+		addOptionalRuntimeMetricNumber(adjustment.ThroughputAfter, add)
+		addOptionalRuntimeMetricNumber(adjustment.EffectPercent, add)
 		addRuntimeMetricNumber(adjustment.CPUBefore, add)
-		addRuntimeMetricNumber(adjustment.CPUAfter, add)
+		addOptionalRuntimeMetricNumber(adjustment.CPUAfter, add)
 		addRuntimeMetricNumber(adjustment.MemoryBefore, add)
-		addRuntimeMetricNumber(adjustment.MemoryAfter, add)
+		addOptionalRuntimeMetricNumber(adjustment.MemoryAfter, add)
 	}
 	for _, tuning := range payload.DatabaseTuning {
 		addNonZero(tuning.RecommendationCt)
@@ -696,12 +696,12 @@ func addRuntimeAdjustmentNumbers(payload PerformancePayload, target string, incl
 		}
 		if matchesTarget && includeMetrics {
 			addRuntimeMetricNumber(adjustment.ThroughputBefore, add)
-			addRuntimeMetricNumber(adjustment.ThroughputAfter, add)
-			addRuntimeMetricNumber(adjustment.EffectPercent, add)
+			addOptionalRuntimeMetricNumber(adjustment.ThroughputAfter, add)
+			addOptionalRuntimeMetricNumber(adjustment.EffectPercent, add)
 			addRuntimeMetricNumber(adjustment.CPUBefore, add)
-			addRuntimeMetricNumber(adjustment.CPUAfter, add)
+			addOptionalRuntimeMetricNumber(adjustment.CPUAfter, add)
 			addRuntimeMetricNumber(adjustment.MemoryBefore, add)
-			addRuntimeMetricNumber(adjustment.MemoryAfter, add)
+			addOptionalRuntimeMetricNumber(adjustment.MemoryAfter, add)
 		}
 	}
 }
@@ -798,6 +798,13 @@ func addRuntimeMetricNumber(v float64, add func(any)) {
 		return
 	}
 	add(v)
+}
+
+func addOptionalRuntimeMetricNumber(v *float64, add func(any)) {
+	if v == nil {
+		return
+	}
+	add(*v)
 }
 
 func normalizePerformanceNumber(s string) string {

@@ -62,12 +62,12 @@ type RuntimeAdjustmentSummary struct {
 	Action           string         `json:"action,omitempty"`
 	Adjustments      map[string]int `json:"adjustments,omitempty"`
 	ThroughputBefore float64        `json:"throughput_before,omitempty"`
-	ThroughputAfter  float64        `json:"throughput_after,omitempty"`
-	EffectPercent    float64        `json:"effect_percent,omitempty"`
+	ThroughputAfter  *float64       `json:"throughput_after,omitempty"`
+	EffectPercent    *float64       `json:"effect_percent,omitempty"`
 	CPUBefore        float64        `json:"cpu_before,omitempty"`
-	CPUAfter         float64        `json:"cpu_after,omitempty"`
+	CPUAfter         *float64       `json:"cpu_after,omitempty"`
 	MemoryBefore     float64        `json:"memory_before,omitempty"`
-	MemoryAfter      float64        `json:"memory_after,omitempty"`
+	MemoryAfter      *float64       `json:"memory_after,omitempty"`
 	Reasoning        string         `json:"reasoning,omitempty"`
 	Confidence       string         `json:"confidence,omitempty"`
 }

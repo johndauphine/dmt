@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Runtime-adjustment persistence now distinguishes unmeasured outcomes from
+  genuine measured zeros. New unmeasured after-metrics are stored as NULL,
+  legacy phantom zeros remain preserved but unmeasured, and AI performance
+  payloads omit outcomes until a complete measurement exists (#702).
+
 - Smart configuration now obtains table and date statistics through explicit
   catalog capabilities, adding bounded SQLite and ClickHouse analysis while
   keeping unsupported or failed statistics out of tuning history. Portless

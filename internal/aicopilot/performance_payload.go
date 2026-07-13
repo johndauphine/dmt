@@ -129,23 +129,33 @@ func buildRuntimeAdjustmentSummaries(adjustments []checkpoint.RuntimeAdjustmentR
 		if !isDeterministicRuntimeAdjustment(a.Confidence) {
 			continue
 		}
-		out = append(out, RuntimeAdjustmentSummary{
+		summary := RuntimeAdjustmentSummary{
 			Action:           runtimeAdjustmentActionForPayload(a),
 			Adjustments:      filterRuntimeAdjustments(a.Adjustments),
 			ThroughputBefore: a.ThroughputBefore,
-			ThroughputAfter:  a.ThroughputAfter,
-			EffectPercent:    a.EffectPercent,
 			CPUBefore:        a.CPUBefore,
-			CPUAfter:         a.CPUAfter,
 			MemoryBefore:     a.MemoryBefore,
-			MemoryAfter:      a.MemoryAfter,
 			Confidence:       normalizeRuntimeAdjustmentConfidence(a.Confidence),
-		})
+		}
+		if a.EffectMeasured {
+			summary.ThroughputAfter = newRuntimeMetricValue(a.ThroughputAfter)
+			summary.EffectPercent = newRuntimeMetricValue(a.EffectPercent)
+			summary.CPUAfter = newRuntimeMetricValue(a.CPUAfter)
+			summary.MemoryAfter = newRuntimeMetricValue(a.MemoryAfter)
+		}
+		out = append(out, summary)
 		if len(out) == limit {
 			break
 		}
 	}
 	return out
+}
+
+// newRuntimeMetricValue gives every measured field its own stable value. In
+// particular, summaries must not retain pointers into a reused range variable.
+func newRuntimeMetricValue(value float64) *float64 {
+	measured := value
+	return &measured
 }
 
 func runtimeAdjustmentActionForPayload(a checkpoint.RuntimeAdjustmentRecord) string {

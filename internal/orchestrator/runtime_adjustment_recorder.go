@@ -71,6 +71,7 @@ func (r *runtimeAdjustmentRecorder) record(_ string, record monitor.AdjustmentRe
 		ThroughputBefore: record.ThroughputBefore,
 		ThroughputAfter:  record.ThroughputAfter,
 		EffectPercent:    record.EffectPercent,
+		EffectMeasured:   record.EffectMeasured,
 		CPUBefore:        record.CPUBefore,
 		CPUAfter:         record.CPUAfter,
 		MemoryBefore:     record.MemoryBefore,
@@ -95,6 +96,7 @@ func (a recordingWriteErrorAdjuster) EvaluateWriteError(ctx context.Context, err
 		Timestamp:        time.Now(),
 		Action:           "chunk_size",
 		Adjustments:      map[string]int{"chunk_size": next},
+		EffectMeasured:   false,
 		Reasoning:        fmt.Sprintf("structural write error reduced chunk_size from %d to %d", errCtx.ChunkSize, next),
 		Confidence:       "deterministic",
 	})

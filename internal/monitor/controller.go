@@ -172,6 +172,7 @@ type AdjustmentRecord struct {
 	ThroughputBefore float64
 	ThroughputAfter  float64
 	EffectPercent    float64
+	EffectMeasured   bool
 	CPUBefore        float64
 	CPUAfter         float64
 	MemoryBefore     float64
@@ -636,6 +637,7 @@ func (c *Controller) recordAdjustment(d *Decision, before PerformanceSnapshot) {
 		Action:           d.Knob,
 		Adjustments:      adjustments,
 		ThroughputBefore: before.Throughput,
+		EffectMeasured:   false,
 		CPUBefore:        before.CPUPercent,
 		MemoryBefore:     before.MemoryPercent,
 		Reasoning:        d.Reasoning,
