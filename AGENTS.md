@@ -38,12 +38,9 @@
   - Commit code to the branch.
   - Get a clean local review from Claude or Codex before pushing.
   - Push the branch and create a PR.
-  - Wait for Copilot's first PR review.
-  - Address actionable Copilot comments.
-  - Do not wait for Copilot to re-review; Copilot does not re-review PRs.
   - Verify CI/checks are green.
-  - Get a clean post-fix review from Claude or Codex.
-  - If CI is green and the post-fix review is clean, merge the PR.
+  - Get a clean post-CI review from Claude or Codex.
+  - If CI is green and the post-CI review is clean, merge the PR.
   - After merging, delete the local feature branch.
 
 ## Configuration & Secrets
