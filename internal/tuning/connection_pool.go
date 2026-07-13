@@ -35,3 +35,14 @@ func finalizeConnectionPoolSizes(out *Output) {
 		out.WriteAheadWriters,
 	)
 }
+
+// finalizeOutput applies resource-dependent finalization in its required
+// order: first shrink the chunk for the effective concurrency tuple, then
+// derive connection pools from that same final tuple.
+func finalizeOutput(out *Output, in Input) {
+	if out == nil {
+		return
+	}
+	applyMemoryClamp(out, in)
+	finalizeConnectionPoolSizes(out)
+}

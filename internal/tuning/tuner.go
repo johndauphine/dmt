@@ -186,6 +186,20 @@ type DriverProfile struct {
 	HardChunkLimit        int    // #166 — 0 means no protocol cap
 }
 
+// DefaultOverrides carries effective user-pinned concurrency values for the
+// no-history default path. Positive fields replace the corresponding
+// recommendation before memory and connection-pool finalization; non-positive
+// fields are ignored. A worker override also keeps the derived MaxPartitions
+// default aligned. ChunkSize is intentionally absent: an explicit chunk is
+// authoritative at the config layer, while this path exists to make an
+// automatically generated chunk safe for the tuple that will actually run.
+type DefaultOverrides struct {
+	Workers           int
+	ReadAheadBuffers  int
+	WriteAheadWriters int
+	ParallelReaders   int
+}
+
 // HistoryProvider supplies past-run rows for history-aware selection.
 // PR1 reads raw rows and does its own regime/outlier filtering +
 // per-WAW aggregation in-package. May be nil — Tune treats nil as
@@ -326,6 +340,34 @@ type DBTuning struct {
 	SourceMaxServerMemoryMB int64
 }
 
+// DefaultOutput returns the canonical no-history policy after all
+// deterministic resource and memory clamps.
+func DefaultOutput(in Input, profile DriverProfile) Output {
+	return DefaultOutputWithOverrides(in, profile, DefaultOverrides{})
+}
+
+// DefaultOutputWithOverrides returns the canonical no-history policy using
+// effective positive pinned concurrency values for memory and pool sizing.
+func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides DefaultOverrides) Output {
+	out := baseline(in, profile)
+	if overrides.Workers > 0 {
+		out.Workers = overrides.Workers
+		out.MaxPartitions = overrides.Workers
+	}
+	if overrides.ReadAheadBuffers > 0 {
+		out.ReadAheadBuffers = overrides.ReadAheadBuffers
+	}
+	if overrides.WriteAheadWriters > 0 {
+		out.WriteAheadWriters = overrides.WriteAheadWriters
+	}
+	if overrides.ParallelReaders > 0 {
+		out.ParallelReaders = overrides.ParallelReaders
+	}
+	finalizeTierAndReasoning(&out, nil, false)
+	finalizeOutput(&out, in)
+	return out
+}
+
 // Tune computes the recommended parameters for a migration. The history
 // provider and DBTuning are optional — pass nil / zero-value for pure-
 // baseline (cold-start) output.
@@ -438,8 +480,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			pinnedAdvice(rows)
 		}
 		finalizeTierAndReasoning(&out, history, historyAvailable)
-		applyMemoryClamp(&out, in)
-		finalizeConnectionPoolSizes(&out)
+		finalizeOutput(&out, in)
 		return out
 	}
 
@@ -476,8 +517,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			}
 			pinnedAdvice(identityFilter.kept)
 			finalizeTierAndReasoning(&out, history, historyAvailable)
-			applyMemoryClamp(&out, in)
-			finalizeConnectionPoolSizes(&out)
+			finalizeOutput(&out, in)
 			return out
 		}
 	}
@@ -516,8 +556,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 
 	pinnedAdvice(rows)
 	finalizeTierAndReasoning(&out, history, historyAvailable)
-	applyMemoryClamp(&out, in)
-	finalizeConnectionPoolSizes(&out)
+	finalizeOutput(&out, in)
 	return out
 }
 

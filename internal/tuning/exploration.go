@@ -72,17 +72,17 @@ var explorationCells = [...]explorationCell{
 	{WAW: 1, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
 	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
 	{WAW: 3, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
-	{WAW: maxWAWForGrid, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
+	{WAW: maxLearnableWAW, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
 	{WAW: 1, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
 	{WAW: 2, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
 	{WAW: 3, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
-	{WAW: maxWAWForGrid, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+	{WAW: maxLearnableWAW, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
 
 	// Deliberate replicates of 0, 1, 6, and 7.
 	{WAW: 1, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
 	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
 	{WAW: 3, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
-	{WAW: maxWAWForGrid, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+	{WAW: maxLearnableWAW, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
 }
 
 // Compile-time equality check: either expression becomes a negative array
@@ -218,7 +218,7 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 //
 // Picks from these eight directions:
 //
-//	WAW + 1   (capped at maxWAWForGrid)
+//	WAW + 1   (capped at maxLearnableWAW)
 //	WAW − 1   (floored at 1)
 //	CS × 1.5  (capped at HardChunkLimit if set)
 //	CS × 0.67 (floored at 1 row)
@@ -234,7 +234,7 @@ func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float6
 	}
 	dirs := []direction{
 		{"waw", "WAW+1", func(o *Output) bool {
-			if o.WriteAheadWriters < 1 || o.WriteAheadWriters >= maxWAWForGrid {
+			if o.WriteAheadWriters < 1 || o.WriteAheadWriters >= maxLearnableWAW {
 				return false
 			}
 			next := o.WriteAheadWriters + 1

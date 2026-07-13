@@ -1,9 +1,12 @@
 package orchestrator
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/tuning"
 )
 
@@ -41,8 +44,8 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 			if s == nil {
 				t.Fatal("GetSystemBasedSuggestions returned nil")
 			}
-			if s.Workers < 2 {
-				t.Errorf("Workers=%d, want >= 2 (baseline floor)", s.Workers)
+			if s.Workers < 4 {
+				t.Errorf("Workers=%d, want >= 4 (canonical baseline floor)", s.Workers)
 			}
 			if s.ChunkSizeRecommendation <= 0 {
 				t.Errorf("ChunkSizeRecommendation=%d, want > 0 (issue #157 successor)", s.ChunkSizeRecommendation)
@@ -67,6 +70,22 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 	}
 }
 
+func TestGetSystemBasedSuggestions_PreservesForcedExplore(t *testing.T) {
+	cfg := &config.Config{
+		Source: config.SourceConfig{Type: "mssql"},
+		Target: config.TargetConfig{Type: "postgres"},
+		Migration: config.MigrationConfig{
+			Explore:     true,
+			ExploreMode: "balanced",
+		},
+	}
+
+	got := GetSystemBasedSuggestions(cfg)
+	if !strings.Contains(got.Reasoning, "exploration: planned grid") {
+		t.Fatalf("offline --explore did not request a planned-grid probe; reasoning: %q", got.Reasoning)
+	}
+}
+
 func TestGetSystemBasedSuggestions_UsesResolvedMemoryEnvelope(t *testing.T) {
 	cfg := loadSmallEnvelopeConfig(t)
 	budgetMB := cfg.AutoConfig().MemoryEnvelope.BudgetMB
@@ -76,6 +95,50 @@ func TestGetSystemBasedSuggestions_UsesResolvedMemoryEnvelope(t *testing.T) {
 	}
 	if s.ChunkSizeRecommendation >= 50_000 {
 		t.Errorf("small envelope left offline chunk_size=%d, want a memory clamp below 50000", s.ChunkSizeRecommendation)
+	}
+}
+
+func TestGetSystemBasedSuggestions_MatchesSharedTargetProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		target    string
+		wantChunk int
+	}{
+		{name: "registered postgres target", target: "postgres", wantChunk: 50_000},
+		{name: "unknown target fallback", target: "offline-profile-missing", wantChunk: 20_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Source: config.SourceConfig{Type: "mssql"},
+				Target: config.TargetConfig{Type: tc.target},
+			}
+			got := GetSystemBasedSuggestions(cfg)
+
+			in := tuning.Input{
+				CPUCores:               runtime.NumCPU(),
+				Platform:               driver.DetectPlatform(),
+				SourceDBType:           cfg.Source.Type,
+				TargetDBType:           tc.target,
+				AvgRowBytes:            500,
+				UncappedAvgRowBytes:    500,
+				RepresentativeRowBytes: 500,
+				SafetyRowBytes:         500,
+				SafetyRowBytesKnown:    false,
+			}
+			profile := driver.BuildTuningProfile(tc.target, in.SafetyRowBytes, driver.TargetProbe{})
+			want := tuning.DefaultOutput(in, profile)
+
+			if got.ChunkSizeRecommendation != tc.wantChunk {
+				t.Fatalf("offline chunk size = %d, want exact target-profile result %d", got.ChunkSizeRecommendation, tc.wantChunk)
+			}
+			if got.Workers != want.Workers || got.ChunkSizeRecommendation != want.ChunkSize ||
+				got.ReadAheadBuffers != want.ReadAheadBuffers || got.WriteAheadWriters != want.WriteAheadWriters ||
+				got.ParallelReaders != want.ParallelReaders || got.MaxPartitions != want.MaxPartitions ||
+				got.MaxSourceConnections != want.MaxSourceConnections || got.MaxTargetConnections != want.MaxTargetConnections ||
+				got.EstimatedMemMB != want.EstimatedMemMB || got.MemoryEstimateOverBudget != want.MemoryEstimateOverBudget {
+				t.Fatalf("offline suggestions did not match shared profile/default output:\n got=%+v\nwant=%+v", got, want)
+			}
+		})
 	}
 }
 

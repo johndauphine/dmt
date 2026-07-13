@@ -112,6 +112,7 @@ func (c *Config) DebugDump() string {
 		fmt.Fprintf(&b, "  Max Memory Limit: %d MB (user ceiling)\n", c.Migration.MaxMemoryMB)
 	}
 	fmt.Fprintf(&b, "  CPU Cores: %d\n", ac.CPUCores)
+	fmt.Fprintf(&b, "  Platform: %s\n", ac.Platform)
 
 	// Source Database
 	fmt.Fprintf(&b, "\nSource (%s):\n", c.Source.Type)
@@ -176,50 +177,33 @@ func (c *Config) DebugDump() string {
 	// Migration Settings
 	b.WriteString("\nMigration Settings:\n")
 
+	const defaultPolicyExpl = "canonical no-history tuning policy"
+
 	// Workers
-	workersExpl := fmt.Sprintf("(cores-2) clamped 4-12, %d cores", ac.CPUCores)
-	fmt.Fprintf(&b, "  Workers: %s\n", c.formatTunableValue(c.Migration.Workers, ac.OriginalWorkers, provenanceMigrationWorkers, workersExpl))
+	fmt.Fprintf(&b, "  Workers: %s\n", c.formatTunableValue(c.Migration.Workers, ac.OriginalWorkers, provenanceMigrationWorkers, defaultPolicyExpl))
 
 	// ChunkSize
-	ramGB := float64(ac.MemoryEnvelope.AvailableMB) / 1024.0
-	chunkExpl := fmt.Sprintf("75K + %.1fGB*3.1K", ramGB)
-	fmt.Fprintf(&b, "  ChunkSize: %s\n", c.formatTunableValue(c.Migration.ChunkSize, ac.OriginalChunkSize, provenanceMigrationChunkSize, chunkExpl))
+	fmt.Fprintf(&b, "  ChunkSize: %s\n", c.formatTunableValue(c.Migration.ChunkSize, ac.OriginalChunkSize, provenanceMigrationChunkSize, defaultPolicyExpl))
 
 	// ReadAheadBuffers
-	buffersExpl := fmt.Sprintf("%dMB budget/%d workers/chunk bytes", ac.MemoryEnvelope.BudgetMB, c.Migration.Workers)
-	fmt.Fprintf(&b, "  ReadAheadBuffers: %s\n", c.formatTunableValue(c.Migration.ReadAheadBuffers, ac.OriginalReadAheadBuffers, provenanceMigrationReadAheadBuffers, buffersExpl))
+	fmt.Fprintf(&b, "  ReadAheadBuffers: %s\n", c.formatTunableValue(c.Migration.ReadAheadBuffers, ac.OriginalReadAheadBuffers, provenanceMigrationReadAheadBuffers, defaultPolicyExpl))
 
 	// MaxPartitions
-	partitionsExpl := "matches workers"
-	fmt.Fprintf(&b, "  MaxPartitions: %s\n", c.formatTunableValue(c.Migration.MaxPartitions, ac.OriginalMaxPartitions, provenanceMigrationMaxPartitions, partitionsExpl))
+	fmt.Fprintf(&b, "  MaxPartitions: %s\n", c.formatTunableValue(c.Migration.MaxPartitions, ac.OriginalMaxPartitions, provenanceMigrationMaxPartitions, defaultPolicyExpl))
 
 	// Connection pools
-	sourceConnsExpl := fmt.Sprintf("%d workers * %d readers + 4", c.Migration.Workers, c.Migration.ParallelReaders)
-	fmt.Fprintf(&b, "  MaxSourceConnections: %s\n", c.formatTunableValue(c.Migration.MaxSourceConnections, ac.OriginalMaxSourceConns, provenanceMigrationMaxSourceConns, sourceConnsExpl))
+	const poolPolicyExpl = "shared connection-pool policy from effective concurrency"
+	fmt.Fprintf(&b, "  MaxSourceConnections: %s\n", c.formatTunableValue(c.Migration.MaxSourceConnections, ac.OriginalMaxSourceConns, provenanceMigrationMaxSourceConns, poolPolicyExpl))
+	fmt.Fprintf(&b, "  MaxTargetConnections: %s\n", c.formatTunableValue(c.Migration.MaxTargetConnections, ac.OriginalMaxTargetConns, provenanceMigrationMaxTargetConns, poolPolicyExpl))
 
-	targetConnsExpl := fmt.Sprintf("%d workers * %d writers + 4", c.Migration.Workers, c.Migration.WriteAheadWriters)
-	fmt.Fprintf(&b, "  MaxTargetConnections: %s\n", c.formatTunableValue(c.Migration.MaxTargetConnections, ac.OriginalMaxTargetConns, provenanceMigrationMaxTargetConns, targetConnsExpl))
-
-	// WriteAheadWriters - use driver defaults for explanation
-	var writersExpl string
-	if targetDriver, err := driver.Get(c.Target.Type); err == nil {
-		defaults := targetDriver.Defaults()
-		if defaults.ScaleWritersWithCores {
-			writersExpl = fmt.Sprintf("driver default scaled with cores (%d cores)", ac.CPUCores)
-		} else {
-			writersExpl = fmt.Sprintf("driver default fixed at %d", defaults.WriteAheadWriters)
-		}
-	} else {
-		writersExpl = "fallback default"
-	}
-	fmt.Fprintf(&b, "  WriteAheadWriters: %s\n", c.formatTunableValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, provenanceMigrationWriteAheadWriters, writersExpl))
+	// WriteAheadWriters
+	fmt.Fprintf(&b, "  WriteAheadWriters: %s\n", c.formatTunableValue(c.Migration.WriteAheadWriters, ac.OriginalWriteAheadWriters, provenanceMigrationWriteAheadWriters, defaultPolicyExpl))
 
 	// ParallelReaders
-	readersExpl := fmt.Sprintf("cores/4 clamped 2-4, %d cores", ac.CPUCores)
-	fmt.Fprintf(&b, "  ParallelReaders: %s\n", c.formatTunableValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, provenanceMigrationParallelReaders, readersExpl))
+	fmt.Fprintf(&b, "  ParallelReaders: %s\n", c.formatTunableValue(c.Migration.ParallelReaders, ac.OriginalParallelReaders, provenanceMigrationParallelReaders, defaultPolicyExpl))
 
 	// LargeTableThreshold
-	fmt.Fprintf(&b, "  LargeTableThreshold: %s\n", c.formatTunableValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, provenanceMigrationLargeTableThreshold, "default 5M"))
+	fmt.Fprintf(&b, "  LargeTableThreshold: %s\n", c.formatTunableValue64(c.Migration.LargeTableThreshold, ac.OriginalLargeTableThresh, provenanceMigrationLargeTableThreshold, defaultPolicyExpl))
 
 	// Source/Target ChunkSize
 	sourceChunkExpl := "defaults to migration chunk_size"
@@ -232,8 +216,7 @@ func (c *Config) DebugDump() string {
 
 	// UpsertMergeChunkSize - only show in upsert mode
 	if c.Migration.TargetMode == "upsert" {
-		upsertExpl := "auto: envelope-budget-scaled 5K-20K"
-		fmt.Fprintf(&b, "  UpsertMergeChunkSize: %s\n", c.formatTunableValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, provenanceMigrationUpsertMergeChunkSize, upsertExpl))
+		fmt.Fprintf(&b, "  UpsertMergeChunkSize: %s\n", c.formatTunableValue(c.Migration.UpsertMergeChunkSize, ac.OriginalUpsertMergeChunkSize, provenanceMigrationUpsertMergeChunkSize, defaultPolicyExpl))
 		// DateUpdatedColumns - only show in upsert mode if configured
 		if len(c.Migration.DateUpdatedColumns) > 0 {
 			fmt.Fprintf(&b, "  DateUpdatedColumns: %v\n", c.Migration.DateUpdatedColumns)
@@ -250,8 +233,8 @@ func (c *Config) DebugDump() string {
 
 	// Restartability Settings
 	b.WriteString("\nRestartability:\n")
-	fmt.Fprintf(&b, "  CheckpointFrequency: %s chunks\n", c.formatTunableValue(c.Migration.CheckpointFrequency, ac.OriginalCheckpointFrequency, provenanceMigrationCheckpointFrequency, "default 10"))
-	fmt.Fprintf(&b, "  MaxRetries: %s\n", c.formatTunableValue(c.Migration.MaxRetries, ac.OriginalMaxRetries, provenanceMigrationMaxRetries, "default 3"))
+	fmt.Fprintf(&b, "  CheckpointFrequency: %s chunks\n", c.formatTunableValue(c.Migration.CheckpointFrequency, ac.OriginalCheckpointFrequency, provenanceMigrationCheckpointFrequency, defaultPolicyExpl))
+	fmt.Fprintf(&b, "  MaxRetries: %s\n", c.formatTunableValue(c.Migration.MaxRetries, ac.OriginalMaxRetries, provenanceMigrationMaxRetries, defaultPolicyExpl))
 	fmt.Fprintf(&b, "  HistoryRetentionDays: %d\n", c.Migration.HistoryRetentionDays)
 
 	// Table Filters
@@ -267,22 +250,48 @@ func (c *Config) DebugDump() string {
 		b.WriteString("  ExcludeTables: [none]\n")
 	}
 
-	// Memory Estimate (conservative estimate, actual may vary based on row content)
+	// Memory Estimate (formula-only fallback; actual may vary by row content).
+	// Use the tuner's complete model so diagnostics include writer buffers and
+	// cannot disagree with the clamp that produced an automatic chunk.
 	b.WriteString("\nMemory Estimate:\n")
-	bytesPerRow := int64(500) // unobserved fallback; actual widths require schema analysis
-	bufferMemory := saturatingMemoryProduct(
-		int64(c.Migration.Workers),
-		int64(c.Migration.ReadAheadBuffers),
-		int64(c.Migration.ChunkSize),
-		bytesPerRow,
-	)
-	fmt.Fprintf(&b, "  Buffer Memory: ~%s (%d workers * %d buffers * %d rows * %d bytes/row)\n",
-		formatMemorySize(bufferMemory),
+	estimatedMemMB := tuning.EstimatedMemMB(
 		c.Migration.Workers,
 		c.Migration.ReadAheadBuffers,
+		c.Migration.WriteAheadWriters,
 		c.Migration.ChunkSize,
-		bytesPerRow)
-	b.WriteString("  Note: Uses an unobserved 500-byte row-width fallback; schema-aware tuning uses the widest observed table-average model.\n")
+		loadTimeFallbackRowBytes,
+	)
+	overBudget := tuning.MemoryEstimateExceedsBudget(
+		ac.MemoryEnvelope.BudgetMB,
+		c.Migration.Workers,
+		c.Migration.ReadAheadBuffers,
+		c.Migration.WriteAheadWriters,
+		c.Migration.ChunkSize,
+		loadTimeFallbackRowBytes,
+	)
+	fmt.Fprintf(&b, "  Modeled Working Set: ~%d MB (%d workers * (%d read-ahead + %d write-ahead) * %d rows * %d bytes/row)\n",
+		estimatedMemMB,
+		c.Migration.Workers,
+		c.Migration.ReadAheadBuffers,
+		c.Migration.WriteAheadWriters,
+		c.Migration.ChunkSize,
+		loadTimeFallbackRowBytes,
+	)
+	if ac.MemoryEnvelope.BudgetMB > 0 {
+		if overBudget {
+			suffix := ""
+			if ac.DefaultPolicyChunkPinned {
+				suffix = "; explicit chunk_size preserved"
+			}
+			fmt.Fprintf(&b, "  Budget Status: exceeds %d MB budget%s\n", ac.MemoryEnvelope.BudgetMB, suffix)
+		} else {
+			fmt.Fprintf(&b, "  Budget Status: within %d MB budget\n", ac.MemoryEnvelope.BudgetMB)
+		}
+	}
+	b.WriteString("  Width Source: unobserved 500-byte fallback estimate; schema-aware tuning uses the widest observed table-average model.\n")
+	if ac.DefaultPolicyReasoning != "" && !ac.DefaultPolicyChunkPinned {
+		fmt.Fprintf(&b, "  Load-time Policy Reasoning: %s\n", ac.DefaultPolicyReasoning)
+	}
 
 	// Profile (if set)
 	if c.Profile.Name != "" || c.Profile.Description != "" {

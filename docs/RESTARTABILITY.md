@@ -205,7 +205,7 @@ internal/config/
 
 ```yaml
 migration:
-  checkpoint_frequency: 10    # Save progress every N chunks (default: 10)
+  checkpoint_frequency: 20    # Save progress every N chunks (default: 20)
   max_retries: 3              # Retry failed tables N times after the first attempt (default: 3)
   history_retention_days: 30  # Keep run history for N days (default: 30)
 ```
@@ -214,15 +214,15 @@ migration:
 
 Controls how often chunk-level progress is saved during transfer.
 
-- **Default**: 10 chunks
+- **Default**: 20 chunks
 - **Trade-off**: Lower values = more frequent saves = less data loss on crash, but more I/O overhead
-- **Location**: `internal/transfer/transfer.go` lines 758-773 (keyset) and 1060-1079 (row_number)
+- **Location**: `internal/transfer/runner.go` supplies the configured frequency to the keyset and ROW_NUMBER checkpoint coordinators
 
 ```go
-// Chunk-level checkpointing: save progress every N chunks
+// Config loading normally supplies the canonical default of 20 chunks.
 checkpointFreq := cfg.Migration.CheckpointFrequency
 if checkpointFreq <= 0 {
-    checkpointFreq = 10 // Default fallback
+    checkpointFreq = 10 // Defensive transfer fallback if config defaulting was bypassed
 }
 if job.Saver != nil && job.TaskID > 0 && chunkCount%checkpointFreq == 0 && lastPK != nil {
     // Save progress...
@@ -443,7 +443,7 @@ CREATE TABLE transfer_progress (
 
 **Impact**: On crash, up to `checkpoint_frequency * chunk_size` rows may need to be re-transferred.
 
-**Example**: With default settings (checkpoint_frequency=10, chunk_size=100000), up to 1M rows could be lost on crash.
+**Example**: The canonical default is `checkpoint_frequency=20`. Because the default `chunk_size` is derived from the target driver's byte profile and the effective memory budget, there is no single default row count; if that policy selects 50,000 rows per chunk, up to 1M rows may need to be replayed.
 
 **Mitigation**: Reduce `checkpoint_frequency` for critical migrations (at cost of more I/O).
 

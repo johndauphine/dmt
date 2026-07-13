@@ -375,6 +375,57 @@ func TestGenerateTemplateWithAI_IncludesProviderSection(t *testing.T) {
 	}
 }
 
+func TestGenerateTemplate_CanonicalTuningDefaultsStayUnpinned(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+	}{
+		{name: "default", template: GenerateTemplate()},
+		{name: "with AI", template: GenerateTemplateWithAI()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commentedValues := map[string]string{
+				"checkpoint_frequency": "20",
+				"read_ahead_buffers":   "4",
+			}
+			found := make(map[string]bool, len(commentedValues))
+
+			for _, line := range strings.Split(tt.template, "\n") {
+				trimmed := strings.TrimSpace(line)
+				for key, want := range commentedValues {
+					if strings.HasPrefix(trimmed, key+":") {
+						t.Errorf("%s must remain commented so canonical auto-tuning can apply; got %q", key, trimmed)
+					}
+
+					prefix := "# " + key + ":"
+					if !strings.HasPrefix(trimmed, prefix) {
+						continue
+					}
+					fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(trimmed, prefix)))
+					if len(fields) == 0 || fields[0] != want {
+						t.Errorf("%s comment = %q, want canonical value %s", key, trimmed, want)
+						continue
+					}
+					found[key] = true
+				}
+			}
+
+			for key := range commentedValues {
+				if !found[key] {
+					t.Errorf("template is missing the commented canonical %s example", key)
+				}
+			}
+			for _, stale := range []string{"checkpoint_frequency: 10", "read_ahead_buffers: 8"} {
+				if strings.Contains(tt.template, stale) {
+					t.Errorf("template contains stale default %q", stale)
+				}
+			}
+		})
+	}
+}
+
 func TestAISection_IsStandaloneSnippet(t *testing.T) {
 	// AISection() is the snippet users can paste into a previously
 	// AI-free secrets file. Must contain the provider list.

@@ -111,6 +111,20 @@ func TestSelectWAW_EmptyBins(t *testing.T) {
 	}
 }
 
+func TestSelectWAW_RejectsLegacyValuesOutsideLearnableRange(t *testing.T) {
+	bins := []wawBin{
+		{WAW: 2, TotalRuns: 5, MeanThroughput: 600_000},
+		{WAW: maxLearnableWAW + 1, TotalRuns: 20, MeanThroughput: 5_000_000},
+	}
+	got, _, ok := selectWAW(bins)
+	if !ok || got != 2 {
+		t.Fatalf("selectWAW = (%d, %v), want (2, true); legacy WAW above %d is not learnable", got, ok, maxLearnableWAW)
+	}
+	if got := countEligibleBins(bins); got != 1 {
+		t.Fatalf("eligible bins = %d, want 1 after excluding legacy out-of-range WAW", got)
+	}
+}
+
 // TestSelectWAW_ThresholdExcludesSparseBins verifies the minRunsPerBin
 // floor: a 1-run high peak is treated as no-evidence, so a stable bin
 // with sufficient runs wins. (Smoothed mean alone can't do this — the
@@ -378,14 +392,14 @@ func TestCellSkipsInGrid_EmptyInput(t *testing.T) {
 }
 
 // TestCellSkipsInGrid_FiltersOutOfRangeWAW pins that cells with WAW
-// outside [1, maxWAWForGrid] are filtered. Defensive — current
+// outside [1, maxLearnableWAW] are filtered. Defensive — current
 // production code only writes WAW values within range, but a future
 // schema change or corrupted history row shouldn't poison the log.
 func TestCellSkipsInGrid_FiltersOutOfRangeWAW(t *testing.T) {
 	cellSkip := map[retryCellKey]bool{
-		{WAW: 0, ParallelReaders: 2, ReadAheadBuffers: 4}:                 true, // below floor
-		{WAW: maxWAWForGrid + 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true, // above cap
-		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}:                 true, // in range
+		{WAW: 0, ParallelReaders: 2, ReadAheadBuffers: 4}:                   true, // below floor
+		{WAW: maxLearnableWAW + 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true, // above cap
+		{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}:                   true, // in range
 	}
 	got := cellSkipsInGrid(cellSkip)
 	if len(got) != 1 {
@@ -716,6 +730,36 @@ func TestTune_NilHistory(t *testing.T) {
 	}
 	if out.ChunkSize != 50_000 {
 		t.Errorf("nil provider should yield baseline chunk_size=50000 at 500B avg; got %d", out.ChunkSize)
+	}
+}
+
+func TestTune_LegacyHistoryCannotSelectWAWAboveLearnableRange(t *testing.T) {
+	in := Input{
+		CPUCores: 16, MemoryGB: 48,
+		SourceDBType: "mssql", TargetDBType: "postgres",
+		Platform:       "linux",
+		AvgRowBytes:    500,
+		MemoryBudgetMB: 64_000,
+	}
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+	rows := make([]HistoryRecord, explorationGridRuns)
+	for i := range rows {
+		rows[i] = HistoryRecord{
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			WriteAheadWriters: maxLearnableWAW + 1,
+			ChunkSize:         50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput: 1_000_000,
+			CPUCores:        16, MemoryGB: 48,
+		}
+	}
+
+	out := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
+	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxLearnableWAW {
+		t.Fatalf("Tune selected legacy WAW=%d outside [1,%d]; reasoning: %s", out.WriteAheadWriters, maxLearnableWAW, out.Reasoning)
+	}
+	if out.Tier == TierSmoothedBins {
+		t.Fatalf("out-of-range legacy bin must not become a smoothed-bin selection; reasoning: %s", out.Reasoning)
 	}
 }
 
@@ -1063,8 +1107,8 @@ func TestApplyHistory_RegressionRespectsRetryRateExclusion(t *testing.T) {
 	if out.WriteAheadWriters == 4 {
 		t.Error("retry-rate + below-median filter should have excluded WAW=4 (100% retry rate, lowest throughput)")
 	}
-	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxWAWForGrid {
-		t.Errorf("picked WAW=%d outside valid grid [1..%d]", out.WriteAheadWriters, maxWAWForGrid)
+	if out.WriteAheadWriters < 1 || out.WriteAheadWriters > maxLearnableWAW {
+		t.Errorf("picked WAW=%d outside valid grid [1..%d]", out.WriteAheadWriters, maxLearnableWAW)
 	}
 	// Sanity: the regression tier (not smoothed-bins) should have done the
 	// picking — otherwise this test would pass via the coverage-gate
@@ -1120,7 +1164,7 @@ func TestApplyHistory_RegressionRespectsHardChunkLimit(t *testing.T) {
 
 	// Either smoothed bins picked or baseline stood; regression's grid was
 	// fully filtered. WAW shouldn't be a wild value.
-	if out.WriteAheadWriters > maxWAWForGrid {
+	if out.WriteAheadWriters > maxLearnableWAW {
 		t.Errorf("WAW=%d outside valid range; HardChunkLimit filter should have constrained selection", out.WriteAheadWriters)
 	}
 	// Reasoning should not mention regression-selected (every grid point

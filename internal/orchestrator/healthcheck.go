@@ -270,14 +270,9 @@ func GetSystemBasedSuggestions(cfg *config.Config) *driver.SmartConfigSuggestion
 		ForceExplore:           cfg.Migration.Explore,
 		ExplorationEpsilon:     driver.ExplorationEpsilon(cfg.Migration.ExploreMode),
 	}
-	profile := tuning.DriverProfile{Name: cfg.Target.Type, BaselineWAW: 2}
-	if d, err := driver.Get(cfg.Target.Type); err == nil {
-		defaults := d.Defaults()
-		profile.BaselineWAW = defaults.WriteAheadWriters
-		profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
-		profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
-		profile.HardChunkLimit = d.HardChunkLimit(in.SafetyRowBytes)
-	}
+	profile := driver.BuildTuningProfile(cfg.Target.Type, in.SafetyRowBytes, driver.TargetProbe{})
+	// Keep the offline exploration contract: --explore still requests a
+	// planned-grid probe even when no history provider is available.
 	out := tuning.Tune(in, profile, nil, tuning.DBTuning{})
 
 	suggestions.Workers = out.Workers

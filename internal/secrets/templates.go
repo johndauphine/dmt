@@ -135,7 +135,7 @@ migration_defaults:
   # Performance settings (auto-tuned if not set)
   # workers: 4                    # Parallel workers (default: based on CPU cores)
   # max_memory_mb: 0              # Optional ceiling on the resolved automatic memory budget
-  # read_ahead_buffers: 8         # Chunks to buffer ahead
+  # read_ahead_buffers: 4         # Chunks to buffer ahead
   # write_ahead_writers: 2        # Parallel writers per job
   # parallel_readers: 2           # Parallel readers per job
 
@@ -150,7 +150,7 @@ migration_defaults:
   sample_size: 100                # Rows to sample for validation
 
   # Checkpoint and recovery
-  checkpoint_frequency: 10        # Save progress every N chunks
+  # checkpoint_frequency: 20      # Save progress every N chunks
   max_retries: 3                  # Retry failed tables N times
   history_retention_days: 30      # Keep run history for N days
 

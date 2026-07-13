@@ -12,6 +12,7 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/internal/systemmemory"
 	"github.com/johndauphine/dmt/internal/tuning"
 	"gopkg.in/yaml.v3"
 )
@@ -615,9 +616,8 @@ func TestValidate_FileBasedDriverSkipsHost(t *testing.T) {
 	})
 }
 
-func TestAutoTuneWriteAheadWriters(t *testing.T) {
-	// Test that write-ahead writers get set to a reasonable value
-	// (may be from auto-tuning or global defaults)
+func TestDefaultPolicyWriteAheadWriters(t *testing.T) {
+	withEmptySecretsFile(t)
 	cfg := &Config{
 		Source: SourceConfig{
 			Type:     "postgres",
@@ -636,19 +636,22 @@ func TestAutoTuneWriteAheadWriters(t *testing.T) {
 			Password: "pass",
 		},
 	}
+	cfg.autoConfig.CPUCores = 8
+	cfg.autoConfig.Platform = "linux"
+	cfg.memoryReader = &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		CapacityMB: 8192, AvailableMB: 8192, Source: "host",
+	}}
 	if err := cfg.applyDefaults(); err != nil {
 		t.Fatalf("applyDefaults() failed: %v", err)
 	}
 
-	// Should have a reasonable value (at least 2)
-	if cfg.Migration.WriteAheadWriters < 2 {
-		t.Errorf("WriteAheadWriters should be at least 2, got %d", cfg.Migration.WriteAheadWriters)
+	if cfg.Migration.WriteAheadWriters != 2 {
+		t.Errorf("WriteAheadWriters = %d, want exact canonical default 2", cfg.Migration.WriteAheadWriters)
 	}
 }
 
-func TestAutoTuneParallelReaders(t *testing.T) {
-	// Test that parallel readers get set to a reasonable value
-	// (may be from auto-tuning or global defaults)
+func TestDefaultPolicyParallelReaders(t *testing.T) {
+	withEmptySecretsFile(t)
 	cfg := &Config{
 		Source: SourceConfig{
 			Type:     "postgres",
@@ -667,13 +670,17 @@ func TestAutoTuneParallelReaders(t *testing.T) {
 			Password: "pass",
 		},
 	}
+	cfg.autoConfig.CPUCores = 8
+	cfg.autoConfig.Platform = "linux"
+	cfg.memoryReader = &fakeMemoryReader{snapshot: systemmemory.Snapshot{
+		CapacityMB: 8192, AvailableMB: 8192, Source: "host",
+	}}
 	if err := cfg.applyDefaults(); err != nil {
 		t.Fatalf("applyDefaults() failed: %v", err)
 	}
 
-	// Should have a reasonable value (at least 2)
-	if cfg.Migration.ParallelReaders < 2 {
-		t.Errorf("ParallelReaders should be at least 2, got %d", cfg.Migration.ParallelReaders)
+	if cfg.Migration.ParallelReaders != 2 {
+		t.Errorf("ParallelReaders = %d, want exact canonical default 2", cfg.Migration.ParallelReaders)
 	}
 }
 

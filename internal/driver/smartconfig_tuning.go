@@ -93,31 +93,14 @@ func explorationEpsilon(mode string) float64 {
 	}
 }
 
-// toTuningProfile builds the per-target DriverProfile from the registered
-// driver. Unknown target â†’ zero-valued profile, which the tuner treats as
-// "use 10 MB conservative chunk fallback + WAW=1 floor."
-//
-// For MySQL targets, the probed @@max_allowed_packet (from
-// SetTargetProbe) drives HardChunkLimit instead of the driver's static
-// HardChunkLimit method â€” the protocol cap is server-configurable and
-// can only be determined at runtime (#166).
+// toTuningProfile builds the per-target profile through the shared driver
+// policy used by schema-aware and offline tuning.
 func (s *SmartConfigAnalyzer) toTuningProfile() tuning.DriverProfile {
-	profile := tuning.DriverProfile{Name: s.targetDBType, BaselineWAW: 2}
-	d, err := Get(s.targetDBType)
-	if err != nil {
-		return profile
-	}
-	defaults := d.Defaults()
-	profile.BaselineWAW = defaults.WriteAheadWriters
-	profile.ScaleWritersWithCores = defaults.ScaleWritersWithCores
-	profile.OptimumBulkChunkBytes = defaults.OptimumBulkChunkBytes
-
 	// SafetyRowBytes is the widest observed table-average width and is the
 	// best available packet-sizing estimate. It is not a bound on every
 	// serialized row; write-error-driven chunk reduction remains the backstop.
 	packetRowBytes := s.packetSizingRowBytes()
-	profile.HardChunkLimit = chunkLimitFromProbe(d.HardChunkLimit(packetRowBytes), s.targetProbe, packetRowBytes)
-	return profile
+	return BuildTuningProfile(s.targetDBType, packetRowBytes, s.targetProbe)
 }
 
 func (s *SmartConfigAnalyzer) packetSizingRowBytes() int64 {

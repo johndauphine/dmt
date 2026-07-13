@@ -133,7 +133,7 @@ func TestApplyDefaultsMemoryEnvelopeReadFailureIsConservative(t *testing.T) {
 	}
 }
 
-func TestApplyDefaultsPublishesEnvelopeAndSizesBuffersFromBudget(t *testing.T) {
+func TestApplyDefaultsPublishesEnvelopeAndUsesCanonicalBuffers(t *testing.T) {
 	withEmptySecretsFile(t)
 	reader := &fakeMemoryReader{snapshot: systemmemory.Snapshot{
 		CapacityMB:  8192,
@@ -163,10 +163,11 @@ func TestApplyDefaultsPublishesEnvelopeAndSizesBuffersFromBudget(t *testing.T) {
 	if reader.reads != 1 {
 		t.Fatalf("memory reader calls = %d, want exactly 1", reader.reads)
 	}
-	// 4096 MiB / 4 workers / 25 MB per chunk exceeds 32, so the existing
-	// upper bound applies. The removed independent 50% sub-budget yielded 21.
-	if cfg.Migration.ReadAheadBuffers != 32 {
-		t.Fatalf("ReadAheadBuffers = %d, want budget-derived upper bound 32", cfg.Migration.ReadAheadBuffers)
+	// #711 supersedes the temporary budget-scaled RAB formula from #708.
+	// The canonical policy fixes RAB at 4 and enforces the envelope by
+	// clamping generated chunks instead.
+	if cfg.Migration.ReadAheadBuffers != 4 {
+		t.Fatalf("ReadAheadBuffers = %d, want canonical default 4", cfg.Migration.ReadAheadBuffers)
 	}
 
 	dump := cfg.DebugDump()

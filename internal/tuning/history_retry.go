@@ -39,7 +39,7 @@ func cellSkipsInGrid(cellSkip map[retryCellKey]bool) map[retryCellKey]bool {
 		if !v {
 			continue
 		}
-		if k.WAW < 1 || k.WAW > maxWAWForGrid {
+		if k.WAW < 1 || k.WAW > maxLearnableWAW {
 			continue
 		}
 		if !gridPairs[[2]int{k.ParallelReaders, k.ReadAheadBuffers}] {
