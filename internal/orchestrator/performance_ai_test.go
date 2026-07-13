@@ -358,9 +358,16 @@ func TestRecordingWriteErrorAdjusterPersistsStructuralAdjustment(t *testing.T) {
 		t.Fatalf("CreateRun() error = %v", err)
 	}
 	recorder := newRuntimeAdjustmentRecorder(state, "run-1")
+	began, completed := 0, 0
+	var completedAt time.Time
 	adjuster := recordingWriteErrorAdjuster{
-		base:     monitor.NewRuleWriteErrorAdjuster(),
-		recorder: recorder,
+		base:                          monitor.NewRuleWriteErrorAdjuster(),
+		recorder:                      recorder,
+		beginObservationContamination: func() { began++ },
+		completeObservationContamination: func(at time.Time) {
+			completed++
+			completedAt = at
+		},
 	}
 
 	next := adjuster.EvaluateWriteError(context.Background(), transfer.WriteErrorContext{
@@ -371,6 +378,14 @@ func TestRecordingWriteErrorAdjusterPersistsStructuralAdjustment(t *testing.T) {
 	})
 	if next != 500 {
 		t.Fatalf("next chunk size = %d, want 500", next)
+	}
+	if began != 0 || completed != 0 {
+		t.Fatalf("recommendation invoked application lifecycle: begin=%d complete=%d", began, completed)
+	}
+	adjuster.WriteErrorAdjustmentApplying()
+	adjuster.WriteErrorAdjustmentApplied()
+	if began != 1 || completed != 1 || completedAt.IsZero() {
+		t.Fatalf("structural lifecycle callbacks = begin:%d complete:%d at:%v", began, completed, completedAt)
 	}
 	records, err := state.GetRuntimeAdjustments(0)
 	if err != nil {
@@ -397,6 +412,15 @@ func TestRecordingWriteErrorAdjusterPersistsStructuralAdjustment(t *testing.T) {
 	}
 	if !recorder.applied() {
 		t.Fatal("recorded structural write adjustment must mark the run adjusted")
+	}
+
+	if next := adjuster.EvaluateWriteError(context.Background(), transfer.WriteErrorContext{
+		ChunkSize: 500, ErrorMessage: "transient network timeout",
+	}); next != 0 {
+		t.Fatalf("non-structural error adjustment = %d, want 0", next)
+	}
+	if began != 1 || completed != 1 {
+		t.Fatalf("non-adjustment changed lifecycle counts: begin=%d complete=%d", began, completed)
 	}
 }
 

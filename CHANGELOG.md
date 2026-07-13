@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Runtime-controller adjustments now capture an explicitly observational
+  three-sample before/after delta when equal, uncontaminated windows are
+  available. Intervening adjustments censor older observations, and the
+  telemetry remains isolated from controller decisions (#710).
+
 - Runtime-adjustment persistence now distinguishes unmeasured outcomes from
   genuine measured zeros. New unmeasured after-metrics are stored as NULL,
   legacy phantom zeros remain preserved but unmeasured, and AI performance

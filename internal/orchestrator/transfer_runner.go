@@ -663,7 +663,18 @@ retryLoop:
 		// through to the normal retry logic.
 		var writeErrAdjuster transfer.WriteErrorAdjuster = monitor.NewRuleWriteErrorAdjuster()
 		if runtimeAdjustments != nil {
-			writeErrAdjuster = recordingWriteErrorAdjuster{base: writeErrAdjuster, recorder: runtimeAdjustments}
+			var beginObservationContamination func()
+			var completeObservationContamination func(time.Time)
+			if runtimeMonitor != nil {
+				beginObservationContamination = runtimeMonitor.BeginExternalAdjustment
+				completeObservationContamination = runtimeMonitor.CompleteExternalAdjustment
+			}
+			writeErrAdjuster = recordingWriteErrorAdjuster{
+				base:                             writeErrAdjuster,
+				recorder:                         runtimeAdjustments,
+				beginObservationContamination:    beginObservationContamination,
+				completeObservationContamination: completeObservationContamination,
+			}
 		}
 		attemptJob := j
 		if attempt > 0 {

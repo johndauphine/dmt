@@ -82,13 +82,18 @@ func (r *runtimeAdjustmentRecorder) record(_ string, record monitor.AdjustmentRe
 }
 
 type recordingWriteErrorAdjuster struct {
-	base     transfer.WriteErrorAdjuster
-	recorder *runtimeAdjustmentRecorder
+	base                             transfer.WriteErrorAdjuster
+	recorder                         *runtimeAdjustmentRecorder
+	beginObservationContamination    func()
+	completeObservationContamination func(time.Time)
 }
 
 func (a recordingWriteErrorAdjuster) EvaluateWriteError(ctx context.Context, errCtx transfer.WriteErrorContext) int {
 	next := a.base.EvaluateWriteError(ctx, errCtx)
-	if next <= 0 || a.recorder == nil {
+	if next <= 0 {
+		return next
+	}
+	if a.recorder == nil {
 		return next
 	}
 	_ = a.recorder.record("", monitor.AdjustmentRecord{
@@ -101,4 +106,20 @@ func (a recordingWriteErrorAdjuster) EvaluateWriteError(ctx context.Context, err
 		Confidence:       "deterministic",
 	})
 	return next
+}
+
+// WriteErrorAdjustmentApplying and WriteErrorAdjustmentApplied are invoked by
+// transfer.writerPool immediately around the actual table chunk/batch setters.
+// Bracketing the mutation closes the recommendation/application interleaving
+// where a controller observation could otherwise arm in between.
+func (a recordingWriteErrorAdjuster) WriteErrorAdjustmentApplying() {
+	if a.beginObservationContamination != nil {
+		a.beginObservationContamination()
+	}
+}
+
+func (a recordingWriteErrorAdjuster) WriteErrorAdjustmentApplied() {
+	if a.completeObservationContamination != nil {
+		a.completeObservationContamination(time.Now())
+	}
 }
