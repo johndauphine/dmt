@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Removed retired auto-tune suggestion, checkpoint aggregate, and monitor-trend
+  APIs after verifying they have no production consumers. Live pool
+  recommendations remain available to analyze, apply, Web, and advisory
+  surfaces, while effective runtime pools and persisted actuals are unchanged
+  (#704).
+
 - AI tuning and runtime-adjustment history now dual-writes UTC epoch
   milliseconds while retaining legacy text for compatibility. Zone-less legacy
   timestamps remain explicitly unresolved, use deterministic ID fallback only
