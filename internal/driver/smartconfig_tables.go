@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -313,57 +314,91 @@ func (s *SmartConfigAnalyzer) getTables(ctx context.Context, schema string) ([]t
 	return tables, rows.Err()
 }
 
-// detectDateColumns finds columns that could be used for incremental sync.
-func (s *SmartConfigAnalyzer) detectDateColumns(ctx context.Context, schema, table string) ([]string, error) {
+// detectDateColumns finds columns that could be used for incremental sync in
+// one schema-wide metadata query. Results for tables outside the already
+// scoped stats set are discarded client-side.
+func (s *SmartConfigAnalyzer) detectDateColumns(ctx context.Context, schema string, allowedTables []tableInfo) (map[string][]string, error) {
+	dateColumns := make(map[string][]string)
+	if len(allowedTables) == 0 {
+		return dateColumns, nil
+	}
+
 	var query string
 	switch s.dbType {
 	case "mssql":
 		query = `
-			SELECT c.name
+			SELECT tbl.name, c.name
 			FROM sys.columns c
 			INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
 			INNER JOIN sys.tables tbl ON c.object_id = tbl.object_id
 			INNER JOIN sys.schemas s ON tbl.schema_id = s.schema_id
-			WHERE s.name = @p1 AND tbl.name = @p2
+			WHERE s.name = @p1
 			  AND t.name IN ('datetime', 'datetime2', 'datetimeoffset', 'date', 'timestamp')
-			ORDER BY c.column_id`
+			ORDER BY tbl.name, c.column_id`
 	case "postgres":
 		query = `
-			SELECT column_name
+			SELECT table_name, column_name
 			FROM information_schema.columns
-			WHERE table_schema = $1 AND table_name = $2
+			WHERE table_schema = $1
 			  AND data_type IN ('timestamp without time zone', 'timestamp with time zone', 'date')
-			ORDER BY ordinal_position`
+			ORDER BY table_name, ordinal_position`
 	case "mysql":
 		query = `
-			SELECT COLUMN_NAME
+			SELECT TABLE_NAME, COLUMN_NAME
 			FROM information_schema.COLUMNS
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+			WHERE TABLE_SCHEMA = ?
 			  AND DATA_TYPE IN ('datetime', 'timestamp', 'date')
-			ORDER BY ORDINAL_POSITION`
+			ORDER BY TABLE_NAME, ORDINAL_POSITION`
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", s.dbType)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, schema, table)
+	rows, err := s.db.QueryContext(ctx, query, schema)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var dateColumns []string
+	// Keep the table name returned by the stats query as the public map key,
+	// matching the prior per-table behavior. Exact matches take precedence;
+	// the case-folded lookup only handles engines whose metadata surfaces use
+	// different casing, and rejects ambiguous case-only table names.
+	allowedExact := make(map[string]string, len(allowedTables))
+	allowedFolded := make(map[string]string, len(allowedTables))
+	for _, table := range allowedTables {
+		allowedExact[table.Name] = table.Name
+		folded := strings.ToLower(table.Name)
+		if existing, ok := allowedFolded[folded]; ok && existing != table.Name {
+			allowedFolded[folded] = ""
+		} else if !ok {
+			allowedFolded[folded] = table.Name
+		}
+	}
+
 	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
+		var table, column string
+		if err := rows.Scan(&table, &column); err != nil {
 			return nil, err
 		}
-		dateColumns = append(dateColumns, col)
+
+		canonical, allowed := allowedExact[table]
+		if !allowed {
+			canonical, allowed = allowedFolded[strings.ToLower(table)]
+			allowed = allowed && canonical != ""
+		}
+		if !allowed {
+			continue
+		}
+		dateColumns[canonical] = append(dateColumns[canonical], column)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	return s.rankDateColumns(dateColumns), nil
+	for table, columns := range dateColumns {
+		dateColumns[table] = s.rankDateColumns(columns)
+	}
+	return dateColumns, nil
 }
 
 // rankDateColumns sorts date columns by likelihood of being update timestamps.
@@ -397,13 +432,11 @@ func (s *SmartConfigAnalyzer) rankDateColumns(columns []string) []string {
 		ranked = append(ranked, rankedCol{name: col, score: score})
 	}
 
-	for i := 0; i < len(ranked)-1; i++ {
-		for j := i + 1; j < len(ranked); j++ {
-			if ranked[j].score < ranked[i].score {
-				ranked[i], ranked[j] = ranked[j], ranked[i]
-			}
-		}
-	}
+	// The schema query supplies ordinal order. A stable sort raises likely
+	// update timestamps while preserving that database order for equal scores.
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].score < ranked[j].score
+	})
 
 	result := make([]string, len(ranked))
 	for i, r := range ranked {

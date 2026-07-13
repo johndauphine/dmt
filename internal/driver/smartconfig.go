@@ -26,13 +26,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/johndauphine/dmt/internal/checkpoint"
 	"strings"
+	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/driver/dbtuning"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/tuning"
 )
+
+const dateColumnDetectionTimeout = 10 * time.Second
 
 type DBTuningSnapshot = tuning.DBTuning
 
@@ -411,6 +414,9 @@ func (s *SmartConfigAnalyzer) SetWorkloadIdentity(sourceHost string, sourcePort 
 // Analyze performs smart configuration detection on the source database.
 func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*SmartConfigSuggestions, error) {
 	logging.Debug("Analyzing database schema for configuration suggestions...")
+	// An analyzer may be reused by callers. A failed stats query must not leave
+	// the previous successful run eligible for a later history save.
+	s.pendingSave = nil
 
 	tables, err := s.getTables(ctx, schema)
 	if err != nil {
@@ -423,6 +429,9 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 	// sizes, and memory-budget math aligned with the actual workload â€”
 	// otherwise an excluded wide table can still drive the global cap.
 	tables = s.applyTableNameFilter(tables)
+	s.suggestions.DateColumns = make(map[string][]string)
+	s.suggestions.ExcludeTables = s.suggestions.ExcludeTables[:0]
+	s.suggestions.Warnings = s.suggestions.Warnings[:0]
 
 	s.suggestions.TotalTables = len(tables)
 	var totalRows int64
@@ -430,24 +439,27 @@ func (s *SmartConfigAnalyzer) Analyze(ctx context.Context, schema string) (*Smar
 		if t.RowCount > 0 {
 			totalRows, _ = saturatingAddPositive(totalRows, t.RowCount)
 		}
+		if s.shouldExcludeTable(t.Name) {
+			s.suggestions.ExcludeTables = append(s.suggestions.ExcludeTables, t.Name)
+		}
 	}
 	s.suggestions.TotalRows = totalRows
 
-	for _, table := range tables {
-		dateColumns, err := s.detectDateColumns(ctx, schema, table.Name)
-		if err != nil {
-			logging.Warn("Warning: analyzing date columns for %s: %v", table.Name, err)
-			continue
-		}
-		if len(dateColumns) > 0 {
-			s.suggestions.DateColumns[table.Name] = dateColumns
-		}
-		if s.shouldExcludeTable(table.Name) {
-			s.suggestions.ExcludeTables = append(s.suggestions.ExcludeTables, table.Name)
-		}
-	}
-
+	// Date-column metadata is advisory. Complete deterministic tuning and arm
+	// its pending history save before entering this separate failure domain so
+	// a slow or unavailable catalog query cannot discard otherwise valid work.
 	s.calculateAutoTuneParams(tables)
+
+	dateCtx, cancelDateLookup := context.WithTimeout(ctx, dateColumnDetectionTimeout)
+	dateColumns, dateErr := s.detectDateColumns(dateCtx, schema, tables)
+	cancelDateLookup()
+	if dateErr != nil {
+		warning := fmt.Sprintf("date-column detection failed: %v", dateErr)
+		s.suggestions.Warnings = append(s.suggestions.Warnings, warning)
+		logging.Warn("Warning: %s", warning)
+	} else {
+		s.suggestions.DateColumns = dateColumns
+	}
 
 	logging.Debug("Smart config analysis complete:")
 	logging.Debug("  - Tables: %d (%s rows)", s.suggestions.TotalTables, formatRowCount(s.suggestions.TotalRows))
