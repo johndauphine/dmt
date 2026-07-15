@@ -1,12 +1,12 @@
-# Epic #705 handoff: native Windows x64 performance sign-off
+# Epic #705 handoff: native Windows result and auto-tune rollback
 
-This is the execution handoff for the remaining work in epic
-[#705](https://github.com/johndauphine/dmt/issues/705). The functional changes
-are merged; the only open exit condition is the native SQL Server-to-PostgreSQL
-performance sign-off specified by
-[#728](https://github.com/johndauphine/dmt/issues/728). Treat the live issue
-bodies as authoritative if this file and GitHub ever disagree. Remove this file
-when the epic closes.
+This is the execution handoff for the remaining rollback work in epic
+[#705](https://github.com/johndauphine/dmt/issues/705). A native Windows
+SQL Server-to-PostgreSQL directional comparison is complete. It supersedes the
+earlier provisional instruction to keep PRs #729 and #730: the release decision
+is to roll back those two commits while retaining the epic work already present
+at the completed-epic baseline. Treat the live issue bodies as authoritative if
+this file and GitHub ever disagree. Remove this file when the epic closes.
 
 Two corrections are also required reading:
 
@@ -24,14 +24,30 @@ Two corrections are also required reading:
   in PR #730.
 - The Mac Docker campaign did not establish a reproducible binary regression.
   It exposed write-path/platform instability and is diagnostic only.
-- Do not roll back #729/#730, disable auto-tuning, or add linker/layout padding
-  on the Mac evidence.
+- A native Windows same-boot paired diagnostic subsequently classified the
+  combined #729/#730 treatment as likely materially slower. All five measured
+  pairs were adverse in both paired signals and passed the predeclared material
+  regression screen.
+- Definitive release recommendation: roll back PR #730 and PR #729, newest
+  first. Do not roll back the rest of epic #705, disable auto-tuning, or add
+  linker/layout padding.
 
 Do not put numeric SQL Server benchmark outcomes in this repository, a GitHub
 issue, a PR, or another public channel without the separate license/legal review
 and any written Microsoft approval required by the SQL Server terms. Keep raw
 results under the local benchmark root. Public status may report methodology,
 gate pass/fail, and qualitative conclusions only.
+
+## Benchmark protocol status
+
+The sections from `Fixed user constraints and decisions` through
+`Hard gates and analysis` are retained as reference for the original formal
+#728 protocol and to explain why the pragmatic screen is not formal sign-off.
+They are not the current next-agent workflow. Do not rerun the Windows setup,
+Stage A, or Stage B before implementing the rollback unless the owner
+explicitly reopens formal sign-off. The actionable instructions are in
+`Native Windows benchmark outcome and rollback recommendation` and
+`Next-agent order of work`.
 
 ## Fixed user constraints and decisions
 
@@ -383,28 +399,172 @@ Apply #728's full current gates. In particular:
 - no replicate may be worse than -10% throughput, with replicate effects
   spanning at most ten percentage points.
 
-A native safety or stability gate failure blocks the epic's performance claim
-even though performance is not a unit-test correctness gate. If Stage A is
-unstable, stop with an inconclusive result. Change auto-tune logic only if
-Stage A passes and Stage B then isolates a policy-selection problem.
+For a formal #728 performance claim, a native safety or stability gate failure
+blocks sign-off even though performance is not a unit-test correctness gate.
+Under that protocol, an unstable Stage A is inconclusive and Stage B cannot
+isolate an auto-policy problem. The pragmatic release decision below does not
+claim to satisfy formal #728 sign-off; it supersedes the old keep instruction
+and directs a conservative rollback of the tested treatment.
+
+## Native Windows benchmark outcome and rollback recommendation
+
+The completed campaign was a pragmatic, same-boot directional release screen,
+not the full four-replicate formal sign-off described above. It used:
+
+- native SQL Server 2022 Developer and PostgreSQL 16 on the same Windows x64
+  laptop and physical disk, with the StackOverflow2010 source fixture;
+- immutable binaries for baseline
+  `53b521f019a6f20f25b507d3ad57aab44f389b1c` and final
+  `9fe2f670e70580aae4aff4e025e8364711d1b4b8`;
+- no Docker or WSL database layer;
+- disposable warm-ups, separate persistent tuning histories for each arm,
+  alternating arm order, and pre-pair state snapshots;
+- `migration.tuning: auto` with runtime tuning disabled;
+- exact transfer/parity and persisted-versus-executed state assertions for
+  every observation; and
+- thirteen paired learning runs, followed by five measured pairs after both
+  arms reached the regression tier together on learning pair 13.
+
+The run completed without a transfer, parity, retry, product-state, or
+orchestration failure. The final arm was adverse in both paired performance
+signals in every measured pair, and the aggregate crossed the materiality rule
+declared before measurement. The recorded qualitative decision is
+`likely_materially_slower`.
+
+Windows telemetry marked background environmental activity during every pair,
+so there was no clean-only sensitivity subset and this is not formal #728
+sign-off or a cross-hardware performance claim. That caveat does not change the
+release decision: the user explicitly chose rollback for a measured material
+slowdown, and this run met that branch of the decision rule rather than the
+inconclusive branch.
+
+Do not report this result as a formal performance-sign-off pass. Report it as a
+qualitative native-Windows regression screen that triggered the predeclared
+rollback decision.
+
+The rollback implementation, unit tests, review, and PR may be completed from
+a clean clone or worktree on macOS. The dedicated Windows environment is
+required only for native performance evidence. Do not rerun the old Mac Docker
+campaign, treat Mac or Docker timings as a substitute for the Windows result,
+or use them to reverse this rollback decision.
+
+Keep raw SQL Server results private. The local decision record and supporting
+artifacts are under:
+
+```text
+C:\dmt-bench\manifests\stage-b-auto-pragmatic-same-boot\20260715T023109889Z\result.json
+C:\dmt-bench\manifests\stage-b-auto-pragmatic-same-boot\20260715T023109889Z\
+C:\dmt-bench\logs\stage-b-auto-pragmatic-same-boot\
+C:\dmt-bench\telemetry\stage-b-auto-pragmatic-same-boot\20260715T023109889Z\
+```
+
+The two temporary Microsoft Defender exclusions for `C:\dmt-bench` and the
+PostgreSQL 16 data directory were removed and verified absent after the run. No
+reboot is required for rollback implementation.
+
+### Rollback boundary
+
+The tested treatment is exactly two adjacent commits:
+
+1. PR #729, `0e913ee86e87b8caa05b0c77d503e83c7675e737`, whose direct
+   parent is the baseline; and
+2. PR #730, `9fe2f670e70580aae4aff4e025e8364711d1b4b8`, whose direct
+   parent is PR #729.
+
+The campaign compared the baseline with the combined treatment. It cannot
+attribute the regression to only one commit or hunk. Revert both commits,
+newest first. Do not reset the branch to the baseline SHA and do not revert the
+whole epic.
+
+The rollback removes the cardinality-aware memory model from #729 and the
+candidate projection, pin-aware selection/finalization, early runtime-cap
+materialization, and unobserved-fallback shrink behavior from #730. There is no
+checkpoint schema or persisted-data migration to reverse; these additions are
+runtime-only.
+
+Everything through the baseline remains. That retains the earlier epic
+benefits, including balanced/safe exploration, unified memory budgeting,
+separated safety widths, bounded runtime growth, system-pressure handling,
+connection-pool truth, canonical defaults, schema-stat coverage,
+runtime-adjustment measurement, UTC timestamp handling, and the dead-code
+sweep.
+
+The negative tunable-value guard added in `internal/config/validation.go` by
+#730 is standalone and does not affect valid benchmark configurations. Prefer
+an exact two-commit rollback first. If this validation is worth retaining,
+reapply only that guard and
+`TestValidateRejectsNegativeCandidateTunables` from
+`internal/config/tunable_validation_test.go` in a separate, reviewable change.
+Treat pin-domain projection and persisted/executed tuple identity as later
+salvage candidates; they currently share the behavior-changing projection and
+materialization path and must be reintroduced independently with fresh
+performance evidence.
 
 ## Next-agent order of work
 
-1. Read #705, #728, and both correction comments; confirm the two exact SHAs.
-2. Inventory the laptop and confirm native engine/fixture availability, disk
-   space, charger/power state, cooling, and a usable thermal-throttle signal.
-3. Build and hash both immutable binaries with one Go toolchain.
-4. Create the private Windows harness and artifact layout; keep raw results out
-   of the repository.
-5. Restore and validate the source fixture; qualify durable PostgreSQL target
-   reset, stats snapshots, and shared-disk quiescence.
-6. Run short smoke observations. Choose a single manual tuple inside both arms'
-   envelope with at least 10% modeled DMT headroom, then freeze configs,
-   thresholds, process allowlist, schedules, and hashes.
-7. Complete Stage A and analyze its four block effects.
-8. Only after Stage A passes, complete Stage B and analyze its four replicate
-   effects.
-9. Report qualitative status publicly. Discuss raw numeric SQL Server results
-   only in an approved private context.
-10. If all gates pass, update #728/#705, close the epic, and remove this handoff
-    in the closing documentation change.
+1. Read #705, #728, this outcome section, and both correction comments. Confirm
+   current main still descends from the two exact treatment commits.
+2. On the Mac, pull current main into a clean clone or worktree and create a
+   dedicated rollback branch. Do not copy or work from
+   `C:\dmt-bench\src\dmt`: that Windows benchmark checkout is currently empty
+   with its tracked tree reported as deleted. Do not use `git reset --hard`
+   against it or any other dirty checkout.
+3. Revert the treatment newest first, preferably as one intentional rollback
+   commit:
+
+   ```text
+   git revert --no-commit 9fe2f670e70580aae4aff4e025e8364711d1b4b8
+   git revert --no-commit 0e913ee86e87b8caa05b0c77d503e83c7675e737
+   git commit -m "revert: roll back auto-tune regressions from #729 and #730"
+   ```
+
+4. At current main `0d403261d7613fe263b477298846d9adf02d7f76`, production
+   code after the rollback should match the tested baseline exactly:
+
+   ```text
+   git diff --exit-code 53b521f019a6f20f25b507d3ad57aab44f389b1c HEAD -- cmd internal
+   ```
+
+   If main has acquired unrelated production changes, preserve them and verify
+   baseline parity only for the files and symbols changed by #729/#730.
+5. Search `cmd` and `internal` for orphaned treatment-only symbols:
+
+   ```text
+   MemoryProfile
+   candidateProjection
+   BeginRuntimeChunkSizeProjection
+   MaterializeRuntimeChunkSizeCap
+   SetPinnedWorkers
+   SetPinnedChunkSize
+   TunableWorkers
+   TunableChunkSize
+   ```
+
+6. Remove the superseded #729/#730 changelog claims and add a qualitative
+   rollback entry. Do not publish raw SQL Server measurements or ratios.
+7. Run the focused and repository-wide verification suite:
+
+   ```text
+   go test ./internal/tuning ./internal/config ./internal/driver ./internal/orchestrator -short
+   go test ./... -short
+   go vet ./...
+   go test -race -short -timeout 5m ./...
+   golangci-lint run
+   ```
+
+8. Build and test the native macOS binary for implementation confidence, and
+   let CI exercise its declared platform matrix. Confirm the baseline
+   exploration, regression selection, scalar safety clamp, connection pool,
+   and runtime-adjustment recording tests remain intact. A macOS build or
+   cross-compiled Windows binary is not native Windows performance evidence.
+9. If release policy requires performance confirmation, return to the native
+   Windows laptop and use fresh isolated histories to compare the rollback
+   binary with the frozen baseline in a short, predeclared same-boot paired
+   check. Do not reuse either final-arm learning state or select extra runs
+   after seeing results. Keep raw outcomes private; do not use Mac Docker
+   timings for this step.
+10. Open a rollback PR explaining that the native result supports reverting the
+    combined treatment while retaining the earlier epic. Obtain clean review
+    and green CI, then update #728/#705 with qualitative status. Reintroduce any
+    salvage candidate only in a separate PR with a no-pin/no-projection golden
+    test and fresh performance evidence.
