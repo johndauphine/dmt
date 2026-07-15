@@ -9,6 +9,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the cardinality-aware memory profile and table-aware chunk caps
+  introduced by #729, restoring the completed-epic scalar widest-width safety
+  model.
+
+- Removed the effective-candidate projection, pin-aware selection and
+  finalization, early runtime-cap materialization, and persisted/executed tuple
+  identity introduced by #730, restoring the completed-epic tuning path.
+
 ### Fixed
 
 - Rolled back the cardinality-aware auto-tune memory model and effective-
