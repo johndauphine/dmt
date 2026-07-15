@@ -200,7 +200,7 @@ func runKeysetForTest(t *testing.T, srcPool *keysetRuntimeSourcePool, tgtPool *k
 		targetCols:      cols,
 		colTypes:        colTypes,
 		colSRIDs:        []int{0, 0},
-		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) ackRelease {
 			coord = newKeysetCheckpointCoordinator(saver, job, pkRanges, nil, 0, cb.checkpointFreq)
 			if coord == nil {
 				return nil

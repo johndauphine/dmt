@@ -47,19 +47,38 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	representativeWidth := in.representativeRowBytes()
 	legacyModelWidth := safeAvgRowBytes(in.AvgRowBytes)
 	csRows := rowsFromBytes(pickedCSBytes, representativeWidth)
+	modelCSBytes := regressionCandidateModelBytes(
+		pickedCSBytes,
+		representativeWidth,
+		legacyModelWidth,
+	)
+	low, high, intervalOK := model.PredictionInterval(
+		pickedWAW, modelCSBytes, pickedPR, pickedRAB,
+		in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth,
+	)
+	if invalidReason, valid := validateRegressionPrediction(predicted, low, high, intervalOK, rows); !valid {
+		logging.Debug("tuning: regression prediction rejected (%s) — falling through to smoothed bins", invalidReason)
+		out.Reasoning = appendReasoning(out.Reasoning,
+			"regression skipped: invalid prediction (%s)", invalidReason,
+		)
+		return false
+	}
+
+	// Validate the selected point before changing any live settings. A
+	// rejected regression therefore leaves the baseline intact for the
+	// existing smoothed-bin fallback below applyHistorySelection.
 	out.WriteAheadWriters = pickedWAW
 	out.ChunkSize = csRows
 	out.ParallelReaders = pickedPR
 	out.ReadAheadBuffers = pickedRAB
 	out.Tier = TierRegression
 
-	// Point-level fit signal: 95% prediction interval at the picked
-	// point. !ok when the model couldn't compute it — emit "N/A" to keep
-	// the format consistent without lying about confidence.
-	// PredictionInterval's explicit ok return distinguishes "couldn't
-	// compute" from "computed a legitimately zero-width interval"
+	// Point-level fit signal: the validated 95% prediction interval at the
+	// picked point. PredictionInterval's explicit ok return distinguishes
+	// "couldn't compute" from "computed a legitimately zero-width interval"
 	// (Codex review on PR #217 — the prior `low != high` sentinel was
-	// ambiguous).
+	// ambiguous). Unavailable or unusable intervals now fall through before
+	// Output is mutated instead of being selected with an "N/A"/"wide" note.
 	//
 	// R² used to be emitted here too but was removed: on noisy real
 	// workloads it's structurally capped low (within-cell variance
@@ -69,10 +88,7 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	// reading the log thought the tuner was broken when it wasn't.
 	// model.r2 is still computed and remains available to debug logs
 	// and unit tests.
-	ciStr := "N/A"
-	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth); ok {
-		ciStr = formatPredictionInterval(predicted, low, high)
-	}
+	ciStr := formatPredictionInterval(predicted, low, high)
 
 	out.Reasoning = appendReasoning(out.Reasoning,
 		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %s [95%% CI: %s]",
@@ -132,6 +148,11 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 				continue
 			}
+			modelCSBytes := regressionCandidateModelBytes(
+				cs,
+				representativeWidth,
+				legacyModelWidth,
+			)
 			for _, reader := range readerGrid {
 				if cellSkip[retryCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
 					continue
@@ -139,7 +160,7 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 				if !covered[coverageCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
 					continue
 				}
-				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth)
+				pred := model.Predict(w, modelCSBytes, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth)
 				if pred > bestPred {
 					bestPred = pred
 					bestWAW = w

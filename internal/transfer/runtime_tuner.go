@@ -41,6 +41,19 @@ type RuntimeMetrics struct {
 	BudgetWaitNs    int64
 	BudgetWaitCount int64
 
+	// SafetyProjected reports that a target protocol limit or conditional
+	// complete-inventory writer-transition ratchet reduced a requested chunk or
+	// batch. ExecutionChunkMin/Max are effective reader chunks observed across
+	// pipelines. They remain diagnostics and compatibility metadata, not a
+	// replacement action for the steady global policy.
+	SafetyProjected   bool
+	ExecutionChunkMin int
+	ExecutionChunkMax int
+	// WriterScaleDeferrals counts pipeline-local WAW upscales that could not be
+	// applied because already-emitted chunks exceeded the prospective fixed-
+	// buffer cap. It distinguishes the tuner's desired WAW from live execution.
+	WriterScaleDeferrals int
+
 	// Cumulative transfer time breakdown (nanoseconds)
 	TotalQueryNs      int64
 	TotalScanNs       int64
@@ -92,6 +105,10 @@ type runtimeTuner struct {
 	chunkRetryCount atomic.Int32
 	budgetWaitNs    atomic.Int64
 	budgetWaitCount atomic.Int64
+	safetyProjected atomic.Bool
+	executionMin    atomic.Int64
+	executionMax    atomic.Int64
+	writerDeferrals atomic.Int32
 
 	// Cumulative transfer time breakdown
 	totalQueryNs      atomic.Int64
@@ -193,6 +210,63 @@ func (rt *runtimeTuner) ReportBudgetWait(waitNs int64) {
 	rt.budgetWaitCount.Add(1)
 }
 
+// ReportChunkProjection records one effective reader chunk after a target
+// protocol limit or conditional writer-transition ratchet. It is an optional
+// concrete-runtime capability rather than part of RuntimeTuner's public
+// contract so focused tuner fakes do not need to implement accounting.
+func (rt *runtimeTuner) ReportChunkProjection(requested, effective int) {
+	if requested <= 0 || effective <= 0 {
+		return
+	}
+	if effective < requested {
+		rt.safetyProjected.Store(true)
+	}
+	observeAtomicPositiveMin(&rt.executionMin, int64(effective))
+	observeAtomicPositiveMax(&rt.executionMax, int64(effective))
+}
+
+// ReportBatchProjection records a writer-only conditional limit without mixing
+// the writer sub-batch into the reader chunk range used by history diagnostics.
+func (rt *runtimeTuner) ReportBatchProjection(requested, effective int) {
+	if requested > 0 && effective > 0 && effective < requested {
+		rt.safetyProjected.Store(true)
+	}
+}
+
+func (rt *runtimeTuner) ReportWriterScaleDeferral() {
+	rt.writerDeferrals.Add(1)
+}
+
+func observeAtomicPositiveMin(dst *atomic.Int64, candidate int64) {
+	if dst == nil || candidate <= 0 {
+		return
+	}
+	for {
+		current := dst.Load()
+		if current > 0 && current <= candidate {
+			return
+		}
+		if dst.CompareAndSwap(current, candidate) {
+			return
+		}
+	}
+}
+
+func observeAtomicPositiveMax(dst *atomic.Int64, candidate int64) {
+	if dst == nil || candidate <= 0 {
+		return
+	}
+	for {
+		current := dst.Load()
+		if current >= candidate {
+			return
+		}
+		if dst.CompareAndSwap(current, candidate) {
+			return
+		}
+	}
+}
+
 // ReportTransferTime atomically adds to cumulative transfer time breakdown.
 func (rt *runtimeTuner) ReportTransferTime(queryNs, scanNs, writeNs, rows int64) {
 	rt.totalQueryNs.Add(queryNs)
@@ -208,16 +282,20 @@ func (rt *runtimeTuner) Metrics() RuntimeMetrics {
 		qd = 0 // Guard against slight negative from concurrent delta reporting
 	}
 	return RuntimeMetrics{
-		ActiveJobs:        int(rt.activeJobs.Load()),
-		QueueDepth:        qd,
-		ErrorCount:        int(rt.errorCount.Load()),
-		ChunkRetryCount:   int(rt.chunkRetryCount.Load()),
-		BudgetWaitNs:      rt.budgetWaitNs.Load(),
-		BudgetWaitCount:   rt.budgetWaitCount.Load(),
-		TotalQueryNs:      rt.totalQueryNs.Load(),
-		TotalScanNs:       rt.totalScanNs.Load(),
-		TotalWriteNs:      rt.totalWriteNs.Load(),
-		TotalTransferRows: rt.totalTransferRows.Load(),
+		ActiveJobs:           int(rt.activeJobs.Load()),
+		QueueDepth:           qd,
+		ErrorCount:           int(rt.errorCount.Load()),
+		ChunkRetryCount:      int(rt.chunkRetryCount.Load()),
+		BudgetWaitNs:         rt.budgetWaitNs.Load(),
+		BudgetWaitCount:      rt.budgetWaitCount.Load(),
+		SafetyProjected:      rt.safetyProjected.Load(),
+		ExecutionChunkMin:    positiveInt64ToInt(rt.executionMin.Load()),
+		ExecutionChunkMax:    positiveInt64ToInt(rt.executionMax.Load()),
+		WriterScaleDeferrals: int(rt.writerDeferrals.Load()),
+		TotalQueryNs:         rt.totalQueryNs.Load(),
+		TotalScanNs:          rt.totalScanNs.Load(),
+		TotalWriteNs:         rt.totalWriteNs.Load(),
+		TotalTransferRows:    rt.totalTransferRows.Load(),
 	}
 }
 

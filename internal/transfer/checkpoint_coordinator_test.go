@@ -9,6 +9,32 @@ import (
 	"github.com/johndauphine/dmt/internal/source"
 )
 
+func TestAckSequencerReleasesReservationsOnlyAfterSequenceGapCloses(t *testing.T) {
+	var seq ackSequencer
+	var applied []int64
+
+	if got := seq.feed(writeAck{seq: 1, bytes: 20}, func(ack writeAck) {
+		applied = append(applied, ack.seq)
+	}); got != (ackRelease{}) {
+		t.Fatalf("out-of-order release = %+v, want zero", got)
+	}
+	if got := seq.feed(writeAck{seq: 2, bytes: 30}, func(ack writeAck) {
+		applied = append(applied, ack.seq)
+	}); got != (ackRelease{}) {
+		t.Fatalf("second out-of-order release = %+v, want zero", got)
+	}
+
+	got := seq.feed(writeAck{seq: 0, bytes: 10}, func(ack writeAck) {
+		applied = append(applied, ack.seq)
+	})
+	if got != (ackRelease{jobs: 3, bytes: 60}) {
+		t.Fatalf("gap-closing release = %+v, want 3 jobs/60 bytes", got)
+	}
+	if !reflect.DeepEqual(applied, []int64{0, 1, 2}) {
+		t.Fatalf("apply order = %v, want [0 1 2]", applied)
+	}
+}
+
 // savedProgress captures one SaveProgress call for assertions.
 type savedProgress struct {
 	lastPK     any

@@ -308,9 +308,10 @@ func (c *Config) applyDefaults() error {
 		c.Migration.TargetMode = "drop_recreate" // Default: drop and recreate tables
 	}
 
-	// All performance/restartability defaults come from the same finalized
-	// no-history policy as runtime tuning (#711). Pinned concurrency is part of
-	// finalization so a generated chunk is clamped for the tuple that will run.
+	// Restore the pre-epic load-time formula policy while retaining the unified
+	// final safety boundary: pinned concurrency participates in the hard memory
+	// clamp, and connection pools are derived later from the effective tuple.
+	// History-aware auto-tuning intentionally has its own pre-epic baseline.
 	c.applyDefaultPolicy(c.loadTimeDefaultOutput())
 
 	if c.Migration.DataDir == "" {

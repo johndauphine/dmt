@@ -197,9 +197,13 @@ func clampInitialRuntimeChunkSize(
 
 // RunResult contains the outcome of a transfer run.
 type RunResult struct {
-	TableStats      map[string]*transfer.TransferStats
-	TableFailures   []TableFailure
-	ChunkRetryCount int // Cumulative count of transient chunk retries across the run
+	TableStats            map[string]*transfer.TransferStats
+	TableFailures         []TableFailure
+	ChunkRetryCount       int // Cumulative count of transient chunk retries across the run
+	SafetyProjected       bool
+	ExecutionChunkSizeMin int
+	ExecutionChunkSizeMax int
+	WriterScaleDeferrals  int
 	// RuntimeAdjusted is true when the runtime controller or write-error
 	// adjuster applied any parameter change during the run (#451).
 	RuntimeAdjusted bool
@@ -410,7 +414,12 @@ func (r *TransferRunner) Run(ctx context.Context, runID string, buildResult *Bui
 		result.TableStats[name] = ts.stats
 	}
 	if tuner != nil {
-		result.ChunkRetryCount = tuner.Metrics().ChunkRetryCount
+		metrics := tuner.Metrics()
+		result.ChunkRetryCount = metrics.ChunkRetryCount
+		result.SafetyProjected = metrics.SafetyProjected
+		result.ExecutionChunkSizeMin = metrics.ExecutionChunkMin
+		result.ExecutionChunkSizeMax = metrics.ExecutionChunkMax
+		result.WriterScaleDeferrals = metrics.WriterScaleDeferrals
 	}
 	result.RuntimeAdjusted = runtimeAdjustments.applied()
 
@@ -502,6 +511,9 @@ func (o *Orchestrator) transferAll(ctx context.Context, runID string, buildResul
 	// final tuning result. Read by the UpdateTuningResult call sites in Run/Resume.
 	o.lastChunkRetryCount = result.ChunkRetryCount
 	o.lastRunAdjusted = result.RuntimeAdjusted
+	o.lastSafetyProjected = result.SafetyProjected
+	o.lastExecutionChunkSizeMin = result.ExecutionChunkSizeMin
+	o.lastExecutionChunkSizeMax = result.ExecutionChunkSizeMax
 
 	return result.TableFailures, nil
 }

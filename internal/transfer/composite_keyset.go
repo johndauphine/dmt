@@ -115,7 +115,7 @@ func executeCompositeKeysetPagination(
 		colSRIDs:        colSRIDs,
 		idempotentOnDup: idempotentOnDup,
 		resumeRowsDone:  resumeRowsDone,
-		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) ackRelease {
 			coord = newCompositeCheckpointCoordinator(saver, job, partitionID, partitionRows, resumeRowsDone, cb.checkpointFreq)
 			if coord == nil {
 				return nil
@@ -296,11 +296,11 @@ func newCompositeCheckpointCoordinator(saver ProgressSaver, job Job, partitionID
 	}
 }
 
-func (c *compositeCheckpointCoordinator) onAck(ack writeAck) {
+func (c *compositeCheckpointCoordinator) onAck(ack writeAck) ackRelease {
 	if c == nil {
-		return
+		return ackRelease{jobs: 1, bytes: ack.bytes}
 	}
-	c.seq.feed(ack, func(a writeAck) {
+	return c.seq.feed(ack, func(a writeAck) {
 		if t, ok := a.lastPK.([]any); ok {
 			c.lastTuple = t
 		}

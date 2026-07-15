@@ -203,8 +203,9 @@ func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
 			target_fsync, target_full_page_writes, target_max_wal_size_mb,
 			target_wal_level, source_max_server_memory_mb,
 			source_host, source_port, source_database, source_schema,
-			target_host, target_port, target_database, target_schema
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			target_host, target_port, target_database, target_schema,
+			projection_context_fingerprint
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		legacyTimestamp, timestampUnixMS,
 		record.SourceDBType, record.TargetDBType,
@@ -222,6 +223,7 @@ func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
 		// the Tier 1 exact-identity filter.
 		nullStr(record.SourceHost), nullInt(int64(record.SourcePort)), nullStr(record.SourceDatabase), nullStr(record.SourceSchema),
 		nullStr(record.TargetHost), nullInt(int64(record.TargetPort)), nullStr(record.TargetDatabase), nullStr(record.TargetSchema),
+		nullStr(record.ProjectionContextFingerprint),
 	)
 	if err != nil {
 		return 0, err
@@ -235,9 +237,9 @@ func (s *State) SaveTuningRecord(record TuningRecord) (int64, error) {
 // chunkRetryCount is the cumulative count of transient chunk retries observed
 // during the run (RuntimeMetrics.ChunkRetryCount); 0 for a clean run.
 //
-// adjustedAtRuntime marks the row as runtime-adjusted (#451): the run's
-// observed throughput blends multiple configs, so the deterministic tuner
-// excludes the row from regression / smoothed-bins / drift cohorts.
+// adjustedAtRuntime is the legacy history-exclusion flag. It covers both a
+// runtime-adjusted blend (#451) and a resume segment whose throughput measures
+// only part of the persisted full workload.
 func (s *State) UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
 	adjusted := 0
 	if adjustedAtRuntime {
@@ -253,6 +255,43 @@ func (s *State) UpdateTuningResult(rowID int64, throughput float64, durationSecs
 	}
 	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
 		logging.Debug("tuning row %d already stamped or missing", rowID)
+	}
+	return nil
+}
+
+// CompleteTuningResult atomically records the observed outcome and its
+// deterministic execution projection. The first completion wins: retries or
+// duplicate completion calls cannot overwrite projection context while
+// leaving an earlier throughput value in place.
+func (s *State) CompleteTuningResult(completion TuningResultCompletion) error {
+	adjusted := 0
+	if completion.AdjustedAtRuntime {
+		adjusted = 1
+	}
+	projected := 0
+	if completion.SafetyProjected {
+		projected = 1
+	}
+	var minValue, maxValue any
+	if completion.ExecutionChunkSizeMin > 0 {
+		minValue = completion.ExecutionChunkSizeMin
+	}
+	if completion.ExecutionChunkSizeMax > 0 {
+		maxValue = completion.ExecutionChunkSizeMax
+	}
+	res, err := s.db.Exec(`
+		UPDATE ai_tuning_history
+		SET final_throughput = ?, final_duration_seconds = ?, chunk_retry_count = ?,
+		    adjusted_at_runtime = ?, safety_projected = ?,
+		    execution_chunk_size_min = ?, execution_chunk_size_max = ?
+		WHERE id = ? AND final_throughput IS NULL
+	`, completion.Throughput, completion.DurationSecs, completion.ChunkRetryCount,
+		adjusted, projected, minValue, maxValue, completion.RowID)
+	if err != nil {
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		logging.Debug("tuning row %d already stamped or missing", completion.RowID)
 	}
 	return nil
 }
@@ -275,7 +314,9 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 		       target_wal_level, source_max_server_memory_mb,
 		       source_host, source_port, source_database, source_schema,
 		       target_host, target_port, target_database, target_schema,
-		       adjusted_at_runtime
+		       adjusted_at_runtime, safety_projected,
+		       execution_chunk_size_min, execution_chunk_size_max,
+		       projection_context_fingerprint
 		FROM ai_tuning_history
 		WHERE source_db_type = ? AND target_db_type = ?
 		ORDER BY timestamp_unix_ms IS NULL ASC, timestamp_unix_ms DESC, id DESC`, limit, sourceType, targetType)
@@ -302,7 +343,9 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 		// #215 workload identity; nullable for older rows.
 		var sourceHost, sourceDatabase, sourceSchema, targetHost, targetDatabase, targetSchema sql.NullString
 		var sourcePort, targetPort sql.NullInt64
-		var adjustedAtRuntime sql.NullInt64
+		var adjustedAtRuntime, safetyProjected sql.NullInt64
+		var executionChunkSizeMin, executionChunkSizeMax sql.NullInt64
+		var projectionContextFingerprint sql.NullString
 
 		if err := rows.Scan(
 			&r.ID, &legacyTimestamp, &timestampUnixMS, &r.SourceDBType, &targetDBType,
@@ -318,7 +361,9 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 			&targetWALLevel, &sourceMaxServerMemoryMB,
 			&sourceHost, &sourcePort, &sourceDatabase, &sourceSchema,
 			&targetHost, &targetPort, &targetDatabase, &targetSchema,
-			&adjustedAtRuntime,
+			&adjustedAtRuntime, &safetyProjected,
+			&executionChunkSizeMin, &executionChunkSizeMax,
+			&projectionContextFingerprint,
 		); err != nil {
 			return nil, err
 		}
@@ -353,6 +398,16 @@ func (s *State) GetTuningHistory(limit int, sourceType, targetType string) ([]Tu
 		// #451: NULL (pre-migration row) reads as false — those runs
 		// mostly predate runtime tuning and stay eligible for training.
 		r.AdjustedAtRuntime = adjustedAtRuntime.Valid && adjustedAtRuntime.Int64 != 0
+		r.SafetyProjected = safetyProjected.Valid && safetyProjected.Int64 != 0
+		if executionChunkSizeMin.Valid {
+			r.ExecutionChunkSizeMin = int(executionChunkSizeMin.Int64)
+		}
+		if executionChunkSizeMax.Valid {
+			r.ExecutionChunkSizeMax = int(executionChunkSizeMax.Int64)
+		}
+		if projectionContextFingerprint.Valid {
+			r.ProjectionContextFingerprint = projectionContextFingerprint.String
+		}
 		if platform.Valid {
 			r.Platform = platform.String
 		}

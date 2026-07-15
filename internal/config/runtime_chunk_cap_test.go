@@ -19,10 +19,11 @@ func runtimeCapTestConfig(budgetMB int64) *Config {
 		Source: SourceConfig{ChunkSize: 50_000},
 		Target: TargetConfig{ChunkSize: 50_000},
 		Migration: MigrationConfig{
-			Workers:           4,
-			ChunkSize:         50_000,
-			ReadAheadBuffers:  4,
-			WriteAheadWriters: 2,
+			Workers:                       4,
+			ChunkSize:                     50_000,
+			ReadAheadBuffers:              4,
+			WriteAheadWriters:             2,
+			RuntimeRepresentativeRowBytes: 500,
 		},
 		autoConfig: AutoConfig{MemoryEnvelope: MemoryEnvelope{BudgetMB: budgetMB}},
 	}
@@ -37,12 +38,13 @@ func TestApplyTunerSuggestionsDerivesRuntimeMemoryCapForPostgresAndMSSQL(t *test
 				Workers:                 4,
 				ReadAheadBuffers:        4,
 				WriteAheadWriters:       2,
+				RepresentativeRowBytes:  500,
 				SafetyRowBytes:          8_192,
 				SafetyRowBytesKnown:     true,
 				ChunkSizeRecommendation: 50_000,
 			})
 
-			want := positiveInt64ToInt(tuning.SafeChunkSize(1_024, 4, 4, 2, 8_192))
+			want := positiveInt64ToInt(tuning.SafeChunkSize(1_024, 4, 4, 2, 500))
 			if cfg.Migration.RuntimeChunkSizeCap != want || want <= 0 {
 				t.Fatalf("runtime cap = %d, want memory cap %d", cfg.Migration.RuntimeChunkSizeCap, want)
 			}
@@ -61,9 +63,10 @@ func TestApplyTunerSuggestionsDerivesRuntimeMemoryCapForPostgresAndMSSQL(t *test
 
 func TestRuntimeChunkSizeCapForUsesMinimumMemoryAndProtocolCap(t *testing.T) {
 	cfg := runtimeCapTestConfig(1_024)
+	cfg.Migration.RuntimeRepresentativeRowBytes = 500
 	cfg.Migration.RuntimeSafetyRowBytes = 8_192
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
-	memoryCap := positiveInt64ToInt(tuning.SafeChunkSize(1_024, 4, 4, 2, 8_192))
+	memoryCap := positiveInt64ToInt(tuning.SafeChunkSize(1_024, 4, 4, 2, 500))
 
 	cfg.Migration.TargetHardChunkLimit = memoryCap + 100
 	if got := cfg.RuntimeChunkSizeCapFor(4, 4, 2); got != memoryCap {
@@ -89,6 +92,7 @@ func TestApplyTunerSuggestionsUsesEffectivePinnedTuple(t *testing.T) {
 		Workers:                 2,
 		ReadAheadBuffers:        2,
 		WriteAheadWriters:       1,
+		RepresentativeRowBytes:  500,
 		SafetyRowBytes:          4_096,
 		SafetyRowBytesKnown:     true,
 		ChunkSizeRecommendation: 50_000,
@@ -97,7 +101,7 @@ func TestApplyTunerSuggestionsUsesEffectivePinnedTuple(t *testing.T) {
 	if cfg.Migration.Workers != 8 || cfg.Migration.ReadAheadBuffers != 6 || cfg.Migration.WriteAheadWriters != 4 {
 		t.Fatalf("pinned tuple was overwritten: %+v", cfg.Migration)
 	}
-	want := positiveInt64ToInt(tuning.SafeChunkSize(128, 8, 6, 4, 4_096))
+	want := positiveInt64ToInt(tuning.SafeChunkSize(128, 8, 6, 4, 500))
 	if cfg.Migration.RuntimeChunkSizeCap != want {
 		t.Fatalf("runtime cap = %d, want %d from pinned tuple", cfg.Migration.RuntimeChunkSizeCap, want)
 	}
@@ -107,8 +111,9 @@ func TestRuntimeChunkCapUnknownWidthIsProtocolOnlyAndGrowthDisabled(t *testing.T
 	cfg := runtimeCapTestConfig(1_024)
 	cfg.Migration.TargetHardChunkLimit = 750
 	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
-		SafetyRowBytes:      500,
-		SafetyRowBytesKnown: false,
+		RepresentativeRowBytes: 0,
+		SafetyRowBytes:         500,
+		SafetyRowBytesKnown:    false,
 	})
 
 	if cfg.Migration.RuntimeSafetyRowBytes != 500 || cfg.Migration.RuntimeSafetyRowBytesKnown {
@@ -136,12 +141,14 @@ func TestRuntimeChunkCapOneRowOverBudgetDisablesGrowth(t *testing.T) {
 	cfg.Migration.ReadAheadBuffers = 1
 	cfg.Migration.WriteAheadWriters = 1
 	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
-		SafetyRowBytes:      1024 * 1024,
-		SafetyRowBytesKnown: true,
+		RepresentativeRowBytes: 64 * 1024,
+		SafetyRowBytes:         1024 * 1024,
+		SafetyRowBytesKnown:    true,
 	})
 
-	if cfg.Migration.RuntimeChunkSizeCap != 1 {
-		t.Fatalf("one-row minimum-progress cap = %d, want 1", cfg.Migration.RuntimeChunkSizeCap)
+	wantGlobalCap := positiveInt64ToInt(tuning.SafeChunkSize(1, 2, 1, 1, 64*1024))
+	if cfg.Migration.RuntimeChunkSizeCap != wantGlobalCap || wantGlobalCap <= 1 {
+		t.Fatalf("representative global cap = %d, want %d (>1)", cfg.Migration.RuntimeChunkSizeCap, wantGlobalCap)
 	}
 	if cfg.Migration.RuntimeChunkGrowthAllowed {
 		t.Fatal("one-row over-budget fallback must disable growth")
@@ -152,8 +159,8 @@ func TestRuntimeChunkCapOneRowOverBudgetDisablesGrowth(t *testing.T) {
 	if !tuning.MemoryEstimateExceedsBudget(1, 2, 1, 1, 1, 1024*1024) {
 		t.Fatal("test fixture must remain explicitly over budget at one row")
 	}
-	if !strings.Contains(logs.String(), "one modeled row still exceeds") ||
-		!strings.Contains(logs.String(), "resource growth disabled") {
+	if !strings.Contains(logs.String(), "one modeled row at the widest observed") ||
+		!strings.Contains(logs.String(), "Runtime growth disabled") {
 		t.Fatalf("one-row over-budget warning missing: %q", logs.String())
 	}
 }
@@ -163,12 +170,14 @@ func TestRuntimeChunkGrowthCapForProspectiveWAWCanFailClosed(t *testing.T) {
 	cfg.Migration.Workers = 1
 	cfg.Migration.ReadAheadBuffers = 1
 	cfg.Migration.WriteAheadWriters = 1
+	cfg.Migration.RuntimeRepresentativeRowBytes = 100 * 1024
 	cfg.Migration.RuntimeSafetyRowBytes = 400 * 1024
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
 	cfg.FinalizeRuntimeChunkSizeCap()
 
-	if !cfg.Migration.RuntimeChunkGrowthAllowed || cfg.RuntimeChunkGrowthCapFor(1, 1, 1) != 1 {
-		t.Fatalf("initial WAW=1 tuple should fit one row: %+v", cfg.Migration)
+	wantInitial := positiveInt64ToInt(tuning.SafeChunkSize(1, 1, 1, 1, 100*1024))
+	if !cfg.Migration.RuntimeChunkGrowthAllowed || cfg.RuntimeChunkGrowthCapFor(1, 1, 1) != wantInitial {
+		t.Fatalf("initial WAW=1 tuple should allow representative cap %d: %+v", wantInitial, cfg.Migration)
 	}
 	if got := cfg.RuntimeChunkGrowthCapFor(1, 1, 2); got != 0 {
 		t.Fatalf("prospective WAW=2 one-row-overbudget cap = %d, want 0 to suppress growth", got)
@@ -178,13 +187,14 @@ func TestRuntimeChunkGrowthCapForProspectiveWAWCanFailClosed(t *testing.T) {
 func TestResetAndFinalizeRuntimeChunkSafetySupportsDegradedProtocolPath(t *testing.T) {
 	cfg := runtimeCapTestConfig(1_024)
 	cfg.Migration.RuntimeChunkSizeCap = 500
+	cfg.Migration.RuntimeRepresentativeRowBytes = 500
 	cfg.Migration.RuntimeSafetyRowBytes = 8_192
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
 	cfg.Migration.RuntimeChunkGrowthAllowed = true
 	cfg.Migration.TargetHardChunkLimit = 250
 
 	cfg.ResetRuntimeChunkSafety()
-	if cfg.Migration.RuntimeChunkSizeCap != 0 || cfg.Migration.RuntimeSafetyRowBytes != 0 ||
+	if cfg.Migration.RuntimeChunkSizeCap != 0 || cfg.Migration.RuntimeRepresentativeRowBytes != 0 || cfg.Migration.RuntimeSafetyRowBytes != 0 ||
 		cfg.Migration.RuntimeSafetyRowBytesKnown || cfg.Migration.RuntimeChunkGrowthAllowed {
 		t.Fatalf("runtime safety reset left stale metadata: %+v", cfg.Migration)
 	}
@@ -206,6 +216,7 @@ func TestResetAndFinalizeRuntimeChunkSafetySupportsDegradedProtocolPath(t *testi
 func TestRuntimeChunkCapExtremeInputsDoNotOverflow(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 	cfg := runtimeCapTestConfig(maxMemoryEnvelopeMB)
+	cfg.Migration.RuntimeRepresentativeRowBytes = math.MaxInt64
 	cfg.Migration.RuntimeSafetyRowBytes = math.MaxInt64
 	cfg.Migration.RuntimeSafetyRowBytesKnown = true
 	cfg.Migration.TargetHardChunkLimit = maxInt
@@ -220,10 +231,11 @@ func TestRuntimeChunkCapExtremeInputsDoNotOverflow(t *testing.T) {
 
 func TestRuntimeChunkSafetyMetadataIsNotSerialized(t *testing.T) {
 	m := MigrationConfig{
-		RuntimeChunkSizeCap:        123,
-		RuntimeSafetyRowBytes:      8_192,
-		RuntimeSafetyRowBytesKnown: true,
-		RuntimeChunkGrowthAllowed:  true,
+		RuntimeChunkSizeCap:           123,
+		RuntimeRepresentativeRowBytes: 500,
+		RuntimeSafetyRowBytes:         8_192,
+		RuntimeSafetyRowBytesKnown:    true,
+		RuntimeChunkGrowthAllowed:     true,
 	}
 	jsonData, err := json.Marshal(m)
 	if err != nil {

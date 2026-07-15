@@ -159,7 +159,7 @@ func executeParallelCompositeKeysetPagination(
 		colSRIDs:        colSRIDs,
 		idempotentOnDup: idempotentOnDup,
 		resumeRowsDone:  resumeRowsDone,
-		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) ackRelease {
 			coord = newCompositeRangeCheckpointCoordinator(saver, job, ranges, partitionID, rowsTotal, resumeRowsDone, cb.checkpointFreq)
 			if coord == nil {
 				return nil
@@ -426,22 +426,22 @@ func newCompositeRangeCheckpointCoordinator(saver ProgressSaver, job Job, ranges
 	return &compositeRangeCheckpointCoordinator{saver: saver, taskID: job.TaskID, tableName: job.Table.Name, partitionID: partitionID, rowsTotal: rowsTotal, resumeRowsDone: resumeRowsDone, checkpointFreq: checkpointFreq, states: states}
 }
 
-func (c *compositeRangeCheckpointCoordinator) onAck(ack writeAck) {
+func (c *compositeRangeCheckpointCoordinator) onAck(ack writeAck) ackRelease {
 	if c == nil {
-		return
+		return ackRelease{jobs: 1, bytes: ack.bytes}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.onAckLocked(ack)
+	return c.onAckLocked(ack)
 }
 
-func (c *compositeRangeCheckpointCoordinator) onAckLocked(ack writeAck) {
+func (c *compositeRangeCheckpointCoordinator) onAckLocked(ack writeAck) ackRelease {
 	if c == nil || ack.readerID < 0 || ack.readerID >= len(c.states) {
-		return
+		return ackRelease{jobs: 1, bytes: ack.bytes}
 	}
 	state := &c.states[ack.readerID]
 	wasComplete := state.complete
-	state.seq.feed(ack, func(a writeAck) {
+	released := state.seq.feed(ack, func(a writeAck) {
 		if tuple, ok := a.lastPK.([]any); ok {
 			state.tuple = tuple
 		}
@@ -462,6 +462,7 @@ func (c *compositeRangeCheckpointCoordinator) onAckLocked(ack writeAck) {
 	if !wasComplete && state.complete {
 		c.saveCheckpointLocked()
 	}
+	return released
 }
 
 // markRangeDone runs on the consumer goroutine while onAck runs on the writer

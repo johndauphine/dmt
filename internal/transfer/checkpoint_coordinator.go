@@ -16,21 +16,37 @@ type ackSequencer struct {
 }
 
 // feed applies ack if it is next in sequence, then drains any buffered
-// successors; out-of-order acks are parked until their turn.
-func (s *ackSequencer) feed(ack writeAck, apply func(writeAck)) {
+// successors; out-of-order acks are parked until their turn. The return value
+// carries the job count and in-flight reservations whose checkpoint metadata
+// is no longer pending. The writer pool releases exactly those resources after
+// this call.
+func (s *ackSequencer) feed(ack writeAck, apply func(writeAck)) (released ackRelease) {
+	if ack.seq < s.nextSeq {
+		// Defensive duplicate/stale acknowledgement: it cannot advance the
+		// watermark, but its independent reservation must not leak.
+		return ackRelease{jobs: 1, bytes: ack.bytes}
+	}
 	if ack.seq != s.nextSeq {
 		if s.pending == nil {
 			s.pending = make(map[int64]writeAck)
 		}
+		if _, exists := s.pending[ack.seq]; exists {
+			// Exactly-once writers should never produce this, but retaining both
+			// is impossible in a seq-keyed map. Keep the first and release the
+			// duplicate's reservation.
+			return ackRelease{jobs: 1, bytes: ack.bytes}
+		}
 		s.pending[ack.seq] = ack
-		return
+		return ackRelease{}
 	}
 	for {
 		apply(ack)
+		released.jobs++
+		released.bytes += ack.bytes
 		s.nextSeq++
 		next, ok := s.pending[s.nextSeq]
 		if !ok {
-			return
+			return released
 		}
 		delete(s.pending, s.nextSeq)
 		ack = next
@@ -109,15 +125,15 @@ func newKeysetCheckpointCoordinator(saver ProgressSaver, job Job, pkRanges []pkR
 	}
 }
 
-func (c *keysetCheckpointCoordinator) onAck(ack writeAck) {
+func (c *keysetCheckpointCoordinator) onAck(ack writeAck) ackRelease {
 	if c == nil {
-		return
+		return ackRelease{jobs: 1, bytes: ack.bytes}
 	}
 	if ack.readerID < 0 || ack.readerID >= len(c.states) {
-		return
+		return ackRelease{jobs: 1, bytes: ack.bytes}
 	}
 	state := &c.states[ack.readerID]
-	state.seq.feed(ack, func(a writeAck) {
+	return state.seq.feed(ack, func(a writeAck) {
 		c.applyAck(state, a)
 		c.ackedRows += a.rows
 		c.completedChunks++
@@ -230,11 +246,11 @@ func newRowNumberCheckpointCoordinator(saver ProgressSaver, job Job, partitionID
 	}
 }
 
-func (c *rowNumberCheckpointCoordinator) onAck(ack writeAck) {
+func (c *rowNumberCheckpointCoordinator) onAck(ack writeAck) ackRelease {
 	if c == nil {
-		return
+		return ackRelease{jobs: 1, bytes: ack.bytes}
 	}
-	c.seq.feed(ack, func(a writeAck) {
+	return c.seq.feed(ack, func(a writeAck) {
 		c.lastRowNum = a.rowNum
 		c.ackedRows += a.rows
 		c.completedChunks++

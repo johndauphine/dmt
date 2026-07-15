@@ -21,7 +21,8 @@ func TestFitRegression_InsufficientData(t *testing.T) {
 func TestArgmaxRegression_SplitsRepresentativeAndLegacyWidths(t *testing.T) {
 	model := &regressionModel{
 		nFeat:     8,
-		beta:      []float64{0, 0, 0, 0, 0, 1, 0, 0},
+		beta:      []float64{0, 0, 0, 1, 0, 1, 0, 0},
+		csStd:     1,
 		logAvgStd: 1,
 	}
 	in := Input{
@@ -43,8 +44,31 @@ func TestArgmaxRegression_SplitsRepresentativeAndLegacyWidths(t *testing.T) {
 	if csBytes != 8_000_000 {
 		t.Fatalf("candidate bytes = %d, want 8000000", csBytes)
 	}
-	if want := math.Log(float64(in.AvgRowBytes)); math.Abs(predicted-want) > 1e-9 {
-		t.Fatalf("prediction = %f, want log(legacy AvgRowBytes)=%f; representative width leaked into model feature", predicted, want)
+	// The 8 MB policy target executes as 1,000 rows under the 8 KB
+	// representative width. History reconstructs that persisted action as
+	// 2 MB under the legacy 2 KB model width, so argmax must score 2 MB—not
+	// the raw 8 MB target—while retaining the 8 MB policy choice.
+	want := 2_000_000.0 + math.Log(float64(in.AvgRowBytes))
+	if math.Abs(predicted-want) > 1e-9 {
+		t.Fatalf("prediction = %f, want mapped legacy-model point=%f", predicted, want)
+	}
+}
+
+func TestRegressionCandidateModelBytes_MatchesPersistedActionCoordinate(t *testing.T) {
+	const (
+		policyBytes      = int64(12_500_000)
+		representative   = int64(500)
+		legacyModelWidth = int64(550)
+	)
+	wantRows := rowsFromBytes(policyBytes, representative)
+	wantModelBytes := chunkBytesForModel(wantRows, legacyModelWidth)
+
+	got := regressionCandidateModelBytes(policyBytes, representative, legacyModelWidth)
+	if got != wantModelBytes {
+		t.Fatalf("mapped model bytes = %d, want %d from persisted %d-row action", got, wantModelBytes, wantRows)
+	}
+	if got == policyBytes {
+		t.Fatalf("mapped model bytes unexpectedly equal raw policy target when widths differ: %d", got)
 	}
 }
 
@@ -160,7 +184,8 @@ func TestFitRegression_RecoversQuadraticPeak(t *testing.T) {
 // TestFitRegression_ConstantFeatureSurvives covers the std=0 edge: when
 // every row has the same WAW (or same chunk_size), the variance is zero
 // and the standardize() helper would divide by zero. The fit must not
-// produce NaN — stddevSafe returns 1 to keep standardize a no-op.
+// produce NaN — stddevSafe returns 0 so standardize ignores the
+// unsupported axis at both fit and prediction time.
 func TestFitRegression_ConstantFeatureSurvives(t *testing.T) {
 	rows := make([]HistoryRecord, 30)
 	for i := range rows {
@@ -181,6 +206,14 @@ func TestFitRegression_ConstantFeatureSurvives(t *testing.T) {
 	pred := m.Predict(2, 50000*500, 0, 0, "mssql", "postgres", "", 500)
 	if math.IsNaN(pred) || math.IsInf(pred, 0) {
 		t.Errorf("constant-feature fit produced %v; expected finite", pred)
+	}
+	// None of the numeric axes varied in training, so the fit has no basis
+	// for extrapolating on any of them. Scoring a far-away synthetic point
+	// must keep those columns at z=0 instead of manufacturing huge leverage.
+	outside := m.Predict(8, 12_500_000, 4, 8, "mssql", "postgres", "", 5_000)
+	if outside != pred {
+		t.Errorf("constant-feature extrapolation changed prediction: at-mean=%v outside=%v stds=[%v %v %v %v %v]",
+			pred, outside, m.wawStd, m.csStd, m.logAvgStd, m.prStd, m.rabStd)
 	}
 }
 
@@ -533,7 +566,7 @@ func TestFitRegression_RecoversRABGradient(t *testing.T) {
 // TestFitRegression_ConstantPRRABSurvives covers the std=0 edge for
 // the new features (#219). When every row has PR=2 RAB=4, the new
 // pr_z / rab_z columns are constant and the standardize() path must
-// not produce NaN — stddevSafe returns 1, keeping the column at z=0.
+// not produce NaN — stddevSafe returns 0, keeping the column at z=0.
 func TestFitRegression_ConstantPRRABSurvives(t *testing.T) {
 	rows := make([]HistoryRecord, 30)
 	for i := range rows {

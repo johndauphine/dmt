@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/drift"
 	"github.com/johndauphine/dmt/internal/exitcodes"
+	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
 	"github.com/johndauphine/dmt/internal/source"
 )
 
@@ -762,6 +762,53 @@ func TestRecordSuccessfulTuningResult(t *testing.T) {
 	}
 }
 
+func TestRecordSuccessfulTuningResultProjectionAccountingFailsClosed(t *testing.T) {
+	t.Run("unsupported backend excludes projected run", func(t *testing.T) {
+		state := &tuningResultState{}
+		o := &Orchestrator{
+			state:                     state,
+			lastTuningRowID:           42,
+			lastSafetyProjected:       true,
+			lastExecutionChunkSizeMin: 8_000,
+			lastExecutionChunkSizeMax: 50_000,
+		}
+		o.recordSuccessfulTuningResult(1_000, 2*time.Second)
+		if !state.adjustedAtRuntime {
+			t.Fatal("projected run without persistence support remained eligible for learning")
+		}
+	})
+
+	t.Run("successful projection persistence keeps exact-identity evidence", func(t *testing.T) {
+		base := &tuningResultState{}
+		state := &atomicTuningResultState{tuningResultState: base}
+		o := &Orchestrator{
+			state:                     state,
+			lastTuningRowID:           42,
+			lastSafetyProjected:       true,
+			lastExecutionChunkSizeMin: 8_000,
+			lastExecutionChunkSizeMax: 50_000,
+		}
+		o.recordSuccessfulTuningResult(1_000, 2*time.Second)
+		if state.completion.AdjustedAtRuntime {
+			t.Fatal("successfully marked safety projection was unnecessarily excluded")
+		}
+		if !state.completion.SafetyProjected || state.completion.ExecutionChunkSizeMin != 8_000 || state.completion.ExecutionChunkSizeMax != 50_000 {
+			t.Fatalf("projection persisted as (%v,%d,%d), want (true,8000,50000)",
+				state.completion.SafetyProjected, state.completion.ExecutionChunkSizeMin, state.completion.ExecutionChunkSizeMax)
+		}
+	})
+
+	t.Run("atomic completion failure leaves row incomplete", func(t *testing.T) {
+		base := &tuningResultState{}
+		state := &atomicTuningResultState{tuningResultState: base, err: errors.New("atomic completion failed")}
+		o := &Orchestrator{state: state, lastTuningRowID: 42, lastSafetyProjected: true}
+		o.recordSuccessfulTuningResult(1_000, 2*time.Second)
+		if state.calls != 1 || base.calls != 0 {
+			t.Fatalf("completion calls atomic=%d legacy=%d, want 1/0", state.calls, base.calls)
+		}
+	})
+}
+
 func TestRecordSuccessfulTuningResultSkipsInvalidDuration(t *testing.T) {
 	state := &tuningResultState{}
 	o := &Orchestrator{state: state, lastTuningRowID: 42}
@@ -937,11 +984,12 @@ func (s *resumePrepState) ClearPartitionTransferProgress(string, string) error {
 
 type tuningResultState struct {
 	checkpoint.StateBackend
-	calls           int
-	rowID           int64
-	throughput      float64
-	durationSecs    float64
-	chunkRetryCount int
+	calls             int
+	rowID             int64
+	throughput        float64
+	durationSecs      float64
+	chunkRetryCount   int
+	adjustedAtRuntime bool
 }
 
 func (s *tuningResultState) UpdateTuningResult(rowID int64, throughput float64, durationSecs float64, chunkRetryCount int, adjustedAtRuntime bool) error {
@@ -950,7 +998,21 @@ func (s *tuningResultState) UpdateTuningResult(rowID int64, throughput float64, 
 	s.throughput = throughput
 	s.durationSecs = durationSecs
 	s.chunkRetryCount = chunkRetryCount
+	s.adjustedAtRuntime = adjustedAtRuntime
 	return nil
+}
+
+type atomicTuningResultState struct {
+	*tuningResultState
+	calls      int
+	completion checkpoint.TuningResultCompletion
+	err        error
+}
+
+func (s *atomicTuningResultState) CompleteTuningResult(completion checkpoint.TuningResultCompletion) error {
+	s.calls++
+	s.completion = completion
+	return s.err
 }
 
 // TestComputeConfigHash_AllowPartialInvariant guards against the

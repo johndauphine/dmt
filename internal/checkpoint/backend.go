@@ -244,7 +244,10 @@ type TuningRecord struct {
 	CPUCores        int       `json:"cpu_cores"`
 	MemoryGB        int       `json:"memory_gb"`
 
-	// Recommended parameters
+	// Global run-policy parameters. ChunkSize is the requested steady policy;
+	// protocol limits or conditional writer-transition ratchets may execute lower
+	// chunks. Reasoning records that distinction for new rows, while legacy static
+	// table projections remain readable.
 	Workers             int   `json:"workers"`
 	ChunkSize           int   `json:"chunk_size"`
 	ReadAheadBuffers    int   `json:"read_ahead_buffers"`
@@ -264,11 +267,29 @@ type TuningRecord struct {
 	FinalThroughput   float64 `json:"final_throughput,omitempty"`       // rows/sec from completed migration
 	FinalDurationSecs float64 `json:"final_duration_seconds,omitempty"` // total migration duration in seconds
 	ChunkRetryCount   int     `json:"chunk_retry_count,omitempty"`      // chunk retries observed during the run (0 = clean)
-	// AdjustedAtRuntime is true when the runtime controller (or write-error
-	// adjuster) changed parameters mid-run (#451). The run's throughput is a
-	// blend across configs, so the tuner must not attribute it to the
-	// recorded parameters. False for pre-migration rows.
+	// AdjustedAtRuntime is the legacy exclusion flag. It is true when the
+	// runtime controller/write-error adjuster changed parameters mid-run (#451)
+	// or when a resume segment measured only part of the persisted workload.
+	// In either case throughput must not be attributed to the recorded policy.
+	// A protocol safety limit alone does not set this flag. Conditional writer-
+	// transition ratchets accompany a runtime adjustment; projected rows without
+	// comparable context are excluded by the history selector.
+	// False for pre-migration rows.
 	AdjustedAtRuntime bool `json:"adjusted_at_runtime,omitempty"`
+
+	// SafetyProjected means a protocol limit, conditional writer-transition
+	// ratchet, or legacy static table projection reduced ChunkSize. The observed
+	// min/max disclose execution without replacing ChunkSize as the learned action.
+	SafetyProjected       bool `json:"safety_projected,omitempty"`
+	ExecutionChunkSizeMin int  `json:"execution_chunk_size_min,omitempty"`
+	ExecutionChunkSizeMax int  `json:"execution_chunk_size_max,omitempty"`
+	// ProjectionContextFingerprint identifies the exact inputs used to validate
+	// projected history: extracted transfer widths/reader plans, resolved memory
+	// budget, target protocol ceiling, and fixed-versus-derived execution policy.
+	// Action-specific connection limits
+	// are validated separately from the persisted tuning tuple. Legacy rows
+	// leave the fingerprint empty and cannot reuse projected evidence.
+	ProjectionContextFingerprint string `json:"projection_context_fingerprint,omitempty"`
 
 	// Effective DB tuning captured at run start. Used by the smartconfig
 	// trajectory rendering to compare history against the current run's
@@ -300,6 +321,29 @@ type TuningRecord struct {
 	TargetPort     int    `json:"target_port,omitempty"`
 	TargetDatabase string `json:"target_database,omitempty"`
 	TargetSchema   string `json:"target_schema,omitempty"`
+}
+
+// TuningResultCompletion is the complete, correlated outcome for one tuning
+// row. Projection fields and throughput must be committed together so a
+// duplicate completion can never pair one attempt's performance with another
+// attempt's execution context.
+type TuningResultCompletion struct {
+	RowID                 int64
+	Throughput            float64
+	DurationSecs          float64
+	ChunkRetryCount       int
+	AdjustedAtRuntime     bool
+	SafetyProjected       bool
+	ExecutionChunkSizeMin int
+	ExecutionChunkSizeMax int
+}
+
+// AtomicTuningResultCompleter is an optional completion-time extension.
+// Implementations commit every TuningResultCompletion field atomically and
+// make the first completion win. Backends without this capability may use the
+// legacy UpdateTuningResult path, but projected rows must then fail closed.
+type AtomicTuningResultCompleter interface {
+	CompleteTuningResult(completion TuningResultCompletion) error
 }
 
 // RuntimeAdjustmentRecord represents a historical runtime adjustment decision.

@@ -303,13 +303,13 @@ type MigrationConfig struct {
 	// pre-#226 behavior (row-count validation only). See the Validation
 	// struct's field docs for the full mode taxonomy.
 	Validation           ValidationConfig `yaml:"validation"`
-	ReadAheadBuffers     int              `yaml:"read_ahead_buffers"`      // Number of chunks to read ahead (default=4)
+	ReadAheadBuffers     int              `yaml:"read_ahead_buffers"`      // Number of chunks to read ahead (generated 4-32)
 	WriteAheadWriters    int              `yaml:"write_ahead_writers"`     // Number of parallel writers per job (default=2)
 	ParallelReaders      int              `yaml:"parallel_readers"`        // Number of parallel readers per job (default=2)
-	UpsertMergeChunkSize int              `yaml:"upsert_merge_chunk_size"` // Chunk size for upsert UPDATE+INSERT (default=5000, auto-tuned)
+	UpsertMergeChunkSize int              `yaml:"upsert_merge_chunk_size"` // Chunk size for upsert UPDATE+INSERT (generated 5K-20K)
 	MaxMemoryMB          int64            `yaml:"max_memory_mb"`           // Optional ceiling on the resolved automatic memory budget
 	// Restartability settings
-	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (default=20)
+	CheckpointFrequency  int `yaml:"checkpoint_frequency"`   // Save progress every N chunks (load-time default=10)
 	MaxRetries           int `yaml:"max_retries"`            // Retry failed tables N times (default=3)
 	HistoryRetentionDays int `yaml:"history_retention_days"` // Keep run history for N days (default=30)
 	// Date-based incremental sync (upsert mode only)
@@ -375,10 +375,11 @@ type MigrationConfig struct {
 	// out of YAML and JSON because it is neither user configuration nor stable
 	// resume identity; failed/manual analysis must start from the zero-value,
 	// growth-disabled state instead of reusing an earlier run's evidence.
-	RuntimeChunkSizeCap        int   `yaml:"-" json:"-"`
-	RuntimeSafetyRowBytes      int64 `yaml:"-" json:"-"`
-	RuntimeSafetyRowBytesKnown bool  `yaml:"-" json:"-"`
-	RuntimeChunkGrowthAllowed  bool  `yaml:"-" json:"-"`
+	RuntimeChunkSizeCap           int   `yaml:"-" json:"-"`
+	RuntimeRepresentativeRowBytes int64 `yaml:"-" json:"-"`
+	RuntimeSafetyRowBytes         int64 `yaml:"-" json:"-"`
+	RuntimeSafetyRowBytesKnown    bool  `yaml:"-" json:"-"`
+	RuntimeChunkGrowthAllowed     bool  `yaml:"-" json:"-"`
 
 	// Explore forces an exploration probe on this run instead of the
 	// tuner's argmax pick (PR2 #179 wires the actual exploration policy;

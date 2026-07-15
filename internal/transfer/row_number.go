@@ -139,7 +139,7 @@ func executeRowNumberPagination(
 		colSRIDs:        colSRIDs,
 		idempotentOnDup: idempotentOnDup,
 		resumeRowsDone:  resumeRowsDone,
-		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) {
+		newAckHandler: func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) ackRelease {
 			coord = newRowNumberCheckpointCoordinator(saver, job, partitionID, partitionRows, initialRowNum, resumeRowsDone, cb.checkpointFreq)
 			if coord == nil {
 				return nil

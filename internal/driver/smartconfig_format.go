@@ -34,7 +34,7 @@ func (s *SmartConfigSuggestions) FormatYAML() string {
 	fmt.Fprintf(&sb, "  upsert_merge_chunk_size: %d\n", s.UpsertMergeChunkSize)
 	fmt.Fprintf(&sb, "  checkpoint_frequency: %d\n", s.CheckpointFrequency)
 	fmt.Fprintf(&sb, "  max_retries: %d\n", s.MaxRetries)
-	fmt.Fprintf(&sb, "  # Estimated memory: ~%dMB\n", s.EstimatedMemMB)
+	fmt.Fprintf(&sb, "  # Estimated memory at representative width: ~%dMB (steady transfer uses shared measured-byte admission/MemoryGuard)\n", s.EstimatedMemMB)
 	if s.MemoryEstimateOverBudget {
 		sb.WriteString("  # WARNING: the final modeled configuration exceeds the memory budget\n")
 	}

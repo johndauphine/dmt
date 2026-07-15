@@ -55,7 +55,7 @@ func assertConfigPolicyMatchesOutput(t *testing.T, cfg *Config, out tuning.Outpu
 	}
 	for _, check := range checks {
 		if check.got != check.want {
-			t.Errorf("%s = %d, want DefaultOutput value %d", check.name, check.got, check.want)
+			t.Errorf("%s = %d, want finalized load-time policy value %d", check.name, check.got, check.want)
 		}
 	}
 
@@ -74,7 +74,7 @@ func assertConfigPolicyMatchesOutput(t *testing.T, cfg *Config, out tuning.Outpu
 	}
 }
 
-func TestApplyDefaultsMatchesCanonicalDefaultOutput(t *testing.T) {
+func TestApplyDefaultsMatchesLegacyLoadTimePolicy(t *testing.T) {
 	withEmptySecretsFile(t)
 
 	tests := []struct {
@@ -84,16 +84,18 @@ func TestApplyDefaultsMatchesCanonicalDefaultOutput(t *testing.T) {
 		platform       string
 		wantWorkers    int
 		wantChunk      int
+		wantRAB        int
 		wantWAW        int
+		wantPR         int
 		wantSourcePool int
 		wantTargetPool int
 		wantEstimate   int64
 	}{
-		{"postgres linux", "postgres", 8, "linux", 6, 50_000, 2, 16, 16, 859},
-		{"mssql linux", "mssql", 8, "linux", 6, 3_000, 2, 16, 16, 52},
-		{"sqlite linux", "sqlite", 8, "linux", 6, 20_000, 1, 16, 10, 287},
-		{"postgres darwin", "postgres", 32, "darwin", 12, 50_000, 1, 28, 16, 1431},
-		{"unknown fallback", "not-registered", 8, "linux", 6, 20_000, 2, 16, 16, 344},
+		{"postgres linux", "postgres", 8, "linux", 6, 200_000, 32, 2, 2, 16, 16, 19_455},
+		{"mssql linux", "mssql", 8, "linux", 6, 200_000, 32, 2, 2, 16, 16, 19_455},
+		{"sqlite linux", "sqlite", 8, "linux", 6, 200_000, 32, 1, 2, 16, 10, 18_883},
+		{"postgres darwin", "postgres", 32, "darwin", 12, 200_000, 28, 8, 8, 100, 100, 41_199},
+		{"unknown fallback", "not-registered", 8, "linux", 6, 200_000, 32, 2, 2, 16, 16, 19_455},
 	}
 
 	for _, tc := range tests {
@@ -103,21 +105,19 @@ func TestApplyDefaultsMatchesCanonicalDefaultOutput(t *testing.T) {
 				t.Fatalf("applyDefaults: %v", err)
 			}
 
-			in := cfg.defaultTuningInput()
-			profile := driver.BuildTuningProfile(tc.target, in.SafetyRowBytes, driver.TargetProbe{})
-			out := tuning.DefaultOutput(in, profile)
+			out := cfg.loadTimeDefaultOutput()
 			assertConfigPolicyMatchesOutput(t, cfg, out)
 
 			if cfg.Migration.Workers != tc.wantWorkers || cfg.Migration.ChunkSize != tc.wantChunk ||
-				cfg.Migration.ReadAheadBuffers != 4 || cfg.Migration.WriteAheadWriters != tc.wantWAW ||
-				cfg.Migration.ParallelReaders != 2 || cfg.Migration.MaxPartitions != tc.wantWorkers {
-				t.Errorf("exact defaults = W%d CS%d RAB%d WAW%d PR%d MP%d, want W%d CS%d RAB4 WAW%d PR2 MP%d",
+				cfg.Migration.ReadAheadBuffers != tc.wantRAB || cfg.Migration.WriteAheadWriters != tc.wantWAW ||
+				cfg.Migration.ParallelReaders != tc.wantPR || cfg.Migration.MaxPartitions != tc.wantWorkers {
+				t.Errorf("exact defaults = W%d CS%d RAB%d WAW%d PR%d MP%d, want W%d CS%d RAB%d WAW%d PR%d MP%d",
 					cfg.Migration.Workers, cfg.Migration.ChunkSize, cfg.Migration.ReadAheadBuffers,
 					cfg.Migration.WriteAheadWriters, cfg.Migration.ParallelReaders, cfg.Migration.MaxPartitions,
-					tc.wantWorkers, tc.wantChunk, tc.wantWAW, tc.wantWorkers)
+					tc.wantWorkers, tc.wantChunk, tc.wantRAB, tc.wantWAW, tc.wantPR, tc.wantWorkers)
 			}
-			if cfg.Migration.LargeTableThreshold != 1_000_000 || cfg.Migration.UpsertMergeChunkSize != 5_000 ||
-				cfg.Migration.CheckpointFrequency != 20 || cfg.Migration.MaxRetries != 3 {
+			if cfg.Migration.LargeTableThreshold != 5_000_000 || cfg.Migration.UpsertMergeChunkSize != 20_000 ||
+				cfg.Migration.CheckpointFrequency != 10 || cfg.Migration.MaxRetries != 3 {
 				t.Errorf("fixed policy fields = threshold:%d upsert:%d checkpoint:%d retries:%d",
 					cfg.Migration.LargeTableThreshold, cfg.Migration.UpsertMergeChunkSize,
 					cfg.Migration.CheckpointFrequency, cfg.Migration.MaxRetries)
@@ -155,9 +155,9 @@ func TestApplyDefaultsWorkerAndHighCoreBoundaries(t *testing.T) {
 		{4, 4, 2, 12, 12},
 		{6, 4, 2, 12, 12},
 		{8, 6, 2, 16, 16},
-		{32, 12, 8, 28, 100},
-		{64, 12, 8, 28, 100},
-		{128, 12, 8, 28, 100},
+		{32, 12, 8, 100, 100},
+		{64, 12, 16, 196, 196},
+		{128, 12, 32, 388, 388},
 	}
 
 	for _, tc := range tests {
@@ -179,7 +179,56 @@ func TestApplyDefaultsWorkerAndHighCoreBoundaries(t *testing.T) {
 	}
 }
 
-func TestApplyDefaultsVirtualizedPlatformsKeepSingleWriterBaseline(t *testing.T) {
+func TestLoadTimeAndAutoTuneBaselinesRemainDistinct(t *testing.T) {
+	withEmptySecretsFile(t)
+
+	cfg := newDefaultPolicyTestConfig("postgres", 18, "linux", systemmemory.Snapshot{
+		CapacityMB: 16_384, AvailableMB: 16_384, Source: "host",
+	})
+	if err := cfg.applyDefaults(); err != nil {
+		t.Fatalf("applyDefaults: %v", err)
+	}
+	if cfg.Migration.Workers != 12 || cfg.Migration.ParallelReaders != 4 || cfg.Migration.WriteAheadWriters != 4 {
+		t.Fatalf("legacy load-time tuple = W%d/PR%d/WAW%d, want W12/PR4/WAW4",
+			cfg.Migration.Workers, cfg.Migration.ParallelReaders, cfg.Migration.WriteAheadWriters)
+	}
+
+	in := cfg.defaultTuningInput()
+	profile := driver.BuildTuningProfile(cfg.Target.Type, in.SafetyRowBytes, driver.TargetProbe{})
+	auto := tuning.Tune(in, profile, nil, tuning.DBTuning{})
+	if auto.Workers != 16 || auto.ParallelReaders != 2 || auto.WriteAheadWriters != 4 {
+		t.Fatalf("pre-epic auto-tune baseline = W%d/PR%d/WAW%d, want W16/PR2/WAW4",
+			auto.Workers, auto.ParallelReaders, auto.WriteAheadWriters)
+	}
+	if auto.MaxSourceConnections != 36 || auto.MaxTargetConnections != 68 {
+		t.Fatalf("auto-tune pools = %d/%d, want truthful 36/68",
+			auto.MaxSourceConnections, auto.MaxTargetConnections)
+	}
+}
+
+func TestLegacyLoadTimeMemoryFormulas(t *testing.T) {
+	for _, tc := range []struct {
+		availableMB int64
+		wantChunk   int
+	}{
+		{512, 76_562},
+		{8 * 1024, 100_000},
+		{40 * 1024, 200_000},
+		{64 * 1024, 200_000},
+	} {
+		if got := legacyLoadTimeChunkSize(tc.availableMB); got != tc.wantChunk {
+			t.Errorf("available=%dMB chunk=%d, want %d", tc.availableMB, got, tc.wantChunk)
+		}
+	}
+	if got := legacyLoadTimeTargetMemoryMB(8*1024, 0); got != 4*1024 {
+		t.Errorf("uncapped target memory = %d, want 4096", got)
+	}
+	if got := legacyLoadTimeTargetMemoryMB(8*1024, 64); got != 32 {
+		t.Errorf("user-capped target memory = %d, want 32", got)
+	}
+}
+
+func TestApplyDefaultsLegacyLoadTimeWAWIsPlatformIndependent(t *testing.T) {
 	withEmptySecretsFile(t)
 
 	for _, platform := range []string{"darwin", "windows", "wsl2"} {
@@ -188,31 +237,34 @@ func TestApplyDefaultsVirtualizedPlatformsKeepSingleWriterBaseline(t *testing.T)
 			if err := cfg.applyDefaults(); err != nil {
 				t.Fatalf("applyDefaults: %v", err)
 			}
-			if cfg.Migration.Workers != 12 || cfg.Migration.WriteAheadWriters != 1 {
-				t.Fatalf("%s defaults W/WAW=%d/%d, want 12/1",
+			if cfg.Migration.Workers != 12 || cfg.Migration.WriteAheadWriters != 32 {
+				t.Fatalf("%s defaults W/WAW=%d/%d, want 12/32",
 					platform, cfg.Migration.Workers, cfg.Migration.WriteAheadWriters)
 			}
-			if cfg.Migration.MaxSourceConnections != 28 || cfg.Migration.MaxTargetConnections != 16 {
-				t.Fatalf("%s pools=%d/%d, want 28/16", platform,
+			if cfg.Migration.MaxSourceConnections != 388 || cfg.Migration.MaxTargetConnections != 388 {
+				t.Fatalf("%s pools=%d/%d, want 388/388", platform,
 					cfg.Migration.MaxSourceConnections, cfg.Migration.MaxTargetConnections)
 			}
 		})
 	}
 }
 
-func TestApplyDefaultsUpsertMergeChunkUsesCanonicalPolicyInBothModes(t *testing.T) {
+func TestApplyDefaultsUpsertMergeChunkUsesLegacyModePolicy(t *testing.T) {
 	withEmptySecretsFile(t)
 
-	for _, mode := range []string{"drop_recreate", "upsert"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want int
+	}{{"drop_recreate", 10_000}, {"upsert", 20_000}} {
+		t.Run(tc.mode, func(t *testing.T) {
 			cfg := newDefaultPolicyTestConfig("postgres", 8, "linux", largePolicyTestSnapshot())
-			cfg.Migration.TargetMode = mode
+			cfg.Migration.TargetMode = tc.mode
 			if err := cfg.applyDefaults(); err != nil {
 				t.Fatalf("applyDefaults: %v", err)
 			}
-			if cfg.Migration.UpsertMergeChunkSize != 5_000 {
-				t.Fatalf("%s upsert_merge_chunk_size = %d, want canonical 5000",
-					mode, cfg.Migration.UpsertMergeChunkSize)
+			if cfg.Migration.UpsertMergeChunkSize != tc.want {
+				t.Fatalf("%s upsert_merge_chunk_size = %d, want legacy %d",
+					tc.mode, cfg.Migration.UpsertMergeChunkSize, tc.want)
 			}
 		})
 	}
@@ -267,7 +319,7 @@ func TestApplyDefaultsMemoryClampUsesResolvedEnvelope(t *testing.T) {
 				CapacityMB: 512, AvailableMB: 512, Source: "cgroup-v2",
 			},
 			wantBudget: 358,
-			wantChunk:  5213,
+			wantChunk:  3128,
 		},
 		{
 			name: "explicit cap",
@@ -276,7 +328,7 @@ func TestApplyDefaultsMemoryClampUsesResolvedEnvelope(t *testing.T) {
 			},
 			maxMemory:  64,
 			wantBudget: 64,
-			wantChunk:  932,
+			wantChunk:  559,
 		},
 	}
 
@@ -411,32 +463,34 @@ migration_defaults:
 			t.Errorf("%s provenance = %q, want secrets default", check.name, got)
 		}
 	}
-	if cfg.Migration.ChunkSize != 50_000 || cfg.Migration.MaxPartitions != 5 ||
-		cfg.Migration.LargeTableThreshold != 1_000_000 || cfg.Migration.UpsertMergeChunkSize != 5_000 {
+	if cfg.Migration.ChunkSize != 200_000 || cfg.Migration.MaxPartitions != 5 ||
+		cfg.Migration.LargeTableThreshold != 5_000_000 || cfg.Migration.UpsertMergeChunkSize != 20_000 {
 		t.Errorf("generated fields beside secrets pins = chunk:%d partitions:%d threshold:%d upsert:%d",
 			cfg.Migration.ChunkSize, cfg.Migration.MaxPartitions,
 			cfg.Migration.LargeTableThreshold, cfg.Migration.UpsertMergeChunkSize)
 	}
 }
 
-func TestGeneratedSecretsTemplateLeavesCanonicalDefaultsUnpinned(t *testing.T) {
+func TestGeneratedSecretsTemplateLeavesLegacyDefaultsUnpinned(t *testing.T) {
 	withSecretsFile(t, secrets.GenerateTemplate())
 
 	cfg, err := LoadBytes(minConfigYAML("  target_mode: drop_recreate\n"))
 	if err != nil {
 		t.Fatalf("LoadBytes with generated secrets template: %v", err)
 	}
+	if cfg.Migration.ReadAheadBuffers < 4 || cfg.Migration.ReadAheadBuffers > 32 {
+		t.Errorf("read_ahead_buffers = %d, want legacy generated value in [4,32]", cfg.Migration.ReadAheadBuffers)
+	}
 	checks := []struct {
 		name       string
 		got, want  int
 		provenance string
 	}{
-		{name: "read_ahead_buffers", got: cfg.Migration.ReadAheadBuffers, want: 4, provenance: provenanceMigrationReadAheadBuffers},
-		{name: "checkpoint_frequency", got: cfg.Migration.CheckpointFrequency, want: 20, provenance: provenanceMigrationCheckpointFrequency},
+		{name: "checkpoint_frequency", got: cfg.Migration.CheckpointFrequency, want: 10, provenance: provenanceMigrationCheckpointFrequency},
 	}
 	for _, check := range checks {
 		if check.got != check.want {
-			t.Errorf("%s = %d, want canonical generated default %d", check.name, check.got, check.want)
+			t.Errorf("%s = %d, want legacy generated default %d", check.name, check.got, check.want)
 		}
 		if got := cfg.tunableProvenance(check.provenance); got != ProvenanceAutoDefault {
 			t.Errorf("%s provenance = %q, want %q; generated secrets template must not pin it", check.name, got, ProvenanceAutoDefault)
@@ -477,7 +531,7 @@ func TestApplyDefaultsAutoChunkUsesPinnedConcurrency(t *testing.T) {
 	}
 }
 
-func TestDebugDumpReportsCanonicalClampAndPinnedOverBudgetTruth(t *testing.T) {
+func TestDebugDumpReportsLegacyClampAndPinnedOverBudgetTruth(t *testing.T) {
 	withEmptySecretsFile(t)
 
 	newConfig := func(chunk int) *Config {
@@ -500,7 +554,7 @@ func TestDebugDumpReportsCanonicalClampAndPinnedOverBudgetTruth(t *testing.T) {
 	autoDump := auto.DebugDump()
 	for _, want := range []string{
 		"Platform: linux",
-		"ChunkSize: 932 (auto: canonical no-history tuning policy; source: auto default)",
+		"ChunkSize: 932 (auto: legacy load-time formula policy; source: auto default)",
 		"Modeled Working Set: ~64 MB",
 		"Budget Status: within 64 MB budget",
 		"Load-time Policy Reasoning:",
@@ -521,23 +575,15 @@ func TestDebugDumpReportsCanonicalClampAndPinnedOverBudgetTruth(t *testing.T) {
 		"ChunkSize: 50000 (source: config)",
 		"Modeled Working Set: ~3434 MB",
 		"Budget Status: exceeds 64 MB budget; explicit chunk_size preserved",
-		"Width Source: unobserved 500-byte fallback estimate",
+		"Width Source: unobserved fallback estimate (500 bytes/row)",
 	} {
 		if !strings.Contains(pinnedDump, want) {
 			t.Errorf("pinned DebugDump missing %q:\n%s", want, pinnedDump)
 		}
 	}
 
-	for _, stale := range []string{
-		"75K",
-		"default 5M",
-		"default 10;",
-		"(cores-2)",
-		"cores/4 clamped",
-		"envelope-budget-scaled",
-	} {
-		if strings.Contains(autoDump, stale) || strings.Contains(pinnedDump, stale) {
-			t.Errorf("DebugDump retained stale formula %q", stale)
-		}
+	if strings.Contains(autoDump, "canonical no-history tuning policy") ||
+		strings.Contains(pinnedDump, "canonical no-history tuning policy") {
+		t.Error("DebugDump conflates legacy load-time defaults with the auto-tuner baseline")
 	}
 }

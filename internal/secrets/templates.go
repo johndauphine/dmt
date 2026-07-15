@@ -150,7 +150,7 @@ migration_defaults:
   sample_size: 100                # Rows to sample for validation
 
   # Checkpoint and recovery
-  # checkpoint_frequency: 20      # Save progress every N chunks
+  # checkpoint_frequency: 10      # Load-time default; auto tuning may recommend 20
   max_retries: 3                  # Retry failed tables N times
   history_retention_days: 30      # Keep run history for N days
 

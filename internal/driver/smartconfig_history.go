@@ -1,9 +1,10 @@
 package driver
 
 import (
-	"github.com/johndauphine/dmt/internal/checkpoint"
+	"fmt"
 	"time"
 
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/tuning"
 )
@@ -16,8 +17,12 @@ type pendingTuningSave struct {
 	safetyRowBytesKnown    bool
 }
 
-// ActualParams holds the actual migration parameters used after user overrides,
-// plus effective DB tuning captured at run start (#144).
+// ActualParams holds the global run policy used after user overrides, plus
+// effective DB tuning captured at run start (#144). ChunkSize is the steady
+// requested action. Target protocol limits can reduce it, and an applied
+// runtime writer transition can ratchet later reader chunks and writer batches;
+// those conditional limits remain disclosure metadata rather than replacement
+// learned actions.
 type ActualParams struct {
 	Workers              int
 	ChunkSize            int
@@ -40,8 +45,10 @@ type ActualParams struct {
 	SourceMaxServerMemoryMB int64
 }
 
-// SaveTuningWithActualParams saves tuning history with the actual params
-// used (after user overrides), not the recommendations.
+// SaveTuningWithActualParams saves tuning history with the global run policy
+// used after user overrides, not the pre-override recommendation. The persisted
+// reasoning distinguishes ordinary direct execution from target protocol limits
+// and conditional writer-transition ratchets.
 func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) int64 {
 	if s.pendingSave == nil {
 		return 0
@@ -61,15 +68,19 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) in
 	s.suggestions.SafetyRowBytes = pendingSafetyRowBytes(ps)
 	s.suggestions.SafetyRowBytesKnown = pendingSafetyRowBytesKnown(ps)
 	// Re-derive EstimatedMemMB so the persisted history reflects the
-	// post-override params, not the pre-override estimate (#160). The safety
-	// width drives the estimate; the legacy AvgRowSizeBytes remains the
-	// persisted regression feature and no checkpoint schema change is needed.
+	// post-override params, not the pre-override estimate (#160). The global
+	// diagnostic uses the row-count-weighted representative width, matching the
+	// recommendation policy. Shared measured-byte admission and MemoryGuard
+	// enforce steady transfer; complete-inventory checks gate writer transitions.
+	// The legacy AvgRowSizeBytes remains the persisted regression feature, and
+	// conditional projection accounting is stored separately.
+	representativeRowBytes := pendingRepresentativeRowBytes(ps)
 	s.suggestions.EstimatedMemMB = tuning.EstimatedMemMB(
 		actual.Workers,
 		actual.ReadAheadBuffers,
 		actual.WriteAheadWriters,
 		actual.ChunkSize,
-		pendingSafetyRowBytes(ps),
+		representativeRowBytes,
 	)
 	s.suggestions.MemoryEstimateOverBudget = tuning.MemoryEstimateExceedsBudget(
 		ps.input.MemoryBudgetMB,
@@ -77,23 +88,31 @@ func (s *SmartConfigAnalyzer) SaveTuningWithActualParams(actual ActualParams) in
 		actual.ReadAheadBuffers,
 		actual.WriteAheadWriters,
 		actual.ChunkSize,
-		pendingSafetyRowBytes(ps),
+		representativeRowBytes,
 	)
 	if s.suggestions.MemoryEstimateOverBudget {
-		widthSource := "unobserved fallback estimate"
-		if s.suggestions.SafetyRowBytesKnown {
-			widthSource = "widest observed table-average model"
-		}
-		logging.Warn("Post-override tuning memory estimate exceeds the resolved budget (estimate=%d MB budget=%d MB safety_width=%d B source=%s)",
-			s.suggestions.EstimatedMemMB, ps.input.MemoryBudgetMB, s.suggestions.SafetyRowBytes, widthSource)
+		logging.Warn("Post-override representative tuning memory estimate exceeds the resolved budget (estimate=%d MB budget=%d MB representative_width=%d B); shared measured-byte admission and MemoryGuard remain active, and runtime writer growth is fail-closed",
+			s.suggestions.EstimatedMemMB, ps.input.MemoryBudgetMB, representativeRowBytes)
 	}
 
-	rowID, err := s.saveTuningResult(ps.input, ps.reasoning, actual)
+	reasoning := executionPolicyReasoning(ps.reasoning, actual.ChunkSize)
+	rowID, err := s.saveTuningResult(ps.input, reasoning, actual)
 	if err != nil {
 		logging.Debug("Failed to save tuning history: %v", err)
 		return 0
 	}
 	return rowID
+}
+
+func executionPolicyReasoning(reasoning string, chunkSize int) string {
+	projection := fmt.Sprintf(
+		"execution policy: chunk_size=%d is the global policy used directly for ordinary reader chunks and writer batches; shared measured-byte admission/MemoryGuard enforce steady memory safety; target protocol limits and complete-inventory writer-transition ratchets are recorded at completion",
+		chunkSize,
+	)
+	if reasoning == "" {
+		return projection
+	}
+	return reasoning + "; " + projection
 }
 
 func pendingRepresentativeRowBytes(ps *pendingTuningSave) int64 {
@@ -133,34 +152,35 @@ func (s *SmartConfigAnalyzer) saveTuningResult(input AutoTuneInput, reasoning st
 	}
 
 	record := checkpoint.TuningRecord{
-		Timestamp:               time.Now(),
-		SourceDBType:            s.dbType,
-		TargetDBType:            s.targetDBType,
-		TotalTables:             s.suggestions.TotalTables,
-		TotalRows:               s.suggestions.TotalRows,
-		AvgRowSizeBytes:         s.suggestions.AvgRowSizeBytes,
-		CPUCores:                input.CPUCores,
-		MemoryGB:                input.MemoryGB,
-		Workers:                 s.suggestions.Workers,
-		ChunkSize:               s.suggestions.ChunkSizeRecommendation,
-		ReadAheadBuffers:        s.suggestions.ReadAheadBuffers,
-		WriteAheadWriters:       s.suggestions.WriteAheadWriters,
-		ParallelReaders:         s.suggestions.ParallelReaders,
-		MaxPartitions:           s.suggestions.MaxPartitions,
-		LargeTableThreshold:     s.suggestions.LargeTableThreshold,
-		MaxSourceConns:          actual.MaxSourceConnections,
-		MaxTargetConns:          actual.MaxTargetConnections,
-		EstimatedMemoryMB:       s.suggestions.EstimatedMemMB,
-		Reasoning:               reasoning, // deterministic tuner's reasoning string
-		WasAIUsed:               false,     // PR1 dropped the AI path entirely
-		Platform:                firstNonEmpty(actual.Platform, input.Platform),
-		TargetSharedBuffersMB:   actual.TargetSharedBuffersMB,
-		TargetSyncCommit:        actual.TargetSyncCommit,
-		TargetFsync:             actual.TargetFsync,
-		TargetFullPageWrites:    actual.TargetFullPageWrites,
-		TargetMaxWALSizeMB:      actual.TargetMaxWALSizeMB,
-		TargetWALLevel:          actual.TargetWALLevel,
-		SourceMaxServerMemoryMB: actual.SourceMaxServerMemoryMB,
+		Timestamp:                    time.Now(),
+		SourceDBType:                 s.dbType,
+		TargetDBType:                 s.targetDBType,
+		TotalTables:                  s.suggestions.TotalTables,
+		TotalRows:                    s.suggestions.TotalRows,
+		AvgRowSizeBytes:              s.suggestions.AvgRowSizeBytes,
+		CPUCores:                     input.CPUCores,
+		MemoryGB:                     input.MemoryGB,
+		Workers:                      s.suggestions.Workers,
+		ChunkSize:                    s.suggestions.ChunkSizeRecommendation,
+		ReadAheadBuffers:             s.suggestions.ReadAheadBuffers,
+		WriteAheadWriters:            s.suggestions.WriteAheadWriters,
+		ParallelReaders:              s.suggestions.ParallelReaders,
+		MaxPartitions:                s.suggestions.MaxPartitions,
+		LargeTableThreshold:          s.suggestions.LargeTableThreshold,
+		MaxSourceConns:               actual.MaxSourceConnections,
+		MaxTargetConns:               actual.MaxTargetConnections,
+		EstimatedMemoryMB:            s.suggestions.EstimatedMemMB,
+		Reasoning:                    reasoning, // deterministic tuner's reasoning string
+		WasAIUsed:                    false,     // PR1 dropped the AI path entirely
+		Platform:                     firstNonEmpty(actual.Platform, input.Platform),
+		TargetSharedBuffersMB:        actual.TargetSharedBuffersMB,
+		TargetSyncCommit:             actual.TargetSyncCommit,
+		TargetFsync:                  actual.TargetFsync,
+		TargetFullPageWrites:         actual.TargetFullPageWrites,
+		TargetMaxWALSizeMB:           actual.TargetMaxWALSizeMB,
+		TargetWALLevel:               actual.TargetWALLevel,
+		SourceMaxServerMemoryMB:      actual.SourceMaxServerMemoryMB,
+		ProjectionContextFingerprint: input.ProjectionContextFingerprint,
 		// Workload identity passthrough (#215). The values come from
 		// the AutoTuneInput the orchestrator built when calling Tune,
 		// so they reflect THIS run's exact endpoints. Pre-#215 callers

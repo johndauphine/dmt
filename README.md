@@ -942,10 +942,20 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `workers` | No | CPU cores - 2, clamped to 4-12 | Number of parallel transfer workers |
-| `chunk_size` | No | Target- and memory-aware | Rows per chunk, derived from the target driver's preferred byte size and estimated row width, then reduced when required by the memory budget |
+| `workers` | No | CPU-based (4-12) | Number of parallel transfer workers. The load-time formula uses 4 workers through 6 cores, `cores - 2` through 13 cores, and 12 workers above that. |
+| `chunk_size` | No | RAM-shaped (50,000-200,000 before safety clamps) | Rows per chunk. The load-time formula starts at 75,000 and scales with available memory; the retained memory envelope may reduce it, and pre-transfer tuning may replace generated values after schema/history analysis. |
 | `max_partitions` | No | Same as effective `workers` | Maximum partitions for large table parallelism |
-| `large_table_threshold` | No | 1,000,000 | Tables with more rows than this are partitioned |
+| `large_table_threshold` | No | 5,000,000 | Tables with more rows than this are partitioned |
+
+Omitted performance values are initialized by the legacy load-time formulas,
+then the schema- and history-aware tuner may replace generated values before a
+run. Explicit user or secrets values remain pinned against policy tuning.
+Before transfer, representative-width memory and target-protocol limits may
+reduce the global chunk, including a pinned value. During steady transfer,
+measured chunk bytes share one admission budget and MemoryGuard is the
+backstop. The complete-inventory table model gates runtime writer-count
+transitions and ratchets later chunk or batch growth only after a transition is
+applied.
 
 **Table Filtering:**
 
@@ -1025,9 +1035,9 @@ The `migration` section controls how data is transferred.
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
-| `read_ahead_buffers` | No | 4 | Number of chunks to buffer ahead of writers |
-| `write_ahead_writers` | No | Target/platform-aware (1-8) | Parallel writers per job; generated values stay within the tuner's learnable range |
-| `parallel_readers` | No | 2 | Parallel readers per job. Use 1 for local databases |
+| `read_ahead_buffers` | No | Memory-shaped (4-32) | Number of chunks to buffer ahead of writers |
+| `write_ahead_writers` | No | Target- and CPU-scaled (minimum 1) | Parallel writers per job; pre-transfer tuning may replace the generated value |
+| `parallel_readers` | No | CPU-scaled (minimum 2) | Parallel readers per job. Pin to 1 for local databases when appropriate |
 | `source.chunk_size` | No | Same as `migration.chunk_size` | Batch size for reading from source database |
 | `target.chunk_size` | No | Same as `migration.chunk_size` | Batch size for writing to target database |
 

@@ -10,10 +10,10 @@ import (
 // regression / smoothed-bins selection from history.go:
 //
 //  1. Planned grid (cold start). For the first explorationGridRuns usable
-//     runs in a (source, target) bucket, deliberately rotate through a
-//     balanced set of (WAW, CS, PR, RAB) candidates regardless of what the
-//     regression would predict. This guarantees the regression has variance
-//     to fit on instead of locking at the cold-start choice.
+//     runs in a (source, target) bucket, deliberately rotate through the
+//     pre-epic (WAW, CS, PR, RAB) menu regardless of what history would pick.
+//     After that short planned window, smoothed bins bridge the gap until the
+//     regression has enough rows to attempt a fit.
 //
 //  2. ε-perturbation (steady state). After the planned phase, the
 //     regression's argmax pick gets a small random nudge with
@@ -25,10 +25,11 @@ import (
 // on-demand probe (e.g. the user just resized their host or wants to
 // re-validate a parameter set after a regime change).
 
-// explorationGridRuns is the K from the issue spec — the number of
-// initial runs in a bucket that go through the planned grid before the
-// regression takes over.
-const explorationGridRuns = 12
+// explorationGridRuns is the K from the issue spec — the number of initial
+// usable runs in a bucket that go through the planned grid. Normal history
+// selection resumes after this window; smoothed bins bridge to the separate
+// regression evidence floor.
+const explorationGridRuns = 6
 
 // perturbPRMax / perturbRABMax / perturbRABMin bound the ε-perturbation
 // directions for parallel_readers and read_ahead_buffers (#219). The
@@ -63,34 +64,21 @@ type explorationCell struct {
 	ReadAheadBuffers int
 }
 
-// explorationCells is the ordered twelve-run cold-start design (#698).
-// The first eight entries are unique and balanced across the four knobs. The
-// last four deliberately replicate cells 0, 1, 6, and 7 so the production
-// regression reaches its twelve-row gate while every WAW and reader
-// combination appears three times and both CS fractions appear six times.
+// explorationCells is the pre-epic ordered menu. Automatic cold start consumes
+// the first six entries; forced or growth-free replacement probes can continue
+// around the full eight-cell ring. Keeping complete cells preserves the newer
+// eligible-ring HardChunkLimit handling without reintroducing the twelve-run
+// planned window.
 var explorationCells = [...]explorationCell{
 	{WAW: 1, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
-	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
-	{WAW: 3, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
-	{WAW: maxLearnableWAW, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
-	{WAW: 1, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
-	{WAW: 2, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
+	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+	{WAW: 3, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
+	{WAW: maxLearnableWAW, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
+	{WAW: 1, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
+	{WAW: 2, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
 	{WAW: 3, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
-	{WAW: maxLearnableWAW, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
-
-	// Deliberate replicates of 0, 1, 6, and 7.
-	{WAW: 1, CSFraction: halfOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 4},
-	{WAW: 2, CSFraction: halfOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
-	{WAW: 3, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 4},
-	{WAW: maxLearnableWAW, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
+	{WAW: maxLearnableWAW, CSFraction: fullOptimumFraction, ParallelReaders: 4, ReadAheadBuffers: 8},
 }
-
-// Compile-time equality check: either expression becomes a negative array
-// length if the table and the cold-start threshold diverge.
-var (
-	_ [explorationGridRuns - len(explorationCells)]struct{}
-	_ [len(explorationCells) - explorationGridRuns]struct{}
-)
 
 // readerGrid is the 2×2 reader candidate domain used by regression argmax.
 // Values bracket the baseline (PR=2, RAB=4): small enough that doubling
@@ -103,10 +91,9 @@ var readerGrid = []readerCandidate{
 	{ParallelReaders: 4, ReadAheadBuffers: 8},
 }
 
-// shouldExplore returns true when this run should pick from the planned
-// grid instead of the regression's argmax: either the user forced it
-// via --explore, or the bucket hasn't accumulated enough runs to make
-// the regression meaningful.
+// shouldExplore returns true when this run should pick from the planned grid:
+// either the user forced it via --explore, or the bucket has not completed the
+// restored six-probe window.
 func shouldExplore(in Input, usableCount int) bool {
 	return in.ForceExplore || usableCount < explorationGridRuns
 }

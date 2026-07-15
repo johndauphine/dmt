@@ -205,7 +205,7 @@ internal/config/
 
 ```yaml
 migration:
-  checkpoint_frequency: 20    # Save progress every N chunks (default: 20)
+  checkpoint_frequency: 10    # Save progress every N chunks (default: 10)
   max_retries: 3              # Retry failed tables N times after the first attempt (default: 3)
   history_retention_days: 30  # Keep run history for N days (default: 30)
 ```
@@ -214,12 +214,15 @@ migration:
 
 Controls how often chunk-level progress is saved during transfer.
 
-- **Default**: 20 chunks
+- **Load-time default**: 10 chunks
+- **Automatic pre-transfer tuning**: May replace an unpinned generated value;
+  its restored baseline recommendation is 20 chunks
 - **Trade-off**: Lower values = more frequent saves = less data loss on crash, but more I/O overhead
 - **Location**: `internal/transfer/runner.go` supplies the configured frequency to the keyset and ROW_NUMBER checkpoint coordinators
 
 ```go
-// Config loading normally supplies the canonical default of 20 chunks.
+// Config loading supplies 10; automatic pre-transfer tuning may later
+// replace an unpinned generated value with its 20-chunk baseline.
 checkpointFreq := cfg.Migration.CheckpointFrequency
 if checkpointFreq <= 0 {
     checkpointFreq = 10 // Defensive transfer fallback if config defaulting was bypassed
@@ -443,7 +446,7 @@ CREATE TABLE transfer_progress (
 
 **Impact**: On crash, up to `checkpoint_frequency * chunk_size` rows may need to be re-transferred.
 
-**Example**: The canonical default is `checkpoint_frequency=20`. Because the default `chunk_size` is derived from the target driver's byte profile and the effective memory budget, there is no single default row count; if that policy selects 50,000 rows per chunk, up to 1M rows may need to be replayed.
+**Example**: The load-time default is `checkpoint_frequency=10`; automatic pre-transfer tuning may replace an unpinned value with 20. The generated `chunk_size` is RAM-shaped and may later be replaced by pre-transfer tuning or a global representative-width/protocol clamp. An applied runtime writer-count transition can also ratchet later chunks downward. At 50,000 effective rows per chunk, the replay window is up to 500,000 rows at frequency 10 or 1,000,000 rows at frequency 20.
 
 **Mitigation**: Reduce `checkpoint_frequency` for critical migrations (at cost of more I/O).
 

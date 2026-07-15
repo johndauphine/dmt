@@ -469,3 +469,43 @@ func TestAITimestampRuntimeDualWriteOrderingAndUpsertPreservation(t *testing.T) 
 		t.Fatal("zero runtime-adjustment timestamp should be rejected")
 	}
 }
+
+func TestProjectionContextFingerprintMigrationKeepsLegacyRowsIncompatible(t *testing.T) {
+	dataDir := t.TempDir()
+	createLegacyAITimestampDB(t, dataDir, false)
+
+	state, err := New(dataDir)
+	if err != nil {
+		t.Fatalf("migrating legacy tuning history: %v", err)
+	}
+	defer state.Close()
+
+	var columnType string
+	var notNull int
+	if err := state.db.QueryRow(`
+		SELECT type, "notnull"
+		FROM pragma_table_info('ai_tuning_history')
+		WHERE name = 'projection_context_fingerprint'
+	`).Scan(&columnType, &notNull); err != nil {
+		t.Fatalf("projection-context migration column: %v", err)
+	}
+	if columnType != "TEXT" || notNull != 0 {
+		t.Fatalf("projection_context_fingerprint = type %q notnull %d, want nullable TEXT", columnType, notNull)
+	}
+
+	history, err := state.GetTuningHistory(0, "mssql", "postgres")
+	if err != nil {
+		t.Fatalf("GetTuningHistory after projection-context migration: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("legacy history rows = %d, want 3", len(history))
+	}
+	for _, row := range history {
+		if row.ProjectionContextFingerprint != "" {
+			t.Fatalf("legacy row %d invented projection context %q", row.ID, row.ProjectionContextFingerprint)
+		}
+		if row.SafetyProjected {
+			t.Fatalf("legacy row %d unexpectedly marked projected", row.ID)
+		}
+	}
+}

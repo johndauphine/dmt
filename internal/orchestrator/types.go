@@ -93,6 +93,19 @@ type Orchestrator struct {
 	// ai_tuning_history so the tuner can exclude the row from training.
 	lastRunAdjusted bool
 
+	// Protocol, conditional transition, and legacy static projection disclosure
+	// is recorded separately from the requested steady policy. Runtime-adjusted
+	// rows remain excluded independently.
+	lastSafetyProjected       bool
+	lastExecutionChunkSizeMin int
+	lastExecutionChunkSizeMax int
+
+	// excludeTuningResultFromLearning is a run-scope fail-closed gate that
+	// transfer metrics must not overwrite. Resume throughput covers only the
+	// remaining segment while the tuning row describes the full workload, so
+	// every resume-created result is ineligible for learning.
+	excludeTuningResultFromLearning bool
+
 	// Identifies the ai_tuning_history row created by applyTuning for this
 	// run. Zero means no row exists, so completion must not stamp history.
 	lastTuningRowID int64

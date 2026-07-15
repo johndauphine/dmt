@@ -366,15 +366,17 @@ func (wp *writerPool) acks() <-chan pool.WriteAck {
 }
 
 // startAckProcessor starts a goroutine to process acks with the given handler.
-func (wp *writerPool) startAckProcessor(handler func(writeAck)) {
-	wp.StartAckProcessor(func(ack pool.WriteAck) {
-		handler(writeAck{
+func (wp *writerPool) startAckProcessor(handler func(writeAck) ackRelease) {
+	wp.StartOrderedAckProcessor(func(ack pool.WriteAck) pool.AckRelease {
+		released := handler(writeAck{
 			readerID: ack.ReaderID,
 			seq:      ack.Seq,
 			lastPK:   ack.LastPK,
 			rowNum:   ack.RowNum,
 			rows:     ack.Rows,
+			bytes:    ack.Bytes,
 		})
+		return pool.AckRelease{Jobs: released.jobs, Bytes: released.bytes}
 	})
 }
 

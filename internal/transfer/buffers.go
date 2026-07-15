@@ -66,42 +66,212 @@ func subtractConnectionOverheadMB(budgetMB, connCount int64) (pipelineMB int64, 
 	return pipelineMB, false
 }
 
+// runtimeSizingTuple returns the effective live concurrency values used by
+// the memory model. Runtime updates are read atomically from the tuner; direct
+// callers without a tuner fall back to config.
+type runtimeSizingTuple struct {
+	workers           int
+	readAheadBuffers  int
+	writeAheadWriters int
+}
+
+func effectiveRuntimeSizingTuple(cfg *config.Config, tuner RuntimeTuner) runtimeSizingTuple {
+	var tuple runtimeSizingTuple
+	if cfg != nil {
+		tuple.workers = cfg.Migration.Workers
+		tuple.readAheadBuffers = cfg.Migration.ReadAheadBuffers
+		tuple.writeAheadWriters = cfg.Migration.WriteAheadWriters
+	}
+	if tuner != nil {
+		snapshot := tuner.Snapshot()
+		if snapshot.Workers > 0 {
+			tuple.workers = snapshot.Workers
+		}
+		if snapshot.ReadAheadBuffers > 0 {
+			tuple.readAheadBuffers = snapshot.ReadAheadBuffers
+		}
+		if snapshot.WriteAheadWriters > 0 {
+			tuple.writeAheadWriters = snapshot.WriteAheadWriters
+		}
+	}
+	if tuple.workers < 1 {
+		tuple.workers = 1
+	}
+	if tuple.readAheadBuffers < 0 {
+		tuple.readAheadBuffers = 0
+	}
+	if tuple.writeAheadWriters < 1 {
+		// runPipeline has the same minimum: even a sparse direct-call config
+		// constructs one writer, so the safety model must count it.
+		tuple.writeAheadWriters = 1
+	}
+	return tuple
+}
+
+// tableSizingRowBytes returns this table's own observed/estimated width. A
+// missing table width falls back to the widest observed safety width from the
+// current analysis; no unobserved width is invented for a runtime writer-growth
+// transition check.
+func tableSizingRowBytes(cfg *config.Config, tableRowBytes int64) (int64, bool) {
+	if tableRowBytes > 0 {
+		return tableRowBytes, true
+	}
+	if cfg != nil && cfg.Migration.RuntimeSafetyRowBytesKnown && cfg.Migration.RuntimeSafetyRowBytes > 0 {
+		return cfg.Migration.RuntimeSafetyRowBytes, true
+	}
+	return 0, false
+}
+
+// perTablePipelineBudgetBytes divides the resolved pipeline budget by the
+// maximum number of concurrent table jobs without first truncating it to whole
+// MiB. It is a buffer-depth sizing target, not steady-state admission: required
+// minimum depths can exceed the share, while the shared measured-byte budget
+// redistributes actual in-flight capacity dynamically.
+func perTablePipelineBudgetBytes(cfg *config.Config, workers int) int64 {
+	budgetMB, _ := pipelineBudgetMB(cfg)
+	if budgetMB <= 0 {
+		return 0
+	}
+	budgetBytes := pipelineBudgetBytes(budgetMB)
+	if workers <= 1 {
+		return budgetBytes
+	}
+	return budgetBytes / int64(workers)
+}
+
+// runtimeTableChunkSizeCap returns the prospective writer-transition ceiling
+// for one table under its complete live pipeline inventory. Unlike the global
+// representative cap, this uses the table's own row width, the actual fixed
+// channel depths, reader scan slack, writer encode copies, and the maximum
+// number of concurrent table jobs. The ceiling is committed to a pipeline's
+// ratchet only after an accepted writer-count transition. TargetHardChunkLimit
+// remains independently binding. Zero means neither a memory-evidence cap nor
+// a protocol cap is available.
+func runtimeTableChunkSizeCap(
+	cfg *config.Config,
+	tableRowBytes int64,
+	workers int,
+	numReaders int,
+	numWriters int,
+	buffers pool.PipelineBufferSizes,
+) int {
+	cap, _ := runtimeTableChunkSizeCapDetail(cfg, tableRowBytes, workers, numReaders, numWriters, buffers)
+	return cap
+}
+
+func runtimeTableChunkSizeCapDetail(
+	cfg *config.Config,
+	tableRowBytes int64,
+	workers int,
+	numReaders int,
+	numWriters int,
+	buffers pool.PipelineBufferSizes,
+) (cap int, minimumExceedsBudget bool) {
+	if cfg == nil {
+		return 0, false
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	rowBytes, known := tableSizingRowBytes(cfg, tableRowBytes)
+	memoryCap := 0
+	if known {
+		pipelineMB, _ := pipelineBudgetMB(cfg)
+		rows, minimumExceeds := pool.SafePipelineChunkSizeDetail(
+			pipelineBudgetBytes(pipelineMB),
+			workers,
+			pool.PipelineBufferConfig{
+				RowBytes:   rowBytes,
+				NumWriters: numWriters,
+				NumReaders: numReaders,
+			},
+			buffers,
+		)
+		memoryCap = positiveInt64ToInt(rows)
+		minimumExceedsBudget = minimumExceeds
+	}
+	return minPositiveInt(memoryCap, cfg.Migration.TargetHardChunkLimit), minimumExceedsBudget
+}
+
+func minPositiveInt(values ...int) int {
+	minimum := 0
+	for _, value := range values {
+		if value > 0 && (minimum == 0 || value < minimum) {
+			minimum = value
+		}
+	}
+	return minimum
+}
+
+func positiveInt64ToInt(value int64) int {
+	if value <= 0 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if value > int64(maxInt) {
+		return maxInt
+	}
+	return int(value)
+}
+
+func capPositiveInt(value, cap int) int {
+	if value > 0 && cap > 0 && value > cap {
+		return cap
+	}
+	return value
+}
+
+func requestedReaderChunkSize(cfg *config.Config, tuner RuntimeTuner, tableName string) int {
+	chunkSize := 0
+	if cfg != nil {
+		chunkSize = cfg.Migration.ChunkSize
+	}
+	if tuner != nil {
+		if value, ok := tuner.TableChunkSize(tableName); ok && value > 0 {
+			chunkSize = value
+		} else if value := tuner.Snapshot().ChunkSize; value > 0 {
+			chunkSize = value
+		}
+	}
+	return chunkSize
+}
+
+func requestedWriterBatchSize(cfg *config.Config, tuner RuntimeTuner, tableName string) int {
+	batchSize := 0
+	if cfg != nil {
+		batchSize = cfg.Migration.ChunkSize
+	}
+	if tuner != nil {
+		if value, ok := tuner.TableBatchSize(tableName); ok && value > 0 {
+			batchSize = value
+		} else if value := tuner.Snapshot().ChunkSize; value > 0 {
+			batchSize = value
+		}
+	}
+	return batchSize
+}
+
 // calculatePipelineBuffers derives both chunkChan and jobChan buffer depths
 // for a specific table from the system's memory budget and the table's actual
-// Go heap cost per row. No magic numbers — all values come from system detection,
-// user config, or per-table column metadata.
+// Go heap cost per row. The requested chunk remains the steady execution
+// policy, matching the pre-epic path. Shared measured-byte admission and the
+// process memory guard provide steady backpressure; the complete-inventory
+// model remains a fail-closed gate and nonrelaxing ratchet for runtime writer
+// transitions. Feeding its static per-table projection into ordinary execution
+// made the effective action WAW/PR-dependent and regressed transfer throughput.
 func calculatePipelineBuffers(cfg *config.Config, job Job, tableName string, tuner RuntimeTuner, numWriters int, numReaders int, readAheadBuffers int) pool.PipelineBufferSizes {
-	// Resolve chunk size: per-table override → global tuner → config default
-	chunkSize := cfg.Migration.ChunkSize
-	if tuner != nil {
-		if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
-			chunkSize = cs
-		} else if cs := tuner.Snapshot().ChunkSize; cs > 0 {
-			chunkSize = cs
-		}
-	}
-
-	tableBudgetMB, _ := pipelineBudgetMB(cfg)
-
-	// Divide budget among concurrent table pipelines. Workers controls how many
-	// tables transfer simultaneously, and each gets its own channels and buffers.
-	// Without this division, each table independently claims the full budget,
-	// causing total memory to be Workers × budget.
-	concurrentTables := int64(cfg.Migration.Workers)
-	if concurrentTables > 1 {
-		tableBudgetMB = tableBudgetMB / concurrentTables
-		if tableBudgetMB < 1 {
-			tableBudgetMB = 1
-		}
-	}
+	tuple := effectiveRuntimeSizingTuple(cfg, tuner)
+	chunkSize := requestedReaderChunkSize(cfg, tuner, tableName)
+	tableBudgetBytes := perTablePipelineBudgetBytes(cfg, tuple.workers)
+	rowBytes, _ := tableSizingRowBytes(cfg, job.Table.EstimatedRowSize)
 
 	return pool.CalculatePipelineBuffers(pool.PipelineBufferConfig{
-		MemoryBudgetMB:   tableBudgetMB,
-		ChunkSize:        chunkSize,
-		RowBytes:         job.Table.EstimatedRowSize,
-		NumWriters:       numWriters,
-		NumReaders:       numReaders,
-		ReadAheadBuffers: readAheadBuffers,
+		MemoryBudgetBytes: tableBudgetBytes,
+		ChunkSize:         chunkSize,
+		RowBytes:          rowBytes,
+		NumWriters:        numWriters,
+		NumReaders:        numReaders,
+		ReadAheadBuffers:  readAheadBuffers,
 	})
 }
 

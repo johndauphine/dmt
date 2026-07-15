@@ -218,6 +218,44 @@ func TestRuntimeTunerReportTransferTime(t *testing.T) {
 	}
 }
 
+func TestRuntimeTunerReportChunkProjection(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 50_000})
+	reporter := tuner.(chunkProjectionReporter)
+
+	reporter.ReportChunkProjection(50_000, 50_000)
+	reporter.ReportChunkProjection(50_000, 8_000)
+	reporter.ReportChunkProjection(50_000, 20_000)
+	reporter.ReportChunkProjection(0, 1)
+
+	m := tuner.Metrics()
+	if !m.SafetyProjected {
+		t.Fatal("SafetyProjected = false, want true after a binding safety limit")
+	}
+	if m.ExecutionChunkMin != 8_000 || m.ExecutionChunkMax != 50_000 {
+		t.Fatalf("execution chunk range = %d..%d, want 8000..50000", m.ExecutionChunkMin, m.ExecutionChunkMax)
+	}
+
+	writerOnly := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 50_000})
+	writerReporter := writerOnly.(chunkProjectionReporter)
+	writerReporter.ReportChunkProjection(50_000, 50_000)
+	writerReporter.ReportBatchProjection(50_000, 8_000)
+	writerMetrics := writerOnly.Metrics()
+	if !writerMetrics.SafetyProjected || writerMetrics.ExecutionChunkMin != 50_000 || writerMetrics.ExecutionChunkMax != 50_000 {
+		t.Fatalf("writer-only projection metrics = (applied=%v range=%d..%d), want (true,50000..50000)",
+			writerMetrics.SafetyProjected, writerMetrics.ExecutionChunkMin, writerMetrics.ExecutionChunkMax)
+	}
+}
+
+func TestRuntimeTunerReportsWriterScaleDeferrals(t *testing.T) {
+	tuner := NewRuntimeTuner(RuntimeSnapshot{WriteAheadWriters: 2})
+	reporter := tuner.(writerScaleDeferralReporter)
+	reporter.ReportWriterScaleDeferral()
+	reporter.ReportWriterScaleDeferral()
+	if got := tuner.Metrics().WriterScaleDeferrals; got != 2 {
+		t.Fatalf("writer scale deferrals = %d, want 2", got)
+	}
+}
+
 func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
 	tuner := NewRuntimeTuner(RuntimeSnapshot{ChunkSize: 1000})
 
@@ -231,6 +269,7 @@ func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
 			tuner.ReportError()
 			tuner.ReportBudgetWait(40)
 			tuner.ReportTransferTime(10, 20, 30, 100)
+			tuner.(chunkProjectionReporter).ReportChunkProjection(1_000, 500)
 		}()
 	}
 	wg.Wait()
@@ -253,6 +292,10 @@ func TestRuntimeTunerConcurrentMetrics(t *testing.T) {
 	}
 	if m.TotalTransferRows != 10000 {
 		t.Errorf("TotalTransferRows = %d, want 10000", m.TotalTransferRows)
+	}
+	if !m.SafetyProjected || m.ExecutionChunkMin != 500 || m.ExecutionChunkMax != 500 {
+		t.Errorf("projection metrics = (applied=%v min=%d max=%d), want (true,500,500)",
+			m.SafetyProjected, m.ExecutionChunkMin, m.ExecutionChunkMax)
 	}
 }
 

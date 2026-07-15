@@ -155,29 +155,33 @@ func safeChunkSizeDetail(budgetMB int64, workers, readAheadBuffers, writeAheadWr
 	return rowsBig.Int64(), false
 }
 
-// applyMemoryClamp enforces the caller-resolved memory budget on out.ChunkSize
-// using SafetyRowBytes, then recomputes EstimatedMemMB. Representative and
-// legacy average widths intentionally do not participate in this hard-safety
-// path. A non-positive budget remains nonbinding, though the estimate is still
-// populated.
+// applyMemoryClamp enforces the caller-resolved memory budget on the global
+// recommendation using the row-count-weighted representative width, then
+// recomputes EstimatedMemMB with that same diagnostic model. Steady transfer
+// applies the resulting policy directly under shared measured-byte admission
+// and MemoryGuard; complete-inventory table checks gate runtime writer growth.
+// Keeping the widest table out of this global policy clamp prevents one outlier
+// from throttling every table. The legacy capped average remains a regression
+// feature only. A non-positive budget remains nonbinding, though the estimate
+// is still populated.
 //
-// If even one row exceeds the budget, ChunkSize is clamped to the one-row
-// minimum-progress fallback and MemoryEstimateOverBudget remains true. The
-// reasoning explicitly says that this is not a fitting configuration.
+// If even one representative modeled row exceeds the budget, ChunkSize is
+// clamped to the one-row minimum-progress fallback and
+// MemoryEstimateOverBudget remains true. The reasoning explicitly says that
+// this is not a fitting representative configuration.
 func applyMemoryClamp(out *Output, in Input) {
-	rowBytes, known := in.safetyRowBytes()
-	widthSource := "unobserved fallback estimate"
-	if known {
-		widthSource = "widest observed table-average model; not a per-row bound"
-	} else {
-		// Width provenance matters even when no clamp fires: a formula/load
-		// fallback is an estimate, not evidence that schema inspection found a
-		// 500-byte row. Keep that distinction in the persisted reasoning.
-		out.Reasoning = appendReasoning(out.Reasoning,
-			"memory estimate: safety width %d B, unobserved fallback estimate (no positive schema width)",
-			rowBytes,
-		)
+	rowBytes := in.representativeRowBytes()
+	widthSource := "row-count-weighted workload representative"
+	if in.RepresentativeRowBytes <= 0 || (in.RepresentativeRowBytes == fallbackRowBytes && !in.SafetyRowBytesKnown) {
+		widthSource = "unobserved fallback planning estimate"
 	}
+	// Width provenance matters even when no clamp fires. Keep the global
+	// diagnostic explicitly representative and name the independent runtime
+	// safety mechanisms without implying a static per-table policy mutation.
+	out.Reasoning = appendReasoning(out.Reasoning,
+		"memory estimate: representative width %d B (%s); steady transfer uses shared measured-byte admission/MemoryGuard, and complete-inventory checks gate runtime writer growth",
+		rowBytes, widthSource,
+	)
 
 	budgetMB := in.MemoryBudgetMB
 	overBudget := MemoryEstimateExceedsBudget(
@@ -202,12 +206,12 @@ func applyMemoryClamp(out *Output, in Input) {
 			out.ChunkSize = int(safe) // safe < current int, so the cast fits.
 			if minimumExceeds {
 				out.Reasoning = appendReasoning(out.Reasoning,
-					"memory clamp: chunk_size %d → 1 row minimum-progress fallback; one modeled row still exceeds budget %d MB (safety width %d B, %s)",
+					"memory clamp: chunk_size %d → 1 row minimum-progress fallback; one representative modeled row still exceeds budget %d MB (representative width %d B, %s)",
 					oldCS, budgetMB, rowBytes, widthSource,
 				)
 			} else {
 				out.Reasoning = appendReasoning(out.Reasoning,
-					"memory clamp: chunk_size %d → %d rows (budget %d MB, safety width %d B, %s)",
+					"memory clamp: chunk_size %d → %d rows (budget %d MB, representative width %d B, %s; steady transfer uses shared measured-byte admission/MemoryGuard, and complete-inventory checks gate runtime writer growth)",
 					oldCS, out.ChunkSize, budgetMB, rowBytes, widthSource,
 				)
 			}
@@ -215,7 +219,7 @@ func applyMemoryClamp(out *Output, in Input) {
 			// A pre-existing one-row recommendation still needs an explicit
 			// warning; silence here would falsely suggest the estimate fits.
 			out.Reasoning = appendReasoning(out.Reasoning,
-				"memory clamp: 1-row minimum-progress fallback still exceeds budget %d MB (safety width %d B, %s)",
+				"memory clamp: 1-row minimum-progress fallback still exceeds budget %d MB (representative width %d B, %s)",
 				budgetMB, rowBytes, widthSource,
 			)
 		}

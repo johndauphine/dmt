@@ -133,7 +133,7 @@ func TestApplyDefaultsMemoryEnvelopeReadFailureIsConservative(t *testing.T) {
 	}
 }
 
-func TestApplyDefaultsPublishesEnvelopeAndUsesCanonicalBuffers(t *testing.T) {
+func TestApplyDefaultsPublishesEnvelopeAndUsesLegacyBuffers(t *testing.T) {
 	withEmptySecretsFile(t)
 	reader := &fakeMemoryReader{snapshot: systemmemory.Snapshot{
 		CapacityMB:  8192,
@@ -163,11 +163,10 @@ func TestApplyDefaultsPublishesEnvelopeAndUsesCanonicalBuffers(t *testing.T) {
 	if reader.reads != 1 {
 		t.Fatalf("memory reader calls = %d, want exactly 1", reader.reads)
 	}
-	// #711 supersedes the temporary budget-scaled RAB formula from #708.
-	// The canonical policy fixes RAB at 4 and enforces the envelope by
-	// clamping generated chunks instead.
-	if cfg.Migration.ReadAheadBuffers != 4 {
-		t.Fatalf("ReadAheadBuffers = %d, want canonical default 4", cfg.Migration.ReadAheadBuffers)
+	// The restored legacy formula uses half of the exact available/user-capped
+	// memory input, while the retained envelope remains the final hard clamp.
+	if cfg.Migration.ReadAheadBuffers != 21 {
+		t.Fatalf("ReadAheadBuffers = %d, want legacy target-memory value 21", cfg.Migration.ReadAheadBuffers)
 	}
 
 	dump := cfg.DebugDump()

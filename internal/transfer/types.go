@@ -116,6 +116,12 @@ type writeAck struct {
 	lastPK   any
 	rowNum   int64
 	rows     int64 // chunk row count, accumulated into rows_done in ack order (#632)
+	bytes    int64 // reservation released only when this ack is applied in order
+}
+
+type ackRelease struct {
+	jobs  int
+	bytes int64
 }
 
 type readerCheckpointState struct {

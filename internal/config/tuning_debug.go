@@ -86,8 +86,11 @@ func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []Param
 
 	// Retain current-run width evidence only after the effective tuple is known:
 	// the apply gates above preserve user/secrets pins, so these values are the
-	// workers and buffers that will actually run. Unknown/fallback width remains
-	// explicit and cannot authorize resource growth (#709).
+	// workers and buffers that will actually run. The representative width sizes
+	// the global policy ceiling; the widest observed width remains separate for
+	// fail-closed growth authorization and missing per-table metadata. An
+	// unknown/fallback safety width cannot authorize resource growth (#709).
+	c.Migration.RuntimeRepresentativeRowBytes = s.RepresentativeRowBytes
 	c.Migration.RuntimeSafetyRowBytes = s.SafetyRowBytes
 	c.Migration.RuntimeSafetyRowBytesKnown = s.SafetyRowBytesKnown
 	c.FinalizeRuntimeChunkSizeCap()
@@ -177,7 +180,7 @@ func (c *Config) DebugDump() string {
 	// Migration Settings
 	b.WriteString("\nMigration Settings:\n")
 
-	const defaultPolicyExpl = "canonical no-history tuning policy"
+	const defaultPolicyExpl = "legacy load-time formula policy"
 
 	// Workers
 	fmt.Fprintf(&b, "  Workers: %s\n", c.formatTunableValue(c.Migration.Workers, ac.OriginalWorkers, provenanceMigrationWorkers, defaultPolicyExpl))
@@ -288,7 +291,7 @@ func (c *Config) DebugDump() string {
 			fmt.Fprintf(&b, "  Budget Status: within %d MB budget\n", ac.MemoryEnvelope.BudgetMB)
 		}
 	}
-	b.WriteString("  Width Source: unobserved 500-byte fallback estimate; schema-aware tuning uses the widest observed table-average model.\n")
+	b.WriteString("  Width Source: unobserved fallback estimate (500 bytes/row); schema-aware global tuning uses the row-count-weighted representative, steady transfer uses shared measured-byte admission/MemoryGuard, and per-table complete inventory gates runtime writer transitions.\n")
 	if ac.DefaultPolicyReasoning != "" && !ac.DefaultPolicyChunkPinned {
 		fmt.Fprintf(&b, "  Load-time Policy Reasoning: %s\n", ac.DefaultPolicyReasoning)
 	}

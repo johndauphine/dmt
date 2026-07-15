@@ -241,6 +241,11 @@ func (o *Orchestrator) Resume(ctx context.Context) (resumeErr error) {
 
 	// Apply AI-recommended parameters (if AI is available)
 	o.applyTuning(ctx)
+	// The row describes the complete workload analyzed above, but any measured
+	// throughput/projection below covers only the unfinished resume segment.
+	// Keep this independent of transfer metrics so transferAll cannot make the
+	// partial-workload result eligible by reporting a clean segment.
+	o.excludeTuningResultFromLearning = true
 
 	// Persist the post-tuning config so `dmt history --run <id>` reflects what actually ran.
 	if err := o.state.UpdateRunConfig(run.ID, o.config.Sanitized()); err != nil {

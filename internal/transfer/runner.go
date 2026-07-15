@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,9 +38,9 @@ type pipelineEnv struct {
 	//
 	// A reader that blocks here holds no reservation — only the one chunk it
 	// just scanned — so this is a single, deadlock-free acquire, never a
-	// hold-and-wait top-up. The transient overshoot of at most one chunk per
-	// reader is exactly the per-reader scan-accumulation slack the #465
-	// buffer model already reserves, with the memory guard as the backstop.
+	// hold-and-wait top-up. As in the pre-epic path, that leaves at most one
+	// unadmitted scanned chunk per reader; MemoryGuard and GOMEMLIMIT are the
+	// process-level backstops for that transient allocation and driver copies.
 	acquireMem func(ctx context.Context, n int64) (int64, bool)
 }
 
@@ -60,17 +61,152 @@ type chunkProducer interface {
 // adjustments (rule-driven, error-driven) take effect on in-flight work.
 // Priority everywhere: per-table override → global tuner value → config.
 type tunerCallbacks struct {
-	chunkSize      func() int
-	batchSize      func() int
-	upsertChunk    func() int
-	checkpointFreq func() int
+	chunkSize       func() int
+	batchSize       func() int
+	upsertChunk     func() int
+	checkpointFreq  func() int
+	tryScaleWriters func(desired int, upscale bool, apply func() error) (applied bool, observedChunk int, prospectiveCap int, err error)
 }
 
-func newTunerCallbacks(cfg *config.Config, tuner RuntimeTuner, tableName string) tunerCallbacks {
-	baseChunkSize := cfg.Migration.ChunkSize
+type chunkProjectionReporter interface {
+	ReportChunkProjection(requested, effective int)
+	ReportBatchProjection(requested, effective int)
+}
+
+type writerScaleDeferralReporter interface {
+	ReportWriterScaleDeferral()
+}
+
+// downwardChunkCap is a race-safe, positive-only minimum. A pipeline's fixed
+// channel depths cannot be resized, and writer downscales retire busy workers
+// asynchronously. Once an applied concurrency state requires a lower execution
+// cap, that cap therefore remains binding for the rest of the pipeline. A
+// desired but refused WAW transition does not mutate it. Relaxing an applied
+// cap requires a new pipeline (or a future explicit, measured resize protocol),
+// not an incidental WAW backoff.
+type downwardChunkCap struct {
+	value atomic.Int64
+}
+
+func newDownwardChunkCap(initial int) *downwardChunkCap {
+	cap := &downwardChunkCap{}
+	if initial > 0 {
+		cap.value.Store(int64(initial))
+	}
+	return cap
+}
+
+func (c *downwardChunkCap) observe(candidate int) int {
+	if c == nil {
+		return candidate
+	}
+	for {
+		current64 := c.value.Load()
+		current := positiveInt64ToInt(current64)
+		if candidate <= 0 || (current > 0 && current <= candidate) {
+			return current
+		}
+		if c.value.CompareAndSwap(current64, int64(candidate)) {
+			return candidate
+		}
+	}
+}
+
+func (c *downwardChunkCap) current() int {
+	if c == nil {
+		return 0
+	}
+	return positiveInt64ToInt(c.value.Load())
+}
+
+func newTunerCallbacks(
+	cfg *config.Config,
+	tuner RuntimeTuner,
+	tableName string,
+	tableRowBytes int64,
+	workers int,
+	numReaders int,
+	initialWriters int,
+	buffers pool.PipelineBufferSizes,
+) tunerCallbacks {
+	if workers < 1 {
+		workers = 1
+	}
+	if numReaders < 1 {
+		numReaders = 1
+	}
+	if initialWriters < 1 {
+		initialWriters = 1
+	}
+
+	capDetailForWriters := func(numWriters int) (int, bool) {
+		if numWriters < 1 {
+			numWriters = 1
+		}
+		return runtimeTableChunkSizeCapDetail(
+			cfg,
+			tableRowBytes,
+			workers,
+			numReaders,
+			numWriters,
+			buffers,
+		)
+	}
+	capForWriters := func(numWriters int) int {
+		cap, _ := capDetailForWriters(numWriters)
+		return cap
+	}
+	protocolCap := 0
+	if cfg != nil {
+		protocolCap = cfg.Migration.TargetHardChunkLimit
+	}
+	// The initial policy is not projected through the per-table inventory
+	// model. Restoring the pre-epic steady execution policy avoids the strongly
+	// WAW-dependent chunk shrink that regressed transfer throughput. The target
+	// protocol limit remains independently binding, and a complete-inventory
+	// ceiling is committed after any applied writer-count transition.
+	capRatchet := newDownwardChunkCap(protocolCap)
+	// Serializing reader-size selection with writer upscales closes the
+	// transition race where a callback could compute an old, larger cap just
+	// before the tuner update but publish/use it after new writers were live.
+	// maxReaderChunk is deliberately a lifetime high-water: proving that all
+	// older chunks have drained would require a generation-aware queue barrier.
+	var sizingMu sync.Mutex
+	var scaleMu sync.Mutex
+	maxReaderChunk := 0
+	writerHighWater := initialWriters
+	pendingTransitionCap := 0
+	effectiveCap := func() int {
+		return minPositiveInt(capRatchet.current(), pendingTransitionCap)
+	}
+	_, rowWidthKnown := tableSizingRowBytes(cfg, tableRowBytes)
+	pipelineMB, _ := pipelineBudgetMB(cfg)
+	memoryBoundAvailable := rowWidthKnown && pipelineMB > 0
+
 	cb := tunerCallbacks{
-		chunkSize:   func() int { return baseChunkSize },
-		batchSize:   func() int { return baseChunkSize },
+		chunkSize: func() int {
+			sizingMu.Lock()
+			defer sizingMu.Unlock()
+			requested := requestedReaderChunkSize(cfg, tuner, tableName)
+			effective := capPositiveInt(requested, effectiveCap())
+			if effective > maxReaderChunk {
+				maxReaderChunk = effective
+			}
+			if reporter, ok := tuner.(chunkProjectionReporter); ok {
+				reporter.ReportChunkProjection(requested, effective)
+			}
+			return effective
+		},
+		batchSize: func() int {
+			sizingMu.Lock()
+			defer sizingMu.Unlock()
+			requested := requestedWriterBatchSize(cfg, tuner, tableName)
+			effective := capPositiveInt(requested, effectiveCap())
+			if reporter, ok := tuner.(chunkProjectionReporter); ok {
+				reporter.ReportBatchProjection(requested, effective)
+			}
+			return effective
+		},
 		upsertChunk: func() int { return cfg.Migration.UpsertMergeChunkSize },
 		checkpointFreq: func() int {
 			f := cfg.Migration.CheckpointFrequency
@@ -79,29 +215,70 @@ func newTunerCallbacks(cfg *config.Config, tuner RuntimeTuner, tableName string)
 			}
 			return f
 		},
+		tryScaleWriters: func(desired int, upscale bool, apply func() error) (bool, int, int, error) {
+			scaleMu.Lock()
+			defer scaleMu.Unlock()
+
+			if !upscale {
+				// A downscale cannot increase inventory. Do not hold sizingMu while
+				// ScaleWorkers retires idle workers: a writer may need batchSize
+				// (and therefore this mutex) to finish its current call. Once the
+				// transition succeeds, activate the complete-inventory ceiling for
+				// the lifetime writer high-water. Busy retirees can still be live,
+				// so a later rebound must never use a looser desired-writer cap.
+				sizingMu.Lock()
+				prospectiveCap := capForWriters(writerHighWater)
+				observed := maxReaderChunk
+				if apply == nil {
+					sizingMu.Unlock()
+					return false, observed, prospectiveCap, nil
+				}
+				// Publish a transactional cap before ScaleWorkers can expose an
+				// asynchronously draining generation. Reader and writer callbacks
+				// consult it during the unlocked apply window.
+				pendingTransitionCap = prospectiveCap
+				sizingMu.Unlock()
+				if err := apply(); err != nil {
+					sizingMu.Lock()
+					pendingTransitionCap = 0
+					sizingMu.Unlock()
+					return false, observed, prospectiveCap, err
+				}
+				sizingMu.Lock()
+				capRatchet.observe(prospectiveCap)
+				pendingTransitionCap = 0
+				observed = maxReaderChunk
+				sizingMu.Unlock()
+				return true, observed, prospectiveCap, nil
+			}
+
+			sizingMu.Lock()
+			defer sizingMu.Unlock()
+			prospectiveWriters := desired
+			if writerHighWater > prospectiveWriters {
+				prospectiveWriters = writerHighWater
+			}
+			prospectiveCap, minimumExceeds := capDetailForWriters(prospectiveWriters)
+			if !memoryBoundAvailable || minimumExceeds || prospectiveCap <= 0 || maxReaderChunk > prospectiveCap {
+				return false, maxReaderChunk, prospectiveCap, nil
+			}
+			if apply == nil {
+				return false, maxReaderChunk, prospectiveCap, nil
+			}
+			if err := apply(); err != nil {
+				return false, maxReaderChunk, prospectiveCap, err
+			}
+			// ScaleWorkers has admitted the new live-writer ceiling while sizingMu
+			// keeps readers and newly started writers out of their sizing callbacks.
+			// Commit the nonincreasing cap and high-water before unlocking; a
+			// refused or failed transition leaves the pool and cap unchanged.
+			writerHighWater = prospectiveWriters
+			capRatchet.observe(prospectiveCap)
+			return true, maxReaderChunk, prospectiveCap, nil
+		},
 	}
 	if tuner == nil {
 		return cb
-	}
-	cb.chunkSize = func() int {
-		if cs, ok := tuner.TableChunkSize(tableName); ok && cs > 0 {
-			return cs
-		}
-		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
-			return cs
-		}
-		return baseChunkSize
-	}
-	// Batch size reaches the writer even though target.chunk_size is set
-	// before tuning: per-table override, then global tuner chunk_size.
-	cb.batchSize = func() int {
-		if bs, ok := tuner.TableBatchSize(tableName); ok && bs > 0 {
-			return bs
-		}
-		if cs := tuner.Snapshot().ChunkSize; cs > 0 {
-			return cs
-		}
-		return baseChunkSize
 	}
 	cb.upsertChunk = func() int { return tuner.Snapshot().UpsertMergeChunkSize }
 	cb.checkpointFreq = func() int {
@@ -140,7 +317,10 @@ type pipelineConfig struct {
 	// the async persistence sink the runner owns (#620) — the coordinator
 	// uses it for periodic saves. Returning nil disables ack processing.
 	// Nil field means no checkpointing at all.
-	newAckHandler func(cb tunerCallbacks, saver ProgressSaver) func(writeAck)
+	// The handler returns the job count and total in-flight byte reservation
+	// released by this acknowledgement. Both are zero for an out-of-order ack
+	// and may include successors when the ack fills a sequence gap.
+	newAckHandler func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) ackRelease
 
 	// onRangeDone receives a parallel producer's end-of-range marker. It is
 	// deliberately separate from a write ack: a range is checkpoint-complete
@@ -161,7 +341,6 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	cfg, job := pc.cfg, pc.job
 	tableName := job.Table.Name
 	stats := &TransferStats{}
-	cb := newTunerCallbacks(cfg, pc.tuner, tableName)
 
 	// Reader and writer counts are both needed up front to compute
 	// pipeline buffer depths from the memory budget.
@@ -170,9 +349,14 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 		numReaders = 1
 	}
 	numWriters := cfg.Migration.WriteAheadWriters
+	readAheadBuffers := cfg.Migration.ReadAheadBuffers
 	if pc.tuner != nil {
-		if tw := pc.tuner.Snapshot().WriteAheadWriters; tw > 0 {
+		snapshot := pc.tuner.Snapshot()
+		if tw := snapshot.WriteAheadWriters; tw > 0 {
 			numWriters = tw
+		}
+		if rab := snapshot.ReadAheadBuffers; rab > 0 {
+			readAheadBuffers = rab
 		}
 	}
 	if numWriters < 1 {
@@ -180,7 +364,43 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	}
 
 	// Compute both pipeline buffer depths from the shared memory budget.
-	pipelineBufs := calculatePipelineBuffers(cfg, job, tableName, pc.tuner, numWriters, numReaders, cfg.Migration.ReadAheadBuffers)
+	pipelineBufs := calculatePipelineBuffers(cfg, job, tableName, pc.tuner, numWriters, numReaders, readAheadBuffers)
+	workers := effectiveRuntimeSizingTuple(cfg, pc.tuner).workers
+	cb := newTunerCallbacks(
+		cfg,
+		pc.tuner,
+		tableName,
+		job.Table.EstimatedRowSize,
+		workers,
+		numReaders,
+		numWriters,
+		pipelineBufs,
+	)
+	if _, minimumExceeds := runtimeTableChunkSizeCapDetail(
+		cfg,
+		job.Table.EstimatedRowSize,
+		workers,
+		numReaders,
+		numWriters,
+		pipelineBufs,
+	); minimumExceeds {
+		rowBytes, _ := tableSizingRowBytes(cfg, job.Table.EstimatedRowSize)
+		budgetMB, _ := pipelineBudgetMB(cfg)
+		logging.Warn("Pipeline %s: the complete-inventory writer-growth model cannot fit one row inside the unified pipeline budget (budget=%d MB, workers=%d, readers=%d, writers=%d, row_width=%d B); runtime writer upscales are disabled for this pipeline while the requested steady policy continues under shared measured-byte admission and MemoryGuard",
+			tableName, budgetMB, workers, numReaders, numWriters, rowBytes)
+		if job.AuditEvent != nil {
+			job.AuditEvent("pipeline_memory_minimum_over_budget", map[string]any{
+				"table":                  tableName,
+				"budget_mb":              budgetMB,
+				"workers":                workers,
+				"readers":                numReaders,
+				"writers":                numWriters,
+				"row_width_bytes":        rowBytes,
+				"requested_chunk_size":   requestedReaderChunkSize(cfg, pc.tuner, tableName),
+				"writer_growth_disabled": true,
+			})
+		}
+	}
 	bufferSize := pipelineBufs.ChunkChanDepth
 	chunkChan := make(chan chunkResult, bufferSize)
 
@@ -268,8 +488,17 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	}
 
 	jobBufSize := pipelineBufs.JobChanDepth
-	logging.Debug("Pipeline %s: chunkChan=%d, jobChan=%d (configChunk=%d, rowBytes=%d, writers=%d, readers=%d)",
-		tableName, bufferSize, jobBufSize, cfg.Migration.ChunkSize, job.Table.EstimatedRowSize, numWriters, numReaders)
+	requestedChunk := requestedReaderChunkSize(cfg, pc.tuner, tableName)
+	requestedBatch := requestedWriterBatchSize(cfg, pc.tuner, tableName)
+	effectiveChunk := cb.chunkSize()
+	effectiveBatch := cb.batchSize()
+	if effectiveChunk != requestedChunk || effectiveBatch != requestedBatch {
+		logging.Info("Pipeline %s: target protocol limit applied (reader chunk %d -> %d, writer batch %d -> %d, hard limit=%d); persisted chunk_size remains the requested policy",
+			tableName, requestedChunk, effectiveChunk, requestedBatch, effectiveBatch,
+			cfg.Migration.TargetHardChunkLimit)
+	}
+	logging.Debug("Pipeline %s: chunkChan=%d, jobChan=%d (effectiveChunk=%d, configuredChunk=%d, rowBytes=%d, writers=%d, readers=%d)",
+		tableName, bufferSize, jobBufSize, effectiveChunk, cfg.Migration.ChunkSize, job.Table.EstimatedRowSize, numWriters, numReaders)
 
 	enableAck := job.Saver != nil && job.TaskID > 0
 
@@ -348,6 +577,7 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	var lastResult chunkResult
 	var loopErr error
 	var lastReportedQueueDepth int // for delta-based queue depth reporting
+	var deferredWriterTarget int   // suppress duplicate transition-safety notices
 
 	debugEnabled := logging.IsDebug()
 	var chunkWaitStart time.Time
@@ -414,7 +644,11 @@ chunkLoop:
 
 		stats.QueryTime += result.queryTime
 		stats.ScanTime += result.scanTime
+		// Final checkpointing only needs pagination metadata. Keeping rows here
+		// would retain the last completed chunk outside the modeled pipeline
+		// inventory (and after its MemBudget reservation is released).
 		lastResult = result
+		lastResult.rows = nil
 
 		// Calculate overlap: if this chunk was ready before last write ended, we had overlap
 		receiveTime := time.Now()
@@ -444,6 +678,9 @@ chunkLoop:
 			}
 			break chunkLoop
 		}
+		// Ownership moved to jobChan/the writer. Drop the consumer's alias so
+		// the single dispatch slot counted by the pipeline model ends here.
+		result.rows = nil
 		if debugEnabled {
 			totalSubmitWait += time.Since(submitStart)
 		}
@@ -451,12 +688,26 @@ chunkLoop:
 		// Check for tuner-driven writer scaling at chunk boundaries
 		if pc.tuner != nil {
 			if desired := pc.tuner.Snapshot().WriteAheadWriters; desired > 0 && desired != numWriters {
-				if err := wp.ScaleWorkers(desired); err != nil {
+				upscale := desired > numWriters
+				applied, observedChunk, prospectiveCap, err := cb.tryScaleWriters(desired, upscale, func() error {
+					return wp.ScaleWorkers(desired)
+				})
+				if err != nil {
 					logging.Warn("Failed to scale workers: %v", err)
-				} else {
+				} else if applied {
 					logging.Debug("Scaled writers from %d to %d (tuner)", numWriters, desired)
 					numWriters = desired
+					deferredWriterTarget = 0
+				} else if upscale && deferredWriterTarget != desired {
+					if reporter, ok := pc.tuner.(writerScaleDeferralReporter); ok {
+						reporter.ReportWriterScaleDeferral()
+					}
+					logging.Info("Pipeline %s: deferring runtime writer upscale %d -> %d until a new pipeline because the prospective fixed-buffer safety check did not admit it (reader chunk high-water=%d, transition cap=%d); the requested chunk policy remains unchanged",
+						tableName, numWriters, desired, observedChunk, prospectiveCap)
+					deferredWriterTarget = desired
 				}
+			} else if desired == numWriters {
+				deferredWriterTarget = 0
 			}
 		}
 		// Actual live workers include downscaled goroutines draining their

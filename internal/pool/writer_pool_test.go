@@ -706,7 +706,7 @@ func TestCalculatePipelineBuffers_OverheadSlotsReserved(t *testing.T) {
 	}
 	got := CalculatePipelineBuffers(cfg)
 
-	overhead := cfg.NumWriters*writerEncodeAmplification + cfg.NumReaders
+	overhead := cfg.NumWriters*writerEncodeAmplification + cfg.NumReaders + consumerDispatchSlots
 	totalSlots := int(int64(cfg.MemoryBudgetMB) * 1024 * 1024 / (int64(cfg.ChunkSize) * cfg.RowBytes))
 	if got.ChunkChanDepth+got.JobChanDepth+overhead > totalSlots {
 		t.Errorf("queued(%d+%d) + overhead(%d) = %d exceeds budget slots %d",
@@ -718,6 +718,66 @@ func TestCalculatePipelineBuffers_OverheadSlotsReserved(t *testing.T) {
 	}
 	if got.ChunkChanDepth < cfg.NumReaders {
 		t.Errorf("chunkDepth %d below reader floor %d", got.ChunkChanDepth, cfg.NumReaders)
+	}
+}
+
+func TestCalculatePipelineBuffersPrefersExactByteBudget(t *testing.T) {
+	cfg := PipelineBufferConfig{
+		MemoryBudgetMB:    100,
+		MemoryBudgetBytes: 900_000,
+		ChunkSize:         1_000,
+		RowBytes:          100,
+		NumWriters:        1,
+		NumReaders:        1,
+		ReadAheadBuffers:  1,
+	}
+	got := CalculatePipelineBuffers(cfg)
+	overhead := cfg.NumReaders + cfg.NumWriters*writerEncodeAmplification + consumerDispatchSlots
+	totalSlots := got.ChunkChanDepth + got.JobChanDepth + overhead
+	if totalSlots > int(cfg.MemoryBudgetBytes/(int64(cfg.ChunkSize)*cfg.RowBytes)) {
+		t.Fatalf("exact byte budget ignored: inventory=%d slots, budget fits %d", totalSlots, cfg.MemoryBudgetBytes/(int64(cfg.ChunkSize)*cfg.RowBytes))
+	}
+}
+
+func TestSafePipelineChunkSizeCountsCompleteInventoryAcrossPipelines(t *testing.T) {
+	const (
+		budgetBytes = int64(64 * 1024 * 1024)
+		pipelines   = 4
+		rowBytes    = int64(4_000)
+		readers     = 3
+		writers     = 2
+		chunkDepth  = 3
+		jobDepth    = 3
+	)
+	cfg := PipelineBufferConfig{RowBytes: rowBytes, NumReaders: readers, NumWriters: writers}
+	sizes := PipelineBufferSizes{ChunkChanDepth: chunkDepth, JobChanDepth: jobDepth}
+	got := SafePipelineChunkSize(budgetBytes, pipelines, cfg, sizes)
+	liveSlots := chunkDepth + jobDepth + readers + writers*writerEncodeAmplification + consumerDispatchSlots
+	want := budgetBytes / int64(pipelines) / int64(liveSlots) / rowBytes
+	if got != want {
+		t.Fatalf("SafePipelineChunkSize = %d, want %d (complete slots=%d)", got, want, liveSlots)
+	}
+	used := got * int64(pipelines) * int64(liveSlots) * rowBytes
+	if used > budgetBytes {
+		t.Fatalf("safe chunk consumes %d bytes, budget %d", used, budgetBytes)
+	}
+	if (got+1)*int64(pipelines)*int64(liveSlots)*rowBytes <= budgetBytes {
+		t.Fatalf("chunk %d was not maximal", got)
+	}
+}
+
+func TestSafePipelineChunkSizeMinimumProgressAndMalformedInputs(t *testing.T) {
+	cfg := PipelineBufferConfig{RowBytes: 2 * 1024 * 1024, NumReaders: 2, NumWriters: 2}
+	sizes := PipelineBufferSizes{ChunkChanDepth: 2, JobChanDepth: 3}
+	if got, minimumExceeds := SafePipelineChunkSizeDetail(1, 4, cfg, sizes); got != 1 || !minimumExceeds {
+		t.Fatalf("over-budget minimum = (%d, %v), want (1, true)", got, minimumExceeds)
+	}
+	if got := SafePipelineChunkSize(0, 4, cfg, sizes); got != 0 {
+		t.Fatalf("zero budget = %d, want 0", got)
+	}
+	cfg.RowBytes = 0
+	if got := SafePipelineChunkSize(1024, 4, cfg, sizes); got != 0 {
+		t.Fatalf("unknown width = %d, want 0", got)
 	}
 }
 
