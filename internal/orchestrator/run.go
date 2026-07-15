@@ -16,12 +16,6 @@ import (
 
 // Run executes a new migration.
 func (o *Orchestrator) Run(ctx context.Context) (runErr error) {
-	// A reused Config may still expose the effective chunk from a prior safety
-	// projection. Restore its nominal views before audit hashing and the run
-	// snapshot so persistence describes the operator/tuner request, not a stale
-	// cap from an earlier table scope.
-	o.config.BeginRuntimeChunkSizeProjection()
-
 	// Use provided run ID or generate a new one
 	runID := o.opts.RunID
 	if runID == "" {

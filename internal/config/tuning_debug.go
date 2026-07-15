@@ -17,9 +17,7 @@ type ParamChange struct {
 }
 
 // ApplyTunerSuggestions overrides generated defaults with tuner recommendations.
-// Only parameters the user didn't explicitly set (Original* == 0) receive
-// performance suggestions. The final memory/protocol safety projection may
-// still lower an explicit chunk while preserving its requested provenance.
+// Only parameters the user didn't explicitly set (Original* == 0) are overridden.
 // Returns a list of parameters that were changed.
 func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []ParamChange {
 	ac := c.autoConfig
@@ -92,15 +90,7 @@ func (c *Config) ApplyTunerSuggestions(s *driver.SmartConfigSuggestions) []Param
 	// explicit and cannot authorize resource growth (#709).
 	c.Migration.RuntimeSafetyRowBytes = s.SafetyRowBytes
 	c.Migration.RuntimeSafetyRowBytesKnown = s.SafetyRowBytesKnown
-	c.Migration.RuntimeMemoryProfile = s.RuntimeMemoryProfile
 	c.FinalizeRuntimeChunkSizeCap()
-	if before, after := c.MaterializeRuntimeChunkSizeCap(); before != after {
-		changes = append(changes, ParamChange{
-			Name:     "chunk_size (runtime safety cap)",
-			OldValue: int64(before),
-			NewValue: int64(after),
-		})
-	}
 
 	return changes
 }

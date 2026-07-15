@@ -19,38 +19,35 @@ func sortedKeys(m map[int]bool) []int {
 	return out
 }
 
-// cellSkipsInCandidates filters retry exclusions to the effective projected
-// candidate domain. Unlike the pre-#728 static-grid check, this includes
-// authoritative pinned values outside the ordinary exploration grid.
-func cellSkipsInCandidates(cellSkip, candidateCells map[retryCellKey]bool) map[retryCellKey]bool {
+// cellSkipsInGrid filters the raw retry-rate exclusion map down to
+// entries whose (PR, RAB) pair appears in readerGrid and whose WAW is
+// in the argmax grid range. Used by the regression skip reasoning so
+// the log only mentions cells that actually participated in argmax
+// filtering — historical exclusions for cells outside the grid (e.g.,
+// PR=3/RAB=5 rows) never gated a candidate and shouldn't be quoted as
+// reasons the grid emptied (Copilot review on #221).
+func cellSkipsInGrid(cellSkip map[retryCellKey]bool) map[retryCellKey]bool {
 	if len(cellSkip) == 0 {
 		return cellSkip
 	}
+	gridPairs := map[[2]int]bool{}
+	for _, r := range readerGrid {
+		gridPairs[[2]int{r.ParallelReaders, r.ReadAheadBuffers}] = true
+	}
 	out := map[retryCellKey]bool{}
 	for k, v := range cellSkip {
-		if !v || !candidateCells[k] {
+		if !v {
+			continue
+		}
+		if k.WAW < 1 || k.WAW > maxLearnableWAW {
+			continue
+		}
+		if !gridPairs[[2]int{k.ParallelReaders, k.ReadAheadBuffers}] {
 			continue
 		}
 		out[k] = true
 	}
 	return out
-}
-
-// cellSkipsInGrid retains the package-test helper for the ordinary unpinned
-// grid. Production diagnostics use cellSkipsInCandidates so projected pins
-// outside this static domain remain visible.
-func cellSkipsInGrid(cellSkip map[retryCellKey]bool) map[retryCellKey]bool {
-	candidates := map[retryCellKey]bool{}
-	for waw := 1; waw <= maxLearnableWAW; waw++ {
-		for _, reader := range readerGrid {
-			candidates[retryCellKey{
-				WAW:              waw,
-				ParallelReaders:  reader.ParallelReaders,
-				ReadAheadBuffers: reader.ReadAheadBuffers,
-			}] = true
-		}
-	}
-	return cellSkipsInCandidates(cellSkip, candidates)
 }
 
 // retryCellKey identifies a (WriteAheadWriters, ParallelReaders,

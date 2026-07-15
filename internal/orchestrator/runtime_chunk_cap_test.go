@@ -12,7 +12,6 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/pool"
 	"github.com/johndauphine/dmt/internal/transfer"
-	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 const runtimeCapProbeDriverName = "runtime-cap-probe-test"
@@ -64,7 +63,7 @@ func TestApplyTuningManualPreservesProtocolCapAndResetsSafetyEvidence(t *testing
 		RuntimeSafetyRowBytesKnown: true,
 		RuntimeChunkGrowthAllowed:  true,
 		TargetHardChunkLimit:       777,
-	}, Source: config.SourceConfig{ChunkSize: 1_000}, Target: config.TargetConfig{ChunkSize: 1_000}}
+	}}
 	o := &Orchestrator{
 		config:     cfg,
 		targetPool: runtimeCapTargetPool{dbType: runtimeCapProbeDriverName},
@@ -75,10 +74,6 @@ func TestApplyTuningManualPreservesProtocolCapAndResetsSafetyEvidence(t *testing
 	if cfg.Migration.TargetHardChunkLimit != 100 || cfg.Migration.RuntimeChunkSizeCap != 100 {
 		t.Fatalf("manual protocol caps = (target=%d runtime=%d), want 100/100",
 			cfg.Migration.TargetHardChunkLimit, cfg.Migration.RuntimeChunkSizeCap)
-	}
-	if cfg.Migration.ChunkSize != 100 || cfg.Source.ChunkSize != 100 || cfg.Target.ChunkSize != 100 {
-		t.Fatalf("manual materialized chunk views = migration:%d source:%d target:%d, want all 100",
-			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize)
 	}
 	if cfg.Migration.RuntimeSafetyRowBytes != 0 || cfg.Migration.RuntimeSafetyRowBytesKnown || cfg.Migration.RuntimeChunkGrowthAllowed {
 		t.Fatalf("manual tuning retained stale width/growth evidence: %+v", cfg.Migration)
@@ -92,7 +87,7 @@ func TestApplyTuningUnsupportedStatsFinalizesProtocolOnlyCap(t *testing.T) {
 		RuntimeSafetyRowBytes:      8_192,
 		RuntimeSafetyRowBytesKnown: true,
 		RuntimeChunkGrowthAllowed:  true,
-	}, Source: config.SourceConfig{ChunkSize: 1_000}, Target: config.TargetConfig{ChunkSize: 1_000}}
+	}}
 	o := &Orchestrator{
 		config:     cfg,
 		sourcePool: runtimeCapFailureSourcePool{},
@@ -104,10 +99,6 @@ func TestApplyTuningUnsupportedStatsFinalizesProtocolOnlyCap(t *testing.T) {
 	if cfg.Migration.TargetHardChunkLimit != 100 || cfg.Migration.RuntimeChunkSizeCap != 100 {
 		t.Fatalf("formula-only protocol caps = (target=%d runtime=%d), want 100/100",
 			cfg.Migration.TargetHardChunkLimit, cfg.Migration.RuntimeChunkSizeCap)
-	}
-	if cfg.Migration.ChunkSize != 100 || cfg.Source.ChunkSize != 100 || cfg.Target.ChunkSize != 100 {
-		t.Fatalf("formula-only materialized chunk views = migration:%d source:%d target:%d, want all 100",
-			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize)
 	}
 	if cfg.Migration.RuntimeSafetyRowBytesKnown || cfg.Migration.RuntimeChunkGrowthAllowed {
 		t.Fatalf("formula-only analysis authorized memory growth without schema width: %+v", cfg.Migration)
@@ -181,156 +172,6 @@ func TestClampInitialRuntimeChunkSizeUpdatesAndRecords(t *testing.T) {
 	}
 	if !strings.Contains(records[0].Reasoning, "1000") || !strings.Contains(records[0].Reasoning, "400") {
 		t.Fatalf("initial clamp reasoning = %q, want original and capped values", records[0].Reasoning)
-	}
-}
-
-type runtimeChunkIdentitySaver struct {
-	actual driver.ActualParams
-}
-
-func (s *runtimeChunkIdentitySaver) SaveTuningWithActualParams(actual driver.ActualParams) int64 {
-	s.actual = actual
-	return 1
-}
-
-func TestCardinalityAwareCapIsConfiguredPersistedAndExecutedIdentically(t *testing.T) {
-	cfg, err := config.LoadBytes([]byte(`
-source:
-  type: sqlite
-  database: source.db
-target:
-  type: sqlite
-  database: target.db
-migration:
-  max_memory_mb: 64
-`))
-	if err != nil {
-		t.Fatalf("LoadBytes: %v", err)
-	}
-	profile := tuning.NewMemoryProfile([]tuning.TableMemoryStat{
-		{Name: "tiny_lookup", RowCount: 2, AvgRowBytes: 36_864},
-		{Name: "large_table", RowCount: 2_000_000, AvgRowBytes: 100},
-	})
-	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
-		Workers:                 1,
-		ReadAheadBuffers:        1,
-		WriteAheadWriters:       1,
-		ChunkSizeRecommendation: 1_000_000,
-		SafetyRowBytes:          36_864,
-		SafetyRowBytesKnown:     true,
-		RuntimeMemoryProfile:    profile,
-	})
-
-	wantCap := int(tuning.NewMemoryModel(profile, 36_864).SafeChunkSize(64, 1, 1, 1))
-	if wantCap != 335_544 || cfg.Migration.RuntimeChunkSizeCap != wantCap {
-		t.Fatalf("derived profile cap = %d (config %d), want 335544", wantCap, cfg.Migration.RuntimeChunkSizeCap)
-	}
-	if cfg.Migration.ChunkSize != wantCap || cfg.Source.ChunkSize != wantCap || cfg.Target.ChunkSize != wantCap {
-		t.Fatalf("pre-save config views = migration:%d source:%d target:%d, want all %d",
-			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize, wantCap)
-	}
-
-	saver := &runtimeChunkIdentitySaver{}
-	orch := &Orchestrator{config: cfg}
-	if rowID := orch.saveTuningWithLivePools(saver, checkpoint.TuningRecord{}); rowID != 1 {
-		t.Fatalf("saved row ID = %d, want 1", rowID)
-	}
-	if saver.actual.ChunkSize != wantCap {
-		t.Fatalf("persisted actual chunk_size = %d, want configured cap %d", saver.actual.ChunkSize, wantCap)
-	}
-
-	state, err := checkpoint.New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer state.Close()
-	if err := state.CreateRun("identity-run", "public", "main", cfg, "", ""); err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	recorder := newRuntimeAdjustmentRecorder(state, "identity-run")
-	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
-		ChunkSize: saver.actual.ChunkSize,
-		Workers:   saver.actual.Workers,
-	})
-	if err := clampInitialRuntimeChunkSize(tuner, cfg, recorder); err != nil {
-		t.Fatalf("clampInitialRuntimeChunkSize: %v", err)
-	}
-	if got := tuner.Snapshot().ChunkSize; got != wantCap {
-		t.Fatalf("executed tuner chunk = %d, want profile cap %d", got, wantCap)
-	}
-	if cfg.Migration.ChunkSize != wantCap || cfg.Source.ChunkSize != wantCap || cfg.Target.ChunkSize != wantCap {
-		t.Fatalf("final atomic config views = migration:%d source:%d target:%d, want all %d",
-			cfg.Migration.ChunkSize, cfg.Source.ChunkSize, cfg.Target.ChunkSize, wantCap)
-	}
-	if recorder.applied() {
-		t.Fatal("materialized configured/persisted tuple should make the final atomic clamp a no-op")
-	}
-	records, err := state.GetRuntimeAdjustments(0)
-	if err != nil {
-		t.Fatalf("GetRuntimeAdjustments: %v", err)
-	}
-	if len(records) != 0 {
-		t.Fatalf("clean identity path recorded runtime adjustments: %+v", records)
-	}
-}
-
-func TestUnobservedFallbackCapIsConfiguredPersistedAndExecutedIdentically(t *testing.T) {
-	cfg, err := config.LoadBytes([]byte(`
-source:
-  type: sqlite
-  database: source.db
-target:
-  type: sqlite
-  database: target.db
-migration:
-  max_memory_mb: 64
-  workers: 12
-  chunk_size: 50000
-  read_ahead_buffers: 4
-  write_ahead_writers: 8
-  parallel_readers: 2
-`))
-	if err != nil {
-		t.Fatalf("LoadBytes: %v", err)
-	}
-	cfg.ApplyTunerSuggestions(&driver.SmartConfigSuggestions{
-		Workers:                 12,
-		ChunkSizeRecommendation: 932,
-		ReadAheadBuffers:        4,
-		WriteAheadWriters:       8,
-		ParallelReaders:         2,
-		SafetyRowBytes:          500,
-		SafetyRowBytesKnown:     false,
-	})
-
-	const want = 932
-	if cfg.Migration.RuntimeChunkSizeCap != want || cfg.Migration.ChunkSize != want ||
-		cfg.Source.ChunkSize != want || cfg.Target.ChunkSize != want {
-		t.Fatalf("fallback config identity = cap:%d migration:%d source:%d target:%d, want all %d",
-			cfg.Migration.RuntimeChunkSizeCap, cfg.Migration.ChunkSize,
-			cfg.Source.ChunkSize, cfg.Target.ChunkSize, want)
-	}
-	if cfg.Migration.RuntimeChunkGrowthAllowed {
-		t.Fatal("unobserved fallback shrink authorized runtime growth")
-	}
-
-	saver := &runtimeChunkIdentitySaver{}
-	orch := &Orchestrator{config: cfg}
-	if rowID := orch.saveTuningWithLivePools(saver, checkpoint.TuningRecord{}); rowID != 1 {
-		t.Fatalf("saved row ID = %d, want 1", rowID)
-	}
-	if saver.actual.ChunkSize != want {
-		t.Fatalf("persisted fallback chunk = %d, want %d", saver.actual.ChunkSize, want)
-	}
-	tuner := transfer.NewRuntimeTuner(transfer.RuntimeSnapshot{
-		ChunkSize: saver.actual.ChunkSize,
-		Workers:   saver.actual.Workers,
-	})
-	if err := clampInitialRuntimeChunkSize(tuner, cfg, nil); err != nil {
-		t.Fatalf("clampInitialRuntimeChunkSize: %v", err)
-	}
-	if got := tuner.Snapshot().ChunkSize; got != want {
-		t.Fatalf("runtime fallback chunk = %d, want %d", got, want)
 	}
 }
 

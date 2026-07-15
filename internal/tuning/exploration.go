@@ -85,20 +85,11 @@ var explorationCells = [...]explorationCell{
 	{WAW: maxLearnableWAW, CSFraction: fullOptimumFraction, ParallelReaders: 2, ReadAheadBuffers: 8},
 }
 
-// explorationReplicateOf makes the four declared variance observations
-// explicit. A negative value means the entry is a unique design cell; a
-// non-negative value is the raw index whose observation this entry repeats.
-// Projection-created aliases are deduplicated separately and never inferred
-// to be intentional merely because their effective tuples are equal.
-var explorationReplicateOf = [...]int{-1, -1, -1, -1, -1, -1, -1, -1, 0, 1, 6, 7}
-
 // Compile-time equality check: either expression becomes a negative array
 // length if the table and the cold-start threshold diverge.
 var (
 	_ [explorationGridRuns - len(explorationCells)]struct{}
 	_ [len(explorationCells) - explorationGridRuns]struct{}
-	_ [explorationGridRuns - len(explorationReplicateOf)]struct{}
-	_ [len(explorationReplicateOf) - explorationGridRuns]struct{}
 )
 
 // readerGrid is the 2×2 reader candidate domain used by regression argmax.
@@ -120,16 +111,19 @@ func shouldExplore(in Input, usableCount int) bool {
 	return in.ForceExplore || usableCount < explorationGridRuns
 }
 
-// applyGridExploration picks the next reachable probe from the planned grid
-// based on raw persisted attempts. The usable post-filter count separately
-// controls cold-start labels and completion (#697, #698). The raw count is a
-// sequential rotation proxy; concurrent tuners can observe the same value and
-// this function does not claim to reserve cells globally.
+// applyGridExploration picks the next probe from the planned grid based
+// on raw persisted attempts, intersected with HardChunkLimit only. The usable
+// post-filter count separately controls cold-start labels and completion
+// (#697, #698). The raw count is a sequential rotation proxy; concurrent
+// tuners can observe the same value and this function does not claim to
+// reserve cells globally.
 // Historical-retry exclusions are intentionally NOT applied here: the
 // planned grid's job is to gather data so historical verdicts can be
 // re-examined as new runs accrue (issue #186 — under the original
 // "any retry → permanent exclusion" rule, AI-era retries at WAW=2
-// permanently locked the deterministic tuner out of probing it).
+// permanently locked the deterministic tuner out of probing it). On
+// a fully-filtered grid (every candidate skipped by HardChunkLimit),
+// the baseline output stands.
 func applyGridExploration(out *Output, in Input, profile DriverProfile, usableCount, rawIndex int) {
 	const fallbackBytes int64 = 10_000_000
 	representativeWidth := in.representativeRowBytes()
@@ -138,48 +132,34 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, usableCo
 		optimumBytes = fallbackBytes
 	}
 
-	type scheduledCell struct {
-		index       int
-		replicateOf int
-		cell        explorationCell
-		projection  candidateProjection
+	// Filter first, then index the eligible ring with the raw persisted-attempt
+	// count. A scan-forward implementation makes several consecutive raw
+	// indexes collapse onto the same later cell when HardChunkLimit removes a
+	// cluster of candidates. Modulo over the eligible ring preserves a complete,
+	// deterministic rotation. Keep the original table index for audit labels.
+	type indexedCell struct {
+		index   int
+		cell    explorationCell
+		csBytes int64
+		csRows  int
 	}
-	schedule := make([]scheduledCell, 0, len(explorationCells))
-	seenBase := make(map[effectiveCandidateKey]bool, len(explorationCells))
-	uniqueEffective := make(map[effectiveCandidateKey]bool, len(explorationCells))
-	declaredReplicates := 0
+	eligible := make([]indexedCell, 0, len(explorationCells))
 	for idx, cell := range explorationCells {
 		csBytes := scaledByteTarget(optimumBytes, cell.CSFraction)
-		projection := projectCandidate(in, profile, candidateFromBytes(
-			out.Workers,
-			cell.WAW,
-			csBytes,
-			cell.ParallelReaders,
-			cell.ReadAheadBuffers,
-			representativeWidth,
-		))
-		key := projection.key()
-		uniqueEffective[key] = true
-		replicateOf := explorationReplicateOf[idx]
-		if replicateOf < 0 && seenBase[key] {
+		csRows := rowsFromBytes(csBytes, representativeWidth)
+		if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
 			continue
 		}
-		if replicateOf >= 0 {
-			declaredReplicates++
-		} else {
-			seenBase[key] = true
-		}
-		schedule = append(schedule, scheduledCell{
-			index:       idx,
-			replicateOf: replicateOf,
-			cell:        cell,
-			projection:  projection,
-		})
+		eligible = append(eligible, indexedCell{index: idx, cell: cell, csBytes: csBytes, csRows: csRows})
 	}
-	if len(schedule) > 0 {
-		selected := schedule[rawIndex%len(schedule)]
+	if len(eligible) > 0 {
+		selected := eligible[rawIndex%len(eligible)]
 		cell := selected.cell
-		applyProjectedCandidate(out, selected.projection)
+
+		out.WriteAheadWriters = cell.WAW
+		out.ChunkSize = selected.csRows
+		out.ParallelReaders = cell.ParallelReaders
+		out.ReadAheadBuffers = cell.ReadAheadBuffers
 		out.Tier = TierExploration
 		// Label the run within the cold-start window when we're in it; for
 		// forced exploration after the usable-row threshold, report the
@@ -188,37 +168,21 @@ func applyGridExploration(out *Output, in Input, profile DriverProfile, usableCo
 		if usableCount < explorationGridRuns {
 			runLabel = fmt.Sprintf("run %d/%d", usableCount+1, explorationGridRuns)
 		}
-		replicateLabel := ""
-		if selected.replicateOf >= 0 {
-			replicateLabel = fmt.Sprintf(", declared replicate of idx %d", selected.replicateOf+1)
-		}
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"exploration: planned grid %s%s (requested WAW=%d, CS=%.1f×optimum=%d rows/%.1f MB, PR=%d, RAB=%d; effective WAW=%d, chunk=%d rows/model=%.1f MB, PR=%d, RAB=%d; %s; raw=%d, unique_effective=%d, scheduled=%d, declared_replicates=%d)",
-			runLabel,
-			replicateLabel,
-			cell.WAW,
-			cell.CSFraction,
-			selected.projection.Requested.ChunkSize,
-			candidateMB(selected.projection.Requested.RequestedChunkBytes),
-			cell.ParallelReaders,
-			cell.ReadAheadBuffers,
-			selected.projection.Effective.WriteAheadWriters,
-			selected.projection.Effective.ChunkSize,
-			candidateMB(selected.projection.ModelChunkBytes),
-			selected.projection.Effective.ParallelReaders,
-			selected.projection.Effective.ReadAheadBuffers,
-			selected.projection.reason(),
-			len(explorationCells),
-			len(uniqueEffective),
-			len(schedule),
-			declaredReplicates,
+			"exploration: planned grid %s (WAW=%d, CS=%.1f×optimum=%.1fMB, PR=%d, RAB=%d)",
+			runLabel, cell.WAW, cell.CSFraction, float64(selected.csBytes)/1024/1024, cell.ParallelReaders, cell.ReadAheadBuffers,
 		)
 		return
 	}
-	// Defensive only: the fixed design is non-empty and projection floors every
-	// candidate to one row, so production cannot exhaust the schedule.
+	// Every grid candidate was filtered out — leave baseline alone. The
+	// caller's memory clamp still runs; this is the safest fallback when
+	// HardChunkLimit eliminates every probe (the historical-retry skip
+	// was removed for #186, so HardChunkLimit is now the only way the
+	// grid empties). Note the fallthrough so finalizeTierAndReasoning
+	// doesn't have to invent a reason for this specific case.
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"exploration: projected schedule unexpectedly empty — baseline kept",
+		"exploration: every planned-grid candidate filtered (HardChunkLimit=%d) — baseline kept",
+		profile.HardChunkLimit,
 	)
 }
 
@@ -243,10 +207,9 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 // direction on a different knob is attempted with probability ε, so
 // composite probes occur with total probability ε² (#295).
 //
-// Each nudge is bounded by the WAW and reader-grid caps, then passed through
-// the same pin/memory/protocol projection as every other candidate. Directions
-// that collapse to the current effective tuple are skipped so exploration
-// never claims variance that cannot execute.
+// Each nudge is bounded by the WAW grid, HardChunkLimit, and the
+// reader-grid caps; if the chosen direction would violate a bound, falls
+// through to the next direction so we always generate *some* variance.
 //
 // Historical-retry exclusions are intentionally NOT applied (same
 // reasoning as applyGridExploration — #186). ε-perturbation is an
@@ -257,13 +220,13 @@ func shouldEpsilonPerturb(epsilon float64) bool {
 //
 //	WAW + 1   (capped at maxLearnableWAW)
 //	WAW − 1   (floored at 1)
-//	CS × 1.5  (then projected through memory/protocol caps)
+//	CS × 1.5  (capped at HardChunkLimit if set)
 //	CS × 0.67 (floored at 1 row)
 //	PR × 2    (capped at perturbPRMax)              #219
 //	PR ÷ 2    (floored at 1)                        #219
 //	RAB × 2   (capped at perturbRABMax)             #219
 //	RAB ÷ 2   (floored at perturbRABMin)            #219
-func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsilon float64) {
+func applyEpsilonPerturbation(out *Output, profile DriverProfile, epsilon float64) {
 	type direction struct {
 		knob  string
 		name  string
@@ -271,9 +234,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 	}
 	dirs := []direction{
 		{"waw", "WAW+1", func(o *Output) bool {
-			if in.PinnedWriteAheadWriters != nil {
-				return false
-			}
 			if o.WriteAheadWriters < 1 || o.WriteAheadWriters >= maxLearnableWAW {
 				return false
 			}
@@ -282,9 +242,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"waw", "WAW-1", func(o *Output) bool {
-			if in.PinnedWriteAheadWriters != nil {
-				return false
-			}
 			if o.WriteAheadWriters <= 1 {
 				return false
 			}
@@ -293,10 +250,10 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"cs", "CS×1.5", func(o *Output) bool {
-			if in.PinnedChunkSize != nil {
+			next := scalePositiveIntRatio(o.ChunkSize, 3, 2)
+			if profile.HardChunkLimit > 0 && next > profile.HardChunkLimit {
 				return false
 			}
-			next := scalePositiveIntRatio(o.ChunkSize, 3, 2)
 			if next == o.ChunkSize {
 				return false
 			}
@@ -304,9 +261,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"cs", "CS×0.67", func(o *Output) bool {
-			if in.PinnedChunkSize != nil {
-				return false
-			}
 			next := scalePositiveIntRatio(o.ChunkSize, 67, 100)
 			if next < 1 {
 				next = 1
@@ -318,9 +272,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"pr", "PR×2", func(o *Output) bool {
-			if in.PinnedParallelReaders != nil {
-				return false
-			}
 			if o.ParallelReaders <= 0 || o.ParallelReaders > perturbPRMax/2 {
 				return false
 			}
@@ -329,9 +280,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"pr", "PR÷2", func(o *Output) bool {
-			if in.PinnedParallelReaders != nil {
-				return false
-			}
 			next := o.ParallelReaders / 2
 			if next < 1 || next == o.ParallelReaders {
 				return false
@@ -340,9 +288,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"rab", "RAB×2", func(o *Output) bool {
-			if in.PinnedReadAheadBuffers != nil {
-				return false
-			}
 			if o.ReadAheadBuffers <= 0 || o.ReadAheadBuffers > perturbRABMax/2 {
 				return false
 			}
@@ -351,9 +296,6 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 			return true
 		}},
 		{"rab", "RAB÷2", func(o *Output) bool {
-			if in.PinnedReadAheadBuffers != nil {
-				return false
-			}
 			next := o.ReadAheadBuffers / 2
 			if next < perturbRABMin || next == o.ReadAheadBuffers {
 				return false
@@ -364,26 +306,17 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 	}
 	applied := make([]string, 0, 2)
 	usedKnobs := map[string]bool{}
-	lastProjection := applyEffectiveProjection(out, in, profile)
 	applyOne := func() bool {
 		order := rand.Perm(len(dirs))
 		for _, idx := range order {
 			if usedKnobs[dirs[idx].knob] {
 				continue
 			}
-			trial := *out
-			if !dirs[idx].apply(&trial) {
-				continue
+			if dirs[idx].apply(out) {
+				usedKnobs[dirs[idx].knob] = true
+				applied = append(applied, dirs[idx].name)
+				return true
 			}
-			projection := projectCandidate(in, profile, candidateFromOutput(trial, in))
-			if projection.key() == lastProjection.key() {
-				continue
-			}
-			applyProjectedCandidate(out, projection)
-			lastProjection = projection
-			usedKnobs[dirs[idx].knob] = true
-			applied = append(applied, dirs[idx].name)
-			return true
 		}
 		return false
 	}
@@ -402,14 +335,5 @@ func applyEpsilonPerturbation(out *Output, in Input, profile DriverProfile, epsi
 	// ("regression-selected ... ; ε-perturbation X applied") so no
 	// provenance is lost.
 	out.Tier = TierExploration
-	out.Reasoning = appendReasoning(out.Reasoning,
-		"ε-perturbation %s applied; effective WAW=%d, chunk=%d rows/model=%.1f MB, PR=%d, RAB=%d (%s)",
-		strings.Join(applied, ", "),
-		lastProjection.Effective.WriteAheadWriters,
-		lastProjection.Effective.ChunkSize,
-		candidateMB(lastProjection.ModelChunkBytes),
-		lastProjection.Effective.ParallelReaders,
-		lastProjection.Effective.ReadAheadBuffers,
-		lastProjection.reason(),
-	)
+	out.Reasoning = appendReasoning(out.Reasoning, "ε-perturbation %s applied", strings.Join(applied, ", "))
 }

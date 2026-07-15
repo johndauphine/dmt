@@ -3,7 +3,6 @@ package tuning
 import (
 	"errors"
 	"math"
-	"strings"
 	"testing"
 )
 
@@ -19,7 +18,7 @@ func TestFitRegression_InsufficientData(t *testing.T) {
 	}
 }
 
-func TestArgmaxRegressionProjectsRepresentativeRowsIntoLegacyModelBytes(t *testing.T) {
+func TestArgmaxRegression_SplitsRepresentativeAndLegacyWidths(t *testing.T) {
 	model := &regressionModel{
 		nFeat:     8,
 		beta:      []float64{0, 0, 0, 0, 0, 1, 0, 0},
@@ -37,231 +36,15 @@ func TestArgmaxRegressionProjectsRepresentativeRowsIntoLegacyModelBytes(t *testi
 	}
 	covered := map[coverageCellKey]bool{{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true}
 
-	search := argmaxRegression(model, in, profile, nil, covered)
-	if !search.ok {
+	_, csBytes, _, _, predicted, ok := argmaxRegression(model, in, profile, nil, covered)
+	if !ok {
 		t.Fatal("argmax rejected every candidate; representative width should make the 8 MB candidate fit the 1500-row hard limit")
 	}
-	if search.projection.Requested.RequestedChunkBytes != 8_000_000 || search.projection.Effective.ChunkSize != 1_000 {
-		t.Fatalf("projected candidate = requested %d bytes/effective %d rows, want 8000000/1000",
-			search.projection.Requested.RequestedChunkBytes, search.projection.Effective.ChunkSize)
+	if csBytes != 8_000_000 {
+		t.Fatalf("candidate bytes = %d, want 8000000", csBytes)
 	}
-	if search.projection.ModelChunkBytes != 2_000_000 {
-		t.Fatalf("model bytes = %d, want effective 1000 rows * legacy 2000 B", search.projection.ModelChunkBytes)
-	}
-	if want := math.Log(float64(in.AvgRowBytes)); math.Abs(search.predicted-want) > 1e-9 {
-		t.Fatalf("prediction = %f, want log(legacy AvgRowBytes)=%f; representative width leaked into model feature", search.predicted, want)
-	}
-}
-
-func TestArgmaxRegressionDeduplicatesObservedScalarClampBeforePrediction(t *testing.T) {
-	model := &regressionModel{
-		nFeat: 8,
-		// With csMean=0 and csStd=1, the CS coefficient makes Predict return
-		// exactly the byte feature it received. This catches any regression to
-		// scoring a raw requested anchor instead of reachable ModelChunkBytes.
-		beta:  []float64{0, 0, 0, 1, 0, 0, 0, 0},
-		csStd: 1,
-	}
-	in := Input{
-		CPUCores:               64, // baselineWorkers = 12
-		MemoryBudgetMB:         8_556,
-		SourceDBType:           "mssql",
-		TargetDBType:           "postgres",
-		AvgRowBytes:            36_864,
-		RepresentativeRowBytes: 466,
-		SafetyRowBytes:         36_864,
-		SafetyRowBytesKnown:    true,
-	}
-	profile := DriverProfile{OptimumBulkChunkBytes: 25_000_000}
-	covered := map[coverageCellKey]bool{{WAW: 1, ParallelReaders: 2, ReadAheadBuffers: 4}: true}
-
-	search := argmaxRegression(model, in, profile, nil, covered)
-	if !search.ok {
-		t.Fatal("argmax rejected the covered projected cell")
-	}
-	if search.rawCount != 64 || search.eligibleRawCount != 2 || search.uniqueCount != 1 {
-		t.Fatalf("search counts = raw:%d eligible:%d unique:%d, want 64/2/1",
-			search.rawCount, search.eligibleRawCount, search.uniqueCount)
-	}
-	if search.projection.Requested.ChunkSize != 26_824 {
-		t.Fatalf("stable dedup winner requested %d rows, want first 26824-row anchor",
-			search.projection.Requested.ChunkSize)
-	}
-	if search.projection.Effective.ChunkSize != 4_056 || !search.projection.MemoryClamped {
-		t.Fatalf("effective projection = %d rows (memory clamped=%v), want 4056/true",
-			search.projection.Effective.ChunkSize, search.projection.MemoryClamped)
-	}
-	const wantModelBytes int64 = 4_056 * 36_864
-	if search.projection.ModelChunkBytes != wantModelBytes {
-		t.Fatalf("model bytes = %d, want reachable 4056 rows * 36864 B",
-			search.projection.ModelChunkBytes)
-	}
-	if search.predicted != float64(wantModelBytes) {
-		t.Fatalf("prediction = %.0f, want effective model feature %d (not either raw byte anchor)",
-			search.predicted, wantModelBytes)
-	}
-}
-
-func TestTuneTwelveRunScalarClampSelectsOnlyReachableRegressionCells(t *testing.T) {
-	in := Input{
-		CPUCores:               64,
-		MemoryGB:               48,
-		MemoryBudgetMB:         8_556,
-		Platform:               "linux",
-		SourceDBType:           "mssql",
-		TargetDBType:           "postgres",
-		AvgRowBytes:            36_864,
-		RepresentativeRowBytes: 466,
-		SafetyRowBytes:         36_864,
-		SafetyRowBytesKnown:    true,
-	}
-	profile := DriverProfile{
-		Name:                  "postgres",
-		BaselineWAW:           2,
-		OptimumBulkChunkBytes: 25_000_000,
-	}
-	rows := make([]HistoryRecord, len(explorationCells))
-	for idx, cell := range explorationCells {
-		projection := projectCandidate(in, profile, candidateFromBytes(
-			baselineWorkers(in.CPUCores),
-			cell.WAW,
-			scaledByteTarget(profile.OptimumBulkChunkBytes, cell.CSFraction),
-			cell.ParallelReaders,
-			cell.ReadAheadBuffers,
-			in.representativeRowBytes(),
-		))
-		throughput := 1_000_000.0 + float64(idx*1_000)
-		rows[idx] = HistoryRecord{
-			SourceDBType:         in.SourceDBType,
-			TargetDBType:         in.TargetDBType,
-			Workers:              projection.Effective.Workers,
-			ChunkSize:            projection.Effective.ChunkSize,
-			WriteAheadWriters:    projection.Effective.WriteAheadWriters,
-			ParallelReaders:      projection.Effective.ParallelReaders,
-			ReadAheadBuffers:     projection.Effective.ReadAheadBuffers,
-			AvgRowBytes:          in.AvgRowBytes,
-			FinalThroughput:      throughput,
-			FinalThroughputBytes: int64(throughput * float64(in.AvgRowBytes)),
-			CPUCores:             in.CPUCores,
-			MemoryGB:             in.MemoryGB,
-			Platform:             in.Platform,
-		}
-	}
-
-	out := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
-	if out.Tier != TierRegression {
-		t.Fatalf("Tier = %q, want regression after twelve usable observations; reasoning: %s", out.Tier, out.Reasoning)
-	}
-	if out.ChunkSize > 4_056 {
-		t.Fatalf("regression selected unreachable chunk %d; reasoning: %s", out.ChunkSize, out.Reasoning)
-	}
-	for _, want := range []string{
-		"regression-selected",
-		"over 12 filtered rows",
-		"raw=64, eligible_raw=16, unique_effective=8",
-		"clamp=memory=",
-	} {
-		if !strings.Contains(out.Reasoning, want) {
-			t.Errorf("reasoning missing %q: %s", want, out.Reasoning)
-		}
-	}
-}
-
-func TestArgmaxRegressionUsesPinnedDomainOutsideOrdinaryGrid(t *testing.T) {
-	workers, chunk, waw, pr, rab := 3, 1_234, 9, 3, 5
-	in := Input{
-		AvgRowBytes:             500,
-		RepresentativeRowBytes:  500,
-		PinnedWorkers:           &workers,
-		PinnedChunkSize:         &chunk,
-		PinnedWriteAheadWriters: &waw,
-		PinnedParallelReaders:   &pr,
-		PinnedReadAheadBuffers:  &rab,
-	}
-	profile := DriverProfile{OptimumBulkChunkBytes: 25_000_000, HardChunkLimit: 1_000}
-	cell := retryCellKey{WAW: waw, ParallelReaders: pr, ReadAheadBuffers: rab}
-	covered := map[coverageCellKey]bool{coverageCellKey(cell): true}
-	model := &regressionModel{nFeat: 8, beta: make([]float64, 8)}
-
-	search := argmaxRegression(model, in, profile, nil, covered)
-	if !search.ok || search.rawCount != 1 || search.eligibleRawCount != 1 || search.uniqueCount != 1 {
-		t.Fatalf("pinned search = ok:%v raw:%d eligible:%d unique:%d, want true/1/1/1",
-			search.ok, search.rawCount, search.eligibleRawCount, search.uniqueCount)
-	}
-	got := search.projection.Effective
-	if got.Workers != workers || got.ChunkSize != 1_000 || got.WriteAheadWriters != waw ||
-		got.ParallelReaders != pr || got.ReadAheadBuffers != rab {
-		t.Fatalf("pinned effective candidate = %+v, want workers=%d/chunk=1000/WAW=%d/PR=%d/RAB=%d",
-			got, workers, waw, pr, rab)
-	}
-
-	skipped := argmaxRegression(model, in, profile, map[retryCellKey]bool{cell: true}, covered)
-	if skipped.ok || !skipped.domainCells[cell] {
-		t.Fatalf("pinned retry exclusion = ok:%v/domain:%v, want false with pinned cell in domain",
-			skipped.ok, skipped.domainCells)
-	}
-	if gotSkips := cellSkipsInCandidates(map[retryCellKey]bool{cell: true}, skipped.domainCells); !gotSkips[cell] {
-		t.Fatalf("pinned retry diagnostic omitted outside-grid cell: %v", gotSkips)
-	}
-}
-
-type recordingPredictionIntervalModel struct {
-	waw              int
-	chunkBytes       int64
-	parallelReaders  int
-	readAheadBuffers int
-	sourceDB         string
-	targetDB         string
-	mode             string
-	avgRowBytes      int64
-}
-
-func (m *recordingPredictionIntervalModel) PredictionInterval(
-	waw int,
-	chunkBytes int64,
-	parallelReaders, readAheadBuffers int,
-	sourceDB, targetDB, mode string,
-	avgRowBytes int64,
-) (float64, float64, bool) {
-	m.waw = waw
-	m.chunkBytes = chunkBytes
-	m.parallelReaders = parallelReaders
-	m.readAheadBuffers = readAheadBuffers
-	m.sourceDB = sourceDB
-	m.targetDB = targetDB
-	m.mode = mode
-	m.avgRowBytes = avgRowBytes
-	return 11, 22, true
-}
-
-func TestProjectedPredictionIntervalUsesEffectiveModelFeature(t *testing.T) {
-	model := &recordingPredictionIntervalModel{}
-	projection := candidateProjection{
-		Requested: tuningCandidate{
-			WriteAheadWriters: 1, ChunkSize: 53_648, RequestedChunkBytes: 25_000_000,
-			ParallelReaders: 2, ReadAheadBuffers: 4,
-		},
-		Effective: tuningCandidate{
-			WriteAheadWriters: 3, ChunkSize: 4_056,
-			ParallelReaders: 7, ReadAheadBuffers: 9,
-		},
-		ModelChunkBytes: 149_520_384,
-	}
-	in := Input{SourceDBType: "mssql", TargetDBType: "postgres", TargetMode: "upsert"}
-
-	low, high, ok := projectedPredictionInterval(model, projection, in, 36_864)
-
-	if !ok || low != 11 || high != 22 {
-		t.Fatalf("interval result = (%v,%v,%v), want (11,22,true)", low, high, ok)
-	}
-	if model.waw != 3 || model.chunkBytes != projection.ModelChunkBytes ||
-		model.parallelReaders != 7 || model.readAheadBuffers != 9 ||
-		model.sourceDB != "mssql" || model.targetDB != "postgres" || model.mode != "upsert" ||
-		model.avgRowBytes != 36_864 {
-		t.Fatalf("PredictionInterval inputs = %+v, want effective axes/model bytes and current workload", model)
-	}
-	if model.chunkBytes == projection.Requested.RequestedChunkBytes {
-		t.Fatal("PredictionInterval received the raw requested byte anchor")
+	if want := math.Log(float64(in.AvgRowBytes)); math.Abs(predicted-want) > 1e-9 {
+		t.Fatalf("prediction = %f, want log(legacy AvgRowBytes)=%f; representative width leaked into model feature", predicted, want)
 	}
 }
 

@@ -9,20 +9,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the cardinality-aware memory profile and table-aware chunk caps
+  introduced by #729, restoring the completed-epic scalar widest-width safety
+  model.
+
+- Removed the effective-candidate projection, pin-aware selection and
+  finalization, early runtime-cap materialization, and persisted/executed tuple
+  identity introduced by #730, restoring the completed-epic tuning path.
+
 ### Fixed
 
-- Auto-tune now projects exploration and regression candidates through user
-  pins plus memory and protocol limits before rotation, coverage checks, and
-  prediction. Accidental effective aliases are deduplicated without losing
-  deliberate exploration replicates, and the selected chunk is materialized
-  before planning and history save so configured, persisted, and executed
-  tuples agree (#728).
-
-- Auto-tune memory enforcement now accounts for each in-scope table's
-  cardinality and average row width, so tiny wide lookup tables saturate at
-  their real row counts instead of collapsing the global chunk-size domain.
-  Incomplete schema evidence continues to use the conservative widest-row
-  fallback (#728).
+- Rolled back the cardinality-aware auto-tune memory model and effective-
+  candidate projection introduced by #729 and #730 after a native Windows
+  regression screen classified the combined change as likely materially
+  slower. Earlier auto-tune safety and exploration improvements remain intact
+  (#728).
 
 - Removed retired auto-tune suggestion, checkpoint aggregate, and monitor-trend
   APIs after verifying they have no production consumers. Live pool

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/systemmemory"
-	"github.com/johndauphine/dmt/internal/tuning"
 	"gopkg.in/yaml.v3"
 	"strings"
 )
@@ -98,19 +97,6 @@ type Config struct {
 	// memoryReader is injectable for deterministic config tests. Production
 	// loading leaves it nil and resolves one systemmemory.NewReader snapshot.
 	memoryReader systemmemory.Reader
-
-	// runtimeChunkProjection preserves the nominal pre-safety chunk views
-	// across repeated tuning passes on the same Config. Safety materialization
-	// mutates the public compatibility fields, so a fresh pass must restore the
-	// prior request before it can derive and apply a new cap.
-	runtimeChunkProjection runtimeChunkProjectionState
-}
-
-type runtimeChunkProjectionState struct {
-	captured  bool
-	migration int
-	source    int
-	target    int
 }
 
 // SlackConfig holds Slack notification settings.
@@ -389,11 +375,10 @@ type MigrationConfig struct {
 	// out of YAML and JSON because it is neither user configuration nor stable
 	// resume identity; failed/manual analysis must start from the zero-value,
 	// growth-disabled state instead of reusing an earlier run's evidence.
-	RuntimeChunkSizeCap        int                  `yaml:"-" json:"-"`
-	RuntimeSafetyRowBytes      int64                `yaml:"-" json:"-"`
-	RuntimeSafetyRowBytesKnown bool                 `yaml:"-" json:"-"`
-	RuntimeMemoryProfile       tuning.MemoryProfile `yaml:"-" json:"-"`
-	RuntimeChunkGrowthAllowed  bool                 `yaml:"-" json:"-"`
+	RuntimeChunkSizeCap        int   `yaml:"-" json:"-"`
+	RuntimeSafetyRowBytes      int64 `yaml:"-" json:"-"`
+	RuntimeSafetyRowBytesKnown bool  `yaml:"-" json:"-"`
+	RuntimeChunkGrowthAllowed  bool  `yaml:"-" json:"-"`
 
 	// Explore forces an exploration probe on this run instead of the
 	// tuner's argmax pick (PR2 #179 wires the actual exploration policy;

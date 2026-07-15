@@ -242,36 +242,6 @@ func TestApplyMemoryClamp_UsesSafetyWidthNotOtherAverages(t *testing.T) {
 	}
 }
 
-func TestApplyMemoryClampUsesCardinalityAwareProfile(t *testing.T) {
-	out := Output{
-		Workers:           1,
-		ReadAheadBuffers:  1,
-		WriteAheadWriters: 0,
-		ChunkSize:         20_000,
-		Reasoning:         "baseline",
-	}
-	in := Input{
-		MemoryBudgetMB:      1,
-		SafetyRowBytes:      36_864,
-		SafetyRowBytesKnown: true,
-		MemoryProfile: NewMemoryProfile([]TableMemoryStat{
-			{Name: "tiny_lookup", RowCount: 2, AvgRowBytes: 36_864},
-			{Name: "large_table", RowCount: 1_000_000, AvgRowBytes: 100},
-		}),
-	}
-
-	applyMemoryClamp(&out, in)
-	if out.ChunkSize != 10_485 {
-		t.Fatalf("ChunkSize = %d, want table-aware cap 10485", out.ChunkSize)
-	}
-	if out.MemoryEstimateOverBudget || out.EstimatedMemMB != 1 {
-		t.Fatalf("clamped profile estimate = %d MiB/over=%v, want 1/false", out.EstimatedMemMB, out.MemoryEstimateOverBudget)
-	}
-	if !strings.Contains(out.Reasoning, "cardinality-aware 2-table model") {
-		t.Fatalf("reasoning omitted active memory model: %q", out.Reasoning)
-	}
-}
-
 func TestApplyMemoryClamp_UnknownSafetyWidthUsesLabeledFallback(t *testing.T) {
 	out := Output{Workers: 1, ReadAheadBuffers: 1, ChunkSize: 3_000}
 	in := Input{
