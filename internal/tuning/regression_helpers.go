@@ -25,10 +25,9 @@ func (in Input) representativeRowBytes() int64 {
 	return fallbackRowBytes
 }
 
-// safetyRowBytes returns the widest/fallback width used when hard memory math
-// cannot use a complete cardinality profile, plus its observed provenance. A
-// non-positive width always clears known, even if a malformed caller set the
-// flag, and uses the documented fallback.
+// safetyRowBytes returns the width used by hard memory math and whether it was
+// observed from schema statistics. A non-positive width always clears known,
+// even if a malformed caller set the flag, and uses the documented fallback.
 func (in Input) safetyRowBytes() (width int64, known bool) {
 	if in.SafetyRowBytes > 0 {
 		return in.SafetyRowBytes, in.SafetyRowBytesKnown

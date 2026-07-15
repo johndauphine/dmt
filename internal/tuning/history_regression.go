@@ -7,11 +7,12 @@ import (
 )
 
 // applyHistoryRegression fits the quadratic model to the filtered rows
-// and walks the projected (WAW × CS_BYTES × PR × RAB) grid to pick the
-// reachable argmax. Retry-rate and coverage gates filter effective cells;
-// memory and protocol limits clamp candidates before prediction. Returns true
-// when it picks (and applies) a recommendation; false on fit failure or an
-// empty effective domain (caller falls through to smoothed bins).
+// and walks the (WAW × CS_BYTES) grid to pick the argmax. The grid is
+// filtered by wawsWithHighRetryRate (#186 — exclude WAWs whose retry
+// rate clears the threshold over enough samples) and HardChunkLimit
+// (skip CS values above the protocol cap). Returns true when it picks
+// (and applies) a recommendation; false on fit failure or empty grid
+// (caller falls through to smoothed bins).
 func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows []HistoryRecord) bool {
 	model, err := fitRegression(rows)
 	if err != nil {
@@ -27,8 +28,8 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 
 	cellSkip := cellsWithHighRetryRate(rows)
 	covered := cellsWithCoverage(rows)
-	search := argmaxRegression(model, in, profile, cellSkip, covered)
-	if !search.ok {
+	pickedWAW, pickedCSBytes, pickedPR, pickedRAB, predicted, ok := argmaxRegression(model, in, profile, cellSkip, covered)
+	if !ok {
 		// Intersect cellSkip with the argmax grid before logging — the
 		// raw map can include cells outside readerGrid (e.g., historical
 		// PR=3/RAB=5 rows). Those never participated in argmax filtering,
@@ -37,18 +38,19 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 		// historical figure since it's diagnostic of "did any history
 		// land in the grid at all" — orthogonal concern.
 		out.Reasoning = appendReasoning(out.Reasoning,
-			"regression skipped: every projected grid candidate filtered (retry-rate exclusions: %s, covered cells: %d, raw=%d, eligible_raw=%d, unique_effective=%d)",
-			formatRetryCellSkips(cellSkipsInCandidates(cellSkip, search.domainCells)),
-			len(covered),
-			search.rawCount,
-			search.eligibleRawCount,
-			search.uniqueCount,
+			"regression skipped: every grid candidate filtered (retry-rate exclusions: %s, HardChunkLimit=%d, covered cells: %d)",
+			formatRetryCellSkips(cellSkipsInGrid(cellSkip)), profile.HardChunkLimit, len(covered),
 		)
 		return false
 	}
 
+	representativeWidth := in.representativeRowBytes()
 	legacyModelWidth := safeAvgRowBytes(in.AvgRowBytes)
-	applyProjectedCandidate(out, search.projection)
+	csRows := rowsFromBytes(pickedCSBytes, representativeWidth)
+	out.WriteAheadWriters = pickedWAW
+	out.ChunkSize = csRows
+	out.ParallelReaders = pickedPR
+	out.ReadAheadBuffers = pickedRAB
 	out.Tier = TierRegression
 
 	// Point-level fit signal: 95% prediction interval at the picked
@@ -68,77 +70,23 @@ func applyHistoryRegression(out *Output, in Input, profile DriverProfile, rows [
 	// model.r2 is still computed and remains available to debug logs
 	// and unit tests.
 	ciStr := "N/A"
-	if low, high, ok := projectedPredictionInterval(model, search.projection, in, legacyModelWidth); ok {
-		ciStr = formatPredictionInterval(search.predicted, low, high)
+	if low, high, ok := model.PredictionInterval(pickedWAW, pickedCSBytes, pickedPR, pickedRAB, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth); ok {
+		ciStr = formatPredictionInterval(predicted, low, high)
 	}
 
 	out.Reasoning = appendReasoning(out.Reasoning,
-		"regression-selected requested WAW=%d, chunk=%d rows/%.1f MB, PR=%d, RAB=%d; effective WAW=%d, chunk=%d rows/model=%.1f MB, PR=%d, RAB=%d (%s) over %d filtered rows (%d covered cells; raw=%d, eligible_raw=%d, unique_effective=%d); predicted %s [95%% CI: %s]",
-		search.projection.Requested.WriteAheadWriters,
-		search.projection.Requested.ChunkSize,
-		candidateMB(search.projection.Requested.RequestedChunkBytes),
-		search.projection.Requested.ParallelReaders,
-		search.projection.Requested.ReadAheadBuffers,
-		search.projection.Effective.WriteAheadWriters,
-		search.projection.Effective.ChunkSize,
-		candidateMB(search.projection.ModelChunkBytes),
-		search.projection.Effective.ParallelReaders,
-		search.projection.Effective.ReadAheadBuffers,
-		search.projection.reason(),
-		len(rows),
-		len(covered),
-		search.rawCount,
-		search.eligibleRawCount,
-		search.uniqueCount,
-		formatBytesPerSec(search.predicted),
-		ciStr,
+		"regression-selected WAW=%d, chunk_size=%d rows (%.1f MB), PR=%d, RAB=%d over %d filtered rows (%d covered cells); predicted %s [95%% CI: %s]",
+		pickedWAW, csRows, float64(pickedCSBytes)/1024/1024, pickedPR, pickedRAB, len(rows), len(covered), formatBytesPerSec(predicted), ciStr,
 	)
 	return true
-}
-
-type predictionIntervalModel interface {
-	PredictionInterval(
-		waw int,
-		csBytes int64,
-		parallelReaders, readAheadBuffers int,
-		sourceDB, targetDB, mode string,
-		avgRowBytes int64,
-	) (low, high float64, ok bool)
-}
-
-// projectedPredictionInterval is the single boundary between a selected
-// effective candidate and uncertainty estimation. Keeping the projection as
-// the input prevents the PI path from drifting back to a raw byte anchor while
-// point prediction uses ModelChunkBytes.
-func projectedPredictionInterval(model predictionIntervalModel, projection candidateProjection, in Input, legacyModelWidth int64) (low, high float64, ok bool) {
-	return model.PredictionInterval(
-		projection.Effective.WriteAheadWriters,
-		projection.ModelChunkBytes,
-		projection.Effective.ParallelReaders,
-		projection.Effective.ReadAheadBuffers,
-		in.SourceDBType,
-		in.TargetDBType,
-		in.TargetMode,
-		legacyModelWidth,
-	)
-}
-
-type regressionSearchResult struct {
-	projection       candidateProjection
-	predicted        float64
-	rawCount         int
-	eligibleRawCount int
-	uniqueCount      int
-	domainCells      map[retryCellKey]bool
-	ok               bool
 }
 
 // argmaxRegression walks the small (WAW × CS_BYTES × PR × RAB) grid and
 // returns the candidate with the highest predicted throughput, subject to
 // the retry-rate exclusion (skip cells whose historical retry rate clears
-// retryRateExclusionThreshold over ≥minRunsForRetryExclusion runs) and the
-// measured-cell coverage gate. Memory and protocol caps are projections, not
-// filters. Returns ok=false when every projected grid point is filtered out.
+// retryRateExclusionThreshold over ≥minRunsForRetryExclusion runs) and
+// HardChunkLimit (skip CS values above the protocol cap). Returns
+// ok=false when every grid point is filtered out.
 //
 // The PR and RAB grids match the reader domain in the exploration design
 // ({2,4} × {4,8}) so argmax only picks values the planned cells actually
@@ -160,7 +108,7 @@ type regressionSearchResult struct {
 // fresh history before exploration), the caller falls through to the
 // smoothed-bins tier — simpler model, fewer assumptions, no
 // extrapolation.
-func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, cellSkip map[retryCellKey]bool, covered map[coverageCellKey]bool) regressionSearchResult {
+func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, cellSkip map[retryCellKey]bool, covered map[coverageCellKey]bool) (waw int, csBytes int64, parallelReaders, readAheadBuffers int, predicted float64, ok bool) {
 	const fallbackBytes int64 = 10_000_000
 	optimumBytes := profile.OptimumBulkChunkBytes
 	if optimumBytes <= 0 {
@@ -172,86 +120,40 @@ func argmaxRegression(model *regressionModel, in Input, profile DriverProfile, c
 		scaledByteTarget(optimumBytes, halfOptimumFraction),
 		scaledByteTarget(optimumBytes, fullOptimumFraction),
 	}
-	if in.PinnedChunkSize != nil && *in.PinnedChunkSize > 0 {
-		csCandidates = []int64{chunkBytesForModel(*in.PinnedChunkSize, representativeWidth)}
-	}
-	wawCandidates := make([]int, 0, maxLearnableWAW)
-	if in.PinnedWriteAheadWriters != nil && *in.PinnedWriteAheadWriters > 0 {
-		wawCandidates = append(wawCandidates, *in.PinnedWriteAheadWriters)
-	} else {
-		for waw := 1; waw <= maxLearnableWAW; waw++ {
-			wawCandidates = append(wawCandidates, waw)
-		}
-	}
-	parallelReaderCandidates := []int{2, 4}
-	if in.PinnedParallelReaders != nil && *in.PinnedParallelReaders > 0 {
-		parallelReaderCandidates = []int{*in.PinnedParallelReaders}
-	}
-	readAheadCandidates := []int{4, 8}
-	if in.PinnedReadAheadBuffers != nil && *in.PinnedReadAheadBuffers > 0 {
-		readAheadCandidates = []int{*in.PinnedReadAheadBuffers}
-	}
 
-	result := regressionSearchResult{domainCells: map[retryCellKey]bool{}}
+	bestWAW := -1
+	var bestCSBytes int64
+	var bestPR, bestRAB int
 	bestPred := math.Inf(-1)
-	seen := make(map[effectiveCandidateKey]bool)
 
-	for _, w := range wawCandidates {
+	for w := 1; w <= maxLearnableWAW; w++ {
 		for _, cs := range csCandidates {
-			for _, pr := range parallelReaderCandidates {
-				for _, rab := range readAheadCandidates {
-					result.rawCount++
-					projection := projectCandidate(in, profile, candidateFromBytes(
-						baselineWorkers(in.CPUCores),
-						w,
-						cs,
-						pr,
-						rab,
-						representativeWidth,
-					))
-					cell := retryCellKey{
-						WAW:              projection.Effective.WriteAheadWriters,
-						ParallelReaders:  projection.Effective.ParallelReaders,
-						ReadAheadBuffers: projection.Effective.ReadAheadBuffers,
-					}
-					result.domainCells[cell] = true
-					if cellSkip[cell] {
-						continue
-					}
-					if !covered[coverageCellKey(cell)] {
-						continue
-					}
-					result.eligibleRawCount++
-					key := projection.key()
-					if seen[key] {
-						continue
-					}
-					seen[key] = true
-					result.uniqueCount++
-					pred := model.Predict(
-						projection.Effective.WriteAheadWriters,
-						projection.ModelChunkBytes,
-						projection.Effective.ParallelReaders,
-						projection.Effective.ReadAheadBuffers,
-						in.SourceDBType,
-						in.TargetDBType,
-						in.TargetMode,
-						legacyModelWidth,
-					)
-					if math.IsNaN(pred) || math.IsInf(pred, 0) {
-						continue
-					}
-					if pred > bestPred {
-						bestPred = pred
-						result.projection = projection
-						result.predicted = pred
-						result.ok = true
-					}
+			csRows := rowsFromBytes(cs, representativeWidth)
+			if profile.HardChunkLimit > 0 && csRows > profile.HardChunkLimit {
+				continue
+			}
+			for _, reader := range readerGrid {
+				if cellSkip[retryCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
+					continue
+				}
+				if !covered[coverageCellKey{WAW: w, ParallelReaders: reader.ParallelReaders, ReadAheadBuffers: reader.ReadAheadBuffers}] {
+					continue
+				}
+				pred := model.Predict(w, cs, reader.ParallelReaders, reader.ReadAheadBuffers, in.SourceDBType, in.TargetDBType, in.TargetMode, legacyModelWidth)
+				if pred > bestPred {
+					bestPred = pred
+					bestWAW = w
+					bestCSBytes = cs
+					bestPR = reader.ParallelReaders
+					bestRAB = reader.ReadAheadBuffers
 				}
 			}
 		}
 	}
-	return result
+	if bestWAW < 0 {
+		return 0, 0, 0, 0, 0, false
+	}
+	return bestWAW, bestCSBytes, bestPR, bestRAB, bestPred, true
 }
 
 // coverageCellKey identifies a (WriteAheadWriters, ParallelReaders,

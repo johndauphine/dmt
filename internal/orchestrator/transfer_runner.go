@@ -180,10 +180,18 @@ func clampInitialRuntimeChunkSize(
 		}
 	}
 
-	// Compatibility views should already have been materialized before history
-	// save and job construction. Repeat the same lowering operation here as the
-	// atomic pre-transfer backstop.
-	cfg.MaterializeRuntimeChunkSizeCap()
+	// These fields are compatibility views used by setup/logging and by paths
+	// that do not consult RuntimeTuner directly. Keep all of them at or below
+	// the same cap that the transfer runtime will enforce.
+	if cfg.Migration.ChunkSize > cap {
+		cfg.Migration.ChunkSize = cap
+	}
+	if cfg.Source.ChunkSize > cap {
+		cfg.Source.ChunkSize = cap
+	}
+	if cfg.Target.ChunkSize > cap {
+		cfg.Target.ChunkSize = cap
+	}
 	return nil
 }
 

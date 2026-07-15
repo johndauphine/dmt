@@ -136,14 +136,6 @@ func TestExplorationCells_BalancedDesign(t *testing.T) {
 		if explorationCells[replicate.got] != explorationCells[replicate.want] {
 			t.Errorf("cell %d = %+v, want replicate of cell %d (%+v)", replicate.got, explorationCells[replicate.got], replicate.want, explorationCells[replicate.want])
 		}
-		if explorationReplicateOf[replicate.got] != replicate.want {
-			t.Errorf("cell %d replicate marker = %d, want %d", replicate.got, explorationReplicateOf[replicate.got], replicate.want)
-		}
-	}
-	for i := 0; i < 8; i++ {
-		if explorationReplicateOf[i] >= 0 {
-			t.Errorf("unique design cell %d unexpectedly marked as replicate of %d", i, explorationReplicateOf[i])
-		}
 	}
 
 	profile := DriverProfile{OptimumBulkChunkBytes: 25_000_000}
@@ -237,7 +229,7 @@ func TestApplyEpsilonPerturbation_CanNudgeReaderAxes(t *testing.T) {
 			ParallelReaders:   2,
 			ReadAheadBuffers:  4,
 		}
-		applyEpsilonPerturbation(&out, Input{}, profile, 0)
+		applyEpsilonPerturbation(&out, profile, 0)
 		if out.ParallelReaders != 2 || out.ReadAheadBuffers != 4 {
 			sawReaderNudge = true
 			break
@@ -272,11 +264,10 @@ func TestApplyGridExploration_IgnoresHistoricalRetries(t *testing.T) {
 	}
 }
 
-// TestApplyGridExploration_HardLimitProjectsInsteadOfFiltering verifies a
-// protocol cap changes the effective chunk but does not remove the requested
-// design cell from rotation. Both half- and full-optimum probes remain
-// reachable and retain their raw audit index.
-func TestApplyGridExploration_HardLimitProjectsInsteadOfFiltering(t *testing.T) {
+// TestApplyGridExploration_HardLimitUsesEligibleRing verifies filtering is
+// applied before raw indexing. With only half-CS table entries eligible,
+// consecutive attempts traverse all six eligible entries before repeating.
+func TestApplyGridExploration_HardLimitUsesEligibleRing(t *testing.T) {
 	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
 	profile := DriverProfile{
 		Name:                  "postgres",
@@ -284,44 +275,32 @@ func TestApplyGridExploration_HardLimitProjectsInsteadOfFiltering(t *testing.T) 
 		OptimumBulkChunkBytes: 25_000_000,
 		HardChunkLimit:        30_000,
 	}
-
-	for _, tc := range []struct {
-		rawIndex  int
-		wantChunk int
-		wantClamp bool
-	}{
-		{rawIndex: 0, wantChunk: 25_000, wantClamp: false},
-		{rawIndex: 4, wantChunk: 30_000, wantClamp: true},
-	} {
+	eligibleIndexes := []int{0, 1, 2, 3, 8, 9}
+	for rawIndex, originalIndex := range eligibleIndexes {
 		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, explorationGridRuns, tc.rawIndex)
-		want := explorationCells[tc.rawIndex]
-		if out.WriteAheadWriters != want.WAW || out.ChunkSize != tc.wantChunk ||
+		applyGridExploration(&out, in, profile, explorationGridRuns, rawIndex)
+		want := explorationCells[originalIndex]
+		if out.WriteAheadWriters != want.WAW || out.ChunkSize != 25_000 ||
 			out.ParallelReaders != want.ParallelReaders || out.ReadAheadBuffers != want.ReadAheadBuffers {
-			t.Errorf("raw index %d output = (WAW=%d CS=%d PR=%d RAB=%d), want projected cell %+v with CS=%d",
-				tc.rawIndex, out.WriteAheadWriters, out.ChunkSize, out.ParallelReaders, out.ReadAheadBuffers, want, tc.wantChunk)
+			t.Errorf("raw index %d output = (WAW=%d CS=%d PR=%d RAB=%d), want eligible table cell %d (%+v)",
+				rawIndex, out.WriteAheadWriters, out.ChunkSize, out.ParallelReaders, out.ReadAheadBuffers, originalIndex, want)
 		}
-		wantLabel := fmt.Sprintf("probe idx %d/%d", tc.rawIndex+1, len(explorationCells))
+		wantLabel := fmt.Sprintf("probe idx %d/%d", originalIndex+1, len(explorationCells))
 		if !strings.Contains(out.Reasoning, wantLabel) {
-			t.Errorf("raw index %d reasoning = %q, want original-cell label %q", tc.rawIndex, out.Reasoning, wantLabel)
-		}
-		hasClamp := strings.Contains(out.Reasoning, "clamp=protocol=30000")
-		if hasClamp != tc.wantClamp {
-			t.Errorf("raw index %d protocol-clamp reasoning present = %v, want %v: %q", tc.rawIndex, hasClamp, tc.wantClamp, out.Reasoning)
+			t.Errorf("raw index %d reasoning = %q, want original-cell label %q", rawIndex, out.Reasoning, wantLabel)
 		}
 	}
 
 	out := baseline(in, profile)
-	applyGridExploration(&out, in, profile, explorationGridRuns, len(explorationCells))
+	applyGridExploration(&out, in, profile, explorationGridRuns, len(eligibleIndexes))
 	if !strings.Contains(out.Reasoning, "probe idx 1/12") {
-		t.Errorf("projected ring did not repeat from first cell after one traversal: %q", out.Reasoning)
+		t.Errorf("eligible ring did not repeat from first cell after one traversal: %q", out.Reasoning)
 	}
 }
 
-// TestApplyGridExploration_TinyHardLimitKeepsProjectedProbe verifies even when
-// both requested byte levels exceed the target limit, exploration selects a
-// reachable one-row-domain probe instead of filtering the grid to empty.
-func TestApplyGridExploration_TinyHardLimitKeepsProjectedProbe(t *testing.T) {
+// TestApplyGridExploration_NoEligibleCellKeepsBaseline verifies the existing
+// safe fallback when both CS levels exceed the protocol cap.
+func TestApplyGridExploration_NoEligibleCellKeepsBaseline(t *testing.T) {
 	in := Input{AvgRowBytes: 500, Platform: "linux", CPUCores: 8}
 	profile := DriverProfile{
 		Name:                  "postgres",
@@ -330,103 +309,16 @@ func TestApplyGridExploration_TinyHardLimitKeepsProjectedProbe(t *testing.T) {
 		HardChunkLimit:        10_000,
 	}
 	out := baseline(in, profile)
+	wantWAW, wantChunk, wantPR, wantRAB := out.WriteAheadWriters, out.ChunkSize, out.ParallelReaders, out.ReadAheadBuffers
 	applyGridExploration(&out, in, profile, 0, 0)
-	if out.WriteAheadWriters != 1 || out.ChunkSize != 10_000 ||
-		out.ParallelReaders != 2 || out.ReadAheadBuffers != 4 {
-		t.Errorf("tiny-limit projection = (WAW=%d CS=%d PR=%d RAB=%d), want (1,10000,2,4)",
-			out.WriteAheadWriters, out.ChunkSize, out.ParallelReaders, out.ReadAheadBuffers)
+	if out.WriteAheadWriters != wantWAW || out.ChunkSize != wantChunk ||
+		out.ParallelReaders != wantPR || out.ReadAheadBuffers != wantRAB {
+		t.Errorf("fully filtered grid changed baseline: got (WAW=%d CS=%d PR=%d RAB=%d), want (WAW=%d CS=%d PR=%d RAB=%d)",
+			out.WriteAheadWriters, out.ChunkSize, out.ParallelReaders, out.ReadAheadBuffers,
+			wantWAW, wantChunk, wantPR, wantRAB)
 	}
-	if out.Tier != TierExploration || !strings.Contains(out.Reasoning, "clamp=protocol=10000") {
-		t.Errorf("tiny-limit Tier/Reasoning = %q/%q, want reachable exploration probe with protocol clamp", out.Tier, out.Reasoning)
-	}
-}
-
-// TestApplyGridExploration_ProjectedRotationDeduplicatesAliasesAndKeepsReplicates
-// pins every candidate axis so the first eight nominal design cells collapse to
-// one effective tuple. The four explicitly declared variance observations must
-// remain in the schedule, while the seven accidental base aliases disappear.
-func TestApplyGridExploration_ProjectedRotationDeduplicatesAliasesAndKeepsReplicates(t *testing.T) {
-	chunk, waw, pr, rab := 40_000, 5, 3, 6
-	in := Input{
-		AvgRowBytes:             500,
-		RepresentativeRowBytes:  500,
-		Platform:                "linux",
-		CPUCores:                8,
-		PinnedChunkSize:         &chunk,
-		PinnedWriteAheadWriters: &waw,
-		PinnedParallelReaders:   &pr,
-		PinnedReadAheadBuffers:  &rab,
-	}
-	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
-	wantIndexes := []int{1, 9, 10, 11, 12, 1, 9, 10, 11, 12, 1}
-	wantReplicateOf := []int{0, 1, 2, 7, 8, 0, 1, 2, 7, 8, 0}
-
-	for rawIndex, wantIndex := range wantIndexes {
-		out := baseline(in, profile)
-		applyGridExploration(&out, in, profile, explorationGridRuns, rawIndex)
-		if out.WriteAheadWriters != waw || out.ChunkSize != chunk ||
-			out.ParallelReaders != pr || out.ReadAheadBuffers != rab {
-			t.Fatalf("raw index %d effective tuple = (WAW=%d CS=%d PR=%d RAB=%d), want pinned (%d,%d,%d,%d)",
-				rawIndex, out.WriteAheadWriters, out.ChunkSize, out.ParallelReaders, out.ReadAheadBuffers,
-				waw, chunk, pr, rab)
-		}
-		wantLabel := fmt.Sprintf("probe idx %d/12", wantIndex)
-		if !strings.Contains(out.Reasoning, wantLabel) {
-			t.Errorf("raw index %d reasoning = %q, want stable projected-rotation label %q", rawIndex, out.Reasoning, wantLabel)
-		}
-		for _, count := range []string{"raw=12", "unique_effective=1", "scheduled=5", "declared_replicates=4"} {
-			if !strings.Contains(out.Reasoning, count) {
-				t.Errorf("raw index %d reasoning missing %q: %q", rawIndex, count, out.Reasoning)
-			}
-		}
-		if wantReplicateOf[rawIndex] == 0 {
-			if strings.Contains(out.Reasoning, "declared replicate") {
-				t.Errorf("raw index %d selected the unique base but was labeled replicate: %q", rawIndex, out.Reasoning)
-			}
-		} else {
-			wantReplicate := fmt.Sprintf("declared replicate of idx %d", wantReplicateOf[rawIndex])
-			if !strings.Contains(out.Reasoning, wantReplicate) {
-				t.Errorf("raw index %d reasoning = %q, want %q", rawIndex, out.Reasoning, wantReplicate)
-			}
-		}
-	}
-}
-
-// TestTune_GridExplorationUsesPinnedEffectiveAxes covers the production entry
-// point: pins replace every candidate axis before projection, and safety still
-// wins when a pinned chunk exceeds the target protocol envelope.
-func TestTune_GridExplorationUsesPinnedEffectiveAxes(t *testing.T) {
-	workers, chunk, waw, pr, rab := 7, 40_000, 5, 3, 6
-	in := Input{
-		CPUCores:                8,
-		Platform:                "linux",
-		SourceDBType:            "mssql",
-		TargetDBType:            "postgres",
-		AvgRowBytes:             500,
-		RepresentativeRowBytes:  500,
-		PinnedWorkers:           &workers,
-		PinnedChunkSize:         &chunk,
-		PinnedWriteAheadWriters: &waw,
-		PinnedParallelReaders:   &pr,
-		PinnedReadAheadBuffers:  &rab,
-	}
-	profile := DriverProfile{
-		Name:                  "postgres",
-		BaselineWAW:           2,
-		OptimumBulkChunkBytes: 25_000_000,
-		HardChunkLimit:        30_000,
-	}
-
-	out := Tune(in, profile, &stubHistory{}, DBTuning{})
-	if out.Workers != workers || out.MaxPartitions != workers || out.ChunkSize != 30_000 ||
-		out.WriteAheadWriters != waw || out.ParallelReaders != pr || out.ReadAheadBuffers != rab {
-		t.Fatalf("pinned projected output = %+v, want W=%d/MP=%d/CS=30000/WAW=%d/PR=%d/RAB=%d",
-			out, workers, workers, waw, pr, rab)
-	}
-	for _, want := range []string{"pins=workers=7/chunk=40000/WAW=5/PR=3/RAB=6", "clamp=protocol=30000", "unique_effective=1", "scheduled=5"} {
-		if !strings.Contains(out.Reasoning, want) {
-			t.Errorf("pinned exploration reasoning missing %q: %q", want, out.Reasoning)
-		}
+	if out.Tier == TierExploration || !strings.Contains(out.Reasoning, "every planned-grid candidate filtered") {
+		t.Errorf("fully filtered grid Tier/Reasoning = %q/%q, want baseline fallback explanation", out.Tier, out.Reasoning)
 	}
 }
 
@@ -616,11 +508,8 @@ func TestTune_ExplorationSmallBudgetPreservesSelectorProvenance(t *testing.T) {
 	if out.Tier != TierExploration {
 		t.Fatalf("Tier = %q, want %q", out.Tier, TierExploration)
 	}
-	if !strings.Contains(out.Reasoning, "exploration: planned grid") || !strings.Contains(out.Reasoning, "clamp=memory=") {
-		t.Fatalf("Reasoning = %q, want exploration selection already projected to the memory envelope", out.Reasoning)
-	}
-	if strings.Contains(out.Reasoning, "memory clamp:") {
-		t.Fatalf("Reasoning = %q, projected exploration should make the late memory clamp a no-op", out.Reasoning)
+	if !strings.Contains(out.Reasoning, "exploration: planned grid") || !strings.Contains(out.Reasoning, "memory clamp") {
+		t.Fatalf("Reasoning = %q, want exploration selection followed by memory clamp", out.Reasoning)
 	}
 	if out.ChunkSize >= 25_000 {
 		t.Errorf("small budget left exploration ChunkSize=%d, want clamp below 25000", out.ChunkSize)
@@ -658,7 +547,7 @@ func TestApplyEpsilonPerturbation_NudgesOneStep(t *testing.T) {
 	for trial := 0; trial < 50; trial++ {
 		out := Output{WriteAheadWriters: 3, ChunkSize: 30000}
 		original := out
-		applyEpsilonPerturbation(&out, Input{}, profile, 0)
+		applyEpsilonPerturbation(&out, profile, 0)
 		changed := out.WriteAheadWriters != original.WriteAheadWriters || out.ChunkSize != original.ChunkSize
 		if !changed {
 			t.Errorf("trial %d: perturbation didn't change anything (WAW=%d, CS=%d)",
@@ -685,79 +574,13 @@ func TestApplyEpsilonPerturbation_CanComposeTwoDirections(t *testing.T) {
 		ParallelReaders:   2,
 		ReadAheadBuffers:  8,
 	}
-	applyEpsilonPerturbation(&out, Input{}, DriverProfile{Name: "postgres", HardChunkLimit: 100_000}, 1)
+	applyEpsilonPerturbation(&out, DriverProfile{Name: "postgres", HardChunkLimit: 100_000}, 1)
 
 	if !strings.Contains(out.Reasoning, ", ") {
 		t.Fatalf("expected composite ε-perturbation reasoning, got %q", out.Reasoning)
 	}
 	if out.Tier != TierExploration {
 		t.Fatalf("composite perturbation Tier = %q, want %q", out.Tier, TierExploration)
-	}
-}
-
-// TestApplyEpsilonPerturbation_AllCandidateAxesPinnedIsNoOp verifies epsilon
-// exploration does not claim a probe when every direction is operator-owned.
-// The upstream tier/reasoning and effective tuple must remain unchanged.
-func TestApplyEpsilonPerturbation_AllCandidateAxesPinnedIsNoOp(t *testing.T) {
-	chunk, waw, pr, rab := 30_000, 3, 2, 8
-	in := Input{
-		AvgRowBytes:             500,
-		RepresentativeRowBytes:  500,
-		PinnedChunkSize:         &chunk,
-		PinnedWriteAheadWriters: &waw,
-		PinnedParallelReaders:   &pr,
-		PinnedReadAheadBuffers:  &rab,
-	}
-	out := Output{
-		Workers:           8,
-		WriteAheadWriters: waw,
-		ChunkSize:         chunk,
-		ParallelReaders:   pr,
-		ReadAheadBuffers:  rab,
-		Tier:              TierRegression,
-		Reasoning:         "regression-selected reachable tuple",
-	}
-	want := out
-
-	applyEpsilonPerturbation(&out, in, DriverProfile{Name: "postgres", HardChunkLimit: 100_000}, 1)
-
-	if out.Workers != want.Workers || out.WriteAheadWriters != want.WriteAheadWriters ||
-		out.ChunkSize != want.ChunkSize || out.ParallelReaders != want.ParallelReaders ||
-		out.ReadAheadBuffers != want.ReadAheadBuffers || out.Tier != want.Tier || out.Reasoning != want.Reasoning {
-		t.Fatalf("all-pinned epsilon changed output:\n got  %+v\n want %+v", out, want)
-	}
-}
-
-func TestApplyEpsilonPerturbation_AllPinnedStillAuditsInitialSafetyProjection(t *testing.T) {
-	chunk, waw, pr, rab := 40_000, 3, 2, 8
-	in := Input{
-		AvgRowBytes:             500,
-		RepresentativeRowBytes:  500,
-		PinnedChunkSize:         &chunk,
-		PinnedWriteAheadWriters: &waw,
-		PinnedParallelReaders:   &pr,
-		PinnedReadAheadBuffers:  &rab,
-	}
-	out := Output{
-		Workers:           8,
-		WriteAheadWriters: waw,
-		ChunkSize:         chunk,
-		ParallelReaders:   pr,
-		ReadAheadBuffers:  rab,
-		Tier:              TierRegression,
-		Reasoning:         "regression-selected pinned tuple",
-	}
-
-	applyEpsilonPerturbation(&out, in, DriverProfile{Name: "postgres", HardChunkLimit: 30_000}, 1)
-
-	if out.ChunkSize != 30_000 || out.Tier != TierRegression {
-		t.Fatalf("all-pinned safety projection = chunk %d/tier %q, want 30000/%q",
-			out.ChunkSize, out.Tier, TierRegression)
-	}
-	if !strings.Contains(out.Reasoning, "effective projection:") ||
-		!strings.Contains(out.Reasoning, "clamp=protocol=30000") ||
-		strings.Contains(out.Reasoning, "ε-perturbation") {
-		t.Fatalf("all-pinned safety reasoning = %q", out.Reasoning)
 	}
 }
 

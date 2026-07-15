@@ -150,13 +150,6 @@ func applyHistorySelection(out *Output, in Input, profile DriverProfile, rows []
 	// other PR/RAB combos are kept in the dataset for the regression
 	// tier (above), which can model the reader axes; they just don't
 	// belong in a comparison that ignores them.
-	if in.PinnedWriteAheadWriters != nil {
-		out.Reasoning = appendReasoning(out.Reasoning,
-			"smoothed-bins skipped: WAW axis pinned at %d; effective candidate projection preserves the configured value",
-			*in.PinnedWriteAheadWriters,
-		)
-		return
-	}
 	binsRows := rowsAtReaderSettings(rows, out.ParallelReaders, out.ReadAheadBuffers)
 	if len(binsRows) == 0 {
 		out.Reasoning = appendReasoning(out.Reasoning,

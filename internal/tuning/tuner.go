@@ -52,19 +52,13 @@ type Input struct {
 	// conservative 500-byte fallback rather than aliasing the legacy average.
 	RepresentativeRowBytes int64
 
-	// SafetyRowBytes is the widest observed positive per-table average. It is
-	// the conservative scalar fallback for memory clamps and estimates when the
-	// cardinality profile below is incomplete. SafetyRowBytesKnown is true only
-	// when schema statistics supplied that positive width; fallback estimates
-	// keep it false so callers never present an assumed width as observed fact.
+	// SafetyRowBytes is the widest observed positive per-table average and is
+	// used exclusively for memory clamps and estimates. SafetyRowBytesKnown is
+	// true only when schema statistics supplied that positive width; fallback
+	// estimates keep it false so callers never present an assumed width as
+	// observed fact.
 	SafetyRowBytes      int64
 	SafetyRowBytesKnown bool
-
-	// MemoryProfile carries every in-scope table's runtime-only cardinality
-	// and average width. Complete profiles enable the cardinality-aware memory
-	// model; incomplete profiles fall back to SafetyRowBytes and must not be
-	// persisted or treated as evidence authorizing runtime growth.
-	MemoryProfile MemoryProfile `json:"-" yaml:"-"`
 
 	// UncappedAvgRowBytes is the pre-cap average row size in bytes
 	// (#214 Copilot fix on PR #288). ClassifyRegime reads this for
@@ -109,14 +103,11 @@ type Input struct {
 	ForceExplore       bool
 	ExplorationEpsilon float64
 
-	// PinnedWorkers, PinnedChunkSize, and PinnedWriteAheadWriters carry
-	// authoritative user-owned axes. PR2 of #728 projects candidates into
-	// this effective domain before scoring; the WAW pin also retains measured
-	// override-cost advice. Nil means the tuner owns the axis. Hard memory and
-	// protocol safety may still lower a pinned chunk, with requested/effective
-	// provenance retained by the config layer.
-	PinnedWorkers           *int
-	PinnedChunkSize         *int
+	// PinnedWriteAheadWriters is the user-pinned WAW value, when the
+	// config provenance says the tuner may not adjust it (#461). Tune
+	// still computes its recommendation; this field only enables the
+	// measured override-cost advice in Output.PinnedAdvice. Nil when
+	// WAW is tuner-managed.
 	PinnedWriteAheadWriters *int
 
 	// PinnedParallelReaders / PinnedReadAheadBuffers mirror the pin for
@@ -366,7 +357,6 @@ func DefaultOutput(in Input, profile DriverProfile) Output {
 // effective positive pinned concurrency values for memory and pool sizing.
 func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides DefaultOverrides) Output {
 	out := baseline(in, profile)
-	applyPinnedAxes(&out, in)
 	if overrides.Workers > 0 {
 		out.Workers = overrides.Workers
 		out.MaxPartitions = overrides.Workers
@@ -381,7 +371,7 @@ func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides Defau
 		out.ParallelReaders = overrides.ParallelReaders
 	}
 	finalizeTierAndReasoning(&out, nil, false)
-	finalizeOutput(&out, in, profile)
+	finalizeOutput(&out, in)
 	return out
 }
 
@@ -398,7 +388,6 @@ func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides Defau
 //	) → memory clamp
 func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTuning DBTuning) Output {
 	out := baseline(in, profile)
-	applyPinnedAxes(&out, in)
 
 	// Fetch + filter once so both exploration and history-selection see
 	// the same row set. Track whether the fetch actually succeeded so a
@@ -498,7 +487,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			pinnedAdvice(rows)
 		}
 		finalizeTierAndReasoning(&out, history, historyAvailable)
-		finalizeOutput(&out, in, profile)
+		finalizeOutput(&out, in)
 		return out
 	}
 
@@ -531,11 +520,11 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 			appendOutlierReasoning(&out, identityFilter)
 			applyHistorySelection(&out, in, profile, identityFilter.kept)
 			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-				applyEpsilonPerturbation(&out, in, profile, in.ExplorationEpsilon)
+				applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
 			}
 			pinnedAdvice(identityFilter.kept)
 			finalizeTierAndReasoning(&out, history, historyAvailable)
-			finalizeOutput(&out, in, profile)
+			finalizeOutput(&out, in)
 			return out
 		}
 	}
@@ -568,13 +557,13 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		appendOutlierReasoning(&out, regimeFilter)
 		applyHistorySelection(&out, in, profile, rows)
 		if shouldEpsilonPerturb(in.ExplorationEpsilon) {
-			applyEpsilonPerturbation(&out, in, profile, in.ExplorationEpsilon)
+			applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
 		}
 	}
 
 	pinnedAdvice(rows)
 	finalizeTierAndReasoning(&out, history, historyAvailable)
-	finalizeOutput(&out, in, profile)
+	finalizeOutput(&out, in)
 	return out
 }
 

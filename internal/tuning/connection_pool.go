@@ -36,42 +36,13 @@ func finalizeConnectionPoolSizes(out *Output) {
 	)
 }
 
-// applyEffectiveProjection synchronizes an Output with the candidate tuple
-// that can actually run and records requested-to-effective provenance once.
-// Selection paths may call it before epsilon exploration; finalization calls it
-// again as an idempotent backstop.
-func applyEffectiveProjection(out *Output, in Input, profile DriverProfile) candidateProjection {
-	if out == nil {
-		return candidateProjection{}
-	}
-	projection := projectCandidate(in, profile, candidateFromOutput(*out, in))
-	if projection.changed() {
-		memoryAudit := ""
-		if projection.MemoryClamped {
-			memoryAudit = "; memory clamp applied during effective projection"
-		}
-		out.Reasoning = appendReasoning(out.Reasoning,
-			"effective projection: requested chunk=%d rows/%.1f MB; effective chunk=%d rows/model=%.1f MB (%s)%s",
-			projection.Requested.ChunkSize,
-			candidateMB(projection.Requested.RequestedChunkBytes),
-			projection.Effective.ChunkSize,
-			candidateMB(projection.ModelChunkBytes),
-			projection.reason(),
-			memoryAudit,
-		)
-	}
-	applyProjectedCandidate(out, projection)
-	return projection
-}
-
 // finalizeOutput applies resource-dependent finalization in its required
 // order: first shrink the chunk for the effective concurrency tuple, then
 // derive connection pools from that same final tuple.
-func finalizeOutput(out *Output, in Input, profile DriverProfile) {
+func finalizeOutput(out *Output, in Input) {
 	if out == nil {
 		return
 	}
-	applyEffectiveProjection(out, in, profile)
 	applyMemoryClamp(out, in)
 	finalizeConnectionPoolSizes(out)
 }

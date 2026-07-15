@@ -162,8 +162,6 @@ func (c *Config) fillDefaultTunableProvenance() {
 // write_ahead_writers knob, for callers (the orchestrator) that need to
 // ask whether a specific tunable is pinned (#461).
 const (
-	TunableWorkers           = provenanceMigrationWorkers
-	TunableChunkSize         = provenanceMigrationChunkSize
 	TunableWriteAheadWriters = provenanceMigrationWriteAheadWriters
 	TunableParallelReaders   = provenanceMigrationParallelReaders
 	TunableReadAheadBuffers  = provenanceMigrationReadAheadBuffers
@@ -215,11 +213,6 @@ func (c *Config) TuningProvenanceSummary() string {
 	}
 	for _, t := range tunables {
 		entry := fmt.Sprintf("%s=%d", strings.TrimPrefix(t.name, "migration."), t.value)
-		if t.name == provenanceMigrationChunkSize &&
-			(c.tunableProvenance(t.name) == ProvenanceUserConfig || c.tunableProvenance(t.name) == ProvenanceSecretsDefault) &&
-			c.autoConfig.OriginalChunkSize > 0 && int64(c.autoConfig.OriginalChunkSize) != t.value {
-			entry = fmt.Sprintf("chunk_size=%d (requested %d; safety-capped)", t.value, c.autoConfig.OriginalChunkSize)
-		}
 		switch c.tunableProvenance(t.name) {
 		case ProvenanceUserConfig, ProvenanceSecretsDefault:
 			pinned = append(pinned, entry)

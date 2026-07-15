@@ -1,7 +1,6 @@
 package tuning
 
 import (
-	"fmt"
 	"math"
 	"math/big"
 )
@@ -157,21 +156,18 @@ func safeChunkSizeDetail(budgetMB int64, workers, readAheadBuffers, writeAheadWr
 }
 
 // applyMemoryClamp enforces the caller-resolved memory budget on out.ChunkSize
-// using the cardinality-aware table profile when complete, or SafetyRowBytes as
-// the conservative scalar fallback. Representative and legacy average widths
-// intentionally do not participate in this hard-safety path. A non-positive
-// budget remains nonbinding, though the estimate is still populated.
+// using SafetyRowBytes, then recomputes EstimatedMemMB. Representative and
+// legacy average widths intentionally do not participate in this hard-safety
+// path. A non-positive budget remains nonbinding, though the estimate is still
+// populated.
 //
 // If even one row exceeds the budget, ChunkSize is clamped to the one-row
 // minimum-progress fallback and MemoryEstimateOverBudget remains true. The
 // reasoning explicitly says that this is not a fitting configuration.
 func applyMemoryClamp(out *Output, in Input) {
 	rowBytes, known := in.safetyRowBytes()
-	memoryModel := NewMemoryModel(in.MemoryProfile, rowBytes)
 	widthSource := "unobserved fallback estimate"
-	if memoryModel.UsesTableProfile() {
-		widthSource = fmt.Sprintf("cardinality-aware %d-table model; widest width remains packet sizing", memoryModel.TableCount())
-	} else if known {
+	if known {
 		widthSource = "widest observed table-average model; not a per-row bound"
 	} else {
 		// Width provenance matters even when no clamp fires: a formula/load
@@ -184,20 +180,22 @@ func applyMemoryClamp(out *Output, in Input) {
 	}
 
 	budgetMB := in.MemoryBudgetMB
-	overBudget := memoryModel.ExceedsBudget(
+	overBudget := MemoryEstimateExceedsBudget(
 		budgetMB,
 		out.Workers,
 		out.ReadAheadBuffers,
 		out.WriteAheadWriters,
 		out.ChunkSize,
+		rowBytes,
 	)
 
 	if overBudget {
-		safe, minimumExceeds := memoryModel.safeChunkSizeDetail(
+		safe, minimumExceeds := safeChunkSizeDetail(
 			budgetMB,
 			out.Workers,
 			out.ReadAheadBuffers,
 			out.WriteAheadWriters,
+			rowBytes,
 		)
 		if safe > 0 && safe < int64(out.ChunkSize) {
 			oldCS := out.ChunkSize
@@ -223,18 +221,20 @@ func applyMemoryClamp(out *Output, in Input) {
 		}
 	}
 
-	out.EstimatedMemMB = memoryModel.EstimatedMemMB(
+	out.EstimatedMemMB = EstimatedMemMB(
 		out.Workers,
 		out.ReadAheadBuffers,
 		out.WriteAheadWriters,
 		out.ChunkSize,
+		rowBytes,
 	)
 
-	out.MemoryEstimateOverBudget = memoryModel.ExceedsBudget(
+	out.MemoryEstimateOverBudget = MemoryEstimateExceedsBudget(
 		budgetMB,
 		out.Workers,
 		out.ReadAheadBuffers,
 		out.WriteAheadWriters,
 		out.ChunkSize,
+		rowBytes,
 	)
 }
