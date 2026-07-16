@@ -24,10 +24,11 @@ const minRunsPerBin = 3
 // WITH retries is real load contention and stays in the pool.
 const outlierFloorRatio = 0.5
 
-// maxLearnableWAW is the inclusive upper bound for every tuner-managed
-// write-ahead-writer value. Keeping the baseline, exploration grid,
-// perturbation, and regression validation on one constant prevents the
-// default policy from producing history outside the learnable domain.
+// maxLearnableWAW is the inclusive upper bound for history-selected and
+// exploratory write-ahead-writer values. The restored pre-epic baseline is
+// intentionally allowed to scale past this domain on large native hosts;
+// history selection does not promote those out-of-domain baseline rows back
+// into a learned recommendation.
 const maxLearnableWAW = 8
 
 // retryRateExclusionThreshold is the per-WAW retry rate above which the
@@ -97,6 +98,12 @@ func applyHistory(out *Output, in Input, profile DriverProfile, history HistoryP
 	}
 
 	rows = filterByRegime(rows, in, currentTuning)
+	if len(rows) == 0 {
+		return
+	}
+	var projectedDropped int
+	rows, projectedDropped = dropSafetyProjected(rows)
+	appendProjectedCrossWorkloadReasoning(out, projectedDropped)
 	if len(rows) == 0 {
 		return
 	}

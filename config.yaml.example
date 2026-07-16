@@ -40,8 +40,9 @@ migration:
   # history — and improves run over run. Leave this section free of tuning
   # knobs unless you have a specific reason; see "Advanced tuning overrides"
   # at the bottom of this section.
-  # Cold-start defaults keep workers within 4-12 and generated writers within
-  # 1-8, then memory-clamp the automatic chunk for the effective concurrency.
+  # Load-time formulas keep workers within 4-12; schema/history-aware tuning
+  # then applies its distinct CPU/target baseline and planned probe policy.
+  # The retained memory envelope may clamp the automatic chunk separately.
 
   # Tables to exclude from migration (glob patterns supported)
   exclude_tables:

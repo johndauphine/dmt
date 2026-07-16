@@ -6,12 +6,16 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-// MemBudget is a shared, byte-weighted admission control for chunks in
-// flight (#617). Readers acquire a chunk's actual scanned size before it
-// enters the pipeline and the bytes are released once the chunk is written
-// or abandoned, so the real peak in-flight memory is bounded by the budget
-// regardless of how far actual row sizes drift from the static estimate
-// used to size the channels.
+// MemBudget is a shared, byte-weighted admission control for scanned chunks
+// entering the pipeline (#617). Readers acquire a chunk's measured scanned
+// size before enqueueing it and release the reservation after the write (when
+// checkpoint acks are disabled), after successful ack delivery (when enabled),
+// or when the chunk is abandoned. Ack ordering retains only bounded checkpoint
+// metadata, not the full row-payload reservation. This bounds admitted row
+// payload and redistributes capacity across active tables. It is not a hard
+// bound on total process memory: each reader scans one chunk before admission,
+// and driver encoding can allocate another copy. MemoryGuard and GOMEMLIMIT
+// remain the process-level backstops.
 //
 // One MemBudget is created per migration and shared across every concurrent
 // table pipeline, so a table running alone can use the whole budget while

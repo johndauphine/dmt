@@ -96,7 +96,7 @@ func TestSafeChunkSize_LargeBudgetKeepsExactOverflowingBufferSum(t *testing.T) {
 	}
 
 	out := Output{Workers: 1, ReadAheadBuffers: maxInt, WriteAheadWriters: maxInt, ChunkSize: 2}
-	applyMemoryClamp(&out, Input{MemoryBudgetMB: budgetMB, SafetyRowBytes: 1, SafetyRowBytesKnown: true})
+	applyMemoryClamp(&out, Input{MemoryBudgetMB: budgetMB, RepresentativeRowBytes: 1, SafetyRowBytes: 1, SafetyRowBytesKnown: true})
 	if out.ChunkSize != 1 || out.MemoryEstimateOverBudget || strings.Contains(out.Reasoning, "still exceeds") {
 		t.Fatalf("exact clamp surfaced false minimum-over-budget state: %+v", out)
 	}
@@ -218,7 +218,7 @@ func TestApplyMemoryClamp_RefusesZeroChunk(t *testing.T) {
 	}
 }
 
-func TestApplyMemoryClamp_UsesSafetyWidthNotOtherAverages(t *testing.T) {
+func TestApplyMemoryClamp_UsesRepresentativeWidthNotOtherAverages(t *testing.T) {
 	out := Output{
 		Workers:           1,
 		ReadAheadBuffers:  1,
@@ -234,15 +234,15 @@ func TestApplyMemoryClamp_UsesSafetyWidthNotOtherAverages(t *testing.T) {
 	}
 
 	applyMemoryClamp(&out, in)
-	if out.ChunkSize != 524 {
-		t.Fatalf("ChunkSize = %d, want 524 from 2000-byte safety width", out.ChunkSize)
+	if out.ChunkSize != 1_000 {
+		t.Fatalf("ChunkSize = %d, want unchanged 1000 from 200-byte representative width", out.ChunkSize)
 	}
-	if !strings.Contains(out.Reasoning, "safety width 2000 B, widest observed table-average model; not a per-row bound") {
-		t.Errorf("reasoning does not identify observed safety width: %q", out.Reasoning)
+	if strings.Contains(out.Reasoning, "memory clamp") {
+		t.Errorf("widest safety width leaked into the global policy clamp: %q", out.Reasoning)
 	}
 }
 
-func TestApplyMemoryClamp_UnknownSafetyWidthUsesLabeledFallback(t *testing.T) {
+func TestApplyMemoryClamp_KnownRepresentativeDoesNotDependOnSafetyEvidence(t *testing.T) {
 	out := Output{Workers: 1, ReadAheadBuffers: 1, ChunkSize: 3_000}
 	in := Input{
 		MemoryBudgetMB:         1,
@@ -251,15 +251,15 @@ func TestApplyMemoryClamp_UnknownSafetyWidthUsesLabeledFallback(t *testing.T) {
 	}
 
 	applyMemoryClamp(&out, in)
-	if out.ChunkSize != 2_097 {
-		t.Fatalf("ChunkSize = %d, want 2097 from independent 500-byte fallback", out.ChunkSize)
+	if out.ChunkSize != 116 {
+		t.Fatalf("ChunkSize = %d, want 116 from 9000-byte representative", out.ChunkSize)
 	}
-	if !strings.Contains(out.Reasoning, "safety width 500 B, unobserved fallback estimate") {
-		t.Errorf("reasoning does not label fallback safety width: %q", out.Reasoning)
+	if !strings.Contains(out.Reasoning, "representative width 9000 B") {
+		t.Errorf("reasoning does not identify representative width: %q", out.Reasoning)
 	}
 }
 
-func TestApplyMemoryClamp_UnknownSafetyWidthLabeledWithoutClamp(t *testing.T) {
+func TestApplyMemoryClamp_UnknownRepresentativeLabeledWithoutClamp(t *testing.T) {
 	out := Output{Workers: 1, ReadAheadBuffers: 1, ChunkSize: 10, Reasoning: "baseline"}
 	in := Input{MemoryBudgetMB: 1}
 
@@ -270,17 +270,18 @@ func TestApplyMemoryClamp_UnknownSafetyWidthLabeledWithoutClamp(t *testing.T) {
 	if out.MemoryEstimateOverBudget {
 		t.Fatal("within-budget fallback estimate marked over budget")
 	}
-	if !strings.Contains(out.Reasoning, "unobserved fallback estimate (no positive schema width)") {
-		t.Errorf("unknown width was not labeled without a clamp: %q", out.Reasoning)
+	if !strings.Contains(out.Reasoning, "unobserved fallback planning") {
+		t.Errorf("unknown representative width was not labeled without a clamp: %q", out.Reasoning)
 	}
 }
 
 func TestApplyMemoryClamp_MinimumProgressCanRemainOverBudget(t *testing.T) {
 	out := Output{Workers: 1, ReadAheadBuffers: 1, ChunkSize: 10, Reasoning: "baseline"}
 	in := Input{
-		MemoryBudgetMB:      1,
-		SafetyRowBytes:      2 * 1024 * 1024,
-		SafetyRowBytesKnown: true,
+		MemoryBudgetMB:         1,
+		RepresentativeRowBytes: 2 * 1024 * 1024,
+		SafetyRowBytes:         2 * 1024 * 1024,
+		SafetyRowBytesKnown:    true,
 	}
 
 	applyMemoryClamp(&out, in)

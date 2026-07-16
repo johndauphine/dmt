@@ -1,8 +1,9 @@
 package driver
 
 import (
-	"github.com/johndauphine/dmt/internal/tuning"
 	"math"
+
+	"github.com/johndauphine/dmt/internal/tuning"
 )
 
 func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []TableStatRow) {
@@ -50,21 +51,27 @@ func (s *SmartConfigAnalyzer) calculateFormulaOnlyParams() {
 // adding the exploration fields from the analyzer's configured state.
 func (s *SmartConfigAnalyzer) toTuningInput(in AutoTuneInput) tuning.Input {
 	return tuning.Input{
-		CPUCores:               in.CPUCores,
-		MemoryGB:               in.MemoryGB,
-		MemoryBudgetMB:         in.MemoryBudgetMB,
-		Platform:               in.Platform,
-		SourceDBType:           in.DatabaseType,
-		TargetDBType:           in.TargetType,
-		TargetMode:             in.TargetMode,
-		TotalTables:            in.TotalTables,
-		TotalRows:              in.TotalRows,
-		AvgRowBytes:            in.AvgRowBytes,
-		RepresentativeRowBytes: in.RepresentativeRowBytes,
-		SafetyRowBytes:         in.SafetyRowBytes,
-		SafetyRowBytesKnown:    in.SafetyRowBytesKnown,
-		UncappedAvgRowBytes:    in.UncappedAvgRowBytes,
-		LargestTableBytes:      in.LargestTableBytes,
+		CPUCores:                             in.CPUCores,
+		MemoryGB:                             in.MemoryGB,
+		MemoryBudgetMB:                       in.MemoryBudgetMB,
+		Platform:                             in.Platform,
+		SourceDBType:                         in.DatabaseType,
+		TargetDBType:                         in.TargetType,
+		TargetMode:                           in.TargetMode,
+		TotalTables:                          in.TotalTables,
+		TotalRows:                            in.TotalRows,
+		AvgRowBytes:                          in.AvgRowBytes,
+		RepresentativeRowBytes:               in.RepresentativeRowBytes,
+		SafetyRowBytes:                       in.SafetyRowBytes,
+		SafetyRowBytesKnown:                  in.SafetyRowBytesKnown,
+		UncappedAvgRowBytes:                  in.UncappedAvgRowBytes,
+		LargestTableBytes:                    in.LargestTableBytes,
+		ProjectionContextFingerprint:         in.ProjectionContextFingerprint,
+		ProjectionConnectionPolicyKnown:      in.ProjectionConnectionPolicyKnown,
+		ProjectionMaxSourceConnectionsPinned: in.ProjectionMaxSourceConnectionsPinned,
+		ProjectionMaxSourceConnections:       in.ProjectionMaxSourceConnections,
+		ProjectionMaxTargetConnectionsPinned: in.ProjectionMaxTargetConnectionsPinned,
+		ProjectionMaxTargetConnections:       in.ProjectionMaxTargetConnections,
 		// Workload identity passthrough (#215).
 		SourceHost:              in.SourceHost,
 		SourcePort:              in.SourcePort,
@@ -197,18 +204,20 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 	out := make([]tuning.HistoryRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, tuning.HistoryRecord{
-			ID:                r.ID,
-			Timestamp:         r.Timestamp,
-			SourceDBType:      r.SourceDBType,
-			TargetDBType:      r.TargetDBType,
-			Workers:           r.Workers,
-			ChunkSize:         r.ChunkSize,
-			WriteAheadWriters: r.WriteAheadWriters,
-			ParallelReaders:   r.ParallelReaders,
-			ReadAheadBuffers:  r.ReadAheadBuffers,
-			AvgRowBytes:       r.AvgRowSizeBytes,
-			TotalRows:         r.TotalRows,
-			TotalTables:       r.TotalTables,
+			ID:                   r.ID,
+			Timestamp:            r.Timestamp,
+			SourceDBType:         r.SourceDBType,
+			TargetDBType:         r.TargetDBType,
+			Workers:              r.Workers,
+			ChunkSize:            r.ChunkSize,
+			WriteAheadWriters:    r.WriteAheadWriters,
+			ParallelReaders:      r.ParallelReaders,
+			ReadAheadBuffers:     r.ReadAheadBuffers,
+			MaxSourceConnections: r.MaxSourceConns,
+			MaxTargetConnections: r.MaxTargetConns,
+			AvgRowBytes:          r.AvgRowSizeBytes,
+			TotalRows:            r.TotalRows,
+			TotalTables:          r.TotalTables,
 			// LargestTableBytes is not persisted yet (#214 follow-up will
 			// add the column); historical rows leave it zero, which the
 			// regime classifier treats as "unknown skew" â€” neutral on
@@ -221,19 +230,23 @@ func (a *tuningHistoryAdapter) Records(sourceDBType, targetDBType string) ([]tun
 			// adapter boundary, so a pre-#215 row with AvgRowSizeBytes==0
 			// gets the safeAvgRowBytes fallback consistently with the
 			// rest of the tuning pipeline.
-			FinalThroughputBytes:    throughputBytesForHistory(r.FinalThroughput, r.AvgRowSizeBytes),
-			ChunkRetryCount:         r.ChunkRetryCount,
-			AdjustedAtRuntime:       r.AdjustedAtRuntime,
-			CPUCores:                r.CPUCores,
-			MemoryGB:                r.MemoryGB,
-			Platform:                r.Platform,
-			TargetSharedBuffersMB:   r.TargetSharedBuffersMB,
-			TargetSyncCommit:        r.TargetSyncCommit,
-			TargetFsync:             r.TargetFsync,
-			TargetFullPageWrites:    r.TargetFullPageWrites,
-			TargetMaxWALSizeMB:      r.TargetMaxWALSizeMB,
-			TargetWALLevel:          r.TargetWALLevel,
-			SourceMaxServerMemoryMB: r.SourceMaxServerMemoryMB,
+			FinalThroughputBytes:         throughputBytesForHistory(r.FinalThroughput, r.AvgRowSizeBytes),
+			ChunkRetryCount:              r.ChunkRetryCount,
+			AdjustedAtRuntime:            r.AdjustedAtRuntime,
+			SafetyProjected:              r.SafetyProjected,
+			ExecutionChunkSizeMin:        r.ExecutionChunkSizeMin,
+			ExecutionChunkSizeMax:        r.ExecutionChunkSizeMax,
+			ProjectionContextFingerprint: r.ProjectionContextFingerprint,
+			CPUCores:                     r.CPUCores,
+			MemoryGB:                     r.MemoryGB,
+			Platform:                     r.Platform,
+			TargetSharedBuffersMB:        r.TargetSharedBuffersMB,
+			TargetSyncCommit:             r.TargetSyncCommit,
+			TargetFsync:                  r.TargetFsync,
+			TargetFullPageWrites:         r.TargetFullPageWrites,
+			TargetMaxWALSizeMB:           r.TargetMaxWALSizeMB,
+			TargetWALLevel:               r.TargetWALLevel,
+			SourceMaxServerMemoryMB:      r.SourceMaxServerMemoryMB,
 			// Workload identity passthrough (#215). Pre-#215 rows
 			// have empty values for these â€” exact-identity match is
 			// equality on strings/ints, so empties fail to match the

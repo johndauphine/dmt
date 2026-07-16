@@ -2,6 +2,9 @@ package driver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
@@ -195,25 +198,50 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []TableStatRow, avgRowSi
 		})
 	}
 
+	projectionFingerprint := projectionContextFingerprint(
+		s.projectionContext,
+		s.dbType,
+		s.targetDBType,
+		s.memoryBudgetMB,
+		s.TargetHardChunkLimit(),
+		safetyRowBytes,
+		s.safetyRowBytesKnown,
+	)
+	projectionConnectionPolicyKnown := s.projectionContext != nil
+	var projectionSourcePinned, projectionTargetPinned bool
+	var projectionSourceLimit, projectionTargetLimit int
+	if s.projectionContext != nil {
+		projectionSourcePinned = s.projectionContext.MaxSourceConnections.Pinned
+		projectionSourceLimit = s.projectionContext.MaxSourceConnections.Value
+		projectionTargetPinned = s.projectionContext.MaxTargetConnections.Pinned
+		projectionTargetLimit = s.projectionContext.MaxTargetConnections.Value
+	}
+
 	return AutoTuneInput{
-		CPUCores:               cores,
-		MemoryGB:               memoryGB,
-		AvailableMemoryMB:      s.availableMemoryMB,
-		Platform:               DetectPlatform(),
-		MaxMemoryMB:            s.memoryBudgetMB,
-		MemoryBudgetMB:         s.memoryBudgetMB,
-		DatabaseType:           s.dbType,
-		TargetType:             s.targetDBType,
-		TargetMode:             s.targetMode,
-		TotalTables:            s.suggestions.TotalTables,
-		TotalRows:              s.suggestions.TotalRows,
-		AvgRowBytes:            avgRowSize,
-		RepresentativeRowBytes: representativeRowBytes,
-		SafetyRowBytes:         safetyRowBytes,
-		SafetyRowBytesKnown:    s.safetyRowBytesKnown,
-		UncappedAvgRowBytes:    uncappedAvgRowBytes,
-		LargestTableBytes:      s.largestSampledTableBytes,
-		LargestTables:          largestTables,
+		CPUCores:                             cores,
+		MemoryGB:                             memoryGB,
+		AvailableMemoryMB:                    s.availableMemoryMB,
+		Platform:                             DetectPlatform(),
+		MaxMemoryMB:                          s.memoryBudgetMB,
+		MemoryBudgetMB:                       s.memoryBudgetMB,
+		DatabaseType:                         s.dbType,
+		TargetType:                           s.targetDBType,
+		TargetMode:                           s.targetMode,
+		TotalTables:                          s.suggestions.TotalTables,
+		TotalRows:                            s.suggestions.TotalRows,
+		AvgRowBytes:                          avgRowSize,
+		RepresentativeRowBytes:               representativeRowBytes,
+		SafetyRowBytes:                       safetyRowBytes,
+		SafetyRowBytesKnown:                  s.safetyRowBytesKnown,
+		UncappedAvgRowBytes:                  uncappedAvgRowBytes,
+		LargestTableBytes:                    s.largestSampledTableBytes,
+		LargestTables:                        largestTables,
+		ProjectionContextFingerprint:         projectionFingerprint,
+		ProjectionConnectionPolicyKnown:      projectionConnectionPolicyKnown,
+		ProjectionMaxSourceConnectionsPinned: projectionSourcePinned,
+		ProjectionMaxSourceConnections:       projectionSourceLimit,
+		ProjectionMaxTargetConnectionsPinned: projectionTargetPinned,
+		ProjectionMaxTargetConnections:       projectionTargetLimit,
 		// Workload identity passthrough (#215).
 		SourceHost:     s.identitySourceHost,
 		SourcePort:     s.identitySourcePort,
@@ -226,6 +254,146 @@ func (s *SmartConfigAnalyzer) buildAutoTuneInput(tables []TableStatRow, avgRowSi
 		TargetDatabase: s.identityTargetDatabase,
 		TargetSchema:   s.identityTargetSchema,
 	}
+}
+
+// projectionContextFingerprint identifies the action-independent execution
+// safety context used to compare projected history. Version 3 records that the
+// requested chunk is used directly in steady transfer, with only target
+// protocol limits binding initially; complete-inventory table limits are
+// conditional writer-transition ratchets. The action itself is already stored
+// on each history row and must not enter this hash: doing so would split the six
+// planned probes into six incompatible cohorts.
+//
+// Connection limits follow the same rule. Fixed user/secrets limits are hashed;
+// generated pools are represented by a versioned derivation policy. The tuner
+// then verifies each projected history row's persisted pool limits against its
+// own recorded action before admitting it. Together those two checks cover the
+// exact post-connection-reserve pipeline budget without circularly hashing the
+// current recommendation.
+//
+// Exact RowCount is intentionally absent because it is not an input to target
+// protocol safety or a conditional per-pipeline transition cap; ordinary source
+// growth must not reset an otherwise identical learning campaign. Dynamic
+// tuple-keyset reader plans and strict strategies depend on live/session state
+// not present here, so those scopes return empty and projected learning fails
+// closed.
+func projectionContextFingerprint(
+	ctx *ProjectionExecutionContext,
+	sourceDBType string,
+	targetDBType string,
+	memoryBudgetMB int64,
+	hardChunkLimit int,
+	fallbackRowBytes int64,
+	fallbackRowBytesKnown bool,
+) string {
+	if ctx == nil || len(ctx.Tables) == 0 || memoryBudgetMB <= 0 || ctx.StrictConsistency {
+		return ""
+	}
+
+	type projectionTable struct {
+		schema     string
+		name       string
+		rowBytes   int64
+		readerPlan string
+	}
+	canonical := make([]projectionTable, 0, len(ctx.Tables))
+	fallbackUsed := false
+	for _, table := range ctx.Tables {
+		readerPlan := "single-reader-v1"
+		switch {
+		case table.SupportsKeysetPagination():
+			readerPlan = "parallel-readers-v1"
+		case table.TupleKeysetEligible(sourceDBType):
+			// The parallel tuple path may fall back after a live MIN/MAX probe
+			// and caps readers to the resulting range count. Schema alone cannot
+			// prove the inventory that produced a projected measurement.
+			return ""
+		}
+
+		rowBytes := table.EstimatedRowSize
+		if rowBytes <= 0 {
+			fallbackUsed = true
+			if fallbackRowBytesKnown && fallbackRowBytes > 0 {
+				rowBytes = fallbackRowBytes
+			} else {
+				// Zero explicitly means execution had no width evidence and
+				// therefore no memory-derived writer-transition cap.
+				rowBytes = 0
+			}
+		}
+		canonical = append(canonical, projectionTable{
+			schema:     table.Schema,
+			name:       table.Name,
+			rowBytes:   rowBytes,
+			readerPlan: readerPlan,
+		})
+	}
+	sort.Slice(canonical, func(i, j int) bool {
+		if canonical[i].schema != canonical[j].schema {
+			return canonical[i].schema < canonical[j].schema
+		}
+		if canonical[i].name != canonical[j].name {
+			return canonical[i].name < canonical[j].name
+		}
+		if canonical[i].rowBytes != canonical[j].rowBytes {
+			return canonical[i].rowBytes < canonical[j].rowBytes
+		}
+		return canonical[i].readerPlan < canonical[j].readerPlan
+	})
+
+	h := sha256.New()
+	_, _ = h.Write([]byte("dmt-projection-context-v3;steady=direct-v1;transitions=complete-inventory-ratchet-v1;connections=per-action-v1\x00"))
+	writeInt64 := func(value int64) {
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], uint64(value))
+		_, _ = h.Write(encoded[:])
+	}
+	writeString := func(value string) {
+		writeInt64(int64(len(value)))
+		_, _ = h.Write([]byte(value))
+	}
+	writeBool := func(value bool) {
+		if value {
+			writeInt64(1)
+			return
+		}
+		writeInt64(0)
+	}
+	writePolicy := func(policy ProjectionTunablePolicy) {
+		writeBool(policy.Pinned)
+		if policy.Pinned {
+			writeInt64(int64(policy.Value))
+			return
+		}
+		writeString("derived-from-action-v1")
+	}
+
+	writeString(Canonicalize(sourceDBType))
+	writeString(Canonicalize(targetDBType))
+	writeInt64(memoryBudgetMB)
+	writeInt64(int64(hardChunkLimit))
+	writeBool(fallbackUsed)
+	if fallbackUsed {
+		writeBool(fallbackRowBytesKnown)
+		if fallbackRowBytesKnown {
+			writeInt64(fallbackRowBytes)
+		}
+	}
+	writeBool(ctx.StrictConsistency)
+	writePolicy(ctx.Workers)
+	writePolicy(ctx.WriteAheadWriters)
+	writePolicy(ctx.ParallelReaders)
+	writePolicy(ctx.ReadAheadBuffers)
+	writePolicy(ctx.MaxSourceConnections)
+	writePolicy(ctx.MaxTargetConnections)
+	writeInt64(int64(len(canonical)))
+	for _, table := range canonical {
+		writeString(table.schema)
+		writeString(table.name)
+		writeInt64(table.rowBytes)
+		writeString(table.readerPlan)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func driverIsPortless(dbType string) bool {

@@ -359,7 +359,8 @@ func TestAnalyzeDateFailurePreservesTuningAndHistory(t *testing.T) {
 			if rowID := analyzer.SaveTuningWithActualParams(actualParamsFromSuggestions(got)); rowID != 42 {
 				t.Fatalf("history row ID after date failure = %d, want 42", rowID)
 			}
-			if history.saved == nil || history.saved.Reasoning != reasoning || history.saved.TotalTables != 2 {
+			if history.saved == nil || !strings.HasPrefix(history.saved.Reasoning, reasoning+"; ") ||
+				!strings.Contains(history.saved.Reasoning, "global policy used directly") || history.saved.TotalTables != 2 {
 				t.Fatalf("history after date failure = %+v, want current tuning persisted", history.saved)
 			}
 		})

@@ -60,8 +60,9 @@ type SmartConfigSuggestions struct {
 	SafetyRowBytes         int64 // widest observed positive table-average width, or fallback estimate
 	SafetyRowBytesKnown    bool  // true only when a positive schema width was observed
 	EstimatedMemMB         int64
-	// MemoryEstimateOverBudget remains true when a one-row minimum-progress
-	// recommendation still exceeds the modeled memory budget.
+	// MemoryEstimateOverBudget reports the representative-width global model.
+	// Steady transfer uses shared measured-byte admission and MemoryGuard;
+	// table widths gate complete-inventory checks for writer transitions.
 	MemoryEstimateOverBudget bool
 
 	// Warnings contains any issues detected during analysis
@@ -125,6 +126,19 @@ type AutoTuneInput struct {
 	// surfaced via LargestTables.
 	LargestTableBytes int64
 
+	// ProjectionContextFingerprint hashes the action-independent execution
+	// environment used to validate non-runtime-adjusted protocol projections and
+	// legacy static projections. Conditional writer-transition metadata is
+	// disclosure-only because those rows are runtime-adjusted and excluded.
+	// Connection policy travels alongside the fingerprint because each history
+	// row's action-derived/fixed pool limits are validated individually.
+	ProjectionContextFingerprint         string
+	ProjectionConnectionPolicyKnown      bool
+	ProjectionMaxSourceConnectionsPinned bool
+	ProjectionMaxSourceConnections       int
+	ProjectionMaxTargetConnectionsPinned bool
+	ProjectionMaxTargetConnections       int
+
 	// Workload identity (#215). Together these form the tuple the
 	// Tier 1 exact-identity classifier uses to find historically-
 	// comparable runs. Caller (orchestrator) populates from
@@ -149,6 +163,33 @@ type TableStats struct {
 	Name        string
 	RowCount    int64
 	AvgRowBytes int64
+}
+
+// ProjectionTunablePolicy describes whether one execution knob is fixed by
+// user/secrets policy or derived from each tuning action. Generated numeric
+// defaults are deliberately not carried: planned-grid actions must share one
+// projection context even though their derived pool sizes differ.
+type ProjectionTunablePolicy struct {
+	Pinned bool
+	Value  int
+}
+
+// ProjectionExecutionContext is the authoritative transfer-side inventory
+// used to decide whether safety-projected history is comparable. Tables must
+// be the post-filter driver.Table values that will be handed to transfer.Execute
+// (in particular, EstimatedRowSize is the Go-heap sizing width), not the
+// analyzer's separate catalog-stat rows.
+type ProjectionExecutionContext struct {
+	Tables                 []Table
+	StrictConsistency      bool
+	StrictConsistencyScope string
+
+	Workers              ProjectionTunablePolicy
+	WriteAheadWriters    ProjectionTunablePolicy
+	ParallelReaders      ProjectionTunablePolicy
+	ReadAheadBuffers     ProjectionTunablePolicy
+	MaxSourceConnections ProjectionTunablePolicy
+	MaxTargetConnections ProjectionTunablePolicy
 }
 
 // TuningHistoryProvider supplies raw past-run data to the analyzer. The
@@ -197,6 +238,7 @@ type SmartConfigAnalyzer struct {
 	safetyRowBytes           int64       // widest positive table-average width, or the fallback estimate (#703)
 	safetyRowBytesKnown      bool        // true only when at least one positive schema width was observed (#703)
 	largestSampledTableBytes int64       // saturated max RowCount Ã— AvgRowSizeBytes across ALL tables (#214/#703)
+	projectionContext        *ProjectionExecutionContext
 
 	// tableNameFilter restricts Analyze to a caller-supplied set of table
 	// names (#241). The orchestrator applies include/exclude filters
@@ -354,6 +396,24 @@ func (s *SmartConfigAnalyzer) SetTableNameFilter(allowed []string) {
 		filter[strings.ToLower(name)] = true
 	}
 	s.tableNameFilter = filter
+}
+
+// SetProjectionExecutionContext supplies the exact post-filter transfer
+// inventory and pin policy used to validate non-runtime-adjusted protocol and
+// legacy static projection history. Conditional writer-transition rows are
+// runtime-adjusted and excluded independently. The context is copied so later
+// caller slice mutations cannot change an analysis already in progress. Without
+// this context projected history fails closed; analyze-only callers do not have
+// enough execution information to prove equivalence.
+func (s *SmartConfigAnalyzer) SetProjectionExecutionContext(ctx ProjectionExecutionContext) {
+	copyCtx := ctx
+	copyCtx.Tables = append([]Table(nil), ctx.Tables...)
+	for i := range copyCtx.Tables {
+		copyCtx.Tables[i].PrimaryKey = append([]string(nil), ctx.Tables[i].PrimaryKey...)
+		copyCtx.Tables[i].PKColumns = append([]Column(nil), ctx.Tables[i].PKColumns...)
+		copyCtx.Tables[i].Columns = append([]Column(nil), ctx.Tables[i].Columns...)
+	}
+	s.projectionContext = &copyCtx
 }
 
 // SetWorkloadIdentity wires the (source endpoint, target endpoint) tuple

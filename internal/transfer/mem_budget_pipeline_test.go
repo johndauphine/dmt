@@ -77,6 +77,178 @@ func TestMemBudgetFullyReleasedOnSuccess(t *testing.T) {
 	}
 }
 
+type checkpointMemBudgetProducer struct {
+	chunks int
+	bytes  int64
+	done   chan struct{}
+}
+
+func (p *checkpointMemBudgetProducer) readerCount() int { return 1 }
+
+func (p *checkpointMemBudgetProducer) produce(ctx context.Context, env pipelineEnv, out chan<- chunkResult) {
+	if p.done != nil {
+		defer close(p.done)
+	}
+	for i := 0; i < p.chunks; i++ {
+		reserved, ok := env.acquireMem(ctx, p.bytes)
+		if !ok {
+			return
+		}
+		if !sendChunkOrCancel(ctx, out, chunkResult{
+			rows:     [][]any{{int64(i), "payload"}},
+			lastPK:   int64(i),
+			readerID: 0,
+			seq:      int64(i),
+			bytes:    reserved,
+			readEnd:  time.Now(),
+		}) {
+			return
+		}
+	}
+}
+
+type checkpointAckTargetPool struct {
+	*keysetRuntimeTargetPool
+	writeFinished chan<- struct{}
+}
+
+func (p *checkpointAckTargetPool) WriteBatch(ctx context.Context, opts driver.WriteBatchOptions) error {
+	if err := p.keysetRuntimeTargetPool.WriteBatch(ctx, opts); err != nil {
+		return err
+	}
+	if p.writeFinished != nil {
+		p.writeFinished <- struct{}{}
+	}
+	return nil
+}
+
+func checkpointMemBudgetConfig() *config.Config {
+	return &config.Config{
+		Target: config.TargetConfig{Schema: ""},
+		Migration: config.MigrationConfig{
+			ChunkSize:         1,
+			ParallelReaders:   1,
+			WriteAheadWriters: 2,
+			TargetMode:        "drop_recreate",
+		},
+	}
+}
+
+func checkpointMemBudgetPipelineConfig(job Job, producer chunkProducer, target pool.TargetPool, handler func(writeAck) ackRelease) pipelineConfig {
+	return pipelineConfig{
+		cfg:             checkpointMemBudgetConfig(),
+		job:             job,
+		tgtPool:         target,
+		prog:            progress.New(),
+		producer:        producer,
+		targetTableName: "items",
+		targetCols:      []string{"id", "payload"},
+		colTypes:        []string{"integer", "text"},
+		colSRIDs:        []int{0, 0},
+		newAckHandler: func(tunerCallbacks, ProgressSaver) func(writeAck) ackRelease {
+			return handler
+		},
+	}
+}
+
+func TestCheckpointPipelineFullyReleasesMemBudgetOnSuccess(t *testing.T) {
+	const chunks = 12
+	table := memBudgetTestTable()
+	table.RowCount = chunks
+	budget := NewMemBudget(64)
+	job := Job{Table: table, TaskID: 617, Saver: &scriptedCheckpointSaver{}, MemBudget: budget}
+	target := &checkpointAckTargetPool{keysetRuntimeTargetPool: &keysetRuntimeTargetPool{updated: true}}
+	producer := &checkpointMemBudgetProducer{chunks: chunks, bytes: 64}
+
+	stats, err := runPipeline(context.Background(), checkpointMemBudgetPipelineConfig(job, producer, target, func(writeAck) ackRelease {
+		return ackRelease{jobs: 1}
+	}))
+	if err != nil {
+		t.Fatalf("runPipeline: %v", err)
+	}
+	if stats.Rows != chunks {
+		t.Fatalf("stats.Rows = %d, want %d", stats.Rows, chunks)
+	}
+	if !budget.fullyReleased() {
+		t.Fatal("checkpoint-enabled pipeline leaked its memory budget on success")
+	}
+}
+
+func TestCheckpointPipelineCancellationWhileAckDeliveryBlockedReleasesMemBudget(t *testing.T) {
+	// With two writers and the minimum three-slot job buffer, ackChan has five
+	// slots. The first ack is held inside the processor, the next five fill the
+	// channel, and the seventh completed write is therefore blocked delivering
+	// its ack while retaining the one-chunk budget reservation.
+	const writesThroughSaturation = 7
+	table := memBudgetTestTable()
+	table.RowCount = 32
+	budget := NewMemBudget(64)
+	saver := &scriptedCheckpointSaver{}
+	job := Job{Table: table, TaskID: 617, Saver: saver, MemBudget: budget}
+	producer := &checkpointMemBudgetProducer{chunks: 32, bytes: 64, done: make(chan struct{})}
+	writes := make(chan struct{}, 32)
+	target := &checkpointAckTargetPool{
+		keysetRuntimeTargetPool: &keysetRuntimeTargetPool{updated: true},
+		writeFinished:           writes,
+	}
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	var releaseOnce sync.Once
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		releaseOnce.Do(func() { close(releaseHandler) })
+	})
+	firstAck := true
+	pc := checkpointMemBudgetPipelineConfig(job, producer, target, func(writeAck) ackRelease {
+		if firstAck {
+			firstAck = false
+			close(handlerStarted)
+			<-releaseHandler
+		}
+		return ackRelease{jobs: 1}
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := runPipeline(ctx, pc)
+		done <- err
+	}()
+
+	select {
+	case <-handlerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ack processor did not receive its first acknowledgement")
+	}
+	for i := 0; i < writesThroughSaturation; i++ {
+		select {
+		case <-writes:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d writes completed before ack delivery saturation; delivered acks did not recycle the one-chunk budget", i)
+		}
+	}
+
+	cancel()
+	select {
+	case <-producer.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("producer did not leave its budget acquire after cancellation")
+	}
+	releaseOnce.Do(func() { close(releaseHandler) })
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runPipeline error = %v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkpoint pipeline did not drain after cancellation during blocked ack delivery")
+	}
+	if !budget.fullyReleased() {
+		t.Fatal("checkpoint pipeline leaked its memory budget after blocked ack delivery cancellation")
+	}
+}
+
 // TestMemBudgetContentionReportsTunerAndPrometheus drives a real transfer
 // through a one-byte shared budget. A blocked writer keeps later readers in
 // acquire long enough to distinguish genuine budget starvation from timer
@@ -310,10 +482,10 @@ func waitForLiveWriterGauge(t *testing.T, reg *observability.Registry, runID str
 }
 
 // TestMemBudgetFullyReleasedOnWriteError asserts the residual-release
-// backstop returns every byte even when the writer fails partway and chunks
-// are abandoned in the channels (#617). Without the drain-time residual
-// release, the abandoned chunks' reservations would leak and shrink the
-// shared budget for the rest of the run.
+// backstop returns every byte even when a checkpoint-enabled writer fails
+// partway and chunks are abandoned in the channels (#617). Without the
+// drain-time residual release, the abandoned chunks' reservations would leak
+// and shrink the shared budget for the rest of the run.
 func TestMemBudgetFullyReleasedOnWriteError(t *testing.T) {
 	const totalRows = 4000
 	db := seedKeysetRuntimeTunerDB(t, totalRows)
@@ -329,7 +501,7 @@ func TestMemBudgetFullyReleasedOnWriteError(t *testing.T) {
 	cfg := memBudgetTestConfig()
 
 	budget := NewMemBudget(64 * 1024)
-	job := Job{Table: table, MemBudget: budget}
+	job := Job{Table: table, TaskID: 617, Saver: &scriptedCheckpointSaver{}, MemBudget: budget}
 
 	_, err := Execute(context.Background(), srcPool, tgtPool, cfg, job, progress.New(), nil)
 	if err == nil {

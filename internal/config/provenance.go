@@ -158,13 +158,18 @@ func (c *Config) fillDefaultTunableProvenance() {
 	markInt(provenanceTargetChunkSize, c.Target.ChunkSize, ProvenanceAutoDefault)
 }
 
-// TunableWriteAheadWriters is the exported provenance name for the
-// write_ahead_writers knob, for callers (the orchestrator) that need to
-// ask whether a specific tunable is pinned (#461).
+// Exported provenance names let the orchestrator describe which execution
+// knobs are fixed by user/secrets policy. That distinction is part of the
+// safety-projection context: generated values remain action-derived, while a
+// pinned value changes the function that maps a tuning action to the live
+// pipeline.
 const (
-	TunableWriteAheadWriters = provenanceMigrationWriteAheadWriters
-	TunableParallelReaders   = provenanceMigrationParallelReaders
-	TunableReadAheadBuffers  = provenanceMigrationReadAheadBuffers
+	TunableWorkers              = provenanceMigrationWorkers
+	TunableWriteAheadWriters    = provenanceMigrationWriteAheadWriters
+	TunableParallelReaders      = provenanceMigrationParallelReaders
+	TunableReadAheadBuffers     = provenanceMigrationReadAheadBuffers
+	TunableMaxSourceConnections = provenanceMigrationMaxSourceConns
+	TunableMaxTargetConnections = provenanceMigrationMaxTargetConns
 )
 
 // PinnedTunables returns the provenance names of tunables pinned by the

@@ -731,6 +731,123 @@ func TestTune_ExactIdentityCohort_FiresRegression(t *testing.T) {
 	}
 }
 
+func TestTune_ProjectedExactIdentityRowsAdvanceColdStartWithoutCrossWorkloadSelection(t *testing.T) {
+	current := mkIdentity()
+	current.SourceDBType = "mssql"
+	current.TargetDBType = "postgres"
+	current.AvgRowBytes = 500
+	current.ProjectionContextFingerprint = "projection-context-current"
+	useDerivedProjectionConnectionPolicy(&current)
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	projectedRow := func(host string, i int) HistoryRecord {
+		row := HistoryRecord{
+			SourceHost: host, SourcePort: current.SourcePort, SourceDatabase: current.SourceDatabase, SourceSchema: current.SourceSchema,
+			TargetHost: current.TargetHost, TargetPort: current.TargetPort, TargetDatabase: current.TargetDatabase, TargetSchema: current.TargetSchema,
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			CPUCores: 16, MemoryGB: 48,
+			WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput:              100_000 + float64(i),
+			FinalThroughputBytes:         int64((100_000 + float64(i)) * 500),
+			SafetyProjected:              true,
+			ExecutionChunkSizeMin:        8_000,
+			ExecutionChunkSizeMax:        50_000,
+			ProjectionContextFingerprint: current.ProjectionContextFingerprint,
+		}
+		stampDerivedProjectionConnections(&row)
+		return row
+	}
+
+	for count := 1; count < minRowsToAttemptRegression; count++ {
+		rows := make([]HistoryRecord, 0, count)
+		for i := 0; i < count; i++ {
+			rows = append(rows, projectedRow(current.SourceHost, i))
+		}
+		out := Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+		if count < explorationGridRuns && out.Tier != TierExploration {
+			t.Errorf("%d exact projected row(s): tier=%q, want cold-start exploration", count, out.Tier)
+		}
+		if count >= explorationGridRuns && out.Tier == TierExploration {
+			t.Errorf("%d exact projected row(s): still exploring after the six-probe window; reasoning=%q", count, out.Reasoning)
+		}
+		if count >= explorationGridRuns {
+			if out.Tier != TierSmoothedBins || out.WriteAheadWriters != 2 {
+				t.Errorf("%d exact projected row(s): got tier=%q WAW=%d, want exact-identity smoothed-bin WAW=2; reasoning=%q",
+					count, out.Tier, out.WriteAheadWriters, out.Reasoning)
+			}
+			if !strings.Contains(out.Reasoning, "exact-identity steady-state fallback") {
+				t.Errorf("%d exact projected row(s): missing retained-cohort reasoning: %q", count, out.Reasoning)
+			}
+		}
+	}
+
+	// The identical six projected rows from another endpoint are not a valid
+	// cross-workload cohort. They neither drive selection nor finish this
+	// workload's cold-start window.
+	otherRows := make([]HistoryRecord, 0, explorationGridRuns)
+	for i := 0; i < explorationGridRuns; i++ {
+		otherRows = append(otherRows, projectedRow("other-source.example.com", i))
+	}
+	out := Tune(current, profile, &stubHistory{rows: otherRows}, DBTuning{})
+	if out.Tier != TierExploration {
+		t.Fatalf("cross-workload projected rows drove steady selection: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "reserved for exact-identity learning") {
+		t.Fatalf("cross-workload projection exclusion is not auditable: %q", out.Reasoning)
+	}
+}
+
+func TestTune_ProjectedExactIdentityRequiresMatchingProjectionContext(t *testing.T) {
+	current := mkIdentity()
+	current.SourceDBType = "mssql"
+	current.TargetDBType = "postgres"
+	current.AvgRowBytes = 500
+	current.ProjectionContextFingerprint = "current-budget-and-schema"
+	useDerivedProjectionConnectionPolicy(&current)
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	rows := make([]HistoryRecord, 0, minRowsToAttemptRegression)
+	for i := 0; i < minRowsToAttemptRegression; i++ {
+		rows = append(rows, HistoryRecord{
+			SourceHost: current.SourceHost, SourcePort: current.SourcePort, SourceDatabase: current.SourceDatabase, SourceSchema: current.SourceSchema,
+			TargetHost: current.TargetHost, TargetPort: current.TargetPort, TargetDatabase: current.TargetDatabase, TargetSchema: current.TargetSchema,
+			SourceDBType: "mssql", TargetDBType: "postgres",
+			CPUCores: 16, MemoryGB: 48,
+			WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500,
+			ParallelReaders: 2, ReadAheadBuffers: 4,
+			FinalThroughput:              100_000 + float64(i),
+			FinalThroughputBytes:         int64((100_000 + float64(i)) * 500),
+			SafetyProjected:              true,
+			ExecutionChunkSizeMin:        8_000,
+			ExecutionChunkSizeMax:        50_000,
+			ProjectionContextFingerprint: "prior-budget-or-schema",
+		})
+	}
+	for i := range rows {
+		stampDerivedProjectionConnections(&rows[i])
+	}
+
+	out := Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+	if out.Tier == TierRegression || out.Tier == TierSmoothedBins {
+		t.Fatalf("context-mismatched projected rows trained selector: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+	if !strings.Contains(out.Reasoning, "projection context was missing, changed, or used incompatible connection policy") {
+		t.Fatalf("projection-context exclusion was not auditable: %q", out.Reasoning)
+	}
+
+	// Ordinary exact-identity history does not depend on projection context and
+	// remains backward compatible when its fingerprint is empty.
+	for i := range rows {
+		rows[i].SafetyProjected = false
+		rows[i].ProjectionContextFingerprint = ""
+	}
+	out = Tune(current, profile, &stubHistory{rows: rows}, DBTuning{})
+	if out.Tier != TierRegression && out.Tier != TierSmoothedBins {
+		t.Fatalf("nonprojected legacy rows became context-gated: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+}
+
 func TestTune_SQLitePortlessIdentityReachesExactIdentityTier(t *testing.T) {
 	current := Input{
 		SourceDBType: "sqlite", TargetDBType: "sqlite",

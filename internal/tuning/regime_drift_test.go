@@ -144,6 +144,170 @@ func TestTune_DriftDetectedBeforeOutlierFilter(t *testing.T) {
 	}
 }
 
+func TestTune_DriftUsesProjectedExactIdentityRows(t *testing.T) {
+	in := mkIdentity()
+	in.SourceDBType = "mssql"
+	in.TargetDBType = "postgres"
+	in.AvgRowBytes = 500
+	in.Platform = "linux"
+	in.ProjectionContextFingerprint = "projection-context-current"
+	useDerivedProjectionConnectionPolicy(&in)
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	rows := makeFixedConfigRunsWithReaders(2, 50_000, 2, 4, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		400_000, 420_000, 380_000,
+	})
+	for i := range rows {
+		rows[i].SourceDBType = in.SourceDBType
+		rows[i].TargetDBType = in.TargetDBType
+		rows[i].SourceHost = in.SourceHost
+		rows[i].SourcePort = in.SourcePort
+		rows[i].SourceDatabase = in.SourceDatabase
+		rows[i].SourceSchema = in.SourceSchema
+		rows[i].TargetHost = in.TargetHost
+		rows[i].TargetPort = in.TargetPort
+		rows[i].TargetDatabase = in.TargetDatabase
+		rows[i].TargetSchema = in.TargetSchema
+		rows[i].SafetyProjected = true
+		rows[i].ExecutionChunkSizeMin = 8_000
+		rows[i].ExecutionChunkSizeMax = 50_000
+		rows[i].ProjectionContextFingerprint = in.ProjectionContextFingerprint
+		stampDerivedProjectionConnections(&rows[i])
+	}
+
+	out := Tune(in, profile, &stubHistory{rows: rows}, DBTuning{})
+	if out.Tier != TierExploration || !strings.Contains(out.Reasoning, "exploration: planned grid") {
+		t.Fatalf("exact projected throughput drift did not force exploration: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+}
+
+func TestTune_ProjectedExactHistoryDoesNotReinspectStaleCrossWorkloadCell(t *testing.T) {
+	in := mkIdentity()
+	in.SourceDBType = "mssql"
+	in.TargetDBType = "postgres"
+	in.AvgRowBytes = 500
+	in.Platform = "linux"
+	in.ProjectionContextFingerprint = "projection-context-current"
+	useDerivedProjectionConnectionPolicy(&in)
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	// This older, different-identity cell contains a real historical drift. It
+	// must not become the apparent "most recent" cell merely because the newer
+	// exact-identity rows below were safety-projected.
+	stale := makeFixedConfigRunsWithReaders(2, 50_000, 2, 4, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		400_000, 420_000, 380_000,
+	})
+	for i := range stale {
+		stale[i].SourceDBType = in.SourceDBType
+		stale[i].TargetDBType = in.TargetDBType
+		stale[i].SourceHost = "older-workload.example.com"
+		stale[i].SourcePort = in.SourcePort
+		stale[i].SourceDatabase = in.SourceDatabase
+		stale[i].SourceSchema = in.SourceSchema
+		stale[i].TargetHost = in.TargetHost
+		stale[i].TargetPort = in.TargetPort
+		stale[i].TargetDatabase = in.TargetDatabase
+		stale[i].TargetSchema = in.TargetSchema
+	}
+
+	exact := makeFixedConfigRunsWithReaders(2, 50_000, 2, 4, []float64{
+		700_000, 710_000, 690_000, 705_000, 695_000, 700_000,
+	})
+	for i := range exact {
+		exact[i].ID = int64(len(stale) + i + 1)
+		exact[i].Timestamp = stale[len(stale)-1].Timestamp.Add(time.Duration(i+1) * time.Hour)
+		exact[i].SourceDBType = in.SourceDBType
+		exact[i].TargetDBType = in.TargetDBType
+		exact[i].SourceHost = in.SourceHost
+		exact[i].SourcePort = in.SourcePort
+		exact[i].SourceDatabase = in.SourceDatabase
+		exact[i].SourceSchema = in.SourceSchema
+		exact[i].TargetHost = in.TargetHost
+		exact[i].TargetPort = in.TargetPort
+		exact[i].TargetDatabase = in.TargetDatabase
+		exact[i].TargetSchema = in.TargetSchema
+		exact[i].SafetyProjected = true
+		exact[i].ExecutionChunkSizeMin = 8_000
+		exact[i].ExecutionChunkSizeMax = 50_000
+		exact[i].ProjectionContextFingerprint = in.ProjectionContextFingerprint
+		stampDerivedProjectionConnections(&exact[i])
+	}
+
+	out := Tune(in, profile, &stubHistory{rows: append(stale, exact...)}, DBTuning{})
+	if out.Tier == TierExploration || strings.Contains(out.Reasoning, "exploration: planned grid") {
+		t.Fatalf("stale cross-workload drift overrode newer exact projected history: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+	if out.Tier != TierSmoothedBins {
+		t.Fatalf("newer stable exact projected cohort did not drive smoothed fallback: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+}
+
+func TestTune_ThinProjectedExactHistoryDoesNotShadowCrossWorkloadDrift(t *testing.T) {
+	in := mkIdentity()
+	in.SourceDBType = "mssql"
+	in.TargetDBType = "postgres"
+	in.AvgRowBytes = 500
+	in.Platform = "linux"
+	in.ProjectionContextFingerprint = "projection-context-current"
+	useDerivedProjectionConnectionPolicy(&in)
+	profile := DriverProfile{Name: "postgres", BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
+
+	// Tier 2/3 will consume these projected-free rows. Their current cell has a
+	// genuine throughput shift, so drift must force a planned probe.
+	crossWorkload := makeFixedConfigRunsWithReaders(2, 50_000, 2, 4, []float64{
+		1_000_000, 1_050_000, 980_000,
+		1_020_000, 1_010_000, 990_000,
+		400_000, 420_000, 380_000,
+	})
+	for i := range crossWorkload {
+		crossWorkload[i].SourceDBType = in.SourceDBType
+		crossWorkload[i].TargetDBType = in.TargetDBType
+		crossWorkload[i].SourceHost = "other-workload.example.com"
+		crossWorkload[i].SourcePort = in.SourcePort
+		crossWorkload[i].SourceDatabase = in.SourceDatabase
+		crossWorkload[i].SourceSchema = in.SourceSchema
+		crossWorkload[i].TargetHost = in.TargetHost
+		crossWorkload[i].TargetPort = in.TargetPort
+		crossWorkload[i].TargetDatabase = in.TargetDatabase
+		crossWorkload[i].TargetSchema = in.TargetSchema
+	}
+
+	// Five exact projected rows are newer and stable, but remain below the
+	// restored six-probe floor. They cannot drive the exact-identity selector,
+	// so they must not redirect drift away from Tier 2/3's cohort.
+	exact := makeFixedConfigRunsWithReaders(2, 50_000, 2, 4, []float64{
+		700_000, 710_000, 690_000, 705_000, 695_000,
+	})
+	for i := range exact {
+		exact[i].ID = int64(len(crossWorkload) + i + 1)
+		exact[i].Timestamp = crossWorkload[len(crossWorkload)-1].Timestamp.Add(time.Duration(i+1) * time.Hour)
+		exact[i].SourceDBType = in.SourceDBType
+		exact[i].TargetDBType = in.TargetDBType
+		exact[i].SourceHost = in.SourceHost
+		exact[i].SourcePort = in.SourcePort
+		exact[i].SourceDatabase = in.SourceDatabase
+		exact[i].SourceSchema = in.SourceSchema
+		exact[i].TargetHost = in.TargetHost
+		exact[i].TargetPort = in.TargetPort
+		exact[i].TargetDatabase = in.TargetDatabase
+		exact[i].TargetSchema = in.TargetSchema
+		exact[i].SafetyProjected = true
+		exact[i].ExecutionChunkSizeMin = 8_000
+		exact[i].ExecutionChunkSizeMax = 50_000
+		exact[i].ProjectionContextFingerprint = in.ProjectionContextFingerprint
+		stampDerivedProjectionConnections(&exact[i])
+	}
+
+	out := Tune(in, profile, &stubHistory{rows: append(crossWorkload, exact...)}, DBTuning{})
+	if out.Tier != TierExploration || !strings.Contains(out.Reasoning, "exploration: planned grid") {
+		t.Fatalf("thin exact projected cohort shadowed cross-workload drift: tier=%q reasoning=%q", out.Tier, out.Reasoning)
+	}
+}
+
 // TestDetectRegimeDrift_DriftAtRecentCellFires: when the most recent
 // run's cell is the one showing drift, the detector fires.
 //

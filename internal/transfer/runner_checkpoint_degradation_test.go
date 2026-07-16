@@ -94,9 +94,10 @@ func runCheckpointDegradationPipeline(t *testing.T, saver *scriptedCheckpointSav
 		targetCols:      []string{"id", "payload"},
 		colTypes:        []string{"integer", "text"},
 		colSRIDs:        []int{0, 0},
-		newAckHandler: func(_ tunerCallbacks, periodic ProgressSaver) func(writeAck) {
-			return func(ack writeAck) {
+		newAckHandler: func(_ tunerCallbacks, periodic ProgressSaver) func(writeAck) ackRelease {
+			return func(ack writeAck) ackRelease {
 				_ = periodic.SaveProgress(665, "items", nil, ack.lastPK, ack.rows, 1, "")
+				return ackRelease{jobs: 1}
 			}
 		},
 		saveFinal: func(_ chunkResult, _ int64) (bool, error) {

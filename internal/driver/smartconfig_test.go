@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,7 +112,10 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 		},
 	}
 	analyzer.pendingSave = &pendingTuningSave{
-		input:     AutoTuneInput{CPUCores: 15, MemoryGB: 24, AvgRowBytes: 500},
+		input: AutoTuneInput{
+			CPUCores: 15, MemoryGB: 24, AvgRowBytes: 500,
+			ProjectionContextFingerprint: "projection-context-v1",
+		},
 		reasoning: "test reasoning",
 	}
 
@@ -150,13 +154,19 @@ func TestSaveTuningWithActualParams(t *testing.T) {
 	if mock.saved.SourceDBType != "mssql" || mock.saved.TargetDBType != "postgres" {
 		t.Errorf("DB types wrong: source=%q target=%q", mock.saved.SourceDBType, mock.saved.TargetDBType)
 	}
-	// PR1: WasAIUsed always false now; Reasoning carries the deterministic
-	// tuner's reasoning string.
+	if mock.saved.ProjectionContextFingerprint != "projection-context-v1" {
+		t.Errorf("projection context fingerprint = %q, want persisted pending input", mock.saved.ProjectionContextFingerprint)
+	}
+	// PR1: WasAIUsed always false now. Reasoning carries both the
+	// deterministic pick and the honest chunk-policy accounting.
 	if mock.saved.WasAIUsed {
 		t.Error("WasAIUsed should be false post-PR #175")
 	}
-	if mock.saved.Reasoning != "test reasoning" {
-		t.Errorf("Reasoning: got %q, want %q", mock.saved.Reasoning, "test reasoning")
+	if !strings.HasPrefix(mock.saved.Reasoning, "test reasoning; ") ||
+		!strings.Contains(mock.saved.Reasoning, "chunk_size=14000 is the global policy") ||
+		!strings.Contains(mock.saved.Reasoning, "used directly for ordinary reader chunks and writer batches") ||
+		!strings.Contains(mock.saved.Reasoning, "complete-inventory writer-transition ratchets") {
+		t.Errorf("Reasoning does not distinguish steady policy from conditional safety limits: %q", mock.saved.Reasoning)
 	}
 
 	// Issue #160: persisted EstimatedMemoryMB must reflect post-override
@@ -224,7 +234,7 @@ func TestSaveTuningWithActualParams_NoOverride(t *testing.T) {
 	}
 }
 
-func TestSaveTuningWithActualParams_UsesSafetyWidthAndPersistsLegacyFeature(t *testing.T) {
+func TestSaveTuningWithActualParams_UsesRepresentativeWidthAndPersistsLegacyFeature(t *testing.T) {
 	const (
 		legacyRowBytes         = int64(500)
 		representativeRowBytes = int64(220)
@@ -261,12 +271,12 @@ func TestSaveTuningWithActualParams_UsesSafetyWidthAndPersistsLegacyFeature(t *t
 
 	analyzer.SaveTuningWithActualParams(actual)
 
-	wantEstimate := tuning.EstimatedMemMB(actual.Workers, actual.ReadAheadBuffers, actual.WriteAheadWriters, actual.ChunkSize, safetyRowBytes)
+	wantEstimate := tuning.EstimatedMemMB(actual.Workers, actual.ReadAheadBuffers, actual.WriteAheadWriters, actual.ChunkSize, representativeRowBytes)
 	if analyzer.suggestions.EstimatedMemMB != wantEstimate {
-		t.Errorf("post-override estimate = %d, want %d from safety width", analyzer.suggestions.EstimatedMemMB, wantEstimate)
+		t.Errorf("post-override estimate = %d, want %d from representative width", analyzer.suggestions.EstimatedMemMB, wantEstimate)
 	}
-	if !analyzer.suggestions.MemoryEstimateOverBudget {
-		t.Error("post-override minimum-progress surface must retain over-budget state")
+	if analyzer.suggestions.MemoryEstimateOverBudget {
+		t.Error("representative post-override estimate was incorrectly marked over budget")
 	}
 	if analyzer.suggestions.RepresentativeRowBytes != representativeRowBytes ||
 		analyzer.suggestions.SafetyRowBytes != safetyRowBytes || !analyzer.suggestions.SafetyRowBytesKnown {
@@ -279,7 +289,7 @@ func TestSaveTuningWithActualParams_UsesSafetyWidthAndPersistsLegacyFeature(t *t
 		t.Errorf("persisted AvgRowSizeBytes = %d, want legacy feature %d", mock.saved.AvgRowSizeBytes, legacyRowBytes)
 	}
 	if mock.saved.EstimatedMemoryMB != wantEstimate {
-		t.Errorf("persisted estimate = %d, want %d from safety width", mock.saved.EstimatedMemoryMB, wantEstimate)
+		t.Errorf("persisted estimate = %d, want %d from representative width", mock.saved.EstimatedMemoryMB, wantEstimate)
 	}
 }
 
@@ -343,6 +353,159 @@ func TestBuildAutoTuneInput_UsesInjectedMemoryEnvelope(t *testing.T) {
 	tuningInput := analyzer.toTuningInput(input)
 	if tuningInput.MemoryBudgetMB != input.MemoryBudgetMB {
 		t.Errorf("tuning MemoryBudgetMB = %d, want %d", tuningInput.MemoryBudgetMB, input.MemoryBudgetMB)
+	}
+}
+
+func TestProjectionContextFingerprintCanonicalAndSensitive(t *testing.T) {
+	parallel := Table{
+		Schema: "dbo", Name: "orders", RowCount: 1_000, EstimatedRowSize: 800,
+		PrimaryKey: []string{"id"},
+		PKColumns:  []Column{{Name: "id", DataType: "bigint"}},
+	}
+	serial := Table{
+		Schema: "dbo", Name: "customers", RowCount: 200, EstimatedRowSize: 300,
+		PrimaryKey: []string{"code"},
+		PKColumns:  []Column{{Name: "code", DataType: "varchar"}},
+	}
+	ctx := ProjectionExecutionContext{Tables: []Table{parallel, serial}}
+	fingerprint := func(context ProjectionExecutionContext, budget int64, limit int, fallback int64, known bool) string {
+		return projectionContextFingerprint(&context, "mssql", "postgres", budget, limit, fallback, known)
+	}
+	base := fingerprint(ctx, 8_192, 50_000, 800, true)
+	if base == "" {
+		t.Fatal("complete projection context produced an empty fingerprint")
+	}
+
+	stats := []TableStatRow{
+		{Name: "orders", RowCount: 1_000, AvgRowSizeBytes: 750},
+		{Name: "customers", RowCount: 200, AvgRowSizeBytes: 250},
+	}
+	analyzer := NewSmartConfigAnalyzer(nil, "mssql")
+	analyzer.SetMemoryEnvelope(16_384, 12_000, 8_192)
+	analyzer.SetTargetDBType("postgres")
+	analyzerCtx := ctx
+	analyzerCtx.MaxSourceConnections = ProjectionTunablePolicy{Pinned: true, Value: 17}
+	analyzer.SetProjectionExecutionContext(analyzerCtx)
+	analyzer.calculateAvgRowSize(stats)
+	input := analyzer.buildAutoTuneInput(stats, 500)
+	if input.ProjectionContextFingerprint != projectionContextFingerprint(
+		analyzer.projectionContext,
+		"mssql",
+		"postgres",
+		8_192,
+		analyzer.TargetHardChunkLimit(),
+		analyzer.safetyRowBytes,
+		analyzer.safetyRowBytesKnown,
+	) {
+		t.Fatalf("AutoTuneInput lost projection context: %q", input.ProjectionContextFingerprint)
+	}
+	if !input.ProjectionConnectionPolicyKnown {
+		t.Fatal("AutoTuneInput lost authoritative connection policy")
+	}
+	if !input.ProjectionMaxSourceConnectionsPinned || input.ProjectionMaxSourceConnections != 17 {
+		t.Fatalf("AutoTuneInput source connection policy = pinned:%v value:%d, want fixed 17",
+			input.ProjectionMaxSourceConnectionsPinned, input.ProjectionMaxSourceConnections)
+	}
+	tuningInput := analyzer.toTuningInput(input)
+	if got := tuningInput.ProjectionContextFingerprint; got != input.ProjectionContextFingerprint {
+		t.Fatalf("tuning.Input projection context = %q, want %q", got, input.ProjectionContextFingerprint)
+	}
+	if !tuningInput.ProjectionConnectionPolicyKnown || !tuningInput.ProjectionMaxSourceConnectionsPinned ||
+		tuningInput.ProjectionMaxSourceConnections != 17 {
+		t.Fatalf("tuning.Input lost source connection policy: %+v", tuningInput)
+	}
+	reordered := ctx
+	reordered.Tables = []Table{serial, parallel}
+	if got := fingerprint(reordered, 8_192, 50_000, 800, true); got != base {
+		t.Fatalf("table order changed fingerprint: got %q want %q", got, base)
+	}
+
+	changedWidth := ctx
+	changedWidth.Tables = append([]Table(nil), ctx.Tables...)
+	changedWidth.Tables[0].EstimatedRowSize++
+	changedName := ctx
+	changedName.Tables = append([]Table(nil), ctx.Tables...)
+	changedName.Tables[0].Name = "orders_v2"
+	changedReaderPlan := ctx
+	changedReaderPlan.Tables = append([]Table(nil), ctx.Tables...)
+	changedReaderPlan.Tables[0].PKColumns = append([]Column(nil), ctx.Tables[0].PKColumns...)
+	changedReaderPlan.Tables[0].PKColumns[0].DataType = "varchar"
+	unknownWidth := ctx
+	unknownWidth.Tables = append([]Table(nil), ctx.Tables...)
+	unknownWidth.Tables[1].EstimatedRowSize = 0
+	pinnedSource := ctx
+	pinnedSource.MaxSourceConnections = ProjectionTunablePolicy{Pinned: true, Value: 12}
+
+	cases := map[string]string{
+		"memory budget":       fingerprint(ctx, 4_096, 50_000, 800, true),
+		"target limit":        fingerprint(ctx, 8_192, 25_000, 800, true),
+		"execution row width": fingerprint(changedWidth, 8_192, 50_000, 800, true),
+		"table identity":      fingerprint(changedName, 8_192, 50_000, 800, true),
+		"reader plan":         fingerprint(changedReaderPlan, 8_192, 50_000, 800, true),
+		"fallback width":      fingerprint(unknownWidth, 8_192, 50_000, 801, true),
+		"fallback evidence":   fingerprint(unknownWidth, 8_192, 50_000, 800, false),
+		"pinned source pool":  fingerprint(pinnedSource, 8_192, 50_000, 800, true),
+	}
+	for name, got := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got == base {
+				t.Fatalf("changed projection context retained fingerprint %q", got)
+			}
+		})
+	}
+
+	// Cardinality affects regime classification and job count, but it is not a
+	// per-pipeline cap input. Ordinary growth must not reset the probe cohort.
+	rowGrowth := ctx
+	rowGrowth.Tables = append([]Table(nil), ctx.Tables...)
+	rowGrowth.Tables[0].RowCount++
+	if got := fingerprint(rowGrowth, 8_192, 50_000, 800, true); got != base {
+		t.Fatalf("row-count-only growth changed fingerprint: got %q want %q", got, base)
+	}
+	if got := fingerprint(ctx, 8_192, 50_000, 9_999, true); got != base {
+		t.Fatalf("unused catalog fallback changed exact-width fingerprint: got %q want %q", got, base)
+	}
+	unknownBase := fingerprint(unknownWidth, 8_192, 50_000, 800, true)
+	if got := fingerprint(unknownWidth, 8_192, 50_000, 801, true); got == unknownBase {
+		t.Fatalf("changed in-use fallback width retained fingerprint %q", got)
+	}
+	if got := fingerprint(unknownWidth, 8_192, 50_000, 800, false); got == unknownBase {
+		t.Fatalf("changed fallback evidence retained fingerprint %q", got)
+	}
+
+	// Generated numeric pools are action outputs. Only changing their policy to
+	// fixed (or changing a fixed value) changes the environment fingerprint.
+	derivedNumeric := ctx
+	derivedNumeric.MaxSourceConnections.Value = 999
+	if got := fingerprint(derivedNumeric, 8_192, 50_000, 800, true); got != base {
+		t.Fatalf("generated pool numeric value changed action-independent fingerprint: got %q want %q", got, base)
+	}
+	pinnedSource.MaxSourceConnections.Value = 13
+	if got := fingerprint(pinnedSource, 8_192, 50_000, 800, true); got == cases["pinned source pool"] {
+		t.Fatalf("changed fixed connection limit retained fingerprint %q", got)
+	}
+
+	if got := projectionContextFingerprint(&ctx, "mssql", "postgres", 0, 50_000, 800, true); got != "" {
+		t.Fatalf("unknown memory budget fingerprint = %q, want empty fail-closed value", got)
+	}
+	if got := projectionContextFingerprint(nil, "mssql", "postgres", 8_192, 50_000, 800, true); got != "" {
+		t.Fatalf("empty table scope fingerprint = %q, want empty fail-closed value", got)
+	}
+	strict := ctx
+	strict.StrictConsistency = true
+	if got := fingerprint(strict, 8_192, 50_000, 800, true); got != "" {
+		t.Fatalf("unmodeled strict reader strategy fingerprint = %q, want empty fail-closed value", got)
+	}
+	dynamicTuple := ProjectionExecutionContext{Tables: []Table{{
+		Schema: "dbo", Name: "lines", EstimatedRowSize: 128,
+		PrimaryKey: []string{"order_id", "line_id"},
+		PKColumns: []Column{
+			{Name: "order_id", DataType: "bigint"},
+			{Name: "line_id", DataType: "bigint"},
+		},
+	}}}
+	if got := fingerprint(dynamicTuple, 8_192, 50_000, 800, true); got != "" {
+		t.Fatalf("dynamic tuple reader inventory fingerprint = %q, want empty fail-closed value", got)
 	}
 }
 
@@ -959,6 +1122,11 @@ func TestTuningHistoryAdapter_MapsAllSharedFields(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].MaxSourceConnections != src.MaxSourceConns || rows[0].MaxTargetConnections != src.MaxTargetConns {
+		t.Fatalf("renamed connection fields not copied: got %d/%d want %d/%d",
+			rows[0].MaxSourceConnections, rows[0].MaxTargetConnections,
+			src.MaxSourceConns, src.MaxTargetConns)
 	}
 
 	out := reflect.ValueOf(rows[0])

@@ -7,10 +7,13 @@ import (
 
 // RuntimeChunkSizeCapFor derives the current row-count ceiling for an
 // arbitrary effective runtime tuple. The immutable #708 memory envelope is the
-// only budget source, and only #703's observed safety width may create a memory
-// cap. TargetHardChunkLimit remains independently binding for protocol safety.
-// A zero result means neither source can provide a usable cap; it never means
-// that runtime growth is unbounded.
+// only budget source. The global ceiling uses the workload's row-count-weighted
+// representative width so one wide outlier does not throttle every table;
+// steady transfer uses shared measured-byte admission and MemoryGuard, while
+// each pipeline evaluates its own complete inventory around writer-count
+// transitions. TargetHardChunkLimit remains independently binding for protocol
+// safety. A zero result means neither source can provide a usable cap; it never
+// means that runtime growth is unbounded.
 func (c *Config) RuntimeChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
 	if c == nil {
 		return 0
@@ -25,12 +28,18 @@ func (c *Config) RuntimeChunkSizeCapFor(workers, readAheadBuffers, writeAheadWri
 // footprint exceeds the immutable envelope. The controller must suppress a
 // prospective WAW increase on zero rather than treating cap=1 as fitting.
 func (c *Config) RuntimeChunkGrowthCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
-	if c == nil || !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 {
+	if c == nil || !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 ||
+		c.Migration.RuntimeRepresentativeRowBytes <= 0 {
 		return 0
 	}
 	if c.runtimeMemoryChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters) <= 0 {
 		return 0
 	}
+	// Keep the existing fail-closed widest-width feasibility gate. Runtime
+	// growth may use the representative global ceiling only when at least one
+	// modeled row from the widest observed table fits the immutable envelope;
+	// each pipeline then checks its complete inventory before writer growth is
+	// authorized.
 	if tuning.MemoryEstimateExceedsBudget(
 		c.autoConfig.MemoryEnvelope.BudgetMB,
 		workers,
@@ -53,13 +62,14 @@ func (c *Config) ResetRuntimeChunkSafety() {
 		return
 	}
 	c.Migration.RuntimeChunkSizeCap = 0
+	c.Migration.RuntimeRepresentativeRowBytes = 0
 	c.Migration.RuntimeSafetyRowBytes = 0
 	c.Migration.RuntimeSafetyRowBytesKnown = false
 	c.Migration.RuntimeChunkGrowthAllowed = false
 }
 
 func (c *Config) runtimeMemoryChunkSizeCapFor(workers, readAheadBuffers, writeAheadWriters int) int {
-	if !c.Migration.RuntimeSafetyRowBytesKnown || c.Migration.RuntimeSafetyRowBytes <= 0 {
+	if c.Migration.RuntimeRepresentativeRowBytes <= 0 {
 		return 0
 	}
 	rows := tuning.SafeChunkSize(
@@ -67,7 +77,7 @@ func (c *Config) runtimeMemoryChunkSizeCapFor(workers, readAheadBuffers, writeAh
 		workers,
 		readAheadBuffers,
 		writeAheadWriters,
-		c.Migration.RuntimeSafetyRowBytes,
+		c.Migration.RuntimeRepresentativeRowBytes,
 	)
 	return positiveInt64ToInt(rows)
 }
@@ -91,7 +101,7 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 	m.RuntimeChunkSizeCap = minNonZeroInt(memoryCap, protocolCap)
 
 	oneRowOverBudget := false
-	if memoryCap > 0 {
+	if memoryCap > 0 && m.RuntimeSafetyRowBytesKnown && m.RuntimeSafetyRowBytes > 0 {
 		oneRowOverBudget = tuning.MemoryEstimateExceedsBudget(
 			c.autoConfig.MemoryEnvelope.BudgetMB,
 			m.Workers,
@@ -105,19 +115,25 @@ func (c *Config) FinalizeRuntimeChunkSizeCap() {
 
 	switch {
 	case oneRowOverBudget:
-		logging.Warn("Runtime chunk cap is the 1-row minimum-progress fallback, but one modeled row still exceeds the memory envelope (budget=%d MB safety_width=%d B workers=%d read_ahead=%d write_ahead=%d); resource growth disabled",
-			c.autoConfig.MemoryEnvelope.BudgetMB, m.RuntimeSafetyRowBytes, m.Workers, m.ReadAheadBuffers, m.WriteAheadWriters)
+		logging.Warn("Runtime growth disabled: one modeled row at the widest observed table-average exceeds the memory envelope (budget=%d MB safety_width=%d B workers=%d read_ahead=%d write_ahead=%d); global cap=%d uses representative width %d B; measured-byte admission/MemoryGuard enforce steady transfer",
+			c.autoConfig.MemoryEnvelope.BudgetMB, m.RuntimeSafetyRowBytes, m.Workers, m.ReadAheadBuffers, m.WriteAheadWriters, m.RuntimeChunkSizeCap, m.RuntimeRepresentativeRowBytes)
+	case memoryCap > 0 && protocolCap > 0 && m.RuntimeChunkGrowthAllowed:
+		logging.Debug("Runtime global chunk cap derived: cap=%d rows (representative memory=%d, protocol=%d, representative width=%d B); per-table complete-inventory checks gate runtime writer growth; resource growth enabled",
+			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeRepresentativeRowBytes)
 	case memoryCap > 0 && protocolCap > 0:
-		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory=%d, protocol=%d, observed safety width=%d B); resource growth enabled",
-			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeSafetyRowBytes)
+		logging.Debug("Runtime global chunk cap derived: cap=%d rows (representative memory=%d, protocol=%d, representative width=%d B); per-table complete-inventory checks gate runtime writer growth; resource growth disabled because widest-width evidence is unavailable",
+			m.RuntimeChunkSizeCap, memoryCap, protocolCap, m.RuntimeRepresentativeRowBytes)
+	case memoryCap > 0 && m.RuntimeChunkGrowthAllowed:
+		logging.Debug("Runtime global chunk cap derived: cap=%d rows (representative memory cap, representative width=%d B); per-table complete-inventory checks gate runtime writer growth; resource growth enabled",
+			m.RuntimeChunkSizeCap, m.RuntimeRepresentativeRowBytes)
 	case memoryCap > 0:
-		logging.Debug("Runtime chunk cap derived: cap=%d rows (memory cap, observed safety width=%d B); resource growth enabled",
-			m.RuntimeChunkSizeCap, m.RuntimeSafetyRowBytes)
+		logging.Debug("Runtime global chunk cap derived: cap=%d rows (representative memory cap, representative width=%d B); per-table complete-inventory checks gate runtime writer growth; resource growth disabled because widest-width evidence is unavailable",
+			m.RuntimeChunkSizeCap, m.RuntimeRepresentativeRowBytes)
 	case protocolCap > 0:
-		logging.Debug("Runtime chunk cap derived: cap=%d rows (protocol-only; safety width unobserved); resource growth disabled",
+		logging.Debug("Runtime chunk cap derived: cap=%d rows (protocol-only; representative width unavailable); resource growth disabled",
 			m.RuntimeChunkSizeCap)
 	default:
-		logging.Debug("Runtime chunk cap unavailable (safety width unobserved and no protocol cap); resource growth disabled")
+		logging.Debug("Runtime global chunk cap unavailable (representative width unavailable and no protocol cap); resource growth disabled")
 	}
 }
 

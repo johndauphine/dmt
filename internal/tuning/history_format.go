@@ -24,7 +24,7 @@ import "fmt"
 // without the misleading number. Lives near the rest of the
 // reasoning-string format so future tweaks stay co-located.
 func formatPredictionInterval(pred, low, high float64) string {
-	if high > piAbsoluteCeiling || (pred > 0 && high > piRelativeRatio*pred) {
+	if predictionIntervalTooWide(pred, high) {
 		return "wide — low model confidence at this point"
 	}
 	if low < 0 {
@@ -37,6 +37,14 @@ func formatPredictionInterval(pred, low, high float64) string {
 	// above promised.
 	unit := bytesPerSecUnit(high)
 	return fmt.Sprintf("%s–%s", formatBytesPerSecAs(low, unit), formatBytesPerSecAs(high, unit))
+}
+
+// predictionIntervalTooWide centralizes the existing operator-facing
+// definition of a materially uninformative interval. Selection uses the
+// same predicate as formatting: if the interval is too wide to present as
+// usable evidence, it is also too wide to justify changing live settings.
+func predictionIntervalTooWide(pred, high float64) bool {
+	return high > piAbsoluteCeiling || (pred > 0 && high > piRelativeRatio*pred)
 }
 
 // formatBytesPerSec renders a bytes/sec value with units the operator

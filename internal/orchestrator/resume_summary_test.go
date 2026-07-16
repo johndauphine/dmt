@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -70,6 +71,46 @@ func TestSummaryRowsTransferredCountsOnlyThisResume(t *testing.T) {
 	// No checkpointed rows for a run → fall back to the estimate.
 	if got := o.summaryRowsTransferred("no-such-run", 0, func() int64 { return 42 }); got != 42 {
 		t.Fatalf("fallback = %d, want 42", got)
+	}
+}
+
+// A resume segment measures only unfinished tables, while applyTuning analyzes
+// and saves the complete workload before completed tables are skipped. Even a
+// clean segment must therefore stay out of tuning cohorts; transferAll's clean
+// runtime metrics must not clear this run-scope exclusion.
+func TestResumeSegmentTuningResultAlwaysExcludedFromLearning(t *testing.T) {
+	base := &tuningResultState{}
+	state := &atomicTuningResultState{tuningResultState: base}
+	o := &Orchestrator{
+		state:                           state,
+		lastTuningRowID:                 42,
+		excludeTuningResultFromLearning: true,
+		lastRunAdjusted:                 false,
+		lastSafetyProjected:             false,
+	}
+
+	// Mirror a clean TransferRunner result being stashed by transferAll. The
+	// independent resume exclusion must survive these assignments.
+	o.lastRunAdjusted = false
+	o.lastSafetyProjected = false
+	o.recordSuccessfulTuningResult(500, time.Second)
+
+	if state.calls != 1 {
+		t.Fatalf("atomic completion calls = %d, want 1", state.calls)
+	}
+	if !state.completion.AdjustedAtRuntime {
+		t.Fatal("clean resume segment remained eligible for full-workload learning")
+	}
+}
+
+func TestApplyTuningClearsPriorResumeSegmentExclusion(t *testing.T) {
+	o := &Orchestrator{
+		config:                          &config.Config{Migration: config.MigrationConfig{Tuning: "manual"}},
+		excludeTuningResultFromLearning: true,
+	}
+	o.applyTuning(context.Background())
+	if o.excludeTuningResultFromLearning {
+		t.Fatal("fresh tuning attempt inherited prior resume-segment exclusion")
 	}
 }
 

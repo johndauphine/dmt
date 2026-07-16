@@ -16,12 +16,13 @@ import (
 // PipelineBufferConfig contains the parameters needed to compute pipeline buffer sizes.
 // All values come from system detection, user config, or per-table metadata.
 type PipelineBufferConfig struct {
-	MemoryBudgetMB   int64 // Memory available for the pipeline (from the resolved envelope minus connection overhead)
-	ChunkSize        int   // Rows per batch
-	RowBytes         int64 // Bytes per row for this specific table (from Table.GoHeapBytesPerRow)
-	NumWriters       int   // Writer goroutines (each holds one chunk being written)
-	NumReaders       int   // Parallel reader goroutines
-	ReadAheadBuffers int   // Configured read-ahead buffers
+	MemoryBudgetMB    int64 // Legacy whole-MiB memory budget; ignored when MemoryBudgetBytes is positive
+	MemoryBudgetBytes int64 // Exact memory available to this pipeline (preferred when a shared budget is divided across jobs)
+	ChunkSize         int   // Rows per batch
+	RowBytes          int64 // Bytes per row for this specific table (from Table.GoHeapBytesPerRow)
+	NumWriters        int   // Writer goroutines (each holds one chunk being written)
+	NumReaders        int   // Parallel reader goroutines
+	ReadAheadBuffers  int   // Configured read-ahead buffers
 }
 
 // PipelineBufferSizes holds the computed buffer depths for both pipeline channels.
@@ -37,6 +38,11 @@ type PipelineBufferSizes struct {
 // memory footprint without improving throughput.
 const maxBufferDepth = 200
 
+// maxWriterPoolSize is both the runtime scaling ceiling and the writer count
+// reserved by the ordered-ack submission window. Keeping one shared bound
+// prevents checkpoint ordering from starving writers after an allowed upscale.
+const maxWriterPoolSize = 128
+
 // writerEncodeAmplification models the driver-side write path holding a
 // second copy of a chunk while encoding it (#465): MySQL materializes a
 // multi-value INSERT string roughly the size of the data, and the
@@ -44,6 +50,13 @@ const maxBufferDepth = 200
 // chunk slots keeps the budget honest for the worst common case; engines
 // that stream (PG COPY) simply leave a little slack.
 const writerEncodeAmplification = 2
+
+// consumerDispatchSlots accounts for the chunk removed from chunkChan while
+// the runner is blocked handing it to a full jobChan. Once the receive frees a
+// chunkChan slot, a reader can fill that slot before the consumer's submit
+// completes, so this handoff chunk is additional live inventory rather than an
+// alias of either channel depth.
+const consumerDispatchSlots = 1
 
 // CalculatePipelineBuffers derives buffer depths for both chunkChan and jobChan
 // from a shared memory budget.
@@ -53,16 +66,22 @@ const writerEncodeAmplification = 2
 //	total_in_flight = chunkChanDepth + jobChanDepth               (queued)
 //	                + numReaders                                  (chunk accumulating in scanRows before it occupies a slot)
 //	                + numWriters × writerEncodeAmplification      (chunk being written + driver-side encode copy)
+//	                + consumerDispatchSlots                       (chunk moving between the two channels)
 //	total_memory    = total_in_flight * chunkSize * rowBytes      (in bytes)
 //
-// Depths are computed once from the chunk size at pipeline start. The
-// runtime tuner may GROW chunk size mid-flight, in which case in-flight
-// memory exceeds this model and the transfer memory guard is the backstop;
-// a shrink just leaves slack. The reader/writer overhead slots are
-// reserved first; the remaining budget is split between chunkChan (reader
-// side) and jobChan (writer side).
+// Checkpoint acknowledgements retain only pagination metadata, not whole row
+// chunks. WriterPool bounds their count with ackSlots independently of the
+// measured-byte budget.
+//
+// Depths are computed once from the chunk size at pipeline start. A caller
+// that changes chunk size mid-flight must cap it against the fixed depths via
+// SafePipelineChunkSize (or retain another hard backstop); a shrink simply
+// leaves slack. The reader/writer overhead slots are reserved first; the
+// remaining budget is split between chunkChan (reader side) and jobChan
+// (writer side).
 func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 	bytesPerChunk := saturatingPositiveProduct64(int64(cfg.ChunkSize), cfg.RowBytes)
+	budgetBytes := pipelineMemoryBudgetBytes(cfg)
 	numReaders := cfg.NumReaders
 	if numReaders < 1 {
 		numReaders = 1
@@ -81,14 +100,12 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 		minChunkDepth = 0
 	}
 
-	if bytesPerChunk <= 0 || cfg.MemoryBudgetMB <= 0 {
+	if bytesPerChunk <= 0 || budgetBytes <= 0 {
 		return PipelineBufferSizes{
 			ChunkChanDepth: minChunkDepth,
 			JobChanDepth:   minJobDepth,
 		}
 	}
-
-	budgetBytes := saturatingPositiveProduct64(cfg.MemoryBudgetMB, 1024*1024)
 
 	// Slots consumed outside the two channels: each writer holds a chunk
 	// plus its encode copy; each reader accumulates one chunk in scanRows
@@ -97,6 +114,7 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 		saturatingNonNegativeIntMultiply(numWriters, writerEncodeAmplification),
 		numReaders,
 	)
+	overheadSlots = saturatingNonNegativeIntAdd(overheadSlots, consumerDispatchSlots)
 
 	// Total chunk slots that fit in memory, capped to prevent excessive buffering
 	// on narrow-row tables where thousands of tiny chunks would fit in budget.
@@ -144,6 +162,75 @@ func CalculatePipelineBuffers(cfg PipelineBufferConfig) PipelineBufferSizes {
 		ChunkChanDepth: chunkDepth,
 		JobChanDepth:   jobDepth,
 	}
+}
+
+// SafePipelineChunkSize returns the largest row count whose complete live
+// inventory fits inside totalBudgetBytes across concurrentPipelines identical
+// pipelines. The channel depths must be the fixed depths that the pipeline
+// will actually use; readers and writers account for scan accumulation and
+// driver-side encoding respectively. Malformed inputs return 0. When even one
+// row per live slot exceeds the budget, the one-row minimum-progress fallback
+// is returned.
+//
+// Dividing one positive factor at a time is equivalent to dividing by their
+// product, but cannot overflow even for adversarial direct callers.
+func SafePipelineChunkSize(totalBudgetBytes int64, concurrentPipelines int, cfg PipelineBufferConfig, sizes PipelineBufferSizes) int64 {
+	rows, _ := SafePipelineChunkSizeDetail(totalBudgetBytes, concurrentPipelines, cfg, sizes)
+	return rows
+}
+
+// SafePipelineChunkSizeDetail is SafePipelineChunkSize plus an explicit flag
+// for the minimum-progress exception. minimumExceedsBudget is true only when
+// the complete inventory for one row per chunk is itself larger than the
+// budget; callers should surface that state rather than describing one row as
+// fitting.
+func SafePipelineChunkSizeDetail(totalBudgetBytes int64, concurrentPipelines int, cfg PipelineBufferConfig, sizes PipelineBufferSizes) (rows int64, minimumExceedsBudget bool) {
+	if totalBudgetBytes <= 0 || concurrentPipelines <= 0 || cfg.RowBytes <= 0 {
+		return 0, false
+	}
+
+	numReaders := cfg.NumReaders
+	if numReaders < 1 {
+		numReaders = 1
+	}
+	numWriters := cfg.NumWriters
+	if numWriters < 0 {
+		numWriters = 0
+	}
+	chunkDepth := sizes.ChunkChanDepth
+	if chunkDepth < 0 {
+		chunkDepth = 0
+	}
+	jobDepth := sizes.JobChanDepth
+	if jobDepth < 0 {
+		jobDepth = 0
+	}
+
+	liveSlots := saturatingNonNegativeIntAdd(chunkDepth, jobDepth)
+	liveSlots = saturatingNonNegativeIntAdd(liveSlots, numReaders)
+	liveSlots = saturatingNonNegativeIntAdd(
+		liveSlots,
+		saturatingNonNegativeIntMultiply(numWriters, writerEncodeAmplification),
+	)
+	liveSlots = saturatingNonNegativeIntAdd(liveSlots, consumerDispatchSlots)
+	if liveSlots <= 0 {
+		return 0, false
+	}
+
+	rows = totalBudgetBytes / cfg.RowBytes
+	rows /= int64(concurrentPipelines)
+	rows /= int64(liveSlots)
+	if rows < 1 {
+		return 1, true
+	}
+	return rows, false
+}
+
+func pipelineMemoryBudgetBytes(cfg PipelineBufferConfig) int64 {
+	if cfg.MemoryBudgetBytes > 0 {
+		return cfg.MemoryBudgetBytes
+	}
+	return saturatingPositiveProduct64(cfg.MemoryBudgetMB, 1024*1024)
 }
 
 func saturatingPositiveProduct64(left, right int64) int64 {
@@ -211,6 +298,14 @@ type WriteAck struct {
 	Rows int64
 }
 
+// AckRelease reports ordered-ack slots made releasable by one callback. Jobs
+// may be greater than one when filling a sequence gap drains buffered
+// successors. Chunk byte reservations are released earlier, immediately after
+// successful ack delivery, and are deliberately independent of this count.
+type AckRelease struct {
+	Jobs int
+}
+
 // WriteFunc is the function signature for executing a write operation.
 // It receives the writer ID and the rows to write.
 type WriteFunc func(ctx context.Context, writerID int, rows [][]any) error
@@ -237,6 +332,11 @@ type WriterPool struct {
 	// Channels
 	jobChan chan WriteJob
 	ackChan chan WriteAck
+	// ackSlots bounds acknowledgements that have been submitted but not yet
+	// applied in sequence order, independently of the optional byte budget.
+	// A slot is acquired before job submission, so the missing earlier job that
+	// can unblock a full reorder window is always already admitted.
+	ackSlots chan struct{}
 
 	// State
 	totalWriteTime int64 // atomic, nanoseconds
@@ -270,12 +370,11 @@ type WriterPoolConfig struct {
 	EnableAck     bool // Whether to enable ack channel for checkpointing
 
 	// OnComplete, if set, releases a job's in-flight memory reservation
-	// (#617). It fires on the write-error path immediately (so a failed
-	// chunk can't wedge a tight budget) and on the success path only after
-	// the ack is delivered (so the reservation covers job.Rows for its whole
-	// live span, including ack backpressure). A worker that exits mid-ack on
-	// cancellation skips it; the transfer runner's residual release frees
-	// those, so each chunk is freed exactly once.
+	// (#617). It fires immediately on a write error (so a failed chunk cannot
+	// wedge a tight budget), after the write when acknowledgements are disabled,
+	// or after successful ack delivery when they are enabled. A worker that exits
+	// while ack delivery is blocked skips it; the transfer runner's residual
+	// release frees that reservation, so each chunk is freed exactly once.
 	OnComplete func(bytes int64)
 }
 
@@ -313,6 +412,13 @@ func NewWriterPool(ctx context.Context, cfg WriterPoolConfig) *WriterPool {
 		ackBufferSize := jobBufferSize + cfg.NumWriters
 		logging.Debug("WriterPool: creating ackChan with buffer size %d", ackBufferSize)
 		wp.ackChan = make(chan WriteAck, ackBufferSize)
+		ackWindowWriters := cfg.NumWriters
+		if ackWindowWriters < maxWriterPoolSize {
+			ackWindowWriters = maxWriterPoolSize
+		}
+		ackWindowSize := jobBufferSize + ackWindowWriters
+		logging.Debug("WriterPool: creating ordered-ack window with %d slots", ackWindowSize)
+		wp.ackSlots = make(chan struct{}, ackWindowSize)
 	}
 
 	return wp
@@ -349,6 +455,11 @@ func (wp *WriterPool) startWorkerLocked() {
 	}
 	wp.workers = append(wp.workers, ws)
 
+	// Count the worker at admission, before publishing the goroutine. Start and
+	// ScaleWorkers are synchronous pool operations; incrementing only after the
+	// scheduler ran the goroutine left a brief, observable live-count of zero
+	// immediately after a successful start/downscale.
+	atomic.AddInt64(&wp.liveWorkers, 1)
 	wp.writerWg.Add(1)
 	go wp.workerWithContext(ws, workerCtx)
 }
@@ -361,7 +472,6 @@ func (wp *WriterPool) startWorkerLocked() {
 // exactly once — the retirement check happens between jobs, never mid-chunk —
 // so a downscale never drops or double-writes an in-flight chunk.
 func (wp *WriterPool) workerWithContext(ws *workerState, workerCtx context.Context) {
-	atomic.AddInt64(&wp.liveWorkers, 1)
 	defer func() {
 		atomic.AddInt64(&wp.liveWorkers, -1)
 		wp.workerExited(ws)
@@ -435,6 +545,7 @@ func (wp *WriterPool) processJob(writerID int, job WriteJob) bool {
 		if wp.onComplete != nil {
 			wp.onComplete(job.Bytes)
 		}
+		wp.releaseAckSlots(1)
 		wp.writeErr.CompareAndSwap(nil, &err)
 		wp.cancel()
 		return false
@@ -465,18 +576,26 @@ func (wp *WriterPool) processJob(writerID int, job WriteJob) bool {
 		}
 		select {
 		case wp.ackChan <- ack:
+			// Delivery transfers the small checkpoint metadata to the bounded
+			// ordered-ack window; the writer no longer owns the full row chunk.
+			// Release its measured-byte reservation now instead of tying row
+			// payload capacity to a possibly missing earlier sequence.
+			if wp.onComplete != nil {
+				wp.onComplete(job.Bytes)
+			}
 		case <-wp.ctx.Done():
 			// Aborting — the runner's residual release frees this chunk's
 			// still-held reservation, so no explicit release here.
+			wp.releaseAckSlots(1)
 			return false
 		}
 	}
 
-	// Release the reservation only after the ack is delivered (#617): the
-	// worker holds job.Rows until this point, so freeing it earlier would
-	// let the budget admit more chunks while these bytes are still live
-	// under ack backpressure, undercounting real in-flight memory.
-	if wp.onComplete != nil {
+	// Without checkpoint acks, the worker is the last owner and releases the
+	// reservation after the successful write. With acks, the successful-delivery
+	// branch above already released it; ackSlots separately bounds retained
+	// checkpoint metadata until ordered application.
+	if wp.ackChan == nil && wp.onComplete != nil {
 		wp.onComplete(job.Bytes)
 	}
 	return true
@@ -484,6 +603,38 @@ func (wp *WriterPool) processJob(writerID int, job WriteJob) bool {
 
 // Submit sends a write job to the pool. Returns false if context is cancelled.
 func (wp *WriterPool) Submit(job WriteJob) bool {
+	if !wp.acquireAckSlot() {
+		return false
+	}
+	if wp.submit(job) {
+		return true
+	}
+	wp.releaseAckSlots(1)
+	return false
+}
+
+func (wp *WriterPool) acquireAckSlot() bool {
+	if wp.ackSlots == nil {
+		return true
+	}
+	select {
+	case wp.ackSlots <- struct{}{}:
+		return true
+	case <-wp.ctx.Done():
+		return false
+	}
+}
+
+func (wp *WriterPool) releaseAckSlots(count int) {
+	if wp.ackSlots == nil || count <= 0 {
+		return
+	}
+	for range count {
+		<-wp.ackSlots
+	}
+}
+
+func (wp *WriterPool) submit(job WriteJob) bool {
 	// Try non-blocking send first to detect when jobChan is full.
 	select {
 	case wp.jobChan <- job:
@@ -557,6 +708,22 @@ func (wp *WriterPool) Acks() <-chan WriteAck {
 
 // StartAckProcessor starts a goroutine to process acks with the given handler.
 func (wp *WriterPool) StartAckProcessor(handler func(WriteAck)) {
+	wp.startAckProcessor(func(ack WriteAck) AckRelease {
+		handler(ack)
+		return AckRelease{Jobs: 1}
+	})
+}
+
+// StartOrderedAckProcessor starts an ack processor whose handler reports the
+// job count whose slots became releasable after applying this ack. It may cover
+// successors when filling an earlier sequence gap, or be zero when the ack
+// must remain pending. This bounds out-of-order checkpoint metadata without
+// retaining the corresponding full row-chunk reservation.
+func (wp *WriterPool) StartOrderedAckProcessor(handler func(WriteAck) AckRelease) {
+	wp.startAckProcessor(handler)
+}
+
+func (wp *WriterPool) startAckProcessor(handler func(WriteAck) AckRelease) {
 	if wp.ackChan == nil {
 		return
 	}
@@ -564,7 +731,8 @@ func (wp *WriterPool) StartAckProcessor(handler func(WriteAck)) {
 	go func() {
 		defer wp.ackWg.Done()
 		for ack := range wp.ackChan {
-			handler(ack)
+			released := handler(ack)
+			wp.releaseAckSlots(released.Jobs)
 		}
 	}()
 }
@@ -603,8 +771,8 @@ func (wp *WriterPool) ScaleWorkers(newCount int) error {
 		return fmt.Errorf("worker count must be at least 1, got %d", newCount)
 	}
 
-	if newCount > 128 {
-		return fmt.Errorf("worker count too high: %d (max 128)", newCount)
+	if newCount > maxWriterPoolSize {
+		return fmt.Errorf("worker count too high: %d (max %d)", newCount, maxWriterPoolSize)
 	}
 
 	wp.scaleMu.Lock()

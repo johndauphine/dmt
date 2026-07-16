@@ -192,7 +192,11 @@ func (s *State) migrate() error {
 		max_target_connections INTEGER,
 		estimated_memory_mb INTEGER,
 		ai_reasoning TEXT,
-		was_ai_used INTEGER NOT NULL DEFAULT 0
+		was_ai_used INTEGER NOT NULL DEFAULT 0,
+		safety_projected INTEGER NOT NULL DEFAULT 0,
+		execution_chunk_size_min INTEGER,
+		execution_chunk_size_max INTEGER,
+		projection_context_fingerprint TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_ai_tuning_timestamp ON ai_tuning_history(timestamp);
@@ -715,6 +719,14 @@ func (s *State) ensureTuningResultColumns() error {
 		// DEFAULT 0 keeps pre-migration rows eligible (their runs
 		// predate the flag and mostly predate runtime tuning).
 		{"adjusted_at_runtime", "ALTER TABLE ai_tuning_history ADD COLUMN adjusted_at_runtime INTEGER DEFAULT 0"},
+		// Persist protocol, conditional transition, and legacy static projection
+		// disclosure separately from the requested policy. The selector may retain
+		// compatible exact-identity evidence while keeping projected rows out of
+		// cross-workload cohorts; runtime transitions are excluded independently.
+		{"safety_projected", "ALTER TABLE ai_tuning_history ADD COLUMN safety_projected INTEGER DEFAULT 0"},
+		{"execution_chunk_size_min", "ALTER TABLE ai_tuning_history ADD COLUMN execution_chunk_size_min INTEGER"},
+		{"execution_chunk_size_max", "ALTER TABLE ai_tuning_history ADD COLUMN execution_chunk_size_max INTEGER"},
+		{"projection_context_fingerprint", "ALTER TABLE ai_tuning_history ADD COLUMN projection_context_fingerprint TEXT"},
 	}
 	for _, m := range migrations {
 		if have[m.col] {

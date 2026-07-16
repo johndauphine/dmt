@@ -17,14 +17,15 @@ func TestDefaultOutput_KnobsByCPU(t *testing.T) {
 		wantSrcConns     int
 		wantTgtConns     int
 	}{
-		{"one core", 1, 4, 4, 12, 12},
-		{"two cores", 2, 4, 4, 12, 12},
-		{"four cores", 4, 4, 4, 12, 12},
+		{"one core", 1, 2, 2, 8, 8},
+		{"two cores", 2, 2, 2, 8, 8},
+		{"four cores", 4, 2, 2, 8, 8},
 		{"six cores", 6, 4, 4, 12, 12},
 		{"eight cores", 8, 6, 6, 16, 16},
-		{"thirty-two cores", 32, 12, 12, 28, 100},
-		{"sixty-four cores", 64, 12, 12, 28, 100},
-		{"one-hundred-twenty-eight cores", 128, 12, 12, 28, 100},
+		{"eighteen cores", 18, 16, 16, 36, 68},
+		{"thirty-two cores", 32, 30, 30, 64, 244},
+		{"sixty-four cores", 64, 62, 62, 128, 996},
+		{"one-hundred-twenty-eight cores", 128, 126, 126, 256, 4036},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,14 +147,16 @@ func TestDefaultOutput_UsesRepresentativeWidth(t *testing.T) {
 	}
 }
 
-func TestDefaultOutput_PathologicalCPUCoresStayBounded(t *testing.T) {
+func TestDefaultOutput_PathologicalCPUCoresDoNotOverflow(t *testing.T) {
 	minInt := -int(^uint(0)>>1) - 1
 	maxInt := int(^uint(0) >> 1)
-	for _, cores := range []int{minInt, maxInt} {
-		out := DefaultOutput(Input{CPUCores: cores, RepresentativeRowBytes: 500}, DriverProfile{BaselineWAW: 1})
-		if out.Workers < 4 || out.Workers > 12 || out.MaxSourceConnections < out.Workers || out.MaxTargetConnections < out.Workers {
-			t.Fatalf("CPUCores=%d produced overflowed baseline: %+v", cores, out)
-		}
+	low := DefaultOutput(Input{CPUCores: minInt, RepresentativeRowBytes: 500}, DriverProfile{BaselineWAW: 1})
+	if low.Workers != 2 || low.MaxSourceConnections != 8 || low.MaxTargetConnections != 6 {
+		t.Fatalf("CPUCores=MinInt produced invalid minimum baseline: %+v", low)
+	}
+	high := DefaultOutput(Input{CPUCores: maxInt, RepresentativeRowBytes: 500}, DriverProfile{BaselineWAW: 1})
+	if high.Workers != maxInt-2 || high.MaxSourceConnections != maxInt || high.MaxTargetConnections != maxInt {
+		t.Fatalf("CPUCores=MaxInt produced overflowed baseline: %+v", high)
 	}
 }
 
@@ -168,7 +171,7 @@ func TestDefaultOutput_PlatformWAW(t *testing.T) {
 	}{
 		{"linux", 2, 2},
 		{"linux", 4, 4},
-		{"linux", 100, maxLearnableWAW},
+		{"linux", 100, 100},
 		{"wsl2", 2, 1},
 		{"darwin", 2, 1},
 		{"windows", 2, 1},
@@ -212,7 +215,7 @@ func TestDefaultOutput_ScalesWAWWithCores(t *testing.T) {
 		{"PG-style scaled, large host", "linux", 16, true, 2, 4}, // cores/4=4 > 2
 		{"PG-style scaled, small host", "linux", 4, true, 2, 2},  // cores/4=1 < 2 → baseline wins
 		{"PG-style scaled, very large", "linux", 32, true, 2, 8}, // cores/4=8 > 2
-		{"PG-style scaled, capped learnable maximum", "linux", 128, true, 2, maxLearnableWAW},
+		{"PG-style scaled, pre-epic uncapped", "linux", 128, true, 2, 32},
 		{"MSSQL-style not scaled", "linux", 32, false, 2, 2}, // scaling off → declared baseline
 		{"PG-style scaled, virtualized capped", "wsl2", 32, true, 2, 1},
 		{"PG-style scaled, darwin capped", "darwin", 32, true, 2, 1},
@@ -262,7 +265,7 @@ func TestDefaultOutput_FixedKnobs(t *testing.T) {
 	}
 }
 
-func TestDefaultOutput_MemoryClampUsesSafetyWidth(t *testing.T) {
+func TestDefaultOutput_GlobalMemoryClampUsesRepresentativeWidth(t *testing.T) {
 	profile := DriverProfile{BaselineWAW: 2, OptimumBulkChunkBytes: 25_000_000}
 	base := Input{
 		CPUCores:               8,
@@ -275,7 +278,7 @@ func TestDefaultOutput_MemoryClampUsesSafetyWidth(t *testing.T) {
 
 	narrow := DefaultOutput(base, profile)
 	if narrow.ChunkSize != 932 {
-		t.Fatalf("500-byte safety ChunkSize = %d, want 932", narrow.ChunkSize)
+		t.Fatalf("500-byte representative ChunkSize = %d, want 932", narrow.ChunkSize)
 	}
 	if narrow.EstimatedMemMB > base.MemoryBudgetMB || narrow.MemoryEstimateOverBudget {
 		t.Fatalf("narrow default not clamped to budget: %+v", narrow)
@@ -284,11 +287,8 @@ func TestDefaultOutput_MemoryClampUsesSafetyWidth(t *testing.T) {
 	wideInput := base
 	wideInput.SafetyRowBytes = 4_000
 	wide := DefaultOutput(wideInput, profile)
-	if wide.ChunkSize != 116 {
-		t.Fatalf("4000-byte safety ChunkSize = %d, want 116", wide.ChunkSize)
-	}
-	if wide.ChunkSize >= narrow.ChunkSize {
-		t.Fatalf("wider safety width did not reduce chunk: narrow=%d wide=%d", narrow.ChunkSize, wide.ChunkSize)
+	if wide.ChunkSize != narrow.ChunkSize {
+		t.Fatalf("widest-table width changed global ChunkSize: narrow=%d wide=%d", narrow.ChunkSize, wide.ChunkSize)
 	}
 	if wide.EstimatedMemMB > wideInput.MemoryBudgetMB || wide.MemoryEstimateOverBudget {
 		t.Fatalf("wide default not clamped to budget: %+v", wide)
@@ -306,7 +306,7 @@ func TestDefaultOutput_UnknownSafetyWidthUsesFallback(t *testing.T) {
 	if out.ChunkSize != 932 {
 		t.Fatalf("fallback-width ChunkSize = %d, want 932", out.ChunkSize)
 	}
-	if !strings.Contains(out.Reasoning, "safety width 500 B, unobserved fallback estimate") {
+	if !strings.Contains(out.Reasoning, "representative width 500 B") {
 		t.Fatalf("Reasoning does not preserve fallback-width provenance: %q", out.Reasoning)
 	}
 }

@@ -35,18 +35,15 @@ func baseline(in Input, profile DriverProfile) Output {
 	}
 }
 
-// baselineWorkers keeps the canonical cores-2 policy within the established
-// load-time floor and high-core safety ceiling.
+// baselineWorkers is the history-aware tuner's pre-epic CPU policy. It is
+// intentionally distinct from config's bounded load-time defaults: automatic
+// tuning reserves two cores and otherwise lets the memory envelope constrain
+// the resulting concurrency tuple.
 func baselineWorkers(cpuCores int) int {
-	const (
-		minWorkers = 4
-		maxWorkers = 12
-	)
+	const minWorkers = 2
+	// Branch before subtracting so pathological negative inputs cannot wrap.
 	if cpuCores <= minWorkers+2 {
 		return minWorkers
-	}
-	if cpuCores >= maxWorkers+2 {
-		return maxWorkers
 	}
 	return cpuCores - 2
 }
@@ -68,8 +65,6 @@ func baselineWorkers(cpuCores int) int {
 //     transport layer's per-flow throughput is lower there and parallel
 //     writers contend; on native Linux (Unix socket or real NIC) the
 //     scaled value applies.
-//  5. Cap tuner-managed values at maxLearnableWAW so defaults stay inside
-//     the exploration, regression, and runtime-controller domain.
 func baselineWAW(in Input, profile DriverProfile) int {
 	waw := profile.BaselineWAW
 	if profile.ScaleWritersWithCores && in.CPUCores > 0 {
@@ -85,9 +80,6 @@ func baselineWAW(in Input, profile DriverProfile) int {
 		if waw > 1 {
 			waw = 1
 		}
-	}
-	if waw > maxLearnableWAW {
-		waw = maxLearnableWAW
 	}
 	return waw
 }

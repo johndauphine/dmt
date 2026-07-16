@@ -52,11 +52,14 @@ type Input struct {
 	// conservative 500-byte fallback rather than aliasing the legacy average.
 	RepresentativeRowBytes int64
 
-	// SafetyRowBytes is the widest observed positive per-table average and is
-	// used exclusively for memory clamps and estimates. SafetyRowBytesKnown is
-	// true only when schema statistics supplied that positive width; fallback
-	// estimates keep it false so callers never present an assumed width as
-	// observed fact.
+	// SafetyRowBytes is the widest observed positive per-table average. It is
+	// retained as fail-closed evidence for runtime growth and as the fallback
+	// width for a transfer job whose own row-size estimate is unavailable. The
+	// global recommendation is sized with RepresentativeRowBytes; execution
+	// applies the hard memory ceiling independently for each table.
+	// SafetyRowBytesKnown is true only when schema statistics supplied that
+	// positive width; fallback estimates keep it false so callers never present
+	// an assumed width as observed fact.
 	SafetyRowBytes      int64
 	SafetyRowBytesKnown bool
 
@@ -77,6 +80,22 @@ type Input struct {
 	// it skip the skew axis for that comparison rather than mismatching
 	// every current input.
 	LargestTableBytes int64
+
+	// ProjectionContextFingerprint identifies the exact deterministic inputs
+	// used to validate safety-projected history, including legacy static table
+	// projection and current protocol/conditional transition limits. Projected
+	// history is comparable only when this and the persisted value match.
+	ProjectionContextFingerprint string
+	// ProjectionConnectionPolicyKnown gates the second half of projected-row
+	// compatibility. Generated pools are recomputed from each history row's
+	// recorded action; fixed user/secrets limits override that derivation. A
+	// caller without authoritative pin provenance cannot safely reuse projected
+	// history even if it supplies a fingerprint.
+	ProjectionConnectionPolicyKnown      bool
+	ProjectionMaxSourceConnectionsPinned bool
+	ProjectionMaxSourceConnections       int
+	ProjectionMaxTargetConnectionsPinned bool
+	ProjectionMaxTargetConnections       int
 
 	// Workload identity (#215). Together these form the tuple the
 	// Tier 1 exact-identity classifier uses to find historically-
@@ -153,10 +172,12 @@ type Output struct {
 
 	EstimatedMemMB int64
 
-	// MemoryEstimateOverBudget is true when the final recommendation's modeled
-	// working set exceeds MemoryBudgetMB. In particular, it remains true when
-	// the tuner returns a one-row minimum-progress chunk that still cannot fit;
-	// the recommendation must never imply that such a chunk is memory-safe.
+	// MemoryEstimateOverBudget is true when the final recommendation's
+	// representative-width modeled working set exceeds MemoryBudgetMB. In
+	// particular, it remains true when the tuner returns a one-row
+	// minimum-progress chunk that still cannot fit. Shared measured-byte
+	// admission and MemoryGuard protect steady transfer, while per-table complete
+	// inventory gates runtime writer-count transitions.
 	MemoryEstimateOverBudget bool
 
 	// Tier names which selector picked the WAW/ChunkSize values. One of
@@ -232,7 +253,11 @@ type HistoryRecord struct {
 	SourceDBType string
 	TargetDBType string
 
-	// What ran
+	// Global policy that ran. ChunkSize is the learned steady action, not a claim
+	// that every call used one literal size: a target protocol limit or an applied
+	// writer-transition ratchet may lower later chunks. Legacy static projections
+	// are also retained for compatibility. Learning the requested action avoids
+	// feeding a conditional result back as the next request.
 	Workers           int
 	ChunkSize         int
 	WriteAheadWriters int
@@ -242,6 +267,11 @@ type HistoryRecord struct {
 	// grid starts varying them.
 	ParallelReaders  int
 	ReadAheadBuffers int
+	// Actual connection limits reported when the tuning row was saved. For a
+	// safety-projected row these must agree with the current fixed/derived pool
+	// policy before its throughput can be attributed to the recorded action.
+	MaxSourceConnections int
+	MaxTargetConnections int
 
 	// AvgRowBytes is the avg_row_size_bytes the analyzer recorded for
 	// the migration that produced this row. Used by PR2's regression to
@@ -296,13 +326,27 @@ type HistoryRecord struct {
 	FinalThroughputBytes int64
 	ChunkRetryCount      int
 
-	// AdjustedAtRuntime is true when the runtime controller changed
-	// parameters mid-run (#451). The row's throughput is a blend across
-	// configs and can't be attributed to the recorded (WAW, CS, PR, RAB),
+	// AdjustedAtRuntime is the persisted exclusion flag. Runtime-controller
+	// changes blend policies (#451), and resume segments measure only a subset
+	// of the persisted full workload. In either case throughput can't be
+	// attributed to the recorded (WAW, CS, PR, RAB),
 	// so Tune drops such rows before every training cohort is built —
 	// regression, smoothed bins, drift detection, and the exploration
 	// bucket count. Pre-#451 rows are false and stay eligible.
+	// A protocol safety limit does not itself make a row runtime-adjusted.
+	// Conditional writer-transition projections accompany a separately recorded
+	// runtime adjustment and are excluded by that flag.
 	AdjustedAtRuntime bool
+
+	// SafetyProjected records that a protocol limit, conditional writer-
+	// transition ratchet, or legacy static table projection reduced ChunkSize.
+	// ExecutionChunkSizeMin/Max are disclosure fields, not replacement actions.
+	// Projected rows are reused only under exact workload identity and a matching
+	// ProjectionContextFingerprint; cross-workload selection excludes them.
+	SafetyProjected              bool
+	ExecutionChunkSizeMin        int
+	ExecutionChunkSizeMax        int
+	ProjectionContextFingerprint string
 
 	// Regime classification fields (host)
 	CPUCores int
@@ -375,6 +419,22 @@ func DefaultOutputWithOverrides(in Input, profile DriverProfile, overrides Defau
 	return out
 }
 
+// FinalizeFormulaOutput applies the retained hard memory envelope and truthful
+// connection-pool derivation to a caller-supplied formula policy. It exists for
+// config's legacy load-time defaults, whose formulas intentionally differ from
+// the history-aware tuner's baseline. Callers must populate every policy field
+// before finalization.
+func FinalizeFormulaOutput(in Input, out Output) Output {
+	if out.Tier == "" {
+		out.Tier = TierBaseline
+	}
+	if out.Reasoning == "" {
+		out.Reasoning = "baseline (caller-supplied formula policy)"
+	}
+	finalizeOutput(&out, in)
+	return out
+}
+
 // Tune computes the recommended parameters for a migration. The history
 // provider and DBTuning are optional — pass nil / zero-value for pure-
 // baseline (cold-start) output.
@@ -400,9 +460,15 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// and removed before the detector can compare it to older runs
 	// (Codex review on PR #183 — bug fix).
 	var regimeRows []HistoryRecord
+	var crossWorkloadRows []HistoryRecord
 	var regimeFilter outlierFilterResult
+	var rawIdentityRows []HistoryRecord
+	var identityRows []HistoryRecord
+	var identityFilter outlierFilterResult
 	historyAvailable := false
 	rawCount := 0
+	projectedCrossWorkloadDropped := 0
+	projectedContextDropped := 0
 	if history != nil {
 		if r, err := history.Records(in.SourceDBType, in.TargetDBType); err == nil {
 			historyAvailable = true
@@ -427,18 +493,39 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 				)
 			}
 			regimeRows = filterByRegime(r, in, currentTuning)
+			// Safety projection can depend on protocol and concrete execution
+			// context. Retain compatible rows for Tier 1 exact-identity learning
+			// below, but keep them out of cross-workload fallback where the same
+			// policy can map to a different execution range.
+			crossWorkloadRows = regimeRows
+			crossWorkloadRows, projectedCrossWorkloadDropped = dropSafetyProjected(crossWorkloadRows)
 			// Defer the outlier-reasoning emission until we know which
 			// cohort drives the selector — Tier 1 (identity) may take
 			// over and run its own filter pass below. Emitting eagerly
 			// here would double-report when the identity cohort is a
 			// subset of the regime cohort (codex review on the initial
 			// #225 commit).
-			regimeFilter = filterOutliersForRegression(regimeRows)
+			regimeFilter = filterOutliersForRegression(crossWorkloadRows)
 		} else {
 			logging.Debug("tuning: history fetch failed (%v) — using baseline", err)
 		}
 	}
 	rows := regimeFilter.kept
+	explorationEligibleCount := len(rows)
+	if historyAvailable && hasExactIdentity(in) {
+		// Before the exact-identity cohort reaches the regression floor, its
+		// safety-projected rows still represent completed planned probes. Count
+		// them for the six-probe cold-start progression even though Tier 2/3
+		// must not consume them as cross-workload performance evidence.
+		rawIdentityRows = filterByExactIdentity(regimeRows, in)
+		identityRows, projectedContextDropped = filterProjectedByContext(
+			rawIdentityRows,
+			in,
+		)
+		identityFilter = filterOutliersForRegression(identityRows)
+		explorationEligibleCount += countSafetyProjected(identityFilter.kept)
+	}
+	appendProjectedContextReasoning(&out, projectedContextDropped)
 
 	// Override-cost advice (#461) is emitted per exit path below, from
 	// the cohort that path's selector actually consumed (identity rows
@@ -475,9 +562,27 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// Exploration paths don't use the regression's prediction surface,
 	// so outlier-filter drops here would be irrelevant to the chosen
 	// output — leave appendOutlierReasoning unfired.
-	driftDetected := historyAvailable && detectRegimeDrift(regimeRows)
+	// Drift must follow the same comparability rule as selection. Safety-
+	// projected history is reused only for one exact workload identity and
+	// projection context, so prefer that already-filtered cohort when deep enough for
+	// the exact-identity selector to consume. A thinner exact cohort cannot
+	// shadow the projected-free cross-workload cohort that Tier 2/3 will actually
+	// use. Once exact history is eligible, do not drop a newer, context-matched
+	// projected run and let an older cross-workload row masquerade as the "most
+	// recent" cell inspected by detectRegimeDrift.
+	driftRows := crossWorkloadRows
+	// Measure eligibility on the selector's post-outlier cohort, but pass the
+	// pre-outlier rows to drift so the throughput shift itself remains visible.
+	projectedIdentityForDrift := countSafetyProjected(identityFilter.kept)
+	exactIdentitySelectorEligible := len(identityFilter.kept) >= minRowsToAttemptRegression ||
+		(projectedIdentityForDrift > 0 && len(identityFilter.kept) >= explorationGridRuns)
+	if exactIdentitySelectorEligible {
+		driftRows = identityRows
+	}
+	driftDetected := historyAvailable && detectRegimeDrift(driftRows)
 	if in.ForceExplore || driftDetected {
-		applyGridExploration(&out, in, profile, len(rows), rawCount)
+		appendProjectedCrossWorkloadReasoning(&out, projectedCrossWorkloadDropped)
+		applyGridExploration(&out, in, profile, explorationEligibleCount, rawCount)
 		// Advice runs after the selector so the reader-settings filter
 		// uses the FINAL output readers, not baseline. Suppressed on
 		// drift: the tuner just declared this history stale, so means
@@ -512,11 +617,43 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// perturbation still applies — that's the steady-state exploration
 	// channel for keeping the regression's training data fresh.
 	if historyAvailable && hasExactIdentity(in) {
-		identityRows := filterByExactIdentity(regimeRows, in)
-		identityFilter := filterOutliersForRegression(identityRows)
+		projectedIdentity := countSafetyProjected(identityFilter.kept)
+		projectedOutsideIdentity := projectedCrossWorkloadDropped - countSafetyProjected(rawIdentityRows)
+		if projectedOutsideIdentity < 0 {
+			projectedOutsideIdentity = 0
+		}
 		if len(identityFilter.kept) >= minRowsToAttemptRegression {
+			appendProjectedCrossWorkloadReasoning(&out, projectedOutsideIdentity)
+			if projectedIdentity > 0 {
+				out.Reasoning = appendReasoning(out.Reasoning,
+					"history projection: %d safety-projected run(s) retained under exact workload identity and projection context; chunk_size remains the global policy action",
+					projectedIdentity,
+				)
+			}
 			// Identity cohort wins — its drops are the ones the
 			// selector consumed, so emit those (not the regime pass).
+			appendOutlierReasoning(&out, identityFilter)
+			applyHistorySelection(&out, in, profile, identityFilter.kept)
+			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
+				applyEpsilonPerturbation(&out, profile, in.ExplorationEpsilon)
+			}
+			pinnedAdvice(identityFilter.kept)
+			finalizeTierAndReasoning(&out, history, historyAvailable)
+			finalizeOutput(&out, in)
+			return out
+		}
+		// Compatible projected rows are withheld from cross-workload tiers, but once the
+		// exact workload completes the restored six-probe window they must feed
+		// the normal steady-state fallback. Otherwise attempts 7–11 would drop
+		// to a fresh baseline despite having comparable evidence. Regression
+		// remains gated at its 12-row floor; this interval therefore uses the
+		// ordinary smoothed-bin selector.
+		if projectedIdentity > 0 && len(identityFilter.kept) >= explorationGridRuns {
+			appendProjectedCrossWorkloadReasoning(&out, projectedOutsideIdentity)
+			out.Reasoning = appendReasoning(out.Reasoning,
+				"history projection: %d safety-projected run(s) retained for exact-identity steady-state fallback with matching projection context; chunk_size remains the global policy action",
+				projectedIdentity,
+			)
 			appendOutlierReasoning(&out, identityFilter)
 			applyHistorySelection(&out, in, profile, identityFilter.kept)
 			if shouldEpsilonPerturb(in.ExplorationEpsilon) {
@@ -540,7 +677,8 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 	// Nil-history OR a failed history fetch does NOT enter exploration
 	// on its own — there's nowhere to learn from / persist the probe
 	// to, so the baseline output is what the user gets.
-	if historyAvailable && shouldExplore(in, len(rows)) {
+	appendProjectedCrossWorkloadReasoning(&out, projectedCrossWorkloadDropped)
+	if historyAvailable && shouldExplore(in, explorationEligibleCount) {
 		// Exploration paths (planned grid, ε-perturbation) intentionally
 		// don't apply the historical-retry filter — that's a SELECTION
 		// concern (handled inside applyHistorySelection's selectWAW /
@@ -550,7 +688,7 @@ func Tune(in Input, profile DriverProfile, history HistoryProvider, currentTunin
 		// regression's prediction surface isn't consumed, so the
 		// regime cohort's outlier drops aren't part of the chosen
 		// output — leave appendOutlierReasoning unfired.
-		applyGridExploration(&out, in, profile, len(rows), rawCount)
+		applyGridExploration(&out, in, profile, explorationEligibleCount, rawCount)
 	} else if len(rows) > 0 {
 		// Tier 2/3 fallback consumes the regime-filtered cohort —
 		// emit its drops as the audit trail for the chosen output.

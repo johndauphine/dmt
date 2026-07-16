@@ -107,7 +107,7 @@ type writeJob struct {
 	rowNum   int64
 	readerID int
 	seq      int64
-	bytes    int64 // MemBudget bytes to release once this chunk is written (#617)
+	bytes    int64 // MemBudget bytes released after write/ack delivery (#617)
 }
 
 type writeAck struct {
@@ -116,6 +116,10 @@ type writeAck struct {
 	lastPK   any
 	rowNum   int64
 	rows     int64 // chunk row count, accumulated into rows_done in ack order (#632)
+}
+
+type ackRelease struct {
+	jobs int
 }
 
 type readerCheckpointState struct {

@@ -2,11 +2,13 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
+	"time"
+
+	"github.com/johndauphine/dmt/internal/checkpoint"
 	"github.com/johndauphine/dmt/internal/config"
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/logging"
-	"strings"
-	"time"
 )
 
 // applyTuning runs the deterministic tuner (internal/tuning) to set
@@ -20,6 +22,10 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// or manual analysis inherit a row or tier created by an earlier segment.
 	o.lastTuningRowID = 0
 	o.lastTuningTier = ""
+	o.lastSafetyProjected = false
+	o.lastExecutionChunkSizeMin = 0
+	o.lastExecutionChunkSizeMax = 0
+	o.excludeTuningResultFromLearning = false
 	// Runtime safety evidence is run-scoped. The orchestrator owns the target
 	// probe lifecycle, so clear both the prior protocol cap and the config-owned
 	// width/growth metadata before every fresh attempt (#709).
@@ -72,7 +78,9 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 
 	// Override-cost advice (#461): tell the tuner which WAW value is
 	// pinned so it can compare the pin against measured history bins.
+	pinnedTunables := make(map[string]bool)
 	for _, name := range o.config.PinnedTunables() {
+		pinnedTunables[name] = true
 		switch name {
 		case config.TunableWriteAheadWriters:
 			analyzer.SetPinnedWriteAheadWriters(o.config.Migration.WriteAheadWriters)
@@ -88,6 +96,11 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	// disables target safety discovery (#709).
 	o.configureAnalyzerTarget(ctx, analyzer)
 	analyzer.SetTargetMode(o.config.Migration.TargetMode)
+	analyzer.SetProjectionExecutionContext(projectionExecutionContext(
+		o.tables,
+		o.config,
+		pinnedTunables,
+	))
 
 	// Wire exploration policy (#179): --explore flag forces a planned-grid
 	// pick this run; ExploreMode controls steady-state ε strength.
@@ -178,6 +191,29 @@ func (o *Orchestrator) applyTuning(ctx context.Context) {
 	o.lastTuningRowID = o.saveTuningWithLivePools(analyzer, tuning)
 }
 
+func projectionExecutionContext(tables []driver.Table, cfg *config.Config, pinned map[string]bool) driver.ProjectionExecutionContext {
+	ctx := driver.ProjectionExecutionContext{Tables: tables}
+	if cfg == nil {
+		return ctx
+	}
+	ctx.StrictConsistency = cfg.Migration.StrictConsistency
+	ctx.StrictConsistencyScope = cfg.Migration.StrictConsistencyScope
+	ctx.Workers = projectionTunablePolicy(pinned[config.TunableWorkers], cfg.Migration.Workers)
+	ctx.WriteAheadWriters = projectionTunablePolicy(pinned[config.TunableWriteAheadWriters], cfg.Migration.WriteAheadWriters)
+	ctx.ParallelReaders = projectionTunablePolicy(pinned[config.TunableParallelReaders], cfg.Migration.ParallelReaders)
+	ctx.ReadAheadBuffers = projectionTunablePolicy(pinned[config.TunableReadAheadBuffers], cfg.Migration.ReadAheadBuffers)
+	ctx.MaxSourceConnections = projectionTunablePolicy(pinned[config.TunableMaxSourceConnections], cfg.Migration.MaxSourceConnections)
+	ctx.MaxTargetConnections = projectionTunablePolicy(pinned[config.TunableMaxTargetConnections], cfg.Migration.MaxTargetConnections)
+	return ctx
+}
+
+func projectionTunablePolicy(pinned bool, value int) driver.ProjectionTunablePolicy {
+	if !pinned {
+		return driver.ProjectionTunablePolicy{}
+	}
+	return driver.ProjectionTunablePolicy{Pinned: true, Value: value}
+}
+
 // configureAnalyzerTarget attaches the live target identity and bounded probe
 // to a smartconfig analyzer. It is safe with a nil target and intentionally
 // best-effort: an unavailable probe yields no protocol cap rather than blocking
@@ -234,7 +270,33 @@ func (o *Orchestrator) recordSuccessfulTuningResult(totalRows int64, transferDur
 	}
 
 	transferThroughput := float64(totalRows) / transferDurationSecs
-	if err := o.state.UpdateTuningResult(o.lastTuningRowID, transferThroughput, transferDurationSecs, o.lastChunkRetryCount, o.lastRunAdjusted); err != nil {
+	excludeFromLearning := o.lastRunAdjusted || o.excludeTuningResultFromLearning
+	completion := checkpoint.TuningResultCompletion{
+		RowID:                 o.lastTuningRowID,
+		Throughput:            transferThroughput,
+		DurationSecs:          transferDurationSecs,
+		ChunkRetryCount:       o.lastChunkRetryCount,
+		AdjustedAtRuntime:     excludeFromLearning,
+		SafetyProjected:       o.lastSafetyProjected,
+		ExecutionChunkSizeMin: o.lastExecutionChunkSizeMin,
+		ExecutionChunkSizeMax: o.lastExecutionChunkSizeMax,
+	}
+	if completer, ok := o.state.(checkpoint.AtomicTuningResultCompleter); ok {
+		if err := completer.CompleteTuningResult(completion); err != nil {
+			// The atomic statement either commits every correlated field or none.
+			// Leave a failed row incomplete rather than trying a split fallback.
+			logging.Debug("Failed to atomically complete tuning result: %v", err)
+		}
+		return
+	}
+
+	if o.lastSafetyProjected {
+		// A backend that cannot atomically persist projection plus throughput
+		// cannot safely retain this row as projected exact-identity evidence.
+		excludeFromLearning = true
+		logging.Warn("Tuning history backend cannot atomically persist safety-projection disclosure; excluding this run from learning")
+	}
+	if err := o.state.UpdateTuningResult(o.lastTuningRowID, transferThroughput, transferDurationSecs, o.lastChunkRetryCount, excludeFromLearning); err != nil {
 		logging.Debug("Failed to update AI tuning result: %v", err)
 	}
 }

@@ -21,6 +21,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Restored the pre-epic six-probe cold-start policy and legacy load-time
+  defaults after retained-epic regression verification. The retained memory,
+  pool, history, and runtime infrastructure now executes the requested global
+  policy directly in steady state under shared measured-byte admission and
+  MemoryGuard. Per-table complete-inventory checks gate writer-count
+  transitions and ratchet future chunk or batch growth only after a transition
+  is applied; transition metadata is recorded atomically apart from the learned
+  action. The execution-context fingerprint was advanced so history from the
+  retired static-projection semantics fails closed; new projected evidence is
+  reused only under matching workload and execution context. Resume segments
+  stay out of learning, and unusable regression predictions fall back to
+  measured bins or baseline.
+
 - Rolled back the cardinality-aware auto-tune memory model and effective-
   candidate projection introduced by #729 and #730 after a native Windows
   regression screen classified the combined change as likely materially
@@ -53,10 +66,11 @@ All notable changes to this project will be documented in this file.
   keeping unsupported or failed statistics out of tuning history. Portless
   SQLite identities can now participate in exact-workload learning (#699).
 
-- Load-time defaults and cold-start tuning now share one memory-clamped policy:
-  workers stay within 4-12, generated writers stay within the learnable 1-8
-  range, and auto chunk sizing accounts for effective pinned concurrency while
-  preserving explicit user values and their truthful diagnostics (#711).
+- Load-time defaults again use their legacy worker, RAM-shaped chunk, reader,
+  writer, buffer, upsert, and checkpoint formulas, independently of the
+  history-aware cold-start baseline. Both paths still pass through the retained
+  memory envelope and truthful connection-pool finalization, and explicit user
+  values remain preserved (#711).
 
 - Connection-pool sizing now uses one overflow-safe formula across tuning and
   configuration, rederives generated limits from the effective worker/reader/
@@ -68,11 +82,13 @@ All notable changes to this project will be documented in this file.
   metadata errors or timeouts emit one warning without discarding valid tuning,
   and out-of-scope tables are filtered without extra round trips (#700).
 
-- Runtime chunk growth now uses a recomputable memory/protocol cap derived
-  from the unified envelope and observed widest-table width. Writer growth
-  atomically applies any required chunk clamp, while missing analysis,
-  unknown pressure, protocol-only limits, and one-row over-budget fallbacks
-  disable resource growth (#709).
+- Runtime writer growth now checks a recomputable per-table complete-inventory
+  ceiling derived from the unified envelope and the table's own observed width.
+  The model covers channel queues, reader scan slack, writer encoding, consumer
+  handoff, and concurrent pipelines; accepted writer transitions ratchet later
+  chunk and batch requests without mutating the ordinary steady policy. Missing
+  analysis, unknown pressure, protocol-only limits, and one-row over-budget
+  fallbacks disable resource growth (#709).
 
 - Runtime memory rules now use the more constrained host or finite-cgroup
   pressure instead of Go heap allocation divided by runtime-reserved memory.
@@ -80,10 +96,12 @@ All notable changes to this project will be documented in this file.
   growth; heap allocation remains a separate diagnostic (#696).
 
 - Smart configuration now separates representative workload width from the
-  widest observed table-average safety width. Performance sizing is no longer
-  distorted by tiny wide tables, while memory clamps use the safer width,
-  preserve unknown-width provenance, round estimates up, and saturate extreme
-  arithmetic instead of wrapping (#703).
+  widest observed table-average fallback width. The representative width sizes
+  the global performance policy, while table-specific widths gate runtime
+  writer transitions and measured bytes govern steady admission (falling back
+  to the widest observed width when transition evidence is unavailable).
+  Unknown-width provenance is preserved, estimates round up, and extreme
+  arithmetic saturates instead of wrapping (#703).
 
 - Memory budgeting now resolves one host/cgroup-aware envelope during config
   loading and passes its exact budget to tuning, GC pacing, transfer buffers,
@@ -113,11 +131,11 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- Cold-start autotuning now uses twelve complete four-knob exploration cells:
-  eight unique balanced probes plus four marginally balanced replicates. The
-  usable-row threshold now matches the regression floor, while raw attempts
-  rotate deterministically over the cells allowed by the hard chunk limit
-  (#698).
+- Cold-start autotuning again uses the pre-epic six-probe window over the
+  original eight-cell ring. Raw attempts still advance that ring
+  deterministically for replacement or forced probes, so safety-adjusted or
+  filtered attempts cannot pin a workload to the same cell, and regression
+  remains gated by its existing evidence floor (#698).
 
 - Strict MySQL and SQL Server readers now have one-million-row live throughput
   proofs, per-engine blocking/prerequisite documentation, in-VM before/after

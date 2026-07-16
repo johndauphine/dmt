@@ -387,7 +387,7 @@ func TestGenerateTemplate_CanonicalTuningDefaultsStayUnpinned(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			commentedValues := map[string]string{
-				"checkpoint_frequency": "20",
+				"checkpoint_frequency": "10",
 				"read_ahead_buffers":   "4",
 			}
 			found := make(map[string]bool, len(commentedValues))
@@ -417,7 +417,7 @@ func TestGenerateTemplate_CanonicalTuningDefaultsStayUnpinned(t *testing.T) {
 					t.Errorf("template is missing the commented canonical %s example", key)
 				}
 			}
-			for _, stale := range []string{"checkpoint_frequency: 10", "read_ahead_buffers: 8"} {
+			for _, stale := range []string{"checkpoint_frequency: 20", "read_ahead_buffers: 8"} {
 				if strings.Contains(tt.template, stale) {
 					t.Errorf("template contains stale default %q", stale)
 				}

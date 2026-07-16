@@ -688,7 +688,7 @@ func TestTune_ExplorationProbesAIPollutedWAW(t *testing.T) {
 	profile := DriverProfile{Name: "postgres", BaselineWAW: 1, OptimumBulkChunkBytes: 25_000_000}
 
 	// 5 AI-era rows at WAW=2 each with retries — places us in cold-
-	// start (rows < explorationGridRuns=12) so the planned grid fires.
+	// start (rows < explorationGridRuns=6) so the planned grid fires.
 	// With bucketCount=5 the grid lands on idx 5 = {WAW=2, CS=1.0×opt}.
 	history := &stubHistory{rows: []HistoryRecord{
 		{CPUCores: 8, MemoryGB: 48, WriteAheadWriters: 2, ChunkSize: 50_000, AvgRowBytes: 500, FinalThroughput: 600_000, ChunkRetryCount: 3},
@@ -1608,8 +1608,8 @@ func TestTune_ExplorationUsesRawPersistedCountAndUsableLabel(t *testing.T) {
 				got.WriteAheadWriters, got.ChunkSize, got.ParallelReaders, got.ReadAheadBuffers,
 				want.WriteAheadWriters, want.ChunkSize, want.ParallelReaders, want.ReadAheadBuffers)
 		}
-		if !strings.Contains(got.Reasoning, "run 3/12") {
-			t.Fatalf("reasoning = %q, want usable-count label run 3/12", got.Reasoning)
+		if !strings.Contains(got.Reasoning, "run 3/6") {
+			t.Fatalf("reasoning = %q, want usable-count label run 3/6", got.Reasoning)
 		}
 		return got
 	}

@@ -158,6 +158,92 @@ func dropRuntimeAdjusted(rows []HistoryRecord) (kept []HistoryRecord, dropped in
 	return kept, dropped
 }
 
+// dropSafetyProjected removes safety-limited rows from a cross-workload cohort.
+// Unlike runtime-adjusted rows, compatible protocol-limited rows may remain
+// evidence for the exact same workload identity and versioned execution
+// context. Legacy static-projection fingerprints fail closed. Across workloads,
+// safety context can differ, so pooling them would misattribute throughput to
+// chunk_size.
+func dropSafetyProjected(rows []HistoryRecord) (kept []HistoryRecord, dropped int) {
+	kept = make([]HistoryRecord, 0, len(rows))
+	for _, r := range rows {
+		if r.SafetyProjected {
+			dropped++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept, dropped
+}
+
+func countSafetyProjected(rows []HistoryRecord) int {
+	count := 0
+	for _, r := range rows {
+		if r.SafetyProjected {
+			count++
+		}
+	}
+	return count
+}
+
+// filterProjectedByContext keeps ordinary rows unchanged and admits a
+// safety-projected row only when both sides carry the same nonempty projection
+// fingerprint and that row's actual connection limits agree with the current
+// fixed/derived policy. Endpoint identity alone is insufficient: memory,
+// protocol, table-width, or pinned-pool policy can change while addresses stay
+// identical.
+func filterProjectedByContext(rows []HistoryRecord, in Input) (kept []HistoryRecord, dropped int) {
+	kept = make([]HistoryRecord, 0, len(rows))
+	for _, r := range rows {
+		if r.SafetyProjected {
+			fingerprintMatches := in.ProjectionContextFingerprint != "" &&
+				r.ProjectionContextFingerprint != "" &&
+				r.ProjectionContextFingerprint == in.ProjectionContextFingerprint
+			if !fingerprintMatches || !projectedConnectionsMatchPolicy(r, in) {
+				dropped++
+				continue
+			}
+		}
+		kept = append(kept, r)
+	}
+	return kept, dropped
+}
+
+func projectedConnectionsMatchPolicy(r HistoryRecord, in Input) bool {
+	if !in.ProjectionConnectionPolicyKnown {
+		return false
+	}
+	source, target := ConnectionPoolSizes(r.Workers, r.ParallelReaders, r.WriteAheadWriters)
+	if in.ProjectionMaxSourceConnectionsPinned {
+		source = in.ProjectionMaxSourceConnections
+	}
+	if in.ProjectionMaxTargetConnectionsPinned {
+		target = in.ProjectionMaxTargetConnections
+	}
+	return source > 0 && target > 0 &&
+		r.MaxSourceConnections == source && r.MaxTargetConnections == target
+}
+
+func appendProjectedContextReasoning(out *Output, dropped int) {
+	if out == nil || dropped <= 0 {
+		return
+	}
+	out.Reasoning = appendReasoning(out.Reasoning,
+		"history projection: %d exact-identity projected run(s) excluded because projection context was missing, changed, or used incompatible connection policy",
+		dropped,
+	)
+}
+
+func appendProjectedCrossWorkloadReasoning(out *Output, dropped int) {
+	if out == nil || dropped <= 0 {
+		return
+	}
+	out.Reasoning = appendReasoning(out.Reasoning,
+		"history projection: %d safety-projected run(s) reserved for exact-identity learning and excluded from cross-workload cohorts",
+		dropped,
+	)
+}
+
 func filterOutliers(rows []HistoryRecord) []HistoryRecord {
 	// First pass: drop incomplete rows so neither pipeline tier sees
 	// them. Median below is computed on completed runs only.

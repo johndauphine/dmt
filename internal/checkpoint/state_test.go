@@ -1127,13 +1127,14 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 
 	mkRecord := func(offset time.Duration) TuningRecord {
 		return TuningRecord{
-			Timestamp:    time.Now().Add(offset),
-			SourceDBType: "mssql",
-			TargetDBType: "postgres",
-			TotalTables:  5,
-			TotalRows:    1_000_000,
-			Workers:      6,
-			ChunkSize:    50_000,
+			Timestamp:                    time.Now().Add(offset),
+			SourceDBType:                 "mssql",
+			TargetDBType:                 "postgres",
+			TotalTables:                  5,
+			TotalRows:                    1_000_000,
+			Workers:                      6,
+			ChunkSize:                    50_000,
+			ProjectionContextFingerprint: "projection-context-v1",
 		}
 	}
 
@@ -1141,15 +1142,30 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveTuningRecord(clean): %v", err)
 	}
-	if err := state.UpdateTuningResult(cleanRowID, 500_000, 100, 0, false); err != nil {
-		t.Fatalf("UpdateTuningResult(clean): %v", err)
+	if err := state.CompleteTuningResult(TuningResultCompletion{
+		RowID: cleanRowID, Throughput: 500_000, DurationSecs: 100,
+		ExecutionChunkSizeMin: 50_000, ExecutionChunkSizeMax: 50_000,
+	}); err != nil {
+		t.Fatalf("CompleteTuningResult(clean): %v", err)
 	}
 	adjustedRowID, err := state.SaveTuningRecord(mkRecord(time.Second))
 	if err != nil {
 		t.Fatalf("SaveTuningRecord(adjusted): %v", err)
 	}
-	if err := state.UpdateTuningResult(adjustedRowID, 400_000, 120, 1, true); err != nil {
-		t.Fatalf("UpdateTuningResult(adjusted): %v", err)
+	if err := state.CompleteTuningResult(TuningResultCompletion{
+		RowID: adjustedRowID, Throughput: 400_000, DurationSecs: 120,
+		ChunkRetryCount: 1, AdjustedAtRuntime: true, SafetyProjected: true,
+		ExecutionChunkSizeMin: 8_000, ExecutionChunkSizeMax: 50_000,
+	}); err != nil {
+		t.Fatalf("CompleteTuningResult(projected): %v", err)
+	}
+	// A duplicate completion with conflicting values must be a full no-op: the
+	// original throughput and projection metadata are one correlated record.
+	if err := state.CompleteTuningResult(TuningResultCompletion{
+		RowID: adjustedRowID, Throughput: 999_000, DurationSecs: 1,
+		SafetyProjected: false, ExecutionChunkSizeMin: 50_000, ExecutionChunkSizeMax: 50_000,
+	}); err != nil {
+		t.Fatalf("CompleteTuningResult(duplicate): %v", err)
 	}
 
 	history, err := state.GetTuningHistory(0, "mssql", "postgres")
@@ -1163,8 +1179,20 @@ func TestUpdateAITuningResult_AdjustedAtRuntimeFlag(t *testing.T) {
 	if !history[0].AdjustedAtRuntime {
 		t.Error("adjusted run should read back AdjustedAtRuntime=true")
 	}
+	if !history[0].SafetyProjected || history[0].ExecutionChunkSizeMin != 8_000 || history[0].ExecutionChunkSizeMax != 50_000 {
+		t.Errorf("projected execution = (%v,%d,%d), want (true,8000,50000)",
+			history[0].SafetyProjected, history[0].ExecutionChunkSizeMin, history[0].ExecutionChunkSizeMax)
+	}
+	if history[0].FinalThroughput != 400_000 || history[0].FinalDurationSecs != 120 || history[0].ProjectionContextFingerprint != "projection-context-v1" {
+		t.Errorf("projected completion correlation changed: throughput=%v duration=%v fingerprint=%q",
+			history[0].FinalThroughput, history[0].FinalDurationSecs, history[0].ProjectionContextFingerprint)
+	}
 	if history[1].AdjustedAtRuntime {
 		t.Error("clean run should read back AdjustedAtRuntime=false")
+	}
+	if history[1].SafetyProjected || history[1].ExecutionChunkSizeMin != 50_000 || history[1].ExecutionChunkSizeMax != 50_000 {
+		t.Errorf("clean execution = (%v,%d,%d), want (false,50000,50000)",
+			history[1].SafetyProjected, history[1].ExecutionChunkSizeMin, history[1].ExecutionChunkSizeMax)
 	}
 }
 

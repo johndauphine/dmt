@@ -102,6 +102,19 @@ func chunkBytesForModel(chunkSize int, avgRowBytes int64) int64 {
 	return bytes
 }
 
+// regressionCandidateModelBytes maps a byte-shaped policy candidate into the
+// legacy regression feature space. Policy candidates become row counts using
+// the representative workload width, while persisted history reconstructs
+// chunk bytes with AvgRowBytes for model compatibility. Scoring the raw policy
+// byte target would therefore evaluate a different point whenever those widths
+// differ, even though the resulting row action is identical.
+func regressionCandidateModelBytes(candidateBytes, representativeRowBytes, legacyModelRowBytes int64) int64 {
+	return chunkBytesForModel(
+		rowsFromBytes(candidateBytes, representativeRowBytes),
+		legacyModelRowBytes,
+	)
+}
+
 // SafeAvgRowBytes is the exported entry point for callers outside the
 // tuning package (e.g. the smartconfig adapter in internal/driver) that
 // need the same fallback policy when converting rows/sec → bytes/sec for
@@ -136,16 +149,23 @@ func standardize(x, mean, std float64) float64 {
 	return (x - mean) / std
 }
 
-// stddevSafe returns sqrt(E[X²] - (E[X])²), or 1 when the variance is
-// zero or the count is degenerate. Returning 1 keeps standardize() a
-// no-op rather than producing NaN when a feature is constant.
+// stddevSafe returns sqrt(E[X²] - (E[X])²), or 0 when the variance is
+// zero or the count is degenerate. standardize treats std<=0 as a zero
+// feature. This matters at prediction time: a constant training column
+// carries no evidence for extrapolating away from its mean, so treating
+// its scale as 1 would manufacture enormous leverage for a new value.
 func stddevSafe(sqSum, mean, n float64) float64 {
 	if n <= 0 {
-		return 1
+		return 0
 	}
 	variance := sqSum/n - mean*mean
-	if variance <= 0 {
-		return 1
+	// E[x²]-E[x]² loses precision for a constant large-magnitude column
+	// (chunk bytes are commonly O(10^7)); cancellation can leave a tiny
+	// positive residue that is not real variation. Treat relative variance
+	// below 1e-12 as zero so that residue cannot become an enormous z-score.
+	scale := math.Max(1, mean*mean)
+	if variance <= 1e-12*scale {
+		return 0
 	}
 	return math.Sqrt(variance)
 }
