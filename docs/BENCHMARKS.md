@@ -1746,24 +1746,26 @@ This is a descriptive strict-versus-relaxed experiment on the 19,310,703-row
 StackOverflow2010 fixture. SQLite and ClickHouse were explicitly excluded from
 the required matrix. Negative changes mean
 strict was faster. Ten-pair cells used counterbalanced order; one-pair cells
-are exploratory and must not be treated as stable effect sizes.
+are exploratory and must not be treated as stable effect sizes. In the status
+column, "transfer validated" means the migration and target-integrity checks
+passed; it does not validate a one-pair performance effect.
 
 | Source → target | Replication | Strict-time change | Status |
 |---|---:|---:|---|
-| SQL Server → PostgreSQL | 10 pairs | median +0.17% | validated |
-| PostgreSQL → PostgreSQL | 10 pairs | median −12.55% | validated |
-| MySQL → PostgreSQL | 10 pairs | median −9.24% | validated |
-| PostgreSQL → MySQL | 10 pairs | median +1.42% | validated |
-| PostgreSQL → SQL Server | 10 pairs | median +15.70% | validated |
-| MySQL → MySQL | 1 pair | −14.71% | validated; batched-INSERT fallback |
-| MySQL → SQL Server | 1 pair | +19.16% | validated |
-| SQL Server → MySQL | 1 pair | −44.33% | validated |
-| SQL Server → SQL Server | 1 pair | +9.91% | validated |
+| SQL Server → PostgreSQL | 10 pairs | median +0.17% | counterbalanced; transfer validated |
+| PostgreSQL → PostgreSQL | 10 pairs | median −12.55% | counterbalanced; transfer validated |
+| MySQL → PostgreSQL | 10 pairs | median −9.24% | counterbalanced; transfer validated |
+| PostgreSQL → MySQL | 10 pairs | median +1.42% | counterbalanced; transfer validated |
+| PostgreSQL → SQL Server | 10 pairs | median +15.70% | counterbalanced; transfer validated |
+| MySQL → MySQL | 1 pair | −14.71% | exploratory; transfer validated; batched-INSERT fallback |
+| MySQL → SQL Server | 1 pair | +19.16% | exploratory; transfer validated |
+| SQL Server → MySQL | 1 pair | −44.33% | exploratory; transfer validated |
+| SQL Server → SQL Server | 1 pair | +9.91% | exploratory; transfer validated |
 
 All nine required matrix cells are represented above. The five ten-pair cells
 have counterbalanced replication; the four remaining cells are single-pair
-exploratory observations. Raw CSV files and per-run logs are retained outside
-the repository under `/private/tmp/dmt-pg-benchmark/`.
+exploratory observations. This table is the durable summary; host-local raw
+artifacts were not added to the repository.
 
 ## Implemented Optimizations
 
