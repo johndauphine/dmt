@@ -70,10 +70,8 @@ const consumerDispatchSlots = 1
 //	total_memory    = total_in_flight * chunkSize * rowBytes      (in bytes)
 //
 // Checkpoint acknowledgements retain only pagination metadata, not whole row
-// chunks. WriterPool bounds their count with ackSlots even when no byte budget
-// exists; when a byte budget does exist, each pending ack keeps its original
-// measured chunk reservation until ordered application, so retained keys cannot
-// escape admission control.
+// chunks. WriterPool bounds their count with ackSlots independently of the
+// measured-byte budget.
 //
 // Depths are computed once from the chunk size at pipeline start. A caller
 // that changes chunk size mid-flight must cap it against the fixed depths via
@@ -298,19 +296,14 @@ type WriteAck struct {
 	// the watermark saved alongside it, which a retry would replay and
 	// count again (#632).
 	Rows int64
-	// Bytes is the in-flight reservation inherited from the acknowledged job.
-	// Ordered checkpoint consumers may retain LastPK while an earlier sequence
-	// is still outstanding, so the reservation is released only when this ack
-	// (and any successors it unblocks) is applied in sequence order.
-	Bytes int64
 }
 
-// AckRelease reports resources made releasable by one ordered-ack callback.
-// Jobs may be greater than one when filling a sequence gap drains buffered
-// successors. Bytes is the corresponding sum of in-flight reservations.
+// AckRelease reports ordered-ack slots made releasable by one callback. Jobs
+// may be greater than one when filling a sequence gap drains buffered
+// successors. Chunk byte reservations are released earlier, immediately after
+// successful ack delivery, and are deliberately independent of this count.
 type AckRelease struct {
-	Jobs  int
-	Bytes int64
+	Jobs int
 }
 
 // WriteFunc is the function signature for executing a write operation.
@@ -377,13 +370,11 @@ type WriterPoolConfig struct {
 	EnableAck     bool // Whether to enable ack channel for checkpointing
 
 	// OnComplete, if set, releases a job's in-flight memory reservation
-	// (#617). It fires on the write-error path immediately (so a failed
-	// chunk can't wedge a tight budget). Without acknowledgements it fires after
-	// the write; with acknowledgements it fires from the ack processor only when
-	// the acknowledgement becomes applicable in sequence order, so retained
-	// checkpoint keys remain admission-controlled. A worker that exits mid-ack
-	// on cancellation skips it; the transfer runner's residual release frees
-	// those, so each chunk is freed exactly once.
+	// (#617). It fires immediately on a write error (so a failed chunk cannot
+	// wedge a tight budget), after the write when acknowledgements are disabled,
+	// or after successful ack delivery when they are enabled. A worker that exits
+	// while ack delivery is blocked skips it; the transfer runner's residual
+	// release frees that reservation, so each chunk is freed exactly once.
 	OnComplete func(bytes int64)
 }
 
@@ -582,10 +573,16 @@ func (wp *WriterPool) processJob(writerID int, job WriteJob) bool {
 			LastPK:   job.LastPK,
 			RowNum:   job.RowNum,
 			Rows:     rowCount,
-			Bytes:    job.Bytes,
 		}
 		select {
 		case wp.ackChan <- ack:
+			// Delivery transfers the small checkpoint metadata to the bounded
+			// ordered-ack window; the writer no longer owns the full row chunk.
+			// Release its measured-byte reservation now instead of tying row
+			// payload capacity to a possibly missing earlier sequence.
+			if wp.onComplete != nil {
+				wp.onComplete(job.Bytes)
+			}
 		case <-wp.ctx.Done():
 			// Aborting — the runner's residual release frees this chunk's
 			// still-held reservation, so no explicit release here.
@@ -594,12 +591,10 @@ func (wp *WriterPool) processJob(writerID int, job WriteJob) bool {
 		}
 	}
 
-	// Without checkpoint acks, the worker is the last owner and may release the
-	// reservation now. With acks, LastPK can remain live in the ordered
-	// sequencer after job.Rows is gone; the ack processor releases Bytes only
-	// when that ack is applied in order. This backpressures an unbounded run of
-	// successors behind one slow early sequence instead of letting retained key
-	// values escape the memory budget.
+	// Without checkpoint acks, the worker is the last owner and releases the
+	// reservation after the successful write. With acks, the successful-delivery
+	// branch above already released it; ackSlots separately bounds retained
+	// checkpoint metadata until ordered application.
 	if wp.ackChan == nil && wp.onComplete != nil {
 		wp.onComplete(job.Bytes)
 	}
@@ -715,15 +710,15 @@ func (wp *WriterPool) Acks() <-chan WriteAck {
 func (wp *WriterPool) StartAckProcessor(handler func(WriteAck)) {
 	wp.startAckProcessor(func(ack WriteAck) AckRelease {
 		handler(ack)
-		return AckRelease{Jobs: 1, Bytes: ack.Bytes}
+		return AckRelease{Jobs: 1}
 	})
 }
 
 // StartOrderedAckProcessor starts an ack processor whose handler reports the
-// job count and total reservation that became releasable after applying this
-// ack. Both may cover successors when filling an earlier sequence gap, or be
-// zero when the ack must remain pending. This keeps out-of-order checkpoint
-// metadata under the same count and byte admission budgets as row chunks.
+// job count whose slots became releasable after applying this ack. It may cover
+// successors when filling an earlier sequence gap, or be zero when the ack
+// must remain pending. This bounds out-of-order checkpoint metadata without
+// retaining the corresponding full row-chunk reservation.
 func (wp *WriterPool) StartOrderedAckProcessor(handler func(WriteAck) AckRelease) {
 	wp.startAckProcessor(handler)
 }
@@ -737,9 +732,6 @@ func (wp *WriterPool) startAckProcessor(handler func(WriteAck) AckRelease) {
 		defer wp.ackWg.Done()
 		for ack := range wp.ackChan {
 			released := handler(ack)
-			if released.Bytes > 0 && wp.onComplete != nil {
-				wp.onComplete(released.Bytes)
-			}
 			wp.releaseAckSlots(released.Jobs)
 		}
 	}()

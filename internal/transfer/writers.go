@@ -374,9 +374,8 @@ func (wp *writerPool) startAckProcessor(handler func(writeAck) ackRelease) {
 			lastPK:   ack.LastPK,
 			rowNum:   ack.RowNum,
 			rows:     ack.Rows,
-			bytes:    ack.Bytes,
 		})
-		return pool.AckRelease{Jobs: released.jobs, Bytes: released.bytes}
+		return pool.AckRelease{Jobs: released.jobs}
 	})
 }
 

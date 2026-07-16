@@ -317,9 +317,10 @@ type pipelineConfig struct {
 	// the async persistence sink the runner owns (#620) — the coordinator
 	// uses it for periodic saves. Returning nil disables ack processing.
 	// Nil field means no checkpointing at all.
-	// The handler returns the job count and total in-flight byte reservation
-	// released by this acknowledgement. Both are zero for an out-of-order ack
-	// and may include successors when the ack fills a sequence gap.
+	// The handler returns the job count whose ordered-ack slots are released by
+	// this acknowledgement. It is zero for an out-of-order ack and may include
+	// successors when the ack fills a sequence gap. Chunk byte reservations are
+	// released earlier, after successful ack delivery.
 	newAckHandler func(cb tunerCallbacks, saver ProgressSaver) func(writeAck) ackRelease
 
 	// onRangeDone receives a parallel producer's end-of-range marker. It is
@@ -433,7 +434,8 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 	// residual — covering every chunk abandoned in a channel on an error or
 	// cancel path — and guarantee the shared budget always nets back to
 	// zero for this table. Successful chunks are released per-chunk by the
-	// writer (OnComplete) to keep the budget accurate mid-run.
+	// writer after the write (without acks) or successful ack delivery (with
+	// acks) to keep the budget accurate mid-run.
 	budget := job.MemBudget
 	metrics := observability.Global()
 	var acquiredBytes int64
@@ -525,10 +527,11 @@ func runPipeline(ctx context.Context, pc pipelineConfig) (*TransferStats, error)
 		TableName:              tableName,
 		BytesPerRow:            job.Table.GoHeapBytesPerRow(), // #229 metrics bytes_total estimate
 		OnComplete: func(bytes int64) {
-			// Release a chunk's reservation once the writer is done with it,
-			// success or error (#617). Decrement the pipeline's running total
-			// so the final residual release covers only chunks that never
-			// reached a writer.
+			// Release a chunk's reservation once the writer no longer owns its
+			// row payload: after a write error, after a successful write when
+			// acks are disabled, or after successful ack delivery when enabled
+			// (#617). Decrement the pipeline's running total so the final
+			// residual release covers only abandoned or undelivered chunks.
 			if bytes > 0 {
 				budget.release(bytes)
 				atomic.AddInt64(&acquiredBytes, -bytes)
@@ -770,6 +773,8 @@ chunkLoop:
 	// every chunk they finished; the remainder is exactly the chunks abandoned
 	// in a channel on an error/cancel path, released here in one shot so the
 	// shared budget nets back to zero for this table regardless of how it ended.
+	// Successfully delivered acks already released their row-payload bytes even
+	// if their bounded metadata waited behind an ordering gap.
 	<-producerDone
 	if residual := atomic.SwapInt64(&acquiredBytes, 0); residual > 0 {
 		budget.release(residual)

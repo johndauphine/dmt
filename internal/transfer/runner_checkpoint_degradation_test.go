@@ -97,7 +97,7 @@ func runCheckpointDegradationPipeline(t *testing.T, saver *scriptedCheckpointSav
 		newAckHandler: func(_ tunerCallbacks, periodic ProgressSaver) func(writeAck) ackRelease {
 			return func(ack writeAck) ackRelease {
 				_ = periodic.SaveProgress(665, "items", nil, ack.lastPK, ack.rows, 1, "")
-				return ackRelease{jobs: 1, bytes: ack.bytes}
+				return ackRelease{jobs: 1}
 			}
 		},
 		saveFinal: func(_ chunkResult, _ int64) (bool, error) {

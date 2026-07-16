@@ -428,7 +428,7 @@ func newCompositeRangeCheckpointCoordinator(saver ProgressSaver, job Job, ranges
 
 func (c *compositeRangeCheckpointCoordinator) onAck(ack writeAck) ackRelease {
 	if c == nil {
-		return ackRelease{jobs: 1, bytes: ack.bytes}
+		return ackRelease{jobs: 1}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -437,7 +437,7 @@ func (c *compositeRangeCheckpointCoordinator) onAck(ack writeAck) ackRelease {
 
 func (c *compositeRangeCheckpointCoordinator) onAckLocked(ack writeAck) ackRelease {
 	if c == nil || ack.readerID < 0 || ack.readerID >= len(c.states) {
-		return ackRelease{jobs: 1, bytes: ack.bytes}
+		return ackRelease{jobs: 1}
 	}
 	state := &c.states[ack.readerID]
 	wasComplete := state.complete
