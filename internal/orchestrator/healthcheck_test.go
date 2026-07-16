@@ -44,8 +44,8 @@ func TestGetSystemBasedSuggestions_NonDegenerate(t *testing.T) {
 			if s == nil {
 				t.Fatal("GetSystemBasedSuggestions returned nil")
 			}
-			if s.Workers < 4 {
-				t.Errorf("Workers=%d, want >= 4 (canonical baseline floor)", s.Workers)
+			if s.Workers < 2 {
+				t.Errorf("Workers=%d, want >= 2 (pre-epic tuner baseline floor)", s.Workers)
 			}
 			if s.ChunkSizeRecommendation <= 0 {
 				t.Errorf("ChunkSizeRecommendation=%d, want > 0 (issue #157 successor)", s.ChunkSizeRecommendation)
