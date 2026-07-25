@@ -9,6 +9,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Integrated SMT v1.1.0's deterministic DDL renderer for DMT CREATE TABLE generation, retaining DMT compatibility fallbacks and five-dialect parity coverage (#737).
+
 ### Removed
 
 - Removed the cardinality-aware memory profile and table-aware chunk caps
