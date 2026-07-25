@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/johndauphine/dmt/internal/ident"
+	"github.com/johndauphine/dmt/internal/smtddl"
 	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
 )
@@ -96,8 +98,24 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 			req.SourceDBType, req.TargetDBType)
 	}
 
-	tbl := driverTableToDDL(req.SourceTable, req.TargetSchema, req.TargetDBType)
-	createDDL := ddl.GenerateCreateTable(tbl, req.SourceDBType, req.TargetDBType)
+	createDDL, err := smtddl.RenderCreateTable(smtDDLRequest(req))
+	if err != nil {
+		// SMT correctly advertises capability gaps such as portable SQLite
+		// identity columns and PostgreSQL interval in its public canonical
+		// model. DMT has established deterministic behavior for those
+		// cases, so retain it as a narrow compatibility escape hatch rather
+		// than dropping a migration's known semantics during integration.
+		if !errors.Is(err, smtddl.ErrUnsupportedIdentity) && !errors.Is(err, smtddl.ErrUnsupportedSourceType) {
+			return nil, fmt.Errorf("rendering CREATE TABLE with SMT: %w", err)
+		}
+		tbl := driverTableToDDL(req.SourceTable, req.TargetSchema, req.TargetDBType)
+		createDDL = ddl.GenerateCreateTable(tbl, req.SourceDBType, req.TargetDBType)
+	} else {
+		// DMT historically returns executable, semicolon-terminated statements.
+		// SMT deliberately returns a reusable SQL fragment, so retain the DMT
+		// contract at this boundary without changing SMT's public output.
+		createDDL = strings.TrimSpace(createDDL) + ";"
+	}
 
 	columnTypes := make(map[string]string, len(req.SourceTable.Columns))
 	for _, col := range req.SourceTable.Columns {
@@ -117,6 +135,114 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 		ColumnTypes:    columnTypes,
 		Notes:          "deterministic mapper (UVG-derived port; no AI)",
 	}, nil
+}
+
+// smtDDLRequest converts DMT discovery metadata to the narrow public SMT
+// CREATE TABLE API. It also retains DMT-specific compatibility policies that
+// sit outside deterministic rendering: target-schema suppression follows the
+// active connection's database/schema, and keyed MySQL LOBs are bounded so
+// they remain valid uniqueness keys.
+func smtDDLRequest(req TableDDLRequest) smtddl.Request {
+	targetSchema := smtDDLTargetSchema(req.TargetSchema, req.TargetDBType)
+	table := smtddl.Table{
+		// Keep CREATE TABLE identifiers aligned with DMT's writer and
+		// finalization paths. In particular, PostgreSQL targets must use
+		// ident.SanitizePG before SMT quotes the names; otherwise a
+		// mixed-case source identifier would be created case-preserved but
+		// later transfer operations would look it up lowercased.
+		Name:       sanitizeForTarget(req.SourceTable.Name, req.TargetDBType),
+		PrimaryKey: make([]string, len(req.SourceTable.PrimaryKey)),
+		Columns:    make([]smtddl.Column, len(req.SourceTable.Columns)),
+	}
+	for i, name := range req.SourceTable.PrimaryKey {
+		table.PrimaryKey[i] = sanitizeForTarget(name, req.TargetDBType)
+	}
+	for i, column := range req.SourceTable.Columns {
+		dataType := column.FullDataType
+		if dataType == "" {
+			dataType = column.DataType
+		}
+		table.Columns[i] = smtddl.Column{
+			Name:       sanitizeForTarget(column.Name, req.TargetDBType),
+			DataType:   dataType,
+			MaxLength:  column.MaxLength,
+			Precision:  column.Precision,
+			Scale:      column.Scale,
+			IsNullable: column.IsNullable,
+			IsIdentity: column.IsIdentity,
+		}
+	}
+
+	// A MySQL TEXT/BLOB primary or unique key is invalid without a prefix;
+	// DMT's established policy is a bounded 255-character/byte key, not a
+	// prefix index that would weaken uniqueness semantics. Preserve that policy
+	// before handing the table to SMT's deliberately generic public API.
+	if Canonicalize(req.TargetDBType) == typemap.DialectMySQL {
+		boundSMTMySQLUniqueLOBs(&table, req.SourceTable, req.SourceDBType)
+	}
+
+	return smtddl.Request{
+		SourceDialect: req.SourceDBType,
+		TargetDialect: req.TargetDBType,
+		TargetSchema:  targetSchema,
+		Table:         table,
+	}
+}
+
+// smtDDLTargetSchema preserves DMT's existing qualification contract before
+// invoking SMT. MySQL and SQLite use the connected database, while the
+// PostgreSQL and MSSQL default schemas are intentionally unqualified.
+func smtDDLTargetSchema(schema, targetDialect string) string {
+	// The legacy DDL path sanitizes before QualifiedTableName applies its
+	// target-default schema rule. Preserve that order so, for example,
+	// PostgreSQL target schema "Public" follows the same unqualified
+	// search-path behavior as "public".
+	schema = sanitizeForTarget(schema, targetDialect)
+	switch Canonicalize(targetDialect) {
+	case typemap.DialectMySQL, typemap.DialectSQLite:
+		return ""
+	case typemap.DialectPostgres:
+		if schema == "public" {
+			return ""
+		}
+	case typemap.DialectMSSQL:
+		if schema == "dbo" {
+			return ""
+		}
+	}
+	return schema
+}
+
+func boundSMTMySQLUniqueLOBs(table *smtddl.Table, source *Table, sourceDialect string) {
+	if table == nil || source == nil {
+		return
+	}
+	keyed := make(map[string]struct{}, len(source.PrimaryKey))
+	for _, name := range source.PrimaryKey {
+		keyed[name] = struct{}{}
+	}
+	for _, index := range source.Indexes {
+		if !index.IsUnique {
+			continue
+		}
+		for _, name := range index.Columns {
+			keyed[name] = struct{}{}
+		}
+	}
+	for i, sourceColumn := range source.Columns {
+		if _, ok := keyed[sourceColumn.Name]; !ok {
+			continue
+		}
+		mapped := typemap.MapDDLType(driverColumnToTypemapColumnInfo(sourceColumn), sourceDialect, typemap.DialectMySQL).SQLType
+		switch strings.ToUpper(strings.TrimSpace(mapped)) {
+		case "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT":
+			table.Columns[i].DataType = "varchar"
+			table.Columns[i].MaxLength = 255
+		case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB":
+			table.Columns[i].DataType = "varbinary"
+			table.Columns[i].MaxLength = 255
+		}
+	}
 }
 
 // GenerateFinalizationDDL implements FinalizationDDLMapper. Dispatches
