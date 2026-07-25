@@ -159,3 +159,84 @@ func TestSMTDDLCompatibilityFallbackForSQLiteIdentity(t *testing.T) {
 		t.Fatalf("SQLite identity compatibility DDL lost AUTOINCREMENT:\n%s", got.CreateTableDDL)
 	}
 }
+
+// TestSMTDDLPostgresMatchesDMTIdentifierContract verifies that the SMT seam
+// uses DMT's established PostgreSQL names before SMT quotes them. Transfer and
+// finalization paths use the same sanitization contract, so this guards against
+// CREATE TABLE succeeding with case-preserved or silently truncated names that
+// those later phases cannot find.
+func TestSMTDDLPostgresMatchesDMTIdentifierContract(t *testing.T) {
+	tableName := "MixedCaseTable" + strings.Repeat("X", 64)
+	columnName := "MixedCasePrimaryKey" + strings.Repeat("Y", 64)
+	targetSchema := "CustomTargetSchema"
+	table := &Table{
+		Name: tableName,
+		Columns: []Column{
+			{Name: columnName, DataType: "bigint", IsNullable: false},
+		},
+		PrimaryKey: []string{columnName},
+	}
+	req := TableDDLRequest{
+		SourceDBType: typemap.DialectMSSQL,
+		TargetDBType: typemap.DialectPostgres,
+		SourceTable:  table,
+		TargetSchema: targetSchema,
+	}
+
+	wantSchema := sanitizeForTarget(targetSchema, typemap.DialectPostgres)
+	wantTable := sanitizeForTarget(tableName, typemap.DialectPostgres)
+	wantColumn := sanitizeForTarget(columnName, typemap.DialectPostgres)
+	if got := smtDDLTargetSchema("Public", typemap.DialectPostgres); got != "" {
+		t.Errorf("mixed-case PostgreSQL default schema = %q, want suppressed empty schema", got)
+	}
+	if len(wantTable) > 63 || len(wantColumn) > 63 {
+		t.Fatalf("DMT PostgreSQL sanitizer did not bound identifiers: table=%d column=%d", len(wantTable), len(wantColumn))
+	}
+
+	smtReq := smtDDLRequest(req)
+	if smtReq.TargetSchema != wantSchema {
+		t.Errorf("SMT target schema = %q, want DMT target %q", smtReq.TargetSchema, wantSchema)
+	}
+	if smtReq.Table.Name != wantTable {
+		t.Errorf("SMT table name = %q, want DMT transfer target %q", smtReq.Table.Name, wantTable)
+	}
+	if got := smtReq.Table.Columns[0].Name; got != wantColumn {
+		t.Errorf("SMT column name = %q, want DMT transfer target %q", got, wantColumn)
+	}
+	if got := smtReq.Table.PrimaryKey[0]; got != wantColumn {
+		t.Errorf("SMT primary key column = %q, want DMT finalization target %q", got, wantColumn)
+	}
+
+	mapper := NewDeterministicMapper()
+	created, err := mapper.GenerateTableDDL(context.Background(), req)
+	if err != nil {
+		t.Fatalf("GenerateTableDDL: %v", err)
+	}
+	for _, want := range []string{
+		`CREATE TABLE "` + wantSchema + `"."` + wantTable + `"`,
+		`"` + wantColumn + `" bigint NOT NULL`,
+		`PRIMARY KEY ("` + wantColumn + `")`,
+	} {
+		if !strings.Contains(created.CreateTableDDL, want) {
+			t.Errorf("CREATE TABLE is missing %q:\n%s", want, created.CreateTableDDL)
+		}
+	}
+
+	finalized, err := mapper.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		SourceDBType: typemap.DialectMSSQL,
+		TargetDBType: typemap.DialectPostgres,
+		Table:        table,
+		TargetSchema: targetSchema,
+		Index: &Index{
+			Name:    "IX_" + tableName,
+			Columns: []string{columnName},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateFinalizationDDL: %v", err)
+	}
+	if want := `ON "` + wantSchema + `"."` + wantTable + `" ("` + wantColumn + `")`; !strings.Contains(finalized, want) {
+		t.Errorf("finalization DDL does not target the CREATE TABLE identity %q:\n%s", want, finalized)
+	}
+}

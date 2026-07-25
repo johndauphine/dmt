@@ -143,10 +143,19 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 // active connection's database/schema, and keyed MySQL LOBs are bounded so
 // they remain valid uniqueness keys.
 func smtDDLRequest(req TableDDLRequest) smtddl.Request {
+	targetSchema := smtDDLTargetSchema(req.TargetSchema, req.TargetDBType)
 	table := smtddl.Table{
-		Name:       req.SourceTable.Name,
-		PrimaryKey: append([]string(nil), req.SourceTable.PrimaryKey...),
+		// Keep CREATE TABLE identifiers aligned with DMT's writer and
+		// finalization paths. In particular, PostgreSQL targets must use
+		// ident.SanitizePG before SMT quotes the names; otherwise a
+		// mixed-case source identifier would be created case-preserved but
+		// later transfer operations would look it up lowercased.
+		Name:       sanitizeForTarget(req.SourceTable.Name, req.TargetDBType),
+		PrimaryKey: make([]string, len(req.SourceTable.PrimaryKey)),
 		Columns:    make([]smtddl.Column, len(req.SourceTable.Columns)),
+	}
+	for i, name := range req.SourceTable.PrimaryKey {
+		table.PrimaryKey[i] = sanitizeForTarget(name, req.TargetDBType)
 	}
 	for i, column := range req.SourceTable.Columns {
 		dataType := column.FullDataType
@@ -154,7 +163,7 @@ func smtDDLRequest(req TableDDLRequest) smtddl.Request {
 			dataType = column.DataType
 		}
 		table.Columns[i] = smtddl.Column{
-			Name:       column.Name,
+			Name:       sanitizeForTarget(column.Name, req.TargetDBType),
 			DataType:   dataType,
 			MaxLength:  column.MaxLength,
 			Precision:  column.Precision,
@@ -175,7 +184,7 @@ func smtDDLRequest(req TableDDLRequest) smtddl.Request {
 	return smtddl.Request{
 		SourceDialect: req.SourceDBType,
 		TargetDialect: req.TargetDBType,
-		TargetSchema:  smtDDLTargetSchema(req.TargetSchema, req.TargetDBType),
+		TargetSchema:  targetSchema,
 		Table:         table,
 	}
 }
@@ -184,6 +193,11 @@ func smtDDLRequest(req TableDDLRequest) smtddl.Request {
 // invoking SMT. MySQL and SQLite use the connected database, while the
 // PostgreSQL and MSSQL default schemas are intentionally unqualified.
 func smtDDLTargetSchema(schema, targetDialect string) string {
+	// The legacy DDL path sanitizes before QualifiedTableName applies its
+	// target-default schema rule. Preserve that order so, for example,
+	// PostgreSQL target schema "Public" follows the same unqualified
+	// search-path behavior as "public".
+	schema = sanitizeForTarget(schema, targetDialect)
 	switch Canonicalize(targetDialect) {
 	case typemap.DialectMySQL, typemap.DialectSQLite:
 		return ""
