@@ -9,10 +9,10 @@ import (
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
-// TestSMTDDLRepresentativeParity pins representative DMT CREATE TABLE output
-// for every supported deterministic target. Each case records both the
-// pre-SMT baseline and the accepted output from SMT's public renderer so a
-// renderer upgrade cannot silently change DMT's externally visible DDL.
+// TestSMTDDLRepresentativeParity pins exact SMT PlanCreate table statements
+// for every supported deterministic target. Each case also records DMT's
+// pre-SMT baseline and explicitly documents a difference, so a renderer
+// upgrade cannot silently change DMT's observable create behavior.
 func TestSMTDDLRepresentativeParity(t *testing.T) {
 	base := &Table{
 		Name: "events",
@@ -41,8 +41,8 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
     "name" character varying(100) NOT NULL,
     "payload" text,
     CONSTRAINT "pk_events" PRIMARY KEY ("id")
-);`,
-			intentionalChange: "SMT uses PostgreSQL's canonical type spellings",
+)`,
+			intentionalChange: "SMT uses PostgreSQL's canonical type spellings and returns its unterminated plan statement verbatim",
 		},
 		{
 			name: "mssql", target: typemap.DialectMSSQL, schema: "dbo",
@@ -57,7 +57,8 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
     [name] NVARCHAR(100) NOT NULL,
     [payload] NVARCHAR(MAX),
     CONSTRAINT [pk_events] PRIMARY KEY ([id])
-);`,
+)`,
+			intentionalChange: "SMT returns its unterminated plan statement verbatim",
 		},
 		{
 			name: "mysql", target: typemap.DialectMySQL, schema: "app",
@@ -72,8 +73,8 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
 				"    `name` VARCHAR(100) NOT NULL,\n" +
 				"    `payload` LONGTEXT,\n" +
 				"    CONSTRAINT `pk_events` PRIMARY KEY (`id`)\n" +
-				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
-			intentionalChange: "SMT pins InnoDB and utf8mb4 instead of relying on server defaults",
+				") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+			intentionalChange: "SMT pins InnoDB and utf8mb4 instead of relying on server defaults, and returns an unterminated plan statement",
 		},
 		{
 			name: "sqlite", target: typemap.DialectSQLite, schema: "ignored",
@@ -88,8 +89,8 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
     "name" VARCHAR(100) NOT NULL,
     "payload" TEXT,
     CONSTRAINT "pk_events" PRIMARY KEY ("id")
-);`,
-			intentionalChange: "SMT renders SQLite's canonical 64-bit INTEGER affinity for BIGINT",
+)`,
+			intentionalChange: "SMT renders SQLite's canonical 64-bit INTEGER affinity for BIGINT and returns an unterminated plan statement",
 		},
 		{
 			name: "clickhouse", target: typemap.DialectClickHouse, schema: "analytics",
@@ -103,8 +104,8 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
 				"    `name` String,\n" +
 				"    `payload` Nullable(String),\n" +
 				"    PRIMARY KEY (`id`)\n" +
-				") ENGINE = MergeTree ORDER BY (`id`);",
-			intentionalChange: "SMT explicitly declares ClickHouse's non-unique sparse primary key alongside ORDER BY",
+				") ENGINE = MergeTree ORDER BY (`id`)",
+			intentionalChange: "SMT explicitly declares ClickHouse's non-unique sparse primary key alongside ORDER BY and returns an unterminated plan statement",
 		},
 	}
 
@@ -124,7 +125,7 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GenerateTableDDL: %v", err)
 			}
-			if gotDDL := strings.TrimSpace(got.CreateTableDDL); gotDDL != tc.want {
+			if gotDDL := got.CreateTableDDL; gotDDL != tc.want {
 				t.Fatalf("SMT output:\n got: %s\nwant: %s", gotDDL, tc.want)
 			}
 			if tc.intentionalChange == "" && tc.want != tc.legacy {

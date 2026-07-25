@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/smt/schema"
 )
 
 func testTable() *driver.Table {
@@ -43,6 +45,72 @@ func openWriter(t *testing.T) (gen driver.Writer, genPath string) {
 	}
 	t.Cleanup(gen.Close)
 	return gen, genPath
+}
+
+// TestSQLiteCatalogWriterExecutesSMTCreatePlanVerbatim is a real database
+// create-path migration check. sqlite_master retains the submitted CREATE
+// TABLE text, allowing this test to prove that the writer executes DMT's SMT
+// plan statement unchanged while retaining DMT's schema/PK idempotency flow.
+func TestSQLiteCatalogWriterExecutesSMTCreatePlanVerbatim(t *testing.T) {
+	ctx := context.Background()
+	gen, genPath := openWriter(t)
+	table := testTable()
+
+	expected, err := driver.PlanCreateTable(driver.TableDDLRequest{
+		SourceDBType: "sqlite",
+		TargetDBType: "sqlite",
+		SourceTable:  table,
+	})
+	if err != nil {
+		t.Fatalf("planning SMT create table: %v", err)
+	}
+	if err := gen.CreateSchema(ctx, "ignored_by_sqlite"); err != nil {
+		t.Fatalf("CreateSchema: %v", err)
+	}
+	if err := gen.CreateTable(ctx, table, "ignored_by_sqlite"); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if err := gen.CreatePrimaryKey(ctx, table, ""); err != nil {
+		t.Fatalf("CreatePrimaryKey inline idempotency: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", genPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'`).Scan(&got); err != nil {
+		t.Fatalf("read sqlite_master: %v", err)
+	}
+	if got != expected {
+		t.Fatalf("writer rewrote SMT create SQL:\n got: %s\nwant: %s", got, expected)
+	}
+}
+
+func TestCreatePrimaryKeyMissingInlineKeyKeepsSMTTypedPolicyAndTableContext(t *testing.T) {
+	ctx := context.Background()
+	gen, _ := openWriter(t)
+
+	if err := gen.CreateTable(ctx, &driver.Table{
+		Name: "without_pk",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "integer", OrdinalPos: 1},
+		},
+	}, ""); err != nil {
+		t.Fatalf("CreateTable without PK: %v", err)
+	}
+	err := gen.CreatePrimaryKey(ctx, &driver.Table{Name: "without_pk", PrimaryKey: []string{"id"}}, "")
+	if err == nil {
+		t.Fatal("CreatePrimaryKey without inline key returned nil")
+	}
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("CreatePrimaryKey error = %T %v, want SMT UnsupportedFeatureError", err, err)
+	}
+	if !strings.Contains(err.Error(), "without_pk") {
+		t.Fatalf("CreatePrimaryKey error = %q, want table context", err)
+	}
 }
 
 // dump reads observable database state: the verbatim DDL of every

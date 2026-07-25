@@ -1,9 +1,8 @@
 // DeterministicMapper is the dmt-driver-side adapter for the
 // deterministic typemap surface (#168 / #169). It implements the four
 // type-mapper interfaces — TypeMapper, TableTypeMapper,
-// FinalizationDDLMapper, TableDropDDLMapper — by delegating to
-// internal/typemap (column-level mapping) and internal/typemap/ddl
-// (full-table assembly + per-constraint DDL).
+// FinalizationDDLMapper, TableDropDDLMapper — with SMT's public create plan
+// for CREATE TABLE and internal typemap/ddl only for later artifacts.
 //
 // History: 169c added the adapter without changing the default
 // type mapper. #170 wires it as the default via GetTypeMapper, with
@@ -42,9 +41,10 @@ import (
 var ErrUnsupportedDDL = errors.New("deterministic mapper: vendor-specific feature not supported by deterministic path")
 
 // DeterministicMapper implements TypeMapper, TableTypeMapper,
-// FinalizationDDLMapper, and TableDropDDLMapper using the internal
-// typemap + typemap/ddl packages. No I/O, no LLM calls, no shared
-// state — same inputs always produce the same outputs.
+// FinalizationDDLMapper, and TableDropDDLMapper. SMT owns create rendering;
+// DMT's internal typemap remains for type metadata and later DDL artifacts.
+// No I/O, no LLM calls, no shared state — same inputs always produce the same
+// outputs.
 type DeterministicMapper struct{}
 
 // NewDeterministicMapper returns the deterministic mapper. The
@@ -90,31 +90,9 @@ func (m *DeterministicMapper) SupportedTargets() []string {
 // log reasoning so a reviewer can see the mapped target type per
 // source column without re-parsing the DDL string.
 func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error) {
-	if req.SourceTable == nil {
-		return nil, fmt.Errorf("GenerateTableDDL: SourceTable is required")
-	}
-	if !m.CanMap(req.SourceDBType, req.TargetDBType) {
-		return nil, fmt.Errorf("deterministic mapper does not support %s → %s",
-			req.SourceDBType, req.TargetDBType)
-	}
-
-	createDDL, err := smtddl.RenderCreateTable(smtDDLRequest(req))
+	createDDL, err := PlanCreateTable(req)
 	if err != nil {
-		// SMT correctly advertises capability gaps such as portable SQLite
-		// identity columns and PostgreSQL interval in its public canonical
-		// model. DMT has established deterministic behavior for those
-		// cases, so retain it as a narrow compatibility escape hatch rather
-		// than dropping a migration's known semantics during integration.
-		if !errors.Is(err, smtddl.ErrUnsupportedIdentity) && !errors.Is(err, smtddl.ErrUnsupportedSourceType) {
-			return nil, fmt.Errorf("rendering CREATE TABLE with SMT: %w", err)
-		}
-		tbl := driverTableToDDL(req.SourceTable, req.TargetSchema, req.TargetDBType)
-		createDDL = ddl.GenerateCreateTable(tbl, req.SourceDBType, req.TargetDBType)
-	} else {
-		// DMT historically returns executable, semicolon-terminated statements.
-		// SMT deliberately returns a reusable SQL fragment, so retain the DMT
-		// contract at this boundary without changing SMT's public output.
-		createDDL = strings.TrimSpace(createDDL) + ";"
+		return nil, err
 	}
 
 	columnTypes := make(map[string]string, len(req.SourceTable.Columns))
@@ -135,6 +113,23 @@ func (m *DeterministicMapper) GenerateTableDDL(ctx context.Context, req TableDDL
 		ColumnTypes:    columnTypes,
 		Notes:          "deterministic mapper (UVG-derived port; no AI)",
 	}, nil
+}
+
+// PlanCreateTable converts DMT discovery metadata to SMT's public create plan
+// and returns its table statement unchanged. It is the sole production create
+// table boundary, shared by writers independently of any optional AI mapper.
+func PlanCreateTable(req TableDDLRequest) (string, error) {
+	if req.SourceTable == nil {
+		return "", fmt.Errorf("PlanCreateTable: SourceTable is required")
+	}
+	createDDL, err := smtddl.RenderCreateTable(smtDDLRequest(req))
+	if err != nil {
+		// Create-path ownership belongs to SMT. Unsupported source features
+		// deliberately propagate SMT's public typed policy instead of falling
+		// back to DMT's legacy SQL renderer or local AI DDL generation.
+		return "", fmt.Errorf("rendering CREATE TABLE with SMT: %w", err)
+	}
+	return createDDL, nil
 }
 
 // smtDDLRequest converts DMT discovery metadata to the narrow public SMT
@@ -430,6 +425,19 @@ func typeInfoToTypemapColumn(info TypeInfo) typemap.ColumnInfo {
 		NumericPrecision:       nullableInt(info.Precision),
 		NumericScale:           nullableInt(info.Scale),
 	}
+}
+
+// driverColumnToTypemapColumnInfo keeps the MySQL keyed-LOB compatibility
+// preflight in DMT's metadata layer. It maps types but never emits SQL; SMT
+// remains the sole create-path renderer.
+func driverColumnToTypemapColumnInfo(col Column) typemap.ColumnInfo {
+	return typeInfoToTypemapColumn(TypeInfo{
+		DataType:     col.DataType,
+		FullDataType: col.FullDataType,
+		MaxLength:    col.MaxLength,
+		Precision:    col.Precision,
+		Scale:        col.Scale,
+	})
 }
 
 // driverColumnToDDL projects a driver.Column to ddl.Column. DefaultValue is

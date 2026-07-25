@@ -1,35 +1,22 @@
 // Package smtddl is DMT's anti-corruption boundary for SMT's public DDL API.
 //
 // DMT owns migration planning, discovery, execution, and finalization. This
-// package deliberately owns only the value conversion needed to render a
-// CREATE TABLE statement through github.com/johndauphine/smt/schema. Keeping
+// package converts discovered metadata into SMT's public schema values and
+// returns PlanCreate statements without constructing or modifying SQL. Keeping
 // the dependency here prevents SMT's application internals from leaking into
 // the DMT driver and orchestrator packages.
 package smtddl
 
 import (
-	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/johndauphine/smt/schema"
 	"github.com/johndauphine/smt/schema/canonical"
 )
 
-// ErrUnsupportedIdentity signals that SMT's selected public dialect declares
-// no identity-column capability. DMT retains its established SQLite
-// compatibility renderer for that narrow case.
-var ErrUnsupportedIdentity = errors.New("SMT DDL dialect does not support identity columns")
-
-// ErrUnsupportedSourceType signals that SMT's public canonical model cannot
-// represent a source type. DMT retains its compatibility renderer for source
-// types, such as PostgreSQL interval, that its existing typemap can render
-// deterministically with an explicit approximation.
-var ErrUnsupportedSourceType = errors.New("SMT canonical model does not support source type")
-
 // Request contains DMT's table-rendering context in a dependency-neutral
-// shape. The public SMT API intentionally does not know about DMT driver or
-// orchestration types.
+// shape. A request with an empty Table renders only schema creation. The public
+// SMT API intentionally does not know about DMT driver or orchestration types.
 type Request struct {
 	SourceDialect string
 	TargetDialect string
@@ -59,10 +46,10 @@ type Column struct {
 	DisplayWidth int
 }
 
-// RenderCreateTable delegates deterministic CREATE TABLE construction to SMT's
-// supported public schema API. Unknown source types fail here; DMT's existing
-// fallback chain performs the Raw-type gate before this boundary is reached.
-func RenderCreateTable(req Request) (string, error) {
+// PlanCreate delegates deterministic create-path construction to SMT's public
+// schema.Renderer.PlanCreate API. DMT retains control of when each returned
+// statement runs, but must execute its SQL verbatim.
+func PlanCreate(req Request) (schema.Plan, error) {
 	renderer, err := schema.NewRenderer(schema.Options{
 		TargetDialect:     req.TargetDialect,
 		Schema:            req.TargetSchema,
@@ -70,14 +57,15 @@ func RenderCreateTable(req Request) (string, error) {
 		UnknownTypePolicy: schema.UnknownTypeFail,
 	})
 	if err != nil {
-		return "", fmt.Errorf("create SMT renderer: %w", err)
+		return schema.Plan{}, fmt.Errorf("create SMT renderer: %w", err)
 	}
-	if !renderer.Capabilities().IdentityColumns {
-		for _, column := range req.Table.Columns {
-			if column.IsIdentity {
-				return "", fmt.Errorf("%w: %s", ErrUnsupportedIdentity, req.TargetDialect)
-			}
+
+	if req.Table.Name == "" {
+		plan, err := renderer.PlanCreate(nil)
+		if err != nil {
+			return schema.Plan{}, fmt.Errorf("plan CREATE schema: %w", err)
 		}
+		return plan, nil
 	}
 
 	columns := make([]schema.Column, len(req.Table.Columns))
@@ -90,7 +78,10 @@ func RenderCreateTable(req Request) (string, error) {
 			DisplayWidth: column.DisplayWidth,
 		}, req.SourceDialect)
 		if ct.Kind == canonical.Raw {
-			return "", fmt.Errorf("%w: %s", ErrUnsupportedSourceType, column.DataType)
+			return schema.Plan{}, &schema.UnsupportedFeatureError{
+				Dialect: renderer.Dialect(),
+				Feature: fmt.Sprintf("source type %q for create-table rendering", column.DataType),
+			}
 		}
 		columns[i] = schema.Column{
 			Name:         column.Name,
@@ -105,22 +96,55 @@ func RenderCreateTable(req Request) (string, error) {
 		}
 	}
 
-	result, err := renderer.CreateTable(schema.Table{
+	plan, err := renderer.PlanCreate([]schema.Table{{
 		Name:       req.Table.Name,
 		Columns:    columns,
 		PrimaryKey: append([]string(nil), req.Table.PrimaryKey...),
-	})
+	}})
 	if err != nil {
-		return "", fmt.Errorf("render CREATE TABLE: %w", err)
+		return schema.Plan{}, fmt.Errorf("plan CREATE TABLE: %w", err)
 	}
-	sql := result.SQL
-	// SMT v1.1.0's PostgreSQL implementation always qualifies table names;
-	// with an intentionally empty schema it emits the invalid `""."table"`.
-	// DMT uses an empty schema to mean the connection/search-path default, so
-	// normalize just that public-renderer edge case at the compatibility seam.
-	const emptyPostgresSchemaPrefix = `CREATE TABLE "".`
-	if renderer.Dialect() == "postgres" && req.TargetSchema == "" && strings.HasPrefix(sql, emptyPostgresSchemaPrefix) {
-		sql = "CREATE TABLE " + strings.TrimPrefix(sql, emptyPostgresSchemaPrefix)
+	return plan, nil
+}
+
+// RenderCreateSchema returns the schema statement from an SMT create plan. An
+// empty result is the public no-op for targets such as SQLite or an omitted
+// schema. The SQL is returned unchanged from SMT.
+func RenderCreateSchema(req Request) (string, error) {
+	plan, err := PlanCreate(req)
+	if err != nil {
+		return "", err
 	}
-	return sql, nil
+	for _, statement := range plan.Statements {
+		if statement.Kind == schema.StatementCreateSchema {
+			return statement.SQL, nil
+		}
+	}
+	return "", nil
+}
+
+// RenderCreateTable returns the table statement from an SMT create plan. It
+// intentionally does not add a semicolon or otherwise rewrite SMT SQL.
+func RenderCreateTable(req Request) (string, error) {
+	plan, err := PlanCreate(req)
+	if err != nil {
+		return "", err
+	}
+	for _, statement := range plan.Statements {
+		if statement.Kind == schema.StatementCreateTable {
+			return statement.SQL, nil
+		}
+	}
+	return "", fmt.Errorf("SMT create plan contains no table statement for %q", req.Table.Name)
+}
+
+// UnsupportedStandalonePrimaryKey returns SMT's public typed policy error for
+// the rare resume/evolution case where a table already exists without its
+// primary key. SMT v1.2.0 PlanCreate owns inline primary keys only; DMT must
+// not synthesize an ALTER TABLE fallback locally.
+func UnsupportedStandalonePrimaryKey(targetDialect string) error {
+	return &schema.UnsupportedFeatureError{
+		Dialect: targetDialect,
+		Feature: "standalone primary-key creation; use PlanCreate with the table primary key",
+	}
 }

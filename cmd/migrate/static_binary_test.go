@@ -10,7 +10,10 @@ import (
 	"testing"
 )
 
-const smtModuleVersion = "github.com/johndauphine/smt v1.1.0"
+const (
+	smtModulePath    = "github.com/johndauphine/smt"
+	smtModuleVersion = smtModulePath + " v1.2.0"
+)
 
 func TestSMTDependencyIsVersioned(t *testing.T) {
 	goMod, err := os.ReadFile(filepath.Join(repoRoot(t), "go.mod"))
@@ -20,6 +23,62 @@ func TestSMTDependencyIsVersioned(t *testing.T) {
 	if !strings.Contains(string(goMod), smtModuleVersion) {
 		t.Fatalf("go.mod must require %s", smtModuleVersion)
 	}
+	if hasModuleReplace(string(goMod), smtModulePath) {
+		t.Fatalf("go.mod must consume %s as a versioned module, not a local replace", smtModulePath)
+	}
+}
+
+func TestHasModuleReplace(t *testing.T) {
+	tests := []struct {
+		name  string
+		goMod string
+		want  bool
+	}{
+		{name: "no replace", goMod: "require " + smtModuleVersion, want: false},
+		{name: "single line SMT replace", goMod: "replace " + smtModulePath + " => ../smt", want: true},
+		{name: "single line unrelated replace", goMod: "replace example.com/other => ../other", want: false},
+		{name: "block SMT replace", goMod: "replace (\n\t" + smtModulePath + " => ../smt\n)", want: true},
+		{name: "block unrelated replace", goMod: "replace (\n\texample.com/other => ../other\n)", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasModuleReplace(tt.goMod, smtModulePath); got != tt.want {
+				t.Errorf("hasModuleReplace() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func hasModuleReplace(goMod, modulePath string) bool {
+	inBlock := false
+	for _, line := range strings.Split(goMod, "\n") {
+		line = strings.TrimSpace(strings.SplitN(line, "//", 2)[0])
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if inBlock {
+			if line == ")" {
+				inBlock = false
+				continue
+			}
+			if len(fields) > 0 && fields[0] == modulePath {
+				return true
+			}
+			continue
+		}
+		if len(fields) == 0 || fields[0] != "replace" {
+			continue
+		}
+		if len(fields) == 2 && fields[1] == "(" {
+			inBlock = true
+			continue
+		}
+		if len(fields) > 1 && fields[1] == modulePath {
+			return true
+		}
+	}
+	return false
 }
 
 func TestStaticBinaryBuildIncludesSMT(t *testing.T) {
@@ -55,8 +114,8 @@ func TestStaticBinaryBuildIncludesSMT(t *testing.T) {
 	version := exec.Command("go", "version", "-m", binary)
 	if output, err := version.CombinedOutput(); err != nil {
 		t.Fatalf("read binary build info: %v\n%s", err, output)
-	} else if !strings.Contains(string(output), "github.com/johndauphine/smt\tv1.1.0") {
-		t.Fatalf("binary build info does not consume SMT v1.1.0:\n%s", output)
+	} else if !strings.Contains(string(output), smtModulePath+"\tv1.2.0") {
+		t.Fatalf("binary build info does not consume SMT v1.2.0:\n%s", output)
 	}
 }
 
