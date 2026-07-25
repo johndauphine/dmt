@@ -10,7 +10,10 @@ import (
 	"testing"
 )
 
-const smtModuleVersion = "github.com/johndauphine/smt v1.1.0"
+const (
+	smtModulePath    = "github.com/johndauphine/smt"
+	smtModuleVersion = smtModulePath + " v1.2.0"
+)
 
 func TestSMTDependencyIsVersioned(t *testing.T) {
 	goMod, err := os.ReadFile(filepath.Join(repoRoot(t), "go.mod"))
@@ -19,6 +22,9 @@ func TestSMTDependencyIsVersioned(t *testing.T) {
 	}
 	if !strings.Contains(string(goMod), smtModuleVersion) {
 		t.Fatalf("go.mod must require %s", smtModuleVersion)
+	}
+	if strings.Contains(string(goMod), "replace "+smtModulePath) {
+		t.Fatalf("go.mod must consume %s as a versioned module, not a local replace", smtModulePath)
 	}
 }
 
@@ -55,8 +61,8 @@ func TestStaticBinaryBuildIncludesSMT(t *testing.T) {
 	version := exec.Command("go", "version", "-m", binary)
 	if output, err := version.CombinedOutput(); err != nil {
 		t.Fatalf("read binary build info: %v\n%s", err, output)
-	} else if !strings.Contains(string(output), "github.com/johndauphine/smt\tv1.1.0") {
-		t.Fatalf("binary build info does not consume SMT v1.1.0:\n%s", output)
+	} else if !strings.Contains(string(output), smtModulePath+"\tv1.2.0") {
+		t.Fatalf("binary build info does not consume SMT v1.2.0:\n%s", output)
 	}
 }
 

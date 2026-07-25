@@ -5,18 +5,16 @@
 //   - column-level: source UDT name doesn't appear in the canonical
 //     catalog (KindRaw fallthrough — vendor-specific types like PG
 //     inet/cidr/macaddr, MSSQL hierarchyid)
-//   - table-level: GenerateTableDDL returned a non-nil error (e.g. an
-//     unsupported source/target dialect that AI may still cover)
 //   - finalization-level: GenerateFinalizationDDL returned the
 //     ErrUnsupportedDDL sentinel (vendor index features — clustered,
 //     covering, filtered)
 //
 // The chain implements all four type-mapper interfaces by satisfying
 // each method with a "try deterministic, fall back to AI" decision.
-// Most lossy translations stay on the deterministic path with an
-// IsApproximate warning rather than invoking AI; the fallback is
-// scoped narrowly to cases where the deterministic path cannot
-// faithfully emit DDL.
+// The create path is deliberately excluded from AI fallback. SMT owns
+// CREATE TABLE, column, and primary-key rendering; unsupported create inputs
+// must return SMT's explicit policy rather than allowing a second renderer to
+// synthesize different SQL.
 //
 // Part of #170 (AI-second epic #167).
 
@@ -55,30 +53,18 @@ const (
 	UnmappedActionConservativeText UnmappedAction = "conservative-text"
 )
 
-// ApproxAction selects what the chain does at table-level when at least
-// one column maps deterministically but with IsApproximate=true (a
-// known-lossy mapping — e.g. PG INTERVAL → MSSQL NVARCHAR(255), PG
-// ENUM → VARCHAR(255), JSONB → MySQL JSON). Mirrors the
-// migration.approx_type_action config knob (#197).
+// ApproxAction preserves the migration.approx_type_action configuration
+// contract. CREATE TABLE generation is now SMT-owned and deliberately ignores
+// this setting; it remains on FallbackChain while later DDL milestones retain
+// their existing compatibility surface.
 type ApproxAction string
 
 const (
-	// ApproxActionDeterministic keeps the deterministic mapping and
-	// emits a one-time INFO log per migration listing affected approx
-	// columns so the user can decide whether to flip the knob.
-	// NewFallbackChain selects this when no AI fallback is available
-	// (no AI to route to); users with AI configured can also force
-	// this explicitly.
+	// ApproxActionDeterministic is retained as a valid configuration value.
 	ApproxActionDeterministic ApproxAction = "deterministic"
 
-	// ApproxActionAIFallback routes any table containing approx columns
-	// through the AI fallback (same path as Raw-bearing tables). AI
-	// sees the whole table and may produce better DDL — at the cost
-	// of an AI call per affected table. NewFallbackChain selects this
-	// by default when AI is configured (issue #209 — consistent with
-	// how Raw / table-DDL-error / finalization-error paths default-on
-	// when AI is available); users opt out via explicit
-	// ApproxActionDeterministic.
+	// ApproxActionAIFallback is retained as a valid configuration value. It no
+	// longer authorizes an AI-generated CREATE TABLE statement.
 	ApproxActionAIFallback ApproxAction = "ai_fallback"
 )
 
@@ -96,18 +82,8 @@ type FallbackChain struct {
 // NewFallbackChain builds a chain. Pass nil for fallback when AI isn't
 // configured — the chain still works, just without AI routing.
 //
-// approxAction defaults to:
-//   - ApproxActionAIFallback when an AI fallback is available (#209 —
-//     consistent with the rest of the codebase: Raw / table-DDL-error /
-//     finalization-error / error-diagnosis paths all default-on when
-//     AI is configured. Configuring AI is an implicit opt-in to AI
-//     features; users opt out by setting the knob explicitly.)
-//   - ApproxActionDeterministic when no AI fallback is available
-//     (no AI to route to → can't use it).
-//
-// Pass an explicit ApproxAction to override (still respected — users
-// who want deterministic-on-AI-configured can set
-// migration.approx_type_action: deterministic in their config).
+// approxAction remains normalized for compatibility with existing config and
+// logs. It does not affect SMT-owned CREATE TABLE generation.
 func NewFallbackChain(primary *DeterministicMapper, fallback TypeMapper, action UnmappedAction, approxAction ApproxAction) *FallbackChain {
 	if action == "" {
 		action = UnmappedActionFail
@@ -181,173 +157,13 @@ func (c *FallbackChain) SupportedTargets() []string {
 	return out
 }
 
-// GenerateTableDDL implements TableTypeMapper. Two routing decisions
-// matter here:
-//
-//  1. Pre-check: if any column maps to KindRaw, the deterministic
-//     mapper would silently pass the source UDT name through verbatim
-//     into the target DDL — emitting e.g. `[ip] INET` when PG inet
-//     targets MSSQL, which is invalid MSSQL. Codex review on PR #170
-//     caught this. Detect Raw columns up front and route the entire
-//     table to AI fallback when configured (AI sees the whole table
-//     and can make holistic decisions). When no AI is configured,
-//     return an error naming the offending columns.
-//
-//  2. After the Raw-column gate, run the deterministic path. If
-//     deterministic returns an error (typically unsupported
-//     source/target combination), fall back to AI when configured;
-//     propagate otherwise.
-//
-// Note: the conservative-text unmapped action is currently a no-op
-// for the table-level path — substituting Raw column types in
-// deterministic-generated DDL would require post-process string
-// manipulation. Tracked as a follow-up; today, conservative-text
-// only takes effect for the column-level MapType path.
+// GenerateTableDDL implements TableTypeMapper through the SMT create boundary.
+// It intentionally never delegates table DDL to the AI fallback: callers must
+// receive SMT's deterministic SQL or its public unsupported-feature policy.
+// Column-level MapType and later finalization DDL retain their established
+// fallback behavior until their separate ownership milestones.
 func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error) {
-	if rawCols := c.findRawColumns(req); len(rawCols) > 0 {
-		if c.fallback != nil {
-			if tableMapper, ok := c.fallback.(TableTypeMapper); ok {
-				logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback (Raw columns: %v)", rawCols)
-				observability.RecordFallback(observability.SurfaceDDL, "raw_columns")
-				return tableMapper.GenerateTableDDL(ctx, req)
-			}
-		}
-		return nil, fmt.Errorf("table %q has columns with unmapped (Raw) types %v and no AI fallback is configured (action=%s)",
-			req.SourceTable.Name, rawCols, c.action)
-	}
-
-	// #197: optional routing for approximate (lossy-but-mapped) columns.
-	// The Raw check above handles the "no mapping" case; this handles
-	// the "mapping exists but lossy" case (e.g. PG INTERVAL → MSSQL
-	// NVARCHAR(255)). Action selected per-chain in NewFallbackChain:
-	// ai_fallback when AI is configured (#209 — implicit opt-in),
-	// deterministic when AI isn't, with explicit overrides respected.
-	// On the deterministic branch (or when ai_fallback was requested
-	// but the AI mapper doesn't implement TableTypeMapper), log once
-	// per table naming the approx columns.
-	if approxCols := c.findApproximateColumns(req); len(approxCols) > 0 {
-		if c.approxAction == ApproxActionAIFallback && c.fallback != nil {
-			if tableMapper, ok := c.fallback.(TableTypeMapper); ok {
-				logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback (approx columns: %v)", approxCols)
-				observability.RecordFallback(observability.SurfaceDDL, "approx_columns")
-				return tableMapper.GenerateTableDDL(ctx, req)
-			}
-		}
-		// Telemetry-only path: deterministic stands but inform the
-		// user. INFO not WARN — approx mappings are intentional
-		// fidelity trade-offs, not errors. Once per table per migration;
-		// the chain has no per-migration state so per-table is the
-		// finest grain available without a bigger refactor.
-		//
-		// The message changes based on whether the user already opted
-		// in: telling someone with ai_fallback set to "set the knob"
-		// is misleading — they did set it, but AI wasn't available
-		// (no provider configured, or the AI mapper doesn't implement
-		// TableTypeMapper). Distinguish the two cases (Copilot review
-		// on PR #208).
-		if c.approxAction == ApproxActionAIFallback {
-			logging.Info("typemap chain: table %q used %d approximate (lossy) deterministic mapping(s) for column(s) %v; "+
-				"approx_type_action=ai_fallback was requested but no AI fallback is available (provider not configured or mapper doesn't support table-level routing) — used deterministic mapping",
-				req.SourceTable.Name, len(approxCols), approxCols)
-		} else {
-			logging.Info("typemap chain: table %q used %d approximate (lossy) deterministic mapping(s) for column(s) %v; "+
-				"set migration.approx_type_action: ai_fallback to route these tables through AI for potentially better DDL",
-				req.SourceTable.Name, len(approxCols), approxCols)
-		}
-	}
-
-	resp, err := c.primary.GenerateTableDDL(ctx, req)
-	if err == nil {
-		return resp, nil
-	}
-	if c.fallback == nil {
-		return nil, err
-	}
-	tableMapper, ok := c.fallback.(TableTypeMapper)
-	if !ok {
-		return nil, fmt.Errorf("deterministic GenerateTableDDL failed (%w) and AI fallback doesn't implement TableTypeMapper", err)
-	}
-	logging.Debug("typemap chain: routing GenerateTableDDL to AI fallback after deterministic error: %v", err)
-	observability.RecordFallback(observability.SurfaceDDL, "table_ddl_error")
-	return tableMapper.GenerateTableDDL(ctx, req)
-}
-
-// findRawColumns walks the source table's columns and returns the
-// names of those whose canonical type is KindRaw (vendor-specific,
-// not in the catalog). Used by GenerateTableDDL to detect cases where
-// the deterministic path would silently emit invalid cross-dialect
-// DDL via verbatim type-name passthrough.
-func (c *FallbackChain) findRawColumns(req TableDDLRequest) []string {
-	if req.SourceTable == nil {
-		return nil
-	}
-	var raw []string
-	for _, col := range req.SourceTable.Columns {
-		canonical := typemap.ToCanonical(typemap.ColumnInfo{
-			UDTName:  col.DataType,
-			DataType: col.DataType,
-		}, req.SourceDBType)
-		if canonical.Kind == typemap.KindRaw {
-			raw = append(raw, col.Name)
-		}
-	}
-	return raw
-}
-
-// findApproximateColumns walks the source table's columns and returns
-// the names of those whose deterministic mapping is non-Raw but
-// IsApproximate (a known-lossy mapping like PG INTERVAL →
-// NVARCHAR(255), JSONB → JSON, ENUM → VARCHAR(255)). Used by
-// GenerateTableDDL to surface lossy mappings so the user can decide
-// whether to enable AI fallback for the affected tables (#197).
-//
-// Skips Raw columns — those are handled by findRawColumns and routed
-// before this gate. Calling this on a Raw-bearing table would double-
-// classify those columns; the caller's order-of-checks avoids that.
-//
-// Populates the same ColumnInfo fields that the actual deterministic
-// mapper sees (length/precision/scale) so the pre-scan's IsApproximate
-// verdict matches what GenerateColumnDef would emit at DDL time. A
-// shallow ColumnInfo would diverge for length-sensitive types — e.g. a
-// `varchar(100)` column would be misclassified as nil-Length and emit
-// LONGTEXT instead of VARCHAR(100), giving a different IsApproximate
-// reading than the real mapper. Copilot review on PR #208.
-func (c *FallbackChain) findApproximateColumns(req TableDDLRequest) []string {
-	if req.SourceTable == nil {
-		return nil
-	}
-	var approx []string
-	for _, col := range req.SourceTable.Columns {
-		colInfo := driverColumnToTypemapColumnInfo(col)
-		canonical := typemap.ToCanonical(colInfo, req.SourceDBType)
-		if canonical.Kind == typemap.KindRaw {
-			continue
-		}
-		ddl := typemap.FromCanonical(canonical, req.TargetDBType)
-		if ddl.IsApproximate {
-			approx = append(approx, col.Name)
-		}
-	}
-	return approx
-}
-
-// driverColumnToTypemapColumnInfo projects a driver.Column into the
-// typemap.ColumnInfo shape used by ToCanonical. Mirrors the field
-// population in typeInfoToTypemapColumn / driverColumnToDDL so any
-// helper that needs to ask "what would the deterministic mapper do
-// with this column?" gets the same answer those production paths do.
-func driverColumnToTypemapColumnInfo(col Column) typemap.ColumnInfo {
-	fullType := col.FullDataType
-	if fullType == "" {
-		fullType = col.DataType
-	}
-	return typemap.ColumnInfo{
-		UDTName:                col.DataType,
-		DataType:               fullType,
-		CharacterMaximumLength: nullableInt(col.MaxLength),
-		NumericPrecision:       nullableInt(col.Precision),
-		NumericScale:           nullableInt(col.Scale),
-	}
+	return c.primary.GenerateTableDDL(ctx, req)
 }
 
 // GenerateFinalizationDDL implements FinalizationDDLMapper. Routes to

@@ -13,14 +13,15 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 	"github.com/johndauphine/dmt/internal/driver/shared"
 	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/internal/smtddl"
 	"github.com/johndauphine/dmt/internal/stats"
 	typeddl "github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
-// Writer implements driver.Writer from a catalog: DDL comes from
-// catalog templates and the type-mapper engine, existence checks from
-// catalog queries, and the data paths from the named bulk/upsert/
-// sequence strategies. Optional capabilities (Upserter,
+// Writer implements driver.Writer from a catalog: SMT owns the create-path
+// SQL, catalog templates remain only for later DDL milestones, catalog queries
+// provide existence checks, and named strategies own bulk/upsert/sequence
+// behavior. Optional capabilities (Upserter,
 // SequenceResetter) are exposed by wrapper types so the type-assertion
 // surface matches the catalog's capability declarations exactly.
 type Writer struct {
@@ -41,7 +42,6 @@ type Writer struct {
 	myState *mysqlInfileState
 
 	typeMapper         driver.TypeMapper
-	tableMapper        driver.TableTypeMapper
 	finalizationMapper driver.FinalizationDDLMapper
 	dbContext          *driver.DatabaseContext
 }
@@ -116,8 +116,10 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 		db.Close()
 		return nil, fmt.Errorf("TypeMapper is required")
 	}
-	tableMapper, ok := opts.TypeMapper.(driver.TableTypeMapper)
-	if !ok {
+	// Preserve the existing writer-option contract even though SMT now owns the
+	// create statement itself. TableTypeMapper remains part of DMT's public
+	// internal wiring surface for telemetry and later DDL milestones.
+	if _, ok := opts.TypeMapper.(driver.TableTypeMapper); !ok {
 		db.Close()
 		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper")
 	}
@@ -145,7 +147,6 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 		dialect:          dialect,
 
 		typeMapper:         opts.TypeMapper,
-		tableMapper:        tableMapper,
 		finalizationMapper: finalizationMapper,
 	}
 	w.dbContext = &driver.DatabaseContext{
@@ -222,30 +223,29 @@ func (w *Writer) PoolStats() stats.PoolStats {
 	}
 }
 
-// CreateSchema renders the catalog template, or is a no-op for engines
-// without schemas.
-func (w *Writer) CreateSchema(ctx context.Context, schema string) error {
-	if w.cat.DDL.CreateSchema == "" {
+// CreateSchema selects the schema/database input and executes SMT's returned
+// create-plan statement unchanged. The catalog flag is connection-selection
+// policy for ClickHouse, not a SQL template.
+func (w *Writer) CreateSchema(ctx context.Context, targetSchema string) error {
+	schemaName := targetSchema
+	if schemaName == "" && w.cat.DDL.CreateSchemaDefaultsToDatabase {
+		// Schema-as-database engines (ClickHouse) accept configs that select
+		// only target.database. SMT still owns the resulting CREATE DATABASE SQL.
+		schemaName = w.config.Database
+	}
+	stmt, err := smtddl.RenderCreateSchema(smtddl.Request{
+		SourceDialect: w.sourceType,
+		TargetDialect: w.cat.Name,
+		TargetSchema:  schemaName,
+	})
+	if err != nil {
+		return fmt.Errorf("planning schema creation with SMT: %w", err)
+	}
+	if stmt == "" {
 		return nil
 	}
-	if schema == "" {
-		if !w.cat.DDL.CreateSchemaDefaultsToDatabase {
-			// Matching the hand-written engines: empty schema means
-			// "use the connection's default database" — a no-op, and
-			// least-privilege users never need CREATE (codex on #509).
-			return nil
-		}
-		// Schema-as-database engines (clickhouse) accept configs with
-		// only target.database set (codex on #507).
-		schema = w.config.Database
-	}
-	stmt := strings.NewReplacer(
-		"{schema}", w.dialect.QuoteIdentifier(schema),
-		// {schema_raw} embeds the name in a string literal (mssql's
-		// conditional IF SCHEMA_ID(...) form); single quotes doubled.
-		"{schema_raw}", strings.ReplaceAll(schema, "'", "''"),
-	).Replace(w.cat.DDL.CreateSchema)
-	_, err := w.db.ExecContext(ctx, stmt)
+	logging.Debug("Generated SMT schema DDL for %s:\n%s", schemaName, stmt)
+	_, err = w.db.ExecContext(ctx, stmt)
 	return err
 }
 
@@ -265,13 +265,13 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 		SourceContext: opts.SourceContext,
 		TargetContext: w.dbContext,
 	}
-	resp, err := w.tableMapper.GenerateTableDDL(ctx, req)
+	createDDL, err := driver.PlanCreateTable(req)
 	if err != nil {
 		return fmt.Errorf("DDL generation failed for table %s: %w", t.FullName(), err)
 	}
-	logging.Debug("Generated DDL for %s:\n%s", t.FullName(), resp.CreateTableDDL)
-	if _, err := w.db.ExecContext(ctx, resp.CreateTableDDL); err != nil {
-		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, resp.CreateTableDDL)
+	logging.Debug("Generated SMT DDL for %s:\n%s", t.FullName(), createDDL)
+	if _, err := w.db.ExecContext(ctx, createDDL); err != nil {
+		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, createDDL)
 	}
 	return nil
 }
@@ -466,12 +466,12 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 	return err == nil, err
 }
 
-// CreatePrimaryKey renders the catalog template, or is a no-op for
-// inline-PK engines. CreateTable already emits the PK inline, so the
-// template only fires for tables that exist without one
-// (resume/evolution flows) — never twice.
+// CreatePrimaryKey preserves DMT's idempotency check after a create plan. SMT
+// v1.2.0 owns primary-key SQL only inline in PlanCreate's table statement, so
+// a pre-existing table without its key returns SMT's typed unsupported policy
+// rather than using DMT's former ALTER TABLE template.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
-	if w.cat.DDL.CreatePrimaryKey == "" || len(t.PrimaryKey) == 0 {
+	if len(t.PrimaryKey) == 0 {
 		return nil
 	}
 	hasPK, err := w.HasPrimaryKey(ctx, targetSchema, t.Name)
@@ -481,16 +481,7 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 	if hasPK {
 		return nil
 	}
-	cols := make([]string, len(t.PrimaryKey))
-	for i, c := range t.PrimaryKey {
-		cols[i] = w.ident(c)
-	}
-	stmt := strings.NewReplacer(
-		"{table}", w.dialect.QualifyTable(targetSchema, w.ident(t.Name)),
-		"{columns}", w.dialect.ColumnList(cols),
-	).Replace(w.cat.DDL.CreatePrimaryKey)
-	_, err = w.db.ExecContext(ctx, stmt)
-	return err
+	return smtddl.UnsupportedStandalonePrimaryKey(w.cat.Name)
 }
 
 func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {

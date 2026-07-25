@@ -45,6 +45,47 @@ func openWriter(t *testing.T) (gen driver.Writer, genPath string) {
 	return gen, genPath
 }
 
+// TestSQLiteCatalogWriterExecutesSMTCreatePlanVerbatim is a real database
+// create-path migration check. sqlite_master retains the submitted CREATE
+// TABLE text, allowing this test to prove that the writer executes DMT's SMT
+// plan statement unchanged while retaining DMT's schema/PK idempotency flow.
+func TestSQLiteCatalogWriterExecutesSMTCreatePlanVerbatim(t *testing.T) {
+	ctx := context.Background()
+	gen, genPath := openWriter(t)
+	table := testTable()
+
+	expected, err := driver.PlanCreateTable(driver.TableDDLRequest{
+		SourceDBType: "sqlite",
+		TargetDBType: "sqlite",
+		SourceTable:  table,
+	})
+	if err != nil {
+		t.Fatalf("planning SMT create table: %v", err)
+	}
+	if err := gen.CreateSchema(ctx, "ignored_by_sqlite"); err != nil {
+		t.Fatalf("CreateSchema: %v", err)
+	}
+	if err := gen.CreateTable(ctx, table, "ignored_by_sqlite"); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if err := gen.CreatePrimaryKey(ctx, table, ""); err != nil {
+		t.Fatalf("CreatePrimaryKey inline idempotency: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", genPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'`).Scan(&got); err != nil {
+		t.Fatalf("read sqlite_master: %v", err)
+	}
+	if got != expected {
+		t.Fatalf("writer rewrote SMT create SQL:\n got: %s\nwant: %s", got, expected)
+	}
+}
+
 // dump reads observable database state: the verbatim DDL of every
 // object, every table's rows, and the sqlite_sequence content.
 func dump(t *testing.T, path string) map[string]any {

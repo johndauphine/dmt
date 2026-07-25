@@ -11,6 +11,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/secrets"
 	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/smt/schema"
 )
 
 // stubMapper is a minimal TypeMapper used to stand in for the AI
@@ -159,42 +160,34 @@ func TestFallbackChain_GenerateTableDDL_DeterministicSuccess(t *testing.T) {
 	}
 }
 
-func TestFallbackChain_GenerateTableDDL_DeterministicFailure_RoutesToAI(t *testing.T) {
-	expectedResp := &TableDDLResponse{CreateTableDDL: "AI_GENERATED_DDL"}
-	stub := &stubMapper{tableDDLReturns: expectedResp}
+func TestFallbackChain_GenerateTableDDL_DeterministicFailure_DoesNotRouteToAI(t *testing.T) {
+	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_GENERATED_DDL"}}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
-	// Unsupported source dialect → deterministic returns error → AI fires
-	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+	// Unsupported source dialect must propagate from the SMT boundary rather
+	// than let the optional AI mapper construct a CREATE TABLE statement.
+	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: "oracle",
 		TargetDBType: typemap.DialectPostgres,
-		SourceTable:  &Table{Name: "users", Columns: []Column{{Name: "id"}}},
+		SourceTable:  &Table{Name: "users", Columns: []Column{{Name: "client_ip", DataType: "inet"}}},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected SMT create-plan error")
 	}
-	if resp.CreateTableDDL != "AI_GENERATED_DDL" {
-		t.Errorf("expected AI fallback to provide the response; got %q", resp.CreateTableDDL)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("expected SMT UnsupportedFeatureError, got %v", err)
 	}
-	if stub.tableDDLCalled != 1 {
-		t.Errorf("AI fallback should fire exactly once; got %d calls", stub.tableDDLCalled)
+	if stub.tableDDLCalled != 0 {
+		t.Errorf("AI must never generate CREATE TABLE; got %d calls", stub.tableDDLCalled)
 	}
 }
 
-// TestFallbackChain_GenerateTableDDL_RawColumn_RoutesToAI — Codex
-// review on PR #170. The deterministic mapper successfully emits
-// CREATE TABLE for tables with Raw columns by passing the source UDT
-// name through verbatim — e.g., a PG `inet` column targeting MSSQL
-// would emit `[ip] INET ...` (invalid MSSQL). The chain must detect
-// Raw columns up front and route the entire table to AI when
-// configured, rather than letting deterministic silently produce
-// invalid cross-dialect DDL.
-func TestFallbackChain_GenerateTableDDL_RawColumn_RoutesToAI(t *testing.T) {
-	expectedResp := &TableDDLResponse{CreateTableDDL: "AI_TABLE_DDL"}
-	stub := &stubMapper{tableDDLReturns: expectedResp}
+func TestFallbackChain_GenerateTableDDL_RawColumn_UsesSMTUnsupportedPolicy(t *testing.T) {
+	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_TABLE_DDL"}}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
-	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
 		TargetDBType: typemap.DialectMSSQL,
 		SourceTable: &Table{
@@ -206,22 +199,17 @@ func TestFallbackChain_GenerateTableDDL_RawColumn_RoutesToAI(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("expected SMT UnsupportedFeatureError, got %v", err)
 	}
-	if resp.CreateTableDDL != "AI_TABLE_DDL" {
-		t.Errorf("expected AI fallback to handle table with Raw column; got DDL=%q (#170 regression — would have emitted invalid INET cross-dialect)",
-			resp.CreateTableDDL)
-	}
-	if stub.tableDDLCalled != 1 {
-		t.Errorf("expected exactly one AI call; got %d", stub.tableDDLCalled)
+	if stub.tableDDLCalled != 0 {
+		t.Errorf("AI must never generate CREATE TABLE; got %d calls", stub.tableDDLCalled)
 	}
 }
 
-func TestFallbackChain_GenerateTableDDL_RawColumn_NoAI_ErrorsClearly(t *testing.T) {
-	// Same scenario but no AI configured — the chain must error with
-	// a clear message naming the offending columns rather than letting
-	// deterministic emit invalid DDL.
+func TestFallbackChain_GenerateTableDDL_RawColumn_NoAIUsesSameSMTPolicy(t *testing.T) {
+	// Policy must be independent of whether an AI mapper is configured.
 	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 
 	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
@@ -238,13 +226,11 @@ func TestFallbackChain_GenerateTableDDL_RawColumn_NoAI_ErrorsClearly(t *testing.
 		},
 	})
 	if err == nil {
-		t.Fatal("expected error for table with Raw columns + no AI fallback (#170 regression)")
+		t.Fatal("expected SMT unsupported policy for Raw source types")
 	}
-	// Error message should name both Raw columns
-	for _, col := range []string{"client_ip", "subnet"} {
-		if !strings.Contains(err.Error(), col) {
-			t.Errorf("error should name unmapped column %q; got %q", col, err.Error())
-		}
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("expected SMT UnsupportedFeatureError, got %v", err)
 	}
 }
 
@@ -540,19 +526,16 @@ func TestHandleUnmapped_UnknownAction_WarnsAndFails(t *testing.T) {
 	}
 }
 
-// ---------- Approx-column routing (#197) ----------
+// ---------- Approx-column create policy ----------
 
-// TestFallbackChain_GenerateTableDDL_ApproxColumn_DefaultDeterministic
-// verifies the default ApproxAction (deterministic) keeps the
-// deterministic path even when approx columns are present. The
-// existing PG-INTERVAL → NVARCHAR(255) approxDDL emission triggers
-// IsApproximate=true, so a PG `interval` column targeting MSSQL is
-// the cleanest test fixture.
-func TestFallbackChain_GenerateTableDDL_ApproxColumn_DefaultDeterministic(t *testing.T) {
+// The ApproxAction setting is retained for configuration compatibility, but it
+// must not authorize a second CREATE TABLE renderer. PG interval is outside
+// SMT's portable create model, so it exercises the explicit error path.
+func TestFallbackChain_GenerateTableDDL_ApproxColumn_DefaultNeverRoutesToAI(t *testing.T) {
 	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_DDL"}}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionDeterministic)
 
-	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
 		TargetDBType: typemap.DialectMSSQL,
 		SourceTable: &Table{
@@ -564,26 +547,21 @@ func TestFallbackChain_GenerateTableDDL_ApproxColumn_DefaultDeterministic(t *tes
 			PrimaryKey: []string{"id"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.CreateTableDDL == "AI_DDL" {
-		t.Error("default ApproxActionDeterministic must NOT route to AI; got AI response")
+	if err == nil {
+		t.Fatal("expected SMT create-plan policy for unsupported interval source type")
 	}
 	if stub.tableDDLCalled != 0 {
-		t.Errorf("AI fallback should NOT fire on default action; got %d calls", stub.tableDDLCalled)
+		t.Errorf("AI must never generate CREATE TABLE; got %d calls", stub.tableDDLCalled)
 	}
 }
 
-// TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback verifies
-// the opt-in ApproxActionAIFallback routes the entire table to AI
-// when at least one column has an approximate mapping.
-func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback(t *testing.T) {
-	expectedResp := &TableDDLResponse{CreateTableDDL: "AI_HANDLED_APPROX"}
-	stub := &stubMapper{tableDDLReturns: expectedResp}
+// Even an explicit legacy ai_fallback setting cannot route SMT-owned CREATE
+// TABLE SQL through the optional AI mapper.
+func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallbackSettingNeverRoutesToAI(t *testing.T) {
+	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_HANDLED_APPROX"}}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionAIFallback)
 
-	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
 		TargetDBType: typemap.DialectMSSQL,
 		SourceTable: &Table{
@@ -595,26 +573,20 @@ func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected SMT create-plan policy for unsupported interval source type")
 	}
-	if resp.CreateTableDDL != "AI_HANDLED_APPROX" {
-		t.Errorf("expected AI fallback to handle approx-bearing table; got %q", resp.CreateTableDDL)
-	}
-	if stub.tableDDLCalled != 1 {
-		t.Errorf("AI fallback should fire exactly once; got %d calls", stub.tableDDLCalled)
+	if stub.tableDDLCalled != 0 {
+		t.Errorf("AI must never generate CREATE TABLE, even when ai_fallback is configured; got %d calls", stub.tableDDLCalled)
 	}
 }
 
-// TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback_NoAI
-// verifies that opting into ai_fallback when no AI is configured
-// silently falls through to deterministic. The user asked for AI
-// but didn't configure it — better to deliver the deterministic
-// result than to fail the migration.
-func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback_NoAI(t *testing.T) {
+// The no-AI case returns the same SMT policy; it must not silently degrade
+// through DMT's old approximate mapping.
+func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback_NoAIUsesSMTPolicy(t *testing.T) {
 	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, ApproxActionAIFallback)
 
-	resp, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
+	_, err := chain.GenerateTableDDL(context.Background(), TableDDLRequest{
 		SourceDBType: typemap.DialectPostgres,
 		TargetDBType: typemap.DialectMSSQL,
 		SourceTable: &Table{
@@ -626,17 +598,13 @@ func TestFallbackChain_GenerateTableDDL_ApproxColumn_AIFallback_NoAI(t *testing.
 			PrimaryKey: []string{"id"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(resp.CreateTableDDL, "CREATE TABLE") {
-		t.Errorf("no-AI configuration with ai_fallback should still emit deterministic DDL; got %q", resp.CreateTableDDL)
+	if err == nil {
+		t.Fatal("expected SMT create-plan policy for unsupported interval source type")
 	}
 }
 
-// TestFallbackChain_GenerateTableDDL_NoApproxColumns_NoTelemetry
-// smoke test: clean tables with no approx columns must not trigger
-// the AI route under ai_fallback either.
+// Clean tables still use the SMT deterministic path when the legacy setting
+// is present.
 func TestFallbackChain_GenerateTableDDL_NoApproxColumns_NoTelemetry(t *testing.T) {
 	stub := &stubMapper{tableDDLReturns: &TableDDLResponse{CreateTableDDL: "AI_DDL"}}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, ApproxActionAIFallback)
@@ -661,49 +629,6 @@ func TestFallbackChain_GenerateTableDDL_NoApproxColumns_NoTelemetry(t *testing.T
 	}
 	if stub.tableDDLCalled != 0 {
 		t.Errorf("AI fallback should NOT fire; got %d calls", stub.tableDDLCalled)
-	}
-}
-
-// TestFindApproximateColumns_DetectsKnownApproxMappings is a focused
-// unit test on findApproximateColumns. PG INTERVAL → MSSQL is the
-// cleanest known approxDDL emission site (see internal/typemap/mssql.go).
-func TestFindApproximateColumns_DetectsKnownApproxMappings(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, ApproxActionDeterministic)
-	req := TableDDLRequest{
-		SourceDBType: typemap.DialectPostgres,
-		TargetDBType: typemap.DialectMSSQL,
-		SourceTable: &Table{
-			Columns: []Column{
-				{Name: "id", DataType: "int4"},      // exact
-				{Name: "dur", DataType: "interval"}, // approx
-				{Name: "name", DataType: "varchar"}, // exact
-			},
-		},
-	}
-	got := chain.findApproximateColumns(req)
-	if len(got) != 1 || got[0] != "dur" {
-		t.Errorf("expected [dur]; got %v", got)
-	}
-}
-
-// TestFindApproximateColumns_SkipsRawColumns verifies findApproximateColumns
-// correctly skips Raw columns (handled separately by findRawColumns).
-// PG `inet` is Raw on a non-PG target.
-func TestFindApproximateColumns_SkipsRawColumns(t *testing.T) {
-	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, ApproxActionDeterministic)
-	req := TableDDLRequest{
-		SourceDBType: typemap.DialectPostgres,
-		TargetDBType: typemap.DialectMSSQL,
-		SourceTable: &Table{
-			Columns: []Column{
-				{Name: "id", DataType: "int4"},
-				{Name: "client_ip", DataType: "inet"}, // Raw on PG
-			},
-		},
-	}
-	got := chain.findApproximateColumns(req)
-	if len(got) != 0 {
-		t.Errorf("Raw columns should not appear in approx list; got %v", got)
 	}
 }
 
