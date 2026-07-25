@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.5.0] - 2026-07-25
+
 ### Added
 
 - Integrated SMT v1.1.0's deterministic DDL renderer for DMT CREATE TABLE generation, retaining DMT compatibility fallbacks and five-dialect parity coverage (#737).
