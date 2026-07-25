@@ -244,9 +244,11 @@ func (w *Writer) CreateSchema(ctx context.Context, targetSchema string) error {
 	if stmt == "" {
 		return nil
 	}
-	logging.Debug("Generated SMT schema DDL for %s:\n%s", schemaName, stmt)
-	_, err = w.db.ExecContext(ctx, stmt)
-	return err
+	logging.DebugEvent("Generated SMT schema DDL", "schema", schemaName, "ddl", stmt)
+	if _, err := w.db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("creating schema %s: %w\nDDL: %s", schemaName, err, stmt)
+	}
+	return nil
 }
 
 func (w *Writer) CreateTable(ctx context.Context, t *driver.Table, targetSchema string) error {
@@ -269,7 +271,7 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	if err != nil {
 		return fmt.Errorf("DDL generation failed for table %s: %w", t.FullName(), err)
 	}
-	logging.Debug("Generated SMT DDL for %s:\n%s", t.FullName(), createDDL)
+	logging.DebugEvent("Generated SMT DDL", "table", t.FullName(), "ddl", createDDL)
 	if _, err := w.db.ExecContext(ctx, createDDL); err != nil {
 		return fmt.Errorf("creating table %s: %w\nDDL: %s", t.FullName(), err, createDDL)
 	}
@@ -481,7 +483,10 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 	if hasPK {
 		return nil
 	}
-	return smtddl.UnsupportedStandalonePrimaryKey(w.cat.Name)
+	if err := smtddl.UnsupportedStandalonePrimaryKey(w.cat.Name); err != nil {
+		return fmt.Errorf("creating primary key for %s: %w", t.FullName(), err)
+	}
+	return nil
 }
 
 func (w *Writer) HasPrimaryKey(ctx context.Context, schema, table string) (bool, error) {

@@ -3,6 +3,7 @@ package generic
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/smt/schema"
 )
 
 func testTable() *driver.Table {
@@ -83,6 +85,31 @@ func TestSQLiteCatalogWriterExecutesSMTCreatePlanVerbatim(t *testing.T) {
 	}
 	if got != expected {
 		t.Fatalf("writer rewrote SMT create SQL:\n got: %s\nwant: %s", got, expected)
+	}
+}
+
+func TestCreatePrimaryKeyMissingInlineKeyKeepsSMTTypedPolicyAndTableContext(t *testing.T) {
+	ctx := context.Background()
+	gen, _ := openWriter(t)
+
+	if err := gen.CreateTable(ctx, &driver.Table{
+		Name: "without_pk",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "integer", OrdinalPos: 1},
+		},
+	}, ""); err != nil {
+		t.Fatalf("CreateTable without PK: %v", err)
+	}
+	err := gen.CreatePrimaryKey(ctx, &driver.Table{Name: "without_pk", PrimaryKey: []string{"id"}}, "")
+	if err == nil {
+		t.Fatal("CreatePrimaryKey without inline key returned nil")
+	}
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("CreatePrimaryKey error = %T %v, want SMT UnsupportedFeatureError", err, err)
+	}
+	if !strings.Contains(err.Error(), "without_pk") {
+		t.Fatalf("CreatePrimaryKey error = %q, want table context", err)
 	}
 }
 
