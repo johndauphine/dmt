@@ -212,13 +212,6 @@ func (c *Catalog) Validate() error {
 			errs = append(errs, fmt.Sprintf("sequence.strategy %q is not a known strategy", c.Sequence.Strategy))
 		}
 	}
-	require(len(c.DDL.DropTableStmts) > 0, "ddl.drop_table_stmts is required")
-	require(len(c.DDL.TruncateStmts) > 0, "ddl.truncate_stmts is required")
-	require(c.DDL.AddColumn != "", "ddl.add_column is required")
-	require(!c.DDL.CanDropNotNull || c.DDL.DropNotNull != "",
-		"ddl.drop_not_null template required when can_drop_not_null")
-	require(!c.DDL.CanAlterColumnType || c.DDL.AlterColumnType != "",
-		"ddl.alter_column_type template required when can_alter_column_type")
 	require(c.Context.VersionQuery != "", "context.version_query is required")
 	if c.Preflight != "" {
 		if _, ok := preflightStrategies[c.Preflight]; !ok {

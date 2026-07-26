@@ -251,26 +251,6 @@ introspection:
     INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
     WHERE s.name = @p1 AND t.name = @p2 AND i.index_id <= 1
 
-ddl:
-  # Conditional one-batch form: CREATE SCHEMA must be alone in its
-  # batch, so it runs through EXEC.
-  create_schema: |
-    IF SCHEMA_ID(N'{schema_raw}') IS NULL
-    BEGIN
-      DECLARE @sql nvarchar(300) = N'CREATE SCHEMA ' + QUOTENAME(N'{schema_raw}');
-      EXEC(@sql)
-    END
-  drop_table_stmts:
-    - "DROP TABLE IF EXISTS {table}"
-  truncate_stmts:
-    - "TRUNCATE TABLE {table}"
-  add_column: "ALTER TABLE {table} ADD {column} {type} NULL"
-  create_primary_key: ""         # PK is created with the table
-  can_drop_not_null: true
-  drop_not_null: "ALTER TABLE {table} ALTER COLUMN {column} {type} NULL"
-  can_alter_column_type: true
-  alter_column_type: "ALTER TABLE {table} ALTER COLUMN {column} {type} {nullability}"
-
 queries:
   # min_max_even: MIN/MAX index seeks + even PK ranges — NTILE over a
   # 10M+ row table is a full scan. The NTILE query remains for the
@@ -337,10 +317,3 @@ context:
 
 ai:
   prompt_augmentation: ""
-  drop_table_prompt_augmentation: |
-
-    SQL Server-specific requirements:
-    - SQL Server does not support CASCADE DROP
-    - Use DROP TABLE IF EXISTS with schema-qualified table name
-    - Quote identifiers with square brackets []
-    - Foreign key constraints must be dropped separately before the table can be dropped

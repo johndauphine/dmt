@@ -2,6 +2,7 @@ package smtddl
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -175,5 +176,167 @@ func TestRenderSideObjectsAllowUnrelatedRawSourceTypeContext(t *testing.T) {
 	}
 	if !strings.Contains(checkSQL, `CHECK ("status" IS NOT NULL)`) {
 		t.Fatalf("check SQL = %q, want SMT-rendered predicate", checkSQL)
+	}
+}
+
+func TestRenderEvolutionReturnsVerbatimPublicBatches(t *testing.T) {
+	req := Request{
+		SourceDialect: "postgres",
+		TargetDialect: "postgres",
+		TargetSchema:  "public",
+		Table: Table{
+			Name: "events",
+			Columns: []Column{
+				{Name: "id", DataType: "int8", IsNullable: false},
+				{Name: "note", DataType: "varchar", MaxLength: 80, IsNullable: true},
+			},
+		},
+	}
+	column := Column{Name: "note", DataType: "varchar", MaxLength: 160, IsNullable: true}
+	renderer, err := schema.NewRenderer(schema.Options{
+		SourceDialect:     req.SourceDialect,
+		TargetDialect:     req.TargetDialect,
+		Schema:            req.TargetSchema,
+		UnknownTypePolicy: schema.UnknownTypeFail,
+	})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	publicTable := schema.TableRef{
+		Name: req.Table.Name,
+		Columns: []schema.Column{
+			{Name: "id", DataType: "int8", IsNullable: false},
+			{Name: "note", DataType: "varchar", MaxLength: 80, IsNullable: true},
+		},
+	}
+	publicColumn := schema.Column{Name: "note", DataType: "varchar", MaxLength: 160, IsNullable: true}
+
+	tests := []struct {
+		name string
+		got  func() (schema.Batch, error)
+		want func() (schema.Batch, error)
+	}{
+		{
+			name: "add column",
+			got:  func() (schema.Batch, error) { return RenderAddColumn(req, column) },
+			want: func() (schema.Batch, error) { return renderer.AddColumn(publicTable, publicColumn) },
+		},
+		{
+			name: "alter nullability",
+			got:  func() (schema.Batch, error) { return RenderAlterColumnNullability(req, column) },
+			want: func() (schema.Batch, error) { return renderer.AlterColumnNullability(publicTable, publicColumn) },
+		},
+		{
+			name: "alter type",
+			got:  func() (schema.Batch, error) { return RenderAlterColumnType(req, column) },
+			want: func() (schema.Batch, error) { return renderer.AlterColumnType(publicTable, publicColumn) },
+		},
+		{
+			name: "drop table cascade",
+			got:  func() (schema.Batch, error) { return RenderDropTable(req, true) },
+			want: func() (schema.Batch, error) {
+				return renderer.DropTable(publicTable, schema.DropOptions{Cascade: true})
+			},
+		},
+		{
+			name: "truncate table cascade",
+			got:  func() (schema.Batch, error) { return RenderTruncateTable(req, true) },
+			want: func() (schema.Batch, error) {
+				return renderer.TruncateTable(publicTable, schema.TruncateOptions{Cascade: true})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.got()
+			if err != nil {
+				t.Fatalf("DMT wrapper: %v", err)
+			}
+			want, err := tt.want()
+			if err != nil {
+				t.Fatalf("SMT public renderer: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("DMT changed SMT batch:\n got: %+v\nwant: %+v", got, want)
+			}
+			for _, statement := range got.Statements {
+				if strings.HasSuffix(statement.SQL, ";") {
+					t.Fatalf("DMT added a SQL terminator: %q", statement.SQL)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderEvolutionProjectsMySQLFullDataTypeAndDefault(t *testing.T) {
+	req := Request{
+		SourceDialect: "mysql",
+		TargetDialect: "mysql",
+		TargetSchema:  "crm",
+		Table:         Table{Name: "events"},
+	}
+	enumColumn := Column{
+		Name:         "status",
+		DataType:     "enum",
+		FullDataType: "enum('new','owner''s')",
+		IsNullable:   true,
+	}
+	add, err := RenderAddColumn(req, enumColumn)
+	if err != nil {
+		t.Fatalf("RenderAddColumn enum: %v", err)
+	}
+	if got := add.Statements[0].SQL; got != "ALTER TABLE `crm`.`events` ADD COLUMN `status` ENUM('new','owner''s')" {
+		t.Fatalf("MySQL enum add SQL = %q", got)
+	}
+
+	unsigned := Column{
+		Name:              "flags",
+		DataType:          "int",
+		FullDataType:      "int(10) unsigned",
+		IsNullable:        true,
+		DefaultExpression: "0",
+		HasDefault:        true,
+	}
+	alter, err := RenderAlterColumnType(req, unsigned)
+	if err != nil {
+		t.Fatalf("RenderAlterColumnType unsigned: %v", err)
+	}
+	if got := alter.Statements[0].SQL; got != "ALTER TABLE `crm`.`events` MODIFY COLUMN `flags` INT UNSIGNED DEFAULT 0" {
+		t.Fatalf("MySQL alter SQL = %q", got)
+	}
+}
+
+func TestRenderEvolutionProjectsMySQLTemporalPrecision(t *testing.T) {
+	req := Request{
+		SourceDialect: "mysql",
+		TargetDialect: "mysql",
+		TargetSchema:  "crm",
+		Table:         Table{Name: "events"},
+	}
+	for _, tc := range []struct {
+		name     string
+		dataType string
+		fullType string
+		wantType string
+	}{
+		{name: "fsp0", dataType: "time", fullType: "time", wantType: "TIME"},
+		{name: "fsp3", dataType: "datetime", fullType: "datetime(3)", wantType: "DATETIME(3)"},
+		{name: "fsp6", dataType: "timestamp", fullType: "timestamp(6)", wantType: "TIMESTAMP(6)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batch, err := RenderAddColumn(req, Column{
+				Name:         tc.name,
+				DataType:     tc.dataType,
+				FullDataType: tc.fullType,
+				IsNullable:   true,
+			})
+			if err != nil {
+				t.Fatalf("RenderAddColumn: %v", err)
+			}
+			want := "ALTER TABLE `crm`.`events` ADD COLUMN `" + tc.name + "` " + tc.wantType
+			if got := batch.Statements[0].SQL; got != want {
+				t.Fatalf("MySQL temporal add SQL = %q, want %q", got, want)
+			}
+		})
 	}
 }

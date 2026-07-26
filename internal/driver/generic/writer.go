@@ -15,13 +15,11 @@ import (
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/smtddl"
 	"github.com/johndauphine/dmt/internal/stats"
-	typeddl "github.com/johndauphine/dmt/internal/typemap/ddl"
 )
 
-// Writer implements driver.Writer from a catalog: SMT owns the create-path
-// SQL, catalog templates remain only for later DDL milestones, catalog queries
-// provide existence checks, and named strategies own bulk/upsert/sequence
-// behavior. Optional capabilities (Upserter,
+// Writer implements driver.Writer from a catalog: SMT owns create and schema-
+// evolution SQL, catalog queries provide existence checks, and named
+// strategies own bulk/upsert/sequence behavior. Optional capabilities (Upserter,
 // SequenceResetter) are exposed by wrapper types so the type-assertion
 // surface matches the catalog's capability declarations exactly.
 type Writer struct {
@@ -41,9 +39,7 @@ type Writer struct {
 	pgState *pgBulkState
 	myState *mysqlInfileState
 
-	typeMapper         driver.TypeMapper
-	finalizationMapper driver.FinalizationDDLMapper
-	dbContext          *driver.DatabaseContext
+	dbContext *driver.DatabaseContext
 }
 
 // writerUpsertSeq is the {Upserter, SequenceResetter} capability combo
@@ -116,15 +112,10 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 		db.Close()
 		return nil, fmt.Errorf("TypeMapper is required")
 	}
-	// Preserve the existing writer-option contract even though SMT now owns the
-	// create statement itself. TableTypeMapper remains part of DMT's public
-	// internal wiring surface for telemetry and later DDL milestones.
-	if _, ok := opts.TypeMapper.(driver.TableTypeMapper); !ok {
-		db.Close()
-		return nil, fmt.Errorf("TypeMapper must implement TableTypeMapper")
-	}
+	// Preserve mapper initialization and telemetry for column-level mapping.
+	// Target-schema DDL is bound directly to SMT below and never dispatched
+	// through the supplied mapper.
 	driver.LogTypeMapperInit(opts.TypeMapper)
-	finalizationMapper, _ := opts.TypeMapper.(driver.FinalizationDDLMapper)
 
 	var version string
 	_ = db.QueryRow(cat.Context.VersionQuery).Scan(&version)
@@ -145,9 +136,6 @@ func NewWriter(cat *Catalog, cfg *dbconfig.TargetConfig, maxConns int, opts driv
 		sourceType:       opts.SourceType,
 		cat:              cat,
 		dialect:          dialect,
-
-		typeMapper:         opts.TypeMapper,
-		finalizationMapper: finalizationMapper,
 	}
 	w.dbContext = &driver.DatabaseContext{
 		Version:                  cat.Context.VersionPrefix + version,
@@ -228,7 +216,7 @@ func (w *Writer) PoolStats() stats.PoolStats {
 // policy for ClickHouse, not a SQL template.
 func (w *Writer) CreateSchema(ctx context.Context, targetSchema string) error {
 	schemaName := targetSchema
-	if schemaName == "" && w.cat.DDL.CreateSchemaDefaultsToDatabase {
+	if schemaName == "" && w.cat.Defaults.CreateSchemaDefaultsToDatabase {
 		// Schema-as-database engines (ClickHouse) accept configs that select
 		// only target.database. SMT still owns the resulting CREATE DATABASE SQL.
 		schemaName = w.config.Database
@@ -278,7 +266,8 @@ func (w *Writer) CreateTableWithOptions(ctx context.Context, t *driver.Table, ta
 	return nil
 }
 
-// AddColumn adds a nullable column, idempotently.
+// AddColumn keeps DMT's idempotent existence probe and migration-safe
+// nullable policy, then executes SMT's evolution batch unchanged.
 func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
 	if t == nil {
 		return errors.New("table is required")
@@ -295,18 +284,19 @@ func (w *Writer) AddColumn(ctx context.Context, t *driver.Table, column *driver.
 		return nil
 	}
 
-	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, w.cat.Name, *column)
+	safeColumn := w.smtEvolutionColumn(*column)
+	safeColumn.IsNullable = true
+	safeColumn.IsIdentity = false
+	safeColumn.DefaultExpression = ""
+	safeColumn.HasDefault = false
+	batch, err := smtddl.RenderAddColumn(w.smtEvolutionRequest(t, targetSchema), safeColumn)
 	if err != nil {
-		return err
+		return fmt.Errorf("planning nullable column add with SMT for %s.%s: %w", t.Name, column.Name, err)
 	}
-	ddl := strings.NewReplacer(
-		"{table}", w.dialect.QualifyTable(targetSchema, w.ident(t.Name)),
-		"{column}", w.dialect.QuoteIdentifier(w.ident(column.Name)),
-		"{type}", mappedType,
-	).Replace(w.cat.DDL.AddColumn)
-	logging.Debug("Adding %s column with DDL: %s", w.cat.Name, ddl)
-	_, err = w.db.ExecContext(ctx, ddl)
-	return err
+	if err := w.executeSMTBatch(ctx, batch); err != nil {
+		return fmt.Errorf("adding nullable column %s.%s: %w", t.Name, column.Name, err)
+	}
+	return nil
 }
 
 // introArgs mirrors the reader: schema-keyed engines bind the schema
@@ -318,6 +308,10 @@ func (w *Writer) introArgs(schema string, rest ...any) []any {
 	if schema == "" {
 		schema = w.config.Database
 	}
+	// Keep catalog probes on the same physical schema identity as CREATE.
+	// Unlike SMT rendering, do not suppress default schemas here: catalog
+	// queries need the concrete public/dbo name.
+	schema = w.smtEvolutionIdentifier(schema)
 	return append([]any{schema}, rest...)
 }
 
@@ -330,8 +324,9 @@ func (w *Writer) columnExists(ctx context.Context, schema, table, column string)
 	return err == nil, err
 }
 
-// DropColumnNotNull returns the uniform rebuild-required error when the
-// catalog declares the engine can't relax NOT NULL in place.
+// DropColumnNotNull maps DMT's relax-only operation to SMT's general
+// nullability evolution API. Unsupported engines retain SMT's typed
+// rebuild-required policy.
 func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
 	if t == nil {
 		return errors.New("table is required")
@@ -339,14 +334,19 @@ func (w *Writer) DropColumnNotNull(ctx context.Context, t *driver.Table, column 
 	if column == nil {
 		return errors.New("column is required")
 	}
-	if !w.cat.DDL.CanDropNotNull {
-		return fmt.Errorf("%s cannot relax NOT NULL for %s.%s without rebuilding the table",
-			w.cat.Name, t.Name, column.Name)
+	nullableColumn := w.smtEvolutionColumn(*column)
+	nullableColumn.IsNullable = true
+	batch, err := smtddl.RenderAlterColumnNullability(w.smtEvolutionRequest(t, targetSchema), nullableColumn)
+	if err != nil {
+		return fmt.Errorf("planning column nullability relaxation with SMT for %s.%s: %w", t.Name, column.Name, err)
 	}
-	return w.alterColumn(ctx, w.cat.DDL.DropNotNull, t, column, targetSchema, "NULL")
+	if err := w.executeSMTBatch(ctx, batch); err != nil {
+		return fmt.Errorf("relaxing column nullability for %s.%s: %w", t.Name, column.Name, err)
+	}
+	return nil
 }
 
-// AlterColumnType — same shape as DropColumnNotNull.
+// AlterColumnType delegates widening SQL and capability policy to SMT.
 func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *driver.Column, targetSchema string) error {
 	if t == nil {
 		return errors.New("table is required")
@@ -354,109 +354,45 @@ func (w *Writer) AlterColumnType(ctx context.Context, t *driver.Table, column *d
 	if column == nil {
 		return errors.New("column is required")
 	}
-	if !w.cat.DDL.CanAlterColumnType {
-		return fmt.Errorf("%s cannot alter type for %s.%s without rebuilding the table",
-			w.cat.Name, t.Name, column.Name)
-	}
-	nullability := "NOT NULL"
-	if column.IsNullable {
-		nullability = "NULL"
-	}
-	return w.alterColumn(ctx, w.cat.DDL.AlterColumnType, t, column, targetSchema, nullability)
-}
-
-// alterColumn renders an in-place MODIFY/ALTER COLUMN template with
-// the mapped type and a translated default clause (the hand-written
-// mysql writer's shape, generalized).
-func (w *Writer) alterColumn(ctx context.Context, tmpl string, t *driver.Table, column *driver.Column, targetSchema, nullability string) error {
-	mappedType, err := driver.MapColumnType(w.typeMapper, w.sourceType, w.cat.Name, *column)
+	batch, err := smtddl.RenderAlterColumnType(
+		w.smtEvolutionRequest(t, targetSchema),
+		w.smtEvolutionColumn(*column),
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("planning column type change with SMT for %s.%s: %w", t.Name, column.Name, err)
 	}
-	defaultClause := ""
-	if column.DefaultValue != "" {
-		isBool := false
-		switch strings.ToLower(column.DataType) {
-		case "bool", "boolean", "bit":
-			isBool = true
-		}
-		expr := typeddl.FormatDDLDefault(column.DefaultValue,
-			driver.Canonicalize(w.sourceType), w.cat.Name, isBool)
-		if expr != "" {
-			defaultClause = " " + typeddl.FormatDefaultClause(expr, mappedType, w.cat.Name)
-		}
+	if err := w.executeSMTBatch(ctx, batch); err != nil {
+		return fmt.Errorf("altering column type for %s.%s: %w", t.Name, column.Name, err)
 	}
-	stmt := strings.NewReplacer(
-		"{table}", w.dialect.QualifyTable(targetSchema, w.ident(t.Name)),
-		"{column}", w.dialect.QuoteIdentifier(w.ident(column.Name)),
-		"{type}", mappedType,
-		"{nullability}", nullability,
-		"{default_clause}", defaultClause,
-	).Replace(tmpl)
-	logging.Debug("Altering %s column with DDL: %s", w.cat.Name, stmt)
-	_, err = w.db.ExecContext(ctx, stmt)
-	return err
+	return nil
 }
 
 func (w *Writer) DropTable(ctx context.Context, schema, table string) error {
-	qualified := w.dialect.QualifyTable(schema, w.ident(table))
-	if err := w.execDDLStatementList(ctx, w.cat.DDL.DropTableStmts, qualified); err != nil {
+	batch, err := smtddl.RenderDropTable(
+		w.smtEvolutionRequest(&driver.Table{Name: table}, schema),
+		w.cat.Name == "postgres",
+	)
+	if err != nil {
+		return fmt.Errorf("planning table drop with SMT for %s: %w", table, err)
+	}
+	if err := w.executeSMTBatch(ctx, batch); err != nil {
 		return fmt.Errorf("dropping %s: %w", table, err)
 	}
 	return nil
 }
 
 func (w *Writer) TruncateTable(ctx context.Context, schema, table string) error {
-	qualified := w.dialect.QualifyTable(schema, w.ident(table))
-	if err := w.execDDLStatementList(ctx, w.cat.DDL.TruncateStmts, qualified); err != nil {
-		return err
-	}
-	if w.cat.DDL.TruncateCleanup != "" {
-		// Best-effort, matching the hand-written writers (e.g. the
-		// sqlite_sequence row may not exist yet).
-		_, _ = w.db.ExecContext(ctx, w.cat.DDL.TruncateCleanup, table)
-	}
-	return nil
-}
-
-func (w *Writer) execDDLStatementList(ctx context.Context, templates []string, qualifiedTable string) error {
-	if len(templates) == 0 {
-		return nil
-	}
-	if len(templates) == 1 {
-		stmt := strings.ReplaceAll(templates[0], "{table}", qualifiedTable)
-		_, err := w.db.ExecContext(ctx, stmt)
-		return err
-	}
-
-	conn, err := w.db.Conn(ctx)
+	batch, err := smtddl.RenderTruncateTable(
+		w.smtEvolutionRequest(&driver.Table{Name: table}, schema),
+		w.cat.Name == "postgres",
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("planning table truncate with SMT for %s: %w", table, err)
 	}
-	defer conn.Close()
-
-	fkChecksDisabled := false
-	for _, tmpl := range templates {
-		stmt := strings.ReplaceAll(tmpl, "{table}", qualifiedTable)
-		if isMySQLDisableFKChecks(w.cat.Name, stmt) && !fkChecksDisabled {
-			fkChecksDisabled = true
-			defer func() {
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if _, err := conn.ExecContext(cleanupCtx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
-					logging.Warn("failed to restore mysql FOREIGN_KEY_CHECKS after DDL: %v", err)
-				}
-			}()
-		}
-		if _, err := conn.ExecContext(ctx, stmt); err != nil {
-			return err
-		}
+	if err := w.executeSMTBatch(ctx, batch); err != nil {
+		return fmt.Errorf("truncating %s: %w", table, err)
 	}
 	return nil
-}
-
-func isMySQLDisableFKChecks(catalogName, stmt string) bool {
-	return catalogName == "mysql" && strings.EqualFold(strings.TrimSpace(stmt), "SET FOREIGN_KEY_CHECKS = 0")
 }
 
 func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, error) {
@@ -469,7 +405,7 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 }
 
 // CreatePrimaryKey preserves DMT's idempotency check after a create plan, then
-// executes SMT v1.3.0's standalone primary-key statement unchanged when a
+// executes SMT's standalone primary-key statement unchanged when a
 // resumed/evolved target table still needs its key.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
 	if len(t.PrimaryKey) == 0 {
@@ -543,13 +479,10 @@ func (w *Writer) GetRowCountExact(ctx context.Context, schema, table string, _ b
 }
 
 func (w *Writer) CreateIndex(ctx context.Context, t *driver.Table, idx *driver.Index, targetSchema string) error {
-	if w.finalizationMapper == nil {
-		return errors.New("finalization mapper not available for index creation")
-	}
 	if w.cat.Quoting.SchemaIgnored {
 		targetSchema = ""
 	}
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+	ddl, err := driver.PlanFinalizationDDL(driver.FinalizationDDLRequest{
 		Type:          driver.DDLTypeIndex,
 		SourceDBType:  w.sourceType,
 		TargetDBType:  w.cat.Name,
@@ -601,16 +534,13 @@ func (w *Writer) bulkEnv() bulkEnv {
 // finalizationDDL generates and executes constraint DDL through the
 // type-mapper engine — the same path CreateIndex uses.
 func (w *Writer) finalizationDDL(ctx context.Context, req driver.FinalizationDDLRequest, kind, name string) error {
-	if w.finalizationMapper == nil {
-		return fmt.Errorf("finalization mapper not available for %s creation", kind)
-	}
 	if w.cat.Quoting.SchemaIgnored {
 		req.TargetSchema = ""
 	}
 	req.SourceDBType = w.sourceType
 	req.TargetDBType = w.cat.Name
 	req.TargetContext = w.dbContext
-	ddl, err := w.finalizationMapper.GenerateFinalizationDDL(ctx, req)
+	ddl, err := driver.PlanFinalizationDDL(req)
 	if err != nil {
 		return fmt.Errorf("%s DDL generation failed for %s.%s: %w", kind, req.Table.Name, name, err)
 	}

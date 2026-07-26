@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -371,5 +372,106 @@ func TestSMTDDLPostgresMatchesDMTIdentifierContract(t *testing.T) {
 	}
 	if want := `ON "` + wantSchema + `"."` + wantTable + `" ("` + wantColumn + `")`; !strings.Contains(finalized, want) {
 		t.Errorf("finalization DDL does not target the CREATE TABLE identity %q:\n%s", want, finalized)
+	}
+}
+
+func TestSMTDDLMySQLFullDataTypeUsesStructuredMetadata(t *testing.T) {
+	table := &Table{
+		Name: "mysql_types",
+		Columns: []Column{
+			{Name: "label", DataType: "varchar", FullDataType: "varchar(100)", MaxLength: 100},
+			{Name: "flags", DataType: "int", FullDataType: "int(10) unsigned zerofill"},
+			{Name: "enabled", DataType: "tinyint", FullDataType: "tinyint(1) unsigned"},
+			{Name: "status", DataType: "enum", FullDataType: "enum('owner''s','a,b')", MaxLength: 7},
+			{Name: "roles", DataType: "set", FullDataType: "set('admin','read\\'only')", MaxLength: 15},
+			{Name: "mask", DataType: "bit", FullDataType: "bit(8)", Precision: 8},
+		},
+	}
+	req := TableDDLRequest{
+		SourceDBType: typemap.DialectMySQL,
+		TargetDBType: typemap.DialectMySQL,
+		SourceTable:  table,
+	}
+
+	smtReq := smtDDLRequest(req)
+	columns := smtReq.Table.Columns
+	if got := columns[0].DataType; got != "varchar" {
+		t.Fatalf("varchar SMT data type = %q, want base catalog type", got)
+	}
+	if got := columns[0].MaxLength; got != 100 {
+		t.Fatalf("varchar SMT max length = %d, want 100", got)
+	}
+	if !columns[1].IsUnsigned {
+		t.Fatal("unsigned MySQL modifier was not projected to SMT metadata")
+	}
+	if got := columns[2].DisplayWidth; got != 1 {
+		t.Fatalf("tinyint SMT display width = %d, want boolean width 1", got)
+	}
+	for i, want := range [][]string{{"owner's", "a,b"}, {"admin", "read'only"}} {
+		got := columns[i+3].EnumValues
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s SMT members = %#v, want %#v", columns[i+3].DataType, got, want)
+		}
+	}
+
+	for _, tc := range []struct {
+		target string
+		want   []string
+	}{
+		{target: typemap.DialectPostgres, want: []string{`"label" character varying(100)`, `"flags" bigint`, `"enabled" boolean`, `"mask" bit(8)`}},
+		{target: typemap.DialectMSSQL, want: []string{`[label] NVARCHAR(100)`, `[flags] BIGINT`, `[enabled] BIT`, `[mask] VARBINARY(1)`}},
+		{target: typemap.DialectMySQL, want: []string{"`label` VARCHAR(100)", "`flags` INT UNSIGNED", "`enabled` TINYINT(1)", "`status` ENUM('owner''s','a,b')", "`roles` SET('admin','read''only')", "`mask` BIT(8)"}},
+		{target: typemap.DialectSQLite, want: []string{`"label" VARCHAR(100)`, `"flags" INTEGER`, `"enabled" BOOLEAN`, `"mask" BIT(8)`}},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			renderReq := req
+			renderReq.TargetDBType = tc.target
+			got, err := PlanCreateTable(renderReq)
+			if err != nil {
+				t.Fatalf("PlanCreateTable MySQL FullDataType to %s: %v", tc.target, err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("CREATE TABLE is missing %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestSMTDDLMySQLTemporalPrecisionCreate(t *testing.T) {
+	table := &Table{
+		Name: "temporal_types",
+		Columns: []Column{
+			{Name: "fsp0", DataType: "time", FullDataType: "time"},
+			{Name: "fsp3", DataType: "datetime", FullDataType: "datetime(3)"},
+			{Name: "fsp6", DataType: "timestamp", FullDataType: "timestamp(6)"},
+		},
+	}
+	req := TableDDLRequest{
+		SourceDBType: typemap.DialectMySQL,
+		TargetDBType: typemap.DialectMySQL,
+		SourceTable:  table,
+	}
+
+	for index, want := range []int{0, 3, 6} {
+		got := smtDDLRequest(req).Table.Columns[index].DatetimePrecision
+		if got == nil || *got != want {
+			t.Fatalf("column %d temporal precision = %v, want %d", index, got, want)
+		}
+	}
+
+	ddl, err := PlanCreateTable(req)
+	if err != nil {
+		t.Fatalf("PlanCreateTable: %v", err)
+	}
+	for _, want := range []string{
+		"`fsp0` TIME",
+		"`fsp3` DATETIME(3)",
+		"`fsp6` TIMESTAMP(6)",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("CREATE TABLE is missing %q:\n%s", want, ddl)
+		}
 	}
 }

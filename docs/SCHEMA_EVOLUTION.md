@@ -100,8 +100,9 @@ capacity. Narrowed and lossy type changes remain hard errors under `auto`; set
 
 Type widening is not auto-applied when the same column also has nullability or
 default drift, when the table has primary-key drift, or when the column is an
-identity or primary-key column. DMT uses the existing source-to-target type
-mapper to choose the new target type.
+identity or primary-key column. DMT passes the discovered source metadata to
+SMT v1.4.0's public evolution renderer, which chooses the target type and
+returns the ordered ALTER batch.
 
 ## Guardrails
 

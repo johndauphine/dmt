@@ -11,15 +11,31 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- DMT now delegates deterministic secondary-index, standalone-primary-key,
-  foreign-key, and check-constraint SQL to SMT v1.3.0's public schema API.
-  DMT retains source discovery, dependency scheduling, idempotency, execution,
-  and migration orchestration; unsupported dialect features return SMT's typed
-  policy errors rather than falling through to local or AI DDL.
+- DMT now pins SMT v1.4.0 and delegates every production target-schema DDL
+  artifact it currently emits to SMT's public module: schemas, tables,
+  columns, inline and standalone primary keys, secondary indexes, foreign
+  keys, check constraints, column add/type/nullability evolution, table drops,
+  and truncation. DMT retains discovery, policy, dependency scheduling,
+  idempotency, execution, and migration orchestration.
 
-- DMT's schema, table, column, and inline-primary-key create path now uses
-  SMT's public `PlanCreate` output directly, with typed unsupported behavior in
-  place of local or AI-generated CREATE SQL (#739).
+- DMT executes SMT evolution batches verbatim and in order, including
+  same-connection affinity, bounded failure cleanup, and advisory
+  best-effort statements. Unsupported dialect features return SMT's typed
+  policy errors rather than falling through to local or AI-generated DDL.
+
+### Fixed
+
+- MySQL source metadata now passes the base `DATA_TYPE` plus structured
+  `COLUMN_TYPE` details to SMT. Lengths, unsigned/zerofill semantics,
+  `TINYINT(1)`, `BIT(N)`, temporal fractional-second precision, and escaped
+  `ENUM`/`SET` members no longer degrade into raw types such as `varchar(100)`
+  or silently change `TIME`/`DATETIME` precision during cross-engine DDL.
+
+### Removed
+
+- Removed generic-catalog target DDL templates and the obsolete local/AI
+  drop-table mapper. The retained local SQL is operational or internal
+  state-management SQL, not migrated target-schema rendering.
 
 ## [5.5.0] - 2026-07-25
 

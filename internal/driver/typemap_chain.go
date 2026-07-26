@@ -5,14 +5,9 @@
 //   - column-level: source UDT name doesn't appear in the canonical
 //     catalog (KindRaw fallthrough — vendor-specific types like PG
 //     inet/cidr/macaddr, MSSQL hierarchyid)
-//   - non-adopted finalization-level paths that return ErrUnsupportedDDL
 //
-// The chain implements all four type-mapper interfaces by satisfying
-// each method with a "try deterministic, fall back to AI" decision.
-// The create path is deliberately excluded from AI fallback. SMT owns
-// CREATE TABLE, column, and primary-key rendering; unsupported create inputs
-// must return SMT's explicit policy rather than allowing a second renderer to
-// synthesize different SQL.
+// DDL methods never fall back to AI. SMT owns target-schema rendering, and
+// unsupported inputs return its explicit typed policy.
 //
 // Part of #170 (AI-second epic #167).
 
@@ -20,7 +15,6 @@ package driver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/johndauphine/dmt/internal/logging"
@@ -158,43 +152,18 @@ func (c *FallbackChain) SupportedTargets() []string {
 // GenerateTableDDL implements TableTypeMapper through the SMT create boundary.
 // It intentionally never delegates table DDL to the AI fallback: callers must
 // receive SMT's deterministic SQL or its public unsupported-feature policy.
-// Column-level MapType retains its established fallback behavior. SMT v1.3.0
-// owns all adopted side-object rendering, so indexes, foreign keys, and checks
-// never fall through to a second local or AI DDL renderer.
+// Column-level MapType retains its established fallback behavior. SMT's public
+// API owns all adopted side-object rendering, so indexes, foreign keys, and
+// checks never fall through to a second local or AI DDL renderer.
 func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error) {
 	return c.primary.GenerateTableDDL(ctx, req)
 }
 
-// GenerateFinalizationDDL keeps adopted side objects on the SMT boundary. Any
-// unsupported capability is surfaced as SMT's typed policy error; it must not
-// be turned into AI-generated SQL. Later, non-adopted finalization artifacts
-// retain the legacy fallback behavior until their own SMT milestones.
+// GenerateFinalizationDDL keeps side objects on the SMT boundary. Any
+// unsupported capability is surfaced as SMT's typed policy error and is never
+// turned into AI-generated SQL.
 func (c *FallbackChain) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
-	sql, err := c.primary.GenerateFinalizationDDL(ctx, req)
-	if err == nil {
-		return sql, nil
-	}
-	switch req.Type {
-	case DDLTypeIndex, DDLTypeForeignKey, DDLTypeCheckConstraint:
-		return "", err
-	}
-	if !errors.Is(err, ErrUnsupportedDDL) || c.fallback == nil {
-		return "", err
-	}
-	finalMapper, ok := c.fallback.(FinalizationDDLMapper)
-	if !ok {
-		return "", fmt.Errorf("deterministic flagged unsupported DDL (%w) and AI fallback doesn't implement FinalizationDDLMapper", err)
-	}
-	logging.Debug("typemap chain: routing %s DDL to AI fallback (deterministic flagged unsupported)", req.Type)
-	observability.RecordFallback(observability.SurfaceDDL, "finalization:"+string(req.Type))
-	return finalMapper.GenerateFinalizationDDL(ctx, req)
-}
-
-// GenerateDropTableDDL implements TableDropDDLMapper. Always routed
-// through the deterministic path — DROP TABLE is dialect-uniform and
-// has no vendor-specific surface that benefits from AI.
-func (c *FallbackChain) GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error) {
-	return c.primary.GenerateDropTableDDL(ctx, req)
+	return c.primary.GenerateFinalizationDDL(ctx, req)
 }
 
 // handleUnmapped implements the unmapped_type_action knob for column-

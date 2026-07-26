@@ -206,10 +206,10 @@ func TestMySQLFromCanonical_Approximate(t *testing.T) {
 }
 
 func TestMySQLEnumValues_Empty(t *testing.T) {
-	if got := parseMySQLEnumValues(""); got != nil {
+	if got := ParseMySQLEnumSetValues(""); got != nil {
 		t.Errorf("empty input → nil, got %v", got)
 	}
-	if got := parseMySQLEnumValues("not_an_enum"); got != nil {
+	if got := ParseMySQLEnumSetValues("not_an_enum"); got != nil {
 		t.Errorf("no parens → nil, got %v", got)
 	}
 }

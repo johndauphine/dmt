@@ -5,14 +5,15 @@ package generic
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/dbconfig"
 	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/smt/schema"
 )
 
 // memorySourceCfg builds a SourceConfig pointed at an in-memory SQLite DB
@@ -273,6 +274,52 @@ func TestWriter_AddColumn(t *testing.T) {
 	}
 }
 
+func TestWriter_TruncateTableExecutesSMTSequenceCleanup(t *testing.T) {
+	path := memoryDBPath(t, "truncate_sequence")
+	w := newTestWriter(t, path)
+	defer w.Close()
+	ctx := context.Background()
+
+	table := &driver.Table{
+		Name: "events",
+		Columns: []driver.Column{
+			{Name: "id", DataType: "integer", IsNullable: false, IsIdentity: true, OrdinalPos: 1},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	if err := w.CreateTable(ctx, table, ""); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if err := w.WriteBatch(ctx, driver.WriteBatchOptions{
+		Table: "events", Columns: []string{"id"}, Rows: [][]any{{int64(41)}},
+	}); err != nil {
+		t.Fatalf("WriteBatch: %v", err)
+	}
+	if err := w.TruncateTable(ctx, "", "events"); err != nil {
+		t.Fatalf("TruncateTable: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var rows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM "events"`).Scan(&rows); err != nil {
+		t.Fatalf("row count: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("rows after truncate = %d, want 0", rows)
+	}
+	var sequenceRows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'events'`).Scan(&sequenceRows); err != nil {
+		t.Fatalf("sequence count: %v", err)
+	}
+	if sequenceRows != 0 {
+		t.Fatalf("sqlite_sequence rows after truncate = %d, want 0", sequenceRows)
+	}
+}
+
 func TestWriter_DropColumnNotNullUnsupported(t *testing.T) {
 	w := &Writer{cat: testCatalog(t)}
 	err := w.DropColumnNotNull(
@@ -284,8 +331,10 @@ func TestWriter_DropColumnNotNullUnsupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("DropColumnNotNull returned nil error")
 	}
-	if !strings.Contains(err.Error(), "cannot relax NOT NULL") {
-		t.Fatalf("error = %q, want unsupported message", err.Error())
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Dialect != "sqlite" ||
+		unsupported.Feature != "altering column nullability without rebuilding the table" {
+		t.Fatalf("error = %T %v, want SMT sqlite UnsupportedFeatureError", err, err)
 	}
 }
 
@@ -300,8 +349,10 @@ func TestWriter_AlterColumnTypeUnsupported(t *testing.T) {
 	if err == nil {
 		t.Fatal("AlterColumnType returned nil error")
 	}
-	if !strings.Contains(err.Error(), "cannot alter type") {
-		t.Fatalf("error = %q, want unsupported message", err.Error())
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Dialect != "sqlite" ||
+		unsupported.Feature != "altering column types without rebuilding the table" {
+		t.Fatalf("error = %T %v, want SMT sqlite UnsupportedFeatureError", err, err)
 	}
 }
 

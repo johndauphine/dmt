@@ -92,7 +92,7 @@ func mysqlToCanonical(col ColumnInfo) CanonicalType {
 		// Parse failure (malformed data_type, missing parens) → fall
 		// back to Raw passthrough so mysqlFromCanonical doesn't end up
 		// emitting an invalid bare ENUM() (Copilot review on PR #185).
-		values := parseMySQLEnumValues(col.DataType)
+		values := ParseMySQLEnumSetValues(col.DataType)
 		if len(values) == 0 {
 			return CanonicalType{Kind: KindRaw, TypeName: col.DataType}
 		}
@@ -300,17 +300,16 @@ func mysqlBlobTierFor(maxBytes *int64) string {
 	}
 }
 
-// parseMySQLEnumValues extracts the enum value list from a column_type
-// string of the form "enum('a','b','c')". Handles single-quote escaping
-// byte by byte to match UVG's parser — MySQL doubles a single quote
-// inside an enum value:
+// ParseMySQLEnumSetValues extracts the member list from a MySQL COLUMN_TYPE
+// declaration such as "enum('a','b')" or "set('a','b')". It handles both
+// doubled-quote and backslash escaping.
 //
 //	enum('it''s')
 //
 // The example lives in a code block because Go 1.26 gofmt applies
 // TeX-style quote substitution to doc-comment prose, silently turning
 // a doubled straight quote into a typographic one.
-func parseMySQLEnumValues(columnType string) []string {
+func ParseMySQLEnumSetValues(columnType string) []string {
 	openIdx := strings.Index(columnType, "(")
 	closeIdx := strings.LastIndex(columnType, ")")
 	if openIdx < 0 || closeIdx < 0 || openIdx+1 >= closeIdx {
@@ -341,6 +340,14 @@ func parseMySQLEnumValues(columnType string) []string {
 			inQuote = false
 			values = append(values, current.String())
 			current.Reset()
+			continue
+		}
+		if ch == '\\' {
+			if i+1 >= len(inner) {
+				return nil
+			}
+			i++
+			current.WriteByte(inner[i])
 			continue
 		}
 		current.WriteByte(ch)

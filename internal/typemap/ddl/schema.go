@@ -7,8 +7,7 @@
 // this file plus typemap.ColumnInfo for per-column metadata. Outputs
 // are SQL strings, with no I/O, no driver dependency, and no shared
 // state. The dmt-side adapter (#169c) wraps these functions to satisfy
-// internal/driver's TypeMapper / TableTypeMapper / FinalizationDDLMapper
-// / TableDropDDLMapper interfaces.
+// internal/driver's historical type and DDL-mapper interfaces.
 //
 // Ported from UVG /Users/john/repos/uvg/src/codegen/ddl.rs (the
 // raw-SQL portion; UVG's tables.rs and relationships.rs are

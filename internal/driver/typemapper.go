@@ -189,7 +189,6 @@ const (
 	DDLTypeIndex           DDLType = "index"
 	DDLTypeForeignKey      DDLType = "foreign_key"
 	DDLTypeCheckConstraint DDLType = "check_constraint"
-	DDLTypeDropTable       DDLType = "drop_table"
 )
 
 // FinalizationDDLRequest contains information needed to generate finalization DDL.
@@ -226,29 +225,6 @@ type FinalizationDDLRequest struct {
 	TargetTableDDL string
 }
 
-// TableDropDDLMapper handles AI-driven DDL generation for dropping tables.
-type TableDropDDLMapper interface {
-	// GenerateDropTableDDL generates DDL statement(s) for dropping a table.
-	// The AI will generate database-specific syntax that properly handles
-	// foreign key constraints and other database-specific requirements.
-	GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error)
-}
-
-// DropTableDDLRequest contains information needed to generate DROP TABLE DDL.
-type DropTableDDLRequest struct {
-	// TargetDBType is the target database type (e.g., "mysql", "postgres").
-	TargetDBType string
-
-	// TargetSchema is the schema name in the target database.
-	TargetSchema string
-
-	// TableName is the name of the table to drop.
-	TableName string
-
-	// TargetContext contains metadata about the target database.
-	TargetContext *DatabaseContext
-}
-
 // GetTypeMapper returns the type mapper for use by drivers + writers.
 // Default behavior since #170:
 //
@@ -257,8 +233,8 @@ type DropTableDDLRequest struct {
 //     mapper alone. AI is no longer required for migrations.
 //   - When AI IS configured, returns a FallbackChain that routes
 //     deterministic-first and falls back to the AI mapper for the
-//     narrow cases the deterministic path can't handle (Raw types,
-//     ErrUnsupportedDDL).
+//     narrow column-type cases the deterministic path can't handle (Raw
+//     vendor-specific types).
 //
 // The unmapped_type_action knob (default "fail") controls what the
 // chain does at column level for Raw types when no AI fallback exists.

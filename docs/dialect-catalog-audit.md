@@ -31,9 +31,8 @@ generic driver (#191): can a YAML catalog express it, and how?
 | `ValidDateTypes` | data | list of type names |
 | `ValueConverters` (#477) | **strategy-selected** | catalog declares per-type conversion rules from a named set (`mixed_endian_uuid`, `bit_to_bool`, `min_datetime_null`, …); the generic driver maps rules → Go funcs |
 | `AIPromptAugmentation` | data | literal text (empty for most catalogs) |
-| `AIDropTablePromptAugmentation` | data | literal text |
 
-**Summary**: 13 of 19 methods are plain data, 4 are parameterized
+**Summary**: 12 of 18 methods are plain data, 4 are parameterized
 templates (the two pagination query/args pairs — with argument order as
 the explicitly declared, conformance-pinned part), and 2 are
 strategy-selected (`ColumnListForSelect`, `ValueConverters`). Nothing in
