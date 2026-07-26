@@ -300,9 +300,8 @@ func TestFallbackChain_GenerateFinalizationDDL_NeverRoutesSMTSideObjectsToAI(t *
 }
 
 func TestFallbackChain_GenerateFinalizationDDL_OtherErrors_DoNotRoute(t *testing.T) {
-	// Errors that aren't ErrUnsupportedDDL — like "unsupported dialect"
-	// or "Index field required" — propagate without AI involvement.
-	// AI can't recover from them either; shouldn't waste a round-trip.
+	// DDL errors such as unsupported dialects or missing payloads propagate
+	// without AI involvement.
 	stub := &stubMapper{finalizationDDLReturns: "AI_DDL"}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
@@ -316,11 +315,8 @@ func TestFallbackChain_GenerateFinalizationDDL_OtherErrors_DoNotRoute(t *testing
 	if err == nil {
 		t.Fatal("expected error to propagate")
 	}
-	if errors.Is(err, ErrUnsupportedDDL) {
-		t.Error("the propagated error should NOT be ErrUnsupportedDDL")
-	}
 	if stub.finalizationDDLCalled != 0 {
-		t.Errorf("AI fallback should NOT fire for non-Unsupported errors; got %d calls", stub.finalizationDDLCalled)
+		t.Errorf("AI fallback should never fire for DDL errors; got %d calls", stub.finalizationDDLCalled)
 	}
 }
 
@@ -337,27 +333,6 @@ func TestFallbackChain_GenerateFinalizationDDL_SideObjectPolicyPropagatesWithout
 	if !errors.As(err, &unsupported) || unsupported.Feature != "clustered indexes" {
 		t.Errorf("expected SMT typed unsupported policy to propagate; got %v", err)
 	}
-}
-
-// ---------- GenerateDropTableDDL — never routes ----------
-
-func TestFallbackChain_GenerateDropTableDDL_AlwaysDeterministic(t *testing.T) {
-	stub := &stubMapper{}
-	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
-
-	got, err := chain.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
-		TargetSchema: "public",
-		TableName:    "users",
-		TargetDBType: typemap.DialectPostgres,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != `DROP TABLE IF EXISTS "users";` {
-		t.Errorf("got %q, want DROP TABLE IF EXISTS \"users\";", got)
-	}
-	// stub is a stubMapper not a TableDropDDLMapper — but even if it
-	// were, the chain should never call it for drops.
 }
 
 // ---------- CanMap / SupportedTargets union ----------

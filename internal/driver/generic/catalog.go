@@ -35,7 +35,6 @@ type Catalog struct {
 	Pagination    PaginationSpec    `yaml:"pagination"`
 	Queries       QueriesSpec       `yaml:"queries"`
 	Introspection IntrospectionSpec `yaml:"introspection"`
-	DDL           DDLSpec           `yaml:"ddl"`
 	Bulk          BulkSpec          `yaml:"bulk"`
 	Upsert        UpsertSpec        `yaml:"upsert"`
 	Sequence      SequenceSpec      `yaml:"sequence"`
@@ -102,6 +101,11 @@ type DefaultsSpec struct {
 	WriteAheadWriters     int    `yaml:"write_ahead_writers"`
 	ScaleWritersWithCores bool   `yaml:"scale_writers_with_cores"`
 	OptimumBulkChunkBytes int    `yaml:"optimum_bulk_chunk_bytes"`
+	// CreateSchemaDefaultsToDatabase is DMT connection-selection policy,
+	// not SQL. ClickHouse treats its configured database as the schema when
+	// target.schema is omitted; other engines preserve SMT's empty-schema
+	// no-op.
+	CreateSchemaDefaultsToDatabase bool `yaml:"create_schema_defaults_to_database"`
 }
 
 // CapabilitiesSpec mirrors the conformance capability matrix.
@@ -328,45 +332,6 @@ type IntrospectionSpec struct {
 	HasPrimaryKey string `yaml:"has_primary_key"`
 }
 
-// DDLSpec carries the writer's DDL templates. Statement lists use the
-// {table} token (dialect-qualified); empty templates mean the engine
-// doesn't support (or need) the operation and the writer degrades the
-// way the capability matrix declares.
-type DDLSpec struct {
-	// CreateSchema is the CREATE SCHEMA template ({schema}); empty =
-	// no-op (sqlite: a file IS the database).
-	CreateSchema string `yaml:"create_schema"`
-	// CreateSchemaDefaultsToDatabase substitutes the connection
-	// database when the configured schema is empty (clickhouse, where
-	// schema IS the database). Engines with a default-database notion
-	// (mysql) keep empty-schema as a no-op — least-privilege upsert
-	// users must not be forced through CREATE DATABASE.
-	CreateSchemaDefaultsToDatabase bool `yaml:"create_schema_defaults_to_database"`
-	// DropTableStmts run in order ({table}); engines that must toggle
-	// FK enforcement around the drop declare it here.
-	DropTableStmts []string `yaml:"drop_table_stmts"`
-	// TruncateStmts run in order ({table}).
-	TruncateStmts []string `yaml:"truncate_stmts"`
-	// TruncateCleanup is an optional parameterized statement run after
-	// truncate with the bare table name as its argument (sqlite:
-	// sqlite_sequence reset).
-	TruncateCleanup string `yaml:"truncate_cleanup"`
-	// AddColumn is the ALTER TABLE template: {table}, {column}, {type}.
-	AddColumn string `yaml:"add_column"`
-	// CreatePrimaryKey ({table}, {columns}); empty = no-op (inline-PK
-	// engines).
-	CreatePrimaryKey string `yaml:"create_primary_key"`
-	// CanDropNotNull / CanAlterColumnType: false returns the uniform
-	// "requires a table rebuild" error instead of attempting DDL.
-	CanDropNotNull     bool `yaml:"can_drop_not_null"`
-	CanAlterColumnType bool `yaml:"can_alter_column_type"`
-	// DropNotNull / AlterColumnType templates ({table}, {column},
-	// {type}, {nullability}, {default_clause}); required when the
-	// corresponding Can* flag is true.
-	DropNotNull     string `yaml:"drop_not_null"`
-	AlterColumnType string `yaml:"alter_column_type"`
-}
-
 // BulkSpec selects the bulk-write strategy.
 type BulkSpec struct {
 	Strategy string `yaml:"strategy"`
@@ -419,6 +384,5 @@ type ContextSpec struct {
 
 // AISpec carries the prompt-augmentation literals.
 type AISpec struct {
-	PromptAugmentation          string `yaml:"prompt_augmentation"`
-	DropTablePromptAugmentation string `yaml:"drop_table_prompt_augmentation"`
+	PromptAugmentation string `yaml:"prompt_augmentation"`
 }

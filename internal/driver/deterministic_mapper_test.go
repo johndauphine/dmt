@@ -373,24 +373,6 @@ func TestDeterministicMapper_GenerateFinalizationDDL_Check(t *testing.T) {
 	}
 }
 
-func TestDeterministicMapper_GenerateFinalizationDDL_DropTable(t *testing.T) {
-	m := NewDeterministicMapper()
-	got, err := m.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
-		Type:         DDLTypeDropTable,
-		SourceDBType: typemap.DialectPostgres,
-		TargetDBType: typemap.DialectPostgres,
-		Table:        &Table{Name: "users"},
-		TargetSchema: "public",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := `DROP TABLE IF EXISTS "users";`
-	if got != want {
-		t.Errorf("\ngot:  %s\nwant: %s", got, want)
-	}
-}
-
 func TestDeterministicMapper_GenerateFinalizationDDL_NilPointers(t *testing.T) {
 	m := NewDeterministicMapper()
 	cases := []struct {
@@ -426,67 +408,6 @@ func TestDeterministicMapper_GenerateFinalizationDDL_UnknownType(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for unknown DDLType")
-	}
-}
-
-// ---------- GenerateDropTableDDL ----------
-
-func TestDeterministicMapper_GenerateDropTableDDL(t *testing.T) {
-	m := NewDeterministicMapper()
-	cases := []struct {
-		name          string
-		schema, table string
-		dialect       string
-		want          string
-	}{
-		{"pg_default_schema_suppressed", "public", "users", typemap.DialectPostgres, `DROP TABLE IF EXISTS "users";`},
-		{"pg_custom_schema_qualified", "inventory", "items", typemap.DialectPostgres, `DROP TABLE IF EXISTS "inventory"."items";`},
-		// MSSQL must ALWAYS qualify when schema is non-empty — even
-		// "dbo" — to stay consistent with Dialect.QualifyTable used
-		// elsewhere in the MSSQL driver. SQL Server allows per-login
-		// default schemas; an unqualified DROP could resolve to a
-		// different schema than the corresponding CREATE/INSERT
-		// (Copilot review on PR #190).
-		{"mssql_default_dbo_qualified", "dbo", "users", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [dbo].[users];"},
-		{"mssql_custom_schema_qualified", "Sales", "orders", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [Sales].[orders];"},
-		{"mssql_empty_schema_unqualified", "", "users", typemap.DialectMSSQL, "DROP TABLE IF EXISTS [users];"},
-		{"mysql_always_suppressed", "any", "users", typemap.DialectMySQL, "DROP TABLE IF EXISTS `users`;"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := m.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
-				TargetSchema: tc.schema,
-				TableName:    tc.table,
-				TargetDBType: tc.dialect,
-			})
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestDeterministicMapper_GenerateDropTableDDL_Validation — Copilot
-// review on PR #190. The mapper should error on missing required
-// fields and on unsupported dialects rather than emit invalid SQL.
-func TestDeterministicMapper_GenerateDropTableDDL_Validation(t *testing.T) {
-	m := NewDeterministicMapper()
-
-	if _, err := m.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
-		TargetDBType: typemap.DialectPostgres,
-		// TableName missing
-	}); err == nil {
-		t.Error("expected error when TableName is empty")
-	}
-
-	if _, err := m.GenerateDropTableDDL(context.Background(), DropTableDDLRequest{
-		TableName:    "users",
-		TargetDBType: "oracle",
-	}); err == nil {
-		t.Error("expected error for unsupported target dialect")
 	}
 }
 

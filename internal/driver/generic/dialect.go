@@ -8,8 +8,8 @@ import (
 	"github.com/johndauphine/dmt/internal/driver"
 )
 
-// Dialect implements driver.Dialect from a Catalog. All SQL shape comes
-// from catalog templates; this type only renders.
+// Dialect implements driver.Dialect from a Catalog. The catalog owns query,
+// pagination, and connection literals; SMT owns schema DDL.
 type Dialect struct {
 	cat *Catalog
 }
@@ -376,10 +376,6 @@ func (d *Dialect) ValueConverters(colTypes []string, targetDBType string) []func
 }
 
 func (d *Dialect) AIPromptAugmentation() string { return d.cat.AI.PromptAugmentation }
-
-func (d *Dialect) AIDropTablePromptAugmentation() string {
-	return d.cat.AI.DropTablePromptAugmentation
-}
 
 // dateArg binds a date-filter timestamp: engines with a declared
 // date_arg_format (mssql) get the UTC-formatted string form; everyone

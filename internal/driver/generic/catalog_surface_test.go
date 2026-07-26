@@ -39,10 +39,6 @@ func TestSQLiteCatalogLiteralSurfaces(t *testing.T) {
 			t.Errorf("AIPromptAugmentation missing %q", frag)
 		}
 	}
-	if !strings.Contains(gen.AIDropTablePromptAugmentation(), "DROP TABLE IF EXISTS") {
-		t.Error("AIDropTablePromptAugmentation missing drop guidance")
-	}
-
 	// The default converter strategy delegates to the shared table —
 	// behavioral check against the (still shared) oracle.
 	colTypes := []string{"INTEGER", "bit", "datetime"}
@@ -228,6 +224,21 @@ func TestShippedCatalogSchemaStatsAndPortlessDeclarations(t *testing.T) {
 			if defaults := d.Defaults(); defaults.Portless != want.portless || defaults.Port != want.port {
 				t.Fatalf("driver defaults = portless:%v port:%d, want %v/%d",
 					defaults.Portless, defaults.Port, want.portless, want.port)
+			}
+		})
+	}
+}
+
+func TestOnlyClickHouseDefaultsCreateSchemaToConnectedDatabase(t *testing.T) {
+	for _, name := range []string{"postgres", "mysql", "mssql", "sqlite", "clickhouse"} {
+		t.Run(name, func(t *testing.T) {
+			cat, err := LoadCatalog(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := name == "clickhouse"
+			if got := cat.Defaults.CreateSchemaDefaultsToDatabase; got != want {
+				t.Fatalf("create-schema database fallback = %v, want %v", got, want)
 			}
 		})
 	}

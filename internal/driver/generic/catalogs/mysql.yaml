@@ -171,25 +171,6 @@ introspection:
     SELECT IFNULL(AVG_ROW_LENGTH, 0) FROM information_schema.TABLES
     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 
-ddl:
-  create_schema: "CREATE DATABASE IF NOT EXISTS {schema}"
-  # FK toggles around destructive ops (multiStatements is on in the DSN
-  # but the generic writer runs list entries separately, equivalent).
-  drop_table_stmts:
-    - "SET FOREIGN_KEY_CHECKS = 0"
-    - "DROP TABLE IF EXISTS {table}"
-    - "SET FOREIGN_KEY_CHECKS = 1"
-  truncate_stmts:
-    - "SET FOREIGN_KEY_CHECKS = 0"
-    - "TRUNCATE TABLE {table}"
-    - "SET FOREIGN_KEY_CHECKS = 1"
-  add_column: "ALTER TABLE {table} ADD COLUMN {column} {type} NULL"
-  create_primary_key: ""         # PK is created with the table
-  can_drop_not_null: true
-  drop_not_null: "ALTER TABLE {table} MODIFY COLUMN {column} {type} NULL{default_clause}"
-  can_alter_column_type: true
-  alter_column_type: "ALTER TABLE {table} MODIFY COLUMN {column} {type} {nullability}{default_clause}"
-
 queries:
   # NTILE buckets: real multi-partition parallel reads.
   partition_boundaries: |
@@ -267,8 +248,3 @@ ai:
     - TEXT/BLOB columns cannot be PRIMARY KEY or UNIQUE without a prefix
       length; use bounded VARCHAR/VARBINARY for keyed columns.
     - AUTO_INCREMENT requires the column to be a key.
-  drop_table_prompt_augmentation: |
-
-    MySQL-specific requirements:
-    - Disable foreign key checks around the drop:
-        SET FOREIGN_KEY_CHECKS = 0; DROP TABLE IF EXISTS `<table>`; SET FOREIGN_KEY_CHECKS = 1;

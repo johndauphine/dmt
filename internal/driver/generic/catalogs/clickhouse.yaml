@@ -17,6 +17,9 @@ connection:
 defaults:
   write_ahead_writers: 4
   scale_writers_with_cores: true
+  # ClickHouse's schema is its database. This is DMT connection-selection
+  # policy; SMT still owns the CREATE DATABASE statement.
+  create_schema_defaults_to_database: true
 
 capabilities:
   upserter: false                # MergeTree dedup is eventual, not upsert
@@ -140,20 +143,6 @@ introspection:
   has_primary_key: |
     SELECT 1 FROM system.columns WHERE database = ? AND table = ? AND is_in_primary_key LIMIT 1
 
-ddl:
-  create_schema: "CREATE DATABASE IF NOT EXISTS {schema}"
-  create_schema_defaults_to_database: true
-  drop_table_stmts:
-    - "DROP TABLE IF EXISTS {table}"
-  truncate_stmts:
-    - "TRUNCATE TABLE {table}"
-  # Schema-evolution columns arrive nullable; ClickHouse spells that as
-  # a type wrapper.
-  add_column: "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} Nullable({type})"
-  create_primary_key: ""         # ORDER BY key is set at CREATE TABLE
-  can_drop_not_null: false
-  can_alter_column_type: false
-
 # No parallel-read benefit measured yet; single partition until the
 # benchmark PR justifies a range-split query (intDiv buckets).
 queries:
@@ -200,8 +189,3 @@ ai:
       genuinely fixed-width values).
     - No foreign keys, CHECK constraints, secondary row-store indexes,
       sequences, or AUTO_INCREMENT.
-  drop_table_prompt_augmentation: |
-
-    ClickHouse-specific requirements:
-    - Use DROP TABLE IF EXISTS; there is no CASCADE and no FK enforcement
-      to disable.

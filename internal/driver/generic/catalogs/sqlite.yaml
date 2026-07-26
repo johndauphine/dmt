@@ -127,24 +127,6 @@ introspection:
   table_exists: "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
   has_primary_key: "SELECT 1 FROM pragma_table_info(?) WHERE pk > 0 LIMIT 1"
 
-ddl:
-  # No CREATE SCHEMA: a sqlite file IS the database.
-  create_schema: ""
-  # Toggle FK enforcement around the drop in case dependents exist.
-  drop_table_stmts:
-    - "PRAGMA foreign_keys = OFF"
-    - "DROP TABLE IF EXISTS {table}"
-    - "PRAGMA foreign_keys = ON"
-  # No TRUNCATE in sqlite; bare DELETE hits the truncate optimization.
-  truncate_stmts:
-    - "DELETE FROM {table}"
-  truncate_cleanup: "DELETE FROM sqlite_sequence WHERE name = ?"
-  add_column: "ALTER TABLE {table} ADD COLUMN {column} {type} NULL"
-  # PK is declared inline at CREATE TABLE; the phase is a no-op.
-  create_primary_key: ""
-  can_drop_not_null: false       # requires a table rebuild
-  can_alter_column_type: false   # requires a table rebuild
-
 bulk:
   strategy: batched_insert
   # SQLITE_MAX_VARIABLE_NUMBER on modernc (mainline >=3.32): one
@@ -186,12 +168,3 @@ ai:
     - SQLite has no schema concept distinct from attached databases; do not qualify with schema.
     - Foreign keys are only enforced when PRAGMA foreign_keys = ON (dmt sets this).
     - ALTER TABLE in SQLite is limited; FK and CHECK constraints must be declared inline.
-  drop_table_prompt_augmentation: |
-
-    SQLite-specific requirements:
-    - Use DROP TABLE IF EXISTS to handle non-existent tables idempotently.
-    - SQLite does not support CASCADE for DROP TABLE; foreign-key enforcement
-      must be temporarily disabled if dependent tables exist:
-        PRAGMA foreign_keys = OFF;
-        DROP TABLE IF EXISTS "<table>";
-        PRAGMA foreign_keys = ON;

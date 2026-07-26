@@ -1,14 +1,12 @@
 // DeterministicMapper is the dmt-driver-side adapter for the
-// deterministic typemap surface (#168 / #169). It implements the four
-// type-mapper interfaces — TypeMapper, TableTypeMapper,
-// FinalizationDDLMapper, TableDropDDLMapper — with SMT's public API for
-// adopted create and side-object DDL and internal typemap/ddl only for later
-// artifacts.
+// deterministic typemap surface (#168 / #169). It implements TypeMapper,
+// TableTypeMapper, and FinalizationDDLMapper with SMT's public API for target
+// schema DDL.
 //
 // History: 169c added the adapter without changing the default
 // type mapper. #170 wires it as the default via GetTypeMapper, with
-// AI as a registered fallback for Raw types and unadopted compatibility
-// paths (see typemap_chain.go's FallbackChain).
+// AI as a registered fallback for Raw column types (see typemap_chain.go's
+// FallbackChain).
 //
 // The adapter is stateless. The constructor exists for symmetry with
 // NewAITypeMapper and to give #170's wiring code a stable factory.
@@ -17,27 +15,19 @@ package driver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/johndauphine/dmt/internal/ident"
 	"github.com/johndauphine/dmt/internal/smtddl"
 	"github.com/johndauphine/dmt/internal/typemap"
-	"github.com/johndauphine/dmt/internal/typemap/ddl"
 	"github.com/johndauphine/smt/schema"
 )
 
-// ErrUnsupportedDDL is retained for non-adopted finalization compatibility.
-// Adopted create and side-object paths return SMT's typed policy errors
-// directly and never use this sentinel to select an AI renderer.
-var ErrUnsupportedDDL = errors.New("deterministic mapper: vendor-specific feature not supported by deterministic path")
-
 // DeterministicMapper implements TypeMapper, TableTypeMapper,
-// FinalizationDDLMapper, and TableDropDDLMapper. SMT owns create rendering;
-// DMT's internal typemap remains for type metadata and later DDL artifacts.
-// No I/O, no LLM calls, no shared state — same inputs always produce the same
-// outputs.
+// and FinalizationDDLMapper. SMT owns target-schema rendering; DMT's internal
+// typemap remains only for type metadata and compatibility policy. No I/O, no
+// LLM calls, no shared state — same inputs always produce the same outputs.
 type DeterministicMapper struct{}
 
 // NewDeterministicMapper returns the deterministic mapper. The
@@ -146,18 +136,18 @@ func smtDDLRequest(req TableDDLRequest) smtddl.Request {
 		table.PrimaryKey[i] = sanitizeForTarget(name, req.TargetDBType)
 	}
 	for i, column := range req.SourceTable.Columns {
-		dataType := column.FullDataType
-		if dataType == "" {
-			dataType = column.DataType
-		}
 		table.Columns[i] = smtddl.Column{
-			Name:       sanitizeForTarget(column.Name, req.TargetDBType),
-			DataType:   dataType,
-			MaxLength:  column.MaxLength,
-			Precision:  column.Precision,
-			Scale:      column.Scale,
-			IsNullable: column.IsNullable,
-			IsIdentity: column.IsIdentity,
+			Name:         sanitizeForTarget(column.Name, req.TargetDBType),
+			DataType:     column.DataType,
+			FullDataType: column.FullDataType,
+			MaxLength:    column.MaxLength,
+			Precision:    column.Precision,
+			Scale:        column.Scale,
+			IsNullable:   column.IsNullable,
+			IsIdentity:   column.IsIdentity,
+		}
+		if Canonicalize(req.SourceDBType) == typemap.DialectMySQL {
+			table.Columns[i] = smtddl.ProjectMySQLFullDataType(table.Columns[i])
 		}
 	}
 
@@ -233,14 +223,20 @@ func boundSMTMySQLUniqueLOBs(table *smtddl.Table, source *Table, sourceDialect s
 	}
 }
 
-// GenerateFinalizationDDL retains DMT's finalization scheduling boundary while
-// delegating adopted side-object SQL to SMT's public API. Drop statements stay
-// on their existing local path until a later SMT API milestone.
+// GenerateFinalizationDDL preserves the mapper compatibility surface while
+// hard-binding production side-object rendering to PlanFinalizationDDL.
 func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
+	return PlanFinalizationDDL(req)
+}
+
+// PlanFinalizationDDL delegates side-object SQL directly to SMT's public API.
+// Production writers call this function rather than an injected mapper so an
+// AI mapper cannot become a target-schema renderer through WriterOptions.
+func PlanFinalizationDDL(req FinalizationDDLRequest) (string, error) {
 	if req.Table == nil {
-		return "", fmt.Errorf("GenerateFinalizationDDL: Table is required")
+		return "", fmt.Errorf("PlanFinalizationDDL: Table is required")
 	}
-	if !m.CanMap(req.SourceDBType, req.TargetDBType) {
+	if !isSupportedDialect(req.SourceDBType) || !isSupportedDialect(req.TargetDBType) {
 		return "", fmt.Errorf("deterministic mapper does not support %s → %s",
 			req.SourceDBType, req.TargetDBType)
 	}
@@ -278,9 +274,6 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 			return "", fmt.Errorf("rendering check constraint %q with SMT: %w", req.CheckConstraint.Name, err)
 		}
 		return sql, nil
-
-	case DDLTypeDropTable:
-		return generateDropTable(req.TargetSchema, req.Table.Name, req.TargetDBType), nil
 
 	default:
 		return "", fmt.Errorf("unknown DDLType %q", req.Type)
@@ -360,28 +353,8 @@ func smtForeignKey(foreignKey ForeignKey, sourceSchema, targetSchema, targetDial
 	}
 }
 
-// GenerateDropTableDDL implements TableDropDDLMapper. Emits a single
-// DROP TABLE IF EXISTS statement; the IF EXISTS handles the case where
-// the table doesn't exist (e.g., first run of drop_recreate). FK
-// drops are handled separately by the orchestrator's drop sequence,
-// not bundled here.
-func (m *DeterministicMapper) GenerateDropTableDDL(ctx context.Context, req DropTableDDLRequest) (string, error) {
-	if req.TableName == "" {
-		return "", fmt.Errorf("GenerateDropTableDDL: TableName is required")
-	}
-	if !isSupportedDialect(req.TargetDBType) {
-		return "", fmt.Errorf("deterministic mapper does not support target dialect %q", req.TargetDBType)
-	}
-	return generateDropTable(req.TargetSchema, req.TableName, req.TargetDBType), nil
-}
-
-// deterministicDDLDialects lists the dialects the deterministic mapper
-// can generate FULL DDL for — type fragments AND quoting/drop/index
-// syntax (internal/typemap/ddl). Deliberately NOT registry-backed
-// (codex review on #479): typemap.Register only supplies type
-// fragments, so a catalog engine that registered types alone must
-// still route to AI fallback here until #191 wires catalog DDL
-// templates into this gate as well.
+// deterministicDDLDialects lists the dialects whose type metadata and target
+// schema DDL are supported by the SMT boundary.
 func deterministicDDLDialects() []string {
 	return []string{
 		typemap.DialectPostgres,
@@ -392,9 +365,9 @@ func deterministicDDLDialects() []string {
 	}
 }
 
-// isSupportedDialect returns true when the deterministic mapper can
-// fully handle the dialect (types + DDL syntax). Anything else → false
-// so wiring can route to AI fallback (#170) for unsupported dialects.
+// isSupportedDialect returns true when the deterministic mapper can fully
+// handle the dialect. Anything else returns false so column-level type mapping
+// can route to AI fallback when configured.
 func isSupportedDialect(dialect string) bool {
 	for _, d := range deterministicDDLDialects() {
 		if d == dialect {
@@ -402,42 +375,6 @@ func isSupportedDialect(dialect string) bool {
 		}
 	}
 	return false
-}
-
-// generateDropTable emits the simple DROP TABLE IF EXISTS form.
-//
-// MSSQL behavior is special: the schema is ALWAYS qualified when
-// non-empty, even when it matches the dialect's default ("dbo").
-// SQL Server allows per-login default schemas, so an unqualified
-// `DROP TABLE [users]` could resolve to a different schema than the
-// subsequent CREATE / INSERT operations (which always qualify via
-// Dialect.QualifyTable elsewhere in the MSSQL driver). The deterministic
-// adapter MUST stay consistent with that convention or DROP/CREATE
-// can target different objects (Copilot review on PR #190).
-//
-// PG and MySQL behave correctly under QualifiedTableName's default-
-// suppression rules: PG's session search_path always puts the default
-// schema first, and MySQL has no schema distinct from the database.
-func generateDropTable(schema, tableName, targetDialect string) string {
-	// Sanitize the table name for PG targets so DROP matches the
-	// case-folded name the rest of dmt's PG flow uses (Writer.
-	// CreatePrimaryKey, FK creation, etc. all sanitize via
-	// ident.SanitizePG). Without this, DROP looks for "LinkTypes"
-	// (case-preserved by quoting) while CREATE / INSERT use
-	// "linktypes" (lowercased) and the operations target different
-	// rows in pg_class.
-	tableName = sanitizeForTarget(tableName, targetDialect)
-	schema = sanitizeForTarget(schema, targetDialect)
-
-	if targetDialect == typemap.DialectMSSQL && schema != "" {
-		// Always qualify on MSSQL — see function doc.
-		return fmt.Sprintf("DROP TABLE IF EXISTS %s.%s;",
-			ddl.QuoteIdentifier(schema, targetDialect),
-			ddl.QuoteIdentifier(tableName, targetDialect),
-		)
-	}
-	qname := ddl.QualifiedTableName(schema, tableName, targetDialect)
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", qname)
 }
 
 // sanitizeForTarget runs the target-dialect's identifier sanitization.
@@ -489,86 +426,8 @@ func driverColumnToTypemapColumnInfo(col Column) typemap.ColumnInfo {
 	})
 }
 
-// driverColumnToDDL projects a driver.Column to ddl.Column. DefaultValue is
-// intentionally not passed through here: #305 uses source defaults for
-// read-only drift reporting, while target DEFAULT preservation remains a
-// separate DDL behavior decision. dmt's reader also doesn't currently expose
-// identity start + increment / autoincrement flag / column comment, so those
-// fields are left at zero values.
-//
-// IsIdentity flows through, so PG / MSSQL identity columns still get
-// SERIAL / IDENTITY emission.
-//
-// Column name is sanitized for PG targets (lowercase) to match the
-// rest of dmt's PG flow which uses ident.SanitizePG. Without this,
-// CREATE TABLE column "CreatedAt" would survive case-preserved while
-// later INSERT / index code looks up "createdat" — mismatch.
-func driverColumnToDDL(col Column, targetDialect string) ddl.Column {
-	fullType := col.FullDataType
-	if fullType == "" {
-		fullType = col.DataType
-	}
-	return ddl.Column{
-		Name:                   sanitizeForTarget(col.Name, targetDialect),
-		UDTName:                col.DataType,
-		DataType:               fullType,
-		CharacterMaximumLength: nullableInt(col.MaxLength),
-		NumericPrecision:       nullableInt(col.Precision),
-		NumericScale:           nullableInt(col.Scale),
-		IsNullable:             col.IsNullable,
-		IsIdentity:             col.IsIdentity,
-	}
-}
-
-// driverTableToDDL projects a driver.Table to ddl.TableInfo. The PK
-// constraint name is synthesized as `pk_<table>` since dmt's reader
-// stores PK as a column-name list with no constraint name. The
-// synthesized name does NOT match Postgres's actual default
-// (Postgres uses `<table>_pkey`) — it's just a readable convention
-// the deterministic mapper picks; introspecting the resulting target
-// will show the synthesized name, not the source's PK name (Copilot
-// review on PR #190).
-//
-// targetDialect drives identifier sanitization: PG targets get
-// lowercased identifiers via ident.SanitizePG so the emitted CREATE
-// TABLE matches the case-folded names the rest of dmt's PG flow
-// (Writer.CreatePrimaryKey, FK creation, INSERT) uses.
-//
-// Secondary indexes, foreign keys, and checks are deliberately absent: SMT
-// owns their standalone rendering through the finalization boundary.
-func driverTableToDDL(t *Table, targetSchema, targetDialect string) ddl.TableInfo {
-	columns := make([]ddl.Column, len(t.Columns))
-	for i, c := range t.Columns {
-		columns[i] = driverColumnToDDL(c, targetDialect)
-	}
-
-	tableName := sanitizeForTarget(t.Name, targetDialect)
-
-	var constraints []ddl.Constraint
-	if len(t.PrimaryKey) > 0 {
-		pkColumns := make([]string, len(t.PrimaryKey))
-		for i, col := range t.PrimaryKey {
-			pkColumns[i] = sanitizeForTarget(col, targetDialect)
-		}
-		constraints = append(constraints, ddl.Constraint{
-			Name:    "pk_" + tableName,
-			Type:    ddl.ConstraintPrimaryKey,
-			Columns: pkColumns,
-		})
-	}
-
-	return ddl.TableInfo{
-		Schema:      sanitizeForTarget(targetSchema, targetDialect),
-		Name:        tableName,
-		Columns:     columns,
-		Constraints: constraints,
-	}
-}
-
-// nullableInt converts dmt's int (where 0 means "unset" by
-// convention) to typemap/ddl's *int (where nil means "unset").
-// MSSQL's -1 MAX sentinel is handled by typemap.ToCanonical (PR #185
-// Codex-fix), so it doesn't need special treatment here.
+// nullableInt converts dmt's int (where 0 means "unset" by convention) to
+// typemap's pointer metadata.
 func nullableInt(v int) *int {
 	if v == 0 {
 		return nil

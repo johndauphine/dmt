@@ -2,14 +2,17 @@
 //
 // DMT owns migration planning, discovery, execution, and finalization. This
 // package converts discovered metadata into SMT's public schema values and
-// returns PlanCreate statements without constructing or modifying SQL. Keeping
-// the dependency here prevents SMT's application internals from leaking into
-// the DMT driver and orchestrator packages.
+// returns create statements and evolution batches without constructing or
+// modifying SQL. Keeping the dependency here prevents SMT's application
+// internals from leaking into the DMT driver and orchestrator packages.
 package smtddl
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
+	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/smt/schema"
 	"github.com/johndauphine/smt/schema/canonical"
 )
@@ -24,6 +27,12 @@ type Request struct {
 	Table         Table
 }
 
+// Batch and Statement expose SMT's public execution contract through DMT's
+// anti-corruption boundary without creating a second representation that
+// could lose ordering, affinity, cleanup, or best-effort metadata.
+type Batch = schema.Batch
+type Statement = schema.Statement
+
 // Table is DMT's table context for SMT create and standalone side-object
 // rendering. DMT schedules indexes and constraints after data transfer; SMT
 // renders their SQL from this metadata without taking over orchestration.
@@ -36,15 +45,21 @@ type Table struct {
 // Column is the source metadata SMT's public schema API needs to deterministically
 // emit a target column definition.
 type Column struct {
-	Name         string
-	DataType     string
-	MaxLength    int
-	Precision    int
-	Scale        int
-	IsNullable   bool
-	IsIdentity   bool
-	IsUnsigned   bool
-	DisplayWidth int
+	Name              string
+	DataType          string
+	FullDataType      string
+	MaxLength         int
+	Precision         int
+	Scale             int
+	DatetimePrecision *int
+	IsNullable        bool
+	IsIdentity        bool
+	IsUnsigned        bool
+	DisplayWidth      int
+	DefaultExpression string
+	HasDefault        bool
+	EnumValues        []string
+	SRID              int
 }
 
 // Index is DMT's public-SMT-compatible secondary-index input. IsClustered is
@@ -210,6 +225,93 @@ func RenderCheckConstraint(req Request, check CheckConstraint) (string, error) {
 	return result.SQL, nil
 }
 
+// RenderAddColumn delegates one complete column-add operation to SMT's public
+// evolution API and returns its ordered execution contract unchanged.
+func RenderAddColumn(req Request, column Column) (schema.Batch, error) {
+	renderer, err := newRenderer(req)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	table, err := tableRef(req, renderer, "add-column", true)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	schemaColumn, err := schemaColumn(req, renderer, "add-column", column, false)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	batch, err := renderer.AddColumn(table, schemaColumn)
+	if err != nil {
+		return schema.Batch{}, fmt.Errorf("render add column with SMT: %w", err)
+	}
+	return batch, nil
+}
+
+// RenderAlterColumnNullability delegates an in-place nullability transition
+// to SMT. PostgreSQL can render this operation without a source type; targets
+// that restate the type retain SMT's typed validation and capability policy.
+func RenderAlterColumnNullability(req Request, column Column) (schema.Batch, error) {
+	renderer, err := newRenderer(req)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	schemaColumn, err := schemaColumn(req, renderer, "alter-column-nullability", column, false)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	batch, err := renderer.AlterColumnNullability(schema.TableRef{Name: req.Table.Name}, schemaColumn)
+	if err != nil {
+		return schema.Batch{}, fmt.Errorf("render column nullability with SMT: %w", err)
+	}
+	return batch, nil
+}
+
+// RenderAlterColumnType delegates an in-place type transition to SMT and
+// returns every statement and advisory flag without rewriting either.
+func RenderAlterColumnType(req Request, column Column) (schema.Batch, error) {
+	renderer, err := newRenderer(req)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	schemaColumn, err := schemaColumn(req, renderer, "alter-column-type", column, false)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	batch, err := renderer.AlterColumnType(schema.TableRef{Name: req.Table.Name}, schemaColumn)
+	if err != nil {
+		return schema.Batch{}, fmt.Errorf("render column type with SMT: %w", err)
+	}
+	return batch, nil
+}
+
+// RenderDropTable delegates an idempotent table drop to SMT. Cascade is an
+// explicit DMT scheduling policy and is never inferred at this boundary.
+func RenderDropTable(req Request, cascade bool) (schema.Batch, error) {
+	renderer, err := newRenderer(req)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	batch, err := renderer.DropTable(schema.TableRef{Name: req.Table.Name}, schema.DropOptions{Cascade: cascade})
+	if err != nil {
+		return schema.Batch{}, fmt.Errorf("render table drop with SMT: %w", err)
+	}
+	return batch, nil
+}
+
+// RenderTruncateTable delegates a data-clearing operation to SMT, including
+// any required session-affinity and best-effort cleanup contract.
+func RenderTruncateTable(req Request, cascade bool) (schema.Batch, error) {
+	renderer, err := newRenderer(req)
+	if err != nil {
+		return schema.Batch{}, err
+	}
+	batch, err := renderer.TruncateTable(schema.TableRef{Name: req.Table.Name}, schema.TruncateOptions{Cascade: cascade})
+	if err != nil {
+		return schema.Batch{}, fmt.Errorf("render table truncate with SMT: %w", err)
+	}
+	return batch, nil
+}
+
 func newRenderer(req Request) (schema.Renderer, error) {
 	renderer, err := schema.NewRenderer(schema.Options{
 		TargetDialect:     req.TargetDialect,
@@ -242,29 +344,109 @@ func tableRef(req Request, renderer schema.Renderer, artifact string, withColumn
 func schemaColumns(req Request, renderer schema.Renderer, artifact string, rejectRaw bool) ([]schema.Column, error) {
 	columns := make([]schema.Column, len(req.Table.Columns))
 	for i, column := range req.Table.Columns {
-		ct := canonical.ToCanonical(column.DataType, canonical.TypeMeta{
-			MaxLength:    column.MaxLength,
-			Precision:    column.Precision,
-			Scale:        column.Scale,
-			IsUnsigned:   column.IsUnsigned,
-			DisplayWidth: column.DisplayWidth,
-		}, req.SourceDialect)
-		if rejectRaw && ct.Kind == canonical.Raw {
-			return nil, unsupported(renderer, fmt.Sprintf("source type %q for %s rendering", column.DataType, artifact))
+		converted, err := schemaColumn(req, renderer, artifact, column, rejectRaw)
+		if err != nil {
+			return nil, err
 		}
-		columns[i] = schema.Column{
-			Name:         column.Name,
-			DataType:     column.DataType,
-			MaxLength:    column.MaxLength,
-			Precision:    column.Precision,
-			Scale:        column.Scale,
-			IsNullable:   column.IsNullable,
-			IsIdentity:   column.IsIdentity,
-			IsUnsigned:   column.IsUnsigned,
-			DisplayWidth: column.DisplayWidth,
-		}
+		columns[i] = converted
 	}
 	return columns, nil
+}
+
+func schemaColumn(req Request, renderer schema.Renderer, artifact string, column Column, rejectRaw bool) (schema.Column, error) {
+	column = projectMySQLFullDataType(req.SourceDialect, column)
+	ct := canonical.ToCanonical(column.DataType, canonical.TypeMeta{
+		MaxLength:         column.MaxLength,
+		Precision:         column.Precision,
+		Scale:             column.Scale,
+		DatetimePrecision: column.DatetimePrecision,
+		IsUnsigned:        column.IsUnsigned,
+		DisplayWidth:      column.DisplayWidth,
+		EnumValues:        column.EnumValues,
+		SRID:              column.SRID,
+	}, req.SourceDialect)
+	if rejectRaw && ct.Kind == canonical.Raw {
+		return schema.Column{}, unsupported(renderer, fmt.Sprintf("source type %q for %s rendering", column.DataType, artifact))
+	}
+	return schema.Column{
+		Name:              column.Name,
+		DataType:          column.DataType,
+		MaxLength:         column.MaxLength,
+		Precision:         column.Precision,
+		Scale:             column.Scale,
+		DatetimePrecision: column.DatetimePrecision,
+		IsNullable:        column.IsNullable,
+		IsIdentity:        column.IsIdentity,
+		IsUnsigned:        column.IsUnsigned,
+		DisplayWidth:      column.DisplayWidth,
+		DefaultExpression: column.DefaultExpression,
+		HasDefault:        column.HasDefault,
+		EnumValues:        append([]string(nil), column.EnumValues...),
+		SRID:              column.SRID,
+	}, nil
+}
+
+// projectMySQLFullDataType recovers the structured facts that MySQL exposes
+// only through information_schema.COLUMNS.COLUMN_TYPE. Existing create-path
+// callers already populate these fields; evolution callers can pass
+// FullDataType and receive the same public SMT input without treating a full
+// declaration such as varchar(100) as a catalog type name.
+func projectMySQLFullDataType(sourceDialect string, column Column) Column {
+	switch strings.ToLower(strings.TrimSpace(sourceDialect)) {
+	case "mysql", "mariadb", "maria":
+	default:
+		return column
+	}
+	return ProjectMySQLFullDataType(column)
+}
+
+// ProjectMySQLFullDataType recovers structured MySQL type metadata from
+// information_schema.COLUMNS.COLUMN_TYPE. MySQL reports temporal FSP only in
+// that declaration, including the semantically significant implicit FSP 0.
+func ProjectMySQLFullDataType(column Column) Column {
+	fullDataType := strings.TrimSpace(column.FullDataType)
+	lower := strings.ToLower(fullDataType)
+	for _, modifier := range strings.Fields(lower) {
+		if modifier == "unsigned" || modifier == "zerofill" {
+			column.IsUnsigned = true
+			break
+		}
+	}
+	first, _, _ := strings.Cut(lower, " ")
+	if first == "tinyint(1)" {
+		column.DisplayWidth = 1
+	}
+	switch strings.ToLower(strings.TrimSpace(column.DataType)) {
+	case "enum", "set":
+		if len(column.EnumValues) == 0 {
+			column.EnumValues = typemap.ParseMySQLEnumSetValues(fullDataType)
+		}
+	case "time", "datetime", "timestamp":
+		column.DatetimePrecision = parseMySQLTemporalPrecision(column.DataType, fullDataType)
+	}
+	return column
+}
+
+func parseMySQLTemporalPrecision(dataType, fullDataType string) *int {
+	base := strings.ToLower(strings.TrimSpace(dataType))
+	decl := strings.ToLower(strings.TrimSpace(fullDataType))
+	if decl == "" {
+		decl = base
+	}
+	first, _, _ := strings.Cut(decl, " ")
+	if first == base {
+		precision := 0
+		return &precision
+	}
+	prefix := base + "("
+	if !strings.HasPrefix(first, prefix) || !strings.HasSuffix(first, ")") {
+		return nil
+	}
+	precision, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(first, prefix), ")"))
+	if err != nil || precision < 0 || precision > 6 {
+		return nil
+	}
+	return &precision
 }
 
 func unsupported(renderer schema.Renderer, feature string) error {

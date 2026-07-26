@@ -9,8 +9,8 @@ import (
 )
 
 // TestSMTDDLBoundaryHasNoLocalRendererEscapeHatch keeps the ownership boundary
-// narrow and reviewable. Create/finalization scheduling stays in DMT while SMT
-// owns SQL for adopted tables and side objects; drops/alters remain later work.
+// narrow and reviewable. Create/finalization/evolution scheduling stays in DMT
+// while SMT owns SQL for tables, side objects, and production mutation methods.
 func TestSMTDDLBoundaryHasNoLocalRendererEscapeHatch(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -19,16 +19,21 @@ func TestSMTDDLBoundaryHasNoLocalRendererEscapeHatch(t *testing.T) {
 	driverDir := filepath.Dir(thisFile)
 
 	assertSourceContainsNone(t, filepath.Join(driverDir, "deterministic_mapper.go"), []string{
+		"internal/typemap/ddl",
 		"ddl.GenerateCreateTable",
 		"strings.TrimSpace(createDDL) + \";\"",
 		"GenerateTableDDL(ctx, req)", // AI fallback must not be called here.
 	})
+	if _, err := os.Stat(filepath.Join(driverDir, "ai_typemapper_dropddl.go")); !os.IsNotExist(err) {
+		t.Fatalf("obsolete local/AI drop-table renderer still exists: %v", err)
+	}
 	assertSourceContains(t, filepath.Join(driverDir, "deterministic_mapper.go"), "smtddl.RenderCreateTable(smtDDLRequest(req))")
 	mapperPath := filepath.Join(driverDir, "deterministic_mapper.go")
-	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "smtddl.RenderIndex")
-	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "smtddl.RenderForeignKey")
-	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "smtddl.RenderCheckConstraint")
-	assertFunctionContainsNone(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", []string{
+	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "return PlanFinalizationDDL(req)")
+	assertFunctionContains(t, mapperPath, "func PlanFinalizationDDL", "smtddl.RenderIndex")
+	assertFunctionContains(t, mapperPath, "func PlanFinalizationDDL", "smtddl.RenderForeignKey")
+	assertFunctionContains(t, mapperPath, "func PlanFinalizationDDL", "smtddl.RenderCheckConstraint")
+	assertFunctionContainsNone(t, mapperPath, "func PlanFinalizationDDL", []string{
 		"ddl.GenerateIndex",
 		"ddl.GenerateAddForeignKey",
 		"ddl.GenerateAddCheck",
@@ -58,11 +63,44 @@ func TestSMTDDLBoundaryHasNoLocalRendererEscapeHatch(t *testing.T) {
 		"strings.NewReplacer",
 		"GenerateTableDDL",
 	})
-	assertFunctionContains(t, writerPath, "func (w *Writer) CreateIndex", "GenerateFinalizationDDL")
+	assertFunctionContains(t, writerPath, "func (w *Writer) CreateIndex", "driver.PlanFinalizationDDL")
 	assertFunctionContainsNone(t, writerPath, "func (w *Writer) CreateIndex", []string{
 		"typeddl.",
 		"strings.NewReplacer",
+		"GenerateFinalizationDDL",
 	})
+	assertSourceContainsNone(t, writerPath, []string{"FinalizationDDLMapper", "finalizationMapper"})
+	for signature, smtCall := range map[string]string{
+		"func (w *Writer) AddColumn":         "smtddl.RenderAddColumn",
+		"func (w *Writer) DropColumnNotNull": "smtddl.RenderAlterColumnNullability",
+		"func (w *Writer) AlterColumnType":   "smtddl.RenderAlterColumnType",
+		"func (w *Writer) DropTable":         "smtddl.RenderDropTable",
+		"func (w *Writer) TruncateTable":     "smtddl.RenderTruncateTable",
+	} {
+		assertFunctionContains(t, writerPath, signature, smtCall)
+		assertFunctionContainsNone(t, writerPath, signature, []string{
+			"MapColumnType",
+			"strings.NewReplacer",
+			"w.cat.DDL",
+			"execDDLStatementList",
+		})
+	}
+
+	batchPath := filepath.Join(driverDir, "generic", "smt_batch.go")
+	assertFunctionContains(t, batchPath, "func executeSMTBatchOn", "execer.ExecContext(ctx, statement.SQL)")
+	assertFunctionContainsNone(t, batchPath, "func executeSMTBatchOn", []string{
+		"strings.TrimSpace",
+		"strings.Replace",
+	})
+
+	catalogDir := filepath.Join(driverDir, "generic", "catalogs")
+	catalogs, err := filepath.Glob(filepath.Join(catalogDir, "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob catalogs: %v", err)
+	}
+	for _, catalog := range catalogs {
+		assertSourceContainsNone(t, catalog, []string{"\nddl:"})
+	}
 }
 
 func assertSourceContains(t *testing.T, path, want string) {
