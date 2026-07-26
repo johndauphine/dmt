@@ -49,9 +49,10 @@ The product MUST:
 3. Fail explicitly when it cannot prove a safe action. It MUST NOT silently
    skip data, silently coerce an unsupported schema feature, invent a resume
    position, or declare success without the required evidence.
-4. Keep migration policy and operational ownership in DMT while delegating
-   deterministic migrated-schema DDL rendering to SMT as specified in
-   [Section 6](#6-deterministic-schema-ddl-and-the-smt-boundary-normative).
+4. Be a completely standalone and independent project. DMT MUST own and
+   implement its required deterministic migrated-schema DDL planning and
+   rendering within its own application as specified in
+   [Section 6](#6-deterministic-schema-ddl-generation-normative).
 5. Expose one shared command and orchestration model through a CLI, terminal
    UI, and embedded browser UI. Front ends MUST NOT implement divergent
    migration logic.
@@ -109,13 +110,13 @@ The following behavior is required:
 - A target without sequences MUST skip sequence reset once with a clear
   structured message; it MUST NOT emit per-table fake successes.
 - A target without post-load constraint capability MUST either create
-  constraints inline when SMT and the engine support that shape or report one
+  constraints inline when DMT and the engine support that shape or report one
   explicit capability degradation. It MUST NOT claim that omitted objects were
   created.
 - SQLite MUST enforce its single-writer constraint regardless of a larger
   configured worker or connection count.
 - ClickHouse schema names represent databases. Its tables require an engine and
-  ordering definition compatible with SMT's ClickHouse renderer. ClickHouse
+  ordering definition compatible with DMT's ClickHouse DDL rules. ClickHouse
   primary/order keys are not to be misrepresented as relational uniqueness
   constraints.
 
@@ -383,8 +384,9 @@ you choose MUST expose and test these logical responsibilities:
 2. **Engine adapters**: connection, quoting, metadata discovery, read
    pagination, bulk writes, optional capabilities, preflight, and engine
    context.
-3. **Canonical schema adapter**: translation of discovered metadata into SMT
-   requests and execution of SMT output.
+3. **Canonical schema and DDL service**: translation of discovered metadata
+   into deterministic target type mappings and ordered DDL plans, rendering
+   those plans for the selected dialect, and executing them.
 4. **Migration orchestrator**: lifecycle, phases, target-mode policy,
    scheduling, retries, validation, notifications, audit, and final outcome.
 5. **Transfer engine**: bounded pipeline, pagination, conversion, writer
@@ -427,46 +429,50 @@ validation, and resume MUST refer to the same physical object. PostgreSQL's
 established normalization behavior, including default `public` handling, MUST
 be consistent across all phases.
 
-## 6. Deterministic schema DDL and the SMT boundary (normative)
+## 6. Deterministic schema DDL generation (normative)
 
-### 6.1 Sole renderer rule
+### 6.1 DMT ownership and sole renderer rule
 
-SMT version **1.4.0** is the sole production renderer for DDL that defines or
-changes migrated target schema objects. The integration mechanism is an
-implementation choice: a native library call, statically linked binding, FFI,
-generated bridge, or equivalent is acceptable if the released DMT executable
-remains self-contained and the behavior below is preserved.
+DMT MUST be completely standalone and independent. It MUST own and implement
+the production planning and rendering of all DDL that defines or changes
+migrated target schema objects. This behavior MUST be part of the DMT project,
+executable, test suite, and release lifecycle. Building, testing, or running DMT
+MUST NOT require or assume access to a separate schema-migration project,
+codebase, renderer executable, network service, or external conformance target.
 
-The following ownership MUST be delegated to SMT:
+The internal architecture and implementation language are choices, but every
+production schema change MUST pass through one deterministic DMT planning and
+rendering contract. Given the same canonical metadata, source dialect, target
+dialect, options, and DMT version, it MUST produce the same ordered plan.
 
-| DMT operation | SMT 1.4.0 public contract |
+That contract MUST implement:
+
+| DMT operation | Required deterministic behavior |
 |---|---|
-| Normalize cross-dialect types for PostgreSQL, SQL Server, MySQL, SQLite, and ClickHouse | canonical schema/type API |
-| Create schema/database and table | `PlanCreate` semantics |
-| Create inline or standalone primary key | create plan / `CreatePrimaryKey` semantics |
-| Create secondary or unique index | `CreateIndex` semantics |
-| Create foreign key | `CreateForeignKey` semantics |
-| Create check constraint | `CreateCheckConstraint` semantics |
-| Add column | `AddColumn` semantics |
-| Relax column nullability | `AlterColumnNullability` semantics |
-| Widen column type | `AlterColumnType` semantics |
-| Drop table | `DropTable` semantics |
-| Truncate table | `TruncateTable` semantics |
+| Normalize cross-dialect types for PostgreSQL, SQL Server, MySQL, SQLite, and ClickHouse | Map canonical source type metadata to an explicit target type or return a typed/classifiable unsupported-type error. |
+| Create schema/database and table | Produce dialect-correct, fully qualified creation statements with ordered columns and explicit creation options. |
+| Create inline or standalone primary key | Preserve ordered key columns and use only forms supported by the target capability contract. |
+| Create secondary or unique index | Preserve uniqueness and ordered columns; quote every identifier using the target dialect. |
+| Create foreign key | Preserve local/referenced column order and supported update/delete actions. |
+| Create check constraint | Preserve the discovered expression only when DMT can render it safely for the target; otherwise fail or report the explicit configured degradation. |
+| Add column | Render the mapped type, nullability, default, identity, and other supported modifiers from structured metadata. |
+| Relax column nullability | Emit only a target-supported change from required to nullable. |
+| Widen column type | Emit only a type transition classified as safe by DMT's schema-contract rules. |
+| Drop table | Render a fully qualified drop for the exact normalized target identity. |
+| Truncate table | Render the target-supported truncate operation or return an explicit capability error. |
 
-SMT also knows how to render other operations, but DMT MUST NOT schedule them
-unless its public policy and metadata model explicitly support them.
+DMT MUST NOT schedule any other migrated-schema operation unless its public
+policy and canonical metadata model explicitly support it. It MUST NOT maintain
+multiple competing production catalogs or bypass the deterministic planner
+with ad hoc or AI-generated DDL. Unknown types, unsupported features, and
+policy errors MUST remain typed or otherwise machine-classifiable and fail with
+actionable object, source-dialect, target-dialect, and operation context.
 
-DMT MUST NOT contain a second production catalog of migrated target-schema DDL
-templates. It MUST NOT fall back to a local renderer or an AI-generated DDL
-statement when SMT returns an unknown-type, unsupported-feature, or policy
-error. Such errors MUST remain typed or otherwise machine-classifiable and fail
-with actionable context.
+### 6.2 Metadata fidelity and rendering
 
-### 6.2 SMT request fidelity
-
-DMT MUST pass base source catalog type names and structured modifiers to SMT.
-It MUST NOT pass a declaration such as `varchar(100)` as though that entire
-declaration were the catalog base type.
+DMT MUST keep base source catalog type names separate from structured
+modifiers. It MUST NOT treat a declaration such as `varchar(100)` as though
+that entire declaration were the catalog base type.
 
 MySQL metadata fidelity and temporal precision distinctions are required:
 explicit fractional precision `0` MUST remain distinguishable from
@@ -474,13 +480,23 @@ unspecified precision; escaped enum/set members MUST round-trip; unsigned and
 zerofill flags MUST not be inferred from lossy strings after the fact.
 
 Source and target dialect, physical target schema, table/column metadata,
-constraints, and creation options MUST be explicit request inputs. SMT's
-returned SQL MUST be executed verbatim; DMT MUST NOT post-process SQL with
-string replacements that alter semantics.
+constraints, and creation options MUST be explicit planner inputs. Identifier
+qualification and escaping MUST be applied structurally, never by interpolating
+untrusted catalog text. Rendered statements MUST be executed as the ordered
+plan produced by DMT; semantic string-replacement post-processing is forbidden.
+
+Target type mapping, defaults, identity/auto-increment behavior, generated
+names, qualification, and statement ordering MUST be covered by deterministic
+fixtures for every supported target dialect. If two dialects cannot preserve a
+source feature exactly, DMT MUST apply an explicitly documented safe mapping,
+an operator-selected degradation allowed by this contract, or a
+typed/classifiable failure. It MUST NOT silently discard or approximate the
+feature.
 
 ### 6.3 Multi-statement batch execution
 
-SMT evolution operations may return an ordered batch. DMT MUST preserve:
+DMT schema operations may require an ordered batch. The plan and executor MUST
+preserve:
 
 - statement order;
 - required versus best-effort statement classification;
@@ -495,10 +511,9 @@ This is a correctness requirement for MySQL foreign-key checks, SQLite
 foreign-key pragmas and sequence cleanup, and future multi-statement dialect
 operations.
 
-### 6.4 SQL DMT intentionally retains
+### 6.4 Operational SQL
 
-DMT remains responsible for operational SQL that does not define the migrated
-schema:
+DMT also owns operational SQL that does not define the migrated schema:
 
 - temporary staging tables and staging-column rewrites used for bulk/upsert or
   replay;
@@ -509,8 +524,9 @@ schema:
 - reconciliation queries and bounded target deletes;
 - read pagination and validation queries.
 
-These operations MUST remain narrowly scoped and dialect-safe. They are not a
-license to introduce a second migrated-schema renderer.
+These operations MUST remain narrowly scoped and dialect-safe. Schema-changing
+DDL MUST still use the single deterministic planning and rendering contract in
+this section.
 
 ## 7. Migration lifecycle (normative)
 
@@ -570,7 +586,7 @@ This mode MUST:
   explicitly acknowledges a backup/destructive action;
 - create durable tasks before the first drop;
 - drop all selected target tables, then recreate tables and primary keys using
-  SMT;
+  DMT's deterministic DDL planner;
 - transfer into empty tables;
 - reset identities/sequences and create enabled secondary objects after data;
 - surface partial preparation clearly: if drops succeeded but creation failed,
@@ -618,7 +634,8 @@ Required modes and behavior:
 `tables: discard_value` MUST be rejected. A discarded column MUST NOT be a
 primary key, identity, or selected date-tracking column. Unsafe evolution MUST
 be blocked: added identity/PK in upsert, nullability tightening, narrowing or
-lossy conversions, coupled default/PK drift, and operations SMT cannot render.
+lossy conversions, coupled default/PK drift, and operations DMT cannot render
+safely.
 Dropped source tables and columns are reported and retained on the target;
 DMT does not infer destructive drops from source absence.
 
@@ -1095,7 +1112,7 @@ AI MAY:
 AI MUST NOT:
 
 - receive row values or sample data;
-- replace SMT as target-schema DDL renderer;
+- replace or bypass DMT's deterministic target-schema DDL planner;
 - overrule deterministic pass/fail facts;
 - turn an unsupported feature into silent success;
 - be required for ordinary migration.
@@ -1208,8 +1225,7 @@ The browser assets MUST be embedded in the executable.
 
 ## 18. Compatibility and release expectations (normative)
 
-The reconstructed compatibility target is **DMT 5.6.0** with
-**SMT 1.4.0** behavior.
+The reconstructed compatibility target is **DMT 5.6.0**.
 
 Use Semantic Versioning:
 
@@ -1241,8 +1257,7 @@ Compatibility requirements include:
 
 Release artifacts MUST include self-contained binaries for macOS x86-64 and
 ARM64, Linux x86-64 and ARM64, and Windows x86-64, plus SHA-256 checksums.
-`dmt --version` MUST report the release version. The build or diagnostics
-surface MUST make the SMT compatibility version discoverable.
+`dmt --version` MUST report the release version.
 
 ## 19. Non-goals for this reconstruction (normative boundaries)
 
@@ -1275,25 +1290,27 @@ The internal design is free, but implement in stages that produce testable
 vertical slices. Do not build the WebUI or optional AI before transfer and
 restart correctness.
 
-### Stage 0: executable contract and SMT proof
+### Stage 0: executable contract and deterministic DDL proof
 
 Deliver:
 
 - versioned executable, config parser, secret expansion/sanitization, semantic
   exit codes, and command skeleton;
-- SMT 1.4.0 integration for all five dialects;
+- DMT-owned deterministic type mapping and DDL generation for all five
+  dialects;
 - canonical metadata fixtures and exact create/evolution batch tests;
-- a test that proves production migrated-schema DDL cannot bypass SMT.
+- a test that proves production migrated-schema DDL cannot bypass DMT's
+  deterministic planner.
 
 Exit criterion: a schema fixture can be planned for every target dialect with
-deterministic SQL or a typed SMT policy error, and no secret fixture appears in
-output.
+deterministic SQL or a typed/classifiable DMT schema-policy error, and no secret
+fixture appears in output.
 
 ### Stage 1: SQLite end-to-end vertical slice
 
-Deliver SQLite source/target discovery, SMT create, bounded transfer, both
-target modes, validation, local state, YAML state, leases, audit, and
-run/resume/status/history.
+Deliver SQLite source/target discovery, deterministic DMT schema creation,
+bounded transfer, both target modes, validation, local state, YAML state,
+leases, audit, and run/resume/status/history.
 
 Exit criterion: an automated SQLite-to-SQLite migration survives forced process
 termination at each write/checkpoint boundary and finishes with exact schema
@@ -1374,17 +1391,19 @@ or accompanied by a reproducible live-database test.
 - [ ] Private files/directories have restrictive platform permissions.
 - [ ] A cgroup/container memory-limit fixture cannot inherit unsafe host memory.
 
-### 21.3 SMT and schema
+### 21.3 Deterministic DDL and schema
 
-- [ ] Build/diagnostics prove SMT 1.4.0 compatibility.
-- [ ] Exact DDL parity fixtures cover create schema/table, PK, unique/non-unique
+- [ ] DMT builds, tests, and runs its schema planner without a separate
+      schema-migration project, renderer executable, service, or conformance
+      target.
+- [ ] Exact DDL fixtures cover create schema/table, PK, unique/non-unique
       index, FK actions, checks, add column, nullability relax, safe widening,
       drop, and truncate for all five dialects.
 - [ ] Batch tests cover ordered statements, single-connection affinity,
       required failure, best-effort failure, cancellation-independent cleanup,
       and primary-error preservation.
-- [ ] A boundary test fails if production code introduces local migrated-schema
-      DDL or an AI DDL fallback.
+- [ ] A boundary test fails if production code bypasses DMT's deterministic
+      planner with ad hoc or AI-generated migrated-schema DDL.
 - [ ] MySQL full type metadata, precision-zero versus unspecified, enum/set
       escaping, spatial SRID, PostgreSQL identifier normalization, and quoted
       delimiter names have regression tests.
@@ -1548,7 +1567,7 @@ Completion requires:
 3. reproducible release artifacts and checksums;
 4. a clean no-AI migration across the required live matrix;
 5. documented limitations matching Section 19;
-6. no alternate production renderer across the SMT boundary;
+6. no production migrated-schema DDL path outside DMT's deterministic planner;
 7. demonstrated recovery after process kill, required state failure, and lease
    takeover without silent loss or false success.
 
@@ -1582,14 +1601,13 @@ Equivalent or better designs are encouraged.
 ## 24. Reference snapshot (non-normative)
 
 This specification was grounded in the DMT 5.6.0 reference snapshot dated
-2026-07-26. That snapshot is implemented in Go 1.25.7 and consumes
-`github.com/johndauphine/smt` v1.4.0. Those language and module choices are
-provenance only. They do not constrain the reconstruction language or internal
-architecture.
+2026-07-26. That snapshot is implemented in Go 1.25.7. The language and module
+choices are provenance only. They do not constrain the reconstruction language
+or internal architecture.
 
 The reference snapshot organizes responsibilities into configuration/secrets,
-catalog-driven drivers, an SMT anti-corruption adapter, orchestration,
-transfer, checkpointing, tuning, validation, audit/observability, command
-services, terminal UI, and embedded WebUI. This logical decomposition informed
-the contracts above; its exact package layout is intentionally not part of the
+catalog-driven drivers, schema planning/rendering, orchestration, transfer,
+checkpointing, tuning, validation, audit/observability, command services,
+terminal UI, and embedded WebUI. This logical decomposition informed the
+contracts above; its exact package layout is intentionally not part of the
 requirements.
