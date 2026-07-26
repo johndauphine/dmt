@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- DMT now delegates deterministic secondary-index, standalone-primary-key,
+  foreign-key, and check-constraint SQL to SMT v1.3.0's public schema API.
+  DMT retains source discovery, dependency scheduling, idempotency, execution,
+  and migration orchestration; unsupported dialect features return SMT's typed
+  policy errors rather than falling through to local or AI DDL.
+
 - DMT's schema, table, column, and inline-primary-key create path now uses
   SMT v1.2.0 `PlanCreate` output directly, with typed unsupported behavior in
   place of local or AI-generated CREATE SQL (#739).

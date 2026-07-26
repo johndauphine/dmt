@@ -468,10 +468,9 @@ func (w *Writer) TableExists(ctx context.Context, schema, table string) (bool, e
 	return err == nil, err
 }
 
-// CreatePrimaryKey preserves DMT's idempotency check after a create plan. SMT
-// v1.2.0 owns primary-key SQL only inline in PlanCreate's table statement, so
-// a pre-existing table without its key returns SMT's typed unsupported policy
-// rather than using DMT's former ALTER TABLE template.
+// CreatePrimaryKey preserves DMT's idempotency check after a create plan, then
+// executes SMT v1.3.0's standalone primary-key statement unchanged when a
+// resumed/evolved target table still needs its key.
 func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSchema string) error {
 	if len(t.PrimaryKey) == 0 {
 		return nil
@@ -483,8 +482,22 @@ func (w *Writer) CreatePrimaryKey(ctx context.Context, t *driver.Table, targetSc
 	if hasPK {
 		return nil
 	}
-	if err := smtddl.UnsupportedStandalonePrimaryKey(w.cat.Name); err != nil {
-		return fmt.Errorf("creating primary key for %s: %w", t.FullName(), err)
+	if w.cat.Quoting.SchemaIgnored {
+		targetSchema = ""
+	}
+	ddl, err := driver.PlanCreatePrimaryKey(driver.TableDDLRequest{
+		SourceDBType:  w.sourceType,
+		TargetDBType:  w.cat.Name,
+		SourceTable:   t,
+		TargetSchema:  targetSchema,
+		TargetContext: w.dbContext,
+	})
+	if err != nil {
+		return fmt.Errorf("primary-key DDL generation failed for %s: %w", t.FullName(), err)
+	}
+	logging.DebugEvent("Generated SMT primary-key DDL", "table", t.FullName(), "ddl", ddl)
+	if _, err := w.db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("creating primary key for %s: %w\nDDL: %s", t.FullName(), err, ddl)
 	}
 	return nil
 }

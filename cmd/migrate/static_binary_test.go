@@ -12,7 +12,7 @@ import (
 
 const (
 	smtModulePath    = "github.com/johndauphine/smt"
-	smtModuleVersion = smtModulePath + " v1.2.0"
+	smtModuleVersion = smtModulePath + " v1.3.0"
 )
 
 func TestSMTDependencyIsVersioned(t *testing.T) {
@@ -114,8 +114,8 @@ func TestStaticBinaryBuildIncludesSMT(t *testing.T) {
 	version := exec.Command("go", "version", "-m", binary)
 	if output, err := version.CombinedOutput(); err != nil {
 		t.Fatalf("read binary build info: %v\n%s", err, output)
-	} else if !strings.Contains(string(output), smtModulePath+"\tv1.2.0") {
-		t.Fatalf("binary build info does not consume SMT v1.2.0:\n%s", output)
+	} else if !strings.Contains(string(output), smtModulePath+"\tv1.3.0") {
+		t.Fatalf("binary build info does not consume SMT v1.3.0:\n%s", output)
 	}
 }
 

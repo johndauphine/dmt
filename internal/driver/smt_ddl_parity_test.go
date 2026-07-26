@@ -2,11 +2,13 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
+	"github.com/johndauphine/smt/schema"
 )
 
 // TestSMTDDLRepresentativeParity pins exact SMT PlanCreate table statements
@@ -132,6 +134,136 @@ func TestSMTDDLRepresentativeParity(t *testing.T) {
 				t.Fatal("parity deviation must document its intentional behavior change")
 			}
 		})
+	}
+}
+
+// TestSMTSideObjectRepresentativeParity pins exact public-SMT side-object
+// output for every DMT target dialect. DMT represents unique source artifacts
+// as Index{IsUnique:true}, so this intentionally exercises a UNIQUE INDEX, not
+// SMT's distinct named-UNIQUE-constraint API.
+func TestSMTSideObjectRepresentativeParity(t *testing.T) {
+	table := &Table{
+		Schema: "public",
+		Name:   "events",
+		Columns: []Column{
+			{Name: "id", DataType: "int8", IsNullable: false},
+			{Name: "code", DataType: "varchar", MaxLength: 80, IsNullable: false},
+		},
+		PrimaryKey: []string{"id"},
+	}
+	index := &Index{Name: "ix_events_code", Columns: []string{"code"}, IsUnique: true}
+	foreignKey := &ForeignKey{
+		Name:       "fk_events_parent",
+		Columns:    []string{"id"},
+		RefSchema:  "public",
+		RefTable:   "parent_events",
+		RefColumns: []string{"id"},
+		OnDelete:   "CASCADE",
+		OnUpdate:   "NO ACTION",
+	}
+	check := &CheckConstraint{Name: "ck_events_code", Definition: "code <> ''"}
+
+	cases := []struct {
+		name, target, schema string
+		index                string
+		primaryKey           string
+		foreignKey           string
+		check                string
+		unsupported          bool
+		intentionalChange    string
+	}{
+		{
+			name: "postgres", target: typemap.DialectPostgres, schema: "public",
+			index:             `CREATE UNIQUE INDEX "ix_events_code" ON "events" ("code")`,
+			primaryKey:        `ALTER TABLE "events" ADD CONSTRAINT "pk_events" PRIMARY KEY ("id")`,
+			foreignKey:        `ALTER TABLE "events" ADD CONSTRAINT "fk_events_parent" FOREIGN KEY ("id") REFERENCES "parent_events" ("id") ON DELETE CASCADE ON UPDATE NO ACTION`,
+			check:             `ALTER TABLE "events" ADD CONSTRAINT "ck_events_code" CHECK ("code" <> '')`,
+			intentionalChange: "SMT emits unterminated SQL, quotes translated check identifiers, and preserves explicit NO ACTION.",
+		},
+		{
+			name: "mssql", target: typemap.DialectMSSQL, schema: "dbo",
+			index:             `CREATE UNIQUE INDEX [ix_events_code] ON [events] ([code])`,
+			primaryKey:        `ALTER TABLE [events] ADD CONSTRAINT [pk_events] PRIMARY KEY ([id])`,
+			foreignKey:        `ALTER TABLE [events] ADD CONSTRAINT [fk_events_parent] FOREIGN KEY ([id]) REFERENCES [parent_events] ([id]) ON DELETE CASCADE ON UPDATE NO ACTION`,
+			check:             `ALTER TABLE [events] ADD CONSTRAINT [ck_events_code] CHECK ([code] <> '')`,
+			intentionalChange: "SMT emits unterminated SQL and preserves explicit NO ACTION instead of DMT's former omission.",
+		},
+		{
+			name: "mysql", target: typemap.DialectMySQL, schema: "app",
+			index:             "CREATE UNIQUE INDEX `ix_events_code` ON `events` (`code`)",
+			primaryKey:        "ALTER TABLE `events` ADD CONSTRAINT `pk_events` PRIMARY KEY (`id`)",
+			foreignKey:        "ALTER TABLE `events` ADD CONSTRAINT `fk_events_parent` FOREIGN KEY (`id`) REFERENCES `parent_events` (`id`) ON DELETE CASCADE ON UPDATE NO ACTION",
+			check:             "ALTER TABLE `events` ADD CONSTRAINT `ck_events_code` CHECK (`code` <> '')",
+			intentionalChange: "SMT emits unterminated SQL and follows DMT's connection-selected MySQL database contract.",
+		},
+		{
+			name: "sqlite", target: typemap.DialectSQLite, schema: "ignored",
+			index:             `CREATE UNIQUE INDEX "ix_events_code" ON "events" ("code")`,
+			unsupported:       true,
+			intentionalChange: "SMT supports standalone indexes but explicitly rejects SQLite ALTER TABLE constraints.",
+		},
+		{
+			name: "clickhouse", target: typemap.DialectClickHouse, schema: "analytics",
+			unsupported:       true,
+			intentionalChange: "SMT explicitly rejects row-store side objects for ClickHouse rather than emitting incompatible SQL.",
+		},
+	}
+
+	mapper := NewDeterministicMapper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := FinalizationDDLRequest{SourceDBType: typemap.DialectPostgres, TargetDBType: tc.target, Table: table, TargetSchema: tc.schema}
+			req.Type, req.Index = DDLTypeIndex, index
+			gotIndex, err := mapper.GenerateFinalizationDDL(context.Background(), req)
+			if tc.unsupported && tc.target == typemap.DialectClickHouse {
+				assertSMTUnsupported(t, err, tc.target)
+				return
+			}
+			if err != nil {
+				t.Fatalf("index: %v", err)
+			}
+			if gotIndex != tc.index {
+				t.Fatalf("index SQL:\n got: %s\nwant: %s", gotIndex, tc.index)
+			}
+
+			req.Type, req.Index, req.ForeignKey = DDLTypeForeignKey, nil, foreignKey
+			gotFK, err := mapper.GenerateFinalizationDDL(context.Background(), req)
+			if tc.unsupported {
+				assertSMTUnsupported(t, err, tc.target)
+			} else if err != nil || gotFK != tc.foreignKey {
+				t.Fatalf("foreign-key SQL = %q, err = %v; want %q", gotFK, err, tc.foreignKey)
+			}
+
+			req.Type, req.ForeignKey, req.CheckConstraint = DDLTypeCheckConstraint, nil, check
+			gotCheck, err := mapper.GenerateFinalizationDDL(context.Background(), req)
+			if tc.unsupported {
+				assertSMTUnsupported(t, err, tc.target)
+			} else if err != nil || gotCheck != tc.check {
+				t.Fatalf("check SQL = %q, err = %v; want %q", gotCheck, err, tc.check)
+			}
+
+			pk, err := PlanCreatePrimaryKey(TableDDLRequest{SourceDBType: typemap.DialectPostgres, TargetDBType: tc.target, SourceTable: table, TargetSchema: tc.schema})
+			if tc.unsupported {
+				assertSMTUnsupported(t, err, tc.target)
+			} else if err != nil || pk != tc.primaryKey {
+				t.Fatalf("primary-key SQL = %q, err = %v; want %q", pk, err, tc.primaryKey)
+			}
+
+			if tc.intentionalChange == "" {
+				t.Fatal("side-object parity change requires an explicit compatibility note")
+			}
+		})
+	}
+}
+
+func assertSMTUnsupported(t *testing.T, err error, dialect string) {
+	t.Helper()
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("error = %T %v, want SMT UnsupportedFeatureError", err, err)
+	}
+	if unsupported.Dialect != dialect {
+		t.Fatalf("unsupported dialect = %q, want %q", unsupported.Dialect, dialect)
 	}
 }
 

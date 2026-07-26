@@ -174,7 +174,9 @@ type TypeInfo struct {
 	SampleValues []string
 }
 
-// FinalizationDDLMapper handles AI-driven DDL generation for finalization phase.
+// FinalizationDDLMapper handles post-load DDL generation for the finalization
+// phase. Adopted artifacts are rendered deterministically by SMT; the
+// interface remains for non-adopted compatibility paths.
 type FinalizationDDLMapper interface {
 	// GenerateFinalizationDDL generates DDL for indexes, foreign keys, or check constraints.
 	GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error)

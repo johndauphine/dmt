@@ -277,26 +277,25 @@ func TestFallbackChain_GenerateTableDDL_NoFallback_ErrorPropagates(t *testing.T)
 
 // ---------- GenerateFinalizationDDL routing ----------
 
-func TestFallbackChain_GenerateFinalizationDDL_RoutesOnErrUnsupportedDDL(t *testing.T) {
+func TestFallbackChain_GenerateFinalizationDDL_NeverRoutesSMTSideObjectsToAI(t *testing.T) {
 	stub := &stubMapper{finalizationDDLReturns: "AI_INDEX_DDL"}
 	chain := NewFallbackChain(NewDeterministicMapper(), stub, UnmappedActionFail, "")
 
-	// Clustered index → deterministic returns ErrUnsupportedDDL → AI fires
-	got, err := chain.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
+	// Clustered indexes are outside SMT's public capability surface, so the
+	// public typed policy reaches DMT unchanged rather than triggering AI SQL.
+	_, err := chain.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
 		Type:         DDLTypeIndex,
 		SourceDBType: typemap.DialectMSSQL,
 		TargetDBType: typemap.DialectMSSQL,
 		Table:        &Table{Name: "t"},
 		Index:        &Index{Name: "ci", Columns: []string{"id"}, IsClustered: true},
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != "clustered indexes" {
+		t.Fatalf("clustered-index error = %#v, want SMT unsupported policy", err)
 	}
-	if got != "AI_INDEX_DDL" {
-		t.Errorf("expected AI fallback to provide the DDL; got %q", got)
-	}
-	if stub.finalizationDDLCalled != 1 {
-		t.Errorf("AI fallback should fire once; got %d calls", stub.finalizationDDLCalled)
+	if stub.finalizationDDLCalled != 0 {
+		t.Errorf("AI must not generate adopted SMT side-object DDL; got %d calls", stub.finalizationDDLCalled)
 	}
 }
 
@@ -325,7 +324,7 @@ func TestFallbackChain_GenerateFinalizationDDL_OtherErrors_DoNotRoute(t *testing
 	}
 }
 
-func TestFallbackChain_GenerateFinalizationDDL_RoutesIndex_NoFallback_ErrorPropagates(t *testing.T) {
+func TestFallbackChain_GenerateFinalizationDDL_SideObjectPolicyPropagatesWithoutFallback(t *testing.T) {
 	chain := NewFallbackChain(NewDeterministicMapper(), nil, UnmappedActionFail, "")
 	_, err := chain.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
 		Type:         DDLTypeIndex,
@@ -334,8 +333,9 @@ func TestFallbackChain_GenerateFinalizationDDL_RoutesIndex_NoFallback_ErrorPropa
 		Table:        &Table{Name: "t"},
 		Index:        &Index{Name: "ci", Columns: []string{"id"}, IsClustered: true},
 	})
-	if !errors.Is(err, ErrUnsupportedDDL) {
-		t.Errorf("expected ErrUnsupportedDDL to propagate when no fallback; got %v", err)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != "clustered indexes" {
+		t.Errorf("expected SMT typed unsupported policy to propagate; got %v", err)
 	}
 }
 

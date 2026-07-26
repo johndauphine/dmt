@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-// TestCreatePathHasNoLocalRendererEscapeHatch keeps the ownership boundary
-// narrow and reviewable. It intentionally examines only the four production
-// create methods; typemap/ddl remains valid for later finalization milestones.
-func TestCreatePathHasNoLocalRendererEscapeHatch(t *testing.T) {
+// TestSMTDDLBoundaryHasNoLocalRendererEscapeHatch keeps the ownership boundary
+// narrow and reviewable. Create/finalization scheduling stays in DMT while SMT
+// owns SQL for adopted tables and side objects; drops/alters remain later work.
+func TestSMTDDLBoundaryHasNoLocalRendererEscapeHatch(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locating boundary test source")
@@ -24,6 +24,17 @@ func TestCreatePathHasNoLocalRendererEscapeHatch(t *testing.T) {
 		"GenerateTableDDL(ctx, req)", // AI fallback must not be called here.
 	})
 	assertSourceContains(t, filepath.Join(driverDir, "deterministic_mapper.go"), "smtddl.RenderCreateTable(smtDDLRequest(req))")
+	mapperPath := filepath.Join(driverDir, "deterministic_mapper.go")
+	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "smtddl.RenderIndex")
+	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "smtddl.RenderForeignKey")
+	assertFunctionContains(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", "smtddl.RenderCheckConstraint")
+	assertFunctionContainsNone(t, mapperPath, "func (m *DeterministicMapper) GenerateFinalizationDDL", []string{
+		"ddl.GenerateIndex",
+		"ddl.GenerateAddForeignKey",
+		"ddl.GenerateAddCheck",
+		"CheckExpressionNeedsFallback",
+	})
+	assertFunctionContains(t, mapperPath, "func PlanCreatePrimaryKey", "smtddl.RenderPrimaryKey")
 	assertSourceContains(t, filepath.Join(driverDir, "typemap_chain.go"), "return c.primary.GenerateTableDDL(ctx, req)")
 	assertSourceContainsNone(t, filepath.Join(driverDir, "typemap_chain.go"), []string{
 		"tableMapper.GenerateTableDDL",
@@ -36,17 +47,21 @@ func TestCreatePathHasNoLocalRendererEscapeHatch(t *testing.T) {
 		"strings.NewReplacer",
 		".Replace(w.cat.DDL.CreateSchema)",
 	})
-	assertFunctionContains(t, writerPath, "func (w *Writer) CreatePrimaryKey", "smtddl.UnsupportedStandalonePrimaryKey")
+	assertFunctionContains(t, writerPath, "func (w *Writer) CreatePrimaryKey", "driver.PlanCreatePrimaryKey")
 	assertFunctionContainsNone(t, writerPath, "func (w *Writer) CreatePrimaryKey", []string{
 		"strings.NewReplacer",
 		".Replace(w.cat.DDL.CreatePrimaryKey)",
-		"w.db.ExecContext",
 	})
 	assertFunctionContains(t, writerPath, "func (w *Writer) CreateTableWithOptions", "driver.PlanCreateTable(req)")
 	assertFunctionContainsNone(t, writerPath, "func (w *Writer) CreateTableWithOptions", []string{
 		"typeddl.",
 		"strings.NewReplacer",
 		"GenerateTableDDL",
+	})
+	assertFunctionContains(t, writerPath, "func (w *Writer) CreateIndex", "GenerateFinalizationDDL")
+	assertFunctionContainsNone(t, writerPath, "func (w *Writer) CreateIndex", []string{
+		"typeddl.",
+		"strings.NewReplacer",
 	})
 }
 
