@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.6.0] - 2026-07-26
+
 ### Changed
 
 - DMT now pins SMT v1.4.0 and delegates every production target-schema DDL
