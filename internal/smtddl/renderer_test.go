@@ -142,3 +142,38 @@ func TestRenderIndexClusteredReturnsSMTTypedPolicy(t *testing.T) {
 		t.Fatalf("unsupported policy = %#v, want mssql clustered-index policy", unsupported)
 	}
 }
+
+func TestRenderSideObjectsAllowUnrelatedRawSourceTypeContext(t *testing.T) {
+	req := Request{
+		SourceDialect: "postgres",
+		TargetDialect: "postgres",
+		TargetSchema:  "public",
+		Table: Table{
+			Name: "events",
+			Columns: []Column{
+				{Name: "client_ip", DataType: "inet"}, // canonical.Raw in the DMT source model
+				{Name: "status", DataType: "integer", IsNullable: false},
+			},
+		},
+	}
+
+	indexSQL, err := RenderIndex(req, Index{
+		Name:    "ix_events_status",
+		Columns: []string{"status"},
+		Filter:  "status IS NOT NULL",
+	})
+	if err != nil {
+		t.Fatalf("RenderIndex with unrelated raw type: %v", err)
+	}
+	if !strings.Contains(indexSQL, `WHERE status IS NOT NULL`) {
+		t.Fatalf("filtered index SQL = %q, want SMT-rendered filter", indexSQL)
+	}
+
+	checkSQL, err := RenderCheckConstraint(req, CheckConstraint{Name: "ck_events_status", Expression: "status IS NOT NULL"})
+	if err != nil {
+		t.Fatalf("RenderCheckConstraint with unrelated raw type: %v", err)
+	}
+	if !strings.Contains(checkSQL, `CHECK ("status" IS NOT NULL)`) {
+		t.Fatalf("check SQL = %q, want SMT-rendered predicate", checkSQL)
+	}
+}

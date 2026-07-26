@@ -102,7 +102,7 @@ func PlanCreate(req Request) (schema.Plan, error) {
 		return plan, nil
 	}
 
-	columns, err := schemaColumns(req, renderer, "create-table")
+	columns, err := schemaColumns(req, renderer, "create-table", true)
 	if err != nil {
 		return schema.Plan{}, err
 	}
@@ -228,7 +228,10 @@ func tableRef(req Request, renderer schema.Renderer, artifact string, withColumn
 	if !withColumns {
 		return table, nil
 	}
-	columns, err := schemaColumns(req, renderer, artifact)
+	// Side-object renderers need the original columns only as expression context.
+	// Unlike CREATE TABLE, an unrelated raw source type must not prevent SMT from
+	// rendering an index filter or CHECK predicate that it can support.
+	columns, err := schemaColumns(req, renderer, artifact, false)
 	if err != nil {
 		return schema.TableRef{}, err
 	}
@@ -236,7 +239,7 @@ func tableRef(req Request, renderer schema.Renderer, artifact string, withColumn
 	return table, nil
 }
 
-func schemaColumns(req Request, renderer schema.Renderer, artifact string) ([]schema.Column, error) {
+func schemaColumns(req Request, renderer schema.Renderer, artifact string, rejectRaw bool) ([]schema.Column, error) {
 	columns := make([]schema.Column, len(req.Table.Columns))
 	for i, column := range req.Table.Columns {
 		ct := canonical.ToCanonical(column.DataType, canonical.TypeMeta{
@@ -246,7 +249,7 @@ func schemaColumns(req Request, renderer schema.Renderer, artifact string) ([]sc
 			IsUnsigned:   column.IsUnsigned,
 			DisplayWidth: column.DisplayWidth,
 		}, req.SourceDialect)
-		if ct.Kind == canonical.Raw {
+		if rejectRaw && ct.Kind == canonical.Raw {
 			return nil, unsupported(renderer, fmt.Sprintf("source type %q for %s rendering", column.DataType, artifact))
 		}
 		columns[i] = schema.Column{
