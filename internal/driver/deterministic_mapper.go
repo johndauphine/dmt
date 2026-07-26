@@ -1,13 +1,14 @@
 // DeterministicMapper is the dmt-driver-side adapter for the
 // deterministic typemap surface (#168 / #169). It implements the four
 // type-mapper interfaces — TypeMapper, TableTypeMapper,
-// FinalizationDDLMapper, TableDropDDLMapper — with SMT's public create plan
-// for CREATE TABLE and internal typemap/ddl only for later artifacts.
+// FinalizationDDLMapper, TableDropDDLMapper — with SMT's public API for
+// adopted create and side-object DDL and internal typemap/ddl only for later
+// artifacts.
 //
 // History: 169c added the adapter without changing the default
 // type mapper. #170 wires it as the default via GetTypeMapper, with
-// AI as a registered fallback for Raw types and ErrUnsupportedDDL
-// (see typemap_chain.go's FallbackChain).
+// AI as a registered fallback for Raw types and unadopted compatibility
+// paths (see typemap_chain.go's FallbackChain).
 //
 // The adapter is stateless. The constructor exists for symmetry with
 // NewAITypeMapper and to give #170's wiring code a stable factory.
@@ -24,20 +25,12 @@ import (
 	"github.com/johndauphine/dmt/internal/smtddl"
 	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
+	"github.com/johndauphine/smt/schema"
 )
 
-// ErrUnsupportedDDL signals that the deterministic mapper cannot
-// faithfully emit DDL for the given input. The wiring layer (#170)
-// is expected to recognize this sentinel via errors.Is and route
-// the request to AI fallback rather than treat the deterministic
-// path as authoritative.
-//
-// Without this sentinel, the adapter would silently emit DDL that
-// drops vendor-specific features the source had requested — Codex
-// review on PR #190 caught this for MSSQL clustered / covering /
-// filtered indexes, where the adapter dropped the metadata and
-// emitted plain btree CREATE INDEX. The wiring layer must instead
-// see the unsupported case so it can route to AI.
+// ErrUnsupportedDDL is retained for non-adopted finalization compatibility.
+// Adopted create and side-object paths return SMT's typed policy errors
+// directly and never use this sentinel to select an AI renderer.
 var ErrUnsupportedDDL = errors.New("deterministic mapper: vendor-specific feature not supported by deterministic path")
 
 // DeterministicMapper implements TypeMapper, TableTypeMapper,
@@ -240,10 +233,9 @@ func boundSMTMySQLUniqueLOBs(table *smtddl.Table, source *Table, sourceDialect s
 	}
 }
 
-// GenerateFinalizationDDL implements FinalizationDDLMapper. Dispatches
-// on req.Type to the right ddl.Generate* function and adapts the
-// dmt-driver constraint shapes (driver.ForeignKey, driver.Index,
-// driver.CheckConstraint) to the typemap/ddl shapes.
+// GenerateFinalizationDDL retains DMT's finalization scheduling boundary while
+// delegating adopted side-object SQL to SMT's public API. Drop statements stay
+// on their existing local path until a later SMT API milestone.
 func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
 	if req.Table == nil {
 		return "", fmt.Errorf("GenerateFinalizationDDL: Table is required")
@@ -253,61 +245,118 @@ func (m *DeterministicMapper) GenerateFinalizationDDL(ctx context.Context, req F
 			req.SourceDBType, req.TargetDBType)
 	}
 
-	tbl := driverTableToDDL(req.Table, req.TargetSchema, req.TargetDBType)
-
-	// ClickHouse has no row-store secondary indexes, FKs, or CHECK
-	// constraints — emitting the generic forms would be invalid SQL
-	// that *succeeds* here and fails at the server. Return the
-	// sentinel so the fallback chain routes or skips cleanly (codex
-	// review on #507 PR 1). The capability matrix (#460) makes the
-	// orchestrator skip FK/CHECK phases for clickhouse targets anyway;
-	// this guard covers the direct finalization path.
-	if req.TargetDBType == typemap.DialectClickHouse {
-		switch req.Type {
-		case DDLTypeIndex, DDLTypeForeignKey, DDLTypeCheckConstraint:
-			return "", fmt.Errorf("%s on clickhouse: %w (no row-store index/FK/CHECK DDL)", req.Type, ErrUnsupportedDDL)
-		}
-	}
-
 	switch req.Type {
 	case DDLTypeIndex:
 		if req.Index == nil {
 			return "", fmt.Errorf("DDLTypeIndex requires Index field")
 		}
-		// Refuse to silently emit a plain CREATE INDEX when the source
-		// index uses vendor-specific features (clustered, covering,
-		// filtered) — those need AI fallback. Returning the sentinel
-		// rather than emitting incomplete DDL is the contract the
-		// wiring layer relies on (Codex review on PR #190).
-		if reason := unsupportedIndexFeature(*req.Index); reason != "" {
-			return "", fmt.Errorf("index %q: %w (%s)", req.Index.Name, ErrUnsupportedDDL, reason)
+		sql, err := smtddl.RenderIndex(smtFinalizationRequest(req), smtIndex(*req.Index, req.TargetDBType))
+		if err != nil {
+			return "", fmt.Errorf("rendering index %q with SMT: %w", req.Index.Name, err)
 		}
-		return ddl.GenerateIndex(tbl, driverIndexToDDL(*req.Index, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
+		return sql, nil
 
 	case DDLTypeForeignKey:
 		if req.ForeignKey == nil {
 			return "", fmt.Errorf("DDLTypeForeignKey requires ForeignKey field")
 		}
-		return ddl.GenerateAddForeignKey(tbl, driverFKToConstraint(*req.ForeignKey, req.Table.Schema, req.TargetSchema, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
+		sql, err := smtddl.RenderForeignKey(smtFinalizationRequest(req), smtForeignKey(*req.ForeignKey, req.Table.Schema, req.TargetSchema, req.TargetDBType))
+		if err != nil {
+			return "", fmt.Errorf("rendering foreign key %q with SMT: %w", req.ForeignKey.Name, err)
+		}
+		return sql, nil
 
 	case DDLTypeCheckConstraint:
 		if req.CheckConstraint == nil {
 			return "", fmt.Errorf("DDLTypeCheckConstraint requires CheckConstraint field")
 		}
-		// Expressions that keep source-only syntax after deterministic
-		// normalization must route to the AI fallback — emitting them
-		// fails at Exec where the fallback chain can't see it.
-		if ddl.CheckExpressionNeedsFallback(req.CheckConstraint.Definition, req.SourceDBType, req.TargetDBType) {
-			return "", fmt.Errorf("check %q: %w (source-dialect cast syntax survives normalization)",
-				req.CheckConstraint.Name, ErrUnsupportedDDL)
+		sql, err := smtddl.RenderCheckConstraint(smtFinalizationRequest(req), smtddl.CheckConstraint{
+			Name:       sanitizeForTarget(req.CheckConstraint.Name, req.TargetDBType),
+			Expression: req.CheckConstraint.Definition,
+		})
+		if err != nil {
+			return "", fmt.Errorf("rendering check constraint %q with SMT: %w", req.CheckConstraint.Name, err)
 		}
-		return ddl.GenerateAddCheck(tbl, driverCheckToConstraint(*req.CheckConstraint, req.TargetDBType), req.SourceDBType, req.TargetDBType), nil
+		return sql, nil
 
 	case DDLTypeDropTable:
 		return generateDropTable(req.TargetSchema, req.Table.Name, req.TargetDBType), nil
 
 	default:
 		return "", fmt.Errorf("unknown DDLType %q", req.Type)
+	}
+}
+
+// PlanCreatePrimaryKey returns SMT's standalone primary-key statement. DMT
+// calls it only after its existing target-side idempotency check confirms that
+// a pre-existing table still needs its key.
+func PlanCreatePrimaryKey(req TableDDLRequest) (string, error) {
+	if req.SourceTable == nil {
+		return "", fmt.Errorf("PlanCreatePrimaryKey: SourceTable is required")
+	}
+	columns := make([]string, len(req.SourceTable.PrimaryKey))
+	for i, column := range req.SourceTable.PrimaryKey {
+		columns[i] = sanitizeForTarget(column, req.TargetDBType)
+	}
+	sql, err := smtddl.RenderPrimaryKey(smtDDLRequest(req), smtddl.PrimaryKey{Columns: columns})
+	if err != nil {
+		return "", fmt.Errorf("rendering standalone primary key with SMT: %w", err)
+	}
+	return sql, nil
+}
+
+func smtFinalizationRequest(req FinalizationDDLRequest) smtddl.Request {
+	return smtDDLRequest(TableDDLRequest{
+		SourceDBType:  req.SourceDBType,
+		TargetDBType:  req.TargetDBType,
+		SourceTable:   req.Table,
+		TargetSchema:  req.TargetSchema,
+		TargetContext: req.TargetContext,
+	})
+}
+
+func smtIndex(index Index, targetDialect string) smtddl.Index {
+	columns := make([]string, len(index.Columns))
+	for i, column := range index.Columns {
+		columns[i] = sanitizeForTarget(column, targetDialect)
+	}
+	includeColumns := make([]string, len(index.IncludeCols))
+	for i, column := range index.IncludeCols {
+		includeColumns[i] = sanitizeForTarget(column, targetDialect)
+	}
+	return smtddl.Index{
+		Name:           sanitizeForTarget(index.Name, targetDialect),
+		Columns:        columns,
+		IsUnique:       index.IsUnique,
+		IsClustered:    index.IsClustered,
+		IncludeColumns: includeColumns,
+		Filter:         index.Filter,
+	}
+}
+
+func smtForeignKey(foreignKey ForeignKey, sourceSchema, targetSchema, targetDialect string) smtddl.ForeignKey {
+	columns := make([]string, len(foreignKey.Columns))
+	for i, column := range foreignKey.Columns {
+		columns[i] = sanitizeForTarget(column, targetDialect)
+	}
+	refColumns := make([]string, len(foreignKey.RefColumns))
+	for i, column := range foreignKey.RefColumns {
+		refColumns[i] = sanitizeForTarget(column, targetDialect)
+	}
+	refSchema := foreignKey.RefSchema
+	if refSchema == "" || refSchema == sourceSchema {
+		refSchema = smtDDLTargetSchema(targetSchema, targetDialect)
+	} else {
+		refSchema = sanitizeForTarget(refSchema, targetDialect)
+	}
+	return smtddl.ForeignKey{
+		Name:       sanitizeForTarget(foreignKey.Name, targetDialect),
+		Columns:    columns,
+		RefSchema:  refSchema,
+		RefTable:   sanitizeForTarget(foreignKey.RefTable, targetDialect),
+		RefColumns: refColumns,
+		OnDelete:   schema.ReferentialAction(foreignKey.OnDelete),
+		OnUpdate:   schema.ReferentialAction(foreignKey.OnUpdate),
 	}
 }
 
@@ -485,10 +534,8 @@ func driverColumnToDDL(col Column, targetDialect string) ddl.Column {
 // TABLE matches the case-folded names the rest of dmt's PG flow
 // (Writer.CreatePrimaryKey, FK creation, INSERT) uses.
 //
-// Indexes are passed through; FK and CHECK constraints are NOT
-// included on the TableInfo because GenerateCreateTable emits PK only
-// per dmt's contract — the orchestrator handles FK / CHECK in the
-// finalize phase via GenerateFinalizationDDL.
+// Secondary indexes, foreign keys, and checks are deliberately absent: SMT
+// owns their standalone rendering through the finalization boundary.
 func driverTableToDDL(t *Table, targetSchema, targetDialect string) ddl.TableInfo {
 	columns := make([]ddl.Column, len(t.Columns))
 	for i, c := range t.Columns {
@@ -510,119 +557,11 @@ func driverTableToDDL(t *Table, targetSchema, targetDialect string) ddl.TableInf
 		})
 	}
 
-	indexes := make([]ddl.Index, len(t.Indexes))
-	for i, idx := range t.Indexes {
-		indexes[i] = driverIndexToDDL(idx, targetDialect)
-	}
-
 	return ddl.TableInfo{
 		Schema:      sanitizeForTarget(targetSchema, targetDialect),
 		Name:        tableName,
 		Columns:     columns,
 		Constraints: constraints,
-		Indexes:     indexes,
-	}
-}
-
-// driverIndexToDDL projects driver.Index to ddl.Index. The
-// IsClustered / IncludeCols / Filter fields are NOT projected —
-// they're vendor-specific (MSSQL clustered, MSSQL covering, MSSQL
-// filtered) and the deterministic emitter doesn't support them.
-// Callers MUST guard with unsupportedIndexFeature first; this
-// projection is only safe when no vendor features are set.
-//
-// Index name and columns are sanitized for PG targets to match the
-// rest of dmt's PG flow.
-func driverIndexToDDL(idx Index, targetDialect string) ddl.Index {
-	cols := make([]string, len(idx.Columns))
-	for i, c := range idx.Columns {
-		cols[i] = sanitizeForTarget(c, targetDialect)
-	}
-	return ddl.Index{
-		Name:     sanitizeForTarget(idx.Name, targetDialect),
-		IsUnique: idx.IsUnique,
-		Columns:  cols,
-	}
-}
-
-// unsupportedIndexFeature returns a non-empty reason string when the
-// index has metadata the deterministic emitter can't faithfully
-// represent. Empty string means the index can be emitted as a plain
-// (UNIQUE) btree CREATE INDEX without losing user intent.
-//
-// Today's vendor-specific features are all MSSQL-flavored — clustered
-// indexes, covering indexes (INCLUDE clause), and filtered indexes
-// (WHERE clause). PG 11+ also supports INCLUDE and WHERE on btree
-// indexes; if a future PG reader populates IncludeCols/Filter for PG
-// targets, the same routing applies (the deterministic emitter still
-// doesn't handle them).
-func unsupportedIndexFeature(idx Index) string {
-	if idx.IsClustered {
-		return "clustered indexes need AI"
-	}
-	if len(idx.IncludeCols) > 0 {
-		return fmt.Sprintf("covering index with %d INCLUDE column(s) needs AI", len(idx.IncludeCols))
-	}
-	if idx.Filter != "" {
-		return "filtered index (WHERE clause) needs AI"
-	}
-	return ""
-}
-
-// driverFKToConstraint projects driver.ForeignKey to a
-// ddl.Constraint of type ConstraintForeignKey. The OnDelete /
-// OnUpdate strings flow through to ddl which applies the
-// cross-dialect translation rules (NO ACTION suppressed always,
-// RESTRICT suppressed for MSSQL — see #189's Codex-fix).
-//
-// Constraint name + columns + referenced table/columns are sanitized
-// for PG targets to match the rest of dmt's PG flow.
-//
-// References INTO the migrated schema follow the data to the TARGET
-// schema (#518 — a pg source's "public" reached an mssql target as
-// REFERENCES [public].[users], which fails because the data lives in
-// [dbo]). References to OTHER source schemas are preserved verbatim:
-// dmt didn't move those tables, so rewriting them would point the
-// constraint at the wrong place (codex).
-func driverFKToConstraint(fk ForeignKey, sourceSchema, targetSchema, targetDialect string) ddl.Constraint {
-	cols := make([]string, len(fk.Columns))
-	for i, c := range fk.Columns {
-		cols[i] = sanitizeForTarget(c, targetDialect)
-	}
-	refCols := make([]string, len(fk.RefColumns))
-	for i, c := range fk.RefColumns {
-		refCols[i] = sanitizeForTarget(c, targetDialect)
-	}
-	refSchema := fk.RefSchema
-	if refSchema == "" || refSchema == sourceSchema {
-		refSchema = targetSchema
-	}
-	return ddl.Constraint{
-		Name:    sanitizeForTarget(fk.Name, targetDialect),
-		Type:    ddl.ConstraintForeignKey,
-		Columns: cols,
-		ForeignKey: &ddl.ForeignKey{
-			RefSchema:  sanitizeForTarget(refSchema, targetDialect),
-			RefTable:   sanitizeForTarget(fk.RefTable, targetDialect),
-			RefColumns: refCols,
-			DeleteRule: fk.OnDelete,
-			UpdateRule: fk.OnUpdate,
-		},
-	}
-}
-
-// driverCheckToConstraint projects driver.CheckConstraint to a
-// ddl.Constraint of type ConstraintCheck. The expression passes
-// through verbatim — cross-dialect translation of CHECK expressions
-// (vendor functions, type casts) is the AI fallback's job.
-//
-// Constraint name is sanitized; the expression itself is NOT
-// touched (it's already SQL, sanitization could break it).
-func driverCheckToConstraint(c CheckConstraint, targetDialect string) ddl.Constraint {
-	return ddl.Constraint{
-		Name:            sanitizeForTarget(c.Name, targetDialect),
-		Type:            ddl.ConstraintCheck,
-		CheckExpression: c.Definition,
 	}
 }
 

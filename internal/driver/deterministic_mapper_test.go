@@ -12,6 +12,7 @@ import (
 
 	"github.com/johndauphine/dmt/internal/typemap"
 	"github.com/johndauphine/dmt/internal/typemap/ddl"
+	"github.com/johndauphine/smt/schema"
 )
 
 // ---------- MapType (column-level) ----------
@@ -223,7 +224,7 @@ func TestDeterministicMapper_GenerateFinalizationDDL_Index(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := `CREATE INDEX "idx_users_created_at" ON "users" ("created_at");`
+	want := `CREATE INDEX "idx_users_created_at" ON "users" ("created_at")`
 	if got != want {
 		t.Errorf("\ngot:  %s\nwant: %s", got, want)
 	}
@@ -249,48 +250,43 @@ func TestDeterministicMapper_GenerateFinalizationDDL_UniqueIndex(t *testing.T) {
 	}
 }
 
-// TestDeterministicMapper_GenerateFinalizationDDL_UnsupportedIndexFeatures
-// — Codex review on PR #190. Without this guard, indexes with vendor-
-// specific features (MSSQL clustered, covering, filtered) were silently
-// emitted as plain btree, dropping the user's specified behavior. The
-// adapter must instead return ErrUnsupportedDDL so the wiring layer
-// (#170) routes to AI fallback.
-func TestDeterministicMapper_GenerateFinalizationDDL_UnsupportedIndexFeatures(t *testing.T) {
-	cases := []struct {
+func TestDeterministicMapper_GenerateFinalizationDDL_IndexesUseSMTCapabilities(t *testing.T) {
+	m := NewDeterministicMapper()
+	base := FinalizationDDLRequest{
+		Type:         DDLTypeIndex,
+		SourceDBType: typemap.DialectMSSQL,
+		TargetDBType: typemap.DialectMSSQL,
+		Table:        &Table{Name: "t"},
+		TargetSchema: "dbo",
+	}
+
+	for _, tc := range []struct {
 		name string
 		idx  *Index
+		want string
 	}{
-		{
-			"clustered_index",
-			&Index{Name: "ci_t", Columns: []string{"id"}, IsClustered: true},
-		},
-		{
-			"covering_index",
-			&Index{Name: "covi_t", Columns: []string{"a"}, IncludeCols: []string{"b", "c"}},
-		},
-		{
-			"filtered_index",
-			&Index{Name: "fi_t", Columns: []string{"id"}, Filter: "deleted_at IS NULL"},
-		},
-	}
-	for _, tc := range cases {
+		{"covering", &Index{Name: "covi_t", Columns: []string{"a"}, IncludeCols: []string{"b", "c"}}, `INCLUDE ([b], [c])`},
+		{"filtered", &Index{Name: "fi_t", Columns: []string{"id"}, Filter: "deleted_at IS NULL"}, `WHERE deleted_at IS NULL`},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewDeterministicMapper()
-			_, err := m.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
-				Type:         DDLTypeIndex,
-				SourceDBType: typemap.DialectMSSQL,
-				TargetDBType: typemap.DialectMSSQL,
-				Table:        &Table{Name: "t"},
-				TargetSchema: "dbo",
-				Index:        tc.idx,
-			})
-			if err == nil {
-				t.Fatalf("%s: expected ErrUnsupportedDDL; got nil error and emitted DDL — silent feature drop (#190 regression)", tc.name)
+			req := base
+			req.Index = tc.idx
+			got, err := m.GenerateFinalizationDDL(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !errors.Is(err, ErrUnsupportedDDL) {
-				t.Errorf("%s: expected errors.Is(err, ErrUnsupportedDDL) to match; got %v", tc.name, err)
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("SMT index SQL = %q, want %q", got, tc.want)
 			}
 		})
+	}
+
+	req := base
+	req.Index = &Index{Name: "ci_t", Columns: []string{"id"}, IsClustered: true}
+	_, err := m.GenerateFinalizationDDL(context.Background(), req)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Dialect != typemap.DialectMSSQL || unsupported.Feature != "clustered indexes" {
+		t.Fatalf("clustered index error = %#v, want SMT typed unsupported policy", err)
 	}
 }
 
@@ -325,14 +321,14 @@ func TestDeterministicMapper_GenerateFinalizationDDL_FK_Cascade(t *testing.T) {
 			t.Errorf("expected FK DDL to contain %q; got:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "ON UPDATE") {
-		t.Errorf("NO ACTION update rule should be suppressed; got:\n%s", got)
+	if !strings.Contains(got, "ON UPDATE NO ACTION") {
+		t.Errorf("SMT should preserve explicit NO ACTION; got:\n%s", got)
 	}
 }
 
-func TestDeterministicMapper_GenerateFinalizationDDL_FK_RestrictToMSSQL(t *testing.T) {
-	// PG → MSSQL with RESTRICT — must suppress (MSSQL doesn't accept RESTRICT).
-	// This is the wiring-layer regression guard for the #189 fix.
+func TestDeterministicMapper_GenerateFinalizationDDL_FK_RestrictToMSSQLUsesSMTPolicy(t *testing.T) {
+	// SMT makes MSSQL's unsupported RESTRICT action explicit instead of silently
+	// weakening it to an omitted action.
 	m := NewDeterministicMapper()
 	table := &Table{Schema: "dbo", Name: "messages"}
 	fk := &ForeignKey{
@@ -341,18 +337,16 @@ func TestDeterministicMapper_GenerateFinalizationDDL_FK_RestrictToMSSQL(t *testi
 		OnDelete: "RESTRICT",
 	}
 
-	got, err := m.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
+	_, err := m.GenerateFinalizationDDL(context.Background(), FinalizationDDLRequest{
 		Type:         DDLTypeForeignKey,
 		SourceDBType: typemap.DialectPostgres,
 		TargetDBType: typemap.DialectMSSQL,
 		Table:        table, TargetSchema: "dbo",
 		ForeignKey: fk,
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if strings.Contains(got, "RESTRICT") {
-		t.Errorf("RESTRICT must not appear on MSSQL targets; got:\n%s", got)
+	var unsupported *schema.UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Dialect != typemap.DialectMSSQL || unsupported.Feature != "foreign-key RESTRICT actions" {
+		t.Fatalf("FK RESTRICT error = %#v, want SMT typed unsupported policy", err)
 	}
 }
 
@@ -373,7 +367,7 @@ func TestDeterministicMapper_GenerateFinalizationDDL_Check(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := `ALTER TABLE "items" ADD CONSTRAINT "ck_price_positive" CHECK (price > 0);`
+	want := `ALTER TABLE "items" ADD CONSTRAINT "ck_price_positive" CHECK ("price" > 0)`
 	if got != want {
 		t.Errorf("\ngot:  %s\nwant: %s", got, want)
 	}

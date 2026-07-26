@@ -88,6 +88,45 @@ func TestSQLiteCatalogWriterExecutesSMTCreatePlanVerbatim(t *testing.T) {
 	}
 }
 
+// TestSQLiteCatalogWriterExecutesSMTIndexVerbatim proves the finalization
+// writer does not rewrite the v1.3 standalone index statement before Exec.
+func TestSQLiteCatalogWriterExecutesSMTIndexVerbatim(t *testing.T) {
+	ctx := context.Background()
+	gen, genPath := openWriter(t)
+	table := testTable()
+	index := &driver.Index{Name: "ix_items_name", Columns: []string{"name"}, IsUnique: true}
+
+	if err := gen.CreateTable(ctx, table, ""); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	expected, err := driver.NewDeterministicMapper().GenerateFinalizationDDL(ctx, driver.FinalizationDDLRequest{
+		Type:         driver.DDLTypeIndex,
+		SourceDBType: "sqlite",
+		TargetDBType: "sqlite",
+		Table:        table,
+		Index:        index,
+	})
+	if err != nil {
+		t.Fatalf("planning SMT index: %v", err)
+	}
+	if err := gen.CreateIndex(ctx, table, index, ""); err != nil {
+		t.Fatalf("CreateIndex: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", genPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var got string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ix_items_name'`).Scan(&got); err != nil {
+		t.Fatalf("read sqlite_master: %v", err)
+	}
+	if got != expected {
+		t.Fatalf("writer rewrote SMT index SQL:\n got: %s\nwant: %s", got, expected)
+	}
+}
+
 func TestCreatePrimaryKeyMissingInlineKeyKeepsSMTTypedPolicyAndTableContext(t *testing.T) {
 	ctx := context.Background()
 	gen, _ := openWriter(t)

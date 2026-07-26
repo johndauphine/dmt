@@ -5,9 +5,7 @@
 //   - column-level: source UDT name doesn't appear in the canonical
 //     catalog (KindRaw fallthrough — vendor-specific types like PG
 //     inet/cidr/macaddr, MSSQL hierarchyid)
-//   - finalization-level: GenerateFinalizationDDL returned the
-//     ErrUnsupportedDDL sentinel (vendor index features — clustered,
-//     covering, filtered)
+//   - non-adopted finalization-level paths that return ErrUnsupportedDDL
 //
 // The chain implements all four type-mapper interfaces by satisfying
 // each method with a "try deterministic, fall back to AI" decision.
@@ -160,21 +158,25 @@ func (c *FallbackChain) SupportedTargets() []string {
 // GenerateTableDDL implements TableTypeMapper through the SMT create boundary.
 // It intentionally never delegates table DDL to the AI fallback: callers must
 // receive SMT's deterministic SQL or its public unsupported-feature policy.
-// Column-level MapType and later finalization DDL retain their established
-// fallback behavior until their separate ownership milestones.
+// Column-level MapType retains its established fallback behavior. SMT v1.3.0
+// owns all adopted side-object rendering, so indexes, foreign keys, and checks
+// never fall through to a second local or AI DDL renderer.
 func (c *FallbackChain) GenerateTableDDL(ctx context.Context, req TableDDLRequest) (*TableDDLResponse, error) {
 	return c.primary.GenerateTableDDL(ctx, req)
 }
 
-// GenerateFinalizationDDL implements FinalizationDDLMapper. Routes to
-// AI fallback when the deterministic mapper returns ErrUnsupportedDDL
-// (the sentinel for "vendor-specific feature outside the deterministic
-// catalog"). Other errors propagate — they typically mean malformed
-// input that AI can't recover either.
+// GenerateFinalizationDDL keeps adopted side objects on the SMT boundary. Any
+// unsupported capability is surfaced as SMT's typed policy error; it must not
+// be turned into AI-generated SQL. Later, non-adopted finalization artifacts
+// retain the legacy fallback behavior until their own SMT milestones.
 func (c *FallbackChain) GenerateFinalizationDDL(ctx context.Context, req FinalizationDDLRequest) (string, error) {
 	sql, err := c.primary.GenerateFinalizationDDL(ctx, req)
 	if err == nil {
 		return sql, nil
+	}
+	switch req.Type {
+	case DDLTypeIndex, DDLTypeForeignKey, DDLTypeCheckConstraint:
+		return "", err
 	}
 	if !errors.Is(err, ErrUnsupportedDDL) || c.fallback == nil {
 		return "", err
