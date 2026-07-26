@@ -18,7 +18,7 @@ All notable changes to this project will be documented in this file.
   policy errors rather than falling through to local or AI DDL.
 
 - DMT's schema, table, column, and inline-primary-key create path now uses
-  SMT v1.2.0 `PlanCreate` output directly, with typed unsupported behavior in
+  SMT's public `PlanCreate` output directly, with typed unsupported behavior in
   place of local or AI-generated CREATE SQL (#739).
 
 ## [5.5.0] - 2026-07-25

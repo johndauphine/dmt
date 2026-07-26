@@ -91,7 +91,7 @@ type CheckConstraint struct {
 func PlanCreate(req Request) (schema.Plan, error) {
 	renderer, err := newRenderer(req)
 	if err != nil {
-		return schema.Plan{}, fmt.Errorf("create SMT renderer: %w", err)
+		return schema.Plan{}, err
 	}
 
 	if req.Table.Name == "" {
