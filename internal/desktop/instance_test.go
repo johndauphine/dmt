@@ -126,6 +126,74 @@ func TestInstanceSecondLaunchNoSidecarYet(t *testing.T) {
 	}
 }
 
+// Regression test for a review finding: a process killed after PublishURL but
+// before Release (SIGKILL, an unrecovered panic) skips the deferred cleanup,
+// so the sidecar file survives on disk even though the OS has already
+// released the advisory lock. Without Acquire() clearing it, a fresh
+// successor could sit on the lock for a while before its own PublishURL
+// runs, and any third launch racing that window would read the first
+// process's stale, now-dead URL instead of correctly seeing "no handoff yet".
+func TestInstanceAcquireClearsStaleSidecarFromCrash(t *testing.T) {
+	withHome(t)
+
+	crashed, err := NewInstance()
+	if err != nil {
+		t.Fatalf("NewInstance (crashed): %v", err)
+	}
+	if ok, _, err := crashed.Acquire(); err != nil || !ok {
+		t.Fatalf("Acquire: (%v, %v)", ok, err)
+	}
+	const staleURL = "http://127.0.0.1:8484/?token=dead-instance"
+	if err := crashed.PublishURL(staleURL); err != nil {
+		t.Fatalf("PublishURL: %v", err)
+	}
+	// Simulate a hard kill: only the OS-level lock is released, unlike a
+	// graceful exit where the deferred Release() would also remove the
+	// sidecar. crashed.lock.Unlock() (not crashed.Release()) mirrors exactly
+	// that gap.
+	if err := crashed.lock.Unlock(); err != nil {
+		t.Fatalf("simulating crash unlock: %v", err)
+	}
+
+	successor, err := NewInstance()
+	if err != nil {
+		t.Fatalf("NewInstance (successor): %v", err)
+	}
+	defer successor.Release()
+	acquired, _, err := successor.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire after crash: %v", err)
+	}
+	if !acquired {
+		t.Fatal("successor should acquire the lock the crashed process dropped")
+	}
+	if _, statErr := os.Stat(successor.sidecarPath); !os.IsNotExist(statErr) {
+		t.Fatalf("stale sidecar from the crashed instance was not cleared on Acquire: statErr=%v", statErr)
+	}
+
+	// The real-world stakes: a third launch racing the successor's own
+	// startup (before it has published its fresh URL) must not be handed the
+	// dead process's URL.
+	racer, err := NewInstance()
+	if err != nil {
+		t.Fatalf("NewInstance (racer): %v", err)
+	}
+	defer racer.Release()
+	racerAcquired, racerHandoff, err := racer.Acquire()
+	if err != nil {
+		t.Fatalf("racer Acquire: %v", err)
+	}
+	if racerAcquired {
+		t.Fatal("racer should not acquire while successor holds the lock")
+	}
+	if racerHandoff == staleURL {
+		t.Fatal("racer was handed the crashed instance's stale URL instead of seeing no handoff yet")
+	}
+	if racerHandoff != "" {
+		t.Errorf("racer handoff = %q, want empty (successor has not published yet)", racerHandoff)
+	}
+}
+
 func TestInstanceReleaseRemovesSidecar(t *testing.T) {
 	withHome(t)
 

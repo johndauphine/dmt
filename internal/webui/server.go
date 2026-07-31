@@ -348,6 +348,11 @@ func (s *Server) tryHandoffToRunningInstance() (inst *desktop.Instance, handedOf
 	}
 	if handoffURL != "" {
 		logging.InfoEvent("webui: another dmt --gui instance is already running; opening a window there")
+		// Called synchronously, unlike the primary launch path's `go
+		// s.openBrowser(...)`: this process is about to return and exit, so
+		// there is no server loop left to run concurrently with. openBrowser
+		// itself still returns immediately either way — it only execs the
+		// opener (cmd.Start(), never Wait()) and never blocks on the browser.
 		s.openBrowser(handoffURL)
 	} else {
 		logging.WarnEvent("webui: another dmt --gui instance appears to be starting; try again shortly")

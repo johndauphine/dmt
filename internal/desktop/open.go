@@ -10,7 +10,6 @@ package desktop
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,8 +159,8 @@ func (l *Launcher) hasDisplay() bool {
 // Chromium-family browsers provide this directly via --app=. Safari has no
 // equivalent and its standalone mode (File > Add to Dock, macOS 14+/Safari 17+)
 // is user-initiated by design, so on a Mac with no Chromium installed this
-// opens a dedicated Safari window instead and reports appWindowUnavailable so
-// the caller can point the operator at Add to Dock.
+// opens a dedicated Safari window instead and returns FallbackSafari so the
+// caller can point the operator at Add to Dock.
 func (l *Launcher) OpenAppWindow(url string) (Fallback, error) {
 	if chrome, ok := l.findChromium(); ok {
 		cmd := exec.Command(chrome, "--app="+url, "--window-size=1280,860")
@@ -278,6 +277,6 @@ func Describe(err error) string {
 	case errors.Is(err, ErrUnsupportedOS):
 		return "no known browser launcher for this platform"
 	default:
-		return fmt.Sprintf("%v", err)
+		return err.Error()
 	}
 }

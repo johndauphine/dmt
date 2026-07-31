@@ -194,6 +194,35 @@ func TestOpenAppWindowChromium(t *testing.T) {
 				"--app=" + testURL, "--window-size=1280,860",
 			},
 		},
+		{
+			// 32-bit installs land under "Program Files (x86)" on a 64-bit
+			// Windows — a separate env var from ProgramFiles, so it needs its
+			// own case rather than assuming the first probe path covers it.
+			name: "windows finds Chrome under ProgramFiles(x86)",
+			goos: "windows",
+			onDisk: []string{
+				filepath.Join("C:", "PFx86", "Google", "Chrome", "Application", "chrome.exe"),
+			},
+			env: map[string]string{"ProgramFiles(x86)": filepath.Join("C:", "PFx86")},
+			want: []string{
+				filepath.Join("C:", "PFx86", "Google", "Chrome", "Application", "chrome.exe"),
+				"--app=" + testURL, "--window-size=1280,860",
+			},
+		},
+		{
+			// Brave installs per-user under LOCALAPPDATA rather than a
+			// system-wide Program Files directory.
+			name: "windows finds Brave under LOCALAPPDATA",
+			goos: "windows",
+			onDisk: []string{
+				filepath.Join("C:", "Users", "op", "AppData", "Local", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+			},
+			env: map[string]string{"LOCALAPPDATA": filepath.Join("C:", "Users", "op", "AppData", "Local")},
+			want: []string{
+				filepath.Join("C:", "Users", "op", "AppData", "Local", "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+				"--app=" + testURL, "--window-size=1280,860",
+			},
+		},
 	}
 
 	for _, tc := range cases {

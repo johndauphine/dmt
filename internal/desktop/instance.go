@@ -69,6 +69,15 @@ func (in *Instance) Acquire() (acquired bool, handoffURL string, err error) {
 		return false, "", fmt.Errorf("desktop: acquiring GUI instance lock: %w", err)
 	}
 	if ok {
+		// Clear any sidecar left by a previous holder before this caller has
+		// had a chance to publish its own (a crash or SIGKILL between a prior
+		// Acquire and its PublishURL/Release skips the deferred cleanup, since
+		// only the OS-level flock is released automatically on process death,
+		// not the sidecar file). Without this, a second `--gui` launch racing
+		// this narrow window could read a stale URL and hand off to a dead
+		// server instead of correctly seeing "no handoff available" — the
+		// already-correct behavior for a missing sidecar (readSidecar below).
+		_ = os.Remove(in.sidecarPath)
 		return true, "", nil
 	}
 	url, readErr := in.readSidecar()
@@ -86,12 +95,13 @@ func (in *Instance) Acquire() (acquired bool, handoffURL string, err error) {
 // PublishURL records the URL for other `dmt --gui` launches to hand off to.
 // Call only after Acquire returns true and the server has bound its address.
 //
-// loopback must be true and the URL must not carry a remote or
-// operator-chosen secret's worth of exposure beyond what the loopback bind
-// already implies: callers pass includeToken=true only when the token was
-// auto-generated for a loopback bind (mirroring the startup banner's own
-// one-click-link rule in internal/webui/server.go printBanner), so an
-// operator-supplied or remote-bind token is never written to disk.
+// PublishURL writes whatever url it is given — it does not itself decide
+// whether a token belongs in it. That decision is the caller's: dmt's only
+// caller (internal/webui/server.go Run) passes the same URL its own printed
+// banner uses, which embeds a bearer token only when it was auto-generated
+// for a loopback bind (see loginURL); an operator-supplied token is never
+// embedded there, so it never reaches this sidecar either. A future caller
+// must preserve that same care before passing a token-bearing URL here.
 func (in *Instance) PublishURL(url string) error {
 	data, err := json.Marshal(handoffInfo{URL: url})
 	if err != nil {
