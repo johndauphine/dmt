@@ -40,13 +40,34 @@ func TestIdleWatchdogFiresAfterWindowClosesAndGraceElapses(t *testing.T) {
 
 	id, _ := hub.subscribe()
 	done := waitWatchdog(t, hub, runs)
-	time.Sleep(5 * testIdlePoll) // let the watchdog's immediate check observe the subscriber
 	hub.unsubscribe(id)
 
 	select {
 	case <-done:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("watchdog did not fire after the only subscriber disconnected and idled out")
+	}
+}
+
+// Regression test for a real race a review caught: arming used to be sampled
+// from subscriberCount() on ticker ticks, so a subscriber that connected and
+// disconnected again inside a single poll interval could be invisible to
+// every tick that ever ran — the watchdog would then never arm, and --gui
+// would never idle-exit for that run. subscribe()/unsubscribe() here happen
+// with no synchronization delay at all, faster than any poll tick could
+// possibly observe them, to prove arming no longer depends on tick timing.
+func TestIdleWatchdogArmsOnFastConnectDisconnect(t *testing.T) {
+	hub := newEventHub()
+	runs := newRunManager()
+
+	done := waitWatchdog(t, hub, runs)
+	id, _ := hub.subscribe()
+	hub.unsubscribe(id) // gone before the watchdog's goroutine could plausibly have ticked yet
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("watchdog never armed after a subscriber connected and disconnected within one poll interval")
 	}
 }
 
@@ -77,7 +98,6 @@ func TestIdleWatchdogWaitsForActiveMigration(t *testing.T) {
 
 	id, _ := hub.subscribe()
 	done := waitWatchdog(t, hub, runs)
-	time.Sleep(5 * testIdlePoll) // let the watchdog's immediate check observe the subscriber
 	hub.unsubscribe(id)
 
 	select {

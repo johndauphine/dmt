@@ -24,14 +24,18 @@ const idleWatchdogGrace = 10 * time.Second
 // armed, it exits only when the subscriber count has been zero for at least
 // grace AND no migration is in flight — an active run always outlives the
 // window that started it.
+//
+// Arming is read from hub.hasEverSubscribed(), a flag latched synchronously
+// inside subscribe() — not sampled from subscriberCount() on each tick. A
+// tick-sampled "armed" would race a subscriber that connects and disconnects
+// within a single poll interval (routine for a --gui browser window, whose
+// SSE connects almost immediately, well inside the multi-second poll period):
+// the count could read zero on every tick that ever observes it, so the
+// watchdog would never arm and idle-exit would never trigger for that run.
 func runIdleWatchdog(ctx context.Context, hub *eventHub, runs *runManager, poll, grace time.Duration) {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
-	// Checked immediately, not just on ticks: a browser that connects and
-	// disconnects again inside a single poll interval must still arm the
-	// watchdog rather than going unnoticed.
-	armed := hub.subscriberCount() > 0
 	var zeroSince time.Time
 	for {
 		select {
@@ -39,11 +43,10 @@ func runIdleWatchdog(ctx context.Context, hub *eventHub, runs *runManager, poll,
 			return
 		case <-ticker.C:
 			if hub.subscriberCount() > 0 {
-				armed = true
 				zeroSince = time.Time{}
 				continue
 			}
-			if !armed {
+			if !hub.hasEverSubscribed() {
 				continue
 			}
 			if zeroSince.IsZero() {

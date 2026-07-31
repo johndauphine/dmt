@@ -138,6 +138,24 @@ func TestOpenUnsupportedPlatform(t *testing.T) {
 	}
 }
 
+// A Linux/BSD box with a display but no opener utility on PATH (a minimal
+// container image, say) is a supported platform lacking a binary — a
+// different failure than ErrUnsupportedOS, whose "for this platform" wording
+// would be misleading here.
+func TestOpenLinuxNoOpenerFound(t *testing.T) {
+	l, argv := fakeLauncher("linux", nil, nil, linuxDisplay)
+	err := l.Open(testURL)
+	if !errors.Is(err, ErrNoOpener) {
+		t.Fatalf("Open with no opener on PATH = %v, want ErrNoOpener", err)
+	}
+	if errors.Is(err, ErrUnsupportedOS) {
+		t.Error("a missing opener on a supported platform must not also read as ErrUnsupportedOS")
+	}
+	if len(*argv) != 0 {
+		t.Errorf("spawned %v despite no opener being found", *argv)
+	}
+}
+
 func TestOpenAppWindowChromium(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -254,6 +272,7 @@ func TestDescribe(t *testing.T) {
 	cases := map[error]string{
 		ErrNoDisplay:     "headless",
 		ErrNoChromium:    "Chromium",
+		ErrNoOpener:      "PATH",
 		ErrUnsupportedOS: "platform",
 	}
 	for err, want := range cases {

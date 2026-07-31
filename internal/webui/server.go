@@ -261,7 +261,7 @@ func (s *Server) Run() error {
 	loginURL := s.loginURL(ln.Addr())
 	if inst != nil {
 		if pubErr := inst.PublishURL(loginURL); pubErr != nil {
-			logging.Warn("webui: could not publish GUI handoff info: %v", pubErr)
+			logging.WarnEvent("webui: could not publish GUI handoff info", "error", pubErr)
 		}
 	}
 	if s.opts.OpenBrowser {
@@ -297,7 +297,7 @@ func (s *Server) Run() error {
 		logging.Info("webui: shutting down")
 		return s.shutdown(baseCancel)
 	case <-idleDone: // nil when !ExitWhenIdle; a nil channel never selects
-		logging.Info("webui: no browser window open and idle — exiting")
+		logging.InfoEvent("webui: no browser window open and idle — exiting")
 		return s.shutdown(baseCancel)
 	case err := <-serveErr:
 		return err
@@ -335,22 +335,22 @@ func (s *Server) shutdown(baseCancel context.CancelFunc) error {
 func (s *Server) tryHandoffToRunningInstance() (inst *desktop.Instance, handedOff bool) {
 	inst, err := desktop.NewInstance()
 	if err != nil {
-		logging.Warn("webui: GUI single-instance check unavailable: %v", err)
+		logging.WarnEvent("webui: GUI single-instance check unavailable", "error", err)
 		return nil, false
 	}
 	acquired, handoffURL, err := inst.Acquire()
 	if err != nil {
-		logging.Warn("webui: GUI single-instance check failed: %v", err)
+		logging.WarnEvent("webui: GUI single-instance check failed", "error", err)
 		return nil, false
 	}
 	if acquired {
 		return inst, false
 	}
 	if handoffURL != "" {
-		logging.Info("webui: another dmt --gui instance is already running; opening a window there")
+		logging.InfoEvent("webui: another dmt --gui instance is already running; opening a window there")
 		s.openBrowser(handoffURL)
 	} else {
-		logging.Warn("webui: another dmt --gui instance appears to be starting; try again shortly")
+		logging.WarnEvent("webui: another dmt --gui instance appears to be starting; try again shortly")
 	}
 	return nil, true
 }
@@ -364,14 +364,14 @@ func (s *Server) openBrowser(url string) {
 		fallback, err := l.OpenAppWindow(url)
 		if err == nil {
 			if fallback == desktop.FallbackSafari {
-				logging.Info("webui: " + desktop.SafariHint)
+				logging.InfoEvent("webui: " + desktop.SafariHint)
 			}
 			return
 		}
-		logging.Warn("webui: could not open an app window (%s); falling back to the default browser", desktop.Describe(err))
+		logging.WarnEvent("webui: could not open an app window; falling back to the default browser", "reason", desktop.Describe(err))
 	}
 	if err := l.Open(url); err != nil {
-		logging.Warn("webui: could not open a browser automatically (%s); use the link above", desktop.Describe(err))
+		logging.WarnEvent("webui: could not open a browser automatically; use the link above", "reason", desktop.Describe(err))
 	}
 }
 

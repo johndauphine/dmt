@@ -1,7 +1,7 @@
 // Command genicons renders the dmt PWA/desktop icon set as PNGs, reproducing
 // the "d" monogram from the WebUI login card (internal/webui/static/app.js,
 // the .brand .logo rule in app.css) using only the standard library
-// (image/color/draw/png + math) — no image tooling or external assets, matching
+// (image/color/png + math) — no image tooling or external assets, matching
 // the project's zero-external-dependency posture (see CLAUDE.md).
 //
 // Run manually and commit the output:

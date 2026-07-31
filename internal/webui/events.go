@@ -38,6 +38,18 @@ type eventHub struct {
 	nextID int
 	last   *event // most recent progress event, replayed to late joiners
 	live   bool   // true only while a migration is running; gates progress relay
+
+	// everSubscribed latches true the moment the first SSE client ever
+	// connects. It exists for the --gui idle-shutdown watchdog
+	// (idle_watchdog.go): the watchdog polls on a timer, so sampling
+	// subscriberCount() on each tick can miss a subscriber that connects and
+	// disconnects again inside a single poll interval — a real risk in
+	// practice, since a --gui browser window's SSE connection typically opens
+	// well within the multi-second poll period. Setting this flag inside
+	// subscribe() itself, synchronously at connection time, makes "has a
+	// browser ever shown up" an event the watchdog can't miss regardless of
+	// its poll cadence.
+	everSubscribed bool
 }
 
 func newEventHub() *eventHub {
@@ -109,6 +121,7 @@ func (h *eventHub) subscribe() (int, <-chan event) {
 	h.nextID++
 	ch := make(chan event, 64)
 	h.subs[id] = ch
+	h.everSubscribed = true
 	return id, ch
 }
 
@@ -138,4 +151,13 @@ func (h *eventHub) subscriberCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs)
+}
+
+// hasEverSubscribed reports whether any SSE client has connected since the
+// hub was created. See the everSubscribed field comment for why the watchdog
+// needs this instead of polling subscriberCount() to decide when to arm.
+func (h *eventHub) hasEverSubscribed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.everSubscribed
 }

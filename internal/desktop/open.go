@@ -26,6 +26,12 @@ var (
 	ErrNoDisplay = errors.New("desktop: no graphical display available")
 	// ErrUnsupportedOS reports a platform with no known browser launcher.
 	ErrUnsupportedOS = errors.New("desktop: no browser launcher for this platform")
+	// ErrNoOpener reports a supported platform (Linux/BSD) with a display, but
+	// no opener utility (xdg-open, gio, etc.) found on PATH — distinct from
+	// ErrUnsupportedOS, whose "for this platform" wording would otherwise be
+	// misleading here: the platform is fine, a minimal userland just lacks the
+	// binary (common in slim containers).
+	ErrNoOpener = errors.New("desktop: no browser-opener utility found on PATH")
 )
 
 // Launcher opens URLs in a browser. The zero value targets the host platform;
@@ -137,7 +143,7 @@ func (l *Launcher) openCmd(url string) (*exec.Cmd, error) {
 				return exec.Command(path, append(append([]string{}, opener.args...), url)...), nil
 			}
 		}
-		return nil, ErrUnsupportedOS
+		return nil, ErrNoOpener
 	default:
 		return nil, ErrUnsupportedOS
 	}
@@ -267,6 +273,8 @@ func Describe(err error) string {
 		return "no graphical display detected (headless session)"
 	case errors.Is(err, ErrNoChromium):
 		return "no Chromium-family browser found for --app-window"
+	case errors.Is(err, ErrNoOpener):
+		return "no browser-opener utility (xdg-open, gio, etc.) found on PATH"
 	case errors.Is(err, ErrUnsupportedOS):
 		return "no known browser launcher for this platform"
 	default:
