@@ -54,9 +54,12 @@ Launch a browser-based operator console — the same command surface as the TUI,
 
 ```bash
 ./dmt --webui        # loopback bind; prints a one-click URL with an auto-generated token
+./dmt --gui          # same thing, but opens a browser window automatically and acts like a desktop app
 ```
 
 It runs the live migration dashboard (progress streamed over Server-Sent Events), readiness checks (preflight/validate/diagnose), the guided setup wizard, profile and session management, and a ⌘K command palette. It calls the same orchestrator the CLI and TUI do — no forked logic.
+
+`--gui` turns it into a desktop app with no native shell and no new runtime dependency (dmt stays a single pure-Go, `CGO_ENABLED=0` binary): it auto-opens a browser, hands off to an already-running instance instead of failing to bind, exits shortly after the window closes (never mid-migration), and is installable as a PWA (Chrome/Edge "Install", Safari "Add to Dock"). See [docs/WEBUI.md](docs/WEBUI.md#desktop-gui---gui) for details.
 
 **Loopback-only by default.** A remote/server bind (`--webui-addr 0.0.0.0:8484`) requires an auth token plus TLS — either native (`--webui-tls-cert`/`--webui-tls-key`) or a TLS-terminating reverse proxy (`--webui-insecure` behind it, optionally with `--webui-trusted-proxy` for per-client rate-limiting). Brute-force throttling, session renewal, and a strict CSP are on by default. The setup wizard stores DB passwords in `${file:}` secret files rather than plaintext.
 

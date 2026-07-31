@@ -110,6 +110,14 @@ func newApp() *cli.App {
 				Name:  "webui",
 				Usage: "Launch the browser-based WebUI instead of the TUI (#578). Serves at --webui-addr.",
 			},
+			&cli.BoolFlag{
+				Name:  "gui",
+				Usage: "Launch the WebUI as a desktop app: opens a browser window automatically, hands off to an already-running instance instead of failing to bind, and exits shortly after the window closes (never mid-migration). Implies --webui; only valid with a loopback --webui-addr.",
+			},
+			&cli.BoolFlag{
+				Name:  "app-window",
+				Usage: "With --gui, open a chromeless app-style window (Chrome/Edge/Brave) instead of a normal browser tab. Falls back to the default browser — Safari on macOS opens as a plain window with an Add to Dock hint — when no Chromium-family browser is found.",
+			},
 			&cli.StringFlag{
 				Name:  "webui-addr",
 				Value: "127.0.0.1:8484",
@@ -159,8 +167,8 @@ func newApp() *cli.App {
 		Action: func(c *cli.Context) error {
 			if c.NArg() == 0 {
 				// No command provided, launch an interactive front-end.
-				// --webui selects the browser UI (#578); otherwise the TUI.
-				if c.Bool("webui") {
+				// --webui or --gui selects the browser UI (#578); otherwise the TUI.
+				if c.Bool("webui") || c.Bool("gui") {
 					return startWebUI(c)
 				}
 				return startTUI(c)

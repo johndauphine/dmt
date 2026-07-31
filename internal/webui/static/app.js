@@ -189,8 +189,39 @@ function mountApp() {
 
   connectEvents();
   startHeartbeat();
+  registerServiceWorker();
   go(location.hash.replace("#", "") || "dashboard");
   refreshRunPill();
+}
+
+// registerServiceWorker enables the offline/instant-load app shell (sw.js).
+// This is a pure enhancement: feature-detected and swallowing its own
+// rejection, so a browser that refuses to register (older Safari has
+// historically been inconsistent on http://localhost) is left with a fully
+// working app — nothing here is load-bearing.
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+// ---------- desktop notifications ----------
+// Fired on migration completion so a --gui window backgrounded during a long
+// transfer still tells the operator when it's done.
+function notifyPermissionPrimed() {
+  // Safari requires the permission request to originate synchronously from a
+  // user gesture — stricter than Chrome, which merely discourages requesting
+  // on page load. So this must be called directly inside a click handler,
+  // before any `await`; never from inside an async function body, where
+  // WebKit no longer considers the call part of the gesture.
+  if (typeof Notification === "undefined" || Notification.permission !== "default") return;
+  Notification.requestPermission();
+}
+function notifyRunEnded(status) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  if (!document.hidden) return; // the operator is already looking at it
+  const title = { completed: "Migration complete", failed: "Migration failed", cancelled: "Migration cancelled" }[status];
+  if (!title) return;
+  try { new Notification(title, { body: "dmt console", icon: "/icon-192.png" }); } catch {}
 }
 
 // startHeartbeat keeps the session alive while the tab is open — an
@@ -326,12 +357,15 @@ function viewDashboard(v) {
   </div>`);
   v.appendChild(telem);
 
-  $("#btn-run").addEventListener("click", () => startRun("/api/run", {
-    dry_run: $("#opt-dryrun").checked,
-    confirm_backup: $("#opt-confirm").checked,
-    ai_schema_advisor: $("#opt-advisor").checked,
-  }));
-  $("#btn-resume").addEventListener("click", () => startRun("/api/resume", {}));
+  $("#btn-run").addEventListener("click", () => {
+    notifyPermissionPrimed();
+    startRun("/api/run", {
+      dry_run: $("#opt-dryrun").checked,
+      confirm_backup: $("#opt-confirm").checked,
+      ai_schema_advisor: $("#opt-advisor").checked,
+    });
+  });
+  $("#btn-resume").addEventListener("click", () => { notifyPermissionPrimed(); startRun("/api/resume", {}); });
   $("#btn-cancel").addEventListener("click", async () => {
     try { await api.post("/api/run/cancel"); toast("Cancelling migration…"); }
     catch (e) { toast(e.message, "err"); }
@@ -428,6 +462,7 @@ function applyRunState(run) {
     if (run.error) $("#dryrun-out").innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(run.error)}</div></div>`;
   }
   if (st === "completed" || st === "failed") toast(`Migration ${st}`, st === "completed" ? "ok" : "err");
+  if (st === "completed" || st === "failed" || st === "cancelled") notifyRunEnded(st);
 }
 
 function set(sel, text, fn) { const e = $(sel); if (!e) return; if (text != null) e.textContent = text; if (fn) fn(e); }

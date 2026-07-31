@@ -128,6 +128,8 @@ var GlobalFlags = []FlagSpec{
 	{Name: "webui-tls-key", Status: TUICLIOnly, Ref: "WebUI TLS key (#578)"},
 	{Name: "webui-insecure", Status: TUICLIOnly, Ref: "WebUI plaintext remote-bind opt-out (#578)"},
 	{Name: "webui-trusted-proxy", Status: TUICLIOnly, Ref: "WebUI trusted reverse-proxy CIDRs for X-Forwarded-For (#604)"},
+	{Name: "gui", Status: TUICLIOnly, Ref: "launches the WebUI as a desktop app (auto-open, single-instance, idle-exit); implies --webui"},
+	{Name: "app-window", Status: TUICLIOnly, Ref: "with --gui, opens a chromeless app-style window instead of a browser tab"},
 }
 
 // Registry is the authoritative command/flag parity list.

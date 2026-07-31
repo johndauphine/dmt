@@ -129,3 +129,13 @@ func (h *eventHub) snapshot() *event {
 	defer h.mu.Unlock()
 	return h.last
 }
+
+// subscriberCount reports the number of connected SSE clients. Used by the
+// --gui idle-shutdown watchdog (idle_watchdog.go) as a proxy for "is a browser
+// window still open" — each open tab/window holds exactly one long-lived
+// EventSource connection for as long as it is mounted.
+func (h *eventHub) subscriberCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
+}

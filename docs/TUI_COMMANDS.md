@@ -39,7 +39,8 @@ disposition (`WebSupported` / `WebNA`).
 Global flags that map to `/session` defaults in the TUI (config, profile,
 state-file, verbosity, log-format, metrics-addr, otel-endpoint, audit-*) are
 available in the WebUI's **Settings → Session defaults**. The `--webui*`
-launch flags are CLI-only (they configure the WebUI itself).
+launch flags, plus `--gui` and `--app-window` (desktop-app mode — see
+`docs/WEBUI.md`), are CLI-only (they configure the WebUI itself).
 
 ## Global flags → `/session` keys
 

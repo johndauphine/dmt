@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/johndauphine/dmt/internal/desktop"
 	"github.com/johndauphine/dmt/internal/logging"
 	"github.com/johndauphine/dmt/internal/version"
 )
@@ -69,6 +70,29 @@ type Options struct {
 	ConfigPath string
 	StateFile  string
 	Profile    string
+
+	// GUI desktop-mode behavior (--gui, internal/desktop). All four are set
+	// together by --gui; AppWindow additionally requires --app-window. They
+	// are independent knobs (not a single bool) because a future caller may
+	// want, say, single-instance handoff without the idle-exit auto-shutdown.
+	//
+	// OpenBrowser launches a browser at the server's URL once it starts
+	// listening. AppWindow requests a chromeless app-style window (falling
+	// back to OpenBrowser's default-browser behavior if no Chromium-family
+	// browser is found). SingleInstance coordinates with any other running
+	// `dmt --gui` via a lock file so a second launch hands off to the first
+	// instead of failing to bind the same port. ExitWhenIdle shuts the server
+	// down shortly after the last connected browser window closes, but never
+	// while a migration is in flight.
+	//
+	// Only valid on a loopback bind — New rejects OpenBrowser on a
+	// non-loopback --webui-addr, since auto-opening a browser would hand a
+	// token-bearing URL to a local process launcher on what may be a shared
+	// server.
+	OpenBrowser    bool
+	AppWindow      bool
+	SingleInstance bool
+	ExitWhenIdle   bool
 }
 
 // tlsEnabled reports whether native TLS is configured.
@@ -143,12 +167,18 @@ func New(opts Options) (*Server, error) {
 	if err := validateBindSecurity(opts); err != nil {
 		return nil, &configErr{err}
 	}
+	// hostFromAddr already succeeded inside validateBindSecurity.
+	host, _ := hostFromAddr(opts.Addr)
+	if opts.OpenBrowser && !isLoopbackHost(host) {
+		return nil, &configErr{fmt.Errorf(
+			"webui: --gui requires a loopback --webui-addr (got %q); opening a browser at a "+
+				"token-bearing URL on a non-loopback bind would expose the token to the local launcher",
+			opts.Addr)}
+	}
 	token, auto, err := resolveAuthToken(opts)
 	if err != nil {
 		return nil, &configErr{err}
 	}
-	// hostFromAddr already succeeded inside validateBindSecurity.
-	host, _ := hostFromAddr(opts.Addr)
 	// A non-loopback bind exposes the token to the network; refuse a weak
 	// operator-chosen one (#594). Auto-generated tokens are long by
 	// construction and exempt.
@@ -190,10 +220,26 @@ func Start(opts Options) error {
 	return s.Run()
 }
 
-// Run binds the address, serves until SIGINT/SIGTERM, then shuts down
-// gracefully. It blocks for the lifetime of the front-end, mirroring how the
-// TUI owns the foreground.
+// Run binds the address, serves until SIGINT/SIGTERM (or, in --gui mode, an
+// idle timeout), then shuts down gracefully. It blocks for the lifetime of
+// the front-end, mirroring how the TUI owns the foreground.
 func (s *Server) Run() error {
+	// Single-instance handoff happens before any port is bound: if another
+	// `dmt --gui` already holds the lock, open a window at its URL and exit
+	// rather than racing it for the same address (--webui server deployments
+	// don't opt into this — SingleInstance is --gui-only).
+	var inst *desktop.Instance
+	if s.opts.SingleInstance {
+		var handedOff bool
+		inst, handedOff = s.tryHandoffToRunningInstance()
+		if handedOff {
+			return nil
+		}
+	}
+	if inst != nil {
+		defer inst.Release()
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -212,6 +258,16 @@ func (s *Server) Run() error {
 
 	s.printBanner(ln.Addr())
 
+	loginURL := s.loginURL(ln.Addr())
+	if inst != nil {
+		if pubErr := inst.PublishURL(loginURL); pubErr != nil {
+			logging.Warn("webui: could not publish GUI handoff info: %v", pubErr)
+		}
+	}
+	if s.opts.OpenBrowser {
+		go s.openBrowser(loginURL)
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
 		var err error
@@ -227,43 +283,128 @@ func (s *Server) Run() error {
 		serveErr <- nil
 	}()
 
+	var idleDone chan struct{}
+	if s.opts.ExitWhenIdle {
+		idleDone = make(chan struct{})
+		go func() {
+			runIdleWatchdog(baseCtx, s.hub, s.runs, idleWatchdogPoll, idleWatchdogGrace)
+			close(idleDone)
+		}()
+	}
+
 	select {
 	case <-ctx.Done():
 		logging.Info("webui: shutting down")
-		// Cancel any in-flight migration so its checkpoint is left resumable
-		// and the process can exit cleanly.
-		if s.runs.cancel() {
-			logging.Info("webui: cancelling active migration")
-		}
-		// Cancel request contexts first so open SSE streams return and
-		// Shutdown doesn't block on them for the full timeout.
-		baseCancel()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		err := s.httpSrv.Shutdown(shutCtx)
-		// Give the cancelled migration a bounded moment to flush its final
-		// checkpoint state before the process exits.
-		s.waitForRuns(shutCtx)
-		return err
+		return s.shutdown(baseCancel)
+	case <-idleDone: // nil when !ExitWhenIdle; a nil channel never selects
+		logging.Info("webui: no browser window open and idle — exiting")
+		return s.shutdown(baseCancel)
 	case err := <-serveErr:
 		return err
 	}
 }
 
-// printBanner writes the startup URL to stdout. For an auto-generated
-// (loopback) token the token is embedded in the link for one-click access;
-// for a configured token the operator signs in with it.
-func (s *Server) printBanner(bound net.Addr) {
+// shutdown cancels any in-flight migration, unblocks long-lived requests, and
+// gracefully stops the HTTP server. Shared by the signal-triggered and
+// idle-triggered exit paths in Run.
+func (s *Server) shutdown(baseCancel context.CancelFunc) error {
+	// Cancel any in-flight migration so its checkpoint is left resumable and
+	// the process can exit cleanly. A no-op (returns false) when idle-exit is
+	// what triggered this, since idleWatchdog never fires while a run is
+	// active.
+	if s.runs.cancel() {
+		logging.Info("webui: cancelling active migration")
+	}
+	// Cancel request contexts first so open SSE streams return and Shutdown
+	// doesn't block on them for the full timeout.
+	baseCancel()
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := s.httpSrv.Shutdown(shutCtx)
+	// Give a cancelled migration a bounded moment to flush its final
+	// checkpoint state before the process exits.
+	s.waitForRuns(shutCtx)
+	return err
+}
+
+// tryHandoffToRunningInstance checks whether another `dmt --gui` already
+// holds the single-instance lock. If so, it opens a window at that instance's
+// URL and reports handedOff=true so the caller exits without ever binding a
+// port. Otherwise it returns the acquired (or nil, on an unexpected local
+// failure) Instance for the caller to hold and eventually Release.
+func (s *Server) tryHandoffToRunningInstance() (inst *desktop.Instance, handedOff bool) {
+	inst, err := desktop.NewInstance()
+	if err != nil {
+		logging.Warn("webui: GUI single-instance check unavailable: %v", err)
+		return nil, false
+	}
+	acquired, handoffURL, err := inst.Acquire()
+	if err != nil {
+		logging.Warn("webui: GUI single-instance check failed: %v", err)
+		return nil, false
+	}
+	if acquired {
+		return inst, false
+	}
+	if handoffURL != "" {
+		logging.Info("webui: another dmt --gui instance is already running; opening a window there")
+		s.openBrowser(handoffURL)
+	} else {
+		logging.Warn("webui: another dmt --gui instance appears to be starting; try again shortly")
+	}
+	return nil, true
+}
+
+// openBrowser launches url in a browser per s.opts.AppWindow. Failures are
+// logged, never fatal — the server keeps running and the banner already
+// printed remains the fallback way to reach it.
+func (s *Server) openBrowser(url string) {
+	l := desktop.New()
+	if s.opts.AppWindow {
+		fallback, err := l.OpenAppWindow(url)
+		if err == nil {
+			if fallback == desktop.FallbackSafari {
+				logging.Info("webui: " + desktop.SafariHint)
+			}
+			return
+		}
+		logging.Warn("webui: could not open an app window (%s); falling back to the default browser", desktop.Describe(err))
+	}
+	if err := l.Open(url); err != nil {
+		logging.Warn("webui: could not open a browser automatically (%s); use the link above", desktop.Describe(err))
+	}
+}
+
+// baseURL builds the scheme+host portion of the server's address, shared by
+// printBanner and loginURL so the banner and the auto-opened browser always
+// agree.
+func (s *Server) baseURL(bound net.Addr) string {
 	scheme := "http"
 	if s.opts.tlsEnabled() {
 		scheme = "https"
 	}
-	base := fmt.Sprintf("%s://%s", scheme, displayHost(s.opts.Addr, bound))
+	return fmt.Sprintf("%s://%s", scheme, displayHost(s.opts.Addr, bound))
+}
+
+// loginURL is the URL a browser should open: for an auto-generated (loopback)
+// token this embeds the one-click ?token=, which the SPA consumes and scrubs
+// from history on load (app.js boot()); for a configured token it is the bare
+// root and the operator signs in manually.
+func (s *Server) loginURL(bound net.Addr) string {
+	base := s.baseURL(bound)
+	if s.tokenAuto {
+		return fmt.Sprintf("%s/?token=%s", base, s.token)
+	}
+	return base + "/"
+}
+
+// printBanner writes the startup URL to stdout.
+func (s *Server) printBanner(bound net.Addr) {
 	fmt.Printf("\n  dmt WebUI %s\n\n", version.Version)
 	if s.tokenAuto {
-		fmt.Printf("  ➜  %s/?token=%s\n\n", base, s.token)
+		fmt.Printf("  ➜  %s\n\n", s.loginURL(bound))
 	} else {
-		fmt.Printf("  ➜  %s/\n", base)
+		fmt.Printf("  ➜  %s\n", s.loginURL(bound))
 		fmt.Printf("     Sign in with your --webui-auth-token.\n\n")
 	}
 	fmt.Printf("  Press Ctrl+C to stop.\n\n")

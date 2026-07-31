@@ -34,11 +34,67 @@ with a single click; the front end scrubs it from the address bar immediately.
 (The token is the shared secret — it stays valid for the server's lifetime, not
 single-use — so treat the printed link as sensitive.)
 
+## Desktop GUI (`--gui`)
+
+`dmt --gui` turns the WebUI into a desktop app, with no native shell and no new
+runtime dependency — dmt stays a single pure-Go, `CGO_ENABLED=0` binary, cross-
+compiled for Windows/macOS/Linux from one machine
+(`make build-all`). "Desktop" here means: dmt opens your browser at itself and
+makes that window behave like an installed app, rather than embedding a
+WebView.
+
+```bash
+dmt --gui                 # opens your default browser, signed in automatically
+dmt --gui --app-window    # opens a chromeless window (Chrome/Edge/Brave)
+```
+
+What `--gui` adds on top of `--webui`:
+
+- **Auto-open.** A browser opens at the server's URL once it starts listening
+  — the one-click loopback link, opened for you instead of printed for you to
+  click. Only valid on a loopback bind: `--gui` with a non-loopback
+  `--webui-addr` is a startup error, since auto-opening a browser at a
+  token-bearing URL would hand that token to whatever local process the
+  launcher invokes.
+- **`--app-window`.** Requests a chromeless, address-bar-less window on
+  Chrome/Edge/Brave. On macOS with none of those installed, it opens a normal
+  Safari window instead — Safari has no command-line app mode, but **File →
+  Add to Dock** (macOS 14+/Safari 17+) is the equivalent: it installs dmt as a
+  standalone, Dock-resident window. Chromium-family browsers also offer an
+  "Install" affordance from the address bar (the page is a PWA — see below).
+- **Single instance.** A second `dmt --gui` launch detects the first one (a
+  lock file under `~/.dmt/gui.lock`) and opens a window at its URL instead of
+  failing to bind the same port.
+- **Idle exit.** dmt exits automatically a few seconds after the last browser
+  window closes — but never while a migration is running; an active run
+  always keeps the process alive until it finishes (or Ctrl+C). Plain
+  `--webui` never does this — a server deployment can't be stopped by someone
+  closing a browser tab.
+- **Completion notifications.** If the window is backgrounded when a migration
+  finishes, a desktop notification fires (after a one-time permission prompt
+  triggered by starting a run).
+
+### Limitations
+
+- The installed PWA is pinned to whatever address it was installed from
+  (`127.0.0.1:8484` by default). If that port is taken, `--gui` won't
+  automatically re-target an already-installed app to a different port.
+- Notifications and "Install app" both require a secure context: `localhost`/
+  `127.0.0.1` qualify automatically (no TLS setup needed), but they will not
+  work over a plaintext non-loopback bind (`--webui-insecure`) — expected,
+  since `--gui` doesn't support non-loopback binds regardless.
+- Safari's Add to Dock needs macOS 14+/Safari 17+; older Safari runs the app
+  as an ordinary tab. Safari also has no `beforeinstallprompt` event, so any
+  in-app "Install" button only appears on Chromium-family browsers — Safari
+  users install via File → Add to Dock instead.
+
 ## Flags
 
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--webui` | off | Launch the WebUI instead of the TUI. |
+| `--gui` | off | Launch the WebUI as a desktop app: auto-open, single-instance handoff, idle-exit (see above). Implies `--webui`; loopback bind only. |
+| `--app-window` | off | With `--gui`, open a chromeless app-style window instead of a browser tab. |
 | `--webui-addr` | `127.0.0.1:8484` | Bind address. A non-loopback host enables remote access (with the requirements below). |
 | `--webui-auth-token` | — | Shared-secret bearer token. Supports `${env:VAR}` / `${file:/path}` expansion so the secret stays out of the process list. **Required** for a non-loopback bind; auto-generated for loopback. |
 | `--webui-tls-cert` / `--webui-tls-key` | — | Serve HTTPS directly (PEM cert + key). |
