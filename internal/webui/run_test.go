@@ -123,6 +123,25 @@ func TestEventHubGatesProgressOutsideRun(t *testing.T) {
 	}
 }
 
+// hasEverSubscribed backs the --gui idle watchdog's arming decision
+// (idle_watchdog.go): it must latch true the instant a client connects and
+// stay true after that client disconnects — unlike subscriberCount(), which
+// reflects only the current moment.
+func TestEventHubHasEverSubscribed(t *testing.T) {
+	h := newEventHub()
+	if h.hasEverSubscribed() {
+		t.Fatal("hasEverSubscribed should be false before any subscriber")
+	}
+	id, _ := h.subscribe()
+	if !h.hasEverSubscribed() {
+		t.Fatal("hasEverSubscribed should be true immediately on subscribe")
+	}
+	h.unsubscribe(id)
+	if !h.hasEverSubscribed() {
+		t.Error("hasEverSubscribed must stay true after the subscriber disconnects")
+	}
+}
+
 func TestEventHubUnsubscribeClosesChannel(t *testing.T) {
 	h := newEventHub()
 	id, ch := h.subscribe()

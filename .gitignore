@@ -46,6 +46,10 @@ vendor/
 *.bak
 *.png
 *.jpg
+# ...except the embedded WebUI/PWA icon set (tools/genicons), which the
+# go:embed directive in internal/webui/assets.go requires to exist in the
+# source tree, not just on disk locally.
+!internal/webui/static/*.png
 
 # Isolated state dir for integration tests (#230). See
 # scripts/integration-test.sh and scripts/fixtures/ci-mssql-pg.yaml.

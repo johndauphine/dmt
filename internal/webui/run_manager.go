@@ -137,3 +137,13 @@ func (m *runManager) state() *runState {
 	}
 	return m.last
 }
+
+// isRunning reports whether a migration is currently in flight. Unlike
+// state(), which keeps returning the last finished run's terminal snapshot
+// indefinitely, this is false as soon as a run completes — the correct signal
+// for "is it safe to exit idle" (--gui's idle-shutdown watchdog).
+func (m *runManager) isRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active != nil
+}

@@ -4,8 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#1198b6" />
   <title>dmt console</title>
   <link rel="stylesheet" href="/app.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png" />
+  <link rel="icon" href="/icon-512.png" sizes="512x512" type="image/png" />
+  <!-- Apple ignores the manifest for "Add to Dock"/Home Screen (macOS 14+/
+       Safari 17+, and iOS/iPadOS): apple-touch-icon and these meta tags are
+       what it reads instead. -->
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="dmt" />
 </head>
 <body>
   <div id="app"><div class="empty"><span class="spinner"></span> Loading…</div></div>

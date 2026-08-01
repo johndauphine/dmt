@@ -9,6 +9,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `dmt --gui` turns the WebUI into a desktop app with no native shell and no
+  new runtime dependency: auto-opens a browser at the running server
+  (loopback-only), an optional chromeless `--app-window` (with a Safari
+  Add-to-Dock fallback on macOS), single-instance handoff, idle-exit that
+  never fires mid-migration, and a PWA layer (manifest, service worker,
+  icons, completion notifications) so browsers offer "Install app" (#743).
+
 ## [5.6.0] - 2026-07-26
 
 ### Changed
