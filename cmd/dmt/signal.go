@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
 
 	"github.com/urfave/cli/v2"
 )

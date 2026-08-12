@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	_ "github.com/johndauphine/dmt/internal/driver/generic" // register generic dialects
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic" // register generic dialects
 
 	_ "modernc.org/sqlite"
 )

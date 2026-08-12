@@ -3,9 +3,9 @@ package transfer
 import (
 	"math"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/pool"
 )
 
 // No buffer sizing constants — all pipeline buffer depths are derived from

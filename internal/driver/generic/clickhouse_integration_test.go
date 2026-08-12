@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/dbconfig"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // Live-server integration for the ClickHouse catalog (#507): a sqlite

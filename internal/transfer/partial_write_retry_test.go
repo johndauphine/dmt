@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/pool"
 )
 
 // partialWriteFakePool records the rows passed to each WriteBatch call and, on

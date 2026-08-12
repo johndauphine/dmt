@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/drift"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/drift"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // Moved from schema_evolution_test.go during the #456 extraction:

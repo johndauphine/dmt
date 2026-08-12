@@ -3,10 +3,10 @@ package orchestrator
 import (
 	"context"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/drift"
-	"github.com/johndauphine/dmt/internal/orchestrator/schemaevolution"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/drift"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator/schemaevolution"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // Schema drift detection, contracts, and evolution live in the

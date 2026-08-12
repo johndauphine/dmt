@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
 )
 
 // #441: deterministic facts must render even when the AI errored, and

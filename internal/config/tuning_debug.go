@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/secrets"
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 // ParamChange records a parameter change made by deterministic tuning.

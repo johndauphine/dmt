@@ -758,7 +758,7 @@ Tune by environment.
 
 ## Operational commands
 
-The CLI surface lives in `cmd/migrate/main.go`. The relevant subset
+The CLI surface lives in `cmd/dmt/main.go`. The relevant subset
 for an SRE:
 
 | Command | What it does | When to use it |

@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/dbconfig"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/driver/shared"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/smtddl"
-	"github.com/johndauphine/dmt/internal/stats"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver/shared"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/smtddl"
+	"github.com/johndauphine/dmt/v5/internal/stats"
 )
 
 // Writer implements driver.Writer from a catalog: SMT owns create and schema-

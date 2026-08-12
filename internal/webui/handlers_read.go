@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // originFromQuery reads the config/profile/state origin from GET query

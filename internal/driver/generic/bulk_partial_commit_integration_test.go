@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // TestRunBatchesPartialCommitOffset pins #541: on a non-transactional target,

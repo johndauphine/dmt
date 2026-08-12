@@ -27,7 +27,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 )
 
 // mysqlKeyPrefixLength is the prefix length used for non-unique

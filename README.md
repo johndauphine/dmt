@@ -793,27 +793,25 @@ shasum -a 256 -c --ignore-missing checksums.txt
 
 ### Build from source
 
-Requires Go 1.24+
+Requires Go 1.25.7+
 
 ```bash
 git clone https://github.com/johndauphine/dmt.git
 cd dmt
-CGO_ENABLED=0 go build -o dmt ./cmd/migrate
+CGO_ENABLED=0 go build -o dmt ./cmd/dmt
 ```
 
 ### Go install
 
 ```bash
-go install github.com/johndauphine/dmt/cmd/migrate@main
+go install github.com/johndauphine/dmt/v5/cmd/dmt@latest
 ```
 
-Use `@main`, not `@latest`. dmt's release tags are `v2.0.0` and above, but the
-module path has no `/vN` major-version suffix, so Go's Semantic Import
-Versioning treats those tags as invalid versions of this module —
-`@latest` resolves to the old `v1.0.0` tag instead. `@main` installs the
-current tip (and reports the right version). This installs a binary named
-`migrate`; the pre-built release binaries above are named `dmt`. For a pinned,
-reproducible install, prefer the release binaries.
+The `/v5` module suffix makes `@latest` resolve to v5 release tags, and this
+installs a binary named `dmt`. Immutable tags published before this fix cannot
+be repaired; use the first v5 release published after this change (or a newer
+one). For a pinned, reproducible install, prefer a specific version or the
+release binaries.
 
 ## Quick Start
 

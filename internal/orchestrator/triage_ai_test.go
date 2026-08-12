@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/orchestrator/validation"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator/validation"
 )
 
 func TestReviewValidationWithAIUnavailableFallback(t *testing.T) {

@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/ident"
-	"github.com/johndauphine/dmt/internal/smtddl"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/ident"
+	"github.com/johndauphine/dmt/v5/internal/smtddl"
 )
 
 func TestPostgresSMTEvolutionIdentifiersMatchCreatePath(t *testing.T) {

@@ -1,8 +1,8 @@
 package config
 
 import (
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 // RuntimeChunkSizeCapFor derives the current row-count ceiling for an

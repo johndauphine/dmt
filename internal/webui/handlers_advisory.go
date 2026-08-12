@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // advisoryTimeout bounds a single DB-touching advisory call.
@@ -168,7 +168,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 	orch, err := orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile})
 	if err != nil {
 		// Target may be unavailable; source-only analysis still yields useful
-		// tuning advice (mirrors cmd/migrate/analyze.go).
+		// tuning advice (mirrors cmd/dmt/analyze.go).
 		orch, err = orchestrator.NewWithOptions(cfg, orchestrator.Options{StateFile: stateFile, SourceOnly: true})
 		if err != nil {
 			writeAPIError(w, err)

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/progress"
 )
 
 type writerFailureBlockingProducer struct {

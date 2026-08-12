@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/setup"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/setup"
 )
 
 // maxContentLines limits output retained in memory to prevent unbounded growth

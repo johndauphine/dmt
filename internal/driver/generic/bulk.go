@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // The bulk-strategy library (#191): named Go implementations of the

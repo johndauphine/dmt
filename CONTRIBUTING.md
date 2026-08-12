@@ -6,7 +6,7 @@ Welcome. This guide covers what you need to know to run dmt's checks locally and
 
 You need:
 
-- **Go 1.25+** (`go.mod` pins the floor at 1.25.0)
+- **Go 1.25.7+** (`go.mod` pins the floor at 1.25.7)
 - **Docker** with at least 8 GB allocated for the test database containers
 - **make** (the repo standardizes on `make` targets so the CI workflow and your local commands stay in lockstep)
 

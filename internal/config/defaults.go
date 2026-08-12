@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/secrets"
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 func (c *Config) applyGlobalDefaults() {

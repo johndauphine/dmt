@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // TestParseMySQLVersion covers the SHOW VERSION() string shapes the

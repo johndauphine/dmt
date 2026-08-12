@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func GenerateConfigReview(ctx context.Context, client TextClient, payload ConfigReviewPayload) (*ConfigReview, error) {

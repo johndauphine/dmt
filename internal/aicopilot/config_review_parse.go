@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func ParseConfigReview(raw string) (*ConfigReview, error) {

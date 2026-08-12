@@ -6,7 +6,7 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // ApplyRuntimeMemoryLimit sets the Go runtime's soft memory limit

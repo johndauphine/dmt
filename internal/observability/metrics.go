@@ -30,7 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // globalMetrics is the process-wide Metrics handle used by hot-path

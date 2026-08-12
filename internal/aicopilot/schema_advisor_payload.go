@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/drift"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/drift"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 func BuildSchemaAdvisorPayload(

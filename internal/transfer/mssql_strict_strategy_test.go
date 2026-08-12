@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/source"
 	mssql "github.com/microsoft/go-mssqldb"
 )
 

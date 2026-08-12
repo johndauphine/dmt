@@ -1,16 +1,16 @@
 // Health-check / preflight rendering shared by the CLI and the TUI
-// (#440). Lives here rather than cmd/migrate so /preflight shows the
+// (#440). Lives here rather than cmd/dmt so /preflight shows the
 // exact same readiness facts as `dmt preflight` without the TUI
 // duplicating the formatting (epic #437 non-goal). Exit-code
-// classification stays in cmd/migrate — it is CLI process semantics.
+// classification stays in cmd/dmt — it is CLI process semantics.
 package command
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // FormatHealthCheckResult renders connectivity, preflight findings, the

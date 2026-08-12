@@ -3,7 +3,7 @@ package driver
 import (
 	"math"
 
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 func (s *SmartConfigAnalyzer) calculateAutoTuneParams(tables []TableStatRow) {

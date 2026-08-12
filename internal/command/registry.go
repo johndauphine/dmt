@@ -1,7 +1,7 @@
 // Package command is the shared command vocabulary between the CLI and
 // the TUI (#438, parent epic #437). The Registry is the single list of
 // production commands and flags with an explicit TUI disposition; a
-// parity test in cmd/migrate enumerates the real urfave/cli tree against
+// parity test in cmd/dmt enumerates the real urfave/cli tree against
 // it, so new CLI surface cannot ship without declaring its TUI story.
 // Typed option structs (options.go) are the handler vocabulary the
 // per-family parity issues (#439-#445) migrate onto.

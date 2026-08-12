@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // #439: the shared renderer must carry the preview's load-bearing facts —

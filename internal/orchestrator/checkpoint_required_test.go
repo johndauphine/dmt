@@ -5,12 +5,12 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/exitcodes"
-	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/source"
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 type requiredWriteFaultState struct {

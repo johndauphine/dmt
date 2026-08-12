@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 
-	_ "github.com/johndauphine/dmt/internal/driver/generic"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic"
 )
 
 func TestKeysetBoundaryQueryErrorReturnsError(t *testing.T) {

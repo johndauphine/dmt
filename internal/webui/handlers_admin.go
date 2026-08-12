@@ -7,9 +7,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/command"
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 // withProfileStore opens the checkpoint profile store and runs fn, always

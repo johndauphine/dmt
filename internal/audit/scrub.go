@@ -3,7 +3,7 @@ package audit
 import (
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // secretKeyNames is the set of field keys whose values are redacted

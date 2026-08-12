@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // CacheClearDescription states exactly what ClearTypeCache(aiOnly)

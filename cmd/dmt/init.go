@@ -7,8 +7,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/johndauphine/dmt/internal/command"
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/config"
 
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"

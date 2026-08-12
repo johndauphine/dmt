@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 func TestNewMemoryGuard_NilWhenNoLimit(t *testing.T) {

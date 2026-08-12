@@ -3,7 +3,7 @@ package command
 import "time"
 
 // Typed option structs (#438): the shared vocabulary CLI and TUI
-// handlers converge on. cmd/migrate binds urfave/cli flags into these;
+// handlers converge on. cmd/dmt binds urfave/cli flags into these;
 // the TUI parses slash-command arguments into the same structs. The
 // per-family parity issues (#439-#445) migrate handlers onto them; until
 // then they define the contract.

@@ -1,8 +1,8 @@
 package config
 
 import (
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 const loadTimeFallbackRowBytes int64 = 500

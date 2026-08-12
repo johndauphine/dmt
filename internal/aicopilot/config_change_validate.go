@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/config"
 	"gopkg.in/yaml.v3"
 )
 

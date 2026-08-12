@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func ParseSchemaAdvisorReview(raw string) (*SchemaAdvisorReview, error) {

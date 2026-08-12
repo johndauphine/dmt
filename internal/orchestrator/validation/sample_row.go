@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // SampleRow (Pass B) picks a deterministic random sample of PK

@@ -13,6 +13,7 @@ import (
 const (
 	smtModulePath    = "github.com/johndauphine/smt"
 	smtModuleVersion = smtModulePath + " v1.4.0"
+	dmtCommandPath   = "github.com/johndauphine/dmt/v5/cmd/dmt"
 )
 
 func TestSMTDependencyIsVersioned(t *testing.T) {
@@ -87,7 +88,7 @@ func TestStaticBinaryBuildIncludesSMT(t *testing.T) {
 	}
 	root := repoRoot(t)
 	binary := filepath.Join(t.TempDir(), "dmt-linux-amd64")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/migrate")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/dmt")
 	build.Dir = root
 	build.Env = append(os.Environ(),
 		"CGO_ENABLED=0",
@@ -114,8 +115,14 @@ func TestStaticBinaryBuildIncludesSMT(t *testing.T) {
 	version := exec.Command("go", "version", "-m", binary)
 	if output, err := version.CombinedOutput(); err != nil {
 		t.Fatalf("read binary build info: %v\n%s", err, output)
-	} else if !strings.Contains(string(output), smtModulePath+"\tv1.4.0") {
-		t.Fatalf("binary build info does not consume SMT v1.4.0:\n%s", output)
+	} else {
+		buildInfo := string(output)
+		if !strings.Contains(buildInfo, smtModulePath+"\tv1.4.0") {
+			t.Fatalf("binary build info does not consume SMT v1.4.0:\n%s", output)
+		}
+		if !strings.Contains(buildInfo, "path\t"+dmtCommandPath) {
+			t.Fatalf("binary build info does not identify the v5 dmt command path:\n%s", output)
+		}
 	}
 }
 

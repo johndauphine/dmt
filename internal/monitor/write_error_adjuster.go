@@ -31,7 +31,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 // RuleWriteErrorAdjuster implements transfer.WriteErrorAdjuster with

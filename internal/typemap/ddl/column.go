@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 )
 
 // GenerateColumnDef returns the per-column line that goes inside a

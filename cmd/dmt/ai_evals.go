@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 	"github.com/urfave/cli/v2"
 )
 

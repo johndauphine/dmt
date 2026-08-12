@@ -30,9 +30,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/johndauphine/dmt/internal/desktop"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/desktop"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/version"
 )
 
 // DefaultAddr is the loopback bind address used when --webui-addr is empty.
@@ -43,7 +43,7 @@ const DefaultAddr = "127.0.0.1:8484"
 const sessionTTL = 12 * time.Hour
 
 // Options configures the WebUI server. It is populated from the global
-// --webui* flags in cmd/migrate.
+// --webui* flags in cmd/dmt.
 type Options struct {
 	// Addr is the TCP bind address (host:port). Loopback hosts get relaxed
 	// security; any other host is treated as remotely reachable.
@@ -211,7 +211,7 @@ func New(opts Options) (*Server, error) {
 }
 
 // Start builds and runs a WebUI server, blocking until the process is
-// signalled to stop. It is the entry point called from cmd/migrate.
+// signalled to stop. It is the entry point called from cmd/dmt.
 func Start(opts Options) error {
 	s, err := New(opts)
 	if err != nil {

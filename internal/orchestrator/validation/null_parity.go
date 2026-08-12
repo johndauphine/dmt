@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // NullParity (Pass C) compares per-column NULL counts between

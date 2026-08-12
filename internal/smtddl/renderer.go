@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 	"github.com/johndauphine/smt/schema"
 	"github.com/johndauphine/smt/schema/canonical"
 )

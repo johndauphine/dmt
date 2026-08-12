@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 func TestRuntimeControllerOptionsUseSafetyOnlyForExploration(t *testing.T) {

@@ -3,7 +3,7 @@ package transfer
 import (
 	"database/sql"
 	"fmt"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 	"testing"
 
 	_ "modernc.org/sqlite"

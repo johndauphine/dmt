@@ -3,15 +3,15 @@ package schemaevolution
 import (
 	"context"
 	"fmt"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/drift"
-	"github.com/johndauphine/dmt/internal/exitcodes"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pool"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/drift"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // SchemaEvolutionError is returned when configured schema evolution cannot

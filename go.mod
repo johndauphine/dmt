@@ -1,4 +1,4 @@
-module github.com/johndauphine/dmt
+module github.com/johndauphine/dmt/v5
 
 go 1.25.7
 

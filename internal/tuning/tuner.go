@@ -17,7 +17,7 @@ package tuning
 import (
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // Input carries the system + workload inputs the tuner reasons about.

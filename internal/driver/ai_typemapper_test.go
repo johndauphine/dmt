@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 func testProvider(apiKey string) *secrets.Provider {

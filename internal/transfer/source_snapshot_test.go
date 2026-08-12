@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/driver"
-	_ "github.com/johndauphine/dmt/internal/driver/generic" // register generic dialects
-	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic" // register generic dialects
+	"github.com/johndauphine/dmt/v5/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/source"
 
 	_ "modernc.org/sqlite"
 )

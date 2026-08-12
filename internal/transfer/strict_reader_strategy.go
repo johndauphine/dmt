@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/pool"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 const (

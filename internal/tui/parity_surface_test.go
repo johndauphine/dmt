@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/command"
 )
 
 // slashFor maps a parity-registry command path to the slash command(s)
@@ -36,7 +36,7 @@ var slashFor = map[string][]string{
 // TestTUICommandSurface is the TUI-side half of the #438 parity
 // enforcement (#446): every command the registry declares TUISupported
 // must be discoverable — present in the autocomplete list and in the
-// /help text. The cmd/migrate parity test enforces the CLI side; this
+// /help text. The cmd/dmt parity test enforces the CLI side; this
 // one stops the TUI from silently dropping a surface the registry
 // still advertises.
 func TestTUICommandSurface(t *testing.T) {

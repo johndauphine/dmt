@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/monitor"
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/monitor"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 type runtimeAdjustmentRecorder struct {

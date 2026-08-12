@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func GeneratePreflightReview(ctx context.Context, client TextClient, payload PreflightPayload) (*PreflightReview, error) {

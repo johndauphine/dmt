@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 // InitSecrets creates ~/.secrets/dmt-config.yaml and returns the

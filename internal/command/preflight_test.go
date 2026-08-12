@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // #440: the shared renderer must carry the readiness facts — both the

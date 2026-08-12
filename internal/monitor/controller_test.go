@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 // fixedClock returns a function suitable for Controller.SetClock

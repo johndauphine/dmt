@@ -6,10 +6,10 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/setup"
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/setup"
+	"github.com/johndauphine/dmt/v5/internal/version"
 )
 
 func (m *Model) handleCommand(cmdStr string) tea.Cmd {

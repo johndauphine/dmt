@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/orchestrator/validation"
-	"github.com/johndauphine/dmt/internal/source"
-	"github.com/johndauphine/dmt/internal/target"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator/validation"
+	"github.com/johndauphine/dmt/v5/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/target"
 )
 
 // validationPolicy carries the resolved fail-or-warn flags for the

@@ -9,7 +9,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/version"
 )
 
 // staticFS holds the embedded front-end. Everything under static/ is compiled

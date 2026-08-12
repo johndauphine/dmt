@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/orchestrator"
-	"github.com/johndauphine/dmt/internal/secrets"
-	"github.com/johndauphine/dmt/internal/setup"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/setup"
 
 	"github.com/urfave/cli/v2"
 )

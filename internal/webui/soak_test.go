@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/progress"
 )
 
 // TestHubConcurrentChurn hammers the event hub with concurrent publishers and

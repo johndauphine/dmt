@@ -1,6 +1,6 @@
 package tuning
 
-import "github.com/johndauphine/dmt/internal/logging"
+import "github.com/johndauphine/dmt/v5/internal/logging"
 
 // shrinkageK is the prior weight in the smoothed-mean estimator. With
 // k=3 a 3-run bin's mean weighs equally with the global prior; larger N

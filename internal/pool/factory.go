@@ -3,12 +3,12 @@ package pool
 import (
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/dbconfig"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 
 	// Import driver packages to trigger init() registration
-	_ "github.com/johndauphine/dmt/internal/driver/generic"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic"
 )
 
 // NewSourcePool creates a source pool based on the configuration type.

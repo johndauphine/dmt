@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/exitcodes"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // preFlightSkipAll is the sentinel value that disables every check.

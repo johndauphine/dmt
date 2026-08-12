@@ -5,8 +5,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 // TypeMapper handles data type conversions between databases.

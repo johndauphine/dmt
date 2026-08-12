@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/version"
 )
 
 // View renders the TUI

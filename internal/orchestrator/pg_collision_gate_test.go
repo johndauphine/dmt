@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // collidingTables returns two tables whose names both sanitize to

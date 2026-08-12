@@ -10,10 +10,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/johndauphine/dmt/internal/command"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // progressInterval is how often the orchestrator's tracker emits a progress
@@ -86,7 +86,7 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyRunOverrides layers per-request run flags onto the loaded config, same
-// as cmd/migrate/run.go's IsSet overrides.
+// as cmd/dmt/run.go's IsSet overrides.
 func applyRunOverrides(cfg *config.Config, req runRequest) {
 	if req.SourceSchema != "" {
 		cfg.Source.Schema = req.SourceSchema

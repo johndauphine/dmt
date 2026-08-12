@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/progress"
 )
 
 func TestCopyDeadlineRetriesThenClassifiesAsTableFailure(t *testing.T) {

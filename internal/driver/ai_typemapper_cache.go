@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // CacheSource is the provenance tag persisted with every cache entry

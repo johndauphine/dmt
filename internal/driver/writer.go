@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/stats"
+	"github.com/johndauphine/dmt/v5/internal/stats"
 )
 
 // Writer represents a database writer that can write data to target tables.

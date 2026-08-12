@@ -12,7 +12,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 const (

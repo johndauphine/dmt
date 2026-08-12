@@ -7,7 +7,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 func TestRuleWriteErrorAdjuster_StructuralErrors_HalveChunk(t *testing.T) {

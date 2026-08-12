@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 	"github.com/urfave/cli/v2"
 )
 

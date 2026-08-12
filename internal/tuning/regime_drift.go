@@ -3,7 +3,7 @@ package tuning
 import (
 	"sort"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // PR2 regime-drift detector (#179).

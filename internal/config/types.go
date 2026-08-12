@@ -2,8 +2,8 @@ package config
 
 import (
 	"fmt"
-	"github.com/johndauphine/dmt/internal/dbconfig"
-	"github.com/johndauphine/dmt/internal/systemmemory"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
+	"github.com/johndauphine/dmt/v5/internal/systemmemory"
 	"gopkg.in/yaml.v3"
 	"strings"
 )

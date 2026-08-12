@@ -8,7 +8,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // sessionKey describes one server-side default an operator can set once and

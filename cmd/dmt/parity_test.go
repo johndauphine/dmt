@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/command"
 	"github.com/urfave/cli/v2"
 )
 

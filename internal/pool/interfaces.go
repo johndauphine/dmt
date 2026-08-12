@@ -5,7 +5,7 @@ package pool
 import (
 	"context"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // SourcePool is an alias for driver.Reader for backward compatibility.

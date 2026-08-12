@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 func TestNew(t *testing.T) {

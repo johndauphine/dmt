@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/dbconfig"
-	coredriver "github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
+	coredriver "github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 func TestReaderLoadColumnsPreservesFullDataTypeCase(t *testing.T) {

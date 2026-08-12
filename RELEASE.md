@@ -7,6 +7,10 @@ This document is the canonical process for cutting a release. The matching polic
 The release is gated on green CI. Don't tag a commit whose `ci.yml` or `integration.yml` is red.
 
 1. **Pick the version** per [VERSIONING.md](./VERSIONING.md) (MAJOR / MINOR / PATCH).
+   The tag major, `go.mod` module suffix, and `internal/version.Version` major
+   must stay synchronized. For v5, use `github.com/johndauphine/dmt/v5` and
+   `v5.*.*` tags; a future major requires updating the module suffix and all
+   intra-project imports before its first release.
 2. **Update `CHANGELOG.md`**:
    - Move every entry under `## [Unreleased]` to a new versioned section: `## [1.2.3] - YYYY-MM-DD`
    - Leave `## [Unreleased]` empty for future PRs to populate

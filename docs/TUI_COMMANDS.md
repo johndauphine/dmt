@@ -3,7 +3,7 @@
 The interactive TUI (launch `dmt` with no arguments) and the WebUI
 (`dmt --webui`) expose the same operator workflows as the CLI. The
 authoritative machine-checked mapping is the parity registry
-(`internal/command/registry.go`): a test in `cmd/migrate` enumerates the
+(`internal/command/registry.go`): a test in `cmd/dmt` enumerates the
 real CLI tree against it, a test in `internal/tui`
 (`TestTUICommandSurface`) verifies every TUI-supported entry is
 discoverable in `/help` and autocomplete, and a test in `internal/webui`

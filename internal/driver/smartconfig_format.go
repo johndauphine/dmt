@@ -2,7 +2,7 @@ package driver
 
 import (
 	"fmt"
-	"github.com/johndauphine/dmt/internal/driver/dbtuning"
+	"github.com/johndauphine/dmt/v5/internal/driver/dbtuning"
 	"strings"
 )
 

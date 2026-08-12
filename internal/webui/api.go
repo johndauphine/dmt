@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/version"
 )
 
 // buildHandler wires the full request tree: security headers on everything,

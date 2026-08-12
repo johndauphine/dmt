@@ -3,7 +3,7 @@
 // with their own I/O layer.
 package setup
 
-import "github.com/johndauphine/dmt/internal/config"
+import "github.com/johndauphine/dmt/v5/internal/config"
 
 // Step represents a setup wizard step.
 type Step int

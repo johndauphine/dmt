@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
 )
 
 const testToken = "test-token-abc"

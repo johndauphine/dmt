@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // progressSnapshot is one complete SaveProgress call captured for async

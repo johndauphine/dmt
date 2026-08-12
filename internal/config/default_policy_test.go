@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/secrets"
-	"github.com/johndauphine/dmt/internal/systemmemory"
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/systemmemory"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 func newDefaultPolicyTestConfig(target string, cores int, platform string, snapshot systemmemory.Snapshot) *Config {

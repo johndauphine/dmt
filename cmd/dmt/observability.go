@@ -3,8 +3,8 @@ package main
 import (
 	"github.com/urfave/cli/v2"
 
-	"github.com/johndauphine/dmt/internal/command"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // setupObservability wires the Prometheus /metrics endpoint and OTLP

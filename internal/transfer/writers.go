@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/observability"
-	"github.com/johndauphine/dmt/internal/pool"
-	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/target"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/observability"
+	"github.com/johndauphine/dmt/v5/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/target"
 )
 
 // writerPool wraps pool.WriterPool with transfer-specific functionality.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // GenerateTableDDL generates complete CREATE TABLE DDL for the target database.

@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 // Prompt returns prompt info for the current step.

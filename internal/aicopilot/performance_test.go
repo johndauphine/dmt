@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/driver/dbtuning"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver/dbtuning"
 )
 
 func TestBuildPerformancePayloadRedactsIdentityAndFiltersRuntimeKnobs(t *testing.T) {

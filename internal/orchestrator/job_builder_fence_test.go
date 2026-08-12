@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/pool"
-	"github.com/johndauphine/dmt/internal/source"
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 // fenceSourcePool is a minimal IncrementalDateReader: it reports a date column

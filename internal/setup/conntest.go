@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 
 	// Register SQL drivers for connection testing.
 	// mysql/postgres/sqlite/clickhouse register via the catalog-driven
 	// generic engine (#509); mssql still self-registers.
-	_ "github.com/johndauphine/dmt/internal/driver/generic"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic"
 )
 
 // sqlDriverNames maps DMT driver names to database/sql driver names.

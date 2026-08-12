@@ -50,6 +50,21 @@ jobs:
           fi
           echo "Tag $TAG matches CHANGELOG entry."
 
+      - name: Validate module major matches release tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          MAJOR="${VERSION%%.*}"
+          MODULE="github.com/johndauphine/dmt/v${MAJOR}"
+          if ! grep -Fqx "module ${MODULE}" go.mod; then
+            echo "ERROR: tag $TAG requires module ${MODULE}; found:" >&2
+            head -n 1 go.mod >&2
+            exit 1
+          fi
+          echo "Tag $TAG and module path ${MODULE} have matching majors."
+
       - name: Extract CHANGELOG section for release notes
         env:
           TAG: ${{ github.ref_name }}
@@ -80,6 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          VERSION="${TAG#v}"
           declare -a TARGETS=(
             "darwin amd64"
             "darwin arm64"
@@ -99,11 +115,32 @@ jobs:
             echo "Building $out ..."
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
               go build \
-                -ldflags "-s -w -X github.com/johndauphine/dmt/internal/version.Version=${TAG}" \
+                -ldflags "-s -w -X github.com/johndauphine/dmt/v5/internal/version.Version=${VERSION}" \
                 -o "$out" \
-                ./cmd/migrate
+                ./cmd/dmt
           done
           ls -la dist/
+
+      - name: Smoke-test versioned Go install
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          GOBIN="$(mktemp -d)"
+          export GOBIN
+          VERSION="${TAG#v}"
+          GOPROXY=direct go install "github.com/johndauphine/dmt/v5/cmd/dmt@${TAG}"
+          if ! VERSION_OUTPUT="$("${GOBIN}/dmt" --version 2>&1)"; then
+            echo "ERROR: installed dmt --version command failed; output:" >&2
+            printf '%s\n' "${VERSION_OUTPUT}" >&2
+            exit 1
+          fi
+          printf 'Installed dmt --version output:\n%s\n' "${VERSION_OUTPUT}"
+          if [[ "${VERSION_OUTPUT}" != "dmt version ${VERSION}" ]]; then
+            echo "ERROR: installed dmt reported unexpected version; expected dmt version ${VERSION}, got:" >&2
+            printf '%s\n' "${VERSION_OUTPUT}" >&2
+            exit 1
+          fi
 
       - name: Generate SHA-256 checksums
         run: |

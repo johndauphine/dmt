@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func createLegacyAITimestampDB(t *testing.T, dataDir string, indexCollision bool) {

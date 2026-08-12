@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/setup"
+	"github.com/johndauphine/dmt/v5/internal/setup"
 )
 
 // TestSetupFlowStart drives the guided setup far enough to prove the

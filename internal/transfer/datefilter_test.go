@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 	// Import driver packages to register dialects
-	_ "github.com/johndauphine/dmt/internal/driver/generic"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic"
 )
 
 func TestBuildKeysetQueryWithDateFilter(t *testing.T) {

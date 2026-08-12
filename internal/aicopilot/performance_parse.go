@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 var performanceNumberPattern = regexp.MustCompile(`[-+]?\d[\d,]*(?:\.\d+)?`)

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // finalizationUntrustedDataFraming is prepended to every finalization DDL

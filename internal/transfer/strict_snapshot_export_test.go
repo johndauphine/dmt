@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/pool"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 func TestStrictKeysetReaderPlan(t *testing.T) {

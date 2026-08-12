@@ -2,6 +2,16 @@
 
 dmt follows [Semantic Versioning 2.0.0](https://semver.org/). This document is the source of truth for what does and doesn't trigger a major/minor/patch bump, what config fields you can rely on as stable, and how breaking changes are deprecated before removal.
 
+## Go module major synchronization
+
+For every v2+ release line, Go semantic import versioning requires the release
+tag major, the `go.mod` module suffix, and all intra-project import paths to
+match. The current v5 line therefore uses `github.com/johndauphine/dmt/v5` and
+tags such as `v5.6.0`. Before publishing a new major, update the module suffix,
+rewrite intra-project imports, update the public `go install` path, and verify
+the release workflow's tagged-install smoke test. Existing immutable tags on an
+incorrect module path cannot be repaired.
+
 ## Triggers
 
 ### MAJOR (`v5.x.x` → `v6.0.0`) — breaking changes

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 func TestAckSequencerReleasesSlotsOnlyAfterSequenceGapCloses(t *testing.T) {

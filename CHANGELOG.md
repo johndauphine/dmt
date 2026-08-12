@@ -9,6 +9,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [5.6.1] - 2026-08-12
+
+### Fixed
+
+- The v5 module path and `dmt` command now use Go semantic import versioning,
+  so `go install github.com/johndauphine/dmt/v5/cmd/dmt@latest` resolves to
+  current v5 releases (#635).
+
 ### Added
 
 - `dmt --gui` turns the WebUI into a desktop app with no native shell and no

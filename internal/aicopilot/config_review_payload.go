@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 func BuildConfigReviewPayload(cfg *config.Config, opts ConfigReviewOptions) ConfigReviewPayload {

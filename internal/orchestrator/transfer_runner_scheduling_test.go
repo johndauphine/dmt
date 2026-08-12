@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/monitor"
-	"github.com/johndauphine/dmt/internal/progress"
-	"github.com/johndauphine/dmt/internal/source"
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/monitor"
+	"github.com/johndauphine/dmt/v5/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 // schedulingRunner builds a TransferRunner whose per-job execution is faked, so

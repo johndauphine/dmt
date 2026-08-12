@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/secrets"
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 	"github.com/johndauphine/smt/schema"
 )
 

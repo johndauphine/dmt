@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 )
 
 func TestGenerateAddForeignKey_BasicCascade(t *testing.T) {

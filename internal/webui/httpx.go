@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/exitcodes"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // maxRequestBody caps decoded request bodies. Command requests are small

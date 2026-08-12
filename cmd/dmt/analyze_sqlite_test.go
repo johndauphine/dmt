@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 func TestAnalyzeCommandSupportsSQLiteSchemaStats(t *testing.T) {

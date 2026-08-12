@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 // TestExternalizeSecrets: writing with ExternalizeSecrets moves DB passwords to

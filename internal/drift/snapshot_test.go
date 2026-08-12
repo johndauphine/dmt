@@ -3,7 +3,7 @@ package drift
 import (
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 func TestBuildTableSnapshotDeterministic(t *testing.T) {

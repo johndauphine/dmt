@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/setup"
+	"github.com/johndauphine/dmt/v5/internal/setup"
 )
 
 // setupSession wraps the shared, UI-agnostic setup.State (internal/setup) that

@@ -1,7 +1,7 @@
 package transfer
 
 import (
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // ackSequencer delivers write acks to apply in seq order (0, 1, 2, …),

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func GeneratePerformanceExplanation(ctx context.Context, client TextClient, payload PerformancePayload) (*PerformanceExplanation, error) {

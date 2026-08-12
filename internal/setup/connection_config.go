@@ -1,6 +1,6 @@
 package setup
 
-import "github.com/johndauphine/dmt/internal/config"
+import "github.com/johndauphine/dmt/v5/internal/config"
 
 // SourceConnConfig returns a copy of s.Config with source-side placeholders
 // resolved, suitable for the source connection test. The wizard keeps raw

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 type mysqlSnapshotRecordingSource struct{ *keysetRuntimeSourcePool }

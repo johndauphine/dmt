@@ -1,5 +1,5 @@
 // Dry-run preview rendering shared by the CLI and the TUI (#439).
-// Lives here rather than cmd/migrate so /run --dry-run shows the exact
+// Lives here rather than cmd/dmt so /run --dry-run shows the exact
 // same human-readable preview as `dmt run --dry-run` without the TUI
 // duplicating the formatting (epic #437 non-goal).
 package command
@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // FormatDryRunResult renders the migration preview for human reading.

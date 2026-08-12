@@ -8,7 +8,7 @@ package ddl
 import (
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 )
 
 // Dialect names. Re-exported from internal/typemap to give the ddl

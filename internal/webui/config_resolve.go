@@ -3,8 +3,8 @@ package webui
 import (
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 // resolveConfig turns a request's origin into a loaded config plus the
@@ -40,7 +40,7 @@ func (s *Server) resolveConfig(o originReq) (cfg *config.Config, path, stateFile
 }
 
 // loadProfileConfig decrypts a saved profile and parses it into a config,
-// replicating the CLI's cmd/migrate/config_loader.go loadProfileConfig path:
+// replicating the CLI's cmd/dmt/config_loader.go loadProfileConfig path:
 // DefaultDataDir → checkpoint store → GetProfile (AES-GCM) → LoadBytes.
 func loadProfileConfig(name string) (*config.Config, error) {
 	dir, err := config.DefaultDataDir()

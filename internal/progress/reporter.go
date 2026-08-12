@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // ProgressUpdate represents a JSON progress update for automation/Airflow.

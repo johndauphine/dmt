@@ -3,9 +3,9 @@ package webui
 import (
 	"time"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // The DTOs here give the WebUI API a stable, snake_case JSON shape for

@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/johndauphine/dmt/internal/command"
+	"github.com/johndauphine/dmt/v5/internal/command"
 )
 
 // Maintenance commands (#443): secrets bootstrap and type-cache

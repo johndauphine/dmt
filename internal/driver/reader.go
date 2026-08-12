@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/stats"
+	"github.com/johndauphine/dmt/v5/internal/stats"
 )
 
 // IncrementalDateReader is the optional capability of locating a

@@ -1,6 +1,6 @@
 package driver
 
-import "github.com/johndauphine/dmt/internal/typemap/ddl"
+import "github.com/johndauphine/dmt/v5/internal/typemap/ddl"
 
 // These adapters exist only for the pre-SMT parity oracle. Production target
 // schema DDL does not import internal/typemap/ddl.

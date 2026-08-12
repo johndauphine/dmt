@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func GenerateSchemaAdvisorReview(ctx context.Context, client TextClient, payload SchemaAdvisorPayload) (*SchemaAdvisorReview, error) {

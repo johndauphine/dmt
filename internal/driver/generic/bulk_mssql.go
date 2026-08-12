@@ -11,8 +11,8 @@ import (
 
 	mssql "github.com/microsoft/go-mssqldb"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // SQL Server strategies (#509), extracted from the hand-written mssql

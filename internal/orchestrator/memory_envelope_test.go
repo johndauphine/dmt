@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 func TestNewWithOptionsRejectsUnresolvedMemoryEnvelope(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 const legacyAITimestampLayout = "2006-01-02 15:04:05"

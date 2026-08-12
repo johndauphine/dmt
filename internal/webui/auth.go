@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // sessionCookie names the browser session cookie set after a successful login.

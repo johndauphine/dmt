@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/smtddl"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/smtddl"
 )
 
 const smtBatchCleanupTimeout = 5 * time.Second

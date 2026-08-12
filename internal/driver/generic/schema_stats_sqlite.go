@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 const sqliteSchemaStatsTableCap = 100

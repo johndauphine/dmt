@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/johndauphine/dmt/internal/tui"
+	"github.com/johndauphine/dmt/v5/internal/tui"
 
 	"github.com/urfave/cli/v2"
 )

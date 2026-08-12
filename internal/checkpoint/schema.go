@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 var legacyAITimestampWarnings sync.Map

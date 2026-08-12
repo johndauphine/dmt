@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // Mode selects which validation passes run. Modes are inclusive:

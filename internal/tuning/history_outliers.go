@@ -4,7 +4,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // medianOfFloats returns the upper-middle element of v after sorting.

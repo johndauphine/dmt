@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
 )
 
 func TestRequiredWriteErrorCarriesStateExitCodeAndGuidance(t *testing.T) {

@@ -7,9 +7,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/observability"
-	"github.com/johndauphine/dmt/internal/orchestrator"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/observability"
+	"github.com/johndauphine/dmt/v5/internal/orchestrator"
 )
 
 // SetupObservability starts the metrics endpoint and OTLP exporter for

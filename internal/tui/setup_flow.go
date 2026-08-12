@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/johndauphine/dmt/internal/secrets"
-	"github.com/johndauphine/dmt/internal/setup"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/setup"
 )
 
 // Setup wizard handling
@@ -152,7 +152,7 @@ func (m *Model) runSetupConnTest(step setup.Step) tea.Cmd {
 		defer cancel()
 
 		// Resolve placeholders only for the side being tested — see comments
-		// in cmd/migrate/main.go and internal/setup.SourceConnConfig.
+		// in cmd/dmt/main.go and internal/setup.SourceConnConfig.
 		var result *setup.ConnTestResult
 		if step == setup.StepSourceConnTest {
 			conn := m.setupState.SourceConnConfig()

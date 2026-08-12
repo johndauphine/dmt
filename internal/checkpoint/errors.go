@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
 )
 
 // RequiredWriteError means a durability transition required for safe retry or

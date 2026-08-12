@@ -1,14 +1,14 @@
 // Triage-review rendering shared by the CLI and the TUI (#441). Lives
-// here rather than cmd/migrate so /validate --ai-triage and /diagnose
+// here rather than cmd/dmt so /validate --ai-triage and /diagnose
 // show the exact same review as the CLI commands (epic #437 non-goal).
-// JSON output stays in cmd/migrate — the TUI renders blocks instead.
+// JSON output stays in cmd/dmt — the TUI renders blocks instead.
 package command
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
 )
 
 // FormatTriageReview renders an AI triage review for human reading.

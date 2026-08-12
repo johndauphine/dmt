@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/johndauphine/dmt/internal/webui"
+	"github.com/johndauphine/dmt/v5/internal/webui"
 
 	"github.com/urfave/cli/v2"
 )

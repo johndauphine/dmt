@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 // Dialect implements driver.Dialect from a Catalog. The catalog owns query,

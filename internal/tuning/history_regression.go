@@ -3,7 +3,7 @@ package tuning
 import (
 	"math"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // applyHistoryRegression fits the quadratic model to the filtered rows

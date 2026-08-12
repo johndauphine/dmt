@@ -5,9 +5,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/exitcodes"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/version"
 
 	"github.com/urfave/cli/v2"
 )
@@ -547,7 +547,7 @@ func newApp() *cli.App {
 }
 
 // runApp executes the CLI and owns exit-code handling, per the #438
-// split: urfave binding + exit codes stay in cmd/migrate.
+// split: urfave binding + exit codes stay in cmd/dmt.
 func runApp(app *cli.App) {
 	if err := app.Run(os.Args); err != nil {
 		code := exitcodes.FromError(err)

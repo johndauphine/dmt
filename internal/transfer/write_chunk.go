@@ -3,8 +3,8 @@ package transfer
 import (
 	"context"
 	"fmt"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/pool"
 )
 
 // writeChunkGeneric writes a chunk of data using the appropriate target pool

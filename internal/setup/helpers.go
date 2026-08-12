@@ -4,8 +4,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 func (s *State) defaultPort(dbType string) int {

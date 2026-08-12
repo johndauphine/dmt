@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
 )
 
 const metadataShimDriverName = "dmt-smartconfig-metadata-test"

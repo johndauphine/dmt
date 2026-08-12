@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 )
 
 // AIProvider represents supported AI providers for type mapping.

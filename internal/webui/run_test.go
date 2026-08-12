@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/progress"
 )
 
 func TestRunManagerSingleFlight(t *testing.T) {

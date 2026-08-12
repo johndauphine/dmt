@@ -3,7 +3,7 @@ package orchestrator
 import (
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/checkpoint"
+	"github.com/johndauphine/dmt/v5/internal/checkpoint"
 )
 
 // TestRunReachedTransfer pins the #623 ownership signal: a resume may skip the

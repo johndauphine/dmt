@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 func BuildPreflightPayload(cfg *config.Config, health HealthSummary, findings []driver.PreFlightFinding) PreflightPayload {

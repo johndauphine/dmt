@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
 
 	"github.com/urfave/cli/v2"
 )

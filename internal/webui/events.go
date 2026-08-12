@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/progress"
+	"github.com/johndauphine/dmt/v5/internal/progress"
 )
 
 // eventType tags the kind of server-sent event pushed to browser clients.

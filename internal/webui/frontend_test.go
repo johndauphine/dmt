@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/version"
+	"github.com/johndauphine/dmt/v5/internal/version"
 )
 
 // TestSPAAssetsServed guards that the embedded SPA (#582) ships in the binary:

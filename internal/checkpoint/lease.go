@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/exitcodes"
+	"github.com/johndauphine/dmt/v5/internal/exitcodes"
 )
 
 // MigrationTarget identifies the canonical target protected by a migration

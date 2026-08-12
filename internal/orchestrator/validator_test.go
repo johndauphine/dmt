@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/config"
 )
 
 // boolPtr is a small helper because config.ValidationConfig uses

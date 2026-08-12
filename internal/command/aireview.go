@@ -2,15 +2,15 @@
 // config-review/runbook output of `dmt ai config-review` and the
 // performance explanation of `analyze --ai-explain`. Lives here so the
 // TUI shows the exact same advisory blocks (epic #437 non-goal). JSON
-// output stays in cmd/migrate.
+// output stays in cmd/dmt.
 package command
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // FormatConfigReview renders patch recommendations and the migration

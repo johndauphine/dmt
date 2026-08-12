@@ -14,8 +14,8 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // LOAD DATA LOCAL INFILE bulk strategy for MySQL targets (#531). The

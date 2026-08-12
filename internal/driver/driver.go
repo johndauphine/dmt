@@ -7,7 +7,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/johndauphine/dmt/internal/dbconfig"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
 )
 
 // DriverDefaults contains default values for a database driver.

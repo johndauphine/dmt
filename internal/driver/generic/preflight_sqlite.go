@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	"github.com/johndauphine/dmt/internal/driver/shared"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver/shared"
 )
 
 // preflightFunc is the engine-specific preflight battery (imperative;

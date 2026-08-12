@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
-	_ "github.com/johndauphine/dmt/internal/driver/generic"
+	"github.com/johndauphine/dmt/v5/internal/driver"
+	_ "github.com/johndauphine/dmt/v5/internal/driver/generic"
 	_ "modernc.org/sqlite"
 )
 

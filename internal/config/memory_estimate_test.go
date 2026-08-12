@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/tuning"
+	"github.com/johndauphine/dmt/v5/internal/tuning"
 )
 
 // TestApplyRuntimeMemoryLimit_SetsGOMEMLIMIT verifies the #462 wiring: the

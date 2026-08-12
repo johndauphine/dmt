@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/johndauphine/dmt/internal/ident"
-	"github.com/johndauphine/dmt/internal/smtddl"
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/ident"
+	"github.com/johndauphine/dmt/v5/internal/smtddl"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 	"github.com/johndauphine/smt/schema"
 )
 

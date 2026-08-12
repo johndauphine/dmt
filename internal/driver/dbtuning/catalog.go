@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/johndauphine/dmt/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/logging"
 )
 
 // SystemInfo captures host-level facts a tuning rule may need to compute

@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"github.com/johndauphine/dmt/internal/secrets"
+	"github.com/johndauphine/dmt/v5/internal/secrets"
 	"gopkg.in/yaml.v3"
 	"os"
 	"reflect"

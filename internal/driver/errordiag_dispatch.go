@@ -8,9 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/johndauphine/dmt/internal/driver/errordiag"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/observability"
+	"github.com/johndauphine/dmt/v5/internal/driver/errordiag"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/observability"
 )
 
 // LookupDeterministicDiagnosis returns a diagnosis if the target driver's

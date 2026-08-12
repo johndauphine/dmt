@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/aicopilot"
+	"github.com/johndauphine/dmt/v5/internal/aicopilot"
 )
 
 // #442: the review must always carry the operator-review disclaimer,

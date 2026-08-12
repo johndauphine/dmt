@@ -17,9 +17,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/observability"
-	"github.com/johndauphine/dmt/internal/typemap"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/observability"
+	"github.com/johndauphine/dmt/v5/internal/typemap"
 )
 
 // UnmappedAction selects what the chain does at column-level when the

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/johndauphine/dmt/internal/dbconfig"
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/dbconfig"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 	"github.com/johndauphine/smt/schema"
 )
 

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `cmd/migrate/` is the CLI entry point and builds the `dmt` binary.
+- `cmd/dmt/` is the CLI entry point and builds the `dmt` binary.
 - `internal/` holds core packages (pipeline, driver, orchestrator, config, checkpoint, TUI). Keep new packages internal unless they must be public.
 - `docs/` contains technical notes and plans; start at `docs/README.md`.
 - `examples/` provides sample YAML configs and benchmark scenarios.

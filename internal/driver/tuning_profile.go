@@ -1,6 +1,6 @@
 package driver
 
-import "github.com/johndauphine/dmt/internal/tuning"
+import "github.com/johndauphine/dmt/v5/internal/tuning"
 
 // BuildTuningProfile builds the tuner's target-specific policy from the
 // registered driver. A zero-valued probe means no live target information is

@@ -59,8 +59,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/transfer"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/transfer"
 )
 
 // Controller is the rule-based runtime adjuster. Same lifecycle as

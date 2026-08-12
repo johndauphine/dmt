@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/driver"
+	"github.com/johndauphine/dmt/v5/internal/driver"
 )
 
 func TestMSSQLDatabaseSnapshotPreflightOrphanIntegration(t *testing.T) {

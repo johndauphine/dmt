@@ -8,9 +8,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/johndauphine/dmt/internal/config"
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/pool"
+	"github.com/johndauphine/dmt/v5/internal/config"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/pool"
 )
 
 // StrictSnapshotEpochOptions supplies run identity and connection settings for

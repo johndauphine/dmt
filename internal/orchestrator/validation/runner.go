@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johndauphine/dmt/internal/logging"
-	"github.com/johndauphine/dmt/internal/source"
+	"github.com/johndauphine/dmt/v5/internal/logging"
+	"github.com/johndauphine/dmt/v5/internal/source"
 )
 
 // Runner orchestrates the configured validation passes across a
