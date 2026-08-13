@@ -513,12 +513,23 @@ function applyProgress(p) {
 
 // setProgressNow keeps the progressbar's accessible value in step with the
 // painted bar. aria-valuetext carries the row tally so the announcement is
-// "42%, 1,200,000 of 3,000,000 rows" rather than a bare number.
+// "42% — 1,200,000 of 3,000,000 rows" rather than a bare number.
+//
+// A total is only ever stated when the caller actually has one. A finished run
+// reports what it transferred but carries no separate total, and echoing the
+// transferred count back as the total would announce a denominator that was
+// never measured — so that case reads "100% — 3,000,000 rows". (Note this has
+// to be decided by the caller: a mid-run tick legitimately reaches
+// rows === total at the end of a transfer, where the total is real and worth
+// saying.)
 function setProgressNow(pct, rows, total) {
   const track = $("#pbar-track");
   if (!track) return;
   track.setAttribute("aria-valuenow", String(pct));
-  track.setAttribute("aria-valuetext", total ? `${pct}% — ${fmtNum(rows)} of ${fmtNum(total)} rows` : `${pct}%`);
+  let text = `${pct}%`;
+  if (total) text += ` — ${fmtNum(rows)} of ${fmtNum(total)} rows`;
+  else if (rows != null) text += ` — ${fmtNum(rows)} rows`;
+  track.setAttribute("aria-valuetext", text);
 }
 
 // Progress arrives several times a second on a busy migration; writing every
@@ -553,7 +564,9 @@ function applyRunState(run) {
     if (st === "completed") {
       set("#s-pct", 100);
       set("#pbar", null, (i) => (i.style.width = "100%"));
-      setProgressNow(100, run.rows_transferred, run.rows_transferred);
+      // No total: a finished run carries a transferred count, not a measured
+      // denominator to state it against.
+      setProgressNow(100, run.rows_transferred, null);
     }
     // Finished runs carry their final tally (#591); a fresh page load has no
     // progress stream, so populate the telemetry from the runState. The Go

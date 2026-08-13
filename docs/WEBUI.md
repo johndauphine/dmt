@@ -198,6 +198,17 @@ Three traps cost real time here, so they are worth knowing up front:
 - **`/json/new` requires `PUT`** on Chrome 111+; a `GET` returns 405. Reusing
   the existing `about:blank` page target and calling `Page.navigate` avoids the
   endpoint entirely.
+- **The service worker will serve you a stale `app.js`.** Its cache name keys on
+  the dmt version (see `sw.js`), so rebuilding the binary without bumping the
+  version leaves a previously-registered worker happily serving the old asset —
+  you will verify a fix that the page never loaded. Call
+  `Network.setCacheDisabled` and `ServiceWorker.setForceUpdateOnPageLoad` before
+  navigating, and assert the page actually has your change (evaluate
+  `someFunction.toString().includes(…)`) before trusting a result.
+- **Kill stale Chrome instances first.** A second `--remote-debugging-port=9222`
+  launch cannot bind the port while the first is alive, so CDP silently attaches
+  to the *old* browser — with the old profile and the old service worker.
+  Confirm the kill took rather than assuming it did.
 
 Under WSL, Chrome installed on the Windows side works: launch the `.exe` and
 both `localhost:9222` (the debug port) and `localhost:8484` (the console)
