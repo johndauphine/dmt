@@ -50,6 +50,37 @@ func TestSPAAssetsServed(t *testing.T) {
 	}
 }
 
+// TestRunEndAnnouncementIsDeduped guards the fix for the stacking completed-run
+// toast (#599): applyRunState is re-entered by SSE, the run-pill poll, and each
+// dashboard mount, so the terminal-state toast and desktop notification have to
+// go through the transition guard rather than firing on "status is terminal".
+// There is no JS runtime in this build, so this asserts the shape of the source
+// — the same approach TestServiceWorkerVersionStamped takes for sw.js.
+func TestRunEndAnnouncementIsDeduped(t *testing.T) {
+	s := newTestServer(t, Options{})
+	h := s.buildHandler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://localhost/app.js", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /app.js = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	for _, want := range []string{"function announceRunEnd(", "lastRunSeen"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("app.js missing the run-end dedup guard %q", want)
+		}
+	}
+	// One announcement site, reached only through announceRunEnd.
+	if n := strings.Count(body, "toast(`Migration "); n != 1 {
+		t.Errorf("`Migration ...` toast appears %d times, want exactly 1 (inside announceRunEnd)", n)
+	}
+	if n := strings.Count(body, "notifyRunEnded("); n != 2 { // the definition + the single call
+		t.Errorf("notifyRunEnded referenced %d times, want 2 (definition + call in announceRunEnd)", n)
+	}
+}
+
 // TestManifestServedWithCorrectMIME guards against Go's builtin mime table
 // (mime/type.go) not knowing the .webmanifest extension: without the explicit
 // override in assets.go, http.FileServer would serve it with a guessed or

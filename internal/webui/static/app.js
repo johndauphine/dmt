@@ -45,7 +45,14 @@ function originBody() {
 
 // ---------- toasts ----------
 function toast(msg, kind = "ok") {
-  let host = $(".toasts"); if (!host) { host = el(`<div class="toasts"></div>`); document.body.appendChild(host); }
+  // The stack is a polite live region so a toast is spoken, not just drawn.
+  // aria-atomic="false" is deliberate: role="status" defaults it to true, which
+  // would re-read every visible toast each time one is appended. (#598)
+  let host = $(".toasts");
+  if (!host) {
+    host = el(`<div class="toasts" role="status" aria-live="polite" aria-atomic="false"></div>`);
+    document.body.appendChild(host);
+  }
   const t = el(`<div class="toast ${kind}"><div>${esc(msg)}</div></div>`);
   host.appendChild(t);
   setTimeout(() => t.remove(), 4200);
@@ -66,12 +73,12 @@ function toggleTheme() {
 
 // ---------- icons (inline, currentColor) ----------
 const ico = {
-  dash: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>`,
-  history: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>`,
-  checks: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,
-  setup: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9 2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2 2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9Z"/></svg>`,
-  profiles: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>`,
-  settings: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--panel)"/><circle cx="15" cy="12" r="2" fill="var(--panel)"/><circle cx="8" cy="18" r="2" fill="var(--panel)"/></svg>`,
+  dash: `<svg class="ico" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>`,
+  history: `<svg class="ico" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 8v4l3 2"/></svg>`,
+  checks: `<svg class="ico" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,
+  setup: `<svg class="ico" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9 2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2 2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9Z"/></svg>`,
+  profiles: `<svg class="ico" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>`,
+  settings: `<svg class="ico" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--panel)"/><circle cx="15" cy="12" r="2" fill="var(--panel)"/><circle cx="8" cy="18" r="2" fill="var(--panel)"/></svg>`,
 };
 
 // ---------- app state ----------
@@ -113,13 +120,13 @@ function mountLogin(urlToken) {
   root.innerHTML = "";
   const card = el(`
     <div class="login-wrap"><div class="card login-card">
-      <div class="brand"><div class="logo">d</div><div><div class="word"><b>dmt</b> console</div></div></div>
+      <div class="brand"><div class="logo" aria-hidden="true">d</div><div><div class="word"><b>dmt</b> console</div></div></div>
       <p class="muted" style="text-align:center;margin:0 0 18px">Sign in with your access token.</p>
       <form id="login-form" class="stack">
         <div class="field"><label for="tok">Access token</label>
           <input id="tok" class="mono" type="password" autocomplete="off" placeholder="paste --webui-auth-token"></div>
         <button class="btn primary" type="submit">Sign in</button>
-        <div id="login-msg" class="muted" style="min-height:18px;font-size:12.5px"></div>
+        <div id="login-msg" class="muted" role="status" aria-live="polite" style="min-height:18px;font-size:12.5px"></div>
       </form>
     </div></div>`);
   root.appendChild(card);
@@ -154,10 +161,11 @@ function mountApp() {
   root.innerHTML = "";
   const shell = el(`
     <div class="shell">
+      <a class="skip-link" href="#view">Skip to content</a>
       <aside class="sidebar">
-        <div class="brand"><div class="logo">d</div>
+        <div class="brand"><div class="logo" aria-hidden="true">d</div>
           <div><div class="word"><b>dmt</b> console</div><div class="ver mono">v${esc(version)}</div></div></div>
-        <nav class="nav" id="nav"></nav>
+        <nav class="nav" id="nav" aria-label="Primary"></nav>
         <div class="sidebar-foot">
           <button class="btn ghost sm" id="palette-btn">⌘K &nbsp;Command palette</button>
           <div class="form-row" style="gap:6px">
@@ -170,10 +178,18 @@ function mountApp() {
         <header class="topbar">
           <h1 id="view-title">Dashboard</h1>
           <div class="spacer"></div>
-          <span id="run-pill" class="badge idle"><span class="dot"></span>idle</span>
+          <!-- Visual mirror of the run state only. Deliberately not a live
+               region: the toast stack already speaks completed/failed, and a
+               second polite region here would say it twice. -->
+          <span id="run-pill" class="badge idle"><span class="dot" aria-hidden="true"></span>idle</span>
         </header>
-        <main id="view" class="view"></main>
+        <main id="view" class="view" tabindex="-1"></main>
       </div>
+      <!-- Single polite live region for run progress and terminal state. The
+           dashboard shows this visually; a screen reader has no other way to
+           learn that a migration advanced or finished. Writes are throttled in
+           announceProgress() so a fast SSE stream cannot flood it. (#598) -->
+      <p id="run-live" class="sr-only" role="status" aria-live="polite"></p>
     </div>`);
   root.appendChild(shell);
 
@@ -183,6 +199,10 @@ function mountApp() {
     b.addEventListener("click", () => go(n.id));
     nav.appendChild(b);
   });
+  // The router owns location.hash, so letting the skip link navigate to #view
+  // would be read as a view name and bounce to the dashboard. Move focus
+  // directly instead and leave the hash alone.
+  $(".skip-link").addEventListener("click", (e) => { e.preventDefault(); $("#view").focus(); });
   $("#theme-btn").addEventListener("click", toggleTheme);
   $("#palette-btn").addEventListener("click", openPalette);
   $("#logout-btn").addEventListener("click", async () => { try { await api.post("/api/logout"); } catch {} location.reload(); });
@@ -243,7 +263,14 @@ function go(view) {
   if (!NAV.some((n) => n.id === view)) view = "dashboard";
   currentView = view;
   location.hash = view;
-  $$(".nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  // The highlight is CSS-only, so the active view also has to be stated in the
+  // accessibility tree — otherwise every nav item sounds identical. (#598)
+  $$(".nav button").forEach((b) => {
+    const on = b.dataset.view === view;
+    b.classList.toggle("active", on);
+    if (on) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
   $("#view-title").textContent = NAV.find((n) => n.id === view).label;
   renderView();
 }
@@ -260,11 +287,50 @@ function renderView() {
 function originFields() {
   return `<div>
     <div class="form-grid">
-      <div class="field"><label>Config file</label><input id="origin-config" class="mono" type="text" placeholder="config.yaml (or leave blank)"></div>
-      <div class="field"><label>Profile</label><input id="origin-profile" class="mono" type="text" placeholder="saved profile name"></div>
+      <div class="field"><label for="origin-config">Config file</label><input id="origin-config" class="mono" type="text" placeholder="config.yaml (or leave blank)"></div>
+      <div class="field"><label for="origin-profile">Profile</label><input id="origin-profile" class="mono" type="text" placeholder="saved profile name"></div>
     </div>
     <button type="button" class="btn sm ghost" data-action="origin-browse" style="margin-top:8px">Browse configs & profiles…</button>
   </div>`;
+}
+
+// ---------- modal plumbing ----------
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+// openModal wires the three things a modal owes a keyboard user: Tab cannot
+// reach the page behind it, Escape closes it, and focus returns to whatever
+// opened it. Returns the close() that undoes all of it — every close path must
+// route through that one function so the document listener is never orphaned.
+// The listener is on the capture phase so Escape lands here first, before any
+// input-level keydown handler inside the modal. (#598)
+function openModal(overlay, container, onClose) {
+  const returnTo = document.activeElement;
+  let closed = false;
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); close(); return; }
+    if (e.key !== "Tab") return;
+    const f = $$(FOCUSABLE, container);
+    if (!f.length) { e.preventDefault(); return; }
+    const first = f[0], last = f[f.length - 1];
+    const outside = !container.contains(document.activeElement);
+    if (e.shiftKey && (outside || document.activeElement === first)) { last.focus(); e.preventDefault(); }
+    else if (!e.shiftKey && (outside || document.activeElement === last)) { first.focus(); e.preventDefault(); }
+  };
+  // Idempotent: Escape, click-outside, and picking all land here, and the
+  // caller may hold its own handle to it.
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    overlay.remove();
+    document.removeEventListener("keydown", onKey, true);
+    // The opener can be gone if closing re-rendered the view; only restore
+    // focus to a node still in the document, or it lands on <body>.
+    if (returnTo && document.contains(returnTo)) returnTo.focus();
+    if (onClose) onClose();
+  };
+  document.addEventListener("keydown", onKey, true);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  return close;
 }
 
 // openOriginPicker shows a dialog to pick a saved profile or a config file
@@ -272,22 +338,23 @@ function originFields() {
 // origin inputs in the current view.
 async function openOriginPicker() {
   if ($(".overlay")) return;
-  const ov = el(`<div class="overlay"><div class="dialog">
-    <div class="dialog-head">Choose a config or profile</div>
-    <div class="dialog-body"><div class="empty"><span class="spinner"></span> Loading…</div></div>
-  </div></div>`);
+  const ov = el(`<div class="overlay">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="picker-title" tabindex="-1">
+      <h2 class="dialog-head" id="picker-title">Choose a config or profile</h2>
+      <div class="dialog-body"><div class="empty"><span class="spinner" aria-hidden="true"></span> Loading…</div></div>
+    </div></div>`);
   document.body.appendChild(ov);
-  // All three close paths (Escape, click-outside, pick) route through close()
-  // so the keydown listener is always removed — no listener/DOM leak.
-  const onKey = (e) => { if (e.key === "Escape") close(); };
-  const close = () => { ov.remove(); document.removeEventListener("keydown", onKey); };
-  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
-  document.addEventListener("keydown", onKey);
+  const dialog = $(".dialog", ov);
+  const close = openModal(ov, dialog);
+  // Focus the dialog itself first: the list is still loading, and focus has to
+  // be inside the modal for the trap and Escape to behave.
+  dialog.focus();
 
   const [cfgs, profs] = await Promise.all([
     api.get("/api/configs").catch(() => ({ configs: [] })),
     api.get("/api/profiles").catch(() => ({ profiles: [] })),
   ]);
+  if (!document.contains(ov)) return; // closed while loading
   const body = $(".dialog-body", ov);
   body.innerHTML = "";
   body.appendChild(pickSection("Saved profiles", (profs.profiles || []).map((p) => ({
@@ -296,6 +363,8 @@ async function openOriginPicker() {
   body.appendChild(pickSection("Config files", (cfgs.configs || []).map((c) => ({
     label: c.name, sub: c.path, pick: () => { fillOrigin({ config: c.path }); close(); },
   })), "No config files found where dmt was launched."));
+  // Now that there is something to choose, put the caret on the first choice.
+  $("button", body)?.focus();
 }
 
 function pickSection(title, items, emptyMsg) {
@@ -303,8 +372,11 @@ function pickSection(title, items, emptyMsg) {
   if (!items.length) { wrap.appendChild(el(`<div class="muted" style="padding:6px 2px;font-size:13px">${esc(emptyMsg)}</div>`)); return wrap; }
   const ul = el(`<ul class="pick-list"></ul>`);
   items.forEach((it) => {
-    const li = el(`<li><div class="pick-label mono">${esc(it.label)}</div>${it.sub ? `<div class="pick-sub muted">${esc(it.sub)}</div>` : ""}</li>`);
-    li.addEventListener("click", it.pick);
+    // A real <button>, not a click-handler <li>: keyboard focus and Enter/Space
+    // come for free and the role is announced correctly.
+    const li = el(`<li><button type="button"><div class="pick-label mono">${esc(it.label)}</div>${
+      it.sub ? `<div class="pick-sub muted">${esc(it.sub)}</div>` : ""}</button></li>`);
+    $("button", li).addEventListener("click", it.pick);
     ul.appendChild(li);
   });
   wrap.appendChild(ul);
@@ -344,7 +416,8 @@ function viewDashboard(v) {
   const telem = el(`<div class="card" id="telemetry-card">
     <div class="phase-row"><span id="run-phase" class="badge idle"><span class="dot"></span>idle</span>
       <span class="muted mono" id="run-id"></span></div>
-    <div class="progress"><i id="pbar"></i></div>
+    <div class="progress" id="pbar-track" role="progressbar" aria-label="Migration progress"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="pbar"></i></div>
     <div class="telemetry" style="margin-top:16px">
       <div class="stat"><div class="k">Progress</div><div class="v"><span id="s-pct">0</span><small>%</small></div></div>
       <div class="stat"><div class="k">Rows transferred</div><div class="v num"><span id="s-rows">0</span><small id="s-rtot"></small></div></div>
@@ -417,9 +490,14 @@ function connectEvents() {
 }
 
 function applyProgress(p) {
-  if (!p || currentView !== "dashboard") return;
+  if (!p) return;
+  // The live region is in the shell, not the view, so a screen-reader user who
+  // has navigated away from the dashboard still hears the migration advance.
+  announceProgress(p);
+  if (currentView !== "dashboard") return;
   const pct = Math.round(p.progress_pct || 0);
   set("#s-pct", pct); set("#pbar", null, (i) => (i.style.width = pct + "%"));
+  setProgressNow(pct, p.rows_transferred, p.rows_total);
   set("#s-rows", fmtNum(p.rows_transferred));
   set("#s-rtot", p.rows_total ? ` / ${fmtNum(p.rows_total)}` : "");
   set("#s-rps", fmtNum(p.rows_per_second));
@@ -433,6 +511,35 @@ function applyProgress(p) {
   }
 }
 
+// setProgressNow keeps the progressbar's accessible value in step with the
+// painted bar. aria-valuetext carries the row tally so the announcement is
+// "42%, 1,200,000 of 3,000,000 rows" rather than a bare number.
+function setProgressNow(pct, rows, total) {
+  const track = $("#pbar-track");
+  if (!track) return;
+  track.setAttribute("aria-valuenow", String(pct));
+  track.setAttribute("aria-valuetext", total ? `${pct}% — ${fmtNum(rows)} of ${fmtNum(total)} rows` : `${pct}%`);
+}
+
+// Progress arrives several times a second on a busy migration; writing every
+// tick into a live region makes a screen reader unusable. Speak on a phase
+// change, and otherwise at most once every 15s and only when the percentage
+// actually moved.
+const ANNOUNCE_EVERY_MS = 15000;
+let lastAnnounced = { pct: -1, phase: "", at: 0 };
+function announceProgress(p) {
+  const region = $("#run-live");
+  if (!region) return;
+  const pct = Math.round(p.progress_pct || 0);
+  const phase = p.phase || "running";
+  const now = Date.now();
+  const phaseChanged = phase !== lastAnnounced.phase;
+  if (!phaseChanged && (pct === lastAnnounced.pct || now - lastAnnounced.at < ANNOUNCE_EVERY_MS)) return;
+  lastAnnounced = { pct, phase, at: now };
+  const tables = p.tables_total ? `, ${fmtNum(p.tables_complete)} of ${fmtNum(p.tables_total)} tables` : "";
+  region.textContent = `${phase}: ${pct}%, ${fmtNum(p.rows_transferred)} rows${tables}`;
+}
+
 function applyRunState(run) {
   if (!run) return;
   const st = run.status;
@@ -443,7 +550,11 @@ function applyRunState(run) {
     const phase = $("#run-phase");
     if (phase) { phase.className = `badge ${kind}`; phase.innerHTML = `<span class="dot"></span>${esc(st)}`; }
     set("#run-id", run.id ? "run " + run.id : "");
-    if (st === "completed") set("#s-pct", 100), set("#pbar", null, (i) => (i.style.width = "100%"));
+    if (st === "completed") {
+      set("#s-pct", 100);
+      set("#pbar", null, (i) => (i.style.width = "100%"));
+      setProgressNow(100, run.rows_transferred, run.rows_transferred);
+    }
     // Finished runs carry their final tally (#591); a fresh page load has no
     // progress stream, so populate the telemetry from the runState. The Go
     // side omits zero counts (omitempty), so any present count means the tally
@@ -461,8 +572,36 @@ function applyRunState(run) {
     }
     if (run.error) $("#dryrun-out").innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(run.error)}</div></div>`;
   }
-  if (st === "completed" || st === "failed") toast(`Migration ${st}`, st === "completed" ? "ok" : "err");
-  if (st === "completed" || st === "failed" || st === "cancelled") notifyRunEnded(st);
+  announceRunEnd(run);
+}
+
+// A finished run must be announced once, on the transition into that state.
+// applyRunState is re-entered from three directions — the SSE terminal events,
+// the run-pill poll, and every dashboard mount — so announcing on "status is
+// terminal" instead of "status just became terminal" stacks a fresh toast (and
+// re-fires the desktop notification) on every refresh of one finished run.
+// A run that was already over when the page loaded is recorded silently: this
+// page observed no transition, so it has nothing to announce.
+const RUN_TERMINAL = ["completed", "failed", "cancelled"];
+let lastRunSeen = null;
+function announceRunEnd(run) {
+  const prev = lastRunSeen;
+  lastRunSeen = { id: run.id, status: run.status };
+  if (!RUN_TERMINAL.includes(run.status)) return;
+  // No prior sighting, or a different run than the one we were tracking: this
+  // is a first observation, not a transition. Same status as last time: already
+  // announced.
+  if (!prev || prev.id !== run.id || prev.status === run.status) return;
+  if (run.status === "completed" || run.status === "failed") {
+    toast(`Migration ${run.status}`, run.status === "completed" ? "ok" : "err");
+  } else {
+    // Cancelled is the one terminal state with no toast, so it would otherwise
+    // never reach a screen reader. Everything else is already spoken by the
+    // toast stack — announcing here too would say it twice. (#598)
+    const region = $("#run-live");
+    if (region) region.textContent = "Migration cancelled";
+  }
+  notifyRunEnded(run.status);
 }
 
 function set(sel, text, fn) { const e = $(sel); if (!e) return; if (text != null) e.textContent = text; if (fn) fn(e); }
@@ -483,7 +622,7 @@ function renderDryRun(r) {
       <dt>Target mode</dt><dd>${esc(r.target_mode)}</dd>
       <dt>Workers</dt><dd class="num">${fmtNum(r.workers)}</dd>
     </dl>
-    <div class="table-wrap" style="margin-top:14px"><table class="data"><thead><tr><th>Table</th><th>Rows</th><th>Pagination</th><th>PK</th><th>Cols</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="table-wrap" style="margin-top:14px"><table class="data"><thead><tr><th scope="col">Table</th><th scope="col">Rows</th><th scope="col">Pagination</th><th scope="col">PK</th><th scope="col">Cols</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>`);
 }
 
@@ -517,7 +656,7 @@ function viewHistory(v) {
 }
 async function loadHistory() {
   const host = $("#hist-body"), pager = $("#hist-pager"); if (!host) return;
-  host.innerHTML = `<span class="spinner"></span> Loading…`;
+  host.innerHTML = `<span class="spinner" aria-hidden="true"></span> Loading…`;
   if (pager) pager.innerHTML = "";
   const params = originBody();
   if (histState.status) params.status = histState.status;
@@ -537,7 +676,7 @@ async function loadHistory() {
       <td class="mono num">${fmtTime(r.started_at)}</td>
       <td>${r.error ? `<span style="color:var(--danger)">${esc(r.error)}</span>` : "—"}</td>
     </tr>`).join("");
-    host.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th>Run</th><th>Status</th><th>Phase</th><th>Started</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    host.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th scope="col">Run</th><th scope="col">Status</th><th scope="col">Phase</th><th scope="col">Started</th><th scope="col">Error</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     renderPager(pager, offset, runs.length, total);
   } catch (e) { host.innerHTML = `<div class="finding error"><div class="sev"></div><div>${esc(e.message)}</div></div>`; }
 }
@@ -571,10 +710,18 @@ const CHECKS = [
 let checkTab = "preflight";
 function viewChecks(v) {
   v.appendChild(el(`<header><h2>Checks</h2><p>Advisory and validation commands — read-only, safe to run anytime.</p></header>`));
-  const tabs = el(`<div class="tabs"></div>`);
+  // A group of toggle buttons rather than role="tablist": these re-render the
+  // whole view instead of swapping a panel, and tab semantics would promise
+  // arrow-key navigation across a DOM that no longer exists. aria-pressed says
+  // which check is selected without over-claiming. (#598)
+  const tabs = el(`<div class="tabs" role="group" aria-label="Check type"></div>`);
   CHECKS.forEach((c) => { const b = el(`<button data-c="${c.id}">${c.label}</button>`); b.addEventListener("click", () => { checkTab = c.id; renderView(); }); tabs.appendChild(b); });
   v.appendChild(tabs);
-  $$("button", tabs).forEach((b) => b.classList.toggle("active", b.dataset.c === checkTab));
+  $$("button", tabs).forEach((b) => {
+    const on = b.dataset.c === checkTab;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", String(on));
+  });
   const c = CHECKS.find((x) => x.id === checkTab);
   const card = el(`<div class="card"><h3>${c.label}</h3><div class="sub">${c.blurb}</div>
     ${originFields()}
@@ -582,7 +729,7 @@ function viewChecks(v) {
     <div id="check-out" class="result"></div></div>`);
   v.appendChild(card);
   $("#run-check").addEventListener("click", async () => {
-    const out = $("#check-out"); out.innerHTML = `<span class="spinner"></span> Running…`;
+    const out = $("#check-out"); out.innerHTML = `<span class="spinner" aria-hidden="true"></span> Running…`;
     try {
       const r = await api.post(c.path, originBody());
       out.innerHTML = ""; out.appendChild(c.render(r));
@@ -606,7 +753,7 @@ function renderValidate(r) {
   }).join("");
   return el(`<div>
     <div class="phase-row">${r.failed ? `<span class="badge err"><span class="dot"></span>mismatch</span>` : `<span class="badge ok"><span class="dot"></span>counts match</span>`}<span class="muted mono">mode: ${esc(r.mode)}</span></div>
-    <div class="table-wrap"><table class="data"><thead><tr><th>Table</th><th>Source</th><th>Target</th><th>Δ</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="table-wrap"><table class="data"><thead><tr><th scope="col">Table</th><th scope="col">Source</th><th scope="col">Target</th><th scope="col" aria-label="Difference">Δ</th></tr></thead><tbody>${rows}</tbody></table></div>
   </div>`);
 }
 function renderTriage(r) {
@@ -637,7 +784,7 @@ async function viewSetup(v) {
 }
 async function setupStart() { renderSetupPrompt(await api.post("/api/setup/start")); }
 async function setupSend(input) {
-  const body = $("#setup-body"); body.innerHTML = `<span class="spinner"></span> Working…`;
+  const body = $("#setup-body"); body.innerHTML = `<span class="spinner" aria-hidden="true"></span> Working…`;
   try { renderSetupPrompt(await api.post("/api/setup/input", { input })); }
   catch (e) { toast(e.message, "err"); }
 }
@@ -659,7 +806,7 @@ function renderSetupPrompt(p) {
   body.innerHTML = "";
   if (p.section_header) body.appendChild(el(`<div class="setup-section">${esc(p.section_header)}</div>`));
   if (p.error) body.appendChild(el(`<div class="finding error"><div class="sev"></div><div>${esc(p.error)}</div></div>`));
-  body.appendChild(el(`<div class="setup-prompt">${esc(p.text)}${p.default ? ` <span class="muted mono">[${esc(p.default)}]</span>` : ""}</div>`));
+  body.appendChild(el(`<div class="setup-prompt" id="setup-prompt-text">${esc(p.text)}${p.default ? ` <span class="muted mono">[${esc(p.default)}]</span>` : ""}</div>`));
 
   if (p.choices && p.choices.length) {
     const row = el(`<div class="choice-row"></div>`);
@@ -667,7 +814,7 @@ function renderSetupPrompt(p) {
     body.appendChild(row);
   }
   const form = el(`<form class="form-row" style="margin-top:12px">
-    <input id="s-input" class="mono" type="${p.is_masked ? "password" : "text"}" autocomplete="off" style="flex:1;min-width:220px" placeholder="${p.default ? "Enter to accept default" : "type your answer"}">
+    <input id="s-input" class="mono" type="${p.is_masked ? "password" : "text"}" autocomplete="off" aria-labelledby="setup-prompt-text" style="flex:1;min-width:220px" placeholder="${p.default ? "Enter to accept default" : "type your answer"}">
     <button class="btn primary" type="submit">Continue</button></form>`);
   form.addEventListener("submit", (e) => { e.preventDefault(); setupSend($("#s-input").value); });
   body.appendChild(form);
@@ -678,15 +825,15 @@ function renderSetupPrompt(p) {
 async function viewProfiles(v) {
   v.appendChild(el(`<header><h2>Profiles</h2><p>Encrypted, reusable connection configs stored in the checkpoint database.</p></header>`));
   const save = el(`<div class="card"><h3>Save a profile</h3><div class="sub">Encrypt a config file as a named profile (requires a master key).</div>
-    <div class="form-row"><div class="field" style="flex:1"><label>Config file</label><input id="p-config" class="mono" type="text" placeholder="config.yaml"></div>
-    <div class="field"><label>Name (optional)</label><input id="p-name" class="mono" type="text" placeholder="from profile.name"></div>
+    <div class="form-row"><div class="field" style="flex:1"><label for="p-config">Config file</label><input id="p-config" class="mono" type="text" placeholder="config.yaml"></div>
+    <div class="field"><label for="p-name">Name (optional)</label><input id="p-name" class="mono" type="text" placeholder="from profile.name"></div>
     <button class="btn primary" id="p-save">Save</button></div></div>`);
   v.appendChild(save);
   $("#p-save").addEventListener("click", async () => {
     try { const r = await api.post("/api/profiles/save", { config: $("#p-config").value.trim(), name: $("#p-name").value.trim() }); toast(`Saved profile ${r.name}`); viewProfilesList(); }
     catch (e) { toast(e.message, "err"); }
   });
-  const list = el(`<div class="card"><h3>Saved profiles</h3><div id="p-list" style="margin-top:12px"><span class="spinner"></span></div></div>`);
+  const list = el(`<div class="card"><h3>Saved profiles</h3><div id="p-list" style="margin-top:12px"><span class="spinner" aria-hidden="true"></span></div></div>`);
   v.appendChild(list);
   viewProfilesList();
 }
@@ -695,9 +842,9 @@ async function viewProfilesList() {
   try {
     const { profiles } = await api.get("/api/profiles");
     if (!profiles.length) { host.innerHTML = `<div class="empty">No profiles saved.</div>`; return; }
-    host.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th>Name</th><th>Description</th><th>Updated</th><th></th></tr></thead><tbody>${
+    host.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr><th scope="col">Name</th><th scope="col">Description</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody>${
       profiles.map((p) => `<tr><td class="mono">${esc(p.name)}</td><td>${esc(p.description || "—")}</td><td class="mono num">${fmtTime(p.updated_at)}</td>
-        <td style="text-align:right"><button class="btn sm danger" data-del="${esc(p.name)}">Delete</button></td></tr>`).join("")}</tbody></table></div>`;
+        <td style="text-align:right"><button class="btn sm danger" data-del="${esc(p.name)}" aria-label="Delete profile ${esc(p.name)}">Delete</button></td></tr>`).join("")}</tbody></table></div>`;
     $$("[data-del]", host).forEach((b) => b.addEventListener("click", async () => {
       try { await api.del("/api/profiles/" + encodeURIComponent(b.dataset.del)); toast("Profile deleted"); viewProfilesList(); }
       catch (e) { toast(e.message, "err"); }
@@ -708,7 +855,7 @@ async function viewProfilesList() {
 // ---------- Settings ----------
 async function viewSettings(v) {
   v.appendChild(el(`<header><h2>Settings</h2><p>Session defaults, secrets, and cache — applied to this server for its lifetime.</p></header>`));
-  const sess = el(`<div class="card"><h3>Session defaults</h3><div class="sub">Set once; honored by subsequent commands.</div><div id="sess-body"><span class="spinner"></span></div></div>`);
+  const sess = el(`<div class="card"><h3>Session defaults</h3><div class="sub">Set once; honored by subsequent commands.</div><div id="sess-body"><span class="spinner" aria-hidden="true"></span></div></div>`);
   v.appendChild(sess);
   const maint = el(`<div class="card"><h3>Maintenance</h3>
     <div class="form-row" style="margin-top:6px">
@@ -725,9 +872,11 @@ async function loadSession() {
   const host = $("#sess-body"); if (!host) return;
   try {
     const { keys } = await api.get("/api/session");
-    host.innerHTML = `<div class="stack">${keys.map((k) => `<div class="form-row" style="align-items:center">
-      <div class="field" style="flex:1"><label>${esc(k.name)}</label><input data-k="${esc(k.name)}" class="mono" type="text" value="${esc(k.value || "")}" placeholder="${esc(k.description)}"></div>
-      <button class="btn sm" data-set="${esc(k.name)}">Set</button></div>`).join("")}</div>`;
+    // Index-based ids rather than the key name: a session key is server-supplied
+    // and need not be a valid id, and the label has to point at something exact.
+    host.innerHTML = `<div class="stack">${keys.map((k, i) => `<div class="form-row" style="align-items:center">
+      <div class="field" style="flex:1"><label for="sess-k-${i}">${esc(k.name)}</label><input id="sess-k-${i}" data-k="${esc(k.name)}" class="mono" type="text" value="${esc(k.value || "")}" placeholder="${esc(k.description)}"></div>
+      <button class="btn sm" data-set="${esc(k.name)}" aria-label="Set ${esc(k.name)}">Set</button></div>`).join("")}</div>`;
     $$("[data-set]", host).forEach((b) => b.addEventListener("click", async () => {
       const inp = $(`[data-k="${b.dataset.set}"]`, host);
       try { await api.post("/api/session", { key: b.dataset.set, value: inp.value.trim() }); toast(`Set ${b.dataset.set}`); }
@@ -753,24 +902,38 @@ const COMMANDS = [
   { label: "Toggle theme", run: toggleTheme },
   { label: "Sign out", run: () => api.post("/api/logout").finally(() => location.reload()) },
 ];
-let paletteSel = 0, paletteItems = COMMANDS;
+let paletteSel = 0, paletteItems = COMMANDS, paletteClose = null;
 function openPalette() {
   if ($(".overlay")) return;
-  const ov = el(`<div class="overlay"><div class="palette">
-    <input id="pal-in" type="text" placeholder="Type a command…" autocomplete="off">
-    <ul id="pal-list"></ul></div></div>`);
+  // combobox + listbox is the pattern this already behaves like: focus stays in
+  // the input while ArrowUp/Down move a virtual selection, so the active option
+  // is published via aria-activedescendant rather than by moving focus. (#598)
+  const ov = el(`<div class="overlay">
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <input id="pal-in" type="text" placeholder="Type a command…" autocomplete="off"
+             role="combobox" aria-controls="pal-list" aria-expanded="true"
+             aria-autocomplete="list" aria-label="Search commands">
+      <ul id="pal-list" role="listbox" aria-label="Commands"></ul>
+    </div></div>`);
   document.body.appendChild(ov);
-  ov.addEventListener("click", (e) => { if (e.target === ov) closePalette(); });
+  // Clearing the handle from the close callback covers every path — Escape and
+  // click-outside close the modal without going through closePalette().
+  paletteClose = openModal(ov, $(".palette", ov), () => { paletteClose = null; });
   const inp = $("#pal-in", ov); paletteSel = 0;
   const draw = (q = "") => {
     paletteItems = COMMANDS.filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
     if (paletteSel >= paletteItems.length) paletteSel = 0;
-    $("#pal-list", ov).innerHTML = paletteItems.map((c, i) => `<li aria-selected="${i === paletteSel}" data-i="${i}">${esc(c.label)}<span class="hint">↵</span></li>`).join("");
+    $("#pal-list", ov).innerHTML = paletteItems.map((c, i) =>
+      `<li role="option" id="pal-opt-${i}" aria-selected="${i === paletteSel}" data-i="${i}">${esc(c.label)}<span class="hint" aria-hidden="true">↵</span></li>`).join("");
     $$("#pal-list li", ov).forEach((li) => li.addEventListener("click", () => { runPalette(+li.dataset.i); }));
+    // Point the input at the highlighted option so a screen reader reads the
+    // selection as it moves; with no matches there is nothing to point at.
+    if (paletteItems.length) inp.setAttribute("aria-activedescendant", `pal-opt-${paletteSel}`);
+    else inp.removeAttribute("aria-activedescendant");
   };
   inp.addEventListener("input", () => draw(inp.value));
+  // Escape is handled by openModal on the capture phase.
   inp.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") return closePalette();
     if (e.key === "ArrowDown") { paletteSel = Math.min(paletteSel + 1, paletteItems.length - 1); draw(inp.value); e.preventDefault(); }
     if (e.key === "ArrowUp") { paletteSel = Math.max(paletteSel - 1, 0); draw(inp.value); e.preventDefault(); }
     if (e.key === "Enter") { runPalette(paletteSel); }
@@ -778,7 +941,9 @@ function openPalette() {
   draw(""); inp.focus();
 }
 function runPalette(i) { const c = paletteItems[i]; closePalette(); if (c) c.run(); }
-function closePalette() { $(".overlay")?.remove(); }
+// Routes through openModal's close() so focus returns to the opener and the
+// document keydown listener is removed; that close() nulls paletteClose itself.
+function closePalette() { if (paletteClose) paletteClose(); else $(".overlay")?.remove(); }
 
 document.addEventListener("keydown", (e) => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
