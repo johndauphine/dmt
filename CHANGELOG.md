@@ -9,6 +9,37 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- WebUI: accessibility pass to WCAG 2.1 AA (#598). Keyboard: a skip link past
+  the sidebar, and the command palette and config picker are now real modal
+  dialogs that trap Tab, close on Escape, and restore focus to their opener —
+  the picker's entries are buttons, so they are reachable at all. Screen
+  readers: named nav landmark with `aria-current`, a `progressbar` with live
+  values, a throttled live region for migration progress, associated labels on
+  every form control, scoped table headers, and decorative icons hidden.
+  Color: the light palette moved to clear AA on every pairing it paints
+  (notably `--fg-faint`, the accent, and the semantic badge colors) and input
+  borders now clear 3:1 in both themes. `internal/webui/contrast_test.go` and
+  `internal/webui/a11y_test.go` pin all of it.
+
+### Fixed
+
+- WebUI: a finished migration is announced once, when it finishes. The
+  completed/failed toast and desktop notification fired on every run-state
+  refresh — SSE, the run-pill poll, and each dashboard mount — so toasts
+  stacked for a single finished run and a reloaded page re-announced a run
+  that ended long ago (#599).
+
+### Changed
+
+- WebUI: remote / team-facing deployment is documented as supported rather
+  than beta. Every hardening item that gated it has landed — login and bearer
+  brute-force throttling, sliding sessions with a 7-day cap, loopback-only
+  metrics, CSP without inline script, trusted-proxy client attribution, and
+  soak coverage. v1 remains single-operator with a shared secret by design
+  (#599).
+
 ## [5.6.1] - 2026-08-12
 
 ### Fixed
