@@ -12,14 +12,22 @@ install or serve separately — `dmt` stays a single self-contained binary.
 
 - **Local, single-operator use — ready.** On a loopback bind (the default) the
   WebUI is a peer to the TUI, verified end-to-end. Use it freely.
-- **Remote / team-facing server — beta.** The remote path works and is gated by
-  a token + TLS, but v1 is **single-operator with a single shared secret**:
-  there are no user accounts, RBAC, per-user audit, or login rate-limiting yet.
-  For a shared server, run it **behind a TLS-terminating reverse proxy and a
-  firewall**, and treat the token as you would a root password.
+- **Remote / team-facing server — supported.** The hardening that gated this is
+  in place: brute-force throttling on both the login and bearer paths with a
+  minimum token length, sliding sessions with a 7-day absolute cap, a
+  loopback-only metrics listener, a CSP with no inline script, opt-in
+  trusted-proxy client attribution, and soak coverage for the long-lived
+  server. Run it **behind a TLS-terminating reverse proxy and a firewall** (see
+  Server deployment below), and treat the token as you would a root password.
 
-Multi-user accounts, RBAC, and SSO are non-goals for v1. Remaining hardening for
-the server case (notably login rate-limiting) is tracked in issue #599.
+**By design, v1 is single-operator with a single shared secret.** There are no
+user accounts, RBAC, per-user audit, or SSO — those are non-goals for v1.
+Everyone holding the token is the same operator, with full control of the
+migration; scope access at the proxy and firewall, not inside dmt.
+
+Known gaps: the console is verified in Chromium and WebKit but not yet in Gecko
+(Firefox). Accessibility is audited to WCAG 2.1 AA and verified in Chrome (see
+Accessibility below), but has not been driven with a real screen reader.
 
 ## Launch
 
@@ -100,6 +108,113 @@ What `--gui` adds on top of `--webui`:
 | `--webui-tls-cert` / `--webui-tls-key` | — | Serve HTTPS directly (PEM cert + key). |
 | `--webui-insecure` | off | Allow a non-loopback bind over plaintext HTTP — only behind a TLS-terminating reverse proxy. |
 | `--webui-trusted-proxy` | — | CIDR (or IP) of a trusted reverse proxy whose `X-Forwarded-For` is honored for rate-limiting and audit logging. Repeatable. Off by default. |
+
+## Accessibility
+
+The console targets WCAG 2.1 AA (#598).
+
+- **Keyboard.** Everything is reachable and operable without a mouse. A skip
+  link jumps past the sidebar to the view; the command palette (`⌘K`/`Ctrl-K`)
+  and the config/profile picker are modal dialogs that trap Tab, close on
+  Escape, and return focus to whatever opened them.
+- **Screen readers.** The primary nav is a named landmark and marks the active
+  view with `aria-current`. Migration progress is published two ways: the bar
+  is a `progressbar` with a live `aria-valuenow`/`aria-valuetext`, and a polite
+  live region speaks phase and percentage. That region is throttled — it speaks
+  on a phase change, and otherwise at most once every 15 seconds — because SSE
+  progress arrives several times a second and an unthrottled region makes the
+  page unusable. Toasts are a separate polite region, so a finished migration
+  is announced exactly once.
+- **Color.** Every foreground/background pairing in both themes clears AA
+  (4.5:1 for text, 3:1 for control boundaries and the focus ring). The ratios
+  are asserted in `internal/webui/contrast_test.go`, so a palette edit that
+  regresses one fails the build with the measured number. Status is never
+  carried by color alone — badges pair the color with their text.
+- **Motion.** `prefers-reduced-motion: reduce` drops the spinner, pulse, and
+  slide-in animations.
+
+Verified in Chrome 151 by driving the running console over the DevTools
+Protocol: the computed accessibility tree (every interactive control across all
+six views resolves to a non-empty accessible name), and real keyboard
+interaction — Tab wraps inside both modals, Escape closes them, focus returns
+to the opener, and `aria-activedescendant` tracks the palette selection. The
+progress throttle and the announce-once behavior were exercised against
+synthetic run states. `internal/webui/a11y_test.go` and
+`internal/webui/contrast_test.go` pin the same properties in CI, where no
+browser is available.
+
+Not yet driven with an actual screen reader (VoiceOver/NVDA/JAWS) — the
+accessibility tree is verified, but how a given reader voices it is not. Gecko
+remains unverified for accessibility as it is for rendering.
+
+### Verifying in a real browser
+
+The Go tests pin structure (roles, labels, contrast ratios) but cannot tell you
+whether focus is *actually* trapped or what the browser *actually* computes for
+the accessibility tree. That needs a real browser driven over the Chrome
+DevTools Protocol. There is no committed harness — CI has no browser, and a
+one-off script is not worth a dependency — so this is the method, not a tool.
+
+Start the console with a known token, and Chrome headless with a debug port:
+
+```bash
+dmt --webui --webui-addr 127.0.0.1:8484 --webui-auth-token "$(openssl rand -hex 24)"
+```
+
+```bash
+chrome --headless --disable-gpu --remote-debugging-port=9222 --user-data-dir=/tmp/dmt-verify about:blank
+```
+
+`GET http://localhost:9222/json` lists targets; connect a WebSocket to the page
+target's `webSocketDebuggerUrl` and send CDP commands. Then `Page.navigate` to
+`http://localhost:8484/?token=…` — the one-click URL logs the SPA in, so the app
+shell mounts without scripting the login form.
+
+What is worth asking for, once attached:
+
+- `Accessibility.getFullAXTree` — assert every node whose role is interactive
+  (`button`, `link`, `textbox`, `combobox`, `checkbox`, `option`) has a
+  non-empty name. Sweep all six views by evaluating `go('<view>')` between
+  passes. This is the check that finds unlabeled controls.
+- `Input.dispatchKeyEvent` — Tab repeatedly with a modal open and assert
+  `document.activeElement` stays inside it; Escape and assert focus returns to
+  the opener; ArrowDown in the palette and assert `aria-activedescendant` moves.
+- `Runtime.evaluate` against `applyProgress()` / `applyRunState()` with
+  synthetic payloads. Real progress needs two live databases, but the logic
+  being checked — the live-region throttle, and announcing a finished run
+  exactly once — is entirely client-side.
+- `Page.captureScreenshot` in both themes after setting
+  `document.documentElement.dataset.theme`, to eyeball a palette change.
+
+Three traps cost real time here, so they are worth knowing up front:
+
+- **`--dump-dom` returns the pre-boot DOM.** The SPA mounts after an async
+  health check and login round-trip, so a plain dump shows only the loading
+  shell. Drive the page over CDP and wait, rather than trusting a one-shot dump.
+- **`--virtual-time-budget` never completes.** The console holds an SSE stream
+  (`/api/events`) open for the life of the page, so virtual time never advances
+  to idle and Chrome hangs instead of dumping. Always wrap browser invocations
+  in a `timeout`.
+- **`/json/new` requires `PUT`** on Chrome 111+; a `GET` returns 405. Reusing
+  the existing `about:blank` page target and calling `Page.navigate` avoids the
+  endpoint entirely.
+- **The service worker will serve you a stale `app.js`.** Its cache name keys on
+  the dmt version (see `sw.js`), so rebuilding the binary without bumping the
+  version leaves a previously-registered worker happily serving the old asset —
+  you will verify a fix that the page never loaded. Call
+  `Network.setCacheDisabled` and `ServiceWorker.setForceUpdateOnPageLoad` before
+  navigating, and assert the page actually has your change (evaluate
+  `someFunction.toString().includes(…)`) before trusting a result.
+- **Kill stale Chrome instances first.** A second `--remote-debugging-port=9222`
+  launch cannot bind the port while the first is alive, so CDP silently attaches
+  to the *old* browser — with the old profile and the old service worker.
+  Confirm the kill took rather than assuming it did.
+
+Under WSL, Chrome installed on the Windows side works: launch the `.exe` and
+both `localhost:9222` (the debug port) and `localhost:8484` (the console)
+resolve across the boundary. `--remote-debugging-pipe` does *not* — the file
+descriptors do not cross into Windows — so the WebSocket transport is required
+there.
 
 ## Security model
 
